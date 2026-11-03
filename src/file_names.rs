@@ -374,14 +374,23 @@ pub(crate) fn title_from_url(url_str: &str) -> String {
 }
 
 /// Derive a displayable filename stem from a direct HLS/DASH manifest URL.
+///
+/// Meaningful path components win; generic endpoint and quality components are skipped.
 pub(crate) fn title_from_manifest_url(url_str: &str) -> String {
     let Ok(parsed) = url::Url::parse(url_str) else {
         return "video".to_string();
     };
 
     const GENERIC_ENDPOINTS: &[&str] = &[
-        "master", "playlist", "manifest", "index", "stream", "hls", "video", "videos", "dash",
-        "chunklist",
+        "master",
+        "playlist",
+        "manifest",
+        "index",
+        "stream",
+        "hls",
+        "video",
+        "videos",
+        "dash",
     ];
     let path_title = parsed
         .path_segments()
@@ -400,8 +409,18 @@ pub(crate) fn title_from_manifest_url(url_str: &str) -> String {
                 .map_or(decoded.as_str(), |(stem, _)| stem);
             let stem = stem.trim_matches('.');
             let lower = stem.to_ascii_lowercase();
-            (!stem.is_empty() && !GENERIC_ENDPOINTS.contains(&lower.as_str()))
-                .then(|| stem.to_string())
+            let quality_variant = lower
+                .strip_suffix('p')
+                .is_some_and(|height| {
+                    !height.is_empty()
+                        && height.len() <= 4
+                        && height.chars().all(|character| character.is_ascii_digit())
+                });
+            let generic_endpoint = GENERIC_ENDPOINTS.contains(&lower.as_str())
+                || lower.starts_with("chunklist")
+                || lower.starts_with("index_")
+                || quality_variant;
+            (!stem.is_empty() && !generic_endpoint).then(|| stem.to_string())
         });
     let candidate = path_title.unwrap_or_else(|| {
         let host = parsed.host_str().unwrap_or("video").strip_prefix("www.");
@@ -942,6 +961,10 @@ mod url_title_tests {
         assert_eq!(
             title_from_manifest_url("https://cdn.example.test/playlist.MPD"),
             "cdn example test"
+        );
+        assert_eq!(
+            title_from_manifest_url("https://cdn.example.test/media/feature/1080p/index.m3u8"),
+            "feature"
         );
     }
 

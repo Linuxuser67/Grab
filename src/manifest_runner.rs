@@ -49,7 +49,7 @@ const MAX_MANIFEST_DOWNLOAD_BYTES: u64 = 1 << 40;
 const RESOURCE_IDLE_TIMEOUT: Duration = Duration::from_secs(30);
 /// Bound parallel manifest requests to the same range as the regular HTTP engine.
 const MAX_RESOURCE_CONNECTIONS: usize = 16;
-/// Static HLS transfers are serial because each track is one ordered byte stream.
+/// Static HLS playlist-based transfers stay serial because each presentation is one ordered track.
 const HLS_STATIC_RESOURCE_CONNECTIONS: usize = 1;
 /// Keep only a small diagnostic tail from FFmpeg.
 const FFMPEG_LOG_LINES: usize = 32;
@@ -885,7 +885,7 @@ async fn transfer_static_manifest_tracks(
                         destination,
                         item_id,
                         track: crate::manifest_destination::TrackKind::Audio,
-                        tx,
+                            tx,
                         downloaded,
                         abort,
                     })
@@ -2692,7 +2692,16 @@ async fn fetch_and_write_hls_track(
     context: ManifestHlsTrackTransfer<'_>,
 ) -> Result<bool, ManifestRunError> {
     let ManifestHlsTrackTransfer {
-        client, staging, plan, directory, filename, destination, item_id, track, tx, downloaded,
+        client,
+        staging,
+        plan,
+        directory,
+        filename,
+        destination,
+        item_id,
+        track,
+        tx,
+        downloaded,
         abort,
     } = context;
     let resources = hls_resources(plan);
@@ -2707,7 +2716,13 @@ async fn fetch_and_write_hls_track(
     };
     let (writer, committed_bytes) =
         crate::manifest_writer::OrderedTrackWriter::open_destination_part(
-            resource_names, directory, staging, filename, destination, item_id, track,
+            resource_names,
+            directory,
+            staging,
+            filename,
+            destination,
+            item_id,
+            track,
         )
         .await
         .map_err(ManifestRunError::Failed)?;
@@ -2722,22 +2737,22 @@ async fn fetch_and_write_hls_track(
 
     for resource in resources.into_iter().skip(writer.next_resource_index()) {
         match fetch_hls_resource_to_writer(
-            client, &resource, format, &mut writer, tx, downloaded, abort,
+            client,
+            &resource,
+            format,
+            &mut writer,
+            tx,
+            downloaded,
+            abort,
         )
         .await
         {
             Ok(true) => {}
             Ok(false) => return Ok(false),
-            Err(error) => {
-                if matches!(&error, ManifestRunError::Unsupported(_)) {
-                    crate::manifest_writer::cleanup_destination_part(
-                        staging, directory, destination, item_id, track, filename,
-                    )
-                    .await
-                    .map_err(ManifestRunError::Failed)?;
-                }
-                return Err(error);
+            Err(ManifestRunError::Unsupported(message)) => {
+                return Err(ManifestRunError::Failed(message));
             }
+            Err(error) => return Err(error),
         }
     }
     writer.finish().await.map_err(ManifestRunError::Failed)?;
@@ -2752,42 +2767,52 @@ struct HlsResourceValidator {
 
 impl HlsResourceValidator {
     fn new(format: OrderedTrackFormat) -> Self {
-        Self { format, header: [0; 564], header_len: 0 }
+        Self {
+            format,
+            header: [0; 564],
+            header_len: 0,
+        }
     }
 
     fn observe(&mut self, chunk: &[u8]) {
-        let copied = self.header.len().saturating_sub(self.header_len).min(chunk.len());
-        self.header[self.header_len..self.header_len + copied].copy_from_slice(&chunk[..copied]);
+        let remaining = self.header.len().saturating_sub(self.header_len);
+        let copied = remaining.min(chunk.len());
+        self.header[self.header_len..self.header_len + copied]
+            .copy_from_slice(&chunk[..copied]);
         self.header_len += copied;
     }
 
-    fn is_valid(&self, length: u64) -> bool {
+    fn is_valid(&self, size: u64) -> bool {
         match self.format {
             OrderedTrackFormat::MpegTs => {
-                length >= 188
-                    && length.is_multiple_of(188)
+                size >= 188
+                    && size.is_multiple_of(188)
                     && self.header.first() == Some(&0x47)
-                    && (length < 376 || self.header.get(188) == Some(&0x47))
-                    && (length < 564 || self.header.get(376) == Some(&0x47))
+                    && (size < 376 || self.header.get(188) == Some(&0x47))
+                    && (size < 564 || self.header.get(376) == Some(&0x47))
             }
             OrderedTrackFormat::Fmp4 => {
                 if self.header_len < 8 {
                     return false;
                 }
                 let size = u32::from_be_bytes([
-                    self.header[0], self.header[1], self.header[2], self.header[3],
+                    self.header[0],
+                    self.header[1],
+                    self.header[2],
+                    self.header[3],
                 ]);
-                (size == 1 || size >= 8)
-                    && self.header[4..8]
-                        .iter()
-                        .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit())
+                let plausible_size = size == 1 || size >= 8;
+                let plausible_type = self.header[4..8]
+                    .iter()
+                    .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit());
+                plausible_size && plausible_type
             }
             OrderedTrackFormat::Any => true,
         }
     }
 }
 
-/// Fetch one static HLS resource and stream its bytes directly into the owned destination part.
+/// Fetch exactly one static HLS resource into the owned destination part.
 async fn fetch_hls_resource_to_writer(
     client: &reqwest::Client,
     resource: &Resource,
@@ -2797,20 +2822,18 @@ async fn fetch_hls_resource_to_writer(
     downloaded: &AtomicU64,
     abort: &mut tokio::sync::oneshot::Receiver<crate::video::StopIntent>,
 ) -> Result<bool, ManifestRunError> {
-    let result: Result<bool, ManifestRunError> = async {
+    let mut reservation = ResourceByteReservation::new(downloaded);
+    let result = async {
         if resource.range.is_some() || resource.key {
-            return Err(ManifestRunError::Unsupported(
-                "This HLS resource cannot be written as a byte-concatenated track".to_string(),
+            return Err(ManifestRunError::Failed(
+                "The selected HLS track contains a resource that cannot be streamed as a complete fragment".to_string(),
             ));
         }
 
         let response = tokio::select! {
             biased;
             _ = &mut *abort => return Ok(false),
-            response = tokio::time::timeout(
-                RESOURCE_IDLE_TIMEOUT,
-                client.get(resource.url.clone()).send(),
-            ) => {
+            response = tokio::time::timeout(RESOURCE_IDLE_TIMEOUT, client.get(resource.url.clone()).send()) => {
                 response
                     .map_err(|_| ManifestRunError::Retryable(
                         "Timed out while requesting an HLS fragment".to_string(),
@@ -2823,22 +2846,27 @@ async fn fetch_hls_resource_to_writer(
         };
         let status = response.status();
         if status == reqwest::StatusCode::PARTIAL_CONTENT {
-            return Err(ManifestRunError::Unsupported(
+            return Err(ManifestRunError::Failed(
                 "The stream server returned partial content for a complete HLS fragment".to_string(),
             ));
         }
         if !status.is_success() {
-            return Err(resource_status_error(status));
+            return Err(match resource_status_error(status) {
+                ManifestRunError::Unsupported(message) => ManifestRunError::Failed(message),
+                other => other,
+            });
         }
-        if response.content_length().is_some_and(|length| length > MAX_RESOURCE_BYTES) {
-            return Err(ManifestRunError::Unsupported(
+        if response
+            .content_length()
+            .is_some_and(|length| length > MAX_RESOURCE_BYTES)
+        {
+            return Err(ManifestRunError::Failed(
                 "An HLS fragment exceeds the 1 GiB limit".to_string(),
             ));
         }
 
-        let mut reservation = ResourceByteReservation::new(downloaded);
         let mut stream = response.bytes_stream();
-        let mut length = 0_u64;
+        let mut size = 0_u64;
         let mut validator = HlsResourceValidator::new(format);
         let pace_start = Instant::now();
         let mut paced = 0_u64;
@@ -2853,22 +2881,32 @@ async fn fetch_hls_resource_to_writer(
                     ))?
                 }
             };
-            let Some(chunk) = next else { break; };
-            let chunk = chunk.map_err(|error| ManifestRunError::Retryable(format!(
-                "An HLS fragment transfer failed: {}",
-                error.without_url()
-            )))?;
-            let chunk_len = u64::try_from(chunk.len()).map_err(|_| {
-                ManifestRunError::Unsupported("An HLS fragment exceeds the size limit".to_string())
+            let Some(chunk) = next else {
+                break;
+            };
+            let chunk = chunk.map_err(|error| {
+                ManifestRunError::Retryable(format!(
+                    "An HLS fragment transfer failed: {}",
+                    error.without_url()
+                ))
             })?;
-            length = length.checked_add(chunk_len)
-                .filter(|length| *length <= MAX_RESOURCE_BYTES)
-                .ok_or_else(|| ManifestRunError::Unsupported(
-                    "An HLS fragment exceeds the 1 GiB limit".to_string()
-                ))?;
-            let total = reservation.reserve(chunk_len).map_err(ManifestRunError::Unsupported)?;
+            let chunk_len = u64::try_from(chunk.len()).map_err(|_| {
+                ManifestRunError::Failed("An HLS fragment exceeds the size limit".to_string())
+            })?;
+            size = size
+                .checked_add(chunk_len)
+                .filter(|size| *size <= MAX_RESOURCE_BYTES)
+                .ok_or_else(|| {
+                    ManifestRunError::Unsupported("An HLS fragment exceeds the 1 GiB limit".to_string())
+                })?;
             validator.observe(&chunk);
-            writer.write_streamed_chunk(&chunk).await.map_err(ManifestRunError::Failed)?;
+            writer
+                .write_streamed_chunk(&chunk)
+                .await
+                .map_err(ManifestRunError::Failed)?;
+            let total = reservation
+                .reserve(chunk_len)
+                .map_err(ManifestRunError::Failed)?;
             if last_progress.elapsed() >= Duration::from_millis(100) {
                 tx.send(progress_message(total)).ok();
                 last_progress = Instant::now();
@@ -2878,33 +2916,56 @@ async fn fetch_hls_resource_to_writer(
                 pace_start,
                 crate::download_rate::live_rate_limit(),
                 chunk.len(),
-            ).await;
+            )
+            .await;
         }
 
-        if length == 0 {
-            return Err(ManifestRunError::Unsupported(
+        if size == 0 {
+            return Err(ManifestRunError::Failed(
                 "The stream server returned an empty HLS fragment".to_string(),
             ));
         }
-        if !validator.is_valid(length) {
+        if !validator.is_valid(size) {
             let message = match format {
-                OrderedTrackFormat::Fmp4 => "The HLS media resource is not a compatible fMP4 fragment",
+                OrderedTrackFormat::Fmp4 => {
+                    "The HLS media resource is not a compatible fMP4 fragment"
+                }
                 _ => "The HLS media segment is not a compatible MPEG-TS fragment",
             };
-            return Err(ManifestRunError::Unsupported(message.to_string()));
+            return Err(ManifestRunError::Failed(message.to_string()));
         }
 
-        writer.commit_streamed_resource().await.map_err(ManifestRunError::Failed)?;
-        reservation.commit();
-        tx.send(progress_message(downloaded.load(Ordering::Relaxed))).ok();
         Ok(true)
-    }.await;
-
-    if !matches!(&result, Ok(true)) {
-        writer.rollback_streamed_resource().await.map_err(ManifestRunError::Failed)?;
-        tx.send(progress_message(downloaded.load(Ordering::Relaxed))).ok();
     }
-    result
+    .await;
+
+    match result {
+        Ok(true) => {
+            if let Err(error) = writer.commit_streamed_resource().await {
+                // Checkpoint publication may have completed before a directory-sync
+                // error was reported. Leave the bytes intact so resume can reconcile
+                // the journal and checkpoint instead of truncating a committed prefix.
+                drop(reservation);
+                tx.send(progress_message(downloaded.load(Ordering::Relaxed)))
+                    .ok();
+                return Err(ManifestRunError::Failed(error));
+            }
+            reservation.commit();
+            tx.send(progress_message(downloaded.load(Ordering::Relaxed)))
+                .ok();
+            Ok(true)
+        }
+        outcome => {
+            writer
+                .rollback_streamed_resource()
+                .await
+                .map_err(ManifestRunError::Failed)?;
+            drop(reservation);
+            tx.send(progress_message(downloaded.load(Ordering::Relaxed)))
+                .ok();
+            outcome
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -3538,6 +3599,12 @@ segment-2.ts
             tokio::fs::read(part).await.expect("read visible HLS part"),
             expected
         );
+        assert!(
+            plan.resources
+                .iter()
+                .all(|resource| !video_dir.join(&resource.filename).exists()),
+            "static HLS MPEG-TS resources must not be staged as individual files"
+        );
         assert_eq!(downloaded.load(Ordering::Relaxed), 188 * 6);
     }
 
@@ -3665,6 +3732,12 @@ segment-2.m4s
         assert_eq!(
             tokio::fs::read(part).await.expect("read visible fMP4 part"),
             expected
+        );
+        assert!(
+            plan.resources
+                .iter()
+                .all(|resource| !video_dir.join(&resource.filename).exists()),
+            "static HLS fMP4 resources must not be staged as individual files"
         );
     }
 

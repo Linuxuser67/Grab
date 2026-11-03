@@ -1,7 +1,8 @@
-//! Crash-safe ordered writes of native manifest tracks.
+//! Crash-safe ordered assembly for native manifest tracks.
 //!
-//! Concurrent DASH resources are committed in manifest order; static HLS
-//! resources stream serially into the same checkpointed destination writer.
+//! Segment requests remain concurrent and bounded by the runner. This module
+//! commits their completed files to one track in manifest order. The checkpoint
+//! advances only after the output bytes and their digest record are synced.
 
 use std::path::Path;
 
@@ -13,7 +14,7 @@ const CHECKPOINT_VERSION: u32 = 3;
 const PREVIOUS_CHECKPOINT_VERSION: u32 = 2;
 const LEGACY_CHECKPOINT_VERSION: u32 = 1;
 const MAX_TRACK_BYTES: u64 = 1 << 40;
-/// Maximum size of one manifest resource.
+/// Maximum size of one staged manifest resource.
 pub(crate) const MAX_RESOURCE_BYTES: u64 = 1024 * 1024 * 1024;
 const MAX_CHECKPOINT_BYTES: u64 = 1024 * 1024;
 
@@ -81,10 +82,10 @@ enum CheckpointState {
     },
 }
 
-/// Write native manifest resources in order with durable per-resource checkpoints.
+/// Incrementally assemble manifest resources in order.
 ///
 /// Each committed resource has a fixed-size SHA-256 record in an append-only
-/// journal. The small atomic checkpoint records the committed prefix length.
+/// journal. The checkpoint records the durable committed prefix length.
 pub(crate) struct OrderedTrackWriter {
     resources: Vec<String>,
     directory: std::path::PathBuf,
@@ -572,11 +573,11 @@ impl OrderedTrackWriter {
     ///
     /// Returns an error if a size limit is exceeded or output writing fails.
     pub(crate) async fn write_streamed_chunk(&mut self, bytes: &[u8]) -> Result<(), String> {
-        let chunk_length = u64::try_from(bytes.len())
-            .map_err(|_| "The streamed HLS fragment is too large".to_string())?;
         if self.next_resource_index >= self.resources.len() {
             return Err("All manifest resources have already been committed".to_string());
         }
+        let chunk_length = u64::try_from(bytes.len())
+            .map_err(|_| "The streamed HLS fragment is too large".to_string())?;
         let next_resource_bytes = self
             .pending_resource_bytes
             .checked_add(chunk_length)

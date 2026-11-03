@@ -11,7 +11,7 @@ use super::{
 
 // Each record is an 8-byte big-endian length followed by 32 raw SHA-256 bytes.
 const RESOURCE_RECORD_BYTES: usize = 40;
-// 100,001 live-manifest resources need about 4 MiB at 40 bytes per record.
+// A 100,001-resource live manifest needs about 4 MiB at 40 bytes per record.
 const MAX_RESOURCE_JOURNAL_BYTES: u64 = 16 * 1024 * 1024;
 
 /// Load a checkpointed prefix, rebuilding the journal only from retained sources.

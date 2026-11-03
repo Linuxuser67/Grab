@@ -298,8 +298,8 @@ fn queue_row_resynced_after_picker_returns_to_form() {
     assert!(list_clamp.is::<libadwaita::Clamp>());
     assert_eq!(
         list_clamp.property::<i32>("maximum-size"),
-        960,
-        "the filter and download rows should share a centered 960px column"
+        800,
+        "the filter and download rows should share a centered 800px column"
     );
     window.present();
     drain_gtk_events();

@@ -2279,3 +2279,144 @@ async fn live_hls_snapshot_appends_fetched_mpegts_fragments_to_visible_destinati
         expected.len() as u64
     );
 }
+
+#[tokio::test]
+async fn static_hls_muxed_audio_is_present_in_the_single_destination_part() {
+    if !tools_available() {
+        return;
+    }
+
+    let root = TempRoot::new("static-muxed-hls-part");
+    let fixture_dir = root.path().join("fixture");
+    std::fs::create_dir_all(&fixture_dir).expect("create HLS fixture directory");
+    let source_playlist_path = fixture_dir.join("media.m3u8");
+    let generated = Command::new("ffmpeg")
+        .args([
+            "-hide_banner",
+            "-loglevel",
+            "error",
+            "-y",
+            "-f",
+            "lavfi",
+            "-i",
+            "testsrc2=size=96x64:rate=12",
+            "-f",
+            "lavfi",
+            "-i",
+            "sine=frequency=880:sample_rate=48000",
+            "-t",
+            "3",
+            "-shortest",
+            "-c:v",
+            "mpeg2video",
+            "-q:v",
+            "5",
+            "-c:a",
+            "aac",
+            "-b:a",
+            "64k",
+            "-f",
+            "hls",
+            "-hls_time",
+            "1",
+            "-hls_playlist_type",
+            "vod",
+            "-hls_segment_type",
+            "mpegts",
+            "-hls_segment_filename",
+        ])
+        .arg(fixture_dir.join("segment%03d.ts"))
+        .arg(&source_playlist_path)
+        .output()
+        .expect("generate multiplexed MPEG-TS HLS fixture");
+    assert_command_succeeded(&generated, "FFmpeg could not generate multiplexed HLS");
+
+    let manifest_url = "https://cdn.fixture.invalid/media.m3u8";
+    let manifest = std::fs::read(&source_playlist_path).expect("read HLS media playlist");
+    let mut plan = crate::manifest::plan_hls_media_playlist(manifest_url, &manifest)
+        .expect("parse multiplexed HLS media playlist");
+    assert!(
+        plan.is_destination_assemblable_candidate(),
+        "a simple MPEG-TS playlist should use direct destination assembly"
+    );
+
+    let urls = plan
+        .resources
+        .iter()
+        .map(|resource| resource.url.clone())
+        .collect::<Vec<_>>();
+    let files = fixture_files(&fixture_dir, &urls);
+    let (server_url, server) = spawn_fixture_server(files, urls.len()).await;
+    for resource in &mut plan.resources {
+        resource.url = loopback_resource_url(&server_url, &resource.url);
+    }
+
+    let destination_dir = root.path().join("downloads");
+    let staging = root.path().join("state");
+    let video_dir = staging.join("video");
+    std::fs::create_dir_all(&destination_dir).expect("create destination directory");
+    std::fs::create_dir_all(&video_dir).expect("create HLS staging directory");
+    let destination = destination_dir.join("muxed-hls.mp4");
+    let item_id = 732;
+    crate::manifest_destination::ensure_plan(&staging, &destination, item_id, false, false)
+        .expect("write one-track destination plan");
+
+    let client = fixture_client();
+    let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+    let downloaded = Arc::new(AtomicU64::new(0));
+    let (_abort_tx, mut abort) = tokio::sync::oneshot::channel();
+    assert!(
+        fetch_and_write_hls_track(ManifestHlsTrackTransfer {
+            client: &client,
+            staging: &staging,
+            plan: &plan,
+            directory: &video_dir,
+            filename: "video-track.ts",
+            destination: &destination,
+            item_id,
+            track: crate::manifest_destination::TrackKind::Video,
+            tx: &tx,
+            downloaded: &downloaded,
+            abort: &mut abort,
+        })
+        .await
+        .expect("append HLS fragments to the visible destination part"),
+        "the HLS transfer unexpectedly aborted"
+    );
+    wait_for_fixture_server(server).await;
+
+    let visible_part = crate::manifest_destination::part_path(
+        &staging,
+        &destination,
+        item_id,
+        crate::manifest_destination::TrackKind::Video,
+    )
+    .expect("resolve the visible HLS destination part");
+    assert_has_audio_and_video(Path::new("ffprobe"), &visible_part);
+    assert!(
+        crate::manifest_destination::part_path(
+            &staging,
+            &destination,
+            item_id,
+            crate::manifest_destination::TrackKind::Audio,
+        )
+        .is_err(),
+        "muxed HLS should not create a separate audio part"
+    );
+
+    let output_part = root.path().join("muxed-hls.part.mp4");
+    assert!(
+        run_ffmpeg(
+            Path::new("ffmpeg"),
+            &visible_part,
+            None,
+            SubtitleOutput::default(),
+            &output_part,
+            &mut abort,
+        )
+        .await
+        .expect("finalize the assembled HLS part"),
+        "HLS finalization unexpectedly aborted"
+    );
+    assert_has_audio_and_video(Path::new("ffprobe"), &output_part);
+}

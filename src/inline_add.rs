@@ -728,8 +728,6 @@ pub(crate) struct VideoStep {
         Rc<RefCell<Vec<crate::manifest_intake::ManifestAudioChoice>>>,
     pub(crate) manifest_audio_selection: Rc<RefCell<Option<crate::media_types::ManifestAudioKey>>>,
     pub(crate) manifest_audio_format: adw::ComboRow,
-    /// Output container for native HLS/DASH downloads; the filename extension is kept in sync.
-    pub(crate) manifest_container: adw::ComboRow,
     /// Index-aligned with the combo's model. Reset on every resolve.
     pub(crate) options: Rc<RefCell<Vec<FormatOption>>>,
     pub(crate) tools: adw::ActionRow,
@@ -890,7 +888,6 @@ pub(crate) fn hide_video_step(v: &VideoStep) {
     v.format.set_visible(false);
     v.manifest_format.set_visible(false);
     v.manifest_audio_format.set_visible(false);
-    v.manifest_container.set_visible(false);
     v.tools.set_visible(false);
     v.error.set_visible(false);
     v.gallery_info.set_visible(false);
@@ -916,7 +913,6 @@ fn clear_manifest_preview(step: &VideoStep) {
     step.manifest_audio_format
         .set_model(Some(&gtk4::StringList::new(&[])));
     step.manifest_audio_format.set_visible(false);
-    step.manifest_container.set_visible(false);
 }
 
 /// Refresh the audio picker for the selected video representation.
@@ -956,31 +952,14 @@ fn refresh_manifest_audio_picker(
         .set_visible(step.manifest_audio_choices.borrow().len() > 1);
 }
 
-/// Native output containers are deliberately limited to the two containers
-/// supported by the manifest finalizer.
-fn manifest_container_extension(selected: u32) -> &'static str {
-    if selected == 1 { "mkv" } else { "mp4" }
-}
-
-fn manifest_container_index(filename: &str) -> u32 {
-    if std::path::Path::new(filename)
-        .extension()
-        .and_then(|extension| extension.to_str())
-        .is_some_and(|extension| extension.eq_ignore_ascii_case("mkv"))
-    {
-        1
-    } else {
-        0
-    }
-}
-
-fn manifest_filename_with_extension(filename: &str, extension: &str) -> String {
+/// Native HLS/DASH output uses Matroska to preserve broad codec and subtitle compatibility.
+fn manifest_filename(filename: &str) -> String {
     let stem = std::path::Path::new(filename)
         .file_stem()
         .and_then(|stem| stem.to_str())
         .filter(|stem| !stem.is_empty())
         .unwrap_or("Video");
-    format!("{stem}.{extension}")
+    format!("{stem}.mkv")
 }
 
 /// Show a parsed manifest and enable Add for the validated representation.
@@ -1022,15 +1001,10 @@ fn show_manifest_ready(
     drop(manifest_state);
     refresh_manifest_audio_picker(step, selected_video_key.as_ref());
     if step.name.text().trim().is_empty() {
-        step.name.set_text(&format!("{suggested_title}.mp4"));
+        step.name.set_text(&format!("{suggested_title}.mkv"));
     }
     let filename = step.name.text().trim().to_string();
-    let container_index = manifest_container_index(&filename);
-    let extension = manifest_container_extension(container_index);
-    step.name
-        .set_text(&manifest_filename_with_extension(&filename, extension));
-    step.manifest_container.set_selected(container_index);
-    step.manifest_container.set_visible(true);
+    step.name.set_text(&manifest_filename(&filename));
     step.name.set_visible(true);
     // The existing revert action is tied to yt-dlp title metadata.
     step.revert.set_visible(false);
@@ -2399,10 +2373,6 @@ fn build_video_preview(
         .build();
     manifest_audio_format.set_visible(false);
     video_group.add(&manifest_audio_format);
-    let manifest_container = adw::ComboRow::builder().title(gettext("Container")).build();
-    manifest_container.set_model(Some(&gtk4::StringList::new(&["MP4", "MKV"])));
-    manifest_container.set_visible(false);
-    video_group.add(&manifest_container);
     let video_format = adw::ComboRow::builder()
         .title(gettext("Media format"))
         .build();
@@ -2499,7 +2469,6 @@ fn build_video_preview(
         manifest_audio_choices: Rc::new(RefCell::new(Vec::new())),
         manifest_audio_selection: Rc::new(RefCell::new(None)),
         manifest_audio_format,
-        manifest_container,
         options: Rc::new(RefCell::new(Vec::new())),
         tools: video_tools,
         error: video_error,
@@ -2553,21 +2522,6 @@ fn wire_video_preview(step: Rc<VideoStep>) {
                     .map(|choice| choice.key.clone());
                 selection.replace(selected_key);
             });
-    }
-    // "Select files…" invokes the opener set below (where the picker context
-    // lives). Connected once; the opener is set once at build time.
-    {
-        let step_weak = Rc::downgrade(&step);
-        step.manifest_container.connect_selected_notify(move |row| {
-            if let Some(step) = step_weak.upgrade() {
-                let filename = step.name.text().trim().to_string();
-                let extension = manifest_container_extension(row.selected());
-                let updated = manifest_filename_with_extension(&filename, extension);
-                if updated != filename {
-                    step.name.set_text(&updated);
-                }
-            }
-        });
     }
     {
         let opener = step.gallery_select_opener.clone();
@@ -3629,10 +3583,7 @@ fn build_submit_handler(context: SubmitContext) -> SubmitHandler {
                         })
                 };
                 if let Some(source) = selected_source {
-                    let filename = manifest_filename_with_extension(
-                        step2.name.text().trim(),
-                        manifest_container_extension(step2.manifest_container.selected()),
-                    );
+                    let filename = manifest_filename(step2.name.text().trim());
                     let enqueue_manager = Rc::clone(&m);
                     let error_step = Rc::clone(&step2);
                     let error_lookup_add = Rc::clone(&lookup_add_submit);
@@ -5356,37 +5307,14 @@ mod tests {
 }
 
 #[cfg(test)]
-mod manifest_container_tests {
-    use super::{
-        manifest_container_extension, manifest_container_index, manifest_filename_with_extension,
-    };
+mod manifest_filename_tests {
+    use super::manifest_filename;
 
     #[test]
-    fn manifest_container_defaults_to_mp4_and_detects_mkv_case_insensitively() {
-        assert_eq!(manifest_container_index("Stream.mp4"), 0);
-        assert_eq!(manifest_container_index("Stream.MKV"), 1);
-        assert_eq!(manifest_container_extension(0), "mp4");
-        assert_eq!(manifest_container_extension(1), "mkv");
-        assert_eq!(manifest_container_extension(99), "mp4");
-    }
-
-    #[test]
-    fn manifest_filename_tracks_selected_container_without_losing_stem() {
-        assert_eq!(
-            manifest_filename_with_extension("Stream.mp4", "mkv"),
-            "Stream.mkv"
-        );
-        assert_eq!(
-            manifest_filename_with_extension("archive.part.MKV", "mp4"),
-            "archive.part.mp4"
-        );
-        assert_eq!(
-            manifest_filename_with_extension("Stream", "mkv"),
-            "Stream.mkv"
-        );
-        assert_eq!(
-            manifest_filename_with_extension(".hidden", "mp4"),
-            ".hidden.mp4"
-        );
+    fn native_manifest_filename_always_uses_matroska() {
+        assert_eq!(manifest_filename("Stream.mp4"), "Stream.mkv");
+        assert_eq!(manifest_filename("archive.part.MKV"), "archive.part.mkv");
+        assert_eq!(manifest_filename("Stream"), "Stream.mkv");
+        assert_eq!(manifest_filename(".hidden"), ".hidden.mkv");
     }
 }

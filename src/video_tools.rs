@@ -2508,14 +2508,14 @@ mod tests {
         let base = unique_dir("version-probe-identity");
         std::fs::create_dir_all(&base).unwrap();
         let binary = base.join("yt-dlp");
-        write_test_script(&binary, "#!/bin/sh\\nprintf 'cached-one\\n'\\n");
+        write_test_script(&binary, "#!/bin/sh\nprintf 'cached-one\\n'\n");
         let original_mtime = std::fs::metadata(&binary).unwrap().modified().unwrap();
 
         assert_eq!(
             probe_first_line(&binary, "--version").await.unwrap(),
             "cached-one"
         );
-        write_test_script(&binary, "#!/bin/sh\\nprintf 'cached-two\\n'\\n");
+        write_test_script(&binary, "#!/bin/sh\nprintf 'cached-two\\n'\n");
         std::fs::File::options()
             .write(true)
             .open(&binary)

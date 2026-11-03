@@ -443,6 +443,43 @@ mod tests {
         }
     }
 
+    #[test]
+    fn startup_sweep_removes_only_old_grab_publish_temporaries() {
+        let directory = tempfile::tempdir().expect("create download directory");
+        let stale = directory.path().join(".grab-publish-stale.partial");
+        std::fs::write(&stale, b"orphaned media").expect("write stale temporary");
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        let startup_started_at = std::time::SystemTime::now();
+        let fresh = directory.path().join(".grab-publish-fresh.partial");
+        std::fs::write(&fresh, b"active media").expect("write fresh temporary");
+        let unrelated = directory.path().join(".other-temp.partial");
+        std::fs::write(&unrelated, b"unrelated").expect("write unrelated file");
+
+        sweep_stale_publish_temporaries(directory.path(), startup_started_at);
+
+        assert!(!stale.exists(), "pre-startup publish leftovers are removed");
+        assert!(fresh.exists(), "files created after startup are preserved");
+        assert!(unrelated.exists(), "unrelated temporary files are preserved");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn startup_sweep_does_not_follow_or_remove_symlink_entries() {
+        let directory = tempfile::tempdir().expect("create download directory");
+        let target = directory.path().join("user-file");
+        std::fs::write(&target, b"user data").expect("write target");
+        let link = directory.path().join(".grab-publish-link.partial");
+        std::os::unix::fs::symlink(&target, &link).expect("create symlink");
+
+        sweep_stale_publish_temporaries(
+            directory.path(),
+            std::time::SystemTime::now() + std::time::Duration::from_secs(1),
+        );
+
+        assert!(link.is_symlink(), "symlink entries are not swept");
+        assert_eq!(std::fs::read(&target).unwrap(), b"user data");
+    }
+
     #[tokio::test]
     async fn same_filesystem_publication_commits_the_renamed_output() {
         let directory = tempfile::tempdir().expect("create publication root");
@@ -561,7 +598,7 @@ mod tests {
         let source = directory.path().join("source.part");
         std::fs::write(&source, vec![0x31; 1024 * 1024]).unwrap();
         let mut source_file = std::fs::File::open(&source).unwrap();
-        let mut temporary = tempfile::NamedTempFile::new_in(directory.path()).unwrap();
+        let mut temporary = crate::file_names::publish_temp_in(directory.path()).unwrap();
         let gate = crate::attempt_gate::AttemptGate::new();
         let mut destination = DiscardAfterFirstWrite {
             file: temporary.as_file_mut(),

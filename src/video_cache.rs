@@ -311,12 +311,7 @@ fn hash_system_time(hasher: &mut Sha256, name: &[u8], time: SystemTime) {
 /// Size plus modification time alone can collide when a binary or cookie jar is
 /// replaced in place while preserving its length and mtime. Unix ctime and the
 /// device/inode pair distinguish those updates without hashing file contents.
-fn hash_file_identity(
-    hasher: &mut Sha256,
-    name: &[u8],
-    path: &Path,
-    metadata: &std::fs::Metadata,
-) {
+fn hash_file_identity(hasher: &mut Sha256, name: &[u8], path: &Path, metadata: &std::fs::Metadata) {
     hash_field(hasher, name, path.as_os_str().to_string_lossy().as_bytes());
     hash_field(hasher, b"file-size", &metadata.len().to_be_bytes());
 

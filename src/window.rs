@@ -205,6 +205,8 @@ pub fn build_window(
         .title("Grab")
         .default_width(settings.window_width().max(400))
         .default_height(settings.window_height().max(300))
+        .width_request(360)
+        .height_request(300)
         .build();
 
     settings
@@ -225,10 +227,6 @@ pub fn build_window(
     // HIG search: the toggle button lives in the header; the search bar
     // slides down below it (GtkSearchBar's built-in animation), sized to
     // match the inline New Download card (12px margins).
-    header.set_title_widget(Some(&adw::WindowTitle::new(
-        &gettext("Grab"),
-        &gettext("Download Manager"),
-    )));
     let search = gtk4::SearchEntry::builder()
         .placeholder_text(gettext("Search downloads"))
         .hexpand(true)
@@ -256,7 +254,6 @@ pub fn build_window(
     search_clamp.set_child(Some(&search_bar));
 
     let menu = gio::Menu::new();
-    menu.append(Some(&gettext("New Download")), Some("app.add-download"));
     let section = gio::Menu::new();
     section.append(Some(&gettext("Cancel All")), Some("app.cancel-all"));
     section.append(Some(&gettext("Retry Failed")), Some("app.retry-failed"));
@@ -273,16 +270,20 @@ pub fn build_window(
     menu.append_section(None, &section2);
     let menu_btn = gtk4::MenuButton::builder()
         .icon_name("open-menu-symbolic")
+        .primary(true)
         .menu_model(&menu)
         .tooltip_text(gettext("Main Menu"))
         .build();
+    menu_btn.set_widget_name("main-menu-button");
     menu_btn.update_property(&[gtk4::accessible::Property::Label(&gettext("Main Menu"))]);
-    header.pack_start(&menu_btn);
+    // GNOME's primary menu belongs at the trailing edge, beside the window controls.
+    header.pack_end(&menu_btn);
 
     let search_toggle = gtk4::ToggleButton::builder()
         .icon_name("system-search-symbolic")
         .tooltip_text(gettext("Search (Ctrl+F)"))
         .build();
+    search_toggle.set_widget_name("search-downloads-button");
     search_toggle.update_property(&[gtk4::accessible::Property::Label(&gettext("Search"))]);
     header.pack_start(&search_toggle);
 
@@ -294,6 +295,7 @@ pub fn build_window(
         .css_classes(["suggested-action"])
         .tooltip_text(gettext("New Download (Ctrl+N)"))
         .build();
+    add_btn.set_widget_name("add-download-button");
     add_btn.update_property(&[gtk4::accessible::Property::Label(&gettext("New Download"))]);
     {
         let card = add_card.clone();
@@ -314,7 +316,8 @@ pub fn build_window(
             }
         });
     }
-    header.pack_end(&add_btn);
+    // "New Download" is the primary window action, so keep it at the leading edge.
+    header.pack_start(&add_btn);
 
     let stack = adw::ViewStack::new();
     let empty = adw::StatusPage::builder()
@@ -400,9 +403,10 @@ pub fn build_window(
     // empty sections collapse as usual.
     let query: Rc<RefCell<String>> = Rc::new(RefCell::new(String::new()));
     let status_sel: Rc<Cell<u32>> = Rc::new(Cell::new(0));
-    // Status filter as a segmented control pinned above the sections: one
-    // mutually-exclusive choice, always visible. Order must match
-    // status_filter_bucket: 0 = All, 1 = Active, 2 = Queued, 3 = Downloaded.
+    // The status filters use the header's centered title area on wide
+    // windows. Narrow windows get a single compact dropdown above the list.
+    // Both controls share this selected bucket: 0 = All, 1 = Active,
+    // 2 = Queued, 3 = Downloaded.
     let seg = adw::ToggleGroup::new();
     for (name, label) in [
         ("all", gettext("All")),
@@ -414,15 +418,92 @@ pub fn build_window(
         seg.add(toggle);
     }
     seg.set_active_name(Some("all"));
-    seg.set_hexpand(true);
-    // AdwToggleGroup doesn't implement GtkAccessible; the label goes on a
-    // wrapper so screen readers announce the filter's purpose.
+    seg.set_widget_name("status-filter-segmented");
+
+    // The wrapper provides an accessible name for AdwToggleGroup.
     let seg_wrap = gtk4::Box::new(gtk4::Orientation::Horizontal, 0);
+    seg_wrap.set_halign(gtk4::Align::Center);
     seg_wrap.update_property(&[gtk4::accessible::Property::Label(&gettext(
         "Filter by status",
     ))]);
     seg_wrap.append(&seg);
-    content.prepend(&seg_wrap);
+
+    let window_title = adw::WindowTitle::new(
+        &gettext("Grab"),
+        &gettext("Download Manager"),
+    );
+    let header_title_stack = gtk4::Stack::new();
+    header_title_stack.set_widget_name("header-title-stack");
+    header_title_stack.add_named(&window_title, Some("title"));
+    header_title_stack.add_named(&seg_wrap, Some("filters"));
+    header_title_stack.set_visible_child_name("title");
+    header.set_title_widget(Some(&header_title_stack));
+
+    let filter_names = [
+        gettext("All"),
+        gettext("Active"),
+        gettext("Queued"),
+        gettext("Downloaded"),
+    ];
+    let filter_model = gtk4::StringList::new(
+        &filter_names.iter().map(String::as_str).collect::<Vec<_>>(),
+    );
+    let status_dropdown = gtk4::DropDown::builder()
+        .model(&filter_model)
+        .selected(0)
+        .tooltip_text(gettext("Filter downloads"))
+        .build();
+    status_dropdown.set_widget_name("status-filter-dropdown");
+    status_dropdown.update_property(&[gtk4::accessible::Property::Label(&gettext(
+        "Filter by status",
+    ))]);
+
+    let compact_filter_row = gtk4::Box::new(gtk4::Orientation::Horizontal, 8);
+    compact_filter_row.set_widget_name("status-filter-compact-row");
+    compact_filter_row.set_halign(gtk4::Align::Center);
+    compact_filter_row.set_margin_top(6);
+    compact_filter_row.set_margin_bottom(6);
+    compact_filter_row.set_margin_start(12);
+    compact_filter_row.set_margin_end(12);
+    let compact_filter_label = gtk4::Label::new(Some(&gettext("Show")));
+    compact_filter_row.append(&compact_filter_label);
+    compact_filter_row.append(&status_dropdown);
+    compact_filter_row.set_visible(false);
+    content.prepend(&compact_filter_row);
+
+    let narrow_layout = Rc::new(Cell::new(false));
+    let has_items = Rc::new(Cell::new(false));
+    let breakpoint = adw::Breakpoint::new(
+        adw::BreakpointCondition::parse("max-width: 700sp")
+            .expect("the static compact-header breakpoint is valid"),
+    );
+    {
+        let narrow = Rc::clone(&narrow_layout);
+        let compact = compact_filter_row.clone();
+        let title = header_title_stack.clone();
+        let has_items = Rc::clone(&has_items);
+        breakpoint.connect_apply(move |_| {
+            narrow.set(true);
+            compact.set_visible(has_items.get());
+            title.set_visible_child_name("title");
+        });
+    }
+    {
+        let narrow = Rc::clone(&narrow_layout);
+        let compact = compact_filter_row.clone();
+        let title = header_title_stack.clone();
+        let has_items = Rc::clone(&has_items);
+        breakpoint.connect_unapply(move |_| {
+            narrow.set(false);
+            compact.set_visible(false);
+            title.set_visible_child_name(if has_items.get() {
+                "filters"
+            } else {
+                "title"
+            });
+        });
+    }
+    window.add_breakpoint(breakpoint);
     // The toggle shows/hides the search bar below the header (HIG pattern);
     // Escape in the entry closes it too.
     {
@@ -485,6 +566,11 @@ pub fn build_window(
         let query = Rc::clone(&query);
         let status_sel = Rc::clone(&status_sel);
         let seg = seg.clone();
+        let dropdown = status_dropdown.clone();
+        let compact = compact_filter_row.clone();
+        let title = header_title_stack.clone();
+        let narrow = Rc::clone(&narrow_layout);
+        let has_items_state = Rc::clone(&has_items);
         Rc::new(move || {
             let store = m.store();
             let q = query.borrow();
@@ -554,11 +640,19 @@ pub fn build_window(
             sec_queued.set_visible(n_queued > 0);
             sec_downloaded.set_visible(n_downloaded > 0);
             let has_items = store.n_items() > 0;
-            // Header + duplicates the empty-state pill, so show it only with the list.
+            has_items_state.set(has_items);
+            // The header holds the primary action once there are rows; the empty
+            // state supplies its own call to action when the queue is empty.
             add.set_visible(has_items);
             search_btn.set_visible(has_items);
-            // The categories only make sense once there are entries to filter.
             seg.set_visible(has_items);
+            if narrow.get() {
+                compact.set_visible(has_items);
+                title.set_visible_child_name("title");
+            } else {
+                compact.set_visible(false);
+                title.set_visible_child_name(if has_items { "filters" } else { "title" });
+            }
             if !has_items {
                 // List is gone, so nothing to search.
                 search_btn.set_active(false);
@@ -578,15 +672,47 @@ pub fn build_window(
     {
         let sync = Rc::clone(&sync);
         let sel = Rc::clone(&status_sel);
-        seg.connect_active_name_notify(move |g| {
-            let idx = match g.active_name().as_deref() {
+        let dropdown = status_dropdown.clone();
+        seg.connect_active_name_notify(move |group| {
+            let idx = match group.active_name().as_deref() {
                 Some("active") => 1,
                 Some("queued") => 2,
                 Some("downloaded") => 3,
                 _ => 0,
             };
-            sel.set(idx);
-            sync();
+            if sel.get() != idx {
+                sel.set(idx);
+                if dropdown.selected() != idx {
+                    dropdown.set_selected(idx);
+                }
+                sync();
+            }
+        });
+    }
+    {
+        let sync = Rc::clone(&sync);
+        let sel = Rc::clone(&status_sel);
+        let seg = seg.clone();
+        status_dropdown.connect_selected_notify(move |dropdown| {
+            let idx = match dropdown.selected() {
+                1 => 1,
+                2 => 2,
+                3 => 3,
+                _ => 0,
+            };
+            if sel.get() != idx {
+                sel.set(idx);
+                let name = match idx {
+                    1 => "active",
+                    2 => "queued",
+                    3 => "downloaded",
+                    _ => "all",
+                };
+                if seg.active_name().as_deref() != Some(name) {
+                    seg.set_active_name(Some(name));
+                }
+                sync();
+            }
         });
     }
 

@@ -248,28 +248,54 @@ pub fn resolve_gallerydl() -> Result<PathBuf, GalleryError> {
 }
 
 /// `gallery-dl --version` output, trimmed. Used for the Preferences row.
+/// Reuse the shared executable-version cache so repeated and concurrent UI
+/// requests do not spawn duplicate gallery-dl processes.
 pub async fn gallerydl_display_version(path: &Path) -> Result<String, GalleryError> {
-    // kill_on_drop: the Preferences row that calls this can be closed
-    // mid-probe; the child must not outlive the dropped future.
-    let mut cmd = tokio::process::Command::new(path);
-    cmd.kill_on_drop(true);
-    let out = cmd
-        .arg("--version")
-        .output()
+    crate::video_tools::probe_first_line(path, "--version")
         .await
-        .map_err(|e| GalleryError::install(format!("couldn't run gallery-dl: {e}")))?;
-    let version = String::from_utf8_lossy(&out.stdout).trim().to_string();
-    if version.is_empty() {
-        return Err(GalleryError::install(
-            "gallery-dl --version produced no output",
-        ));
-    }
-    Ok(version)
+        .map_err(|error| GalleryError::probe(format!("couldn't run gallery-dl: {error}")))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn gallerydl_version_uses_shared_single_flight_cache() {
+        let base = std::env::temp_dir().join(format!(
+            "grab-gallery-version-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&base).unwrap();
+        let binary = base.join("gallery-dl");
+        let counter = base.join("counter");
+        std::fs::write(
+            &binary,
+            format!(
+                "#!/bin/sh\\nprintf x >> '{}'\\nsleep 0.1\\nprintf '1.32.17\\n'\\n",
+                counter.display()
+            ),
+        )
+        .unwrap();
+        std::fs::set_permissions(
+            &binary,
+            std::fs::Permissions::from_mode(0o755),
+        )
+        .unwrap();
+
+        let (first, second) = tokio::join!(
+            gallerydl_display_version(&binary),
+            gallerydl_display_version(&binary)
+        );
+        assert_eq!(first.unwrap(), "1.32.17");
+        assert_eq!(second.unwrap(), "1.32.17");
+        assert_eq!(std::fs::read(&counter).unwrap(), b"x");
+        std::fs::remove_dir_all(&base).ok();
+    }
 
     #[test]
     fn codeberg_stable_release_metadata_accepts_only_expected_assets() {

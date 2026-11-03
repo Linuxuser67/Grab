@@ -666,9 +666,7 @@ where
     }
 
     let permissions = temporary.as_file().metadata()?.permissions();
-    temporary
-        .as_file_mut()
-        .seek(std::io::SeekFrom::Start(0))?;
+    temporary.as_file_mut().seek(std::io::SeekFrom::Start(0))?;
     let mut source = temporary.as_file();
     let mut buffer = [0_u8; 256 * 1024];
     loop {

@@ -571,6 +571,138 @@ pub(crate) fn rename_noreplace_same_device(
     }
 }
 
+/// Create a destination-side temporary with a name reserved for crash cleanup.
+pub(crate) fn publish_temp_in(
+    parent: &std::path::Path,
+) -> std::io::Result<tempfile::NamedTempFile> {
+    tempfile::Builder::new()
+        .prefix(".grab-publish-")
+        .suffix(".partial")
+        .tempfile_in(parent)
+}
+
+/// Remove a path only while it still names the file held by our open descriptor.
+fn remove_claimed_file(path: &std::path::Path, file: &std::fs::File) {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt as _;
+        let Ok(path_metadata) = std::fs::symlink_metadata(path) else {
+            return;
+        };
+        let Ok(file_metadata) = file.metadata() else {
+            return;
+        };
+        if !path_metadata.file_type().is_file()
+            || path_metadata.dev() != file_metadata.dev()
+            || path_metadata.ino() != file_metadata.ino()
+        {
+            return;
+        }
+        let _ = std::fs::remove_file(path);
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = (path, file);
+    }
+}
+
+/// Exclusive-create fallback for filesystems without hard links or no-replace rename.
+///
+/// The final name is reserved with `create_new` before copying. Such filesystems
+/// cannot provide atomic publication without either primitive, so readers may
+/// observe the file while this fallback copies it. Existing destinations are
+/// never opened or truncated.
+fn publish_by_exclusive_copy<F>(
+    temporary: tempfile::NamedTempFile,
+    destination: &std::path::Path,
+    mut should_continue: F,
+) -> std::io::Result<()>
+where
+    F: FnMut() -> bool,
+{
+    use std::io::Write as _;
+
+    if !should_continue() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::Interrupted,
+            "publication was cancelled",
+        ));
+    }
+
+    let mut claim = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(destination)?;
+    let mut armed = true;
+    let result = (|| {
+        if !should_continue() {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::Interrupted,
+                "publication was cancelled",
+            ));
+        }
+
+        let permissions = temporary.as_file().metadata()?.permissions();
+        let mut source = temporary.as_file();
+        std::io::copy(&mut source, &mut claim)?;
+        claim.set_permissions(permissions)?;
+        claim.flush()?;
+        claim.sync_all()?;
+
+        if !should_continue() {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::Interrupted,
+                "publication was cancelled",
+            ));
+        }
+        Ok(())
+    })();
+
+    if result.is_err() && armed {
+        remove_claimed_file(destination, &claim);
+        armed = false;
+    }
+    if result.is_ok() {
+        armed = false;
+    }
+    drop(claim);
+    drop(temporary);
+    let _ = armed;
+    result
+}
+
+/// Persist a temporary without clobbering, using an exclusive-copy fallback when
+/// the filesystem supports neither no-replace rename nor hard links.
+pub(crate) fn persist_noclobber_with_fallback<F>(
+    temporary: tempfile::NamedTempFile,
+    destination: &std::path::Path,
+    mut should_continue: F,
+) -> std::io::Result<()>
+where
+    F: FnMut() -> bool,
+{
+    match temporary.persist_noclobber(destination) {
+        Ok(published_file) => {
+            if should_continue() {
+                drop(published_file);
+                Ok(())
+            } else {
+                remove_claimed_file(destination, &published_file);
+                Err(std::io::Error::new(
+                    std::io::ErrorKind::Interrupted,
+                    "publication was cancelled",
+                ))
+            }
+        }
+        Err(error)
+            if link_unsupported(&error.error) || noreplace_unsupported(&error.error) =>
+        {
+            publish_by_exclusive_copy(error.file, destination, should_continue)
+        }
+        Err(error) => Err(error.error),
+    }
+}
+
 /// Copy through a destination-local temporary and publish without replacing an existing file.
 fn copy_noreplace(old: &std::path::Path, new: &std::path::Path) -> std::io::Result<()> {
     let parent = new.parent().ok_or_else(|| {
@@ -581,15 +713,12 @@ fn copy_noreplace(old: &std::path::Path, new: &std::path::Path) -> std::io::Resu
     })?;
     let mut source = std::fs::File::open(old)?;
     let permissions = source.metadata()?.permissions();
-    let mut temporary = tempfile::NamedTempFile::new_in(parent)?;
+    let mut temporary = publish_temp_in(parent)?;
     std::io::copy(&mut source, temporary.as_file_mut())?;
     temporary.as_file().set_permissions(permissions)?;
     temporary.as_file().sync_all()?;
 
-    let published_file = temporary
-        .persist_noclobber(new)
-        .map_err(|error| error.error)?;
-    drop(published_file);
+    persist_noclobber_with_fallback(temporary, new, || true)?;
 
     if let Err(error) = std::fs::remove_file(old) {
         tracing::warn!("copy_noreplace: published but could not unlink source: {error}");

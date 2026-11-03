@@ -394,3 +394,128 @@ fn count_queue_rows(widget: &gtk4::Widget) -> usize {
     }
     count
 }
+
+/// The status filters use the header's centered title area on wide windows
+/// and move into the list as a dropdown when the window becomes narrow.
+#[test]
+#[ignore = "needs a display; run under Xvfb (see ci.yml)"]
+fn status_filters_adapt_between_header_and_compact_dropdown() {
+    // SAFETY: UI tests run serially; no other thread reads these variables
+    // while this process-global setup runs.
+    unsafe {
+        std::env::set_var("GSETTINGS_SCHEMA_DIR", env!("GRAB_SCHEMA_DIR"));
+        std::env::set_var("GSETTINGS_BACKEND", "memory");
+    }
+    gtk4::init().expect("gtk::init (run under Xvfb)");
+
+    let app = libadwaita::Application::builder()
+        .application_id("io.github.linuxuser67.Grab.HeaderFilterTest")
+        .flags(gtk4::gio::ApplicationFlags::NON_UNIQUE)
+        .build();
+    app.register(None::<&gtk4::gio::Cancellable>)
+        .expect("register test application before building its window");
+
+    for (width, expected_title, expected_compact) in [(620, "title", true), (960, "filters", false)]
+    {
+        let settings = crate::settings::AppSettings::new();
+        let manager = crate::download::DownloadManager::new(
+            gtk4::gio::ListStore::new::<crate::download::DownloadItem>(),
+            settings.clone(),
+        );
+        manager.store().append(&crate::download::DownloadItem::new(
+            1,
+            "https://example.com/file",
+            "Example file",
+            "/tmp",
+        ));
+        let toasts = std::rc::Rc::new(libadwaita::ToastOverlay::new());
+        let (window, _, add_card) = crate::window::build_window(&app, manager, settings, toasts);
+        window.set_default_size(width, 500);
+        window.present();
+        drain_gtk_events();
+
+        let title = find_widget_by_name(window.upcast_ref(), "header-title-stack")
+            .expect("header title stack exists");
+        assert_eq!(
+            title.property::<String>("visible-child-name"),
+            expected_title,
+            "unexpected header title layout at {width}px"
+        );
+        let compact = find_widget_by_name(window.upcast_ref(), "status-filter-compact-row")
+            .expect("compact status filter exists");
+        assert_eq!(
+            compact.is_visible(),
+            expected_compact,
+            "unexpected compact filter visibility at {width}px"
+        );
+        assert!(
+            find_widget_by_name(window.upcast_ref(), "add-download-button").is_some(),
+            "the New Download action remains in the header"
+        );
+        assert!(
+            find_widget_by_name(window.upcast_ref(), "main-menu-button").is_some(),
+            "the main menu remains in the header"
+        );
+
+        let dropdown = find_widget_by_name(window.upcast_ref(), "status-filter-dropdown")
+            .expect("compact status filter exists")
+            .downcast::<gtk4::DropDown>()
+            .expect("compact filter is a GtkDropDown");
+        let segmented = find_widget_by_name(window.upcast_ref(), "status-filter-segmented")
+            .expect("wide status filter exists")
+            .downcast::<libadwaita::ToggleGroup>()
+            .expect("wide filter is an AdwToggleGroup");
+        if width == 620 {
+            dropdown.set_selected(2);
+            drain_gtk_events();
+            assert_eq!(
+                segmented.active_name().as_deref(),
+                Some("queued"),
+                "the narrow filter selection must update the shared status filter"
+            );
+        } else {
+            segmented.set_active_name(Some("downloaded"));
+            drain_gtk_events();
+            assert_eq!(
+                dropdown.selected(),
+                3,
+                "the wide filter selection must update the compact filter"
+            );
+        }
+
+        if width == 960 {
+            let picker_child = gtk4::Box::new(gtk4::Orientation::Vertical, 0);
+            let picker_page = libadwaita::NavigationPage::builder()
+                .tag("header-filter-test-picker")
+                .title("Picker")
+                .child(&picker_child)
+                .build();
+            add_card.navigation().push(&picker_page);
+            drain_gtk_events();
+            assert_eq!(
+                title.property::<String>("visible-child-name"),
+                "title",
+                "queue filters must leave the header while the picker is visible"
+            );
+            assert!(
+                !find_widget_by_name(window.upcast_ref(), "search-downloads-button")
+                    .expect("search button exists")
+                    .is_visible(),
+                "queue search must leave the header while the picker is visible"
+            );
+
+            assert!(
+                add_card.navigation().pop(),
+                "the picker page should return to the download form"
+            );
+            drain_gtk_events();
+            assert_eq!(
+                title.property::<String>("visible-child-name"),
+                "filters",
+                "queue filters must return when the queue becomes visible"
+            );
+        }
+        window.destroy();
+        drain_gtk_events();
+    }
+}

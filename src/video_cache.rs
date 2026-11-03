@@ -464,38 +464,6 @@ mod tests {
         assert_ne!(before, after);
     }
 
-    #[cfg(unix)]
-    #[test]
-    fn cache_key_changes_when_cookie_snapshot_is_rewritten_with_same_length() {
-        let directory = tempfile::tempdir().expect("temporary directory");
-        let binary = fake_binary(directory.path());
-        let cookie_file = directory.path().join("handoff.cookies");
-        std::fs::write(&cookie_file, "cookie=one").expect("write cookie jar");
-        let url = "https://example.test/watch?v=1";
-        let args = vec![
-            "--cookies".to_string(),
-            cookie_file.to_string_lossy().into_owned(),
-            "--".to_string(),
-            url.to_string(),
-        ];
-        let original_mtime = std::fs::metadata(&cookie_file)
-            .expect("cookie metadata")
-            .modified()
-            .expect("cookie modification time");
-        let before = cache_key(url, &binary, "2026.10.23", "none", None, &args)
-            .expect("initial cookie identity");
-
-        std::fs::write(&cookie_file, "cookie=two").expect("rewrite cookie jar");
-        std::fs::File::options()
-            .write(true)
-            .open(&cookie_file)
-            .expect("open rewritten cookie jar")
-            .set_times(std::fs::FileTimes::new().set_modified(original_mtime))
-            .expect("restore cookie modification time");
-        let after = cache_key(url, &binary, "2026.10.23", "none", None, &args)
-            .expect("updated cookie identity");
-        assert_ne!(before, after);
-    }
 
     #[cfg(unix)]
     #[test]

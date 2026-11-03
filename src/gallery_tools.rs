@@ -282,11 +282,7 @@ mod tests {
             ),
         )
         .unwrap();
-        std::fs::set_permissions(
-            &binary,
-            std::fs::Permissions::from_mode(0o755),
-        )
-        .unwrap();
+        std::fs::set_permissions(&binary, std::fs::Permissions::from_mode(0o755)).unwrap();
 
         let (first, second) = tokio::join!(
             gallerydl_display_version(&binary),

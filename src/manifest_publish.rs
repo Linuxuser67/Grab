@@ -324,7 +324,7 @@ async fn persist_prepared_copy(
 ) -> std::io::Result<ManifestPublishOutcome> {
     let destination_for_worker = destination.to_path_buf();
     let gate_for_worker = Arc::clone(gate);
-    let mut pending = tokio::task::spawn_blocking(move || {
+    let mut pending = match tokio::task::spawn_blocking(move || {
         let mut pending =
             PendingDestination::new(&destination_for_worker, Arc::clone(&gate_for_worker), None);
         crate::file_names::persist_noclobber_with_fallback(
@@ -336,7 +336,16 @@ async fn persist_prepared_copy(
         Ok::<_, std::io::Error>(pending)
     })
     .await
-    .map_err(std::io::Error::other)??;
+    {
+        Ok(Ok(pending)) => pending,
+        Ok(Err(error))
+            if error.kind() == std::io::ErrorKind::Interrupted && !gate.is_active() =>
+        {
+            return Ok(ManifestPublishOutcome::Aborted);
+        }
+        Ok(Err(error)) => return Err(error),
+        Err(error) => return Err(std::io::Error::other(error)),
+    };
     if let Err(error) = sync_parent_directory(destination).await {
         pending.rollback().await;
         return Err(error);

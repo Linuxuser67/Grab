@@ -469,18 +469,12 @@ fn attach_native_fallback_reason(
             video.native_fallback_reason = Some(native_error);
             Ok(MediaLookupOutcome::Video(video))
         }
-        Err(MediaLookupFailure::MissingTools(message)) => {
-            Err(MediaLookupFailure::MissingTools(append_native_fallback_reason(
-                &message,
-                Some(native_error.as_str()),
-            )))
-        }
-        Err(MediaLookupFailure::Failed(message)) => {
-            Err(MediaLookupFailure::Failed(append_native_fallback_reason(
-                &message,
-                Some(native_error.as_str()),
-            )))
-        }
+        Err(MediaLookupFailure::MissingTools(message)) => Err(MediaLookupFailure::MissingTools(
+            append_native_fallback_reason(&message, Some(native_error.as_str())),
+        )),
+        Err(MediaLookupFailure::Failed(message)) => Err(MediaLookupFailure::Failed(
+            append_native_fallback_reason(&message, Some(native_error.as_str())),
+        )),
         other => other,
     }
 }
@@ -505,17 +499,14 @@ async fn lookup_media_inner(
     let native_browser = browser.clone();
     let native_proxy = proxy.clone();
     let native_future = async move {
-        let result = crate::manifest_intake::lookup(
-            &native_url,
-            &native_browser,
-            native_proxy.as_ref(),
-        )
-        .await
-        .and_then(|manifest| {
-            manifest.ok_or_else(|| {
-                gettext("The URL did not resolve to a supported HLS or DASH manifest")
-            })
-        });
+        let result =
+            crate::manifest_intake::lookup(&native_url, &native_browser, native_proxy.as_ref())
+                .await
+                .and_then(|manifest| {
+                    manifest.ok_or_else(|| {
+                        gettext("The URL did not resolve to a supported HLS or DASH manifest")
+                    })
+                });
         (result, native_started.elapsed().as_millis() as u64)
     };
 
@@ -583,9 +574,9 @@ async fn lookup_extractors_inner(
                 "lookup tool resolution timing"
             );
             tracing::error!(error = %error, "lookup tool resolution task failed");
-            return Err(MediaLookupFailure::Failed(
-                gettext("The lookup failed unexpectedly. Please try again."),
-            ));
+            return Err(MediaLookupFailure::Failed(gettext(
+                "The lookup failed unexpectedly. Please try again.",
+            )));
         }
     };
     let (youtube_result, gallery_result) = local_tools;
@@ -601,8 +592,8 @@ async fn lookup_extractors_inner(
         },
         "lookup tool resolution timing"
     );
-    let youtube_bin = youtube_result
-        .map_err(|error| MediaLookupFailure::MissingTools(error.to_string()))?;
+    let youtube_bin =
+        youtube_result.map_err(|error| MediaLookupFailure::MissingTools(error.to_string()))?;
     let gallery_tool = match gallery_result {
         Some(Ok(path)) => Some(path),
         Some(Err(error)) => {
@@ -640,9 +631,7 @@ async fn lookup_extractors_inner(
         let _abort_probe_on_drop = AbortTaskOnDrop(probe_handle.abort_handle());
         let outcome = probe_handle.await.map_err(|error| {
             tracing::error!(error = %error, "dual-backend probe task failed");
-            MediaLookupFailure::Failed(gettext(
-                "The lookup failed unexpectedly. Please try again.",
-            ))
+            MediaLookupFailure::Failed(gettext("The lookup failed unexpectedly. Please try again."))
         })?;
         let crate::inline_gallery::DualProbeOutcome::Complete { gallery, ytdlp } = outcome;
 

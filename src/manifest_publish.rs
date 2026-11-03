@@ -449,11 +449,15 @@ mod tests {
     #[test]
     fn startup_sweep_removes_only_old_file_derived_publish_temporaries() {
         let directory = tempfile::tempdir().expect("create download directory");
-        let stale = directory.path().join(".episode.mkv.publish-stale123.partial");
+        let stale = directory
+            .path()
+            .join(".episode.mkv.publish-stale123.partial");
         std::fs::write(&stale, b"orphaned media").expect("write stale temporary");
         std::thread::sleep(std::time::Duration::from_millis(20));
         let startup_started_at = std::time::SystemTime::now();
-        let fresh = directory.path().join(".episode.mkv.publish-fresh123.partial");
+        let fresh = directory
+            .path()
+            .join(".episode.mkv.publish-fresh123.partial");
         std::fs::write(&fresh, b"active media").expect("write fresh temporary");
         let unrelated = directory.path().join(".other-temp.partial");
         std::fs::write(&unrelated, b"unrelated").expect("write unrelated file");

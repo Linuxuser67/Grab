@@ -857,7 +857,7 @@ fn manifest_filename_with_extension(filename: &str, extension: &str) -> String {
         .file_stem()
         .and_then(|stem| stem.to_str())
         .filter(|stem| !stem.is_empty())
-        .unwrap_or("Stream");
+        .unwrap_or("Video");
     format!("{stem}.{extension}")
 }
 
@@ -877,6 +877,7 @@ fn show_manifest_ready(
     let Some(manifest) = manifest_state.as_ref() else {
         return;
     };
+    let suggested_title = crate::file_names::title_from_manifest_url(&manifest.source_url);
     let choices = manifest.choices();
     let selected_index =
         crate::manifest_intake::preferred_choice_index(&choices, preferred_quality);
@@ -899,7 +900,7 @@ fn show_manifest_ready(
     drop(manifest_state);
     refresh_manifest_audio_picker(step, selected_video_key.as_ref());
     if step.name.text().trim().is_empty() {
-        step.name.set_text("Stream.mp4");
+        step.name.set_text(&format!("{suggested_title}.mp4"));
     }
     let filename = step.name.text().trim().to_string();
     let container_index = manifest_container_index(&filename);

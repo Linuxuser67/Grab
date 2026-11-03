@@ -969,3 +969,112 @@ async fn resumes_a_crash_during_staging_to_destination_part_migration() {
         .await
         .expect("remove staging");
 }
+
+#[tokio::test]
+async fn streamed_destination_writer_resumes_without_staged_source_files() {
+    let root = test_directory();
+    let staging = root.join("staging");
+    let track_directory = staging.join("video");
+    let destination_dir = root.join("destination");
+    tokio::fs::create_dir_all(&track_directory)
+        .await
+        .expect("create HLS track recovery directory");
+    tokio::fs::create_dir_all(&destination_dir)
+        .await
+        .expect("create HLS destination directory");
+    let destination = destination_dir.join("recording.mp4");
+    crate::manifest_destination::ensure_plan(&staging, &destination, 78, false, false)
+        .expect("create HLS destination plan");
+    let resources = vec!["segment-1.bin".to_string(), "segment-2.bin".to_string()];
+    let track = crate::manifest_destination::TrackKind::Video;
+
+    let (Some(mut writer), committed) = OrderedTrackWriter::open_destination_part(
+        resources.clone(),
+        &track_directory,
+        &staging,
+        "video-track.ts",
+        &destination,
+        78,
+        track,
+    )
+    .await
+    .expect("open destination writer") else {
+        panic!("a fresh destination part must return an active writer");
+    };
+    assert_eq!(committed, 0);
+    writer
+        .write_streamed_chunk(b"first")
+        .await
+        .expect("write first network chunk");
+    writer
+        .commit_streamed_resource()
+        .await
+        .expect("checkpoint first network resource");
+    writer
+        .write_streamed_chunk(b"discarded partial fragment")
+        .await
+        .expect("write partial fragment before rollback");
+    writer
+        .rollback_streamed_resource()
+        .await
+        .expect("discard uncommitted fragment bytes");
+    assert_eq!(writer.committed_offset(), 5);
+    drop(writer);
+
+    let part = crate::manifest_destination::part_path(&staging, &destination, 78, track)
+        .expect("resolve owned destination part");
+    let mut file = tokio::fs::OpenOptions::new()
+        .append(true)
+        .open(&part)
+        .await
+        .expect("open part to simulate an interrupted write");
+    tokio::io::AsyncWriteExt::write_all(&mut file, b"uncommitted")
+        .await
+        .expect("write uncommitted crash tail");
+    file.sync_all().await.expect("sync crash tail");
+    drop(file);
+
+    let (Some(mut writer), committed) = OrderedTrackWriter::open_destination_part(
+        resources,
+        &track_directory,
+        &staging,
+        "video-track.ts",
+        &destination,
+        78,
+        track,
+    )
+    .await
+    .expect("resume destination writer without staged source files") else {
+        panic!("a committed destination prefix must remain resumable");
+    };
+    assert_eq!(committed, 5);
+    assert_eq!(writer.next_resource_index(), 1);
+    writer
+        .write_streamed_chunk(b"sec")
+        .await
+        .expect("write second resource prefix");
+    writer
+        .write_streamed_chunk(b"ond")
+        .await
+        .expect("write second resource suffix");
+    writer
+        .commit_streamed_resource()
+        .await
+        .expect("checkpoint second network resource");
+    writer
+        .finish()
+        .await
+        .expect("flush streamed destination part");
+
+    assert_eq!(
+        tokio::fs::read(&part)
+            .await
+            .expect("read streamed destination part"),
+        b"firstsecond"
+    );
+    assert!(!track_directory.join("segment-1.bin").exists());
+    assert!(!track_directory.join("segment-2.bin").exists());
+    tokio::fs::remove_dir_all(root)
+        .await
+        .expect("remove HLS writer test directory");
+}

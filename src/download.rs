@@ -1355,7 +1355,12 @@ impl DownloadManager {
         let mut requested_name = filename
             .filter(|name| sane_filename(name))
             .map(str::to_string)
-            .unwrap_or_else(|| "Stream.mp4".to_string());
+            .unwrap_or_else(|| {
+                format!(
+                    "{}.mp4",
+                    crate::file_names::title_from_manifest_url(&source.url)
+                )
+            });
         match std::path::Path::new(&requested_name)
             .extension()
             .and_then(|extension| extension.to_str())

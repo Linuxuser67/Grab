@@ -1642,6 +1642,32 @@ fn native_manifest_queue_deduplicates_repeated_requested_filenames() {
 }
 
 #[test]
+fn native_manifest_without_a_supplied_name_uses_a_title_from_the_manifest_url() {
+    let (_queue_lock, _main_loop_lock) = test_locks();
+    let dest =
+        std::env::temp_dir().join(format!("grab-manifest-derived-name-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dest);
+    std::fs::create_dir_all(&dest).expect("destination directory");
+    let directory = dest.to_string_lossy().into_owned();
+    let manager = DownloadManager::new(gio::ListStore::new::<DownloadItem>(), test_settings());
+    let source = crate::media_types::ManifestSource {
+        url: "https://cdn.example.test/media/my_video.m3u8?token=rotating".to_string(),
+        kind: crate::media_types::ManifestKind::Hls,
+        representation_key: "hls-variant-0123456789abcdef0123456789abcdef".into(),
+        audio_key: None,
+        subtitle_key: None,
+        subtitle_language: None,
+    };
+
+    let item = manager
+        .enqueue_manifest_staged(source, &directory, None, &[])
+        .expect("enqueue manifest with a derived filename");
+
+    assert_eq!(item.filename(), "my video.mp4");
+    let _ = std::fs::remove_dir_all(&dest);
+}
+
+#[test]
 fn native_manifest_accepts_mp4_and_mkv_but_rejects_other_containers() {
     let (_queue_lock, _main_loop_lock) = test_locks();
     let dest = std::env::temp_dir().join(format!("grab-manifest-name-{}", std::process::id()));

@@ -1111,6 +1111,37 @@ mod tests {
         assert!(!destination.exists(), "cancelled claim must be removed");
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn exclusive_copy_fallback_keeps_partial_output_private() {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let dir = tempfile::tempdir().unwrap();
+        let temporary = publish_temp_in(dir.path()).unwrap();
+        std::fs::write(temporary.path(), b"complete payload").unwrap();
+        temporary
+            .as_file()
+            .set_permissions(std::fs::Permissions::from_mode(0o644))
+            .unwrap();
+        let destination = dir.path().join("published");
+        let mut checks = 0;
+
+        publish_by_exclusive_copy(temporary, &destination, || {
+            checks += 1;
+            if checks == 2 {
+                let mode = std::fs::metadata(&destination).unwrap().permissions().mode() & 0o777;
+                assert_eq!(mode, 0o600, "partial destination stays private");
+            }
+            true
+        })
+        .unwrap();
+
+        assert_eq!(
+            std::fs::metadata(&destination).unwrap().permissions().mode() & 0o777,
+            0o644
+        );
+    }
+
     #[test]
     fn exclusive_copy_fallback_publishes_complete_bytes() {
         let dir = tempfile::tempdir().unwrap();

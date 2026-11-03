@@ -1644,7 +1644,8 @@ fn native_manifest_queue_deduplicates_repeated_requested_filenames() {
 #[test]
 fn native_manifest_without_a_supplied_name_uses_a_title_from_the_manifest_url() {
     let (_queue_lock, _main_loop_lock) = test_locks();
-    let dest = std::env::temp_dir().join(format!("grab-manifest-derived-name-{}", std::process::id()));
+    let dest =
+        std::env::temp_dir().join(format!("grab-manifest-derived-name-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dest);
     std::fs::create_dir_all(&dest).expect("destination directory");
     let directory = dest.to_string_lossy().into_owned();

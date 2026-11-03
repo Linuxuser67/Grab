@@ -970,7 +970,6 @@ async fn resumes_a_crash_during_staging_to_destination_part_migration() {
         .expect("remove staging");
 }
 
-
 #[tokio::test]
 async fn streamed_destination_writer_resumes_without_staged_source_files() {
     let root = test_directory();
@@ -1062,10 +1061,15 @@ async fn streamed_destination_writer_resumes_without_staged_source_files() {
         .commit_streamed_resource()
         .await
         .expect("checkpoint second network resource");
-    writer.finish().await.expect("flush streamed destination part");
+    writer
+        .finish()
+        .await
+        .expect("flush streamed destination part");
 
     assert_eq!(
-        tokio::fs::read(&part).await.expect("read streamed destination part"),
+        tokio::fs::read(&part)
+            .await
+            .expect("read streamed destination part"),
         b"firstsecond"
     );
     assert!(!track_directory.join("segment-1.bin").exists());

@@ -358,7 +358,9 @@ impl OrderedTrackWriter {
                 }
                 Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
                 Err(error) => {
-                    return Err(format!("Could not inspect destination manifest part: {error}"));
+                    return Err(format!(
+                        "Could not inspect destination manifest part: {error}"
+                    ));
                 }
             }
         }
@@ -523,14 +525,15 @@ impl OrderedTrackWriter {
             remove_regular_file_if_present(&target).await?;
             sync_directory(directory).await?;
         } else {
-            output
-                .set_len(committed_offset)
-                .await
-                .map_err(|error| format!("Could not restore the manifest track checkpoint: {error}"))?;
+            output.set_len(committed_offset).await.map_err(|error| {
+                format!("Could not restore the manifest track checkpoint: {error}")
+            })?;
             output
                 .seek(std::io::SeekFrom::Start(committed_offset))
                 .await
-                .map_err(|error| format!("Could not seek to the manifest track checkpoint: {error}"))?;
+                .map_err(|error| {
+                    format!("Could not seek to the manifest track checkpoint: {error}")
+                })?;
         }
 
         Ok((
@@ -662,10 +665,9 @@ impl OrderedTrackWriter {
             .seek(std::io::SeekFrom::Start(self.committed_offset))
             .await
             .map_err(|error| format!("Could not reposition the HLS destination part: {error}"))?;
-        self.output
-            .sync_all()
-            .await
-            .map_err(|error| format!("Could not sync the rolled-back HLS destination part: {error}"))?;
+        self.output.sync_all().await.map_err(|error| {
+            format!("Could not sync the rolled-back HLS destination part: {error}")
+        })?;
         self.pending_resource_digest = Sha256::new();
         self.pending_resource_bytes = 0;
         Ok(())
@@ -740,11 +742,12 @@ impl OrderedTrackWriter {
                 .map_err(|error| {
                     format!("Could not roll back an incomplete manifest write: {error}")
                 })?;
-            self.output
-                .sync_all()
-                .await
-                .map_err(|error| format!("Could not sync the incomplete manifest track: {error}"))?;
-            return Err("A staged manifest segment changed while it was being assembled".to_string());
+            self.output.sync_all().await.map_err(|error| {
+                format!("Could not sync the incomplete manifest track: {error}")
+            })?;
+            return Err(
+                "A staged manifest segment changed while it was being assembled".to_string(),
+            );
         }
 
         self.output
@@ -797,7 +800,8 @@ impl OrderedTrackWriter {
         }
         if self.next_resource_index != self.resources.len() {
             return Err(
-                "The manifest track cannot be published before all resources are committed".to_string(),
+                "The manifest track cannot be published before all resources are committed"
+                    .to_string(),
             );
         }
         self.output
@@ -809,8 +813,9 @@ impl OrderedTrackWriter {
             sync_directory(parent).await?;
         }
         if self.destination_part.is_none() {
-            crate::file_names::rename_noreplace(&self.part, &self.target)
-                .map_err(|error| format!("Could not publish the ordered manifest track: {error}"))?;
+            crate::file_names::rename_noreplace(&self.part, &self.target).map_err(|error| {
+                format!("Could not publish the ordered manifest track: {error}")
+            })?;
             sync_directory(&self.directory).await?;
         }
         if self.checkpoint_policy == CheckpointPolicy::RemoveAfterPublish {
@@ -934,7 +939,9 @@ async fn committed_resource_prefix_inner(
         );
     }
     if checkpoint.next_resource_index > resources.len() {
-        return Err("The manifest writer checkpoint exceeds the selected resource plan".to_string());
+        return Err(
+            "The manifest writer checkpoint exceeds the selected resource plan".to_string(),
+        );
     }
 
     let committed = load_resource_records(
@@ -974,7 +981,9 @@ async fn committed_resource_prefix_inner(
     };
     if part_metadata.is_some() && target_metadata.is_some() {
         if part_override.is_none() || checkpoint.next_resource_index != resources.len() {
-            return Err("Both the interrupted and published manifest track files exist".to_string());
+            return Err(
+                "Both the interrupted and published manifest track files exist".to_string(),
+            );
         }
         let target_length = target_metadata
             .as_ref()
@@ -988,7 +997,9 @@ async fn committed_resource_prefix_inner(
 
     let output_path = if let Some(metadata) = &part_metadata {
         if metadata.len() < checkpoint.committed_offset {
-            return Err("The interrupted manifest track is shorter than its checkpoint".to_string());
+            return Err(
+                "The interrupted manifest track is shorter than its checkpoint".to_string(),
+            );
         }
         Some(&part)
     } else if let Some(metadata) = &target_metadata {
@@ -1144,7 +1155,9 @@ async fn verify_resource_ranges_file(
                 .map_err(|_| "The committed manifest resource length is too large".to_string())?;
         }
         if digest_hex(&digest.finalize()) != resource.sha256 {
-            return Err("The ordered manifest track contains corrupted committed bytes".to_string());
+            return Err(
+                "The ordered manifest track contains corrupted committed bytes".to_string(),
+            );
         }
     }
     Ok(())
@@ -1168,7 +1181,9 @@ pub(crate) async fn cleanup_committed_resources(
             "The completed manifest track has no retained verified checkpoint".to_string()
         })?;
     if committed.len() != resources.len() {
-        return Err("The completed manifest checkpoint has an incomplete resource list".to_string());
+        return Err(
+            "The completed manifest checkpoint has an incomplete resource list".to_string(),
+        );
     }
     remove_committed_source_files(resources, directory, &committed).await
 }
@@ -1369,7 +1384,9 @@ async fn load_checkpoint(
             let metadata = tokio::fs::symlink_metadata(&resource_path)
                 .await
                 .map_err(|error| {
-                    format!("A committed manifest source is missing and no track bytes remain: {error}")
+                    format!(
+                        "A committed manifest source is missing and no track bytes remain: {error}"
+                    )
                 })?;
             if metadata.file_type().is_symlink()
                 || !metadata.is_file()

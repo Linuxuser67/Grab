@@ -381,17 +381,8 @@ pub(crate) fn title_from_manifest_url(url_str: &str) -> String {
         return "video".to_string();
     };
 
-    const GENERIC_ENDPOINTS: &[&str] = &[
-        "master",
-        "playlist",
-        "manifest",
-        "index",
-        "stream",
-        "hls",
-        "video",
-        "videos",
-        "dash",
-    ];
+    const GENERIC_ENDPOINTS: &[&str] =
+        &["master", "playlist", "manifest", "index", "stream", "hls", "video", "videos", "dash"];
     let path_title = parsed
         .path_segments()
         .into_iter()
@@ -403,19 +394,16 @@ pub(crate) fn title_from_manifest_url(url_str: &str) -> String {
             let stem = decoded
                 .rsplit_once('.')
                 .filter(|(_, extension)| {
-                    extension.eq_ignore_ascii_case("m3u8")
-                        || extension.eq_ignore_ascii_case("mpd")
+                    extension.eq_ignore_ascii_case("m3u8") || extension.eq_ignore_ascii_case("mpd")
                 })
                 .map_or(decoded.as_str(), |(stem, _)| stem);
             let stem = stem.trim_matches('.');
             let lower = stem.to_ascii_lowercase();
-            let quality_variant = lower
-                .strip_suffix('p')
-                .is_some_and(|height| {
-                    !height.is_empty()
-                        && height.len() <= 4
-                        && height.chars().all(|character| character.is_ascii_digit())
-                });
+            let quality_variant = lower.strip_suffix('p').is_some_and(|height| {
+                !height.is_empty()
+                    && height.len() <= 4
+                    && height.chars().all(|character| character.is_ascii_digit())
+            });
             let generic_endpoint = GENERIC_ENDPOINTS.contains(&lower.as_str())
                 || lower.starts_with("chunklist")
                 || lower.starts_with("index_")

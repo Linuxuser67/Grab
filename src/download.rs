@@ -1356,7 +1356,10 @@ impl DownloadManager {
             .filter(|name| sane_filename(name))
             .map(str::to_string)
             .unwrap_or_else(|| {
-                format!("{}.mp4", crate::file_names::title_from_manifest_url(&source.url))
+                format!(
+                    "{}.mp4",
+                    crate::file_names::title_from_manifest_url(&source.url)
+                )
             });
         match std::path::Path::new(&requested_name)
             .extension()

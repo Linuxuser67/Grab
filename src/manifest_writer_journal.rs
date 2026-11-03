@@ -72,7 +72,9 @@ pub(super) async fn load_resource_records(
             || metadata.len() == 0
             || metadata.len() > MAX_RESOURCE_BYTES
         {
-            return Err("A staged manifest resource cannot rebuild its committed digest".to_string());
+            return Err(
+                "A staged manifest resource cannot rebuild its committed digest".to_string(),
+            );
         }
         rebuilt.push(CommittedResource {
             length: metadata.len(),
@@ -105,7 +107,9 @@ pub(super) async fn read_resource_journal(
     let metadata = match tokio::fs::symlink_metadata(journal_path).await {
         Ok(metadata) => {
             if metadata.file_type().is_symlink() || !metadata.is_file() {
-                return Err("The manifest resource digest journal is not a regular file".to_string());
+                return Err(
+                    "The manifest resource digest journal is not a regular file".to_string()
+                );
             }
             Some(metadata)
         }
@@ -360,7 +364,9 @@ fn validate_committed_resources(
             || resource.length > MAX_RESOURCE_BYTES
             || parse_digest(&resource.sha256).is_err()
         {
-            return Err("The manifest resource digest journal contains invalid metadata".to_string());
+            return Err(
+                "The manifest resource digest journal contains invalid metadata".to_string(),
+            );
         }
         offset = offset
             .checked_add(resource.length)

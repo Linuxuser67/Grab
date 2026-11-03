@@ -2760,8 +2760,7 @@ impl HlsResourceValidator {
     fn observe(&mut self, chunk: &[u8]) {
         let remaining = self.header.len().saturating_sub(self.header_len);
         let copied = remaining.min(chunk.len());
-        self.header[self.header_len..self.header_len + copied]
-            .copy_from_slice(&chunk[..copied]);
+        self.header[self.header_len..self.header_len + copied].copy_from_slice(&chunk[..copied]);
         self.header_len += copied;
     }
 

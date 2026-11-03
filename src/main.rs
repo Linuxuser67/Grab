@@ -49,6 +49,7 @@ mod gallery_runner;
 mod gallery_tools;
 // Video-page extraction + resolver worker: card, prefs, queue and engine entry.
 mod video;
+mod video_cache;
 mod video_argv;
 mod video_plan;
 mod video_prefs;
@@ -57,7 +58,6 @@ mod video_progress;
 mod video_quality;
 mod video_runner;
 mod video_spawn;
-mod video_cache;
 mod video_staging;
 mod video_tools;
 mod video_types;

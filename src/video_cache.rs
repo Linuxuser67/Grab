@@ -73,8 +73,7 @@ async fn video_cache() -> Option<&'static VideoCache> {
             let cache = VideoCache::new(&config, Some(VIDEO_CACHE_TTL.as_secs()))
                 .await
                 .map_err(|error| error.to_string())?;
-            secure_cache_file(&cache_dir.join("videos.redb"))
-                .map_err(|error| error.to_string())?;
+            secure_cache_file(&cache_dir.join("videos.redb")).map_err(|error| error.to_string())?;
             Ok::<VideoCache, String>(cache)
         })
         .await
@@ -90,9 +89,7 @@ async fn video_cache() -> Option<&'static VideoCache> {
 /// Use the stable XDG cache location, not the runtime directory used for
 /// transient cookie handoff files. The database contains extractor URLs.
 fn secure_cache_directory() -> std::io::Result<PathBuf> {
-    let directory = glib::user_cache_dir()
-        .join(crate::APP_ID)
-        .join("yt-dlp");
+    let directory = glib::user_cache_dir().join(crate::APP_ID).join("yt-dlp");
     std::fs::create_dir_all(&directory)?;
 
     let metadata = std::fs::symlink_metadata(&directory)?;
@@ -192,13 +189,21 @@ pub(crate) fn cache_key(
     hash_field(&mut hasher, b"schema", b"grab-ytdlp-video-v1");
     hash_field(&mut hasher, b"url", url.as_str().as_bytes());
     hash_field(&mut hasher, b"yt-dlp-version", yt_version.as_bytes());
-    hash_field(&mut hasher, b"binary-path", youtube_bin.as_os_str().to_string_lossy().as_bytes());
+    hash_field(
+        &mut hasher,
+        b"binary-path",
+        youtube_bin.as_os_str().to_string_lossy().as_bytes(),
+    );
 
     let binary_metadata = std::fs::metadata(youtube_bin).ok()?;
     if !binary_metadata.is_file() {
         return None;
     }
-    hash_field(&mut hasher, b"binary-size", &binary_metadata.len().to_be_bytes());
+    hash_field(
+        &mut hasher,
+        b"binary-size",
+        &binary_metadata.len().to_be_bytes(),
+    );
     if let Ok(modified) = binary_metadata.modified() {
         hash_system_time(&mut hasher, b"binary-modified", modified);
     }
@@ -214,8 +219,16 @@ pub(crate) fn cache_key(
         if !metadata.is_file() || std::fs::File::open(path).is_err() {
             return None;
         }
-        hash_field(&mut hasher, b"handoff-cookie-path", path.as_os_str().to_string_lossy().as_bytes());
-        hash_field(&mut hasher, b"handoff-cookie-size", &metadata.len().to_be_bytes());
+        hash_field(
+            &mut hasher,
+            b"handoff-cookie-path",
+            path.as_os_str().to_string_lossy().as_bytes(),
+        );
+        hash_field(
+            &mut hasher,
+            b"handoff-cookie-size",
+            &metadata.len().to_be_bytes(),
+        );
         if let Ok(modified) = metadata.modified() {
             hash_system_time(&mut hasher, b"handoff-cookie-modified", modified);
         }
@@ -236,7 +249,11 @@ pub(crate) fn cache_key(
         "no_proxy",
     ] {
         if let Some(value) = std::env::var_os(name) {
-            hash_field(&mut hasher, name.as_bytes(), value.to_string_lossy().as_bytes());
+            hash_field(
+                &mut hasher,
+                name.as_bytes(),
+                value.to_string_lossy().as_bytes(),
+            );
         }
     }
 

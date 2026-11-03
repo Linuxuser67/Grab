@@ -635,7 +635,7 @@ fn publish_by_exclusive_copy<F>(
 where
     F: FnMut() -> bool,
 {
-    use std::io::Write as _;
+    use std::io::{Read as _, Write as _};
 
     if !should_continue() {
         return Err(std::io::Error::new(
@@ -663,7 +663,20 @@ where
 
     let permissions = temporary.as_file().metadata()?.permissions();
     let mut source = temporary.as_file();
-    std::io::copy(&mut source, &mut claim.file)?;
+    let mut buffer = [0_u8; 256 * 1024];
+    loop {
+        if !should_continue() {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::Interrupted,
+                "publication was cancelled",
+            ));
+        }
+        let read = source.read(&mut buffer)?;
+        if read == 0 {
+            break;
+        }
+        claim.file.write_all(&buffer[..read])?;
+    }
     claim.file.set_permissions(permissions)?;
     claim.file.flush()?;
     claim.file.sync_all()?;
@@ -689,6 +702,12 @@ pub(crate) fn persist_noclobber_with_fallback<F>(
 where
     F: FnMut() -> bool,
 {
+    if !should_continue() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::Interrupted,
+            "publication was cancelled",
+        ));
+    }
     match temporary.persist_noclobber(destination) {
         Ok(published_file) => {
             if should_continue() {

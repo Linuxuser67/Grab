@@ -5239,11 +5239,15 @@ mod tests {
 
     #[tokio::test]
     async fn native_manifest_overrides_an_already_completed_extractor_result() {
-        let native = async {
-            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        let (native_ready_tx, native_ready_rx) = tokio::sync::oneshot::channel();
+        let native = async move {
+            let _ = native_ready_rx.await;
             (Ok::<_, String>("native"), 5)
         };
-        let extractor = std::future::ready("extractor");
+        let extractor = async move {
+            native_ready_tx.send(()).expect("native waiter is alive");
+            "extractor"
+        };
 
         match prefer_native_manifest(native, extractor).await {
             NativePriorityOutcome::Native {
@@ -5264,7 +5268,7 @@ mod tests {
     async fn failed_native_intake_waits_for_and_returns_the_extractor_result() {
         let native = async { (Err("unsupported manifest".to_string()), 1) };
         let extractor = async {
-            tokio::time::sleep(std::time::Duration::from_millis(1)).await;
+            tokio::task::yield_now().await;
             Ok::<_, String>("extractor")
         };
 
@@ -5286,11 +5290,15 @@ mod tests {
 
     #[tokio::test]
     async fn failed_native_intake_falls_back_when_extractors_finish_first() {
-        let native = async {
-            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        let (native_ready_tx, native_ready_rx) = tokio::sync::oneshot::channel();
+        let native = async move {
+            let _ = native_ready_rx.await;
             (Err("unsupported manifest".to_string()), 5)
         };
-        let extractor = std::future::ready(Ok::<_, String>("extractor"));
+        let extractor = async move {
+            native_ready_tx.send(()).expect("native waiter is alive");
+            Ok::<_, String>("extractor")
+        };
 
         match prefer_native_manifest(native, extractor).await {
             NativePriorityOutcome::Fallback {

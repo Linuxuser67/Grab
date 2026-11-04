@@ -192,6 +192,56 @@ pub(crate) fn cache_key(
     proxy: Option<&crate::net_types::ResolvedProxy>,
     identity_args: &[String],
 ) -> Option<String> {
+    identity_key(
+        raw_url,
+        youtube_bin,
+        yt_version,
+        cookies_browser,
+        proxy,
+        identity_args,
+        CacheScope::Video,
+    )
+}
+
+/// Which surface a key is for. Playlist listings carry only ids, titles and
+/// page URLs, so they may be scoped to a browser profile or a staged handoff
+/// jar; video metadata may not, because it carries signed media URLs.
+enum CacheScope {
+    Video,
+    Playlist,
+}
+
+/// Playlist keys are scoped by the profile spec or the jar's path (never the
+/// cookie contents) and the playlist TTL bounds how long a rotation can go
+/// unnoticed.
+pub(crate) fn playlist_cache_key(
+    raw_url: &str,
+    youtube_bin: &Path,
+    yt_version: &str,
+    cookies_browser: &str,
+    proxy: Option<&crate::net_types::ResolvedProxy>,
+    identity_args: &[String],
+) -> Option<String> {
+    identity_key(
+        raw_url,
+        youtube_bin,
+        yt_version,
+        cookies_browser,
+        proxy,
+        identity_args,
+        CacheScope::Playlist,
+    )
+}
+
+fn identity_key(
+    raw_url: &str,
+    youtube_bin: &Path,
+    yt_version: &str,
+    cookies_browser: &str,
+    proxy: Option<&crate::net_types::ResolvedProxy>,
+    identity_args: &[String],
+    scope: CacheScope,
+) -> Option<String> {
     let mut url = url::Url::parse(raw_url).ok()?;
     url.set_fragment(None);
     if has_rotating_auth_query(&url) {
@@ -204,10 +254,13 @@ pub(crate) fn cache_key(
     let has_cookie_file = identity_args
         .iter()
         .any(|argument| argument == "--cookies" || argument.starts_with("--cookies="));
-    // Authenticated extraction can return session-bound metadata and media
-    // URLs. Do not persist it: extension handoff cookie files are temporary,
-    // and browser-profile cookies can change independently of this process.
-    if browser_profile_is_active || has_cookie_file {
+    // The only `--cookies` in this extractor argv is a live extension handoff
+    // jar. Its staged path is hashed into the key, so a playlist entry is
+    // scoped to that jar: a new handoff stages a new path and gets a new entry.
+    // Video metadata refuses both sources: it carries session-bound media URLs.
+    // shortcut: any future user-supplied `--cookies` file would inherit the
+    // playlist policy, give it its own decision then.
+    if matches!(scope, CacheScope::Video) && (has_cookie_file || browser_profile_is_active) {
         return None;
     }
 
@@ -427,7 +480,7 @@ pub(crate) fn has_rotating_auth_query(url: &url::Url) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::{cache_key, has_rotating_auth_query, validate_cache_file_path};
+    use super::{cache_key, has_rotating_auth_query, playlist_cache_key, validate_cache_file_path};
     use crate::net_types::ResolvedProxy;
     use std::path::Path;
 
@@ -672,6 +725,64 @@ mod tests {
         let restored = cache.get(key).await.expect("read").expect("hit");
         assert_eq!(restored.id, video.id);
         assert_eq!(restored.title, video.title);
+    }
+
+    #[test]
+    fn playlist_cache_key_allows_a_browser_profile_and_a_staged_handoff_jar() {
+        let directory = tempfile::tempdir().expect("temporary directory");
+        let binary = fake_binary(directory.path());
+        let url = "https://example.test/playlist?list=1";
+        let profile_args = vec![
+            "--cookies-from-browser=firefox".to_string(),
+            "--".to_string(),
+            url.to_string(),
+        ];
+        assert_eq!(
+            cache_key(url, &binary, "2026.10.23", "firefox", None, &profile_args),
+            None,
+            "authenticated video metadata must stay out of the cache"
+        );
+        assert!(
+            playlist_cache_key(url, &binary, "2026.10.23", "firefox", None, &profile_args)
+                .is_some(),
+            "a playlist listing has no signed URLs and may be cached per profile"
+        );
+        let handoff_args = vec![
+            "--cookies".to_string(),
+            "/tmp/handoff.jar".to_string(),
+            "--".to_string(),
+            url.to_string(),
+        ];
+        assert_eq!(
+            cache_key(url, &binary, "2026.10.23", "none", None, &handoff_args),
+            None,
+            "authenticated video metadata must stay out of the cache"
+        );
+        let handoff_key =
+            playlist_cache_key(url, &binary, "2026.10.23", "none", None, &handoff_args)
+                .expect("a playlist may be cached for the lifetime of its handoff jar");
+        assert_eq!(
+            Some(handoff_key.clone()),
+            playlist_cache_key(url, &binary, "2026.10.23", "firefox", None, &handoff_args),
+            "a live jar drops the configured profile out of the key"
+        );
+        let anonymous_args = vec!["--".to_string(), url.to_string()];
+        assert_ne!(
+            Some(handoff_key.clone()),
+            playlist_cache_key(url, &binary, "2026.10.23", "none", None, &anonymous_args),
+            "an anonymous lookup must not read a jar-scoped entry"
+        );
+        let other_jar_args = vec![
+            "--cookies".to_string(),
+            "/tmp/other-handoff.jar".to_string(),
+            "--".to_string(),
+            url.to_string(),
+        ];
+        assert_ne!(
+            Some(handoff_key),
+            playlist_cache_key(url, &binary, "2026.10.23", "none", None, &other_jar_args),
+            "each staged jar must get its own playlist entry"
+        );
     }
 
     #[test]

@@ -412,8 +412,6 @@ pub fn build_window(
     all_page.set_widget_name("status-page-all");
     let active_page = gtk4::Box::new(gtk4::Orientation::Vertical, 0);
     active_page.set_widget_name("status-page-active");
-    let queued_page = gtk4::Box::new(gtk4::Orientation::Vertical, 0);
-    queued_page.set_widget_name("status-page-queued");
     let downloaded_page = gtk4::Box::new(gtk4::Orientation::Vertical, 0);
     downloaded_page.set_widget_name("status-page-downloaded");
 
@@ -430,12 +428,6 @@ pub fn build_window(
         "content-loading-symbolic",
     );
     view_stack.add_titled_with_icon(
-        &queued_page,
-        Some("queued"),
-        &gettext("Queued"),
-        "task-due-symbolic",
-    );
-    view_stack.add_titled_with_icon(
         &downloaded_page,
         Some("downloaded"),
         &gettext("Downloaded"),
@@ -444,8 +436,8 @@ pub fn build_window(
     all_page.append(&scroll);
     view_stack.set_visible_child_name("all");
 
-    // Four destinations need room for their wide labels. 550sp is the
-    // libadwaita recommendation for a four-page view switcher.
+    // Three destinations need room for their wide labels; 550sp also leaves
+    // headroom for longer translated labels.
     let breakpoint = adw::Breakpoint::new(
         adw::BreakpointCondition::parse("max-width: 550sp")
             .expect("the static view-switcher breakpoint is valid"),
@@ -498,16 +490,15 @@ pub fn build_window(
         it.status() == crate::download::DownloadStatus::Queued
     }
     /// View-stack bucket for a status (0 = All); order matches the pages.
-    /// Active deliberately covers everything in flight or stalled —
-    /// including the terminal Failed/Cancelled states, so one bucket shows
-    /// anything still needing attention. Queued is the waiting, Downloaded
-    /// the finished.
+    /// Active deliberately covers everything not finished — in flight, waiting,
+    /// stalled and the terminal Failed/Cancelled states — so one bucket shows
+    /// anything still needing attention. Downloaded is the finished bucket.
+    /// The All view still groups waiting items under their own Queued section.
     fn status_filter_bucket(s: crate::download::DownloadStatus) -> u32 {
         use crate::download::DownloadStatus::*;
         match s {
-            Downloading | Paused | Failed | Cancelled => 1,
-            Queued | Scheduled => 2,
-            Done => 3,
+            Downloading | Paused | Queued | Scheduled | Failed | Cancelled => 1,
+            Done => 2,
         }
     }
 
@@ -687,7 +678,6 @@ pub fn build_window(
         let scroll = scroll.clone();
         let all_page = all_page.clone();
         let active_page = active_page.clone();
-        let queued_page = queued_page.clone();
         let downloaded_page = downloaded_page.clone();
         view_stack.connect_visible_child_name_notify(move |stack| {
             let Some(name) = stack.visible_child_name() else {
@@ -695,8 +685,7 @@ pub fn build_window(
             };
             let (bucket, page) = match name.as_str() {
                 "active" => (1, &active_page),
-                "queued" => (2, &queued_page),
-                "downloaded" => (3, &downloaded_page),
+                "downloaded" => (2, &downloaded_page),
                 _ => (0, &all_page),
             };
             status_sel.set(bucket);

@@ -28,7 +28,7 @@ A download manager for GNOME. Built with GTK 4 and libadwaita.
     <td align="center">
       <img src="screenshots/dark-torrent.png" alt="Grab main window with an active torrent download" width="400">
       <br>
-      <em>Torrent download with segmented filter (All / Active / Queued / Downloaded)</em>
+      <em>Torrent download with segmented filter (All / Active / Downloaded)</em>
     </td>
     <td align="center">
       <img src="screenshots/dark-new-download.png" alt="New Download card with URL, file name and media format picker" width="400">

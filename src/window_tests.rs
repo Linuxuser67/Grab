@@ -395,6 +395,22 @@ fn count_queue_rows(widget: &gtk4::Widget) -> usize {
     count
 }
 
+/// Rows the selected filter actually shows; hidden rows stay parented in their
+/// section, so `is_visible` is what the filter toggles.
+fn count_visible_rows(widget: &gtk4::Widget) -> usize {
+    let mut count = usize::from(
+        widget
+            .downcast_ref::<gtk4::ListBoxRow>()
+            .is_some_and(|row| row.is_visible()),
+    );
+    let mut child = widget.first_child();
+    while let Some(current) = child {
+        count += count_visible_rows(&current);
+        child = current.next_sibling();
+    }
+    count
+}
+
 /// Queue status navigation uses libadwaita's adaptive view-switcher pattern.
 /// The selected page owns the shared queue scroller; no row widgets are duplicated.
 #[test]
@@ -434,8 +450,15 @@ fn status_views_use_gnome_adaptive_view_switcher() {
             "/tmp",
         );
         active.set_status(crate::download::DownloadStatus::Paused);
-        let downloaded = crate::download::DownloadItem::new(
+        let scheduled = crate::download::DownloadItem::new(
             3,
+            "https://example.com/scheduled",
+            "scheduled.bin",
+            "/tmp",
+        );
+        scheduled.set_status(crate::download::DownloadStatus::Scheduled);
+        let downloaded = crate::download::DownloadItem::new(
+            4,
             "https://example.com/downloaded",
             "downloaded.bin",
             "/tmp",
@@ -443,6 +466,7 @@ fn status_views_use_gnome_adaptive_view_switcher() {
         downloaded.set_status(crate::download::DownloadStatus::Done);
         manager.store().append(&queued);
         manager.store().append(&active);
+        manager.store().append(&scheduled);
         manager.store().append(&downloaded);
         let toasts = std::rc::Rc::new(libadwaita::ToastOverlay::new());
         let (window, _, add_card) = crate::window::build_window(&app, manager, settings, toasts);
@@ -493,7 +517,6 @@ fn status_views_use_gnome_adaptive_view_switcher() {
         for (name, expected_icon) in [
             ("all", "view-list-symbolic"),
             ("active", "content-loading-symbolic"),
-            ("queued", "task-due-symbolic"),
             ("downloaded", "folder-download-symbolic"),
         ] {
             let child = view_stack
@@ -516,7 +539,7 @@ fn status_views_use_gnome_adaptive_view_switcher() {
             find_widget_by_name(window.upcast_ref(), "download-section-downloaded")
                 .expect("downloaded downloads section exists");
 
-        for name in ["active", "queued", "downloaded", "all"] {
+        for name in ["active", "downloaded", "all"] {
             view_stack.set_visible_child_name(name);
             drain_gtk_events();
             assert_eq!(
@@ -541,13 +564,29 @@ fn status_views_use_gnome_adaptive_view_switcher() {
             );
             assert_eq!(
                 queued_section.is_visible(),
-                name == "queued" || name == "all",
-                "queued rows are shown only in the Queued and All views"
+                name == "active" || name == "all",
+                "queued rows join the Active filter and stay in the All view"
             );
             assert_eq!(
                 downloaded_section.is_visible(),
                 name == "downloaded" || name == "all",
                 "downloaded rows are shown only in the Downloaded and All views"
+            );
+            // Paused and scheduled rows live in the Active section, queued rows in
+            // their own; every page must show exactly the rows it filters in.
+            let expected_rows = match name {
+                "active" => (2, 1, 0),
+                "downloaded" => (0, 0, 1),
+                _ => (2, 1, 1),
+            };
+            assert_eq!(
+                (
+                    count_visible_rows(&active_section),
+                    count_visible_rows(&queued_section),
+                    count_visible_rows(&downloaded_section),
+                ),
+                expected_rows,
+                "the {name} view shows exactly its own rows"
             );
         }
 

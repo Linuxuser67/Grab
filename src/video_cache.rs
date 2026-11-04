@@ -701,7 +701,14 @@ mod tests {
         ];
         assert_eq!(
             Some(handoff_key.clone()),
-            cache_key(url, &binary, "2026.10.23", "none", None, &equivalent_handoff),
+            cache_key(
+                url,
+                &binary,
+                "2026.10.23",
+                "none",
+                None,
+                &equivalent_handoff
+            ),
             "identical cookie contents at a new staged path must reuse the in-memory preview"
         );
 

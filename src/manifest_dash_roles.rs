@@ -92,7 +92,8 @@ fn push_element(
         return None;
     }
 
-    let name = start.name().local_name().as_ref();
+    let local_name = start.name().local_name();
+    let name = local_name.as_ref();
     let in_mpd_namespace = matches!(
         namespace,
         ResolveResult::Bound(namespace) if namespace.into_inner() == DASH_MPD_NAMESPACE

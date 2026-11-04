@@ -21,10 +21,10 @@ use crate::manifest::{
     dash::{DashPresentation, DashRepresentationPlan, DashResource, DashResourceKind},
 };
 use crate::manifest_intake::ManifestLookup;
-use crate::mpeg_ts_validation::TransportStreamValidator;
 #[cfg(test)]
 use crate::manifest_intake::NativeManifest;
 use crate::media_types::{ManifestKind, ManifestRepresentationKey, ManifestSource};
+use crate::mpeg_ts_validation::TransportStreamValidator;
 
 mod dash_live;
 mod hls_live;

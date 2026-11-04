@@ -2631,17 +2631,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "mpeg-ts"
-version = "0.6.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "58e29fe9663eaab1366e35fee07415500dca8fde1ba58df7cfa5a363920f0b97"
-dependencies = [
- "broadcast-common",
- "bytes",
- "thiserror 2.0.21",
-]
-
-[[package]]
 name = "moka"
 version = "0.12.16"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2666,6 +2655,17 @@ name = "mp4ameta"
 version = "0.13.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "453e991b2efe96c288cbc2d03a19e353504294559ecb6c03067fff5bd824616d"
+
+[[package]]
+name = "mpeg-ts"
+version = "0.6.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "58e29fe9663eaab1366e35fee07415500dca8fde1ba58df7cfa5a363920f0b97"
+dependencies = [
+ "broadcast-common",
+ "bytes",
+ "thiserror 2.0.21",
+]
 
 [[package]]
 name = "multiversion_no_op"

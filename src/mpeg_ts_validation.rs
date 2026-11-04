@@ -104,11 +104,7 @@ fn is_valid_packet(bytes: &[u8; TS_PACKET_SIZE]) -> bool {
             return false;
         }
 
-        if adaptation_length > 0
-            && !packet
-                .adaptation_field()
-                .is_some_and(|field| field.is_ok())
-        {
+        if adaptation_length > 0 && !packet.adaptation_field().is_some_and(|field| field.is_ok()) {
             return false;
         }
     }

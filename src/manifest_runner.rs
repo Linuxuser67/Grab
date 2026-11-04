@@ -2792,7 +2792,6 @@ async fn fetch_and_write_hls_track(
             client,
             &resource,
             format,
-            directory,
             &mut writer,
             tx,
             downloaded,
@@ -2859,7 +2858,7 @@ impl HlsResourceValidator {
         }
     }
 
-    async fn is_valid(self, size: u64) -> Result<bool, ManifestRunError> {
+    async fn validate(self, size: u64) -> Result<bool, ManifestRunError> {
         match self {
             Self::Any => Ok(true),
             Self::MpegTs(validator) => Ok(validator.is_valid_complete(size)),
@@ -2885,7 +2884,6 @@ async fn fetch_hls_resource_to_writer(
     client: &reqwest::Client,
     resource: &Resource,
     format: OrderedTrackFormat,
-    staging: &Path,
     writer: &mut crate::manifest_writer::OrderedTrackWriter,
     tx: &tokio::sync::mpsc::UnboundedSender<EngineMsg>,
     downloaded: &AtomicU64,
@@ -2936,6 +2934,11 @@ async fn fetch_hls_resource_to_writer(
 
         let mut stream = response.bytes_stream();
         let mut size = 0_u64;
+        let staging = writer.staging_directory().ok_or_else(|| {
+            ManifestRunError::Failed(
+                "The HLS destination writer has no private staging directory".to_string(),
+            )
+        })?;
         let mut validator = HlsResourceValidator::new(format, staging)?;
         let pace_start = Instant::now();
         let mut paced = 0_u64;
@@ -2994,7 +2997,7 @@ async fn fetch_hls_resource_to_writer(
                 "The stream server returned an empty HLS fragment".to_string(),
             ));
         }
-        if !validator.is_valid(size).await? {
+        if !validator.validate(size).await? {
             let message = match format {
                 OrderedTrackFormat::Fmp4 => {
                     "The HLS media resource is not a compatible fMP4 fragment"
@@ -3610,7 +3613,7 @@ mod tests {
         }
         assert!(
             validator
-                .is_valid(bytes.len() as u64)
+                .validate(bytes.len() as u64)
                 .await
                 .expect("validate staged fMP4 resource")
         );
@@ -3623,7 +3626,7 @@ mod tests {
             .expect("stage invalid fMP4 response");
         assert!(
             !invalid
-                .is_valid(15)
+                .validate(15)
                 .await
                 .expect("reject invalid fMP4 response")
         );

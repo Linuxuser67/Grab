@@ -53,8 +53,12 @@ pub enum TorrentError {
         source: io::Error,
     },
     /// The application data directory for the torrent session could not be created.
-    #[error("Cannot create session dir: {0}")]
-    SessionDirectory(#[source] io::Error),
+    #[error("{message}: {source}")]
+    SessionDirectory {
+        message: String,
+        #[source]
+        source: io::Error,
+    },
     /// The archive filename collision retry limit was reached.
     #[error("{0}")]
     StoreNameCollisions(String),
@@ -109,20 +113,24 @@ pub enum TorrentError {
     #[error("{0}")]
     SessionStart(String),
     /// The archived torrent metadata needed to safely trash its files is unavailable.
-    #[error("no torrent archive")]
-    TrashArchiveMissing,
+    #[error("{0}")]
+    TrashArchiveMissing(String),
     /// The archived torrent metadata could not be parsed for deletion.
-    #[error("invalid torrent metadata")]
-    TrashInvalidMetadata,
+    #[error("{0}")]
+    TrashInvalidMetadata(String),
     /// The torrent file list could not be parsed for deletion.
-    #[error("invalid torrent file list")]
-    TrashInvalidFileList,
+    #[error("{0}")]
+    TrashInvalidFileList(String),
     /// A single-file torrent target traverses a symlink or unsafe path.
-    #[error("refusing to trash through symlink: {}", .0.display())]
-    TrashUnsafePath(PathBuf),
+    #[error("{message}: {}", .path.display())]
+    TrashUnsafePath {
+        message: String,
+        path: PathBuf,
+    },
     /// GIO could not move a torrent-owned file to the desktop Trash.
-    #[error("could not move {} to Trash: {source}", .path.display())]
+    #[error("{message}: {}: {source}", .path.display())]
     TrashFile {
+        message: String,
         path: PathBuf,
         #[source]
         source: glib::Error,
@@ -957,9 +965,10 @@ pub(crate) fn trash_torrent_contents(
     folder: &std::path::Path,
     url: &str,
 ) -> Result<bool, TorrentError> {
-    let bytes = read_archive_bytes(url).ok_or(TorrentError::TrashArchiveMissing)?;
-    let meta =
-        librqbit::torrent_from_bytes(&bytes).map_err(|_| TorrentError::TrashInvalidMetadata)?;
+    let bytes = read_archive_bytes(url)
+        .ok_or_else(|| TorrentError::TrashArchiveMissing(gettext("No torrent archive")))?;
+    let meta = librqbit::torrent_from_bytes(&bytes)
+        .map_err(|_| TorrentError::TrashInvalidMetadata(gettext("Invalid torrent metadata")))?;
     let multi = is_multi_file(meta.info.data.files.as_deref());
     if !multi {
         // Single-file torrent: torrent_file_list returns empty (no selectable
@@ -968,13 +977,17 @@ pub(crate) fn trash_torrent_contents(
             .unwrap_or_else(|| meta.info_hash.as_string());
         let target = folder.join(name);
         if path_has_symlink_component(&target, folder) {
-            return Err(TorrentError::TrashUnsafePath(target));
+            return Err(TorrentError::TrashUnsafePath {
+                message: gettext("Refusing to trash through a symbolic link"),
+                path: target,
+            });
         }
         match gio::File::for_path(&target).trash(gio::Cancellable::NONE) {
             Ok(()) => {}
             Err(e) if e.kind::<gio::IOErrorEnum>() == Some(gio::IOErrorEnum::NotFound) => {}
             Err(source) => {
                 return Err(TorrentError::TrashFile {
+                    message: gettext("Could not move to Trash"),
                     path: target,
                     source,
                 });
@@ -985,7 +998,8 @@ pub(crate) fn trash_torrent_contents(
             .map(|mut entries| entries.next().is_none())
             .unwrap_or(true));
     }
-    let (_, entries) = torrent_file_list(&bytes).map_err(|_| TorrentError::TrashInvalidFileList)?;
+    let (_, entries) = torrent_file_list(&bytes)
+        .map_err(|_| TorrentError::TrashInvalidFileList(gettext("Invalid torrent file list")))?;
     let empty_keep: std::collections::HashSet<usize> = std::collections::HashSet::new();
     for (i, entry) in entries.iter().enumerate() {
         if let Some(target) = deletion_target(folder, i, &empty_keep, entry) {
@@ -999,6 +1013,7 @@ pub(crate) fn trash_torrent_contents(
                 Err(e) if e.kind::<gio::IOErrorEnum>() == Some(gio::IOErrorEnum::NotFound) => {}
                 Err(source) => {
                     return Err(TorrentError::TrashFile {
+                        message: gettext("Could not move to Trash"),
                         path: target,
                         source,
                     });
@@ -1115,7 +1130,10 @@ async fn ensure_session(cfg: SessionConfig) -> Result<Arc<Session>, TorrentError
     SESSION
         .get_or_try_init(|| async {
             let dir = glib::user_data_dir().join("grab");
-            std::fs::create_dir_all(&dir).map_err(TorrentError::SessionDirectory)?;
+            std::fs::create_dir_all(&dir).map_err(|source| TorrentError::SessionDirectory {
+                message: gettext("Cannot create session directory"),
+                source,
+            })?;
             // Fast resume: persist bitfields + session torrents across restarts (orphans swept once the queue is restored).
             let mut opts = SessionOptions {
                 fastresume: true,

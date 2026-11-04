@@ -1795,10 +1795,7 @@ mod tests {
             .finish();
 
         let result = tracing::subscriber::with_default(subscriber, parse);
-        let captured = output
-            .lock()
-            .expect("DASH diagnostic output lock")
-            .clone();
+        let captured = output.lock().expect("DASH diagnostic output lock").clone();
         (
             result,
             String::from_utf8(captured).expect("DASH diagnostic logs are UTF-8"),
@@ -1842,7 +1839,10 @@ mod tests {
             )
         });
 
-        assert!(result.is_ok(), "the typed parser should remain tolerant of unknown elements");
+        assert!(
+            result.is_ok(),
+            "the typed parser should remain tolerant of unknown elements"
+        );
         assert!(
             logs.contains("Unused XML element") && logs.contains("OutputProtection"),
             "expected an ignored OutputProtection diagnostic, got: {logs}"
@@ -1852,7 +1852,10 @@ mod tests {
         // Grab downloads the encoded media rather than rendering it, the normal
         // native planner should still expand the same complete media resources.
         let manifest = result.expect("unmodeled output protection must not block downloads");
-        let video = manifest.video_representations.first().expect("video representation");
+        let video = manifest
+            .video_representations
+            .first()
+            .expect("video representation");
         let plan = plan_dash_representation(&manifest, &video.key)
             .expect("output protection must not block native resource planning");
         let segment_urls = plan
@@ -1879,7 +1882,10 @@ mod tests {
             )
         });
 
-        assert!(result.is_ok(), "the typed parser should remain tolerant of vendor extensions");
+        assert!(
+            result.is_ok(),
+            "the typed parser should remain tolerant of vendor extensions"
+        );
         assert!(
             logs.contains("Unused XML element") && logs.contains("SegmentPresentation"),
             "expected an ignored vendor extension diagnostic, got: {logs}"

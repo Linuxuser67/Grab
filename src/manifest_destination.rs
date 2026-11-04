@@ -649,7 +649,9 @@ fn create_part_file(path: &Path) -> Result<File, String> {
     let mut options = OpenOptions::new();
     options.read(true).write(true).create_new(true);
     #[cfg(unix)]
-    options.custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC);
+    options
+        .mode(0o600)
+        .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC);
     let file = options.open(path).map_err(|error| {
         if error.kind() == std::io::ErrorKind::AlreadyExists {
             "A file already exists at the planned manifest part path without a matching ownership proof; it was preserved".to_string()
@@ -657,9 +659,6 @@ fn create_part_file(path: &Path) -> Result<File, String> {
             format!("Could not exclusively create destination manifest part {}: {error}", path.display())
         }
     })?;
-    #[cfg(unix)]
-    file.set_permissions(fs::Permissions::from_mode(0o600))
-        .map_err(|error| format!("Could not secure destination manifest part: {error}"))?;
     file.sync_all()
         .map_err(|error| format!("Could not sync destination manifest part: {error}"))?;
     let parent = path
@@ -924,6 +923,23 @@ mod tests {
                 .exists(),
             "ownership metadata must remain when cleanup cannot verify a part"
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn destination_part_is_private_when_created() {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let destination_dir = tempfile::tempdir().expect("create destination");
+        let staging = tempfile::tempdir().expect("create staging");
+        let destination = destination_dir.path().join("Example.mp4");
+        ensure_plan(staging.path(), &destination, 46, false, false).expect("write plan");
+
+        let file = open_owned_part(staging.path(), &destination, 46, TrackKind::Video)
+            .expect("create owned video part");
+        let mode = file.metadata().expect("inspect part permissions").permissions().mode() & 0o777;
+
+        assert_eq!(mode, 0o600, "destination part must be private at creation");
     }
 
     #[test]

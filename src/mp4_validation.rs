@@ -137,12 +137,7 @@ fn box_end(start: u64, size: u64, parent_end: u64) -> Option<u64> {
     start.checked_add(size).filter(|end| *end <= parent_end)
 }
 
-fn payload_covers_box(
-    data_offset: u64,
-    data_len: u64,
-    header_end: u64,
-    box_end: u64,
-) -> bool {
+fn payload_covers_box(data_offset: u64, data_len: u64, header_end: u64, box_end: u64) -> bool {
     data_offset >= header_end && data_offset.checked_add(data_len) == Some(box_end)
 }
 
@@ -186,10 +181,7 @@ impl<R: Read + Seek> Seek for BoundedReader<'_, R> {
     fn seek(&mut self, position: SeekFrom) -> io::Result<u64> {
         let target = match position {
             SeekFrom::Start(position) => Some(position),
-            SeekFrom::Current(offset) => self
-                .inner
-                .stream_position()?
-                .checked_add_signed(offset),
+            SeekFrom::Current(offset) => self.inner.stream_position()?.checked_add_signed(offset),
             SeekFrom::End(offset) => self.end.checked_add_signed(offset),
         }
         .ok_or_else(|| {
@@ -334,7 +326,11 @@ mod tests {
     #[test]
     fn accepts_complete_initialization_and_media_segments() {
         let init = init_segment();
-        assert!(is_fmp4_resource(&mut Cursor::new(init.clone()), 0, init.len() as u64));
+        assert!(is_fmp4_resource(
+            &mut Cursor::new(init.clone()),
+            0,
+            init.len() as u64
+        ));
 
         let media = media_segment();
         assert!(is_fmp4_resource(

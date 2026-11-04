@@ -85,10 +85,7 @@ fn boxes_cover_range(boxes: &[BoxRef], start: u64, end: u64) -> bool {
                 children,
                 ..
             } => {
-                let Some(data_end) = data_offset.checked_add(*data_len) else {
-                    return false;
-                };
-                if data_end != box_end {
+                if !payload_covers_box(*data_offset, *data_len, header_end, box_end) {
                     return false;
                 }
 
@@ -110,7 +107,19 @@ fn boxes_cover_range(boxes: &[BoxRef], start: u64, end: u64) -> bool {
                     None => children_start == box_end,
                 }
             }
-            NodeKind::FullBox { .. } | NodeKind::Leaf { .. } | NodeKind::Unknown { .. } => true,
+            NodeKind::FullBox {
+                data_offset,
+                data_len,
+                ..
+            }
+            | NodeKind::Leaf {
+                data_offset,
+                data_len,
+            }
+            | NodeKind::Unknown {
+                data_offset,
+                data_len,
+            } => payload_covers_box(*data_offset, *data_len, header_end, box_end),
         };
         if !children_are_contiguous {
             return false;
@@ -128,6 +137,15 @@ fn box_end(start: u64, size: u64, parent_end: u64) -> Option<u64> {
     }
 
     start.checked_add(size).filter(|end| *end <= parent_end)
+}
+
+fn payload_covers_box(
+    data_offset: u64,
+    data_len: u64,
+    header_end: u64,
+    box_end: u64,
+) -> bool {
+    data_offset >= header_end && data_offset.checked_add(data_len) == Some(box_end)
 }
 
 /// Restrict parser reads and seeks to one resource, even when the underlying
@@ -372,6 +390,23 @@ mod tests {
         malformed.extend_from_slice(b"uuid");
         malformed.extend_from_slice(&box_bytes(b"mdat", &[0x12, 0x34]));
         malformed.extend_from_slice(&box_bytes(b"free", &[]));
+
+        assert!(!is_fmp4_resource(
+            &mut Cursor::new(malformed.clone()),
+            0,
+            malformed.len() as u64
+        ));
+    }
+
+    #[test]
+    fn rejects_full_box_fields_that_overrun_their_parent() {
+        let mut malformed = Vec::new();
+        malformed.extend_from_slice(&17_u32.to_be_bytes());
+        malformed.extend_from_slice(b"moof");
+        malformed.extend_from_slice(&9_u32.to_be_bytes());
+        malformed.extend_from_slice(b"mfhd");
+        malformed.push(0);
+        malformed.extend_from_slice(&box_bytes(b"mdat", &[0x12, 0x34]));
 
         assert!(!is_fmp4_resource(
             &mut Cursor::new(malformed.clone()),

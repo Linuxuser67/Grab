@@ -761,6 +761,25 @@ impl Drop for ClaimedDestination<'_> {
     }
 }
 
+fn claim_still_owns_path(claim: &ClaimedDestination<'_>) -> std::io::Result<bool> {
+    let path_metadata = std::fs::symlink_metadata(claim.path)?;
+    let file_metadata = claim.file.metadata()?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt as _;
+        Ok(path_metadata.file_type().is_file()
+            && path_metadata.dev() == file_metadata.dev()
+            && path_metadata.ino() == file_metadata.ino())
+    }
+    #[cfg(not(unix))]
+    {
+        Ok(path_metadata.file_type().is_file()
+            && file_metadata.is_file()
+            && path_metadata.len() == 0
+            && file_metadata.len() == 0)
+    }
+}
+
 /// Publish the complete destination-side temporary via the shared atomic claim helper.
 ///
 /// The temporary already contains a fully synced copy on the destination filesystem;

@@ -583,14 +583,14 @@ fn probe_json_expired(cached_at: std::time::Instant) -> bool {
 }
 
 /// Return whether a stored video source belongs to the normalized queue URL.
-fn video_source_matches_url(source: &crate::media_types::VideoSource, url: &url::Url) -> bool {
+fn video_source_matches_url(source: &crate::media_types::VideoSource, url: &str) -> bool {
     match source {
         crate::media_types::VideoSource::Page { page_url, .. } => {
-            normalize_url(page_url).is_ok_and(|page| page == *url)
+            normalize_url(page_url).is_ok_and(|page| page == url)
         }
         crate::media_types::VideoSource::Manifest { source } => {
             crate::manifest_intake::valid_source(source)
-                && normalize_url(&source.url).is_ok_and(|manifest_url| manifest_url == *url)
+                && normalize_url(&source.url).is_ok_and(|manifest_url| manifest_url == url)
         }
         crate::media_types::VideoSource::Direct => false,
     }

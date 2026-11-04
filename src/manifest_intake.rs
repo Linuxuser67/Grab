@@ -60,10 +60,9 @@ fn manifest_preview_cache_key(
 
     let effective_browser =
         preview_cookie_browser(&url, cookies_browser, ManifestTransportPolicy::HttpsOnly);
-    let handoff_cookie_path =
-        crate::extension_server::live_handoff_identity(raw_url, effective_browser)
-            .map(|(path, _)| path)
-            .filter(|path| std::fs::File::open(path).is_ok());
+    let handoff_cookie_path = crate::extension_server::live_handoff_identity(raw_url)
+        .map(|(path, _)| path)
+        .filter(|path| std::fs::File::open(path).is_ok());
 
     // A live browser profile is mutable outside this process. Do not reuse
     // metadata unless the exact extension snapshot is the active cookie source.
@@ -440,7 +439,7 @@ async fn client_for_manifest_with_policy(
         crate::subprocess_proxy::validate_proxy_compatibility()?;
     }
     if let Some((path, handoff_user_agent)) =
-        crate::extension_server::live_handoff_identity(raw_url, cookies_browser)
+        crate::extension_server::live_handoff_identity(raw_url)
         && let Ok(text) = tokio::fs::read_to_string(&path).await
     {
         let (jar, count) = crate::cookies::jar_from_export(&text);

@@ -489,10 +489,11 @@ const MAX_HANDOFF_ENTRIES: usize = QUEUE_DEPTH;
 /// Keep stale-host tombstones bounded. Only hosts with a staged jar are
 /// recorded, but bound the map for fail-safe behaviour under unexpected input.
 const MAX_SUPPRESSED_HOSTS: usize = MAX_HANDOFF_ENTRIES * 4;
-/// A staged jar at or past this age is a snapshot when a live browser source
-/// is configured: yt-dlp merges `--cookies` after the browser jar, so its old
-/// values would override the browser's rotated cookies. Probe and auto-add
-/// downloads run immediately; this only affects cards left open for a while.
+/// A staged jar at or past this age is never used, with or without a live
+/// browser source: it is a snapshot, and yt-dlp merges `--cookies` after the
+/// browser jar, so stale values would override rotated cookies. Expiry also
+/// re-enables metadata caching — a usable staged jar forces `cache_key` to
+/// `None`, so keeping it forever would disable caching for the whole session.
 const HANDOFF_FRESH: Duration = Duration::from_secs(30 * 60);
 static COOKIE_FILE_COUNTER: AtomicU64 = AtomicU64::new(0);
 static SUPPRESSION_ID_COUNTER: AtomicU64 = AtomicU64::new(0);
@@ -877,52 +878,35 @@ fn suppress_handoff_host(url: &str) -> Option<Suppression> {
     })
 }
 
-/// Browser UA staged with a handoff's cookies, if any. Same lookup as the
-/// cookies (exact URL, then same-host fallback).
-pub(crate) fn handoff_user_agent(url: &str, browser: &str) -> Option<String> {
-    handoff_user_agent_at(url, browser, SystemTime::now())
-}
-
-fn handoff_user_agent_at(url: &str, browser: &str, now: SystemTime) -> Option<String> {
-    live_handoff_entry_at(url, browser, now).and_then(|entry| entry.user_agent)
-}
-
 /// The staged jar and UA must be accepted as one identity: a download must not
 /// keep a handoff UA when the jar is stale or unreadable and browser cookies are exported.
-pub(crate) fn live_handoff_identity(url: &str, browser: &str) -> Option<(PathBuf, Option<String>)> {
-    live_handoff_identity_at(url, browser, SystemTime::now())
+pub(crate) fn live_handoff_identity(url: &str) -> Option<(PathBuf, Option<String>)> {
+    live_handoff_identity_at(url, SystemTime::now())
 }
 
-fn live_handoff_identity_at(
-    url: &str,
-    browser: &str,
-    now: SystemTime,
-) -> Option<(PathBuf, Option<String>)> {
-    live_handoff_entry_at(url, browser, now).map(|entry| (entry.path, entry.user_agent))
+fn live_handoff_identity_at(url: &str, now: SystemTime) -> Option<(PathBuf, Option<String>)> {
+    live_handoff_entry_at(url, now).map(|entry| (entry.path, entry.user_agent))
 }
 
-fn live_handoff_entry_at(url: &str, browser: &str, now: SystemTime) -> Option<HandoffCookies> {
-    let live_browser = crate::video_tools::cookies_browser_spec(browser).is_some();
-    handoff_entry(url).filter(|entry| handoff_jar_usable_at(entry, live_browser, now))
+fn live_handoff_entry_at(url: &str, now: SystemTime) -> Option<HandoffCookies> {
+    handoff_entry(url).filter(|entry| handoff_jar_usable_at(entry, now))
 }
 
-/// True when a staged jar may replace `--cookies-from-browser`. With a live
-/// browser source, only a fresh jar wins; without one, a stale jar still
-/// beats sending no cookies at all.
-fn handoff_jar_usable_at(entry: &HandoffCookies, live_browser: bool, now: SystemTime) -> bool {
+/// True when a staged jar may replace `--cookies-from-browser`. A jar is only
+/// a snapshot of a browser session: after [`HANDOFF_FRESH`] it must not be used
+/// even when no live browser is configured, or a stale `cf_clearance` keeps
+/// disabling metadata caching (a staged jar forces `cache_key` to `None`).
+fn handoff_jar_usable_at(entry: &HandoffCookies, now: SystemTime) -> bool {
     // SystemTime includes suspend duration on Linux. A backwards wall-clock
-    // adjustment fails closed as stale when a live browser source exists.
-    !live_browser
-        || now
-            .duration_since(entry.staged_at)
-            .is_ok_and(|age| age < HANDOFF_FRESH)
+    // adjustment fails closed as stale.
+    now.duration_since(entry.staged_at)
+        .is_ok_and(|age| age < HANDOFF_FRESH)
 }
 
 fn ytdlp_spawn_identity_at(cookies_browser: &str, page_url: &str, now: SystemTime) -> Vec<String> {
-    let live_browser = crate::video_tools::cookies_browser_spec(cookies_browser).is_some();
     let entry = handoff_entry(page_url);
     // Filter once so the staged UA and cookie jar share the same freshness decision.
-    let usable = entry.filter(|entry| handoff_jar_usable_at(entry, live_browser, now));
+    let usable = entry.filter(|entry| handoff_jar_usable_at(entry, now));
     let user_agent = usable
         .as_ref()
         .and_then(|entry| entry.user_agent.as_deref());
@@ -959,17 +943,6 @@ pub(crate) fn handoff_cookie_args(url: &str) -> Vec<String> {
         Some(p) => vec!["--cookies".to_string(), p.to_string_lossy().into_owned()],
         None => Vec::new(),
     }
-}
-
-/// Handoff jar for gallery-dl when it is safe to use alongside the configured
-/// browser source. A stale snapshot would override rotated cookies exported
-/// from the live browser, so withhold it and let gallery-dl use the export.
-pub(crate) fn live_handoff_cookie_path(url: &str, browser: &str) -> Option<PathBuf> {
-    live_handoff_cookie_path_at(url, browser, SystemTime::now())
-}
-
-fn live_handoff_cookie_path_at(url: &str, browser: &str, now: SystemTime) -> Option<PathBuf> {
-    live_handoff_entry_at(url, browser, now).map(|entry| entry.path)
 }
 
 /// Drop a URL's staged handoff cookies and delete the file. Called when its
@@ -1974,28 +1947,22 @@ mod tests {
     }
 
     #[test]
-    fn handoff_jar_usable_only_while_fresh_with_a_live_browser() {
+    fn handoff_jar_usable_only_while_fresh() {
         let entry = HandoffCookies {
             path: PathBuf::from("/tmp/jar"),
             user_agent: None,
             staged_at: SystemTime::now(),
             staged_instant: Instant::now(),
         };
-        assert!(handoff_jar_usable_at(&entry, true, entry.staged_at));
+        assert!(handoff_jar_usable_at(&entry, entry.staged_at));
         assert!(!handoff_jar_usable_at(
             &entry,
-            true,
-            entry.staged_at + HANDOFF_FRESH
-        ));
-        assert!(handoff_jar_usable_at(
-            &entry,
-            false,
             entry.staged_at + HANDOFF_FRESH
         ));
     }
 
     #[test]
-    fn handoff_user_agent_uses_the_same_freshness_policy_as_its_jar() {
+    fn live_handoff_identity_uses_the_jar_freshness_policy() {
         let _g = exclusive();
         let url = "https://ua-freshness.example.com/file";
         let path = write_handoff_cookies(url, &[cookie("c", "v")]).expect("path");
@@ -2003,31 +1970,18 @@ mod tests {
         let now = SystemTime::now();
 
         assert_eq!(
-            handoff_user_agent_at(url, "brave", now),
-            Some("UA/1".into())
-        );
-        assert_eq!(
-            live_handoff_identity_at(url, "brave", now),
-            Some((path.clone(), Some("UA/1".into())))
+            live_handoff_identity_at(url, now),
+            Some((path, Some("UA/1".into())))
         );
 
         let stale_at = now + HANDOFF_FRESH + Duration::from_secs(1);
-        assert_eq!(handoff_user_agent_at(url, "brave", stale_at), None);
-        assert_eq!(live_handoff_identity_at(url, "brave", stale_at), None);
-        // Without a configured browser, the staged jar and its UA remain the only source.
-        assert_eq!(
-            handoff_user_agent_at(url, "none", stale_at),
-            Some("UA/1".into())
-        );
-        assert_eq!(
-            live_handoff_identity_at(url, "none", stale_at),
-            Some((path, Some("UA/1".into())))
-        );
+        // A stale jar is never used, even without a configured browser.
+        assert_eq!(live_handoff_identity_at(url, stale_at), None);
         clear_handoff_cookies();
     }
 
     #[test]
-    fn ytdlp_spawn_identity_drops_a_stale_jar_for_live_cookies() {
+    fn ytdlp_spawn_identity_drops_a_stale_jar() {
         let _g = exclusive();
         let url = "https://freshness.example.com/v";
         let path = write_handoff_cookies(url, &[cookie("c", "v")]).expect("path");
@@ -2053,15 +2007,37 @@ mod tests {
         // The stale jar's UA must not be paired with the configured browser's
         // live cookies; keep the UA only when the staged jar is used.
         assert!(!stale.iter().any(|a| a == "UA/1"));
-        // Without a live source the stale jar and its UA remain the only source.
+        // A stale jar is never used, even without a live source.
         let offline = ytdlp_spawn_identity_at("none", url, later);
-        assert_eq!(offline[0], "--cookies");
-        assert!(offline.iter().any(|a| a == "UA/1"));
+        assert!(!offline.iter().any(|a| a == "--cookies"));
+        assert!(!offline.iter().any(|a| a == "UA/1"));
         clear_handoff_cookies();
     }
 
     #[test]
-    fn live_handoff_path_withholds_a_stale_jar_only_with_a_live_browser() {
+    fn a_stale_jar_leaves_the_lookup_cacheable() {
+        let _g = exclusive();
+        let url = "https://www.youtube.com/watch?v=cache-identity";
+        let path = write_handoff_cookies(url, &[cookie("c", "v")]).expect("path");
+        store_handoff_cookies(url, path, None);
+        let fresh = ytdlp_spawn_identity_at("none", url, SystemTime::now());
+        assert!(fresh.iter().any(|a| a == "--cookies"));
+        let stale_at = SystemTime::now() + HANDOFF_FRESH + Duration::from_secs(1);
+        let args = ytdlp_spawn_identity_at("none", url, stale_at);
+        assert!(!args.iter().any(|a| a == "--cookies"));
+        let directory = tempfile::tempdir().expect("temporary directory");
+        let binary = directory.path().join("yt-dlp");
+        std::fs::write(&binary, b"fake yt-dlp binary").expect("write fake binary");
+        assert!(
+            crate::video_cache::cache_key(url, &binary, "2026.10.23", "none", None, &args)
+                .is_some(),
+            "a stale jar must not keep metadata caching disabled"
+        );
+        clear_handoff_cookies();
+    }
+
+    #[test]
+    fn live_handoff_path_withholds_a_stale_jar() {
         let _g = exclusive();
         let url = "https://gallery-freshness.example.com/album";
         let path = write_handoff_cookies(url, &[cookie("c", "v")]).expect("path");
@@ -2069,21 +2045,16 @@ mod tests {
 
         let now = SystemTime::now();
         assert_eq!(
-            live_handoff_cookie_path_at(url, "brave", now),
-            Some(path.clone()),
+            live_handoff_identity_at(url, now).map(|(path, _)| path),
+            Some(path),
             "fresh handoff jars remain preferred"
         );
 
         let stale_at = now + HANDOFF_FRESH;
         assert_eq!(
-            live_handoff_cookie_path_at(url, "brave", stale_at),
+            live_handoff_identity_at(url, stale_at),
             None,
-            "a stale jar must not override the live browser's rotated cookies"
-        );
-        assert_eq!(
-            live_handoff_cookie_path_at(url, "none", stale_at),
-            Some(path),
-            "without a browser source, the handoff jar is still the only cookie source"
+            "a stale jar must not be served at all"
         );
         clear_handoff_cookies();
     }
@@ -2178,10 +2149,8 @@ mod tests {
         // This models the authenticated POST that follows the extension's cold-start
         // wake. The server must stage the jar before queuing the URL so gallery-dl
         // can resolve it immediately when GTK drains the handoff and starts probing.
-        assert_eq!(
-            handoff_user_agent(&handoff.url, "none").as_deref(),
-            Some("Grab-Test-UA")
-        );
+        let (_, handoff_ua) = live_handoff_identity(&handoff.url).expect("staged handoff");
+        assert_eq!(handoff_ua.as_deref(), Some("Grab-Test-UA"));
         let text = std::fs::read_to_string(&staged).unwrap();
         assert!(
             text.contains("example.com\tTRUE\t/\tFALSE\t0\tcf\tabc"),
@@ -2253,7 +2222,7 @@ mod tests {
         assert_eq!(status(&r2), "200", "{r2}");
         let _ = srv.rx.recv().await.expect("handoff");
         assert!(
-            live_handoff_cookie_path(url, "none").is_none(),
+            live_handoff_identity(url).is_none(),
             "stale entry must be gone"
         );
         assert!(!staged.exists(), "staged file must be deleted");

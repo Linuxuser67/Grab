@@ -296,6 +296,24 @@ mod tests {
         assert_eq!(restored.items[1].page_url, "https://example.test/second");
     }
 
+    #[tokio::test(flavor = "current_thread")]
+    async fn playlist_cache_round_trips_a_grab_key() {
+        let directory = tempfile::tempdir().expect("temporary directory");
+        let config = yt_dlp::cache::CacheConfig::builder()
+            .cache_dir(directory.path().to_path_buf())
+            .build();
+        let cache = yt_dlp::cache::PlaylistCache::new(&config, Some(60))
+            .await
+            .expect("create playlist cache");
+        let key = cache_key("grab-ytdlp-video-v1:round-trip");
+        let stored = to_cached_playlist(&key, &playlist()).expect("complete playlist");
+        cache.put(key.clone(), stored).await.expect("store");
+        let restored = cache.get(&key).await.expect("read").expect("hit");
+        let info = from_cached_playlist(&key, restored).expect("valid cached playlist");
+        assert_eq!(info.total, 2);
+        assert_eq!(info.items[1].title.as_ref(), "Second item");
+    }
+
     #[test]
     fn playlist_cache_id_is_namespaced_by_authentication_identity() {
         assert_ne!(

@@ -99,8 +99,7 @@ pub(crate) async fn run_download(mut ctx: FetchCtx, connections: usize, mode: St
     let mut tries = 3;
     // Resolve the staged jar and its UA together, so a stale/missing/unreadable
     // jar can never leave its UA paired with cookies exported from the live browser.
-    if let Some((path, handoff_ua)) =
-        crate::extension_server::live_handoff_identity(&ctx.url, &ctx.opts.cookies_browser)
+    if let Some((path, handoff_ua)) = crate::extension_server::live_handoff_identity(&ctx.url)
         && let Ok(text) = tokio::fs::read_to_string(&path).await
     {
         let (jar, count) = crate::cookies::jar_from_export(&text);

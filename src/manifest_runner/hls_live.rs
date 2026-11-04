@@ -217,8 +217,10 @@ pub(super) async fn load_live_hls_track(
     })
 }
 
+const MAX_LIVE_HLS_POLL_INTERVAL: Duration = Duration::from_secs(60);
+
 fn live_hls_poll_interval(target_duration: u64, changed: bool) -> Duration {
-    let target = Duration::from_secs(target_duration);
+    let target = Duration::from_secs(target_duration).min(MAX_LIVE_HLS_POLL_INTERVAL);
     if changed { target } else { target.div_f32(2.0) }
 }
 

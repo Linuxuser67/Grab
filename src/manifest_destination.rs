@@ -111,14 +111,7 @@ pub(crate) fn ensure_plan(
 }
 
 fn safe_file_name(name: &str) -> bool {
-    !name.is_empty()
-        && name != "."
-        && name != ".."
-        && Path::new(name)
-            .file_name()
-            .and_then(|file_name| file_name.to_str())
-            == Some(name)
-        && !name.chars().any(char::is_control)
+    crate::file_names::is_single_component(name)
 }
 
 fn read_plan(path: &Path) -> Result<Option<DestinationPlan>, String> {

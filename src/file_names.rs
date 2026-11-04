@@ -2,6 +2,21 @@
 
 use gio::prelude::FileExt as _;
 
+/// Validate a single untrusted filename component on every supported platform.
+/// Backslashes are rejected even on Unix so staged names have portable semantics.
+pub(crate) fn is_single_component(name: &str) -> bool {
+    !name.is_empty()
+        && name != "."
+        && name != ".."
+        && !name.contains('/')
+        && !name.contains('\\')
+        && !name.chars().any(char::is_control)
+        && std::path::Path::new(name)
+            .file_name()
+            .and_then(|component| component.to_str())
+            == Some(name)
+}
+
 /// Split stem and extension (last dot only; leading dot is stem). Pure.
 fn split_stem_ext(name: &str) -> (&str, Option<&str>) {
     match name.rfind('.') {

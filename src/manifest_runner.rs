@@ -2546,15 +2546,7 @@ fn progress_message(downloaded: u64) -> EngineMsg {
 }
 
 fn safe_resource_filename(filename: &str) -> bool {
-    !filename.is_empty()
-        && filename != "."
-        && filename != ".."
-        && !filename.contains('/')
-        && !filename.contains('\\')
-        && Path::new(filename)
-            .file_name()
-            .and_then(|name| name.to_str())
-            == Some(filename)
+    crate::file_names::is_single_component(filename)
 }
 
 fn content_range_matches(header: Option<&str>, range: ManifestByteRange) -> bool {
@@ -3256,6 +3248,8 @@ fn add_hls_staging_options(command: &mut tokio::process::Command) {
     // .bin staging name. Permit only those names and probe their contents:
     // HLS resources may contain MPEG-TS, fragmented MP4, or encryption keys.
     command.args([
+        "-protocol_whitelist",
+        "file,crypto",
         "-allowed_extensions",
         "bin",
         "-allowed_segment_extensions",

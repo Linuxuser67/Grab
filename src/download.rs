@@ -582,7 +582,7 @@ fn probe_json_expired(cached_at: std::time::Instant) -> bool {
     cached_at.elapsed() > PROBE_JSON_TTL
 }
 
-/// Queue + engine owner: persists the queue, spawns downloads, notifies the UI.
+/// Return whether a stored video source belongs to the normalized queue URL.
 fn video_source_matches_url(
     source: &crate::media_types::VideoSource,
     url: &url::Url,
@@ -598,7 +598,8 @@ fn video_source_matches_url(
         crate::media_types::VideoSource::Direct => false,
     }
 }
-
+ 
+/// Queue + engine owner: persists the queue, spawns downloads, notifies the UI.
 impl DownloadManager {
     /// Cache a probe's raw info JSON for `--load-info-json`.
     /// Overwrites any earlier entry for the key. Bounded (64 entries):

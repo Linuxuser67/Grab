@@ -1229,7 +1229,7 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn claimed_rename_fallback_keeps_partial_output_private() {
+    fn claimed_rename_fallback_keeps_the_destination_claim_private() {
         use std::os::unix::fs::PermissionsExt as _;
 
         let dir = tempfile::tempdir().unwrap();

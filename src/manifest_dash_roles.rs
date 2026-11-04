@@ -15,6 +15,7 @@ const MAX_ELEMENT_DEPTH: usize = 32;
 /// Role scheme used to identify the main audio or subtitle representation.
 pub(super) const DASH_ROLE_SCHEME: &str = "urn:mpeg:dash:role:2011";
 
+/// Representation identity and its direct-child `Role=main` flag.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(super) struct RepresentationRoleMetadata {
     pub(super) id: Option<String>,

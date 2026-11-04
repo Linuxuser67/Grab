@@ -6,6 +6,8 @@ mod content_range;
 mod cookies;
 mod download;
 mod download_fetch;
+#[cfg(test)]
+mod download_ytdlp_fetcher_poc;
 mod download_intake;
 mod download_net;
 mod download_pieces;

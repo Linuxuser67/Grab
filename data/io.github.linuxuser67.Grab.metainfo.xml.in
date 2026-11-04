@@ -50,6 +50,16 @@
     </screenshot>
   </screenshots>
   <releases>
+    <release version="6.5.0~beta.10" date="2026-11-04">
+      <description>
+        <ul>
+          <li>Cache playlist and media previews using browser cookies; authenticated video previews are cached in memory.</li>
+          <li>Remove the Queued tab from the queue view switcher while keeping the Queued section in All view.</li>
+          <li>Harden native HLS MPEG-TS, fMP4, and DASH parsing (structural validation, centralized Content-Range, audit findings).</li>
+          <li>Carry forward the full native manifest, destination-part, cache, and media-tool improvements from the current beta line.</li>
+        </ul>
+      </description>
+    </release>
     <release version="6.5.0~beta.9" date="2026-11-03">
       <description>
         <ul>

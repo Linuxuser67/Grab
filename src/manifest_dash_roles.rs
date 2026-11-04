@@ -127,10 +127,13 @@ fn push_element(
             if *representation_count > max_representations {
                 return None;
             }
-            periods.last_mut()?.last_mut()?.push(RepresentationRoleMetadata {
-                id: representation_id(start)?,
-                is_main: false,
-            });
+            periods
+                .last_mut()?
+                .last_mut()?
+                .push(RepresentationRoleMetadata {
+                    id: representation_id(start)?,
+                    is_main: false,
+                });
             Element::Representation
         }
         (Some(Element::Representation), "Role", true) => {
@@ -211,8 +214,7 @@ mod tests {
   </Period>
 </MPD>"#;
 
-        let metadata =
-            representation_metadata(body, 3).expect("valid MPD representation metadata");
+        let metadata = representation_metadata(body, 3).expect("valid MPD representation metadata");
         assert_eq!(metadata.len(), 2);
         assert_eq!(metadata[0][0].id.as_deref(), Some("first"));
         assert!(!metadata[0][0].is_main);
@@ -234,8 +236,7 @@ mod tests {
   </mpd:Period>
 </mpd:MPD>"#;
 
-        let metadata =
-            representation_metadata(body, 1).expect("valid MPD representation metadata");
+        let metadata = representation_metadata(body, 1).expect("valid MPD representation metadata");
         assert_eq!(metadata[0][0].id.as_deref(), Some("main"));
         assert!(metadata[0][0].is_main);
     }
@@ -256,15 +257,15 @@ mod tests {
   </Period>
 </MPD>"#;
 
-        let metadata =
-            representation_metadata(body, 1).expect("valid MPD representation metadata");
+        let metadata = representation_metadata(body, 1).expect("valid MPD representation metadata");
         assert_eq!(metadata[0][0].id.as_deref(), Some("main"));
         assert!(metadata[0][0].is_main);
     }
 
     #[test]
     fn ignores_namespaced_role_attributes() {
-        let body = br#"<MPD xmlns="urn:mpeg:dash:schema:mpd:2011" xmlns:foreign="urn:example:foreign">
+        let body =
+            br#"<MPD xmlns="urn:mpeg:dash:schema:mpd:2011" xmlns:foreign="urn:example:foreign">
   <Period>
     <AdaptationSet>
       <Representation id="main">
@@ -274,8 +275,8 @@ mod tests {
   </Period>
 </MPD>"#;
 
-        let metadata = representation_metadata(body, 1)
-            .expect("foreign attributes do not invalidate the MPD");
+        let metadata =
+            representation_metadata(body, 1).expect("foreign attributes do not invalidate the MPD");
         assert_eq!(metadata[0][0].id.as_deref(), Some("main"));
         assert!(!metadata[0][0].is_main);
     }

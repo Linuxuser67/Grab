@@ -123,9 +123,7 @@ impl WriterMode {
     fn into_parts(self) -> (CheckpointPolicy, Option<DestinationPart>, bool) {
         match self {
             Self::Staged => (CheckpointPolicy::RemoveAfterPublish, None, false),
-            Self::StagedRetainingCheckpoint => {
-                (CheckpointPolicy::RetainAfterPublish, None, false)
-            }
+            Self::StagedRetainingCheckpoint => (CheckpointPolicy::RetainAfterPublish, None, false),
             Self::DestinationPart(part) => {
                 (CheckpointPolicy::RetainAfterPublish, Some(part), false)
             }

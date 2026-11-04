@@ -905,9 +905,7 @@ fn ytdlp_spawn_identity_at(cookies_browser: &str, page_url: &str, now: SystemTim
     // Prefer a fresh handoff over a browser export. When no browser source is
     // configured, retain the staged jar as the only available credential even
     // after its freshness window; its cookie-file identity stays memory-only.
-    let usable = entry.filter(|entry| {
-        handoff_jar_usable_at(entry, now) || !browser_configured
-    });
+    let usable = entry.filter(|entry| handoff_jar_usable_at(entry, now) || !browser_configured);
     let user_agent = usable
         .as_ref()
         .and_then(|entry| entry.user_agent.as_deref());
@@ -2032,15 +2030,8 @@ mod tests {
         let directory = tempfile::tempdir().expect("temporary directory");
         let binary = directory.path().join("yt-dlp");
         std::fs::write(&binary, b"fake yt-dlp binary").expect("write fake binary");
-        let key = crate::video_cache::cache_key(
-            url,
-            &binary,
-            "2026.10.23",
-            "none",
-            None,
-            &args,
-        )
-        .expect("an offline handoff jar should still produce an extraction key");
+        let key = crate::video_cache::cache_key(url, &binary, "2026.10.23", "none", None, &args)
+            .expect("an offline handoff jar should still produce an extraction key");
         assert!(
             key.starts_with("grab-ytdlp-video-auth-v1:"),
             "handoff-cookie metadata must stay in the authenticated in-memory namespace"

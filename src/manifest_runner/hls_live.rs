@@ -1117,7 +1117,10 @@ mod destination_part_tests {
     #[test]
     fn live_hls_poll_interval_is_bounded() {
         assert_eq!(live_hls_poll_interval(3_600, true), Duration::from_secs(60));
-        assert_eq!(live_hls_poll_interval(3_600, false), Duration::from_secs(30));
+        assert_eq!(
+            live_hls_poll_interval(3_600, false),
+            Duration::from_secs(30)
+        );
         assert_eq!(live_hls_poll_interval(4, false), Duration::from_secs(2));
     }
 

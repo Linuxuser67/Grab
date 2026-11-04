@@ -1182,7 +1182,10 @@ mod tests {
             r"sub\\segment.bin",
             "name\npart.bin",
         ] {
-            assert!(!is_single_component(unsafe_name), "accepted {unsafe_name:?}");
+            assert!(
+                !is_single_component(unsafe_name),
+                "accepted {unsafe_name:?}"
+            );
         }
     }
 

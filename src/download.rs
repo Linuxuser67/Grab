@@ -583,10 +583,7 @@ fn probe_json_expired(cached_at: std::time::Instant) -> bool {
 }
 
 /// Return whether a stored video source belongs to the normalized queue URL.
-fn video_source_matches_url(
-    source: &crate::media_types::VideoSource,
-    url: &url::Url,
-) -> bool {
+fn video_source_matches_url(source: &crate::media_types::VideoSource, url: &url::Url) -> bool {
     match source {
         crate::media_types::VideoSource::Page { page_url, .. } => {
             normalize_url(page_url).is_ok_and(|page| page == *url)
@@ -598,7 +595,7 @@ fn video_source_matches_url(
         crate::media_types::VideoSource::Direct => false,
     }
 }
- 
+
 /// Queue + engine owner: persists the queue, spawns downloads, notifies the UI.
 impl DownloadManager {
     /// Cache a probe's raw info JSON for `--load-info-json`.

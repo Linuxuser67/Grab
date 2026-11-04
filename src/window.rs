@@ -873,6 +873,54 @@ pub fn build_window(
     toasts.set_child(Some(&toolbar));
     window.set_content(Some(toasts.as_ref()));
 
+    // Drag the window from empty background: the press point is hit-tested so
+    // controls keep their own drag and click behaviour.
+    {
+        let drag = gtk4::GestureDrag::new();
+        drag.connect_drag_begin(move |gesture, start_x, start_y| {
+            let Some(widget) = gesture.widget() else {
+                return;
+            };
+            let Some(target) = widget.pick(start_x, start_y, gtk4::PickFlags::DEFAULT) else {
+                return;
+            };
+            if is_control(&target) {
+                return;
+            }
+            let Some(native) = widget.native() else {
+                return;
+            };
+            let Some(surface) = native.surface() else {
+                return;
+            };
+            let Some(toplevel) = surface.downcast_ref::<gtk4::gdk::Toplevel>() else {
+                return;
+            };
+            let Some(point) = widget.compute_point(
+                &native,
+                &gtk4::graphene::Point::new(start_x as f32, start_y as f32),
+            ) else {
+                return;
+            };
+            let Some(device) = gesture.device() else {
+                return;
+            };
+            let (dx, dy) = native.surface_transform();
+            gesture.set_state(gtk4::EventSequenceState::Claimed);
+            toplevel.begin_move(
+                &device,
+                gesture.current_button() as i32,
+                f64::from(point.x()) + dx,
+                f64::from(point.y()) + dy,
+                gesture.current_event_time(),
+            );
+            // The WM owns the pointer now and GTK sees no release; reset like
+            // GtkWindowHandle does so the sequence does not stay claimed.
+            gesture.reset();
+        });
+        toasts.add_controller(drag);
+    }
+
     // Flip a named app action on/off; silently skips a missing one.
     let set_action = |app: &adw::Application, name: &str, enabled: bool| {
         if let Some(a) = app.lookup_action(name).and_downcast::<gio::SimpleAction>() {
@@ -917,6 +965,32 @@ pub fn build_window(
     }
 
     (window, search_toggle, add_card)
+}
+
+/// Interactive widgets whose own drag or click must win over moving the window.
+/// Walks ancestors so a label or progress bar inside a row still counts.
+fn is_control(widget: &gtk4::Widget) -> bool {
+    let mut current = Some(widget.clone());
+    while let Some(node) = current {
+        if node.is::<gtk4::Button>()
+            || node.is::<gtk4::CheckButton>()
+            || node.is::<gtk4::MenuButton>()
+            || node.is::<gtk4::Entry>()
+            || node.is::<gtk4::Text>()
+            || node.is::<gtk4::TextView>()
+            || node.is::<gtk4::ListBoxRow>()
+            || node.is::<gtk4::ListItem>()
+            || node.is::<gtk4::GridView>()
+            || node.is::<gtk4::Range>()
+            || node.is::<gtk4::WindowHandle>()
+            || node.is::<adw::Toggle>()
+            || node.is::<adw::ToggleGroup>()
+        {
+            return true;
+        }
+        current = node.parent();
+    }
+    false
 }
 
 #[cfg(test)]

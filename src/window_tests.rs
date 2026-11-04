@@ -395,6 +395,34 @@ fn count_queue_rows(widget: &gtk4::Widget) -> usize {
     count
 }
 
+/// Window dragging is background-only: controls and anything inside them block
+/// the move, so entries, rows and buttons keep their own drags and clicks.
+#[test]
+#[ignore = "needs a display; run under Xvfb (see ci.yml)"]
+fn window_drag_ignores_controls() {
+    // SAFETY: UI tests run serially; no other thread reads these variables
+    // while this process-global setup runs.
+    unsafe {
+        std::env::set_var("GSETTINGS_SCHEMA_DIR", env!("GRAB_SCHEMA_DIR"));
+        std::env::set_var("GSETTINGS_BACKEND", "memory");
+    }
+    gtk4::init().expect("gtk::init (run under Xvfb)");
+
+    let button = gtk4::Button::new();
+    let button_label = gtk4::Label::new(Some("Download"));
+    button.set_child(Some(&button_label));
+    assert!(crate::window::is_control(&button_label));
+    let row = gtk4::ListBoxRow::new();
+    let row_label = gtk4::Label::new(Some("Queued"));
+    row.set_child(Some(&row_label));
+    assert!(crate::window::is_control(&row_label));
+    assert!(crate::window::is_control(&gtk4::Entry::new()));
+    assert!(crate::window::is_control(&gtk4::GridView::builder().build()));
+    assert!(crate::window::is_control(&gtk4::WindowHandle::new()));
+    let plain_label = gtk4::Label::new(Some("Active"));
+    assert!(!crate::window::is_control(&plain_label));
+}
+
 /// Queue status navigation uses libadwaita's adaptive view-switcher pattern.
 /// The selected page owns the shared queue scroller; no row widgets are duplicated.
 #[test]

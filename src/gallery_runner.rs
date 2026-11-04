@@ -256,6 +256,7 @@ pub async fn run_gallery_download_with_proxy(
 
     while !stdout_done || !stderr_progress_done {
         tokio::select! {
+            // Process file events before progress from the separate stderr pipe.
             biased;
             line = lines.next_line(), if !stdout_done => {
                 match line {

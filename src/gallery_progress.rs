@@ -155,22 +155,34 @@ mod tests {
         assert_eq!(progress_fraction(11, None, 10), None);
 
         let mut resumed = GalleryProgress::new();
-        resumed.feed(ProgressLine::Skipped("/a.jpg".to_string()));
-        resumed.feed(ProgressLine::Skipped("/b.jpg".to_string()));
+        assert_eq!(
+            resumed.feed(ProgressLine::Skipped("/a.jpg".to_string())),
+            None
+        );
+        assert_eq!(
+            resumed.feed(ProgressLine::Skipped("/b.jpg".to_string())),
+            None
+        );
         assert_eq!(progress_fraction(resumed.files_done(), Some(50), 4), Some(0.625));
     }
 
     #[test]
     fn progress_is_reset_when_a_file_finishes_or_is_skipped() {
         let mut progress = GalleryProgress::new();
-        progress.feed(ProgressLine::Progress(Some(67)));
+        assert_eq!(progress.feed(ProgressLine::Progress(Some(67))), None);
         assert_eq!(progress.current_file_percent, Some(67));
 
-        progress.feed(ProgressLine::Completed("/a.jpg".to_string()));
+        assert_eq!(
+            progress.feed(ProgressLine::Completed("/a.jpg".to_string())),
+            Some("/a.jpg".to_string())
+        );
         assert_eq!(progress.current_file_percent, None);
 
-        progress.feed(ProgressLine::Progress(Some(25)));
-        progress.feed(ProgressLine::Skipped("/b.jpg".to_string()));
+        assert_eq!(progress.feed(ProgressLine::Progress(Some(25))), None);
+        assert_eq!(
+            progress.feed(ProgressLine::Skipped("/b.jpg".to_string())),
+            None
+        );
         assert_eq!(progress.current_file_percent, None);
         assert_eq!(progress.files_done(), 2);
     }

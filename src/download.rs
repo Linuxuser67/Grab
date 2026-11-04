@@ -3444,7 +3444,11 @@ impl DownloadManager {
             while let Some(msg) = rx.recv().await {
                 match msg {
                     GalleryMsg::Progress(update) => {
-                        let done = update.files_completed;
+                        let done = update.files_done;
+                        let file_progress = update
+                            .current_file_percent
+                            .map(|percent| format!(" · {percent}%"))
+                            .unwrap_or_default();
                         item_c.set_gallery_files_done(done);
                         // Show the last completed filename if available.
                         let file_part = update
@@ -3453,18 +3457,24 @@ impl DownloadManager {
                             .and_then(|p| std::path::Path::new(p).file_name()?.to_str())
                             .map(|n| format!(" • {n}"))
                             .unwrap_or_default();
-                        if total > 0 && done <= total {
-                            item_c.set_progress((done as f64 / total as f64).min(1.0));
+                        if let Some(fraction) = crate::gallery_progress::progress_fraction(
+                            done,
+                            update.current_file_percent,
+                            total,
+                        ) {
+                            item_c.set_progress(fraction);
                             item_c.set_detail(format!(
-                                "Gallery \u{2022} {done}/{total} files{file_part}"
+                                "Gallery \u{2022} {done}/{total} files{file_progress}{file_part}"
                             ));
                         } else {
-                            // Total unknown or the probe count was wrong (done >
-                            // total): reset to indeterminate instead of keeping
-                            // a stale fraction. progress <= 0 pulses the bar
-                            // (should_pulse) and the a11y label reads 0%.
+                            // Unknown or inconsistent file totals cannot produce
+                            // a meaningful aggregate fraction; keep the bar
+                            // indeterminate while still showing the current
+                            // file's percentage when gallery-dl reports it.
                             item_c.set_progress(0.0);
-                            item_c.set_detail(format!("Gallery \u{2022} {done} files{file_part}"));
+                            item_c.set_detail(format!(
+                                "Gallery \u{2022} {done} files{file_progress}{file_part}"
+                            ));
                         }
                         this.changed();
                     }

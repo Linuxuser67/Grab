@@ -87,9 +87,10 @@ impl GalleryFilter {
 /// - `-f '/O'`: original filenames (not extractor-specific templates)
 /// - `extractor.directory=[]`: flat output (no category/subcategory nesting)
 /// - `extractor.cookies-update=false`: don't mutate Grab's staged cookies
-/// - `downloader.http.progress=null`: suppress gallery-dl's stderr progress
+/// - `downloader.http.progress=0.5`: emit per-file progress to stderr
 /// - `output.progress=false`: disable multi-URL progress indicator
-/// - `output.mode=pipe`: one file path per line (see gallery_progress)
+/// - custom `output.mode`: keep success/skip paths line-oriented on stdout and
+///   emit a parseable percentage (or `?` when size is unknown) on stderr
 ///
 /// Build a gallery-dl `--range` spec from 0-based selected indices.
 /// gallery-dl uses 1-based indices; consecutive runs compress to `a-b`.
@@ -185,14 +186,15 @@ pub fn download_argv_with_proxy(
         "-o".to_string(),
         "extractor.cookies-update=false".to_string(),
         "-o".to_string(),
-        "downloader.http.progress=null".to_string(),
+        "downloader.http.progress=0.5".to_string(),
         "-o".to_string(),
         "output.progress=false".to_string(),
         "-o".to_string(),
-        // Pipe mode: one file path per line. Avoids the custom JSON
-        // output.mode which triggers a gallery-dl internal bug
-        // (AttributeError in output.py _make_func).
-        "output.mode=pipe".to_string(),
+        "output.shorten=false".to_string(),
+        "-o".to_string(),
+        // All three path templates are required by gallery-dl's CustomOutput.
+        // Omitting one triggers AttributeError in output.py _make_func.
+        r##"output.mode={"start":"","success":"{}\n","skip":"# {}\n","progress":"?\n","progress-total":"{3}%\n"}"##.to_string(),
     ];
     if let Some(cookies) = cookies_file {
         argv.push("-C".to_string());
@@ -393,6 +395,34 @@ mod tests {
         );
         let f_pos = argv.iter().position(|a| a == "-f").unwrap();
         assert_eq!(argv[f_pos + 1], "/O");
+    }
+
+    #[test]
+    fn download_argv_emits_parseable_file_and_percentage_progress() {
+        let argv = download_argv(
+            &tool(),
+            "https://example.com/gallery",
+            Path::new("/tmp/dest"),
+            None,
+            None,
+            GalleryFilter::All,
+            None,
+            None,
+        );
+        assert!(argv.contains(&"downloader.http.progress=0.5".to_string()));
+        assert!(argv.contains(&"output.shorten=false".to_string()));
+
+        let mode = argv
+            .iter()
+            .find_map(|argument| argument.strip_prefix("output.mode="))
+            .expect("custom output mode must be configured");
+        let mode: serde_json::Value =
+            serde_json::from_str(mode).expect("custom output mode must be valid JSON");
+        assert_eq!(mode["start"], "");
+        assert_eq!(mode["success"], "{}\n");
+        assert_eq!(mode["skip"], "# {}\n");
+        assert_eq!(mode["progress"], "?\n");
+        assert_eq!(mode["progress-total"], "{3}%\n");
     }
 
     #[test]

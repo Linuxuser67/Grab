@@ -1067,7 +1067,7 @@ struct ManifestLiveHlsFinalization<'a> {
     abort: &'a mut tokio::sync::oneshot::Receiver<crate::video::StopIntent>,
 }
 
-async fn cleanup_live_hls_destination_part_if_present(
+async fn cleanup_manifest_destination_part_if_present(
     staging: &Path,
     destination: &Path,
     item_id: u64,
@@ -1110,6 +1110,78 @@ async fn cleanup_live_hls_destination_part_if_present(
                 "Could not inspect the live HLS destination part: {error}"
             )));
         }
+    }
+    Ok(())
+}
+
+async fn cleanup_static_destination_parts_after_fallback(
+    tracks: &Tracks,
+    staging: &Path,
+    destination: &Path,
+    item_id: u64,
+    video_dir: &Path,
+    audio_dir: &Path,
+) -> Result<(), ManifestRunError> {
+    match tracks {
+        Tracks::Hls { audio, .. } => {
+            cleanup_manifest_destination_part_if_present(
+                staging,
+                destination,
+                item_id,
+                video_dir,
+                crate::manifest_destination::TrackKind::Video,
+                "video-track.ts",
+            )
+            .await?;
+            if audio.is_some() {
+                cleanup_manifest_destination_part_if_present(
+                    staging,
+                    destination,
+                    item_id,
+                    audio_dir,
+                    crate::manifest_destination::TrackKind::Audio,
+                    "audio-track.ts",
+                )
+                .await?;
+            }
+        }
+        Tracks::Dash {
+            audio, subtitle, ..
+        } => {
+            cleanup_manifest_destination_part_if_present(
+                staging,
+                destination,
+                item_id,
+                video_dir,
+                crate::manifest_destination::TrackKind::Video,
+                "video-track.mp4",
+            )
+            .await?;
+            if audio.is_some() {
+                cleanup_manifest_destination_part_if_present(
+                    staging,
+                    destination,
+                    item_id,
+                    audio_dir,
+                    crate::manifest_destination::TrackKind::Audio,
+                    "audio-track.mp4",
+                )
+                .await?;
+            }
+            if subtitle.is_some() {
+                let subtitle_directory = staging.join("subtitles");
+                cleanup_manifest_destination_part_if_present(
+                    staging,
+                    destination,
+                    item_id,
+                    &subtitle_directory,
+                    crate::manifest_destination::TrackKind::Subtitles,
+                    "subtitle-track.mp4",
+                )
+                .await?;
+            }
+        }
+        Tracks::DashLiveOffline { .. } => {}
     }
     Ok(())
 }
@@ -1179,7 +1251,7 @@ async fn prepare_live_hls_finalization(
                 LiveHlsCaptureOutcome::FinishVideoOnly | LiveHlsCaptureOutcome::Unrecoverable
             ) {
                 if destination_parts && has_destination_audio {
-                    cleanup_live_hls_destination_part_if_present(
+                    cleanup_manifest_destination_part_if_present(
                         staging,
                         destination,
                         item_id,
@@ -1210,7 +1282,7 @@ async fn prepare_live_hls_finalization(
         has_audio = false;
     }
     if destination_parts && has_destination_audio && !has_audio {
-        cleanup_live_hls_destination_part_if_present(
+        cleanup_manifest_destination_part_if_present(
             staging,
             destination,
             item_id,
@@ -1520,23 +1592,39 @@ pub(crate) async fn run_manifest_download(
             }
             LiveCapturePreparation::Stopped(outcome) => return Ok(outcome),
         }
-    } else if !transfer_static_manifest_tracks(ManifestStaticTransfer {
-        client: &client,
-        tracks: &tracks,
-        destination_parts: static_destination_parts,
-        staging: &staging,
-        destination: &job.dest,
-        item_id: job.item_id,
-        video_dir: &video_dir,
-        audio_dir: &audio_dir,
-        concurrency,
-        tx: &tx,
-        downloaded: &downloaded,
-        abort: &mut abort,
-    })
-    .await?
-    {
-        return Ok(ManifestOutcome::Aborted);
+    } else {
+        match transfer_static_manifest_tracks(ManifestStaticTransfer {
+            client: &client,
+            tracks: &tracks,
+            destination_parts: static_destination_parts,
+            staging: &staging,
+            destination: &job.dest,
+            item_id: job.item_id,
+            video_dir: &video_dir,
+            audio_dir: &audio_dir,
+            concurrency,
+            tx: &tx,
+            downloaded: &downloaded,
+            abort: &mut abort,
+        })
+        .await
+        {
+            Ok(true) => {}
+            Ok(false) => return Ok(ManifestOutcome::Aborted),
+            Err(error @ ManifestRunError::Unsupported(_)) if static_destination_parts => {
+                cleanup_static_destination_parts_after_fallback(
+                    &tracks,
+                    &staging,
+                    &job.dest,
+                    job.item_id,
+                    &video_dir,
+                    &audio_dir,
+                )
+                .await?;
+                return Err(error);
+            }
+            Err(error) => return Err(error),
+        }
     }
     finalize_manifest_download(ManifestFinalization {
         job: &job,

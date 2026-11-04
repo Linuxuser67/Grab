@@ -54,8 +54,8 @@ pub fn progress_fraction(
     if total_files == 0 || files_done > total_files {
         return None;
     }
-    let current = current_file_percent.unwrap_or(0) as f64 / 100.0;
-    Some(((files_done as f64 + current) / total_files as f64).min(1.0))
+    let current = f64::from(current_file_percent.unwrap_or(0)) / 100.0;
+    Some(((f64::from(files_done) + current) / f64::from(total_files)).min(1.0))
 }
 
 /// Aggregate file completion and the current file's percentage.

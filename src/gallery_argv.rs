@@ -194,7 +194,7 @@ pub fn download_argv_with_proxy(
         "-o".to_string(),
         // All three path templates are required by gallery-dl's CustomOutput.
         // Omitting one triggers AttributeError in output.py _make_func.
-        r##"output.mode={"start":"","success":"{}\n","skip":"# {}\n","progress":"?","progress-total":"{3}%"}"##.to_string(),
+        r##"output.mode={"start":"","success":"{}\n","skip":"# {}\n","progress":"?\n","progress-total":"{3}%\n"}"##.to_string(),
     ];
     if let Some(cookies) = cookies_file {
         argv.push("-C".to_string());
@@ -421,8 +421,8 @@ mod tests {
         assert_eq!(mode["start"], "");
         assert_eq!(mode["success"], "{}\n");
         assert_eq!(mode["skip"], "# {}\n");
-        assert_eq!(mode["progress"], "?");
-        assert_eq!(mode["progress-total"], "{3}%");
+        assert_eq!(mode["progress"], "?\n");
+        assert_eq!(mode["progress-total"], "{3}%\n");
     }
 
     #[test]

@@ -14,6 +14,7 @@ use futures_util::{StreamExt as _, TryStreamExt as _};
 use tokio::io::{AsyncBufReadExt as _, AsyncReadExt as _, AsyncSeekExt as _, AsyncWriteExt as _};
 use url::Url;
 
+use crate::content_range::{ParsedContentRange, parse_content_range};
 use crate::engine_msg::EngineMsg;
 use crate::manifest::{
     HlsLiveAccumulator, HlsPlan, HlsResource, HlsResourceKind, ManifestByteRange,
@@ -2628,27 +2629,20 @@ fn safe_resource_filename(filename: &str) -> bool {
 }
 
 fn content_range_matches(header: Option<&str>, range: ManifestByteRange) -> bool {
-    let Some(value) = header.and_then(|header| header.strip_prefix("bytes ")) else {
+    let Some(ParsedContentRange::Satisfied {
+        first_byte,
+        last_byte,
+        complete_length: Some(total),
+    }) = header.and_then(parse_content_range)
+    else {
         return false;
     };
-    let Some((positions, total)) = value.split_once('/') else {
-        return false;
-    };
-    let Some((start, end)) = positions.split_once('-') else {
-        return false;
-    };
-    let (Ok(start), Ok(end), Ok(total)) = (
-        start.parse::<u64>(),
-        end.parse::<u64>(),
-        total.parse::<u64>(),
-    ) else {
-        return false;
-    };
+
     range
         .offset
         .checked_add(range.length)
         .is_some_and(|exclusive_end| {
-            start == range.offset && end == exclusive_end - 1 && total >= exclusive_end
+            first_byte == range.offset && last_byte == exclusive_end - 1 && total >= exclusive_end
         })
 }
 
@@ -5131,6 +5125,8 @@ segment-2.m4s
         assert!(!content_range_matches(Some("bytes 0-7/64"), range));
         assert!(!content_range_matches(Some("bytes 16-22/64"), range));
         assert!(!content_range_matches(Some("bytes 16-23/20"), range));
+        assert!(!content_range_matches(Some("bytes 16-23/*"), range));
+        assert!(!content_range_matches(Some("bytes */64"), range));
     }
 
     #[test]

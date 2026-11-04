@@ -254,31 +254,41 @@ pub async fn fetch_video_infos(
             let cache_cookies_browser = cookies_browser.clone();
             let cache_proxy = fetch_proxy.clone();
             let cache_identity_args = identity_args.clone();
-            let cache_key = match tokio::task::spawn_blocking(move || {
-                crate::video_cache::cache_key(
+            let (cache_key, playlist_base_key) = match tokio::task::spawn_blocking(move || {
+                let video = crate::video_cache::cache_key(
                     &cache_url,
                     &cache_binary,
                     &cache_version,
                     &cache_cookies_browser,
                     cache_proxy.as_ref(),
                     &cache_identity_args,
-                )
+                );
+                let playlist = crate::video_cache::playlist_cache_key(
+                    &cache_url,
+                    &cache_binary,
+                    &cache_version,
+                    &cache_cookies_browser,
+                    cache_proxy.as_ref(),
+                    &cache_identity_args,
+                );
+                (video, playlist)
             })
             .await
             {
-                Ok(key) => key,
+                Ok(keys) => keys,
                 Err(error) => {
                     tracing::warn!(
                         error = %error,
                         "yt-dlp cache identity task failed; probing without cache"
                     );
-                    None
+                    (None, None)
                 }
             };
-            // Playlist metadata uses the same extraction identity, but a
-            // separate namespace and the crate's dedicated playlist cache.
-            // The download worker still re-resolves each selected item.
-            let playlist_cache_key = cache_key
+            // Playlist metadata uses a separate namespace and the crate's
+            // dedicated playlist cache. It may be cached for a browser profile
+            // or a staged handoff jar: it holds no signed media URLs. The
+            // download worker still re-resolves each item.
+            let playlist_cache_key = playlist_base_key
                 .as_deref()
                 .map(crate::video_playlist_cache::cache_key);
             if let Some(playlist) = match playlist_cache_key.as_deref() {
@@ -292,9 +302,9 @@ pub async fn fetch_video_infos(
                 );
                 return Ok((ProbeResult::Playlist(playlist), None));
             }
-            // A persistent metadata hit avoids starting yt-dlp (and Deno) for
-            // a repeat preview. The raw JSON is intentionally absent on a hit:
-            // the download worker must obtain fresh extraction data later.
+            // A metadata hit avoids starting yt-dlp (and Deno) for a repeat
+            // preview. The raw JSON is intentionally absent on a hit: the
+            // download worker must obtain fresh extraction data later.
             if let Some(video) = match cache_key.as_deref() {
                 Some(key) => crate::video_cache::lookup_video(key).await,
                 None => None,

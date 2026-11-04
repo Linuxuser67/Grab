@@ -3485,7 +3485,9 @@ mod tests {
     fn valid_transport_stream(packet_count: usize, continuity_seed: u8) -> Vec<u8> {
         let mut bytes = vec![0xff; packet_count * mpeg_ts::ts::TS_PACKET_SIZE];
         for (index, packet) in bytes
-            .chunks_exact_mut(mpeg_ts::ts::TS_PACKET_SIZE)
+            .as_chunks_mut::<{ mpeg_ts::ts::TS_PACKET_SIZE }>()
+            .0
+            .iter_mut()
             .enumerate()
         {
             packet[0] = 0x47;

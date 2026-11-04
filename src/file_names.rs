@@ -716,20 +716,16 @@ impl Drop for ClaimedDestination<'_> {
 
 /// Exclusive-create fallback for filesystems without hard links or no-replace rename.
 ///
-/// The final name is reserved with `create_new` before copying. Such filesystems
-/// cannot provide atomic publication without either primitive, so readers may
-/// observe the file while this fallback copies it. Existing destinations are
-/// never opened or truncated.
+/// The final name is held as a private, empty claim until a completed temporary
+/// is atomically renamed over it. A crash before rename leaves no truncated file.
 fn publish_by_exclusive_copy<F>(
-    mut temporary: tempfile::NamedTempFile,
+    temporary: tempfile::NamedTempFile,
     destination: &std::path::Path,
     mut should_continue: F,
 ) -> std::io::Result<()>
 where
     F: FnMut() -> bool,
 {
-    use std::io::{Read as _, Seek as _, Write as _};
-
     if !should_continue() {
         return Err(std::io::Error::new(
             std::io::ErrorKind::Interrupted,
@@ -758,28 +754,13 @@ where
         ));
     }
 
-    let permissions = temporary.as_file().metadata()?.permissions();
-    temporary.as_file_mut().seek(std::io::SeekFrom::Start(0))?;
-    let mut source = temporary.as_file();
-    let mut buffer = [0_u8; 256 * 1024];
-    loop {
-        if !should_continue() {
-            return Err(std::io::Error::new(
-                std::io::ErrorKind::Interrupted,
-                "publication was cancelled",
-            ));
-        }
-        let read = source.read(&mut buffer)?;
-        if read == 0 {
-            break;
-        }
-        claim.file.write_all(&buffer[..read])?;
+    temporary.as_file().sync_all()?;
+    if !claim_still_owns_path(&claim)? {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::AlreadyExists,
+            "the exclusive publication claim was replaced",
+        ));
     }
-    claim.file.flush()?;
-    claim.file.sync_all()?;
-    claim.file.set_permissions(permissions)?;
-    claim.file.sync_all()?;
-
     if !should_continue() {
         return Err(std::io::Error::new(
             std::io::ErrorKind::Interrupted,
@@ -787,8 +768,31 @@ where
         ));
     }
 
+    // Same-directory rename atomically replaces our empty placeholder.
+    std::fs::rename(temporary.path(), destination)?;
     claim.armed = false;
     Ok(())
+}
+
+fn claim_still_owns_path(claim: &ClaimedDestination<'_>) -> std::io::Result<bool> {
+    let path_metadata = std::fs::symlink_metadata(claim.path)?;
+    let file_metadata = claim.file.metadata()?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt as _;
+        Ok(path_metadata.file_type().is_file()
+            && path_metadata.dev() == file_metadata.dev()
+            && path_metadata.ino() == file_metadata.ino())
+    }
+    #[cfg(not(unix))]
+    {
+        // The application targets Unix desktops. On other targets, conservatively
+        // accept only a still-empty regular file at the claimed path.
+        Ok(path_metadata.file_type().is_file()
+            && file_metadata.is_file()
+            && path_metadata.len() == 0
+            && file_metadata.len() == 0)
+    }
 }
 
 /// Persist a temporary without clobbering, using an exclusive-copy fallback when
@@ -1184,6 +1188,23 @@ mod tests {
     }
 
     #[test]
+    fn single_component_filename_validator_rejects_traversal_and_controls() {
+        assert!(is_single_component("segment-00001.bin"));
+        assert!(is_single_component("résumé.m3u8"));
+        for unsafe_name in [
+            "",
+            ".",
+            "..",
+            "../segment.bin",
+            "sub/segment.bin",
+            r"sub\\segment.bin",
+            "name\npart.bin",
+        ] {
+            assert!(!is_single_component(unsafe_name), "accepted {unsafe_name:?}");
+        }
+    }
+
+    #[test]
     fn publish_temporary_name_filter_rejects_unrelated_files() {
         assert!(!is_publish_temporary_name(std::ffi::OsStr::new(
             ".notes.partial"
@@ -1217,7 +1238,7 @@ mod tests {
         let mut checks = 0;
         let result = publish_by_exclusive_copy(temporary, &destination, || {
             checks += 1;
-            checks < 4
+            checks < 3
         });
 
         assert_eq!(result.unwrap_err().kind(), std::io::ErrorKind::Interrupted);
@@ -1242,12 +1263,10 @@ mod tests {
         publish_by_exclusive_copy(temporary, &destination, || {
             checks += 1;
             if checks == 2 {
-                let mode = std::fs::metadata(&destination)
-                    .unwrap()
-                    .permissions()
-                    .mode()
-                    & 0o777;
-                assert_eq!(mode, 0o600, "partial destination stays private");
+                let metadata = std::fs::metadata(&destination).unwrap();
+                assert_eq!(metadata.len(), 0, "destination remains an empty claim");
+                let mode = metadata.permissions().mode() & 0o777;
+                assert_eq!(mode, 0o600, "empty destination claim stays private");
             }
             true
         })
@@ -1260,6 +1279,11 @@ mod tests {
                 .mode()
                 & 0o777,
             0o644
+        );
+        assert_eq!(
+            std::fs::read(&destination).unwrap(),
+            b"complete payload",
+            "the final name is published only with complete bytes"
         );
     }
 

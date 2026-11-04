@@ -606,6 +606,12 @@ impl OrderedTrackWriter {
     ///
     /// Returns an error if the resource is empty or durable output, journal, or checkpoint I/O fails.
     pub(crate) async fn commit_streamed_resource(&mut self) -> Result<u64, String> {
+        if self.append_only || self.destination_part.is_none() {
+            return Err(
+                "Streamed resource commits require a non-appendable destination-part writer"
+                    .to_string(),
+            );
+        }
         if self.pending_resource_bytes == 0 {
             return Err("The stream server returned an empty HLS fragment".to_string());
         }

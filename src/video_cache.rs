@@ -41,15 +41,20 @@ pub(crate) async fn lookup_video(key: &str) -> Option<Video> {
     clean_expired_if_due(cache).await;
 
     match cache.get(key).await {
-        Ok(Some(video)) if is_cacheable_video(&video) && video.are_format_urls_fresh() => {
-            tracing::debug!("yt-dlp metadata cache hit");
-            Some(video)
-        }
-        Ok(Some(_)) => {
-            if let Err(error) = cache.remove(key).await {
-                tracing::warn!(error = %error, "could not remove stale yt-dlp metadata cache entry");
+        Ok(Some(cached_video)) => {
+            let video = restore_persistent_cache_record(key, cached_video);
+            if let Some(video) = video
+                && is_cacheable_video(&video)
+                && video.are_format_urls_fresh()
+            {
+                tracing::debug!("yt-dlp metadata cache hit");
+                Some(video)
+            } else {
+                if let Err(error) = cache.remove(key).await {
+                    tracing::warn!(error = %error, "could not remove stale yt-dlp metadata cache entry");
+                }
+                None
             }
-            None
         }
         Ok(None) => None,
         Err(error) => {
@@ -77,7 +82,8 @@ pub(crate) async fn store_video(key: &str, video: &Video) {
         return;
     };
 
-    if let Err(error) = cache.put(key.to_string(), video.clone()).await {
+    let cached_video = persistent_cache_record(key, video);
+    if let Err(error) = cache.put(key.to_string(), cached_video).await {
         tracing::warn!(error = %error, "yt-dlp metadata cache write failed");
         return;
     }
@@ -89,12 +95,31 @@ fn is_cacheable_video(video: &Video) -> bool {
         && crate::video_types::has_fetchable_media(video)
 }
 
+/// Give each extraction identity a distinct Redb primary key without changing
+/// the media ID used by the rest of the application.
+fn persistent_cache_record(key: &str, video: &Video) -> Video {
+    let mut cached_video = video.clone();
+    cached_video.id = format!("{key}::{}", video.id);
+    cached_video
+}
+
+/// Restore the media ID only for a record belonging to the requested extraction key.
+fn restore_persistent_cache_record(key: &str, mut video: Video) -> Option<Video> {
+    let media_id = video.id.strip_prefix(key)?.strip_prefix("::")?;
+    video.id = media_id.to_owned();
+    Some(video)
+}
+
+fn prune_authenticated_previews(previews: &mut HashMap<String, (Instant, Video)>, now: Instant) {
+    previews.retain(|_, (stored_at, _)| {
+        now.saturating_duration_since(*stored_at) < AUTHENTICATED_PREVIEW_TTL
+    });
+}
+
 fn lookup_authenticated_preview(key: &str) -> Option<Video> {
-    let previews = AUTHENTICATED_PREVIEWS.lock().ok()?;
-    let (stored_at, video) = previews.get(key)?;
-    if stored_at.elapsed() >= AUTHENTICATED_PREVIEW_TTL {
-        return None;
-    }
+    let mut previews = AUTHENTICATED_PREVIEWS.lock().ok()?;
+    prune_authenticated_previews(&mut previews, Instant::now());
+    let (_, video) = previews.get(key)?;
     if is_cacheable_video(video) && video.are_format_urls_fresh() {
         Some(video.clone())
     } else {
@@ -106,6 +131,7 @@ fn store_authenticated_preview(key: &str, video: &Video) {
     let Ok(mut previews) = AUTHENTICATED_PREVIEWS.lock() else {
         return;
     };
+    prune_authenticated_previews(&mut previews, Instant::now());
     if previews.len() >= AUTHENTICATED_PREVIEW_CAPACITY && !previews.contains_key(key) {
         previews.clear();
     }
@@ -534,11 +560,15 @@ pub(crate) fn has_rotating_auth_query(url: &url::Url) -> bool {
 #[cfg(test)]
 mod tests {
     use super::{
-        AUTHENTICATED_VIDEO_NAMESPACE, cache_key, has_rotating_auth_query, lookup_video,
-        playlist_cache_key, store_video, validate_cache_file_path,
+        AUTHENTICATED_PREVIEW_TTL, AUTHENTICATED_VIDEO_NAMESPACE, cache_key,
+        has_rotating_auth_query, lookup_video, persistent_cache_record, playlist_cache_key,
+        prune_authenticated_previews, restore_persistent_cache_record, store_video,
+        validate_cache_file_path,
     };
     use crate::net_types::ResolvedProxy;
+    use std::collections::HashMap;
     use std::path::Path;
+    use std::time::{Duration, Instant};
 
     fn fake_binary(directory: &Path) -> std::path::PathBuf {
         let binary = directory.join("yt-dlp");
@@ -832,6 +862,82 @@ mod tests {
             }],
         }))
         .expect("test video must parse")
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn persistent_cache_keeps_extraction_keys_with_the_same_media_id_separate() {
+        let directory = tempfile::tempdir().expect("temporary cache directory");
+        let config = yt_dlp::cache::CacheConfig::builder()
+            .cache_dir(directory.path().to_path_buf())
+            .build();
+        let first_key = "grab-ytdlp-video-v1:first-extraction";
+        let second_key = "grab-ytdlp-video-v1:second-extraction";
+
+        let mut first_video = fetchable_video();
+        first_video.title = "First extraction".to_string();
+        let mut second_video = first_video.clone();
+        second_video.title = "Second extraction".to_string();
+
+        let cache = yt_dlp::cache::VideoCache::new(&config, Some(60))
+            .await
+            .expect("create persistent cache");
+        cache
+            .put(
+                first_key.to_string(),
+                persistent_cache_record(first_key, &first_video),
+            )
+            .await
+            .expect("store first extraction");
+        cache
+            .put(
+                second_key.to_string(),
+                persistent_cache_record(second_key, &second_video),
+            )
+            .await
+            .expect("store second extraction");
+        drop(cache);
+
+        // Reopening discards the in-memory L1 cache and exercises Redb directly.
+        let cache = yt_dlp::cache::VideoCache::new(&config, Some(60))
+            .await
+            .expect("reopen persistent cache");
+        let first_cached = cache
+            .get(first_key)
+            .await
+            .expect("read first extraction")
+            .expect("first extraction remains cached");
+        let second_cached = cache
+            .get(second_key)
+            .await
+            .expect("read second extraction")
+            .expect("second extraction remains cached");
+
+        let first = restore_persistent_cache_record(first_key, first_cached)
+            .expect("first record belongs to its extraction key");
+        let second = restore_persistent_cache_record(second_key, second_cached)
+            .expect("second record belongs to its extraction key");
+
+        assert_eq!(first.id, "x");
+        assert_eq!(second.id, "x");
+        assert_eq!(first.title, "First extraction");
+        assert_eq!(second.title, "Second extraction");
+    }
+
+    #[test]
+    fn authenticated_preview_pruning_removes_expired_entries_and_keeps_fresh_ones() {
+        let now = Instant::now();
+        let expired_at = now
+            .checked_sub(AUTHENTICATED_PREVIEW_TTL + Duration::from_secs(1))
+            .expect("test instant is within the supported range");
+        let mut previews = HashMap::from([
+            ("expired".to_string(), (expired_at, fetchable_video())),
+            ("fresh".to_string(), (now, fetchable_video())),
+        ]);
+
+        prune_authenticated_previews(&mut previews, now);
+
+        assert!(!previews.contains_key("expired"));
+        assert!(previews.contains_key("fresh"));
     }
 
     #[tokio::test(flavor = "current_thread")]

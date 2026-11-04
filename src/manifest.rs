@@ -17,6 +17,9 @@ pub(crate) const MAX_MANIFEST_BYTES: usize = 4 * 1024 * 1024;
 #[path = "manifest_dash.rs"]
 pub(crate) mod dash;
 
+#[path = "manifest_dash_roles.rs"]
+mod dash_roles;
+
 /// Errors that make a manifest unsuitable for Grab's native download path.
 #[derive(Debug, Error, PartialEq, Eq)]
 pub(crate) enum ManifestError {

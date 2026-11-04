@@ -15,6 +15,12 @@ const MAX_ELEMENT_DEPTH: usize = 32;
 /// Role scheme used to identify the main audio or subtitle representation.
 pub(super) const DASH_ROLE_SCHEME: &str = "urn:mpeg:dash:role:2011";
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(super) struct RepresentationRoleMetadata {
+    pub(super) id: Option<String>,
+    pub(super) is_main: bool,
+}
+
 #[derive(Clone, Copy)]
 enum Element {
     Mpd,
@@ -24,18 +30,18 @@ enum Element {
     Other,
 }
 
-/// Return representation-level Role=main flags in MPD source order.
+/// Return representation IDs and Role=main flags in MPD source order.
 ///
-/// The caller accepts only single-period presentations, so the result is
-/// aligned with that Period's AdaptationSets and Representations.
-pub(super) fn representation_main_roles(
+/// IDs allow the caller to verify that this pass and the typed MPD parser
+/// identify the same representation at each source-order position.
+pub(super) fn representation_metadata(
     body: &[u8],
     max_representations: usize,
-) -> Option<Vec<Vec<bool>>> {
+) -> Option<Vec<Vec<RepresentationRoleMetadata>>> {
     let mut reader = NsReader::from_reader(body);
     let mut buffer = Vec::new();
     let mut stack = Vec::new();
-    let mut periods: Vec<Vec<Vec<bool>>> = Vec::new();
+    let mut periods: Vec<Vec<Vec<RepresentationRoleMetadata>>> = Vec::new();
     let mut representation_count = 0_usize;
     let mut adaptation_count = 0_usize;
 
@@ -83,7 +89,7 @@ fn push_element(
     start: &BytesStart<'_>,
     namespace: &ResolveResult<'_>,
     stack: &mut Vec<Element>,
-    periods: &mut Vec<Vec<Vec<bool>>>,
+    periods: &mut Vec<Vec<Vec<RepresentationRoleMetadata>>>,
     max_representations: usize,
     representation_count: &mut usize,
     adaptation_count: &mut usize,
@@ -120,12 +126,15 @@ fn push_element(
             if *representation_count > max_representations {
                 return None;
             }
-            periods.last_mut()?.last_mut()?.push(false);
+            periods.last_mut()?.last_mut()?.push(RepresentationRoleMetadata {
+                id: representation_id(start)?,
+                is_main: false,
+            });
             Element::Representation
         }
         (Some(Element::Representation), "Role", true) => {
             if is_main_role(start)? {
-                *periods.last_mut()?.last_mut()?.last_mut()? = true;
+                periods.last_mut()?.last_mut()?.last_mut()?.is_main = true;
             }
             Element::Other
         }
@@ -133,6 +142,22 @@ fn push_element(
     };
     stack.push(element);
     Some(())
+}
+
+fn representation_id(start: &BytesStart<'_>) -> Option<Option<String>> {
+    let mut id = None;
+    for attribute in start.attributes() {
+        let attribute = attribute.ok()?;
+        if attribute.key.local_name().as_ref() == "id" {
+            id = Some(
+                attribute
+                    .normalized_value(XmlVersion::Implicit1_0)
+                    .ok()?
+                    .into_owned(),
+            );
+        }
+    }
+    Some(id)
 }
 
 fn is_main_role(start: &BytesStart<'_>) -> Option<bool> {
@@ -167,7 +192,7 @@ fn is_main_role(start: &BytesStart<'_>) -> Option<bool> {
 
 #[cfg(test)]
 mod tests {
-    use super::representation_main_roles;
+    use super::representation_metadata;
 
     #[test]
     fn maps_representation_roles_in_source_order() {
@@ -185,10 +210,15 @@ mod tests {
   </Period>
 </MPD>"#;
 
-        assert_eq!(
-            representation_main_roles(body, 3),
-            Some(vec![vec![false, true], vec![false]])
-        );
+        let metadata =
+            representation_metadata(body, 3).expect("valid MPD representation metadata");
+        assert_eq!(metadata.len(), 2);
+        assert_eq!(metadata[0][0].id.as_deref(), Some("first"));
+        assert!(!metadata[0][0].is_main);
+        assert_eq!(metadata[0][1].id.as_deref(), Some("main"));
+        assert!(metadata[0][1].is_main);
+        assert_eq!(metadata[1][0].id.as_deref(), Some("other"));
+        assert!(!metadata[1][0].is_main);
     }
 
     #[test]
@@ -203,7 +233,10 @@ mod tests {
   </mpd:Period>
 </mpd:MPD>"#;
 
-        assert_eq!(representation_main_roles(body, 1), Some(vec![vec![true]]));
+        let metadata =
+            representation_metadata(body, 1).expect("valid MPD representation metadata");
+        assert_eq!(metadata[0][0].id.as_deref(), Some("main"));
+        assert!(metadata[0][0].is_main);
     }
 
     #[test]
@@ -222,18 +255,21 @@ mod tests {
   </Period>
 </MPD>"#;
 
-        assert_eq!(representation_main_roles(body, 1), Some(vec![vec![true]]));
+        let metadata =
+            representation_metadata(body, 1).expect("valid MPD representation metadata");
+        assert_eq!(metadata[0][0].id.as_deref(), Some("main"));
+        assert!(metadata[0][0].is_main);
     }
 
     #[test]
     fn rejects_malformed_or_unbounded_role_documents() {
-        assert_eq!(representation_main_roles(b"<MPD>", 1), None);
+        assert_eq!(representation_metadata(b"<MPD>", 1), None);
 
         let too_many = br#"<MPD xmlns="urn:mpeg:dash:schema:mpd:2011"><Period><AdaptationSet>
   <Representation id="one"/>
   <Representation id="two"/>
 </AdaptationSet></Period></MPD>"#;
-        assert_eq!(representation_main_roles(too_many, 1), None);
+        assert_eq!(representation_metadata(too_many, 1), None);
     }
 
     #[test]
@@ -243,6 +279,6 @@ mod tests {
             r#"<MPD xmlns="urn:mpeg:dash:schema:mpd:2011"><Period><AdaptationSet><Representation>{}</Representation></AdaptationSet></Period></MPD>"#,
             nested_tags
         );
-        assert_eq!(representation_main_roles(nested.as_bytes(), 1), None);
+        assert_eq!(representation_metadata(nested.as_bytes(), 1), None);
     }
 }

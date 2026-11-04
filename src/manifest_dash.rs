@@ -285,17 +285,24 @@ pub(crate) fn parse_dash_manifest_at(
     let [period] = mpd.periods.as_slice() else {
         return Err(DashError::UnsupportedPresentation);
     };
-    let representation_main_roles =
-        dash_roles::representation_main_roles(body.as_bytes(), MAX_REPRESENTATIONS)
+    let representation_metadata =
+        dash_roles::representation_metadata(body.as_bytes(), MAX_REPRESENTATIONS)
             .ok_or(DashError::Parse)?;
     // The typed parser and the metadata pass must describe the same source-order
     // structure; otherwise a foreign or unsupported element could shift role indexes.
-    if representation_main_roles.len() != period.adaptations.len()
+    if representation_metadata.len() != period.adaptations.len()
         || period
             .adaptations
             .iter()
-            .zip(&representation_main_roles)
-            .any(|(adaptation, roles)| adaptation.representations.len() != roles.len())
+            .zip(&representation_metadata)
+            .any(|(adaptation, metadata)| {
+                adaptation.representations.len() != metadata.len()
+                    || adaptation
+                        .representations
+                        .iter()
+                        .zip(metadata)
+                        .any(|(representation, metadata)| representation.id != metadata.id)
+            })
     {
         return Err(DashError::Parse);
     }
@@ -332,7 +339,7 @@ pub(crate) fn parse_dash_manifest_at(
     let mut subtitle_representations = Vec::new();
 
     for (adaptation_index, adaptation) in period.adaptations.iter().enumerate() {
-        let adaptation_main_roles = &representation_main_roles[adaptation_index];
+        let adaptation_metadata = &representation_metadata[adaptation_index];
         if adaptation.href.is_some() || !adaptation.ContentProtection.is_empty() {
             return Err(DashError::UnsupportedPresentation);
         }
@@ -346,9 +353,10 @@ pub(crate) fn parse_dash_manifest_at(
         let adaptation_base = resolve_base_url(period_base.clone(), &adaptation.BaseURL)?;
         for (representation_index, representation) in adaptation.representations.iter().enumerate()
         {
-            let representation_is_main = *adaptation_main_roles
+            let representation_is_main = adaptation_metadata
                 .get(representation_index)
-                .ok_or(DashError::Parse)?;
+                .ok_or(DashError::Parse)?
+                .is_main;
             if representation.href.is_some() || !representation.ContentProtection.is_empty() {
                 return Err(DashError::UnsupportedPresentation);
             }

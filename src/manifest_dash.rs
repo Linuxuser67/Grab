@@ -205,8 +205,9 @@ struct DashListSegment {
 ///
 /// Dynamic support is limited to HTTPS SegmentTemplate presentations with a
 /// finite MPD update interval and complete segments. Multiple periods, DRM,
-/// XLink, dynamic SegmentList, LL-DASH, SegmentBase, indexed addressing,
-/// non-zero presentation-time offsets, and WebM remain on yt-dlp fallback.
+/// XLink, adaptation-set Subset/Preselection combinations, dynamic SegmentList,
+/// LL-DASH, SegmentBase, indexed addressing, non-zero presentation-time offsets,
+/// and WebM remain on yt-dlp fallback.
 ///
 /// # Errors
 /// Returns an error when the MPD is malformed, exceeds the input limit, uses
@@ -229,6 +230,11 @@ pub(crate) fn parse_dash_manifest_at(
     }
 
     let manifest_url = parse_manifest_url(manifest_url)?;
+    // OutputProtection describes the rendering device's output link (for example,
+    // an HDCP requirement), not media encryption or segment addressing. Grab
+    // downloads the encoded resources and does not render them, so this descriptor
+    // does not restrict native download planning. ContentProtection remains
+    // explicitly rejected below because it signals protected media.
     let mpd = dash_mpd_core::parse(body).map_err(|_| DashError::Parse)?;
 
     let presentation = match mpd.mpdtype.as_deref() {
@@ -285,6 +291,12 @@ pub(crate) fn parse_dash_manifest_at(
     let [period] = mpd.periods.as_slice() else {
         return Err(DashError::UnsupportedPresentation);
     };
+    // Subset constrains which AdaptationSets may be selected together, while
+    // Preselection declares a coordinated set of media components. Grab's
+    // independent video/audio track selection cannot honor either constraint.
+    if !period.subsets.is_empty() || !period.pre_selections.is_empty() {
+        return Err(DashError::UnsupportedPresentation);
+    }
     let representation_metadata =
         dash_roles::representation_metadata(body.as_bytes(), MAX_REPRESENTATIONS)
             .ok_or(DashError::Parse)?;
@@ -1745,6 +1757,140 @@ mod tests {
     use super::*;
 
     const BASE_URL: &str = "https://cdn.example.test/path/manifest.mpd";
+    #[derive(Clone)]
+    struct SharedLogWriter(std::sync::Arc<std::sync::Mutex<Vec<u8>>>);
+
+    impl std::io::Write for SharedLogWriter {
+        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+            let mut output = self
+                .0
+                .lock()
+                .map_err(|_| std::io::Error::other("DASH test log buffer is poisoned"))?;
+            output.extend_from_slice(bytes);
+            Ok(bytes.len())
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for SharedLogWriter {
+        type Writer = Self;
+
+        fn make_writer(&'a self) -> Self::Writer {
+            self.clone()
+        }
+    }
+
+    fn capture_dash_warnings(
+        parse: impl FnOnce() -> Result<DashManifestPlan, DashError>,
+    ) -> (Result<DashManifestPlan, DashError>, String) {
+        let output = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let subscriber = tracing_subscriber::fmt()
+            .without_time()
+            .with_ansi(false)
+            .with_max_level(tracing::Level::WARN)
+            .with_writer(SharedLogWriter(std::sync::Arc::clone(&output)))
+            .finish();
+
+        let result = tracing::subscriber::with_default(subscriber, parse);
+        let captured = output.lock().expect("DASH diagnostic output lock").clone();
+        (
+            result,
+            String::from_utf8(captured).expect("DASH diagnostic logs are UTF-8"),
+        )
+    }
+
+    #[test]
+    fn supported_static_and_dynamic_fixtures_have_no_ignored_element_warnings() {
+        let (static_result, static_logs) = capture_dash_warnings(|| {
+            parse_dash_manifest(
+                BASE_URL,
+                include_str!("../tests/fixtures/dash/static-segment-template.mpd"),
+            )
+        });
+        assert!(static_result.is_ok(), "static fixture should parse");
+        assert!(
+            !static_logs.contains("Unused XML element"),
+            "supported static fixture unexpectedly logged ignored elements: {static_logs}"
+        );
+
+        let (dynamic_result, dynamic_logs) = capture_dash_warnings(|| {
+            parse_dash_manifest_at(
+                BASE_URL,
+                include_str!("../tests/fixtures/dash/dynamic-segment-template.mpd"),
+                SystemTime::UNIX_EPOCH + Duration::from_secs(120),
+            )
+        });
+        assert!(dynamic_result.is_ok(), "dynamic fixture should parse");
+        assert!(
+            !dynamic_logs.contains("Unused XML element"),
+            "supported dynamic fixture unexpectedly logged ignored elements: {dynamic_logs}"
+        );
+    }
+
+    #[test]
+    fn warns_when_the_typed_dash_model_ignores_output_protection() {
+        let (result, logs) = capture_dash_warnings(|| {
+            parse_dash_manifest(
+                BASE_URL,
+                include_str!("../tests/fixtures/dash/unmodeled-output-protection.mpd"),
+            )
+        });
+
+        assert!(
+            result.is_ok(),
+            "the typed parser should remain tolerant of unknown elements"
+        );
+        assert!(
+            logs.contains("Unused XML element") && logs.contains("OutputProtection"),
+            "expected an ignored OutputProtection diagnostic, got: {logs}"
+        );
+
+        // OutputProtection is an HDCP/output-device constraint, not DRM. Since
+        // Grab downloads the encoded media rather than rendering it, the normal
+        // native planner should still expand the same complete media resources.
+        let manifest = result.expect("unmodeled output protection must not block downloads");
+        let video = manifest
+            .video_representations
+            .first()
+            .expect("video representation");
+        let plan = plan_dash_representation(&manifest, &video.key)
+            .expect("output protection must not block native resource planning");
+        let segment_urls = plan
+            .resources
+            .iter()
+            .filter(|resource| resource.kind == DashResourceKind::Segment)
+            .map(|resource| resource.url.as_str())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            segment_urls,
+            [
+                "https://cdn.example.test/path/seg-1.m4s",
+                "https://cdn.example.test/path/seg-2.m4s"
+            ]
+        );
+    }
+
+    #[test]
+    fn warns_when_the_typed_dash_model_ignores_vendor_extensions() {
+        let (result, logs) = capture_dash_warnings(|| {
+            parse_dash_manifest(
+                BASE_URL,
+                include_str!("../tests/fixtures/dash/vendor-extension.mpd"),
+            )
+        });
+
+        assert!(
+            result.is_ok(),
+            "the typed parser should remain tolerant of vendor extensions"
+        );
+        assert!(
+            logs.contains("Unused XML element") && logs.contains("SegmentPresentation"),
+            "expected an ignored vendor extension diagnostic, got: {logs}"
+        );
+    }
 
     fn mpd_with_trick_mode_property(
         on_adaptation: bool,
@@ -2484,6 +2630,50 @@ mod tests {
                 "unsupported MPD should not enter native path: {body}"
             );
         }
+    }
+
+    #[test]
+    fn rejects_subset_and_preselection_combinations() {
+        let subset = r#"<?xml version="1.0"?>
+<MPD xmlns="urn:mpeg:dash:schema:mpd:2011" type="static" mediaPresentationDuration="PT2S">
+  <Period duration="PT2S">
+    <Subset id="1" contains="1 2"/>
+    <AdaptationSet id="1" contentType="video" mimeType="video/mp4">
+      <SegmentTemplate duration="2" media="video-$Number$.m4s"/>
+      <Representation id="v1"/>
+    </AdaptationSet>
+    <AdaptationSet id="2" contentType="audio" mimeType="audio/mp4">
+      <SegmentTemplate duration="2" media="audio-$Number$.m4s"/>
+      <Representation id="a1"/>
+    </AdaptationSet>
+  </Period>
+</MPD>"#;
+        let preselection = r#"<?xml version="1.0"?>
+<MPD xmlns="urn:mpeg:dash:schema:mpd:2011" type="static" mediaPresentationDuration="PT2S">
+  <Period duration="PT2S">
+    <AdaptationSet id="1" contentType="audio" mimeType="audio/mp4">
+      <SegmentTemplate duration="2" media="audio-$Number$.m4s"/>
+      <Representation id="a1"/>
+    </AdaptationSet>
+    <Preselection id="main" tag="main" preselectionComponents="1"
+                  codecs="ac-4.02.01.03"/>
+  </Period>
+</MPD>"#;
+
+        let parsed_subset = dash_mpd_core::parse(subset).expect("Subset fixture MPD should parse");
+        assert_eq!(parsed_subset.periods[0].subsets.len(), 1);
+        assert_eq!(
+            parse_dash_manifest(BASE_URL, subset).err(),
+            Some(DashError::UnsupportedPresentation)
+        );
+
+        let parsed_preselection =
+            dash_mpd_core::parse(preselection).expect("Preselection fixture MPD should parse");
+        assert_eq!(parsed_preselection.periods[0].pre_selections.len(), 1);
+        assert_eq!(
+            parse_dash_manifest(BASE_URL, preselection).err(),
+            Some(DashError::UnsupportedPresentation)
+        );
     }
 
     #[test]

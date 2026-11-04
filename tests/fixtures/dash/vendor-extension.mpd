@@ -1,0 +1,16 @@
+<?xml version="1.0"?>
+<MPD xmlns="urn:mpeg:dash:schema:mpd:2011"
+     xmlns:vendor="urn:example:vendor:dash"
+     type="static"
+     mediaPresentationDuration="PT10S">
+  <Period duration="PT10S">
+    <AdaptationSet id="video" contentType="video" mimeType="video/mp4">
+      <SegmentTemplate timescale="1" duration="5"
+                       initialization="init.mp4"
+                       media="seg-$Number$.m4s"/>
+      <vendor:SegmentPresentation vendor:profile="example"/>
+      <Representation id="v1" bandwidth="1000000"
+                      width="1280" height="720" codecs="avc1.64001f"/>
+    </AdaptationSet>
+  </Period>
+</MPD>

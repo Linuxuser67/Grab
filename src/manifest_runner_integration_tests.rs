@@ -2181,9 +2181,17 @@ async fn live_hls_snapshot_appends_fetched_mpegts_fragments_to_visible_destinati
         .expect("persist live HLS destination plan");
 
     let make_transport_stream = |seed: u8| {
-        let mut bytes = vec![0_u8; 188 * 3];
-        for offset in [0, 188, 376] {
-            bytes[offset] = 0x47;
+        let mut bytes = vec![0xff; 188 * 3];
+        for (index, packet) in bytes
+            .as_chunks_mut::<{ mpeg_ts::ts::TS_PACKET_SIZE }>()
+            .0
+            .iter_mut()
+            .enumerate()
+        {
+            packet[0] = 0x47;
+            packet[1] = 0;
+            packet[2] = 0;
+            packet[3] = 0x10 | (seed.wrapping_add(index as u8) & 0x0f);
         }
         bytes[4] = seed;
         bytes

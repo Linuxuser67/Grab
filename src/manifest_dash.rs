@@ -1892,7 +1892,6 @@ mod tests {
         );
     }
 
-
     fn mpd_with_trick_mode_property(
         on_adaptation: bool,
         element: &str,

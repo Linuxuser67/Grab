@@ -190,6 +190,26 @@ pub(crate) fn should_hide_to_background(has_transferring: bool, shutting_down: b
     has_transferring && !shutting_down
 }
 
+fn apply_navigation_state(
+    narrow_layout: bool,
+    has_items: bool,
+    queue_visible: bool,
+    header: &adw::HeaderBar,
+    view_switcher: &adw::ViewSwitcher,
+    switcher_bar: &adw::ViewSwitcherBar,
+    search_toggle: &gtk4::ToggleButton,
+) {
+    let show_navigation = has_items && queue_visible;
+    view_switcher.set_visible(show_navigation);
+    switcher_bar.set_reveal(narrow_layout && show_navigation);
+    search_toggle.set_visible(show_navigation);
+    if narrow_layout || !show_navigation {
+        header.set_title_widget(None::<&gtk4::Widget>);
+    } else {
+        header.set_title_widget(Some(view_switcher));
+    }
+}
+
 pub fn build_window(
     app: &adw::Application,
     manager: Rc<DownloadManager>,
@@ -447,16 +467,21 @@ pub fn build_window(
         let header = header.clone();
         let switcher = view_switcher.clone();
         let switcher_bar = switcher_bar.clone();
+        let search_toggle = search_toggle.clone();
         let has_items = Rc::clone(&has_items);
         let queue_visible = Rc::clone(&queue_view_visible);
         breakpoint.connect_apply(move |_| {
             narrow.set(true);
-            // Clearing the title widget makes AdwHeaderBar show the window
-            // title ("Grab"), while the same stack is exposed by the bottom bar.
-            header.set_title_widget(None::<&gtk4::Widget>);
-            let show_navigation = has_items.get() && queue_visible.get();
-            switcher.set_visible(show_navigation);
-            switcher_bar.set_reveal(show_navigation);
+            // The header title is cleared on narrow layouts; navigation moves to the bottom bar.
+            apply_navigation_state(
+                true,
+                has_items.get(),
+                queue_visible.get(),
+                &header,
+                &switcher,
+                &switcher_bar,
+                &search_toggle,
+            );
         });
     }
     {
@@ -464,18 +489,20 @@ pub fn build_window(
         let header = header.clone();
         let switcher = view_switcher.clone();
         let switcher_bar = switcher_bar.clone();
+        let search_toggle = search_toggle.clone();
         let has_items = Rc::clone(&has_items);
         let queue_visible = Rc::clone(&queue_view_visible);
         breakpoint.connect_unapply(move |_| {
             narrow.set(false);
-            switcher_bar.set_reveal(false);
-            let show_navigation = has_items.get() && queue_visible.get();
-            switcher.set_visible(show_navigation);
-            if show_navigation {
-                header.set_title_widget(Some(&switcher));
-            } else {
-                header.set_title_widget(None::<&gtk4::Widget>);
-            }
+            apply_navigation_state(
+                false,
+                has_items.get(),
+                queue_visible.get(),
+                &header,
+                &switcher,
+                &switcher_bar,
+                &search_toggle,
+            );
         });
     }
     window.add_breakpoint(breakpoint);
@@ -642,20 +669,15 @@ pub fn build_window(
             // The header holds the primary action once there are rows; the empty
             // state supplies its own call to action when the queue is empty.
             add.set_visible(has_items);
-            search_btn.set_visible(has_items && queue_visible.get());
-            let show_navigation = has_items && queue_visible.get();
-            view_switcher.set_visible(show_navigation);
-            if narrow.get() {
-                header.set_title_widget(None::<&gtk4::Widget>);
-                switcher_bar.set_reveal(show_navigation);
-            } else {
-                switcher_bar.set_reveal(false);
-                if show_navigation {
-                    header.set_title_widget(Some(&view_switcher));
-                } else {
-                    header.set_title_widget(None::<&gtk4::Widget>);
-                }
-            }
+            apply_navigation_state(
+                narrow.get(),
+                has_items,
+                queue_visible.get(),
+                &header,
+                &view_switcher,
+                &switcher_bar,
+                &search_btn,
+            );
             if !has_items {
                 // List is gone, so nothing to search.
                 search_btn.set_active(false);
@@ -824,6 +846,7 @@ pub fn build_window(
         let switcher_bar = switcher_bar.clone();
         let header = header.clone();
         let narrow = Rc::clone(&narrow_layout);
+        let has_items = Rc::clone(&has_items);
         let search_toggle = search_toggle.clone();
         add_card
             .navigation()
@@ -832,13 +855,16 @@ pub fn build_window(
                     .visible_page_tag()
                     .is_some_and(|tag| tag.as_str() != "form");
                 queue_visible.set(!picker);
+                apply_navigation_state(
+                    narrow.get(),
+                    has_items.get(),
+                    queue_visible.get(),
+                    &header,
+                    &view_switcher,
+                    &switcher_bar,
+                    &search_toggle,
+                );
                 if picker {
-                    view_switcher.set_visible(false);
-                    switcher_bar.set_reveal(false);
-                    if !narrow.get() {
-                        header.set_title_widget(None::<&gtk4::Widget>);
-                    }
-                    search_toggle.set_visible(false);
                     search_toggle.set_active(false);
                 }
                 content_stack.set_visible(!picker);

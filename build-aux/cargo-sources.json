@@ -3083,6 +3083,19 @@
     {
         "type": "archive",
         "archive-type": "tar-gzip",
+        "url": "https://static.crates.io/crates/mp4box/mp4box-0.14.0.crate",
+        "sha256": "7ae7aaf77bec45241eb7d6b94913d42542e5d9718a9551b3e2c3f98893913d5a",
+        "dest": "cargo/mp4box-0.14.0"
+    },
+    {
+        "type": "inline",
+        "contents": "{\"package\": \"7ae7aaf77bec45241eb7d6b94913d42542e5d9718a9551b3e2c3f98893913d5a\", \"files\": {}}",
+        "dest": "cargo/mp4box-0.14.0",
+        "dest-filename": ".cargo-checksum.json"
+    },
+    {
+        "type": "archive",
+        "archive-type": "tar-gzip",
         "url": "https://static.crates.io/crates/mpeg-ts/mpeg-ts-0.6.2.crate",
         "sha256": "58e29fe9663eaab1366e35fee07415500dca8fde1ba58df7cfa5a363920f0b97",
         "dest": "cargo/mpeg-ts-0.6.2"

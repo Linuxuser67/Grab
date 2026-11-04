@@ -24,6 +24,7 @@ use crate::manifest_intake::ManifestLookup;
 #[cfg(test)]
 use crate::manifest_intake::NativeManifest;
 use crate::media_types::{ManifestKind, ManifestRepresentationKey, ManifestSource};
+use crate::mp4_validation::is_fmp4_resource as validate_fmp4_resource;
 use crate::mpeg_ts_validation::TransportStreamValidator;
 
 mod dash_live;
@@ -2822,57 +2823,58 @@ async fn fetch_and_write_hls_track(
     Ok(true)
 }
 
-struct HlsResourceValidator {
-    format: OrderedTrackFormat,
-    transport_stream: TransportStreamValidator,
-    header: [u8; 8],
-    header_len: usize,
+enum HlsResourceValidator {
+    Any,
+    MpegTs(TransportStreamValidator),
+    Fmp4(tokio::fs::File),
 }
 
 impl HlsResourceValidator {
-    fn new(format: OrderedTrackFormat) -> Self {
-        Self {
-            format,
-            transport_stream: TransportStreamValidator::new(),
-            header: [0; 8],
-            header_len: 0,
+    fn new(format: OrderedTrackFormat, staging: &Path) -> Result<Self, ManifestRunError> {
+        match format {
+            OrderedTrackFormat::Any => Ok(Self::Any),
+            OrderedTrackFormat::MpegTs => Ok(Self::MpegTs(TransportStreamValidator::new())),
+            OrderedTrackFormat::Fmp4 => {
+                let file = tempfile::tempfile_in(staging).map_err(|error| {
+                    ManifestRunError::Failed(format!(
+                        "Could not create private fMP4 validation staging: {error}"
+                    ))
+                })?;
+                Ok(Self::Fmp4(tokio::fs::File::from_std(file)))
+            }
         }
     }
 
-    fn observe(&mut self, chunk: &[u8]) {
-        match self.format {
-            OrderedTrackFormat::MpegTs => self.transport_stream.observe(chunk),
-            OrderedTrackFormat::Fmp4 => {
-                let remaining = self.header.len().saturating_sub(self.header_len);
-                let copied = remaining.min(chunk.len());
-                self.header[self.header_len..self.header_len + copied]
-                    .copy_from_slice(&chunk[..copied]);
-                self.header_len += copied;
+    async fn observe(&mut self, chunk: &[u8]) -> Result<(), ManifestRunError> {
+        match self {
+            Self::Any => Ok(()),
+            Self::MpegTs(validator) => {
+                validator.observe(chunk);
+                Ok(())
             }
-            OrderedTrackFormat::Any => {}
+            Self::Fmp4(file) => file.write_all(chunk).await.map_err(|error| {
+                manifest_storage_error("Could not stage an HLS fMP4 resource for validation", error)
+            }),
         }
     }
 
-    fn is_valid(&self, size: u64) -> bool {
-        match self.format {
-            OrderedTrackFormat::MpegTs => self.transport_stream.is_valid_complete(size),
-            OrderedTrackFormat::Fmp4 => {
-                if self.header_len < self.header.len() {
-                    return false;
-                }
-                let box_size = u32::from_be_bytes([
-                    self.header[0],
-                    self.header[1],
-                    self.header[2],
-                    self.header[3],
-                ]);
-                let plausible_size = box_size == 1 || box_size >= 8;
-                let plausible_type = self.header[4..8]
-                    .iter()
-                    .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit());
-                plausible_size && plausible_type
+    async fn validate(self, size: u64) -> Result<bool, ManifestRunError> {
+        match self {
+            Self::Any => Ok(true),
+            Self::MpegTs(validator) => Ok(validator.is_valid_complete(size)),
+            Self::Fmp4(mut file) => {
+                file.flush().await.map_err(|error| {
+                    manifest_storage_error("Could not flush an HLS fMP4 validation resource", error)
+                })?;
+                let mut file = file.into_std().await;
+                tokio::task::spawn_blocking(move || validate_fmp4_resource(&mut file, 0, size))
+                    .await
+                    .map_err(|error| {
+                        ManifestRunError::Failed(format!(
+                            "Could not validate an HLS fMP4 resource: {error}"
+                        ))
+                    })
             }
-            OrderedTrackFormat::Any => true,
         }
     }
 }
@@ -2932,7 +2934,12 @@ async fn fetch_hls_resource_to_writer(
 
         let mut stream = response.bytes_stream();
         let mut size = 0_u64;
-        let mut validator = HlsResourceValidator::new(format);
+        let staging = writer.staging_directory().ok_or_else(|| {
+            ManifestRunError::Failed(
+                "The HLS destination writer has no private staging directory".to_string(),
+            )
+        })?;
+        let mut validator = HlsResourceValidator::new(format, staging)?;
         let pace_start = Instant::now();
         let mut paced = 0_u64;
         let mut last_progress = Instant::now();
@@ -2964,7 +2971,7 @@ async fn fetch_hls_resource_to_writer(
                 .ok_or_else(|| {
                     ManifestRunError::Failed("An HLS fragment exceeds the 1 GiB limit".to_string())
                 })?;
-            validator.observe(&chunk);
+            validator.observe(&chunk).await?;
             writer
                 .write_streamed_chunk(&chunk)
                 .await
@@ -2990,7 +2997,7 @@ async fn fetch_hls_resource_to_writer(
                 "The stream server returned an empty HLS fragment".to_string(),
             ));
         }
-        if !validator.is_valid(size) {
+        if !validator.validate(size).await? {
             let message = match format {
                 OrderedTrackFormat::Fmp4 => {
                     "The HLS media resource is not a compatible fMP4 fragment"
@@ -3295,24 +3302,28 @@ async fn is_mpegts_segment(path: &Path) -> Result<bool, ManifestRunError> {
     Ok(validator.is_valid_prefix())
 }
 
-/// Whether a fetched fMP4 resource starts with a plausible ISO BMFF box header.
-///
-/// A CDN or proxy error page served with a 200 status would otherwise be
-/// committed to a destination-visible part that resume can never repair.
+/// Whether a fetched resource is a structurally complete ISO BMFF init segment
+/// or fragmented media segment.
 async fn is_fmp4_resource(path: &Path) -> Result<bool, ManifestRunError> {
-    let mut file = tokio::fs::File::open(path)
-        .await
-        .map_err(|error| manifest_storage_error("Could not open an HLS media fragment", error))?;
-    let mut header = [0_u8; 8];
-    if file.read_exact(&mut header).await.is_err() {
-        return Ok(false);
-    }
-    let size = u32::from_be_bytes([header[0], header[1], header[2], header[3]]);
-    let plausible_size = size == 1 || size >= 8;
-    let plausible_type = header[4..8]
-        .iter()
-        .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit());
-    Ok(plausible_size && plausible_type)
+    let path = path.to_path_buf();
+    tokio::task::spawn_blocking(move || {
+        let mut file = std::fs::File::open(&path).map_err(|error| {
+            format!(
+                "Could not open an HLS media fragment at {}: {error}",
+                path.display()
+            )
+        })?;
+        let size = file
+            .metadata()
+            .map_err(|error| format!("Could not inspect an HLS media fragment: {error}"))?
+            .len();
+        Ok(validate_fmp4_resource(&mut file, 0, size))
+    })
+    .await
+    .map_err(|error| {
+        ManifestRunError::Failed(format!("Could not validate an HLS fMP4 resource: {error}"))
+    })?
+    .map_err(ManifestRunError::Failed)
 }
 
 async fn remove_regular_file_if_present(path: &Path) -> Result<(), String> {
@@ -3533,12 +3544,40 @@ mod tests {
         );
     }
 
+    fn fmp4_box(kind: &[u8; 4], payload: &[u8]) -> Vec<u8> {
+        let size = u32::try_from(8 + payload.len()).expect("test box fits in a u32");
+        let mut bytes = Vec::with_capacity(size as usize);
+        bytes.extend_from_slice(&size.to_be_bytes());
+        bytes.extend_from_slice(kind);
+        bytes.extend_from_slice(payload);
+        bytes
+    }
+
+    fn valid_fmp4_init_segment() -> Vec<u8> {
+        let mut ftyp_payload = Vec::from(*b"isom");
+        ftyp_payload.extend_from_slice(&0_u32.to_be_bytes());
+        ftyp_payload.extend_from_slice(b"isom");
+        let ftyp = fmp4_box(b"ftyp", &ftyp_payload);
+        let moov = fmp4_box(b"moov", &[]);
+        [ftyp, moov].concat()
+    }
+
+    fn valid_fmp4_media_segment(sequence_number: u32, media_data: &[u8]) -> Vec<u8> {
+        let mut mfhd_payload = vec![0, 0, 0, 0];
+        mfhd_payload.extend_from_slice(&sequence_number.to_be_bytes());
+        let mfhd = fmp4_box(b"mfhd", &mfhd_payload);
+        let moof = fmp4_box(b"moof", &mfhd);
+        let mdat = fmp4_box(b"mdat", media_data);
+        [moof, mdat].concat()
+    }
+
     #[tokio::test]
-    async fn fmp4_fragment_validation_requires_box_headers() {
+    async fn fmp4_fragment_validation_checks_complete_box_structure() {
         let directory = tempfile::tempdir().expect("create fragment test directory");
         let path = directory.path().join("segment.bin");
+        let bytes = valid_fmp4_media_segment(1, &[0x12, 0x34]);
 
-        tokio::fs::write(&path, b"\x00\x00\x00\x0cmoof\x00\x00\x00\x01")
+        tokio::fs::write(&path, &bytes)
             .await
             .expect("write fMP4 fragment");
         assert!(
@@ -3547,13 +3586,15 @@ mod tests {
                 .expect("inspect fMP4 fragment")
         );
 
-        tokio::fs::write(&path, b"moof")
+        let mut malformed = bytes;
+        malformed[8..12].copy_from_slice(&u32::MAX.to_be_bytes());
+        tokio::fs::write(&path, malformed)
             .await
-            .expect("write truncated fMP4 fragment");
+            .expect("write malformed fMP4 fragment");
         assert!(
             !is_fmp4_resource(&path)
                 .await
-                .expect("inspect truncated fMP4 fragment")
+                .expect("inspect malformed fMP4 fragment")
         );
 
         tokio::fs::write(&path, b"<!DOCTYPE html>")
@@ -3563,6 +3604,40 @@ mod tests {
             !is_fmp4_resource(&path)
                 .await
                 .expect("inspect HTML error page")
+        );
+    }
+
+    #[tokio::test]
+    async fn streamed_fmp4_validation_spools_without_buffering_the_resource() {
+        let staging = tempfile::tempdir().expect("create fMP4 validation staging");
+        let bytes = valid_fmp4_media_segment(1, &[0x12, 0x34]);
+        let mut validator = HlsResourceValidator::new(OrderedTrackFormat::Fmp4, staging.path())
+            .expect("create fMP4 resource validator");
+
+        for chunk in bytes.chunks(5) {
+            validator
+                .observe(chunk)
+                .await
+                .expect("stage fMP4 resource chunk");
+        }
+        assert!(
+            validator
+                .validate(bytes.len() as u64)
+                .await
+                .expect("validate staged fMP4 resource")
+        );
+
+        let mut invalid = HlsResourceValidator::new(OrderedTrackFormat::Fmp4, staging.path())
+            .expect("create second fMP4 resource validator");
+        invalid
+            .observe(b"<!DOCTYPE html>")
+            .await
+            .expect("stage invalid fMP4 response");
+        assert!(
+            !invalid
+                .validate(15)
+                .await
+                .expect("reject invalid fMP4 response")
         );
     }
 
@@ -3693,9 +3768,9 @@ segment-2.ts
             .await
             .expect("bind fMP4 fragment server");
         let address = listener.local_addr().expect("fMP4 server address");
-        let init = b"\x00\x00\x00\x10ftyp\x00\x00\x00\x00\x00\x00\x00\x00".to_vec();
-        let first = b"\x00\x00\x00\x0cmoof\x00\x00\x00\x01".to_vec();
-        let second = b"\x00\x00\x00\x0cmdat\x00\x00\x00\x02".to_vec();
+        let init = valid_fmp4_init_segment();
+        let first = valid_fmp4_media_segment(1, &[0x12, 0x34]);
+        let second = valid_fmp4_media_segment(2, &[0x56, 0x78]);
         let init_response = init.clone();
         let first_response = first.clone();
         let second_response = second.clone();

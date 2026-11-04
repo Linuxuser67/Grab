@@ -199,11 +199,12 @@ async fn gallery_integration_probe_count_download() {
 
     // 4. Second run reports all as skipped.
     let resumed_progress = std::cell::Cell::new(0u32);
-    let result2 = match crate::gallery_runner::run_gallery_download(&job, &tool, None, None, |update| {
-        resumed_progress.set(update.files_done)
-    })
-    .await
-    {
+    let result2 =
+        match crate::gallery_runner::run_gallery_download(&job, &tool, None, None, |update| {
+            resumed_progress.set(update.files_done)
+        })
+        .await
+        {
             Ok(r) => r,
             Err(e) if is_gallery_dl_internal_bug(&e) => {
                 if std::env::var("GRAB_REQUIRE_GALLERY_DL").as_deref() == Ok("1") {

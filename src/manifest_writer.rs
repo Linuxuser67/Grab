@@ -505,8 +505,6 @@ impl OrderedTrackWriter {
                 if let Some(parent) = part.parent() {
                     sync_directory(parent).await?;
                 }
-                remove_regular_file_if_present(&target).await?;
-                sync_directory(directory).await?;
                 Ok::<(), String>(())
             }
             .await;
@@ -515,6 +513,11 @@ impl OrderedTrackWriter {
                 cleanup_failed_destination_migration(output, destination_part.as_ref()).await;
                 return Err(error);
             }
+
+            // Once the destination copy is durable, source cleanup failures must
+            // preserve that copy for recovery rather than deleting the only good data.
+            remove_regular_file_if_present(&target).await?;
+            sync_directory(directory).await?;
         } else {
             output.set_len(committed_offset).await.map_err(|error| {
                 format!("Could not restore the manifest track checkpoint: {error}")

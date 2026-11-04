@@ -765,7 +765,7 @@ impl Drop for ClaimedDestination<'_> {
 ///
 /// The temporary already contains a fully synced copy on the destination filesystem;
 /// no second copy is needed.
-fn publish_by_exclusive_copy<F>(
+fn publish_by_claimed_rename<F>(
     temporary: tempfile::NamedTempFile,
     destination: &std::path::Path,
     should_continue: F,
@@ -807,7 +807,7 @@ where
             }
         }
         Err(error) if link_unsupported(&error.error) || noreplace_unsupported(&error.error) => {
-            publish_by_exclusive_copy(error.file, destination, should_continue)
+            publish_by_claimed_rename(error.file, destination, should_continue)
         }
         Err(error) => Err(error.error),
     }
@@ -1197,14 +1197,14 @@ mod tests {
     }
 
     #[test]
-    fn exclusive_copy_fallback_never_clobbers_an_existing_destination() {
+    fn claimed_rename_fallback_never_clobbers_an_existing_destination() {
         let dir = tempfile::tempdir().unwrap();
         let destination = dir.path().join("existing");
         let temporary = publish_temp_for(&destination).unwrap();
         std::fs::write(temporary.path(), b"new payload").unwrap();
         std::fs::write(&destination, b"user data").unwrap();
 
-        let error = publish_by_exclusive_copy(temporary, &destination, || true)
+        let error = publish_by_claimed_rename(temporary, &destination, || true)
             .expect_err("create_new must reject an existing destination");
 
         assert_eq!(error.kind(), std::io::ErrorKind::AlreadyExists);
@@ -1212,13 +1212,13 @@ mod tests {
     }
 
     #[test]
-    fn exclusive_copy_fallback_removes_its_claim_on_cancellation() {
+    fn claimed_rename_fallback_removes_its_claim_on_cancellation() {
         let dir = tempfile::tempdir().unwrap();
         let destination = dir.path().join("cancelled");
         let temporary = publish_temp_for(&destination).unwrap();
         std::fs::write(temporary.path(), vec![0x5a; 1024 * 1024]).unwrap();
         let mut checks = 0;
-        let result = publish_by_exclusive_copy(temporary, &destination, || {
+        let result = publish_by_claimed_rename(temporary, &destination, || {
             checks += 1;
             checks < 3
         });
@@ -1229,7 +1229,7 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn exclusive_copy_fallback_keeps_partial_output_private() {
+    fn claimed_rename_fallback_keeps_partial_output_private() {
         use std::os::unix::fs::PermissionsExt as _;
 
         let dir = tempfile::tempdir().unwrap();
@@ -1242,7 +1242,7 @@ mod tests {
             .unwrap();
         let mut checks = 0;
 
-        publish_by_exclusive_copy(temporary, &destination, || {
+        publish_by_claimed_rename(temporary, &destination, || {
             checks += 1;
             if checks == 2 {
                 let metadata = std::fs::metadata(&destination).unwrap();
@@ -1270,7 +1270,7 @@ mod tests {
     }
 
     #[test]
-    fn exclusive_copy_fallback_publishes_complete_bytes() {
+    fn claimed_rename_fallback_publishes_complete_bytes() {
         use std::io::Write as _;
 
         let dir = tempfile::tempdir().unwrap();
@@ -1281,7 +1281,7 @@ mod tests {
             .write_all(b"complete payload")
             .unwrap();
 
-        publish_by_exclusive_copy(temporary, &destination, || true).unwrap();
+        publish_by_claimed_rename(temporary, &destination, || true).unwrap();
 
         assert_eq!(std::fs::read(&destination).unwrap(), b"complete payload");
     }

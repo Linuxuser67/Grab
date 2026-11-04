@@ -148,7 +148,7 @@ fn representation_id(start: &BytesStart<'_>) -> Option<Option<String>> {
     let mut id = None;
     for attribute in start.attributes() {
         let attribute = attribute.ok()?;
-        if attribute.key.local_name().as_ref() == "id" {
+        if attribute.key.as_ref() == "id" {
             id = Some(
                 attribute
                     .normalized_value(XmlVersion::Implicit1_0)
@@ -166,7 +166,7 @@ fn is_main_role(start: &BytesStart<'_>) -> Option<bool> {
 
     for attribute in start.attributes() {
         let attribute = attribute.ok()?;
-        match attribute.key.local_name().as_ref() {
+        match attribute.key.as_ref() {
             "schemeIdUri" => {
                 scheme = Some(
                     attribute
@@ -259,6 +259,24 @@ mod tests {
             representation_metadata(body, 1).expect("valid MPD representation metadata");
         assert_eq!(metadata[0][0].id.as_deref(), Some("main"));
         assert!(metadata[0][0].is_main);
+    }
+
+    #[test]
+    fn ignores_namespaced_role_attributes() {
+        let body = br#"<MPD xmlns="urn:mpeg:dash:schema:mpd:2011" xmlns:foreign="urn:example:foreign">
+  <Period>
+    <AdaptationSet>
+      <Representation id="main">
+        <Role foreign:schemeIdUri="urn:mpeg:dash:role:2011" foreign:value="main"/>
+      </Representation>
+    </AdaptationSet>
+  </Period>
+</MPD>"#;
+
+        let metadata = representation_metadata(body, 1)
+            .expect("foreign attributes do not invalidate the MPD");
+        assert_eq!(metadata[0][0].id.as_deref(), Some("main"));
+        assert!(!metadata[0][0].is_main);
     }
 
     #[test]

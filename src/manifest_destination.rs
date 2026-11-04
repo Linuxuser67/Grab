@@ -937,7 +937,12 @@ mod tests {
 
         let file = open_owned_part(staging.path(), &destination, 46, TrackKind::Video)
             .expect("create owned video part");
-        let mode = file.metadata().expect("inspect part permissions").permissions().mode() & 0o777;
+        let mode = file
+            .metadata()
+            .expect("inspect part permissions")
+            .permissions()
+            .mode()
+            & 0o777;
 
         assert_eq!(mode, 0o600, "destination part must be private at creation");
     }

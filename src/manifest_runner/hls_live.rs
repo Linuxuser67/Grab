@@ -1086,9 +1086,12 @@ mod destination_part_tests {
     const BASE_URL: &str = "https://cdn.example.test/live.m3u8";
 
     fn transport_stream(seed: u8) -> Vec<u8> {
-        let mut bytes = vec![0_u8; 188 * 3];
-        for offset in [0, 188, 376] {
-            bytes[offset] = 0x47;
+        let mut bytes = vec![0xff; 188 * 3];
+        for (index, packet) in bytes.chunks_exact_mut(188).enumerate() {
+            packet[0] = 0x47;
+            packet[1] = 0;
+            packet[2] = 0;
+            packet[3] = 0x10 | (seed.wrapping_add(index as u8) & 0x0f);
         }
         bytes[4] = seed;
         bytes

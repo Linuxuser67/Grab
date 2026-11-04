@@ -20,6 +20,8 @@ gio = "0.22"
 url = "2"
 # HLS playlist parsing and local media-playlist serialization.
 m3u8-rs = "6.0.1"
+# Parse and validate MPEG-2 transport packets in native HLS segments.
+mpeg-ts = { version = "=0.6.2", default-features = false, features = ["std"] }
 # Parse HLS diagnostics without exposing playlist contents. m3u8-rs exposes nom 7 parser errors.
 nom = "7"
 # DASH MPD parsing and serialization for native VOD downloads; pin the untrusted-input parser release.

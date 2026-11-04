@@ -30,6 +30,7 @@ mod manifest_runner;
 mod manifest_types;
 mod manifest_writer;
 mod media_types;
+mod mpeg_ts_validation;
 mod net_types;
 mod preferences;
 mod runtime;

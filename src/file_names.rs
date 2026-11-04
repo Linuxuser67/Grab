@@ -524,15 +524,62 @@ fn link_unsupported(e: &std::io::Error) -> bool {
 }
 
 /// Claim `new` atomically with `create_new`, then rename `old` over the
-/// placeholder. Cleans up the placeholder if the rename fails.
+/// private placeholder. A guard removes only the placeholder inode on failure.
 fn claim_and_rename(old: &std::path::Path, new: &std::path::Path) -> std::io::Result<()> {
-    std::fs::OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .open(new)?;
-    std::fs::rename(old, new).inspect_err(|_| {
-        let _ = std::fs::remove_file(new);
-    })
+    claim_and_rename_while(old, new, || true)
+}
+
+fn claim_and_rename_while<F>(
+    old: &std::path::Path,
+    new: &std::path::Path,
+    mut should_continue: F,
+) -> std::io::Result<()>
+where
+    F: FnMut() -> bool,
+{
+    if !should_continue() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::Interrupted,
+            "publication was cancelled",
+        ));
+    }
+
+    let mut options = std::fs::OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt as _;
+        options.mode(0o600);
+    }
+    let file = options.open(new)?;
+    let mut claim = ClaimedDestination {
+        path: new,
+        file,
+        armed: true,
+    };
+
+    if !should_continue() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::Interrupted,
+            "publication was cancelled",
+        ));
+    }
+    if !claim_still_owns_path(&claim)? {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::AlreadyExists,
+            "the exclusive destination claim was replaced",
+        ));
+    }
+    if !should_continue() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::Interrupted,
+            "publication was cancelled",
+        ));
+    }
+
+    std::fs::rename(old, new)?;
+    claim.armed = false;
+    Ok(())
 }
 
 /// Rename without clobbering, copying only when the filesystems differ.
@@ -714,85 +761,20 @@ impl Drop for ClaimedDestination<'_> {
     }
 }
 
-/// Exclusive-create fallback for filesystems without hard links or no-replace rename.
+/// Publish the complete destination-side temporary via the shared atomic claim helper.
 ///
-/// The final name is held as a private, empty claim until a completed temporary
-/// is atomically renamed over it. A crash before rename leaves no truncated file.
+/// The temporary already contains a fully synced copy on the destination filesystem;
+/// no second copy is needed.
 fn publish_by_exclusive_copy<F>(
     temporary: tempfile::NamedTempFile,
     destination: &std::path::Path,
-    mut should_continue: F,
+    should_continue: F,
 ) -> std::io::Result<()>
 where
     F: FnMut() -> bool,
 {
-    if !should_continue() {
-        return Err(std::io::Error::new(
-            std::io::ErrorKind::Interrupted,
-            "publication was cancelled",
-        ));
-    }
-
-    let mut options = std::fs::OpenOptions::new();
-    options.write(true).create_new(true);
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::OpenOptionsExt as _;
-        options.mode(0o600);
-    }
-    let file = options.open(destination)?;
-    let mut claim = ClaimedDestination {
-        path: destination,
-        file,
-        armed: true,
-    };
-
-    if !should_continue() {
-        return Err(std::io::Error::new(
-            std::io::ErrorKind::Interrupted,
-            "publication was cancelled",
-        ));
-    }
-
     temporary.as_file().sync_all()?;
-    if !claim_still_owns_path(&claim)? {
-        return Err(std::io::Error::new(
-            std::io::ErrorKind::AlreadyExists,
-            "the exclusive publication claim was replaced",
-        ));
-    }
-    if !should_continue() {
-        return Err(std::io::Error::new(
-            std::io::ErrorKind::Interrupted,
-            "publication was cancelled",
-        ));
-    }
-
-    // Same-directory rename atomically replaces our empty placeholder.
-    std::fs::rename(temporary.path(), destination)?;
-    claim.armed = false;
-    Ok(())
-}
-
-fn claim_still_owns_path(claim: &ClaimedDestination<'_>) -> std::io::Result<bool> {
-    let path_metadata = std::fs::symlink_metadata(claim.path)?;
-    let file_metadata = claim.file.metadata()?;
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::MetadataExt as _;
-        Ok(path_metadata.file_type().is_file()
-            && path_metadata.dev() == file_metadata.dev()
-            && path_metadata.ino() == file_metadata.ino())
-    }
-    #[cfg(not(unix))]
-    {
-        // The application targets Unix desktops. On other targets, conservatively
-        // accept only a still-empty regular file at the claimed path.
-        Ok(path_metadata.file_type().is_file()
-            && file_metadata.is_file()
-            && path_metadata.len() == 0
-            && file_metadata.len() == 0)
-    }
+    claim_and_rename_while(temporary.path(), destination, should_continue)
 }
 
 /// Persist a temporary without clobbering, using an exclusive-copy fallback when

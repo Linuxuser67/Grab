@@ -135,23 +135,23 @@ fn is_cacheable_static_manifest(lookup: &ManifestLookup) -> bool {
             !plan
                 .variants
                 .iter()
-                .any(|variant| has_rotating_auth_query(&variant.url))
+                .any(|variant| crate::video_cache::has_rotating_auth_query(&variant.url))
                 && !plan
                     .audio_renditions
                     .iter()
                     .filter_map(|rendition| rendition.url.as_ref())
-                    .any(has_rotating_auth_query)
+                    .any(crate::video_cache::has_rotating_auth_query)
                 && !plan
                     .subtitle_renditions
                     .iter()
-                    .any(|rendition| has_rotating_auth_query(&rendition.url))
+                    .any(|rendition| crate::video_cache::has_rotating_auth_query(&rendition.url))
         }
         crate::manifest_types::NativeManifest::HlsMedia(plan) => {
             !plan.is_live
                 && !plan
                     .resources
                     .iter()
-                    .any(|resource| has_rotating_auth_query(&resource.url))
+                    .any(|resource| crate::video_cache::has_rotating_auth_query(&resource.url))
         }
         crate::manifest_types::NativeManifest::Dash(plan) => {
             matches!(

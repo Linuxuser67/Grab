@@ -827,12 +827,7 @@ impl OrderedTrackWriter {
     }
 }
 
-/// Remove the owned destination part and its XDG recovery metadata after
-/// the final container has been published successfully.
-///
-/// # Errors
-///
-/// Returns an error if the part is no longer owned by this item or metadata cleanup fails.
+/// Roll back an owned destination part when a legacy staging migration fails.
 async fn cleanup_failed_destination_migration(
     output: tokio::fs::File,
     destination_part: Option<&DestinationPart>,

@@ -2624,7 +2624,7 @@ fn progress_message(downloaded: u64) -> EngineMsg {
 }
 
 fn safe_resource_filename(filename: &str) -> bool {
-    crate::file_names::is_single_component(filename)
+    crate::file_names::is_single_component(filename) && !filename.contains('\\')
 }
 
 fn content_range_matches(header: Option<&str>, range: ManifestByteRange) -> bool {

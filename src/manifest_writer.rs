@@ -1573,7 +1573,7 @@ async fn remove_regular_file_if_present(path: &Path) -> Result<(), String> {
 }
 
 fn safe_filename(filename: &str) -> bool {
-    crate::file_names::is_single_component(filename)
+    crate::file_names::is_single_component(filename) && !filename.contains('\\')
 }
 
 fn plan_fingerprint(resources: &[String]) -> Result<String, String> {

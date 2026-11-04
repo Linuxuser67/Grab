@@ -853,6 +853,7 @@ fn segment_resource_filenames(segment: &m3u8_rs::MediaSegment) -> Vec<&str> {
 
 fn is_safe_staged_resource_name(filename: &str) -> bool {
     crate::file_names::is_single_component(filename)
+        && !filename.contains('\\')
         && (filename.starts_with("segment-")
             || filename.starts_with("init-")
             || filename.starts_with("key-"))

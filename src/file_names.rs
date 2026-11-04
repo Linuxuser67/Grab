@@ -2,14 +2,11 @@
 
 use gio::prelude::FileExt as _;
 
-/// Validate a single untrusted filename component on every supported platform.
-/// Backslashes are rejected even on Unix so staged names have portable semantics.
+/// Validate one filename component using the host platform's path semantics.
 pub(crate) fn is_single_component(name: &str) -> bool {
     !name.is_empty()
         && name != "."
         && name != ".."
-        && !name.contains('/')
-        && !name.contains('\\')
         && !name.chars().any(char::is_control)
         && std::path::Path::new(name)
             .file_name()
@@ -1198,7 +1195,6 @@ mod tests {
             "..",
             "../segment.bin",
             "sub/segment.bin",
-            r"sub\\segment.bin",
             "name\npart.bin",
         ] {
             assert!(
@@ -1206,6 +1202,8 @@ mod tests {
                 "accepted {unsafe_name:?}"
             );
         }
+        #[cfg(unix)]
+        assert!(is_single_component(r"segment\part.bin"));
     }
 
     #[test]

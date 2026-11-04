@@ -24,8 +24,8 @@ use crate::manifest_intake::ManifestLookup;
 #[cfg(test)]
 use crate::manifest_intake::NativeManifest;
 use crate::media_types::{ManifestKind, ManifestRepresentationKey, ManifestSource};
-use crate::mpeg_ts_validation::TransportStreamValidator;
 use crate::mp4_validation::is_fmp4_resource as validate_fmp4_resource;
+use crate::mpeg_ts_validation::TransportStreamValidator;
 
 mod dash_live;
 mod hls_live;
@@ -3603,7 +3603,10 @@ mod tests {
             .expect("create fMP4 resource validator");
 
         for chunk in bytes.chunks(5) {
-            validator.observe(chunk).await.expect("stage fMP4 resource chunk");
+            validator
+                .observe(chunk)
+                .await
+                .expect("stage fMP4 resource chunk");
         }
         assert!(
             validator

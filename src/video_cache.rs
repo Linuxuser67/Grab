@@ -718,6 +718,8 @@ mod tests {
         let other_handoff = vec![
             "--cookies".to_string(),
             other_jar.to_string_lossy().into_owned(),
+            "--user-agent".to_string(),
+            "Browser/1".to_string(),
             "--".to_string(),
             url.to_string(),
         ];

@@ -45,6 +45,12 @@ pub(crate) async fn lookup_video(key: &str) -> Option<Video> {
 
 /// Store only parsed, static single-video metadata. Never cache playlist
 /// stubs, live streams, or failed/empty extractions.
+///
+/// shortcut: the crate's Redb layer keys rows by `video.id`, so two identities
+/// for the same video overwrite one row and a later L2 lookup can return the
+/// other identity's metadata. Only anonymous extractions are cached, so the
+/// cross-identity data differs at most by proxy/impersonation. Upgrade to a
+/// per-identity store if authenticated or geo-scoped metadata is ever cached.
 pub(crate) async fn store_video(key: &str, video: &Video) {
     if !is_cacheable_video(video) {
         return;
@@ -191,6 +197,7 @@ pub(crate) fn cache_key(
     if has_rotating_auth_query(&url) {
         return None;
     }
+    canonicalize_youtube_url(&mut url);
 
     let browser_profile_is_active =
         crate::video_tools::cookies_browser_spec(cookies_browser).is_some();
@@ -220,30 +227,24 @@ pub(crate) fn cache_key(
     }
     hash_file_identity(&mut hasher, b"binary", youtube_bin, &binary_metadata);
 
-    // This exact argv snapshot is also passed to the child process. It includes
-    // extractor args, Deno runtime, cookies, and the paired User-Agent.
+    // Hash the identity flags, but not the positional URL (hashed above) or the
+    // resolved Deno path: `find_deno` may only learn that path after the first
+    // YouTube lookup, and the path does not change what is extracted.
+    let mut skip_runtime_value = false;
     for argument in identity_args {
-        hash_field(&mut hasher, b"identity-arg", argument.as_bytes());
-    }
-    if let Some(runtime) = identity_args
-        .windows(2)
-        .find(|pair| pair[0] == "--js-runtimes")
-        .and_then(|pair| pair[1].strip_prefix("deno:"))
-    {
-        let path = Path::new(runtime);
-        let metadata = std::fs::metadata(path).ok()?;
-        if !metadata.is_file() {
-            return None;
+        let argument = argument.as_str();
+        if argument == "--" {
+            break;
         }
-        hash_field(
-            &mut hasher,
-            b"deno-path",
-            path.as_os_str().to_string_lossy().as_bytes(),
-        );
-        hash_file_identity(&mut hasher, b"deno", path, &metadata);
-    }
-    if let Some(path) = std::env::var_os("PATH") {
-        hash_field(&mut hasher, b"PATH", path.to_string_lossy().as_bytes());
+        if skip_runtime_value {
+            skip_runtime_value = false;
+            continue;
+        }
+        if argument == "--js-runtimes" {
+            skip_runtime_value = true;
+            continue;
+        }
+        hash_field(&mut hasher, b"identity-arg", argument.as_bytes());
     }
 
     if let Some(proxy) = proxy {
@@ -285,6 +286,67 @@ fn hash_field(hasher: &mut Sha256, name: &[u8], value: &[u8]) {
     hasher.update(name);
     hasher.update((value.len() as u64).to_be_bytes());
     hasher.update(value);
+}
+
+/// Collapse YouTube spellings that address the same video so a share link and
+/// its canonical watch URL share one cache entry. Other hosts are unchanged.
+fn canonicalize_youtube_url(url: &mut url::Url) {
+    let host = url.host_str().unwrap_or_default().to_ascii_lowercase();
+    if !matches!(
+        host.as_str(),
+        "youtube.com" | "www.youtube.com" | "m.youtube.com" | "youtu.be"
+    ) {
+        return;
+    }
+    let path = url.path().trim_matches('/');
+    let mut segments = path.split('/');
+    let first = segments.next().unwrap_or_default();
+    let second = segments.next();
+    let video_id = if host == "youtu.be" {
+        // `youtu.be/watch?v=…` is malformed; leave it to the query filter below
+        // instead of reading "watch" as a video id.
+        (second.is_none() && !first.is_empty() && !matches!(first, "watch" | "playlist"))
+            .then(|| first.to_string())
+    } else {
+        match first {
+            "shorts" | "embed" | "live" => second.filter(|id| !id.is_empty()).map(str::to_string),
+            _ => None,
+        }
+    };
+    let is_watch = matches!(url.path(), "/watch" | "/playlist");
+    if video_id.is_none() && !is_watch {
+        return;
+    }
+    let mut watch = if let Some(id) = video_id {
+        // A `youtu.be` link can carry playlist context, so keep it: dropping
+        // `list` would make a playlist share link collide with the plain video.
+        let mut watch = url::Url::parse("https://www.youtube.com/watch").expect("static URL");
+        watch.query_pairs_mut().append_pair("v", &id).extend_pairs(
+            url.query_pairs()
+                .filter(|(key, _)| key.as_ref() != "v")
+                .map(|(key, value)| (key.into_owned(), value.into_owned())),
+        );
+        watch
+    } else {
+        url.clone()
+    };
+    watch
+        .set_host(Some("www.youtube.com"))
+        .expect("static YouTube host");
+    // Keep only the parameters that change what yt-dlp extracts; share and
+    // tracking parameters (si, t, feature, pp) do not. Sorting keeps the link
+    // order from splitting the cache.
+    let mut kept: Vec<(String, String)> = watch
+        .query_pairs()
+        .filter(|(key, _)| matches!(key.as_ref(), "v" | "list" | "index"))
+        .map(|(key, value)| (key.into_owned(), value.into_owned()))
+        .collect();
+    kept.sort();
+    watch.set_query(None);
+    if !kept.is_empty() {
+        watch.query_pairs_mut().extend_pairs(kept);
+    }
+    *url = watch;
 }
 
 #[cfg(not(unix))]
@@ -499,5 +561,142 @@ mod tests {
         assert!(!has_rotating_auth_query(
             &url::Url::parse("https://example.test/watch?v=1").unwrap()
         ));
+    }
+
+    #[test]
+    fn cache_key_collapses_youtube_url_spellings() {
+        let directory = tempfile::tempdir().expect("temporary directory");
+        let binary = fake_binary(directory.path());
+        let canonical = "https://www.youtube.com/watch?v=dQw4w9WgXcQ";
+        let base = cache_key(
+            canonical,
+            &binary,
+            "2026.10.23",
+            "none",
+            None,
+            &["--".to_string(), canonical.to_string()],
+        )
+        .expect("anonymous lookup should be cacheable");
+        for url in [
+            "https://youtu.be/dQw4w9WgXcQ?si=share-token",
+            "https://www.youtube.com/shorts/dQw4w9WgXcQ",
+            "https://m.youtube.com/watch?v=dQw4w9WgXcQ&t=30s",
+            "https://www.youtube.com/watch?feature=share&v=dQw4w9WgXcQ",
+        ] {
+            assert_eq!(
+                cache_key(
+                    url,
+                    &binary,
+                    "2026.10.23",
+                    "none",
+                    None,
+                    &["--".to_string(), url.to_string()],
+                ),
+                Some(base.clone()),
+                "expected {url} to share the canonical key"
+            );
+        }
+    }
+
+    #[test]
+    fn cache_key_keeps_playlist_context_on_short_links() {
+        let directory = tempfile::tempdir().expect("temporary directory");
+        let binary = fake_binary(directory.path());
+        let canonical = "https://www.youtube.com/watch?v=dQw4w9WgXcQ&list=PL123&index=2";
+        let with_playlist = cache_key(
+            canonical,
+            &binary,
+            "2026.10.23",
+            "none",
+            None,
+            &["--".to_string(), canonical.to_string()],
+        )
+        .expect("anonymous lookup should be cacheable");
+        for url in [
+            "https://youtu.be/dQw4w9WgXcQ?list=PL123&index=2&si=share-token",
+            "https://www.youtube.com/watch?list=PL123&v=dQw4w9WgXcQ&index=2",
+        ] {
+            assert_eq!(
+                cache_key(
+                    url,
+                    &binary,
+                    "2026.10.23",
+                    "none",
+                    None,
+                    &["--".to_string(), url.to_string()],
+                ),
+                Some(with_playlist.clone()),
+                "expected {url} to keep its playlist context"
+            );
+        }
+        // A playlist share link must not collide with the plain single video.
+        let plain = "https://www.youtube.com/watch?v=dQw4w9WgXcQ";
+        let without_playlist = cache_key(
+            plain,
+            &binary,
+            "2026.10.23",
+            "none",
+            None,
+            &["--".to_string(), plain.to_string()],
+        )
+        .expect("anonymous lookup should be cacheable");
+        assert_ne!(without_playlist, with_playlist);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn video_cache_round_trips_a_grab_key() {
+        let directory = tempfile::tempdir().expect("temporary directory");
+        let config = yt_dlp::cache::CacheConfig::builder()
+            .cache_dir(directory.path().to_path_buf())
+            .build();
+        let cache = yt_dlp::cache::VideoCache::new(&config, Some(60))
+            .await
+            .expect("create cache");
+        let video: yt_dlp::model::Video = serde_json::from_value(serde_json::json!({
+            "id": "x",
+            "title": "T",
+            "age_limit": 0,
+            "live_status": "not_live",
+            "playable_in_embed": true,
+            "extractor": "generic",
+            "extractor_key": "Generic",
+            "_version": {"version": "2026.08.19", "repository": "yt-dlp"},
+            "formats": [],
+        }))
+        .expect("test video must parse");
+        let key = "grab-ytdlp-video-v1:round-trip";
+        cache
+            .put(key.to_string(), video.clone())
+            .await
+            .expect("store");
+        let restored = cache.get(key).await.expect("read").expect("hit");
+        assert_eq!(restored.id, video.id);
+        assert_eq!(restored.title, video.title);
+    }
+
+    #[test]
+    fn cache_key_ignores_the_resolved_deno_path() {
+        let directory = tempfile::tempdir().expect("temporary directory");
+        let binary = fake_binary(directory.path());
+        let url = "https://www.youtube.com/watch?v=1";
+        let bare = vec![
+            "--no-js-runtimes".to_string(),
+            "--js-runtimes".to_string(),
+            "deno".to_string(),
+            "--".to_string(),
+            url.to_string(),
+        ];
+        let pinned = vec![
+            "--no-js-runtimes".to_string(),
+            "--js-runtimes".to_string(),
+            "/opt/deno/bin/deno".to_string(),
+            "--".to_string(),
+            url.to_string(),
+        ];
+        assert_eq!(
+            cache_key(url, &binary, "2026.10.23", "none", None, &bare),
+            cache_key(url, &binary, "2026.10.23", "none", None, &pinned),
+            "the Deno path is not part of the extraction contract"
+        );
     }
 }

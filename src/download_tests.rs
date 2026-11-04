@@ -8543,7 +8543,7 @@ fn gallery_remove_discards_handoff_cookies() {
     // write_handoff_cookies only writes the file; the handoff receiver
     // registers it in the store once accepted — simulate that here.
     crate::extension_server::store_handoff_cookies(&job.page_url, path, None);
-    assert!(crate::extension_server::live_handoff_cookie_path(&job.page_url, "none").is_some());
+    assert!(crate::extension_server::live_handoff_identity(&job.page_url).is_some());
     // Enqueue the gallery, then remove it.
     let item = glib::MainContext::default()
         .block_on(m.enqueue_gallery_async(&job))
@@ -8554,7 +8554,7 @@ fn gallery_remove_discards_handoff_cookies() {
     m.remove(id);
     // Cookies must be gone.
     assert!(
-        crate::extension_server::live_handoff_cookie_path(&job.page_url, "none").is_none(),
+        crate::extension_server::live_handoff_identity(&job.page_url).is_none(),
         "handoff cookies not discarded on gallery removal"
     );
     crate::extension_server::discard_handoff_cookies(&job.page_url);

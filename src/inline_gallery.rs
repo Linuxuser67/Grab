@@ -97,11 +97,10 @@ pub(crate) fn resolve_gallery_auth(url: &str, browser: &str) -> GalleryAuth {
     // The jar and browser user-agent are one identity. Resolve them under one
     // store lookup and one freshness decision so an eviction or freshness
     // boundary cannot pair cookies with a UA from a different handoff.
-    let (cookies_path, user_agent) =
-        match crate::extension_server::live_handoff_identity(url, browser) {
-            Some((path, user_agent)) => (Some(path), user_agent),
-            None => (None, None),
-        };
+    let (cookies_path, user_agent) = match crate::extension_server::live_handoff_identity(url) {
+        Some((path, user_agent)) => (Some(path), user_agent),
+        None => (None, None),
+    };
     let cookies_browser = if cookies_path.is_none() {
         let spec = crate::video_tools::gallery_cookies_browser_spec(browser);
         if spec.is_none() && !browser.is_empty() && browser != "none" {

@@ -1,13 +1,16 @@
-//! Persistent cache for successful, static yt-dlp video metadata.
+//! Cache for successful, static yt-dlp video metadata.
 //!
 //! The upstream yt_dlp::cache::VideoCache supplies Moka L1 and Redb L2.
 //! Grab owns cache identity because the same page can produce different
 //! metadata under different cookies, user agents, proxies, or extractor args.
+//! Authenticated previews stay in memory; everything else is persisted.
 
 use sha2::{Digest, Sha256};
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::sync::{LazyLock, Mutex};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use tokio::sync::OnceCell;
 use yt_dlp::cache::{CacheConfig, VideoCache};
 use yt_dlp::model::Video;
@@ -15,12 +18,25 @@ use yt_dlp::model::Video;
 const VIDEO_CACHE_TTL: Duration = Duration::from_secs(15 * 60);
 const CLEAN_INTERVAL: Duration = Duration::from_secs(5 * 60);
 
+/// Authenticated previews stay in memory: the Redb layer keys rows by video id,
+/// so two identities for one video would overwrite each other, and these entries
+/// carry signed media URLs. A staged handoff jar outlives this window.
+const AUTHENTICATED_PREVIEW_TTL: Duration = VIDEO_CACHE_TTL;
+const AUTHENTICATED_PREVIEW_CAPACITY: usize = 32;
+/// Namespace for video keys that must never reach the persistent cache.
+const AUTHENTICATED_VIDEO_NAMESPACE: &str = "grab-ytdlp-video-auth-v1";
+
 static VIDEO_CACHE: OnceCell<VideoCache> = OnceCell::const_new();
 static LAST_CLEAN_AT: AtomicU64 = AtomicU64::new(0);
+static AUTHENTICATED_PREVIEWS: LazyLock<Mutex<HashMap<String, (Instant, Video)>>> =
+    LazyLock::new(|| Mutex::new(HashMap::new()));
 
 /// Return cached metadata only when the URL and current extraction identity
 /// match. Errors in the optional cache never prevent a normal yt-dlp lookup.
 pub(crate) async fn lookup_video(key: &str) -> Option<Video> {
+    if key.starts_with(AUTHENTICATED_VIDEO_NAMESPACE) {
+        return lookup_authenticated_preview(key);
+    }
     let cache = video_cache().await?;
     clean_expired_if_due(cache).await;
 
@@ -46,13 +62,15 @@ pub(crate) async fn lookup_video(key: &str) -> Option<Video> {
 /// Store only parsed, static single-video metadata. Never cache playlist
 /// stubs, live streams, or failed/empty extractions.
 ///
-/// shortcut: the crate's Redb layer keys rows by `video.id`, so two identities
-/// for the same video overwrite one row and a later L2 lookup can return the
-/// other identity's metadata. Only anonymous extractions are cached, so the
-/// cross-identity data differs at most by proxy/impersonation. Upgrade to a
-/// per-identity store if authenticated or geo-scoped metadata is ever cached.
+/// Authenticated previews use an in-memory namespace instead of the persistent
+/// cache: the crate's Redb layer keys rows by `video.id`, so two identities for
+/// one video would overwrite each other, and signed media URLs stay off disk.
 pub(crate) async fn store_video(key: &str, video: &Video) {
     if !is_cacheable_video(video) {
+        return;
+    }
+    if key.starts_with(AUTHENTICATED_VIDEO_NAMESPACE) {
+        store_authenticated_preview(key, video);
         return;
     }
     let Some(cache) = video_cache().await else {
@@ -69,6 +87,29 @@ pub(crate) async fn store_video(key: &str, video: &Video) {
 fn is_cacheable_video(video: &Video) -> bool {
     !crate::video_types::yt_dlp_reports_currently_live(video.is_live, &video.live_status)
         && crate::video_types::has_fetchable_media(video)
+}
+
+fn lookup_authenticated_preview(key: &str) -> Option<Video> {
+    let previews = AUTHENTICATED_PREVIEWS.lock().ok()?;
+    let (stored_at, video) = previews.get(key)?;
+    if stored_at.elapsed() >= AUTHENTICATED_PREVIEW_TTL {
+        return None;
+    }
+    if is_cacheable_video(video) && video.are_format_urls_fresh() {
+        Some(video.clone())
+    } else {
+        None
+    }
+}
+
+fn store_authenticated_preview(key: &str, video: &Video) {
+    let Ok(mut previews) = AUTHENTICATED_PREVIEWS.lock() else {
+        return;
+    };
+    if previews.len() >= AUTHENTICATED_PREVIEW_CAPACITY && !previews.contains_key(key) {
+        previews.clear();
+    }
+    previews.insert(key.to_string(), (Instant::now(), video.clone()));
 }
 
 async fn video_cache() -> Option<&'static VideoCache> {
@@ -203,9 +244,10 @@ pub(crate) fn cache_key(
     )
 }
 
-/// Which surface a key is for. Playlist listings carry only ids, titles and
-/// page URLs, so they may be scoped to a browser profile or a staged handoff
-/// jar; video metadata may not, because it carries signed media URLs.
+/// Which surface a key is for. A playlist listing holds no signed media URLs,
+/// so it may be scoped to a browser profile or a staged handoff jar. Video
+/// metadata may be scoped to a jar's staged path, but not to a browser profile:
+/// it carries signed media URLs.
 enum CacheScope {
     Video,
     Playlist,
@@ -254,18 +296,29 @@ fn identity_key(
     let has_cookie_file = identity_args
         .iter()
         .any(|argument| argument == "--cookies" || argument.starts_with("--cookies="));
-    // The only `--cookies` in this extractor argv is a live extension handoff
-    // jar. Its staged path is hashed into the key, so a playlist entry is
-    // scoped to that jar: a new handoff stages a new path and gets a new entry.
-    // Video metadata refuses both sources: it carries session-bound media URLs.
-    // shortcut: any future user-supplied `--cookies` file would inherit the
-    // playlist policy, give it its own decision then.
-    if matches!(scope, CacheScope::Video) && (has_cookie_file || browser_profile_is_active) {
+    // A staged extension handoff jar is the only source of `--cookies` in this
+    // argv, and its path is hashed into the key, so an entry is scoped to that
+    // jar: a new handoff stages a new path and cannot read the old entry. The
+    // staged name embeds the pid and a per-process counter, so a path could
+    // only repeat across restarts; the playlist TTL bounds that case. A live
+    // jar replaces the configured browser profile in the argv, so it is the
+    // auth source whenever it is present; a profile alone still refuses video
+    // metadata, which carries signed media URLs. Playlists may use either.
+    // shortcut: a future user-supplied `--cookies` file would be cached for
+    // video too, giving it its own decision then.
+    if matches!(scope, CacheScope::Video) && browser_profile_is_active && !has_cookie_file {
         return None;
     }
+    // Authenticated video previews get their own namespace so they never reach
+    // the persistent cache, which keys rows by video id.
+    let schema = if matches!(scope, CacheScope::Video) && has_cookie_file {
+        AUTHENTICATED_VIDEO_NAMESPACE
+    } else {
+        "grab-ytdlp-video-v1"
+    };
 
     let mut hasher = Sha256::new();
-    hash_field(&mut hasher, b"schema", b"grab-ytdlp-video-v1");
+    hash_field(&mut hasher, b"schema", schema.as_bytes());
     hash_field(&mut hasher, b"url", url.as_str().as_bytes());
     hash_field(&mut hasher, b"yt-dlp-version", yt_version.as_bytes());
     hash_field(
@@ -331,7 +384,7 @@ fn identity_key(
     for byte in hasher.finalize() {
         let _ = write!(&mut digest_hex, "{byte:02x}");
     }
-    Some(format!("grab-ytdlp-video-v1:{digest_hex}"))
+    Some(format!("{schema}:{digest_hex}"))
 }
 
 fn hash_field(hasher: &mut Sha256, name: &[u8], value: &[u8]) {
@@ -480,7 +533,10 @@ pub(crate) fn has_rotating_auth_query(url: &url::Url) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::{cache_key, has_rotating_auth_query, playlist_cache_key, validate_cache_file_path};
+    use super::{
+        AUTHENTICATED_VIDEO_NAMESPACE, cache_key, has_rotating_auth_query, lookup_video,
+        playlist_cache_key, store_video, validate_cache_file_path,
+    };
     use crate::net_types::ResolvedProxy;
     use std::path::Path;
 
@@ -526,7 +582,7 @@ mod tests {
     }
 
     #[test]
-    fn authenticated_extractions_are_not_persistently_cached() {
+    fn browser_profile_video_keys_are_refused_and_handoff_keys_stay_in_memory() {
         let directory = tempfile::tempdir().expect("temporary directory");
         let binary = fake_binary(directory.path());
         let url = "https://example.test/watch?v=1";
@@ -543,14 +599,40 @@ mod tests {
             "--".to_string(),
             url.to_string(),
         ];
-        assert!(cache_key(url, &binary, "2026.10.23", "none", None, &with_handoff).is_none());
+        let handoff_key = cache_key(url, &binary, "2026.10.23", "none", None, &with_handoff)
+            .expect("a staged handoff jar may cache video metadata for its lifetime");
+        assert!(
+            handoff_key.starts_with(AUTHENTICATED_VIDEO_NAMESPACE),
+            "authenticated video entries must stay out of the persistent cache"
+        );
+        assert_eq!(
+            Some(handoff_key.clone()),
+            cache_key(url, &binary, "2026.10.23", "firefox", None, &with_handoff),
+            "a live jar replaces the configured profile, so the profile must not refuse it"
+        );
 
         let equals_form = vec![
             format!("--cookies={}", cookie_file.display()),
             "--".to_string(),
             url.to_string(),
         ];
-        assert!(cache_key(url, &binary, "2026.10.23", "none", None, &equals_form).is_none());
+        assert!(
+            cache_key(url, &binary, "2026.10.23", "none", None, &equals_form).is_some(),
+            "both --cookies spellings are cacheable"
+        );
+
+        let other_jar = directory.path().join("other-handoff.cookies");
+        let other_handoff = vec![
+            "--cookies".to_string(),
+            other_jar.to_string_lossy().into_owned(),
+            "--".to_string(),
+            url.to_string(),
+        ];
+        assert_ne!(
+            Some(handoff_key),
+            cache_key(url, &binary, "2026.10.23", "none", None, &other_handoff),
+            "each staged jar must get its own video entry"
+        );
     }
 
     #[cfg(unix)]
@@ -727,6 +809,47 @@ mod tests {
         assert_eq!(restored.title, video.title);
     }
 
+    fn fetchable_video() -> yt_dlp::model::Video {
+        serde_json::from_value(serde_json::json!({
+            "id": "x",
+            "title": "T",
+            "age_limit": 0,
+            "live_status": "not_live",
+            "playable_in_embed": true,
+            "extractor": "generic",
+            "extractor_key": "Generic",
+            "_version": {"version": "2026.08.19", "repository": "yt-dlp"},
+            "formats": [{
+                "format": "137 - 1920x1080",
+                "format_id": "137",
+                "protocol": "https",
+                "ext": "mp4",
+                "url": "https://cdn.example/v.mp4",
+                "vcodec": "avc1.640028",
+                "acodec": "none",
+                "http_headers": {},
+                "filesize": 100,
+            }],
+        }))
+        .expect("test video must parse")
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn authenticated_video_keys_round_trip_through_the_public_path() {
+        let key = format!("{AUTHENTICATED_VIDEO_NAMESPACE}:round-trip");
+        let video = fetchable_video();
+        assert!(
+            lookup_video(&key).await.is_none(),
+            "an unseen key must miss"
+        );
+        store_video(&key, &video).await;
+        assert_eq!(
+            lookup_video(&key).await.as_ref(),
+            Some(&video),
+            "the public path must route the auth namespace to memory"
+        );
+    }
+
     #[test]
     fn playlist_cache_key_allows_a_browser_profile_and_a_staged_handoff_jar() {
         let directory = tempfile::tempdir().expect("temporary directory");
@@ -740,7 +863,7 @@ mod tests {
         assert_eq!(
             cache_key(url, &binary, "2026.10.23", "firefox", None, &profile_args),
             None,
-            "authenticated video metadata must stay out of the cache"
+            "profile-scoped video metadata must stay out of the cache"
         );
         assert!(
             playlist_cache_key(url, &binary, "2026.10.23", "firefox", None, &profile_args)
@@ -753,10 +876,9 @@ mod tests {
             "--".to_string(),
             url.to_string(),
         ];
-        assert_eq!(
-            cache_key(url, &binary, "2026.10.23", "none", None, &handoff_args),
-            None,
-            "authenticated video metadata must stay out of the cache"
+        assert!(
+            cache_key(url, &binary, "2026.10.23", "none", None, &handoff_args).is_some(),
+            "video metadata is scoped to a staged handoff jar"
         );
         let handoff_key =
             playlist_cache_key(url, &binary, "2026.10.23", "none", None, &handoff_args)

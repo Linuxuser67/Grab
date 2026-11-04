@@ -491,9 +491,8 @@ const MAX_HANDOFF_ENTRIES: usize = QUEUE_DEPTH;
 const MAX_SUPPRESSED_HOSTS: usize = MAX_HANDOFF_ENTRIES * 4;
 /// A staged jar at or past this age is never used, with or without a live
 /// browser source: it is a snapshot, and yt-dlp merges `--cookies` after the
-/// browser jar, so stale values would override rotated cookies. Expiry also
-/// re-enables metadata caching — a usable staged jar forces `cache_key` to
-/// `None`, so keeping it forever would disable caching for the whole session.
+/// browser jar, so stale values would override rotated cookies. Entries scoped
+/// to that jar's staged path age out on their own once it is dropped.
 const HANDOFF_FRESH: Duration = Duration::from_secs(30 * 60);
 static COOKIE_FILE_COUNTER: AtomicU64 = AtomicU64::new(0);
 static SUPPRESSION_ID_COUNTER: AtomicU64 = AtomicU64::new(0);
@@ -895,7 +894,7 @@ fn live_handoff_entry_at(url: &str, now: SystemTime) -> Option<HandoffCookies> {
 /// True when a staged jar may replace `--cookies-from-browser`. A jar is only
 /// a snapshot of a browser session: after [`HANDOFF_FRESH`] it must not be used
 /// even when no live browser is configured, or a stale `cf_clearance` keeps
-/// disabling metadata caching (a staged jar forces `cache_key` to `None`).
+/// being replayed into the extractor.
 fn handoff_jar_usable_at(entry: &HandoffCookies, now: SystemTime) -> bool {
     // SystemTime includes suspend duration on Linux. A backwards wall-clock
     // adjustment fails closed as stale.

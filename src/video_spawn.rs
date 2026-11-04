@@ -285,9 +285,9 @@ pub async fn fetch_video_infos(
                 }
             };
             // Playlist metadata uses a separate namespace and the crate's
-            // dedicated playlist cache. Unlike video metadata it may be cached
-            // for a browser profile or a staged handoff jar: it holds no signed
-            // media URLs. The download worker still re-resolves each item.
+            // dedicated playlist cache. It may be cached for a browser profile
+            // or a staged handoff jar: it holds no signed media URLs. The
+            // download worker still re-resolves each item.
             let playlist_cache_key = playlist_base_key
                 .as_deref()
                 .map(crate::video_playlist_cache::cache_key);
@@ -302,9 +302,9 @@ pub async fn fetch_video_infos(
                 );
                 return Ok((ProbeResult::Playlist(playlist), None));
             }
-            // A persistent metadata hit avoids starting yt-dlp (and Deno) for
-            // a repeat preview. The raw JSON is intentionally absent on a hit:
-            // the download worker must obtain fresh extraction data later.
+            // A metadata hit avoids starting yt-dlp (and Deno) for a repeat
+            // preview. The raw JSON is intentionally absent on a hit: the
+            // download worker must obtain fresh extraction data later.
             if let Some(video) = match cache_key.as_deref() {
                 Some(key) => crate::video_cache::lookup_video(key).await,
                 None => None,

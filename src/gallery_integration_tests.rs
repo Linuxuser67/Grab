@@ -177,7 +177,7 @@ async fn gallery_integration_probe_count_download() {
     let completed = std::cell::Cell::new(0u32);
     let result =
         match crate::gallery_runner::run_gallery_download(&job, &tool, None, None, |update| {
-            completed.set(update.files_completed);
+            completed.set(update.files_done);
         })
         .await
         {

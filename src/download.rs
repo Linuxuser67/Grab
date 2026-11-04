@@ -3444,7 +3444,7 @@ impl DownloadManager {
             while let Some(msg) = rx.recv().await {
                 match msg {
                     GalleryMsg::Progress(update) => {
-                        let done = update.files_completed.saturating_add(update.files_skipped);
+                        let done = update.files_done;
                         let file_progress = update
                             .current_file_percent
                             .map(|percent| format!(" · {percent}%"))

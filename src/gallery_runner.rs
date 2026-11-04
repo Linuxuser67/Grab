@@ -46,8 +46,7 @@ pub fn done_label(files: usize, skipped: u32) -> String {
 /// Progress update from the runner.
 #[derive(Debug, Clone)]
 pub struct GalleryProgressUpdate {
-    pub files_completed: u32,
-    pub files_skipped: u32,
+    pub files_done: u32,
     /// Percentage reported for the current file, when its size is known.
     pub current_file_percent: Option<u8>,
     /// Last completed file path (gallery-dl doesn't name the in-progress file).
@@ -257,6 +256,7 @@ pub async fn run_gallery_download_with_proxy(
 
     while !stdout_done || !stderr_progress_done {
         tokio::select! {
+            biased;
             line = lines.next_line(), if !stdout_done => {
                 match line {
                     Ok(Some(line)) => {
@@ -273,8 +273,7 @@ pub async fn run_gallery_download_with_proxy(
                         }
                         if meaningful {
                             on_progress(GalleryProgressUpdate {
-                                files_completed: progress.files_completed,
-                                files_skipped: progress.files_skipped,
+                                files_done: progress.files_done(),
                                 current_file_percent: progress.current_file_percent,
                                 last_completed_file: last_completed.clone(),
                             });
@@ -293,8 +292,7 @@ pub async fn run_gallery_download_with_proxy(
                     Some(percent) => {
                         let _ = progress.feed(ProgressLine::Progress(percent));
                         on_progress(GalleryProgressUpdate {
-                            files_completed: progress.files_completed,
-                            files_skipped: progress.files_skipped,
+                            files_done: progress.files_done(),
                             current_file_percent: progress.current_file_percent,
                             last_completed_file: last_completed.clone(),
                         });

@@ -229,6 +229,11 @@ pub(crate) fn parse_dash_manifest_at(
     }
 
     let manifest_url = parse_manifest_url(manifest_url)?;
+    // OutputProtection describes the rendering device's output link (for example,
+    // an HDCP requirement), not media encryption or segment addressing. Grab
+    // downloads the encoded resources and does not render them, so this descriptor
+    // does not restrict native download planning. ContentProtection remains
+    // explicitly rejected below because it signals protected media.
     let mpd = dash_mpd_core::parse(body).map_err(|_| DashError::Parse)?;
 
     let presentation = match mpd.mpdtype.as_deref() {
@@ -1834,6 +1839,27 @@ mod tests {
         assert!(
             logs.contains("Unused XML element") && logs.contains("OutputProtection"),
             "expected an ignored OutputProtection diagnostic, got: {logs}"
+        );
+
+        // OutputProtection is an HDCP/output-device constraint, not DRM. Since
+        // Grab downloads the encoded media rather than rendering it, the normal
+        // native planner should still expand the same complete media resources.
+        let manifest = result.expect("unmodeled output protection must not block downloads");
+        let video = manifest.video_representations.first().expect("video representation");
+        let plan = plan_dash_representation(&manifest, &video.key)
+            .expect("output protection must not block native resource planning");
+        let segment_urls = plan
+            .resources
+            .iter()
+            .filter(|resource| resource.kind == DashResourceKind::Segment)
+            .map(|resource| resource.url.as_str())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            segment_urls,
+            [
+                "https://cdn.example.test/path/seg-1.m4s",
+                "https://cdn.example.test/path/seg-2.m4s"
+            ]
         );
     }
 

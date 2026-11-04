@@ -127,9 +127,7 @@ impl WriterMode {
             #[cfg(test)]
             Self::Staged => (CheckpointPolicy::RemoveAfterPublish, None, false),
             #[cfg(test)]
-            Self::StagedRetainingCheckpoint => {
-                (CheckpointPolicy::RetainAfterPublish, None, false)
-            }
+            Self::StagedRetainingCheckpoint => (CheckpointPolicy::RetainAfterPublish, None, false),
             Self::DestinationPart(part) => {
                 (CheckpointPolicy::RetainAfterPublish, Some(part), false)
             }

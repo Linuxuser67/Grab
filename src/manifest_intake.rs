@@ -38,15 +38,44 @@ struct ManifestPreviewCacheKey {
     proxy: Option<String>,
 }
 
+/// Cookie source a manifest client actually used. A preview may only be cached
+/// under a key describing the same source, or a failed cookie export would store
+/// an anonymous response under a browser-profile key.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ManifestClientAuth {
+    Anonymous,
+    Handoff,
+    Browser,
+}
+
+impl ManifestPreviewCacheKey {
+    fn matches_auth(&self, auth: ManifestClientAuth) -> bool {
+        match auth {
+            ManifestClientAuth::Handoff => self.handoff_cookie_path.is_some(),
+            ManifestClientAuth::Browser => {
+                self.handoff_cookie_path.is_none()
+                    && !self.cookies_browser.is_empty()
+                    && self.cookies_browser != "none"
+            }
+            ManifestClientAuth::Anonymous => {
+                self.handoff_cookie_path.is_none()
+                    && (self.cookies_browser.is_empty() || self.cookies_browser == "none")
+            }
+        }
+    }
+}
+
 static MANIFEST_PREVIEW_CACHE: LazyLock<
     Mutex<HashMap<ManifestPreviewCacheKey, (Instant, ManifestLookup)>>,
 > = LazyLock::new(|| Mutex::new(HashMap::new()));
 
-/// Build a cache key only when the preview's authentication identity is stable.
+/// Build a preview cache key from the URL, the effective cookie source, the
+/// staged jar (if any) and the proxy.
 ///
-/// Browser-profile cookies can rotate independently of Grab, so they bypass
-/// this cache. Extension handoff jars have a unique staged path and therefore
-/// form a stable, short-lived identity. Anonymous requests are cacheable.
+/// A browser profile is keyed by the browser setting, never by cookie contents,
+/// so a rotation is at most [`MANIFEST_PREVIEW_CACHE_TTL`] stale. Extension
+/// handoff jars have a unique staged path and therefore form a short-lived
+/// identity.
 fn manifest_preview_cache_key(
     raw_url: &str,
     cookies_browser: &str,
@@ -63,13 +92,6 @@ fn manifest_preview_cache_key(
     let handoff_cookie_path = crate::extension_server::live_handoff_identity(raw_url)
         .map(|(path, _)| path)
         .filter(|path| std::fs::File::open(path).is_ok());
-
-    // A live browser profile is mutable outside this process. Do not reuse
-    // metadata unless the exact extension snapshot is the active cookie source.
-    if !effective_browser.is_empty() && effective_browser != "none" && handoff_cookie_path.is_none()
-    {
-        return None;
-    }
 
     Some(ManifestPreviewCacheKey {
         url: url.to_string(),
@@ -392,11 +414,13 @@ pub(crate) async fn lookup(
         cookies_browser,
         ManifestTransportPolicy::HttpsOnly,
     );
-    let result = tokio::time::timeout(MANIFEST_LOOKUP_BUDGET, async {
-        let client = client_for_manifest(raw_url, cookies_browser, proxy).await?;
-        lookup_preview_with_client(&client, raw_url)
+    let (auth, result) = tokio::time::timeout(MANIFEST_LOOKUP_BUDGET, async {
+        let (client, auth) =
+            client_for_manifest_with_policy(raw_url, cookies_browser, proxy).await?;
+        let lookup = lookup_preview_with_client(&client, raw_url)
             .await
-            .map_err(|error| error.to_string())
+            .map_err(|error| error.to_string())?;
+        Ok::<_, String>((auth, lookup))
     })
     .await
     .unwrap_or_else(|_| {
@@ -405,7 +429,9 @@ pub(crate) async fn lookup(
             MANIFEST_LOOKUP_BUDGET.as_secs()
         ))
     })?;
-    if let (Some(key), Some(lookup)) = (cache_key, result.as_ref()) {
+    if let (Some(key), Some(lookup)) = (cache_key, result.as_ref())
+        && key.matches_auth(auth)
+    {
         manifest_preview_cache_insert(key, lookup);
     }
     Ok(result)
@@ -418,14 +444,16 @@ pub(crate) async fn client_for_manifest(
     cookies_browser: &str,
     proxy: Option<&crate::net_types::ResolvedProxy>,
 ) -> Result<reqwest::Client, String> {
-    client_for_manifest_with_policy(raw_url, cookies_browser, proxy).await
+    client_for_manifest_with_policy(raw_url, cookies_browser, proxy)
+        .await
+        .map(|(client, _)| client)
 }
 
 async fn client_for_manifest_with_policy(
     raw_url: &str,
     cookies_browser: &str,
     proxy: Option<&crate::net_types::ResolvedProxy>,
-) -> Result<reqwest::Client, String> {
+) -> Result<(reqwest::Client, ManifestClientAuth), String> {
     // A browser handoff is public-only. An upstream proxy resolves the target
     // remotely and would bypass the local guarded DNS resolver, so reject it
     // consistently in both preview and download attempts.
@@ -449,7 +477,8 @@ async fn client_for_manifest_with_policy(
                 .unwrap_or(crate::download_net::DEFAULT_USER_AGENT);
             return crate::download_net::http_client_with_jar_and_user_agent(
                 proxy, jar, user_agent,
-            );
+            )
+            .map(|client| (client, ManifestClientAuth::Handoff));
         }
     }
 
@@ -467,7 +496,8 @@ async fn client_for_manifest_with_policy(
         .await
         {
             Ok(Ok(Some(jar))) => {
-                return crate::download_net::http_client_with_jar(proxy, jar);
+                return crate::download_net::http_client_with_jar(proxy, jar)
+                    .map(|client| (client, ManifestClientAuth::Browser));
             }
             Ok(Ok(None)) => {}
             Ok(Err(error)) => {
@@ -482,6 +512,7 @@ async fn client_for_manifest_with_policy(
     }
 
     crate::download_net::http_client_for(proxy)
+        .map(|client| (client, ManifestClientAuth::Anonymous))
         .map_err(|_| gettext("The configured proxy could not be used for this manifest"))
 }
 
@@ -2130,7 +2161,7 @@ segment.ts
     }
 
     #[test]
-    fn preview_cache_rejects_signed_and_mutable_browser_urls() {
+    fn preview_cache_rejects_signed_urls_but_keys_browser_profiles() {
         assert!(
             manifest_preview_cache_key(
                 "https://cache-preview.example.test/master.m3u8?X-Amz-Signature=secret",
@@ -2140,14 +2171,47 @@ segment.ts
             .is_none(),
             "signed manifest URLs must not be retained"
         );
+        let firefox = manifest_preview_cache_key(
+            "https://cache-preview.example.test/master.m3u8",
+            "firefox",
+            None,
+        );
         assert!(
+            firefox.is_some(),
+            "a browser profile is keyed by the browser setting with a short TTL"
+        );
+        assert_ne!(
+            firefox,
             manifest_preview_cache_key(
                 "https://cache-preview.example.test/master.m3u8",
-                "firefox",
+                "chrome",
                 None,
-            )
-            .is_none(),
-            "mutable browser-profile cookies must bypass preview caching"
+            ),
+            "each browser profile must get its own preview entry"
         );
+    }
+
+    #[test]
+    fn preview_cache_key_only_matches_the_source_that_served_it() {
+        let url = "https://cache-preview.example.test/master.m3u8";
+        let anonymous = manifest_preview_cache_key(url, "none", None).expect("anonymous key");
+        let browser = manifest_preview_cache_key(url, "firefox", None).expect("browser key");
+        let handoff = ManifestPreviewCacheKey {
+            handoff_cookie_path: Some(std::path::PathBuf::from("/tmp/handoff.jar")),
+            ..browser.clone()
+        };
+
+        assert!(anonymous.matches_auth(ManifestClientAuth::Anonymous));
+        assert!(!anonymous.matches_auth(ManifestClientAuth::Handoff));
+        assert!(!anonymous.matches_auth(ManifestClientAuth::Browser));
+
+        assert!(browser.matches_auth(ManifestClientAuth::Browser));
+        assert!(
+            !browser.matches_auth(ManifestClientAuth::Anonymous),
+            "a failed cookie export must not store an anonymous preview under a profile key"
+        );
+
+        assert!(handoff.matches_auth(ManifestClientAuth::Handoff));
+        assert!(!handoff.matches_auth(ManifestClientAuth::Browser));
     }
 }

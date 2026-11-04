@@ -9,8 +9,8 @@ fn trash_torrent_contents_reports_missing_archive_as_typed_error() {
     let folder = std::env::temp_dir();
     let error = trash_torrent_contents(&folder, "torrent:/tmp/grab-missing-trash-test.torrent")
         .expect_err("missing archive must fail");
-    assert!(matches!(error, TorrentError::TrashArchiveMissing));
-    assert_eq!(error.to_string(), "no torrent archive");
+    assert!(matches!(error, TorrentError::TrashArchiveMissing(_)));
+    assert_eq!(error.to_string(), gettext("No torrent archive"));
 }
 
 #[test]

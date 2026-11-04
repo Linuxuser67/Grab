@@ -330,6 +330,21 @@ enum Tracks {
     },
 }
 
+impl Tracks {
+    fn uses_destination_parts(&self) -> bool {
+        match self {
+            Self::Hls { video, audio, .. } => {
+                video.is_destination_assemblable_candidate()
+                    && audio
+                        .as_ref()
+                        .is_none_or(HlsPlan::is_destination_assemblable_candidate)
+            }
+            Self::Dash { .. } => true,
+            Self::DashLiveOffline { .. } => false,
+        }
+    }
+}
+
 #[derive(Debug)]
 struct LiveHlsTrack {
     playlist_url: Url,
@@ -816,6 +831,7 @@ async fn resolve_manifest_tracks(
 struct ManifestStaticTransfer<'a> {
     client: &'a reqwest::Client,
     tracks: &'a Tracks,
+    destination_parts: bool,
     staging: &'a Path,
     destination: &'a Path,
     item_id: u64,
@@ -836,6 +852,7 @@ async fn transfer_static_manifest_tracks(
     let ManifestStaticTransfer {
         client,
         tracks,
+        destination_parts,
         staging,
         destination,
         item_id,
@@ -853,11 +870,7 @@ async fn transfer_static_manifest_tracks(
             subtitle,
             ..
         } => {
-            let use_destination_parts = video.is_destination_assemblable_candidate()
-                && audio
-                    .as_ref()
-                    .is_none_or(HlsPlan::is_destination_assemblable_candidate);
-            if use_destination_parts {
+            if destination_parts {
                 if !fetch_and_write_hls_track(ManifestHlsTrackTransfer {
                     client,
                     staging,
@@ -1054,7 +1067,7 @@ struct ManifestLiveHlsFinalization<'a> {
     abort: &'a mut tokio::sync::oneshot::Receiver<crate::video::StopIntent>,
 }
 
-async fn cleanup_live_hls_destination_part_if_present(
+async fn cleanup_manifest_destination_part_if_present(
     staging: &Path,
     destination: &Path,
     item_id: u64,
@@ -1097,6 +1110,78 @@ async fn cleanup_live_hls_destination_part_if_present(
                 "Could not inspect the live HLS destination part: {error}"
             )));
         }
+    }
+    Ok(())
+}
+
+async fn cleanup_static_destination_parts_after_fallback(
+    tracks: &Tracks,
+    staging: &Path,
+    destination: &Path,
+    item_id: u64,
+    video_dir: &Path,
+    audio_dir: &Path,
+) -> Result<(), ManifestRunError> {
+    match tracks {
+        Tracks::Hls { audio, .. } => {
+            cleanup_manifest_destination_part_if_present(
+                staging,
+                destination,
+                item_id,
+                video_dir,
+                crate::manifest_destination::TrackKind::Video,
+                "video-track.ts",
+            )
+            .await?;
+            if audio.is_some() {
+                cleanup_manifest_destination_part_if_present(
+                    staging,
+                    destination,
+                    item_id,
+                    audio_dir,
+                    crate::manifest_destination::TrackKind::Audio,
+                    "audio-track.ts",
+                )
+                .await?;
+            }
+        }
+        Tracks::Dash {
+            audio, subtitle, ..
+        } => {
+            cleanup_manifest_destination_part_if_present(
+                staging,
+                destination,
+                item_id,
+                video_dir,
+                crate::manifest_destination::TrackKind::Video,
+                "video-track.mp4",
+            )
+            .await?;
+            if audio.is_some() {
+                cleanup_manifest_destination_part_if_present(
+                    staging,
+                    destination,
+                    item_id,
+                    audio_dir,
+                    crate::manifest_destination::TrackKind::Audio,
+                    "audio-track.mp4",
+                )
+                .await?;
+            }
+            if subtitle.is_some() {
+                let subtitle_directory = staging.join("subtitles");
+                cleanup_manifest_destination_part_if_present(
+                    staging,
+                    destination,
+                    item_id,
+                    &subtitle_directory,
+                    crate::manifest_destination::TrackKind::Subtitles,
+                    "subtitle-track.mp4",
+                )
+                .await?;
+            }
+        }
+        Tracks::DashLiveOffline { .. } => {}
     }
     Ok(())
 }
@@ -1166,7 +1251,7 @@ async fn prepare_live_hls_finalization(
                 LiveHlsCaptureOutcome::FinishVideoOnly | LiveHlsCaptureOutcome::Unrecoverable
             ) {
                 if destination_parts && has_destination_audio {
-                    cleanup_live_hls_destination_part_if_present(
+                    cleanup_manifest_destination_part_if_present(
                         staging,
                         destination,
                         item_id,
@@ -1197,7 +1282,7 @@ async fn prepare_live_hls_finalization(
         has_audio = false;
     }
     if destination_parts && has_destination_audio && !has_audio {
-        cleanup_live_hls_destination_part_if_present(
+        cleanup_manifest_destination_part_if_present(
             staging,
             destination,
             item_id,
@@ -1410,6 +1495,7 @@ pub(crate) async fn run_manifest_download(
         downloaded,
     } = prepare_manifest_attempt(&job, &tx).await?;
     let mut _finish_stop_sender = None;
+    let static_destination_parts = !live_hls && !live_dash && tracks.uses_destination_parts();
     let mut live_destination_parts = live_dash;
     if live_hls {
         let Tracks::Hls { video, audio, .. } = &tracks else {
@@ -1506,37 +1592,43 @@ pub(crate) async fn run_manifest_download(
             }
             LiveCapturePreparation::Stopped(outcome) => return Ok(outcome),
         }
-    } else if !transfer_static_manifest_tracks(ManifestStaticTransfer {
-        client: &client,
-        tracks: &tracks,
-        staging: &staging,
-        destination: &job.dest,
-        item_id: job.item_id,
-        video_dir: &video_dir,
-        audio_dir: &audio_dir,
-        concurrency,
-        tx: &tx,
-        downloaded: &downloaded,
-        abort: &mut abort,
-    })
-    .await?
-    {
-        return Ok(ManifestOutcome::Aborted);
+    } else {
+        match transfer_static_manifest_tracks(ManifestStaticTransfer {
+            client: &client,
+            tracks: &tracks,
+            destination_parts: static_destination_parts,
+            staging: &staging,
+            destination: &job.dest,
+            item_id: job.item_id,
+            video_dir: &video_dir,
+            audio_dir: &audio_dir,
+            concurrency,
+            tx: &tx,
+            downloaded: &downloaded,
+            abort: &mut abort,
+        })
+        .await
+        {
+            Ok(true) => {}
+            Ok(false) => return Ok(ManifestOutcome::Aborted),
+            Err(error @ ManifestRunError::Unsupported(_)) if static_destination_parts => {
+                cleanup_static_destination_parts_after_fallback(
+                    &tracks,
+                    &staging,
+                    &job.dest,
+                    job.item_id,
+                    &video_dir,
+                    &audio_dir,
+                )
+                .await?;
+                return Err(error);
+            }
+            Err(error) => return Err(error),
+        }
     }
     finalize_manifest_download(ManifestFinalization {
         job: &job,
-        destination_parts: live_destination_parts
-            || (!live_hls
-                && !live_dash
-                && (matches!(&tracks, Tracks::Dash { .. })
-                    || matches!(
-                        &tracks,
-                        Tracks::Hls { video, audio, .. }
-                            if video.is_destination_assemblable_candidate()
-                                && audio
-                                    .as_ref()
-                                    .is_none_or(HlsPlan::is_destination_assemblable_candidate)
-                    ))),
+        destination_parts: live_destination_parts || static_destination_parts,
         gate,
         abort,
         tx: &tx,
@@ -1603,36 +1695,22 @@ async fn finalize_manifest_download(
     tx.send(EngineMsg::Phase("Merging audio and video…".to_string()))
         .ok();
 
-    let video_input = match &tracks {
-        Tracks::Hls { .. } if destination_parts => crate::manifest_destination::part_path_async(
+    let video_input = if destination_parts {
+        crate::manifest_destination::part_path_async(
             staging.to_path_buf(),
             job.dest.clone(),
             job.item_id,
             crate::manifest_destination::TrackKind::Video,
         )
         .await
-        .map_err(ManifestRunError::Failed)?,
-        Tracks::Hls { .. } => video_dir.join("local.m3u8"),
-        Tracks::Dash { .. } if destination_parts => crate::manifest_destination::part_path_async(
-            staging.to_path_buf(),
-            job.dest.clone(),
-            job.item_id,
-            crate::manifest_destination::TrackKind::Video,
-        )
-        .await
-        .map_err(ManifestRunError::Failed)?,
-        Tracks::Dash { .. } => video_dir.join("video-track.mp4"),
-        Tracks::DashLiveOffline { .. } if destination_parts => {
-            crate::manifest_destination::part_path_async(
-                staging.to_path_buf(),
-                job.dest.clone(),
-                job.item_id,
-                crate::manifest_destination::TrackKind::Video,
-            )
-            .await
-            .map_err(ManifestRunError::Failed)?
+        .map_err(ManifestRunError::Failed)?
+    } else {
+        match &tracks {
+            Tracks::Hls { .. } => video_dir.join("local.m3u8"),
+            Tracks::Dash { .. } | Tracks::DashLiveOffline { .. } => {
+                video_dir.join("video-track.mp4")
+            }
         }
-        Tracks::DashLiveOffline { .. } => video_dir.join("video-track.mp4"),
     };
     let audio_input = if has_audio {
         Some(if destination_parts {
@@ -2546,15 +2624,7 @@ fn progress_message(downloaded: u64) -> EngineMsg {
 }
 
 fn safe_resource_filename(filename: &str) -> bool {
-    !filename.is_empty()
-        && filename != "."
-        && filename != ".."
-        && !filename.contains('/')
-        && !filename.contains('\\')
-        && Path::new(filename)
-            .file_name()
-            .and_then(|name| name.to_str())
-            == Some(filename)
+    crate::file_names::is_single_component(filename) && !filename.contains('\\')
 }
 
 fn content_range_matches(header: Option<&str>, range: ManifestByteRange) -> bool {
@@ -2735,7 +2805,22 @@ async fn fetch_and_write_hls_track(
         {
             Ok(true) => {}
             Ok(false) => return Ok(false),
-            Err(error) => return Err(error),
+            Err(error) => {
+                if matches!(&error, ManifestRunError::Unsupported(_)) {
+                    drop(writer);
+                    crate::manifest_writer::cleanup_destination_part(
+                        staging,
+                        directory,
+                        destination,
+                        item_id,
+                        track,
+                        filename,
+                    )
+                    .await
+                    .map_err(ManifestRunError::Failed)?;
+                }
+                return Err(error);
+            }
         }
     }
     writer.finish().await.map_err(ManifestRunError::Failed)?;
@@ -2807,8 +2892,8 @@ async fn fetch_hls_resource_to_writer(
     let mut reservation = ResourceByteReservation::new(downloaded);
     let result = async {
         if resource.range.is_some() || resource.key {
-            return Err(ManifestRunError::Failed(
-                "The selected HLS track contains a resource that cannot be streamed as a complete fragment".to_string(),
+            return Err(ManifestRunError::Unsupported(
+                "The selected HLS track contains a ranged or encrypted resource".to_string(),
             ));
         }
 
@@ -2914,7 +2999,7 @@ async fn fetch_hls_resource_to_writer(
                 }
                 _ => "The HLS media segment is not a compatible MPEG-TS fragment",
             };
-            return Err(ManifestRunError::Failed(message.to_string()));
+            return Err(ManifestRunError::Unsupported(message.to_string()));
         }
 
         Ok(true)
@@ -3256,6 +3341,8 @@ fn add_hls_staging_options(command: &mut tokio::process::Command) {
     // .bin staging name. Permit only those names and probe their contents:
     // HLS resources may contain MPEG-TS, fragmented MP4, or encryption keys.
     command.args([
+        "-protocol_whitelist",
+        "file,crypto",
         "-allowed_extensions",
         "bin",
         "-allowed_segment_extensions",

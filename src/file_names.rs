@@ -2,6 +2,18 @@
 
 use gio::prelude::FileExt as _;
 
+/// Validate one filename component using the host platform's path semantics.
+pub(crate) fn is_single_component(name: &str) -> bool {
+    !name.is_empty()
+        && name != "."
+        && name != ".."
+        && !name.chars().any(char::is_control)
+        && std::path::Path::new(name)
+            .file_name()
+            .and_then(|component| component.to_str())
+            == Some(name)
+}
+
 /// Split stem and extension (last dot only; leading dot is stem). Pure.
 fn split_stem_ext(name: &str) -> (&str, Option<&str>) {
     match name.rfind('.') {
@@ -509,15 +521,62 @@ fn link_unsupported(e: &std::io::Error) -> bool {
 }
 
 /// Claim `new` atomically with `create_new`, then rename `old` over the
-/// placeholder. Cleans up the placeholder if the rename fails.
+/// private placeholder. A guard removes only the placeholder inode on failure.
 fn claim_and_rename(old: &std::path::Path, new: &std::path::Path) -> std::io::Result<()> {
-    std::fs::OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .open(new)?;
-    std::fs::rename(old, new).inspect_err(|_| {
-        let _ = std::fs::remove_file(new);
-    })
+    claim_and_rename_while(old, new, || true)
+}
+
+fn claim_and_rename_while<F>(
+    old: &std::path::Path,
+    new: &std::path::Path,
+    mut should_continue: F,
+) -> std::io::Result<()>
+where
+    F: FnMut() -> bool,
+{
+    if !should_continue() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::Interrupted,
+            "publication was cancelled",
+        ));
+    }
+
+    let mut options = std::fs::OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt as _;
+        options.mode(0o600);
+    }
+    let file = options.open(new)?;
+    let mut claim = ClaimedDestination {
+        path: new,
+        file,
+        armed: true,
+    };
+
+    if !should_continue() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::Interrupted,
+            "publication was cancelled",
+        ));
+    }
+    if !claim_still_owns_path(&claim)? {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::AlreadyExists,
+            "the exclusive destination claim was replaced",
+        ));
+    }
+    if !should_continue() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::Interrupted,
+            "publication was cancelled",
+        ));
+    }
+
+    std::fs::rename(old, new)?;
+    claim.armed = false;
+    Ok(())
 }
 
 /// Rename without clobbering, copying only when the filesystems differ.
@@ -699,85 +758,43 @@ impl Drop for ClaimedDestination<'_> {
     }
 }
 
-/// Exclusive-create fallback for filesystems without hard links or no-replace rename.
+fn claim_still_owns_path(claim: &ClaimedDestination<'_>) -> std::io::Result<bool> {
+    let path_metadata = std::fs::symlink_metadata(claim.path)?;
+    let file_metadata = claim.file.metadata()?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt as _;
+        Ok(path_metadata.file_type().is_file()
+            && path_metadata.dev() == file_metadata.dev()
+            && path_metadata.ino() == file_metadata.ino())
+    }
+    #[cfg(not(unix))]
+    {
+        Ok(path_metadata.file_type().is_file()
+            && file_metadata.is_file()
+            && path_metadata.len() == 0
+            && file_metadata.len() == 0)
+    }
+}
+
+/// Publish the complete destination-side temporary via the shared atomic claim helper.
 ///
-/// The final name is reserved with `create_new` before copying. Such filesystems
-/// cannot provide atomic publication without either primitive, so readers may
-/// observe the file while this fallback copies it. Existing destinations are
-/// never opened or truncated.
-fn publish_by_exclusive_copy<F>(
-    mut temporary: tempfile::NamedTempFile,
+/// The temporary already contains a fully synced copy on the destination filesystem;
+/// no second copy is needed.
+fn publish_by_claimed_rename<F>(
+    temporary: tempfile::NamedTempFile,
     destination: &std::path::Path,
-    mut should_continue: F,
+    should_continue: F,
 ) -> std::io::Result<()>
 where
     F: FnMut() -> bool,
 {
-    use std::io::{Read as _, Seek as _, Write as _};
-
-    if !should_continue() {
-        return Err(std::io::Error::new(
-            std::io::ErrorKind::Interrupted,
-            "publication was cancelled",
-        ));
-    }
-
-    let mut options = std::fs::OpenOptions::new();
-    options.write(true).create_new(true);
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::OpenOptionsExt as _;
-        options.mode(0o600);
-    }
-    let file = options.open(destination)?;
-    let mut claim = ClaimedDestination {
-        path: destination,
-        file,
-        armed: true,
-    };
-
-    if !should_continue() {
-        return Err(std::io::Error::new(
-            std::io::ErrorKind::Interrupted,
-            "publication was cancelled",
-        ));
-    }
-
-    let permissions = temporary.as_file().metadata()?.permissions();
-    temporary.as_file_mut().seek(std::io::SeekFrom::Start(0))?;
-    let mut source = temporary.as_file();
-    let mut buffer = [0_u8; 256 * 1024];
-    loop {
-        if !should_continue() {
-            return Err(std::io::Error::new(
-                std::io::ErrorKind::Interrupted,
-                "publication was cancelled",
-            ));
-        }
-        let read = source.read(&mut buffer)?;
-        if read == 0 {
-            break;
-        }
-        claim.file.write_all(&buffer[..read])?;
-    }
-    claim.file.flush()?;
-    claim.file.sync_all()?;
-    claim.file.set_permissions(permissions)?;
-    claim.file.sync_all()?;
-
-    if !should_continue() {
-        return Err(std::io::Error::new(
-            std::io::ErrorKind::Interrupted,
-            "publication was cancelled",
-        ));
-    }
-
-    claim.armed = false;
-    Ok(())
+    temporary.as_file().sync_all()?;
+    claim_and_rename_while(temporary.path(), destination, should_continue)
 }
 
-/// Persist a temporary without clobbering, using an exclusive-copy fallback when
-/// the filesystem supports neither no-replace rename nor hard links.
+/// Persist a temporary without clobbering, using an exclusive claim-and-rename
+/// fallback when the filesystem supports neither no-replace rename nor hard links.
 pub(crate) fn persist_noclobber_with_fallback<F>(
     temporary: tempfile::NamedTempFile,
     destination: &std::path::Path,
@@ -806,7 +823,7 @@ where
             }
         }
         Err(error) if link_unsupported(&error.error) || noreplace_unsupported(&error.error) => {
-            publish_by_exclusive_copy(error.file, destination, should_continue)
+            publish_by_claimed_rename(error.file, destination, should_continue)
         }
         Err(error) => Err(error.error),
     }
@@ -1169,6 +1186,27 @@ mod tests {
     }
 
     #[test]
+    fn single_component_filename_validator_rejects_traversal_and_controls() {
+        assert!(is_single_component("segment-00001.bin"));
+        assert!(is_single_component("résumé.m3u8"));
+        for unsafe_name in [
+            "",
+            ".",
+            "..",
+            "../segment.bin",
+            "sub/segment.bin",
+            "name\npart.bin",
+        ] {
+            assert!(
+                !is_single_component(unsafe_name),
+                "accepted {unsafe_name:?}"
+            );
+        }
+        #[cfg(unix)]
+        assert!(is_single_component(r"segment\part.bin"));
+    }
+
+    #[test]
     fn publish_temporary_name_filter_rejects_unrelated_files() {
         assert!(!is_publish_temporary_name(std::ffi::OsStr::new(
             ".notes.partial"
@@ -1179,14 +1217,14 @@ mod tests {
     }
 
     #[test]
-    fn exclusive_copy_fallback_never_clobbers_an_existing_destination() {
+    fn claimed_rename_fallback_never_clobbers_an_existing_destination() {
         let dir = tempfile::tempdir().unwrap();
         let destination = dir.path().join("existing");
         let temporary = publish_temp_for(&destination).unwrap();
         std::fs::write(temporary.path(), b"new payload").unwrap();
         std::fs::write(&destination, b"user data").unwrap();
 
-        let error = publish_by_exclusive_copy(temporary, &destination, || true)
+        let error = publish_by_claimed_rename(temporary, &destination, || true)
             .expect_err("create_new must reject an existing destination");
 
         assert_eq!(error.kind(), std::io::ErrorKind::AlreadyExists);
@@ -1194,15 +1232,15 @@ mod tests {
     }
 
     #[test]
-    fn exclusive_copy_fallback_removes_its_claim_on_cancellation() {
+    fn claimed_rename_fallback_removes_its_claim_on_cancellation() {
         let dir = tempfile::tempdir().unwrap();
         let destination = dir.path().join("cancelled");
         let temporary = publish_temp_for(&destination).unwrap();
         std::fs::write(temporary.path(), vec![0x5a; 1024 * 1024]).unwrap();
         let mut checks = 0;
-        let result = publish_by_exclusive_copy(temporary, &destination, || {
+        let result = publish_by_claimed_rename(temporary, &destination, || {
             checks += 1;
-            checks < 4
+            checks < 3
         });
 
         assert_eq!(result.unwrap_err().kind(), std::io::ErrorKind::Interrupted);
@@ -1211,7 +1249,7 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn exclusive_copy_fallback_keeps_partial_output_private() {
+    fn claimed_rename_fallback_keeps_the_destination_claim_private() {
         use std::os::unix::fs::PermissionsExt as _;
 
         let dir = tempfile::tempdir().unwrap();
@@ -1224,15 +1262,13 @@ mod tests {
             .unwrap();
         let mut checks = 0;
 
-        publish_by_exclusive_copy(temporary, &destination, || {
+        publish_by_claimed_rename(temporary, &destination, || {
             checks += 1;
             if checks == 2 {
-                let mode = std::fs::metadata(&destination)
-                    .unwrap()
-                    .permissions()
-                    .mode()
-                    & 0o777;
-                assert_eq!(mode, 0o600, "partial destination stays private");
+                let metadata = std::fs::metadata(&destination).unwrap();
+                assert_eq!(metadata.len(), 0, "destination remains an empty claim");
+                let mode = metadata.permissions().mode() & 0o777;
+                assert_eq!(mode, 0o600, "empty destination claim stays private");
             }
             true
         })
@@ -1246,10 +1282,15 @@ mod tests {
                 & 0o777,
             0o644
         );
+        assert_eq!(
+            std::fs::read(&destination).unwrap(),
+            b"complete payload",
+            "the final name is published only with complete bytes"
+        );
     }
 
     #[test]
-    fn exclusive_copy_fallback_publishes_complete_bytes() {
+    fn claimed_rename_fallback_publishes_complete_bytes() {
         use std::io::Write as _;
 
         let dir = tempfile::tempdir().unwrap();
@@ -1260,7 +1301,7 @@ mod tests {
             .write_all(b"complete payload")
             .unwrap();
 
-        publish_by_exclusive_copy(temporary, &destination, || true).unwrap();
+        publish_by_claimed_rename(temporary, &destination, || true).unwrap();
 
         assert_eq!(std::fs::read(&destination).unwrap(), b"complete payload");
     }

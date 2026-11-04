@@ -891,10 +891,7 @@ fn live_handoff_entry_at(url: &str, now: SystemTime) -> Option<HandoffCookies> {
     handoff_entry(url).filter(|entry| handoff_jar_usable_at(entry, now))
 }
 
-/// True when a staged jar may replace `--cookies-from-browser`. A jar is only
-/// a snapshot of a browser session: after [`HANDOFF_FRESH`] it must not be used
-/// even when no live browser is configured, or a stale `cf_clearance` keeps
-/// being replayed into the extractor.
+/// True when a staged jar is fresh enough to replace a live browser export.
 fn handoff_jar_usable_at(entry: &HandoffCookies, now: SystemTime) -> bool {
     // SystemTime includes suspend duration on Linux. A backwards wall-clock
     // adjustment fails closed as stale.
@@ -903,9 +900,12 @@ fn handoff_jar_usable_at(entry: &HandoffCookies, now: SystemTime) -> bool {
 }
 
 fn ytdlp_spawn_identity_at(cookies_browser: &str, page_url: &str, now: SystemTime) -> Vec<String> {
+    let browser_configured = crate::video_tools::cookies_browser_spec(cookies_browser).is_some();
     let entry = handoff_entry(page_url);
-    // Filter once so the staged UA and cookie jar share the same freshness decision.
-    let usable = entry.filter(|entry| handoff_jar_usable_at(entry, now));
+    // Prefer a fresh handoff over a browser export. When no browser source is
+    // configured, retain the staged jar as the only available credential even
+    // after its freshness window; its cookie-file identity stays memory-only.
+    let usable = entry.filter(|entry| handoff_jar_usable_at(entry, now) || !browser_configured);
     let user_agent = usable
         .as_ref()
         .and_then(|entry| entry.user_agent.as_deref());
@@ -1996,25 +1996,28 @@ mod tests {
         );
         assert!(fresh.iter().any(|a| a == "UA/1"));
         let later = now + HANDOFF_FRESH + Duration::from_secs(1);
-        let stale = ytdlp_spawn_identity_at("brave", url, later);
-        assert!(!stale.iter().any(|a| a == "--cookies"));
+        let configured = ytdlp_spawn_identity_at("brave", url, later);
+        assert!(!configured.iter().any(|a| a == "--cookies"));
         assert!(
-            stale
+            configured
                 .iter()
                 .any(|a| a.starts_with("--cookies-from-browser="))
         );
         // The stale jar's UA must not be paired with the configured browser's
-        // live cookies; keep the UA only when the staged jar is used.
-        assert!(!stale.iter().any(|a| a == "UA/1"));
-        // A stale jar is never used, even without a live source.
+        // live cookies.
+        assert!(!configured.iter().any(|a| a == "UA/1"));
+
+        // Without a live browser source the staged jar is still better than
+        // silently starting an authenticated download anonymously.
         let offline = ytdlp_spawn_identity_at("none", url, later);
-        assert!(!offline.iter().any(|a| a == "--cookies"));
-        assert!(!offline.iter().any(|a| a == "UA/1"));
+        assert_eq!(offline[0], "--cookies");
+        assert_eq!(offline[1], path.to_string_lossy().into_owned());
+        assert!(offline.iter().any(|a| a == "UA/1"));
         clear_handoff_cookies();
     }
 
     #[test]
-    fn a_stale_jar_leaves_the_lookup_cacheable() {
+    fn an_offline_stale_jar_remains_an_authenticated_cache_identity() {
         let _g = exclusive();
         let url = "https://www.youtube.com/watch?v=cache-identity";
         let path = write_handoff_cookies(url, &[cookie("c", "v")]).expect("path");
@@ -2023,14 +2026,15 @@ mod tests {
         assert!(fresh.iter().any(|a| a == "--cookies"));
         let stale_at = SystemTime::now() + HANDOFF_FRESH + Duration::from_secs(1);
         let args = ytdlp_spawn_identity_at("none", url, stale_at);
-        assert!(!args.iter().any(|a| a == "--cookies"));
+        assert!(args.iter().any(|a| a == "--cookies"));
         let directory = tempfile::tempdir().expect("temporary directory");
         let binary = directory.path().join("yt-dlp");
         std::fs::write(&binary, b"fake yt-dlp binary").expect("write fake binary");
+        let key = crate::video_cache::cache_key(url, &binary, "2026.10.23", "none", None, &args)
+            .expect("an offline handoff jar should still produce an extraction key");
         assert!(
-            crate::video_cache::cache_key(url, &binary, "2026.10.23", "none", None, &args)
-                .is_some(),
-            "a stale jar must not keep metadata caching disabled"
+            key.starts_with("grab-ytdlp-video-auth-v1:"),
+            "handoff-cookie metadata must stay in the authenticated in-memory namespace"
         );
         clear_handoff_cookies();
     }

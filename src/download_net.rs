@@ -287,16 +287,25 @@ pub(crate) fn http_client() -> Result<reqwest::Client, String> {
     client_builder().build().map_err(|e| e.to_string())
 }
 
+/// Apply the resolved proxy chain consistently to every attempt-scoped client.
+fn apply_proxies(
+    mut builder: reqwest::ClientBuilder,
+    proxy: Option<&ResolvedProxy>,
+) -> reqwest::ClientBuilder {
+    if let Some(proxy) = proxy {
+        for resolved in &proxy.proxies {
+            builder = builder.proxy(resolved.clone());
+        }
+    }
+    builder
+}
+
 /// Build one client per download attempt. Connection pooling stays shared within
 /// its requests and range workers, but DNS policy does not leak to other rows.
 pub(crate) fn http_client_for(proxy: Option<&ResolvedProxy>) -> Result<reqwest::Client, String> {
-    let mut builder = client_builder();
-    if let Some(proxy) = proxy {
-        for p in &proxy.proxies {
-            builder = builder.proxy(p.clone());
-        }
-    }
-    builder.build().map_err(|e| e.to_string())
+    apply_proxies(client_builder(), proxy)
+        .build()
+        .map_err(|error| error.to_string())
 }
 
 /// Read-only view of a cookie jar for reqwest's cookie provider: staged
@@ -311,13 +320,9 @@ pub(crate) fn http_client_with_jar(
     proxy: Option<&ResolvedProxy>,
     jar: std::sync::Arc<reqwest::cookie::Jar>,
 ) -> Result<reqwest::Client, String> {
-    let mut b = client_builder().cookie_provider(jar);
-    if let Some(p) = proxy {
-        for x in &p.proxies {
-            b = b.proxy(x.clone());
-        }
-    }
-    b.build().map_err(|e| e.to_string())
+    apply_proxies(client_builder().cookie_provider(jar), proxy)
+        .build()
+        .map_err(|error| error.to_string())
 }
 
 /// Build an attempt-scoped client with browser-bound cookies and the matching user agent.
@@ -326,13 +331,12 @@ pub(crate) fn http_client_with_jar_and_user_agent(
     jar: std::sync::Arc<reqwest::cookie::Jar>,
     user_agent: &str,
 ) -> Result<reqwest::Client, String> {
-    let mut builder = client_builder().cookie_provider(jar).user_agent(user_agent);
-    if let Some(proxy) = proxy {
-        for resolved in &proxy.proxies {
-            builder = builder.proxy(resolved.clone());
-        }
-    }
-    builder.build().map_err(|error| error.to_string())
+    apply_proxies(
+        client_builder().cookie_provider(jar).user_agent(user_agent),
+        proxy,
+    )
+    .build()
+    .map_err(|error| error.to_string())
 }
 
 fn private_v4(a: Ipv4Addr) -> bool {
@@ -814,13 +818,9 @@ pub(crate) fn http_client_for_with_dns_overrides_for_test(
 ) -> Result<(reqwest::Client, Arc<AtomicBool>), String> {
     let (redirect, resolver) = guarded_network_policy_with_dns_overrides(overrides);
     let dns_override_hits = Arc::clone(&resolver.dns_override_hits);
-    let mut builder = client_builder_with_policy(redirect, resolver);
-    if let Some(proxy) = proxy {
-        for resolved in &proxy.proxies {
-            builder = builder.proxy(resolved.clone());
-        }
-    }
-    let client = builder.build().map_err(|error| error.to_string())?;
+    let client = apply_proxies(client_builder_with_policy(redirect, resolver), proxy)
+        .build()
+        .map_err(|error| error.to_string())?;
     Ok((client, dns_override_hits))
 }
 

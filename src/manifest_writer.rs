@@ -111,6 +111,36 @@ struct DestinationPart {
     track: crate::manifest_destination::TrackKind,
 }
 
+enum WriterMode {
+    #[cfg(test)]
+    Staged,
+    #[cfg(test)]
+    StagedRetainingCheckpoint,
+    DestinationPart(DestinationPart),
+    AppendableDestinationPart(DestinationPart),
+    AppendableDestinationPartRetainingSources(DestinationPart),
+}
+
+impl WriterMode {
+    fn into_parts(self) -> (CheckpointPolicy, Option<DestinationPart>, bool) {
+        match self {
+            #[cfg(test)]
+            Self::Staged => (CheckpointPolicy::RemoveAfterPublish, None, false),
+            #[cfg(test)]
+            Self::StagedRetainingCheckpoint => (CheckpointPolicy::RetainAfterPublish, None, false),
+            Self::DestinationPart(part) => {
+                (CheckpointPolicy::RetainAfterPublish, Some(part), false)
+            }
+            Self::AppendableDestinationPart(part) => {
+                (CheckpointPolicy::RetainAfterPublish, Some(part), true)
+            }
+            Self::AppendableDestinationPartRetainingSources(part) => {
+                (CheckpointPolicy::RetainSources, Some(part), true)
+            }
+        }
+    }
+}
+
 struct HashingWriter<'a> {
     output: &'a mut tokio::fs::File,
     digest: Sha256,
@@ -175,13 +205,11 @@ impl OrderedTrackWriter {
         directory: &Path,
         filename: &str,
     ) -> Result<(Option<Self>, u64), String> {
-        Box::pin(Self::open_with_policy(
+        Box::pin(Self::open_with_mode(
             resources,
             directory,
             filename,
-            CheckpointPolicy::RemoveAfterPublish,
-            None,
-            false,
+            WriterMode::Staged,
         ))
         .await
     }
@@ -200,13 +228,11 @@ impl OrderedTrackWriter {
         directory: &Path,
         filename: &str,
     ) -> Result<(Option<Self>, u64), String> {
-        Box::pin(Self::open_with_policy(
+        Box::pin(Self::open_with_mode(
             resources,
             directory,
             filename,
-            CheckpointPolicy::RetainAfterPublish,
-            None,
-            false,
+            WriterMode::StagedRetainingCheckpoint,
         ))
         .await
     }
@@ -227,18 +253,16 @@ impl OrderedTrackWriter {
         item_id: u64,
         track: crate::manifest_destination::TrackKind,
     ) -> Result<(Option<Self>, u64), String> {
-        Box::pin(Self::open_with_policy(
+        Box::pin(Self::open_with_mode(
             resources,
             directory,
             filename,
-            CheckpointPolicy::RetainAfterPublish,
-            Some(DestinationPart {
+            WriterMode::DestinationPart(DestinationPart {
                 staging: staging.to_path_buf(),
                 destination: destination.to_path_buf(),
                 item_id,
                 track,
             }),
-            false,
         ))
         .await
     }
@@ -260,18 +284,16 @@ impl OrderedTrackWriter {
         item_id: u64,
         track: crate::manifest_destination::TrackKind,
     ) -> Result<(Option<Self>, u64), String> {
-        Box::pin(Self::open_with_policy(
+        Box::pin(Self::open_with_mode(
             resources,
             directory,
             filename,
-            CheckpointPolicy::RetainAfterPublish,
-            Some(DestinationPart {
+            WriterMode::AppendableDestinationPart(DestinationPart {
                 staging: staging.to_path_buf(),
                 destination: destination.to_path_buf(),
                 item_id,
                 track,
             }),
-            true,
         ))
         .await
     }
@@ -292,30 +314,27 @@ impl OrderedTrackWriter {
         item_id: u64,
         track: crate::manifest_destination::TrackKind,
     ) -> Result<(Option<Self>, u64), String> {
-        Box::pin(Self::open_with_policy(
+        Box::pin(Self::open_with_mode(
             resources,
             directory,
             filename,
-            CheckpointPolicy::RetainSources,
-            Some(DestinationPart {
+            WriterMode::AppendableDestinationPartRetainingSources(DestinationPart {
                 staging: staging.to_path_buf(),
                 destination: destination.to_path_buf(),
                 item_id,
                 track,
             }),
-            true,
         ))
         .await
     }
 
-    async fn open_with_policy(
+    async fn open_with_mode(
         resources: Vec<String>,
         directory: &Path,
         filename: &str,
-        checkpoint_policy: CheckpointPolicy,
-        destination_part: Option<DestinationPart>,
-        append_only: bool,
+        mode: WriterMode,
     ) -> Result<(Option<Self>, u64), String> {
+        let (checkpoint_policy, destination_part, append_only) = mode.into_parts();
         if resources.is_empty() {
             return Err("The manifest recording contains no media resources".to_string());
         }
@@ -448,80 +467,57 @@ impl OrderedTrackWriter {
                 .map_err(|error| format!("Could not open the ordered manifest track: {error}"))?
         };
         if let Some(migration_source) = migration_source {
-            let mut input = match open_regular_file_no_follow_async(&migration_source).await {
-                Ok(file) => file,
-                Err(error) => {
-                    drop(output);
-                    if let Some(destination_part) = destination_part.as_ref() {
-                        let _ = crate::manifest_destination::remove_owned_part_async(
-                            destination_part.staging.clone(),
-                            destination_part.destination.clone(),
-                            destination_part.item_id,
-                            destination_part.track,
+            let migration = async {
+                let mut input = open_regular_file_no_follow_async(&migration_source)
+                    .await
+                    .map_err(|error| {
+                        format!(
+                            "Could not safely open the completed staging track for migration: {error}"
                         )
-                        .await;
-                    }
-                    return Err(format!(
-                        "Could not safely open the completed staging track for migration: {error}"
-                    ));
-                }
-            };
-            verify_resource_ranges_file(&mut input, &migration_source, &committed_resources)
-                .await?;
-            input
-                .seek(std::io::SeekFrom::Start(0))
-                .await
-                .map_err(|error| {
-                    format!("Could not rewind the completed staging track: {error}")
+                    })?;
+                verify_resource_ranges_file(&mut input, &migration_source, &committed_resources)
+                    .await?;
+                input
+                    .seek(std::io::SeekFrom::Start(0))
+                    .await
+                    .map_err(|error| {
+                        format!("Could not rewind the completed staging track: {error}")
+                    })?;
+                output.set_len(0).await.map_err(|error| {
+                    format!("Could not reset the destination manifest part for migration: {error}")
                 })?;
-            output.set_len(0).await.map_err(|error| {
-                format!("Could not reset the destination manifest part for migration: {error}")
-            })?;
-            output
-                .seek(std::io::SeekFrom::Start(0))
-                .await
-                .map_err(|error| {
-                    format!("Could not seek to the start of the destination manifest part: {error}")
+                output
+                    .seek(std::io::SeekFrom::Start(0))
+                    .await
+                    .map_err(|error| {
+                        format!("Could not seek to the start of the destination manifest part: {error}")
+                    })?;
+                let copied = tokio::io::copy(&mut input, &mut output)
+                    .await
+                    .map_err(|error| format!("Could not migrate the completed staging track: {error}"))?;
+                if copied != committed_offset {
+                    return Err(
+                        "The completed staging track length does not match its checkpoint"
+                            .to_string(),
+                    );
+                }
+                output.sync_all().await.map_err(|error| {
+                    format!("Could not sync the migrated destination manifest part: {error}")
                 })?;
-            let copied = match tokio::io::copy(&mut input, &mut output).await {
-                Ok(copied) => copied,
-                Err(error) => {
-                    drop(output);
-                    if let Some(destination_part) = destination_part.as_ref() {
-                        let _ = crate::manifest_destination::remove_owned_part_async(
-                            destination_part.staging.clone(),
-                            destination_part.destination.clone(),
-                            destination_part.item_id,
-                            destination_part.track,
-                        )
-                        .await;
-                    }
-                    return Err(format!(
-                        "Could not migrate the completed staging track: {error}"
-                    ));
+                if let Some(parent) = part.parent() {
+                    sync_directory(parent).await?;
                 }
-            };
-            if copied != committed_offset {
-                drop(output);
-                if let Some(destination_part) = destination_part.as_ref() {
-                    let _ = crate::manifest_destination::remove_owned_part_async(
-                        destination_part.staging.clone(),
-                        destination_part.destination.clone(),
-                        destination_part.item_id,
-                        destination_part.track,
-                    )
-                    .await;
-                }
-                return Err(
-                    "The completed staging track length does not match its checkpoint".to_string(),
-                );
+                Ok::<(), String>(())
             }
-            output.sync_all().await.map_err(|error| {
-                format!("Could not sync the migrated destination manifest part: {error}")
-            })?;
-            if let Some(parent) = part.parent() {
-                sync_directory(parent).await?;
+            .await;
+
+            if let Err(error) = migration {
+                cleanup_failed_destination_migration(output, destination_part.as_ref()).await;
+                return Err(error);
             }
+
+            // Once the destination copy is durable, source cleanup failures must
+            // preserve that copy for recovery rather than deleting the only good data.
             remove_regular_file_if_present(&target).await?;
             sync_directory(directory).await?;
         } else {
@@ -606,6 +602,12 @@ impl OrderedTrackWriter {
     ///
     /// Returns an error if the resource is empty or durable output, journal, or checkpoint I/O fails.
     pub(crate) async fn commit_streamed_resource(&mut self) -> Result<u64, String> {
+        if self.append_only || self.destination_part.is_none() {
+            return Err(
+                "Streamed resource commits require a non-appendable destination-part writer"
+                    .to_string(),
+            );
+        }
         if self.pending_resource_bytes == 0 {
             return Err("The stream server returned an empty HLS fragment".to_string());
         }
@@ -827,12 +829,23 @@ impl OrderedTrackWriter {
     }
 }
 
-/// Remove the owned destination part and its XDG recovery metadata after
-/// the final container has been published successfully.
-///
-/// # Errors
-///
-/// Returns an error if the part is no longer owned by this item or metadata cleanup fails.
+/// Roll back an owned destination part when a legacy staging migration fails.
+async fn cleanup_failed_destination_migration(
+    output: tokio::fs::File,
+    destination_part: Option<&DestinationPart>,
+) {
+    drop(output);
+    if let Some(destination_part) = destination_part {
+        let _ = crate::manifest_destination::remove_owned_part_async(
+            destination_part.staging.clone(),
+            destination_part.destination.clone(),
+            destination_part.item_id,
+            destination_part.track,
+        )
+        .await;
+    }
+}
+
 pub(crate) async fn cleanup_destination_part(
     staging: &Path,
     track_directory: &Path,
@@ -1560,12 +1573,7 @@ async fn remove_regular_file_if_present(path: &Path) -> Result<(), String> {
 }
 
 fn safe_filename(filename: &str) -> bool {
-    !filename.is_empty()
-        && filename != "."
-        && filename != ".."
-        && !filename.contains('/')
-        && !filename.contains('\\')
-        && !filename.chars().any(char::is_control)
+    crate::file_names::is_single_component(filename) && !filename.contains('\\')
 }
 
 fn plan_fingerprint(resources: &[String]) -> Result<String, String> {

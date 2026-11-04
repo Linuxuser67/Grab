@@ -83,7 +83,7 @@ fn manifest_preview_cache_key(
 ) -> Option<ManifestPreviewCacheKey> {
     let mut url = Url::parse(raw_url).ok()?;
     url.set_fragment(None);
-    if has_rotating_auth_query(&url) {
+    if crate::video_cache::has_rotating_auth_query(&url) {
         return None;
     }
 
@@ -98,41 +98,6 @@ fn manifest_preview_cache_key(
         cookies_browser: effective_browser.to_string(),
         handoff_cookie_path,
         proxy: proxy.map(|resolved| resolved.cli_url.clone()),
-    })
-}
-
-/// Whether a URL carries a known rotating signature or authentication parameter.
-fn has_rotating_auth_query(url: &Url) -> bool {
-    url.query_pairs().any(|(name, _)| {
-        matches!(
-            name.to_ascii_lowercase().as_str(),
-            "token"
-                | "access_token"
-                | "auth"
-                | "authorization"
-                | "sig"
-                | "signature"
-                | "expires"
-                | "expiry"
-                | "policy"
-                | "key-pair-id"
-                | "hmac"
-                | "hdnea"
-                | "hdnts"
-                | "awsaccesskeyid"
-                | "googleaccessid"
-                | "x-amz-algorithm"
-                | "x-amz-credential"
-                | "x-amz-date"
-                | "x-amz-expires"
-                | "x-amz-security-token"
-                | "x-amz-signature"
-                | "x-goog-algorithm"
-                | "x-goog-credential"
-                | "x-goog-date"
-                | "x-goog-expires"
-                | "x-goog-signature"
-        )
     })
 }
 
@@ -170,23 +135,23 @@ fn is_cacheable_static_manifest(lookup: &ManifestLookup) -> bool {
             !plan
                 .variants
                 .iter()
-                .any(|variant| has_rotating_auth_query(&variant.url))
+                .any(|variant| crate::video_cache::has_rotating_auth_query(&variant.url))
                 && !plan
                     .audio_renditions
                     .iter()
                     .filter_map(|rendition| rendition.url.as_ref())
-                    .any(has_rotating_auth_query)
+                    .any(crate::video_cache::has_rotating_auth_query)
                 && !plan
                     .subtitle_renditions
                     .iter()
-                    .any(|rendition| has_rotating_auth_query(&rendition.url))
+                    .any(|rendition| crate::video_cache::has_rotating_auth_query(&rendition.url))
         }
         crate::manifest_types::NativeManifest::HlsMedia(plan) => {
             !plan.is_live
                 && !plan
                     .resources
                     .iter()
-                    .any(|resource| has_rotating_auth_query(&resource.url))
+                    .any(|resource| crate::video_cache::has_rotating_auth_query(&resource.url))
         }
         crate::manifest_types::NativeManifest::Dash(plan) => {
             matches!(

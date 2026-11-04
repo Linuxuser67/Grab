@@ -1415,6 +1415,7 @@ dependencies = [
  "libc",
  "librqbit",
  "m3u8-rs",
+ "mp4box",
  "mpeg-ts",
  "nom 7.1.3",
  "percent-encoding",
@@ -2657,6 +2658,16 @@ name = "mp4ameta"
 version = "0.13.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "453e991b2efe96c288cbc2d03a19e353504294559ecb6c03067fff5bd824616d"
+
+[[package]]
+name = "mp4box"
+version = "0.14.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "7ae7aaf77bec45241eb7d6b94913d42542e5d9718a9551b3e2c3f98893913d5a"
+dependencies = [
+ "anyhow",
+ "serde",
+]
 
 [[package]]
 name = "mpeg-ts"

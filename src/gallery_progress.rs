@@ -122,7 +122,10 @@ mod tests {
     fn parse_progress_percent_and_unknown_total() {
         assert_eq!(parse_progress_line("42%"), ProgressLine::Progress(Some(42)));
         assert_eq!(parse_progress_line("?"), ProgressLine::Progress(None));
-        assert_eq!(parse_progress_line("101%"), ProgressLine::Other("101%".to_string()));
+        assert_eq!(
+            parse_progress_line("101%"),
+            ProgressLine::Other("101%".to_string())
+        );
     }
 
     #[test]
@@ -163,7 +166,10 @@ mod tests {
             resumed.feed(ProgressLine::Skipped("/b.jpg".to_string())),
             None
         );
-        assert_eq!(progress_fraction(resumed.files_done(), Some(50), 4), Some(0.625));
+        assert_eq!(
+            progress_fraction(resumed.files_done(), Some(50), 4),
+            Some(0.625)
+        );
     }
 
     #[test]

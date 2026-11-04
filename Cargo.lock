@@ -360,7 +360,9 @@ version = "10.0.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "929cfb6b3467025a1bb59c716fb91d7a2cead89560e18160b3a550c37bf33a8f"
 dependencies = [
+ "chrono",
  "hex",
+ "serde",
 ]
 
 [[package]]
@@ -2664,6 +2666,7 @@ checksum = "58e29fe9663eaab1366e35fee07415500dca8fde1ba58df7cfa5a363920f0b97"
 dependencies = [
  "broadcast-common",
  "bytes",
+ "serde",
  "thiserror 2.0.21",
 ]
 

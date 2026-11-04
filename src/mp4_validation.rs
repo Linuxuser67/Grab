@@ -41,13 +41,11 @@ where
     let mut has_media_data = false;
 
     for box_ref in &boxes {
-        match box_ref.hdr.typ.0 {
-            *b"ftyp" => has_file_type = true,
-            *b"moov" => has_movie = true,
-            *b"moof" => has_movie_fragment = true,
-            *b"mdat" => has_media_data = true,
-            _ => {}
-        }
+        let box_type = box_ref.hdr.typ.0;
+        has_file_type |= box_type == *b"ftyp";
+        has_movie |= box_type == *b"moov";
+        has_movie_fragment |= box_type == *b"moof";
+        has_media_data |= box_type == *b"mdat";
     }
 
     (has_file_type && has_movie) || (has_movie_fragment && has_media_data)

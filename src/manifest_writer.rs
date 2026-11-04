@@ -112,7 +112,9 @@ struct DestinationPart {
 }
 
 enum WriterMode {
+    #[cfg(test)]
     Staged,
+    #[cfg(test)]
     StagedRetainingCheckpoint,
     DestinationPart(DestinationPart),
     AppendableDestinationPart(DestinationPart),
@@ -122,8 +124,12 @@ enum WriterMode {
 impl WriterMode {
     fn into_parts(self) -> (CheckpointPolicy, Option<DestinationPart>, bool) {
         match self {
+            #[cfg(test)]
             Self::Staged => (CheckpointPolicy::RemoveAfterPublish, None, false),
-            Self::StagedRetainingCheckpoint => (CheckpointPolicy::RetainAfterPublish, None, false),
+            #[cfg(test)]
+            Self::StagedRetainingCheckpoint => {
+                (CheckpointPolicy::RetainAfterPublish, None, false)
+            }
             Self::DestinationPart(part) => {
                 (CheckpointPolicy::RetainAfterPublish, Some(part), false)
             }

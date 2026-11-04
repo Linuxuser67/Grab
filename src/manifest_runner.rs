@@ -3553,6 +3553,15 @@ mod tests {
         bytes
     }
 
+    fn valid_fmp4_init_segment() -> Vec<u8> {
+        let mut ftyp_payload = Vec::from(*b"isom");
+        ftyp_payload.extend_from_slice(&0_u32.to_be_bytes());
+        ftyp_payload.extend_from_slice(b"isom");
+        let ftyp = fmp4_box(b"ftyp", &ftyp_payload);
+        let moov = fmp4_box(b"moov", &[]);
+        [ftyp, moov].concat()
+    }
+
     fn valid_fmp4_media_segment(sequence_number: u32, media_data: &[u8]) -> Vec<u8> {
         let mut mfhd_payload = vec![0, 0, 0, 0];
         mfhd_payload.extend_from_slice(&sequence_number.to_be_bytes());
@@ -3759,7 +3768,7 @@ segment-2.ts
             .await
             .expect("bind fMP4 fragment server");
         let address = listener.local_addr().expect("fMP4 server address");
-        let init = b"\x00\x00\x00\x10ftyp\x00\x00\x00\x00\x00\x00\x00\x00".to_vec();
+        let init = valid_fmp4_init_segment();
         let first = valid_fmp4_media_segment(1, &[0x12, 0x34]);
         let second = valid_fmp4_media_segment(2, &[0x56, 0x78]);
         let init_response = init.clone();

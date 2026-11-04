@@ -130,6 +130,16 @@ fn requested_range(request: &str) -> Option<&str> {
     })
 }
 
+#[test]
+fn fetcher_accepts_grabs_guarded_reqwest_client() {
+    let client = crate::download_net::http_client_for(None)
+        .expect("build Grab's guarded HTTP client");
+    let _fetcher = Fetcher::with_client(
+        "https://cdn.example.test/asset.bin",
+        Arc::new(client),
+    );
+}
+
 fn fetcher(url: &str, segment_size: usize) -> Fetcher {
     let client = Arc::new(
         reqwest::Client::builder()

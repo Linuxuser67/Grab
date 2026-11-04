@@ -4,13 +4,13 @@
 
 This is a controlled, test-only evaluation of yt_dlp::download::Fetcher from the exact yt-dlp = 2.9.1 version already pinned by Grab. It does not change the production downloader or add a dependency.
 
-The compatibility probes use a shared reqwest::Client, a local HTTP server, and destinations inside tempfile directories. They do not access the network or write to user download locations.
+The compatibility probes use destinations inside tempfile directories and a local HTTP server. A separate no-network construction test passes Grab's actual `download_net::http_client_for(None)` guarded client into `Fetcher::with_client`, verifying API type compatibility. The loopback transfer fixture uses an isolated no-proxy client because Grab's production resolver correctly rejects private/loopback destinations by default. No probe accesses the public network or writes to user download locations.
 
 ## Result
 
 **Do not replace Grab's plain HTTP engine with Fetcher 2.9.1.**
 
-The positive probe confirms that Fetcher::with_client accepts and reuses an externally created Arc<reqwest::Client> and can download a normal range-capable HTTP resource. The negative probes show that this transport reuse is not enough to preserve Grab's download correctness and filesystem guarantees.
+The no-network construction probe confirms that `Fetcher::with_client` accepts the exact reqwest client type returned by Grab's guarded client builder. A separate loopback transfer probe confirms that the crate can download a normal range-capable HTTP resource when supplied an isolated reqwest client. The negative probes show that this transport reuse is not enough to preserve Grab's download correctness and filesystem guarantees.
 
 ## Findings
 

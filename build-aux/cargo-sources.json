@@ -4441,7 +4441,7 @@
     },
     {
         "type": "inline",
-        "contents": "{\"package\":\"115dffd5f3853e06e746965a20dcbae6ee747ae30b543d91b0e089668bb07798\",\"files\":{}}",
+        "contents": "{\"package\": \"115dffd5f3853e06e746965a20dcbae6ee747ae30b543d91b0e089668bb07798\", \"files\": {}}",
         "dest": "cargo/serde_ignored-0.1.14",
         "dest-filename": ".cargo-checksum.json"
     },

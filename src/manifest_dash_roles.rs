@@ -13,7 +13,7 @@ const DASH_MPD_NAMESPACE: &str = "urn:mpeg:dash:schema:mpd:2011";
 /// Maximum XML nesting accepted by this small metadata pass.
 const MAX_ELEMENT_DEPTH: usize = 32;
 /// Role scheme used to identify the main audio or subtitle representation.
-const DASH_ROLE_SCHEME: &str = "urn:mpeg:dash:role:2011";
+pub(super) const DASH_ROLE_SCHEME: &str = "urn:mpeg:dash:role:2011";
 
 #[derive(Clone, Copy)]
 enum Element {
@@ -92,21 +92,21 @@ fn push_element(
         return None;
     }
 
-    let name = local_name(start.name().as_ref());
+    let name = start.name().local_name().as_ref();
     let in_mpd_namespace = matches!(
         namespace,
         ResolveResult::Bound(namespace) if namespace.into_inner() == DASH_MPD_NAMESPACE
     );
     let element = match (stack.last().copied(), name, in_mpd_namespace) {
-        (None, b"MPD", true) => Element::Mpd,
-        (Some(Element::Mpd), b"Period", true) => {
+        (None, "MPD", true) => Element::Mpd,
+        (Some(Element::Mpd), "Period", true) => {
             if !periods.is_empty() {
                 return None;
             }
             periods.push(Vec::new());
             Element::Period
         }
-        (Some(Element::Period), b"AdaptationSet", true) => {
+        (Some(Element::Period), "AdaptationSet", true) => {
             *adaptation_count = (*adaptation_count).checked_add(1)?;
             if *adaptation_count > max_representations {
                 return None;
@@ -114,7 +114,7 @@ fn push_element(
             periods.last_mut()?.push(Vec::new());
             Element::AdaptationSet
         }
-        (Some(Element::AdaptationSet), b"Representation", true) => {
+        (Some(Element::AdaptationSet), "Representation", true) => {
             *representation_count = (*representation_count).checked_add(1)?;
             if *representation_count > max_representations {
                 return None;
@@ -122,7 +122,7 @@ fn push_element(
             periods.last_mut()?.last_mut()?.push(false);
             Element::Representation
         }
-        (Some(Element::Representation), b"Role", true) => {
+        (Some(Element::Representation), "Role", true) => {
             if is_main_role(start)? {
                 *periods.last_mut()?.last_mut()?.last_mut()? = true;
             }
@@ -140,8 +140,8 @@ fn is_main_role(start: &BytesStart<'_>) -> Option<bool> {
 
     for attribute in start.attributes() {
         let attribute = attribute.ok()?;
-        match attribute.key.as_ref() {
-            b"schemeIdUri" => {
+        match attribute.key.local_name().as_ref() {
+            "schemeIdUri" => {
                 scheme = Some(
                     attribute
                         .normalized_value(XmlVersion::Implicit1_0)
@@ -149,7 +149,7 @@ fn is_main_role(start: &BytesStart<'_>) -> Option<bool> {
                         .into_owned(),
                 );
             }
-            b"value" => {
+            "value" => {
                 value = Some(
                     attribute
                         .normalized_value(XmlVersion::Implicit1_0)
@@ -162,10 +162,6 @@ fn is_main_role(start: &BytesStart<'_>) -> Option<bool> {
     }
 
     Some(scheme.as_deref() == Some(DASH_ROLE_SCHEME) && value.as_deref() == Some("main"))
-}
-
-fn local_name(name: &[u8]) -> &[u8] {
-    name.rsplit(|byte| *byte == b':').next().unwrap_or(name)
 }
 
 #[cfg(test)]

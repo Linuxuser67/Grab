@@ -344,8 +344,7 @@ pub(crate) fn parse_dash_manifest_at(
         }
 
         let adaptation_base = resolve_base_url(period_base.clone(), &adaptation.BaseURL)?;
-        for (representation_index, representation) in
-            adaptation.representations.iter().enumerate()
+        for (representation_index, representation) in adaptation.representations.iter().enumerate()
         {
             let representation_is_main = *adaptation_main_roles
                 .get(representation_index)

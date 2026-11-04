@@ -3,10 +3,10 @@
 //! The main MPD parser owns validation and resource planning. This bounded,
 //! streaming pass retains only representation-level main-role flags.
 
+use quick_xml::XmlVersion;
 use quick_xml::events::{BytesStart, Event};
 use quick_xml::name::ResolveResult;
 use quick_xml::reader::NsReader;
-use quick_xml::XmlVersion;
 
 /// DASH MPD elements are identified by this namespace, regardless of prefix.
 const DASH_MPD_NAMESPACE: &str = "urn:mpeg:dash:schema:mpd:2011";
@@ -161,10 +161,7 @@ fn is_main_role(start: &BytesStart<'_>) -> Option<bool> {
         }
     }
 
-    Some(
-        scheme.as_deref() == Some(DASH_ROLE_SCHEME)
-            && value.as_deref() == Some("main"),
-    )
+    Some(scheme.as_deref() == Some(DASH_ROLE_SCHEME) && value.as_deref() == Some("main"))
 }
 
 fn local_name(name: &[u8]) -> &[u8] {
@@ -209,15 +206,13 @@ mod tests {
   </mpd:Period>
 </mpd:MPD>"#;
 
-        assert_eq!(
-            representation_main_roles(body, 1),
-            Some(vec![vec![true]])
-        );
+        assert_eq!(representation_main_roles(body, 1), Some(vec![vec![true]]));
     }
 
     #[test]
     fn ignores_foreign_namespaces_without_shifting_representation_indexes() {
-        let body = br#"<MPD xmlns="urn:mpeg:dash:schema:mpd:2011" xmlns:foreign="urn:example:foreign">
+        let body =
+            br#"<MPD xmlns="urn:mpeg:dash:schema:mpd:2011" xmlns:foreign="urn:example:foreign">
   <Period>
     <AdaptationSet>
       <foreign:Representation id="not-a-dash-representation">
@@ -230,10 +225,7 @@ mod tests {
   </Period>
 </MPD>"#;
 
-        assert_eq!(
-            representation_main_roles(body, 1),
-            Some(vec![vec![true]])
-        );
+        assert_eq!(representation_main_roles(body, 1), Some(vec![vec![true]]));
     }
 
     #[test]
@@ -249,11 +241,7 @@ mod tests {
 
     #[test]
     fn rejects_excessive_xml_nesting() {
-        let nested_tags = format!(
-            "{}{}",
-            "<Other>".repeat(32),
-            "</Other>".repeat(32)
-        );
+        let nested_tags = format!("{}{}", "<Other>".repeat(32), "</Other>".repeat(32));
         let nested = format!(
             r#"<MPD xmlns="urn:mpeg:dash:schema:mpd:2011"><Period><AdaptationSet><Representation>{}</Representation></AdaptationSet></Period></MPD>"#,
             nested_tags

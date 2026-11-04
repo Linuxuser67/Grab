@@ -110,10 +110,7 @@ fn restore_persistent_cache_record(key: &str, mut video: Video) -> Option<Video>
     Some(video)
 }
 
-fn prune_authenticated_previews(
-    previews: &mut HashMap<String, (Instant, Video)>,
-    now: Instant,
-) {
+fn prune_authenticated_previews(previews: &mut HashMap<String, (Instant, Video)>, now: Instant) {
     previews.retain(|_, (stored_at, _)| {
         now.saturating_duration_since(*stored_at) < AUTHENTICATED_PREVIEW_TTL
     });
@@ -564,9 +561,9 @@ pub(crate) fn has_rotating_auth_query(url: &url::Url) -> bool {
 mod tests {
     use super::{
         AUTHENTICATED_PREVIEW_TTL, AUTHENTICATED_VIDEO_NAMESPACE, cache_key,
-        has_rotating_auth_query, lookup_video, persistent_cache_record,
-        playlist_cache_key, prune_authenticated_previews, restore_persistent_cache_record,
-        store_video, validate_cache_file_path,
+        has_rotating_auth_query, lookup_video, persistent_cache_record, playlist_cache_key,
+        prune_authenticated_previews, restore_persistent_cache_record, store_video,
+        validate_cache_file_path,
     };
     use crate::net_types::ResolvedProxy;
     use std::collections::HashMap;

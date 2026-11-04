@@ -205,8 +205,9 @@ struct DashListSegment {
 ///
 /// Dynamic support is limited to HTTPS SegmentTemplate presentations with a
 /// finite MPD update interval and complete segments. Multiple periods, DRM,
-/// XLink, dynamic SegmentList, LL-DASH, SegmentBase, indexed addressing,
-/// non-zero presentation-time offsets, and WebM remain on yt-dlp fallback.
+/// XLink, adaptation-set Subset/Preselection combinations, dynamic SegmentList,
+/// LL-DASH, SegmentBase, indexed addressing, non-zero presentation-time offsets,
+/// and WebM remain on yt-dlp fallback.
 ///
 /// # Errors
 /// Returns an error when the MPD is malformed, exceeds the input limit, uses
@@ -290,6 +291,12 @@ pub(crate) fn parse_dash_manifest_at(
     let [period] = mpd.periods.as_slice() else {
         return Err(DashError::UnsupportedPresentation);
     };
+    // Subset constrains which AdaptationSets may be selected together, while
+    // Preselection declares a coordinated set of media components. Grab's
+    // independent video/audio track selection cannot honor either constraint.
+    if !period.subsets.is_empty() || !period.pre_selections.is_empty() {
+        return Err(DashError::UnsupportedPresentation);
+    }
     let representation_metadata =
         dash_roles::representation_metadata(body.as_bytes(), MAX_REPRESENTATIONS)
             .ok_or(DashError::Parse)?;
@@ -2618,6 +2625,50 @@ mod tests {
                 "unsupported MPD should not enter native path: {body}"
             );
         }
+    }
+
+    #[test]
+    fn rejects_subset_and_preselection_combinations() {
+        let subset = r#"<?xml version="1.0"?>
+<MPD xmlns="urn:mpeg:dash:schema:mpd:2011" type="static" mediaPresentationDuration="PT2S">
+  <Period duration="PT2S">
+    <Subset id="1" contains="1 2"/>
+    <AdaptationSet id="1" contentType="video" mimeType="video/mp4">
+      <SegmentTemplate duration="2" media="video-$Number$.m4s"/>
+      <Representation id="v1"/>
+    </AdaptationSet>
+    <AdaptationSet id="2" contentType="audio" mimeType="audio/mp4">
+      <SegmentTemplate duration="2" media="audio-$Number$.m4s"/>
+      <Representation id="a1"/>
+    </AdaptationSet>
+  </Period>
+</MPD>"#;
+        let preselection = r#"<?xml version="1.0"?>
+<MPD xmlns="urn:mpeg:dash:schema:mpd:2011" type="static" mediaPresentationDuration="PT2S">
+  <Period duration="PT2S">
+    <AdaptationSet id="1" contentType="audio" mimeType="audio/mp4">
+      <SegmentTemplate duration="2" media="audio-$Number$.m4s"/>
+      <Representation id="a1"/>
+    </AdaptationSet>
+    <Preselection id="main" tag="main" preselectionComponents="1"
+                  codecs="ac-4.02.01.03"/>
+  </Period>
+</MPD>"#;
+
+        let parsed_subset = dash_mpd_core::parse(subset).expect("Subset fixture MPD should parse");
+        assert_eq!(parsed_subset.periods[0].subsets.len(), 1);
+        assert_eq!(
+            parse_dash_manifest(BASE_URL, subset).err(),
+            Some(DashError::UnsupportedPresentation)
+        );
+
+        let parsed_preselection =
+            dash_mpd_core::parse(preselection).expect("Preselection fixture MPD should parse");
+        assert_eq!(parsed_preselection.periods[0].pre_selections.len(), 1);
+        assert_eq!(
+            parse_dash_manifest(BASE_URL, preselection).err(),
+            Some(DashError::UnsupportedPresentation)
+        );
     }
 
     #[test]

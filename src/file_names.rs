@@ -777,8 +777,8 @@ where
     claim_and_rename_while(temporary.path(), destination, should_continue)
 }
 
-/// Persist a temporary without clobbering, using an exclusive-copy fallback when
-/// the filesystem supports neither no-replace rename nor hard links.
+/// Persist a temporary without clobbering, using an exclusive claim-and-rename
+/// fallback when the filesystem supports neither no-replace rename nor hard links.
 pub(crate) fn persist_noclobber_with_fallback<F>(
     temporary: tempfile::NamedTempFile,
     destination: &std::path::Path,

@@ -1114,6 +1114,13 @@ mod destination_part_tests {
         (bodies, bytes)
     }
 
+    #[test]
+    fn live_hls_poll_interval_is_bounded() {
+        assert_eq!(live_hls_poll_interval(3_600, true), Duration::from_secs(60));
+        assert_eq!(live_hls_poll_interval(3_600, false), Duration::from_secs(30));
+        assert_eq!(live_hls_poll_interval(4, false), Duration::from_secs(2));
+    }
+
     #[tokio::test]
     async fn live_hls_destination_part_appends_in_playlist_order_and_resumes_without_duplication() {
         let staging = tempfile::tempdir().expect("create live HLS staging");

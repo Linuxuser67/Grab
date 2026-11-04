@@ -330,6 +330,21 @@ enum Tracks {
     },
 }
 
+impl Tracks {
+    fn uses_destination_parts(&self) -> bool {
+        match self {
+            Self::Hls { video, audio, .. } => {
+                video.is_destination_assemblable_candidate()
+                    && audio
+                        .as_ref()
+                        .is_none_or(HlsPlan::is_destination_assemblable_candidate)
+            }
+            Self::Dash { .. } => true,
+            Self::DashLiveOffline { .. } => false,
+        }
+    }
+}
+
 #[derive(Debug)]
 struct LiveHlsTrack {
     playlist_url: Url,
@@ -816,6 +831,7 @@ async fn resolve_manifest_tracks(
 struct ManifestStaticTransfer<'a> {
     client: &'a reqwest::Client,
     tracks: &'a Tracks,
+    destination_parts: bool,
     staging: &'a Path,
     destination: &'a Path,
     item_id: u64,
@@ -836,6 +852,7 @@ async fn transfer_static_manifest_tracks(
     let ManifestStaticTransfer {
         client,
         tracks,
+        destination_parts,
         staging,
         destination,
         item_id,
@@ -853,11 +870,7 @@ async fn transfer_static_manifest_tracks(
             subtitle,
             ..
         } => {
-            let use_destination_parts = video.is_destination_assemblable_candidate()
-                && audio
-                    .as_ref()
-                    .is_none_or(HlsPlan::is_destination_assemblable_candidate);
-            if use_destination_parts {
+            if destination_parts {
                 if !fetch_and_write_hls_track(ManifestHlsTrackTransfer {
                     client,
                     staging,
@@ -1410,6 +1423,7 @@ pub(crate) async fn run_manifest_download(
         downloaded,
     } = prepare_manifest_attempt(&job, &tx).await?;
     let mut _finish_stop_sender = None;
+    let static_destination_parts = !live_hls && !live_dash && tracks.uses_destination_parts();
     let mut live_destination_parts = live_dash;
     if live_hls {
         let Tracks::Hls { video, audio, .. } = &tracks else {
@@ -1509,6 +1523,7 @@ pub(crate) async fn run_manifest_download(
     } else if !transfer_static_manifest_tracks(ManifestStaticTransfer {
         client: &client,
         tracks: &tracks,
+        destination_parts: static_destination_parts,
         staging: &staging,
         destination: &job.dest,
         item_id: job.item_id,
@@ -1525,18 +1540,7 @@ pub(crate) async fn run_manifest_download(
     }
     finalize_manifest_download(ManifestFinalization {
         job: &job,
-        destination_parts: live_destination_parts
-            || (!live_hls
-                && !live_dash
-                && (matches!(&tracks, Tracks::Dash { .. })
-                    || matches!(
-                        &tracks,
-                        Tracks::Hls { video, audio, .. }
-                            if video.is_destination_assemblable_candidate()
-                                && audio
-                                    .as_ref()
-                                    .is_none_or(HlsPlan::is_destination_assemblable_candidate)
-                    ))),
+        destination_parts: live_destination_parts || static_destination_parts,
         gate,
         abort,
         tx: &tx,
@@ -1603,36 +1607,22 @@ async fn finalize_manifest_download(
     tx.send(EngineMsg::Phase("Merging audio and video…".to_string()))
         .ok();
 
-    let video_input = match &tracks {
-        Tracks::Hls { .. } if destination_parts => crate::manifest_destination::part_path_async(
+    let video_input = if destination_parts {
+        crate::manifest_destination::part_path_async(
             staging.to_path_buf(),
             job.dest.clone(),
             job.item_id,
             crate::manifest_destination::TrackKind::Video,
         )
         .await
-        .map_err(ManifestRunError::Failed)?,
-        Tracks::Hls { .. } => video_dir.join("local.m3u8"),
-        Tracks::Dash { .. } if destination_parts => crate::manifest_destination::part_path_async(
-            staging.to_path_buf(),
-            job.dest.clone(),
-            job.item_id,
-            crate::manifest_destination::TrackKind::Video,
-        )
-        .await
-        .map_err(ManifestRunError::Failed)?,
-        Tracks::Dash { .. } => video_dir.join("video-track.mp4"),
-        Tracks::DashLiveOffline { .. } if destination_parts => {
-            crate::manifest_destination::part_path_async(
-                staging.to_path_buf(),
-                job.dest.clone(),
-                job.item_id,
-                crate::manifest_destination::TrackKind::Video,
-            )
-            .await
-            .map_err(ManifestRunError::Failed)?
+        .map_err(ManifestRunError::Failed)?
+    } else {
+        match &tracks {
+            Tracks::Hls { .. } => video_dir.join("local.m3u8"),
+            Tracks::Dash { .. } | Tracks::DashLiveOffline { .. } => {
+                video_dir.join("video-track.mp4")
+            }
         }
-        Tracks::DashLiveOffline { .. } => video_dir.join("video-track.mp4"),
     };
     let audio_input = if has_audio {
         Some(if destination_parts {
@@ -2727,7 +2717,22 @@ async fn fetch_and_write_hls_track(
         {
             Ok(true) => {}
             Ok(false) => return Ok(false),
-            Err(error) => return Err(error),
+            Err(error) => {
+                if matches!(&error, ManifestRunError::Unsupported(_)) {
+                    drop(writer);
+                    crate::manifest_writer::cleanup_destination_part(
+                        staging,
+                        directory,
+                        destination,
+                        item_id,
+                        track,
+                        filename,
+                    )
+                    .await
+                    .map_err(ManifestRunError::Failed)?;
+                }
+                return Err(error);
+            }
         }
     }
     writer.finish().await.map_err(ManifestRunError::Failed)?;
@@ -2799,8 +2804,8 @@ async fn fetch_hls_resource_to_writer(
     let mut reservation = ResourceByteReservation::new(downloaded);
     let result = async {
         if resource.range.is_some() || resource.key {
-            return Err(ManifestRunError::Failed(
-                "The selected HLS track contains a resource that cannot be streamed as a complete fragment".to_string(),
+            return Err(ManifestRunError::Unsupported(
+                "The selected HLS track contains a ranged or encrypted resource".to_string(),
             ));
         }
 
@@ -2906,7 +2911,7 @@ async fn fetch_hls_resource_to_writer(
                 }
                 _ => "The HLS media segment is not a compatible MPEG-TS fragment",
             };
-            return Err(ManifestRunError::Failed(message.to_string()));
+            return Err(ManifestRunError::Unsupported(message.to_string()));
         }
 
         Ok(true)

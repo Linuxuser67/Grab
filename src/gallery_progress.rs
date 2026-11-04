@@ -153,6 +153,11 @@ mod tests {
         assert_eq!(progress_fraction(10, Some(50), 10), Some(1.0));
         assert_eq!(progress_fraction(0, None, 0), None);
         assert_eq!(progress_fraction(11, None, 10), None);
+
+        let mut resumed = GalleryProgress::new();
+        resumed.feed(ProgressLine::Skipped("/a.jpg".to_string()));
+        resumed.feed(ProgressLine::Skipped("/b.jpg".to_string()));
+        assert_eq!(progress_fraction(resumed.files_done(), Some(50), 4), Some(0.625));
     }
 
     #[test]

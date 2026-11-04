@@ -3553,12 +3553,12 @@ mod tests {
         bytes
     }
 
-    fn valid_fmp4_media_segment() -> Vec<u8> {
+    fn valid_fmp4_media_segment(sequence_number: u32, media_data: &[u8]) -> Vec<u8> {
         let mut mfhd_payload = vec![0, 0, 0, 0];
-        mfhd_payload.extend_from_slice(&1_u32.to_be_bytes());
+        mfhd_payload.extend_from_slice(&sequence_number.to_be_bytes());
         let mfhd = fmp4_box(b"mfhd", &mfhd_payload);
         let moof = fmp4_box(b"moof", &mfhd);
-        let mdat = fmp4_box(b"mdat", &[0x12, 0x34]);
+        let mdat = fmp4_box(b"mdat", media_data);
         [moof, mdat].concat()
     }
 
@@ -3566,7 +3566,7 @@ mod tests {
     async fn fmp4_fragment_validation_checks_complete_box_structure() {
         let directory = tempfile::tempdir().expect("create fragment test directory");
         let path = directory.path().join("segment.bin");
-        let bytes = valid_fmp4_media_segment();
+        let bytes = valid_fmp4_media_segment(1, &[0x12, 0x34]);
 
         tokio::fs::write(&path, &bytes)
             .await
@@ -3601,7 +3601,7 @@ mod tests {
     #[tokio::test]
     async fn streamed_fmp4_validation_spools_without_buffering_the_resource() {
         let staging = tempfile::tempdir().expect("create fMP4 validation staging");
-        let bytes = valid_fmp4_media_segment();
+        let bytes = valid_fmp4_media_segment(1, &[0x12, 0x34]);
         let mut validator = HlsResourceValidator::new(OrderedTrackFormat::Fmp4, staging.path())
             .expect("create fMP4 resource validator");
 
@@ -3760,8 +3760,8 @@ segment-2.ts
             .expect("bind fMP4 fragment server");
         let address = listener.local_addr().expect("fMP4 server address");
         let init = b"\x00\x00\x00\x10ftyp\x00\x00\x00\x00\x00\x00\x00\x00".to_vec();
-        let first = b"\x00\x00\x00\x0cmoof\x00\x00\x00\x01".to_vec();
-        let second = b"\x00\x00\x00\x0cmdat\x00\x00\x00\x02".to_vec();
+        let first = valid_fmp4_media_segment(1, &[0x12, 0x34]);
+        let second = valid_fmp4_media_segment(2, &[0x56, 0x78]);
         let init_response = init.clone();
         let first_response = first.clone();
         let second_response = second.clone();

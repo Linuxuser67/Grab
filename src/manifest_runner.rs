@@ -11,7 +11,7 @@ use std::time::{Duration, Instant};
 use thiserror::Error;
 
 use futures_util::{StreamExt as _, TryStreamExt as _};
-use tokio::io::{AsyncBufReadExt as _, AsyncReadExt as _, AsyncSeekExt as _, AsyncWriteExt as _};
+use tokio::io::{AsyncBufReadExt as _, AsyncReadExt as _, AsyncWriteExt as _};
 use url::Url;
 
 use crate::content_range::{ParsedContentRange, parse_content_range};
@@ -24,6 +24,7 @@ use crate::manifest_intake::ManifestLookup;
 #[cfg(test)]
 use crate::manifest_intake::NativeManifest;
 use crate::media_types::{ManifestKind, ManifestRepresentationKey, ManifestSource};
+use crate::mpeg_ts_validation::TransportStreamValidator;
 
 mod dash_live;
 mod hls_live;
@@ -2823,7 +2824,8 @@ async fn fetch_and_write_hls_track(
 
 struct HlsResourceValidator {
     format: OrderedTrackFormat,
-    header: [u8; 564],
+    transport_stream: TransportStreamValidator,
+    header: [u8; 8],
     header_len: usize,
 }
 
@@ -2831,38 +2833,40 @@ impl HlsResourceValidator {
     fn new(format: OrderedTrackFormat) -> Self {
         Self {
             format,
-            header: [0; 564],
+            transport_stream: TransportStreamValidator::new(),
+            header: [0; 8],
             header_len: 0,
         }
     }
 
     fn observe(&mut self, chunk: &[u8]) {
-        let remaining = self.header.len().saturating_sub(self.header_len);
-        let copied = remaining.min(chunk.len());
-        self.header[self.header_len..self.header_len + copied].copy_from_slice(&chunk[..copied]);
-        self.header_len += copied;
+        match self.format {
+            OrderedTrackFormat::MpegTs => self.transport_stream.observe(chunk),
+            OrderedTrackFormat::Fmp4 => {
+                let remaining = self.header.len().saturating_sub(self.header_len);
+                let copied = remaining.min(chunk.len());
+                self.header[self.header_len..self.header_len + copied]
+                    .copy_from_slice(&chunk[..copied]);
+                self.header_len += copied;
+            }
+            OrderedTrackFormat::Any => {}
+        }
     }
 
     fn is_valid(&self, size: u64) -> bool {
         match self.format {
-            OrderedTrackFormat::MpegTs => {
-                size >= 188
-                    && size.is_multiple_of(188)
-                    && self.header.first() == Some(&0x47)
-                    && (size < 376 || self.header.get(188) == Some(&0x47))
-                    && (size < 564 || self.header.get(376) == Some(&0x47))
-            }
+            OrderedTrackFormat::MpegTs => self.transport_stream.is_valid_complete(size),
             OrderedTrackFormat::Fmp4 => {
-                if self.header_len < 8 {
+                if self.header_len < self.header.len() {
                     return false;
                 }
-                let size = u32::from_be_bytes([
+                let box_size = u32::from_be_bytes([
                     self.header[0],
                     self.header[1],
                     self.header[2],
                     self.header[3],
                 ]);
-                let plausible_size = size == 1 || size >= 8;
+                let plausible_size = box_size == 1 || box_size >= 8;
                 let plausible_type = self.header[4..8]
                     .iter()
                     .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit());
@@ -3260,35 +3264,35 @@ async fn concat_dash_resource_names(
 }
 
 async fn is_mpegts_segment(path: &Path) -> Result<bool, ManifestRunError> {
+    const PACKET_SIZE: u64 = mpeg_ts::ts::TS_PACKET_SIZE as u64;
+    const PREFIX_PACKETS: u64 = 3;
+
     let mut file = tokio::fs::File::open(path)
         .await
         .map_err(|error| manifest_storage_error("Could not open an HLS media fragment", error))?;
     let metadata = file.metadata().await.map_err(|error| {
         manifest_storage_error("Could not inspect an HLS media fragment", error)
     })?;
-    if metadata.len() < 188 || !metadata.len().is_multiple_of(188) {
+    let size = metadata.len();
+    if size < PACKET_SIZE || !size.is_multiple_of(PACKET_SIZE) {
         return Ok(false);
     }
 
-    let mut offset = 0_u64;
-    let mut sync_byte = [0_u8; 1];
-    while offset < metadata.len().min(564) {
-        file.seek(std::io::SeekFrom::Start(offset))
-            .await
-            .map_err(|error| {
-                manifest_storage_error("Could not inspect an HLS media fragment", error)
-            })?;
-        file.read_exact(&mut sync_byte).await.map_err(|error| {
+    // Keep the recovery-path probe bounded to the same three-packet prefix
+    // that was previously checked for sync-byte alignment.
+    let prefix_size = size.min(PACKET_SIZE * PREFIX_PACKETS);
+    let mut remaining = prefix_size;
+    let mut packet = [0_u8; mpeg_ts::ts::TS_PACKET_SIZE];
+    let mut validator = TransportStreamValidator::new();
+    while remaining > 0 {
+        file.read_exact(&mut packet).await.map_err(|error| {
             manifest_storage_error("Could not inspect an HLS media fragment", error)
         })?;
-        if sync_byte[0] != 0x47 {
-            return Ok(false);
-        }
-        offset = offset.checked_add(188).ok_or_else(|| {
-            ManifestRunError::Failed("The HLS media fragment offset overflowed".to_string())
-        })?;
+        validator.observe(&packet);
+        remaining -= PACKET_SIZE;
     }
-    Ok(true)
+
+    Ok(validator.is_valid_prefix())
 }
 
 /// Whether a fetched fMP4 resource starts with a plausible ISO BMFF box header.
@@ -3478,14 +3482,27 @@ async fn run_ffmpeg(
 mod tests {
     use super::*;
 
+    fn valid_transport_stream(packet_count: usize, continuity_seed: u8) -> Vec<u8> {
+        let mut bytes = vec![0xff; packet_count * mpeg_ts::ts::TS_PACKET_SIZE];
+        for (index, packet) in bytes
+            .as_chunks_mut::<{ mpeg_ts::ts::TS_PACKET_SIZE }>()
+            .0
+            .iter_mut()
+            .enumerate()
+        {
+            packet[0] = 0x47;
+            packet[1] = 0;
+            packet[2] = 0;
+            packet[3] = 0x10 | (continuity_seed.wrapping_add(index as u8) & 0x0f);
+        }
+        bytes
+    }
+
     #[tokio::test]
-    async fn mpegts_fragment_validation_requires_aligned_transport_packets() {
+    async fn mpegts_fragment_validation_checks_complete_transport_packet_headers() {
         let directory = tempfile::tempdir().expect("create fragment test directory");
         let path = directory.path().join("segment.bin");
-        let mut bytes = vec![0_u8; 188 * 3];
-        for offset in [0, 188, 376] {
-            bytes[offset] = 0x47;
-        }
+        let mut bytes = valid_transport_stream(3, 0);
         tokio::fs::write(&path, &bytes)
             .await
             .expect("write MPEG-TS fragment");
@@ -3495,7 +3512,8 @@ mod tests {
                 .expect("inspect MPEG-TS fragment")
         );
 
-        bytes[188] = 0;
+        // A malformed packet later in the checked prefix must be rejected.
+        bytes[188 + 3] = 0; // reserved adaptation_field_control
         tokio::fs::write(&path, &bytes)
             .await
             .expect("write invalid transport fragment");
@@ -3505,7 +3523,7 @@ mod tests {
                 .expect("inspect invalid transport fragment")
         );
 
-        tokio::fs::write(&path, vec![0x47; 187])
+        tokio::fs::write(&path, valid_transport_stream(1, 0)[..187].to_vec())
             .await
             .expect("write truncated transport fragment");
         assert!(
@@ -3556,12 +3574,8 @@ mod tests {
             .await
             .expect("bind HLS fragment server");
         let address = listener.local_addr().expect("HLS server address");
-        let mut first = vec![0_u8; 188 * 3];
-        let mut second = vec![0_u8; 188 * 3];
-        for offset in [0, 188, 376] {
-            first[offset] = 0x47;
-            second[offset] = 0x47;
-        }
+        let mut first = valid_transport_stream(3, 0);
+        let mut second = valid_transport_stream(3, 3);
         first[4] = 1;
         second[4] = 2;
         let first_response = first.clone();

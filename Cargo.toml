@@ -75,6 +75,8 @@ tempfile = "3.27.0"
 [dev-dependencies]
 pretty_assertions = "1"
 proptest = "1"
+# Enable ignored-MPD-element diagnostics only in test builds.
+dash-mpd-core = { version = "=0.1.0", features = ["warn_ignored_elements"] }
 
 [profile.release]
 opt-level = 3

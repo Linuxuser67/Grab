@@ -1745,6 +1745,114 @@ mod tests {
     use super::*;
 
     const BASE_URL: &str = "https://cdn.example.test/path/manifest.mpd";
+    #[derive(Clone)]
+    struct SharedLogWriter(std::sync::Arc<std::sync::Mutex<Vec<u8>>>);
+
+    impl std::io::Write for SharedLogWriter {
+        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+            let mut output = self
+                .0
+                .lock()
+                .map_err(|_| std::io::Error::other("DASH test log buffer is poisoned"))?;
+            output.extend_from_slice(bytes);
+            Ok(bytes.len())
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for SharedLogWriter {
+        type Writer = Self;
+
+        fn make_writer(&'a self) -> Self::Writer {
+            self.clone()
+        }
+    }
+
+    fn capture_dash_warnings(
+        parse: impl FnOnce() -> Result<DashManifestPlan, DashError>,
+    ) -> (Result<DashManifestPlan, DashError>, String) {
+        let output = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let subscriber = tracing_subscriber::fmt()
+            .without_time()
+            .with_ansi(false)
+            .with_max_level(tracing::Level::WARN)
+            .with_writer(SharedLogWriter(std::sync::Arc::clone(&output)))
+            .finish();
+
+        let result = tracing::subscriber::with_default(subscriber, parse);
+        let captured = output
+            .lock()
+            .expect("DASH diagnostic output lock")
+            .clone();
+        (
+            result,
+            String::from_utf8(captured).expect("DASH diagnostic logs are UTF-8"),
+        )
+    }
+
+    #[test]
+    fn supported_static_and_dynamic_fixtures_have_no_ignored_element_warnings() {
+        let (static_result, static_logs) = capture_dash_warnings(|| {
+            parse_dash_manifest(
+                BASE_URL,
+                include_str!("../tests/fixtures/dash/static-segment-template.mpd"),
+            )
+        });
+        assert!(static_result.is_ok(), "static fixture should parse");
+        assert!(
+            !static_logs.contains("Unused XML element"),
+            "supported static fixture unexpectedly logged ignored elements: {static_logs}"
+        );
+
+        let (dynamic_result, dynamic_logs) = capture_dash_warnings(|| {
+            parse_dash_manifest_at(
+                BASE_URL,
+                include_str!("../tests/fixtures/dash/dynamic-segment-template.mpd"),
+                SystemTime::UNIX_EPOCH + Duration::from_secs(120),
+            )
+        });
+        assert!(dynamic_result.is_ok(), "dynamic fixture should parse");
+        assert!(
+            !dynamic_logs.contains("Unused XML element"),
+            "supported dynamic fixture unexpectedly logged ignored elements: {dynamic_logs}"
+        );
+    }
+
+    #[test]
+    fn warns_when_the_typed_dash_model_ignores_output_protection() {
+        let (result, logs) = capture_dash_warnings(|| {
+            parse_dash_manifest(
+                BASE_URL,
+                include_str!("../tests/fixtures/dash/unmodeled-output-protection.mpd"),
+            )
+        });
+
+        assert!(result.is_ok(), "the typed parser should remain tolerant of unknown elements");
+        assert!(
+            logs.contains("Unused XML element") && logs.contains("OutputProtection"),
+            "expected an ignored OutputProtection diagnostic, got: {logs}"
+        );
+    }
+
+    #[test]
+    fn warns_when_the_typed_dash_model_ignores_vendor_extensions() {
+        let (result, logs) = capture_dash_warnings(|| {
+            parse_dash_manifest(
+                BASE_URL,
+                include_str!("../tests/fixtures/dash/vendor-extension.mpd"),
+            )
+        });
+
+        assert!(result.is_ok(), "the typed parser should remain tolerant of vendor extensions");
+        assert!(
+            logs.contains("Unused XML element") && logs.contains("SegmentPresentation"),
+            "expected an ignored vendor extension diagnostic, got: {logs}"
+        );
+    }
+
 
     fn mpd_with_trick_mode_property(
         on_adaptation: bool,

@@ -1,8 +1,8 @@
 use super::*;
 use crate::download_fetch::{
     AttemptFail, FetchCtx, StartMode, accepts_content_range, backoff_delay, fetch_piece,
-    filename_from_content_disposition, has_holes, open_partial, parse_content_range,
-    rejects_unexpected_restart, response_total, run_download, stamp_request, truncate_to_prefix,
+    filename_from_content_disposition, has_holes, open_partial, rejects_unexpected_restart,
+    response_total, run_download, stamp_request, truncate_to_prefix,
 };
 use crate::download_intake::{MAX_URL_LEN, normalize_url};
 use crate::download_net::{
@@ -501,20 +501,6 @@ fn piece_size_scales_with_total() {
 }
 
 #[test]
-fn parses_range_totals() {
-    assert_eq!(parse_content_range("bytes 0-0/12345"), Some((0, 0, 12345)));
-    assert_eq!(
-        parse_content_range("bytes 1048576-2097151/8388608"),
-        Some((1048576, 2097151, 8388608))
-    );
-    // Inverted range or garbage rejected.
-    assert_eq!(parse_content_range("bytes 99-0/12345"), None);
-    assert_eq!(parse_content_range("bytes */12345"), None);
-    assert_eq!(parse_content_range("nonsense"), None);
-    assert_eq!(parse_content_range("bytes 0-0/0"), None);
-}
-
-#[test]
 fn resolves_response_totals() {
     assert_eq!(response_total(Some(100), None, false, 0), Some(100));
     assert_eq!(response_total(Some(60), None, true, 40), Some(100));
@@ -570,6 +556,9 @@ fn accepts_content_range_validates_206_start() {
         40,
         Some(100)
     ));
+    // Unknown totals and unsatisfied ranges are not valid 206 responses.
+    assert!(!accepts_content_range(Some("bytes 40-99/*"), 40, None));
+    assert!(!accepts_content_range(Some("bytes */100"), 40, None));
     // Missing or unparseable: reject (206 without valid Content-Range is non-compliant).
     assert!(!accepts_content_range(None, 40, Some(100)));
     assert!(!accepts_content_range(Some("garbage"), 40, Some(100)));

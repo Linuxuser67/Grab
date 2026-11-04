@@ -2017,6 +2017,19 @@
     {
         "type": "archive",
         "archive-type": "tar-gzip",
+        "url": "https://static.crates.io/crates/http-content-range/http-content-range-0.2.5.crate",
+        "sha256": "0298eab7a8b2346aa6e6b3502dfddf643735e45864cbe4ce9c73606cecb8b53f",
+        "dest": "cargo/http-content-range-0.2.5"
+    },
+    {
+        "type": "inline",
+        "contents": "{\"package\": \"0298eab7a8b2346aa6e6b3502dfddf643735e45864cbe4ce9c73606cecb8b53f\", \"files\": {}}",
+        "dest": "cargo/http-content-range-0.2.5",
+        "dest-filename": ".cargo-checksum.json"
+    },
+    {
+        "type": "archive",
+        "archive-type": "tar-gzip",
         "url": "https://static.crates.io/crates/httpdate/httpdate-1.0.3.crate",
         "sha256": "df3b46402a9d5adb4c86a0cf463f42e19994e3ee891101b1841f30a545cb49a9",
         "dest": "cargo/httpdate-1.0.3"

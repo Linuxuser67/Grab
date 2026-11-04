@@ -1,6 +1,7 @@
 //! HTTP fetch engine: attempts, range probing, piece fetching, resume bitmaps.
 //! The download manager spawns `run_download`; tests drive the pieces directly.
 
+use crate::content_range::{ParsedContentRange, parse_content_range};
 use crate::download_net::{DEFAULT_USER_AGENT, DownloadOptions};
 use crate::download_pieces::{SegmentState, plan_pieces};
 use crate::download_rate::{live_rate_limit, pace_chunk, parse_rate, progress_msg};
@@ -549,9 +550,12 @@ async fn attempt_once(
             let claimed = resp
                 .headers()
                 .get(reqwest::header::CONTENT_RANGE)
-                .and_then(|v| v.to_str().ok())
-                .and_then(|v| v.split('/').next_back())
-                .and_then(|t| t.parse::<u64>().ok());
+                .and_then(|value| value.to_str().ok())
+                .and_then(parse_content_range)
+                .and_then(|range| match range {
+                    ParsedContentRange::Unsatisfied { complete_length } => Some(complete_length),
+                    ParsedContentRange::Satisfied { .. } => None,
+                });
             // A length match alone proves nothing: recheck the local file (the offset came from an earlier stat) and its allocation.
             if start > 0
                 && claimed == Some(start)
@@ -1025,9 +1029,16 @@ async fn probe_ranges(
         .headers()
         .get(reqwest::header::CONTENT_RANGE)
         .and_then(|v| v.to_str().ok());
-    let total = parse_content_range(value.unwrap_or_default())
-        .filter(|(s, _, _)| *s == 0)
-        .map(|(_, _, t)| t)
+    let total = value
+        .and_then(parse_content_range)
+        .and_then(|range| match range {
+            ParsedContentRange::Satisfied {
+                first_byte: 0,
+                complete_length: Some(total),
+                ..
+            } => Some(total),
+            ParsedContentRange::Satisfied { .. } | ParsedContentRange::Unsatisfied { .. } => None,
+        })
         .ok_or_else(|| gettext("Bad Content-Range"))?;
     // Capture the validators from the probe: this becomes the session validator
     // for all piece workers, and is persisted for cross-session resume.
@@ -1037,18 +1048,6 @@ async fn probe_ranges(
         last_modified,
     };
     Ok((total, validator))
-}
-
-/// Parse `Content-Range: bytes <start>-<end>/<total>` (a wrong range pins all chunks to one file version).
-pub(crate) fn parse_content_range(value: &str) -> Option<(u64, u64, u64)> {
-    let (range, total) = value.strip_prefix("bytes ")?.split_once('/')?;
-    let (start, end) = range.split_once('-')?;
-    let (start, end, total) = (
-        start.parse::<u64>().ok()?,
-        end.parse::<u64>().ok()?,
-        total.parse::<u64>().ok()?,
-    );
-    (total > 0 && end >= start).then_some((start, end, total))
 }
 
 /// Total size for a response (`None` only when neither header says; then EOF is the only signal).
@@ -1070,10 +1069,16 @@ pub(crate) fn response_total(
             if !partial {
                 return None;
             }
-            content_range
-                .and_then(parse_content_range)
-                .filter(|(s, _, _)| *s == start)
-                .map(|(_, _, t)| t)
+            match content_range.and_then(parse_content_range) {
+                Some(ParsedContentRange::Satisfied {
+                    first_byte,
+                    complete_length,
+                    ..
+                }) if first_byte == start => complete_length,
+                Some(ParsedContentRange::Satisfied { .. })
+                | Some(ParsedContentRange::Unsatisfied { .. })
+                | None => None,
+            }
         })
 }
 
@@ -1095,9 +1100,14 @@ pub(crate) fn accepts_content_range(
     start: u64,
     expected_total: Option<u64>,
 ) -> bool {
-    content_range
-        .and_then(parse_content_range)
-        .is_some_and(|(s, _, t)| s == start && expected_total.is_none_or(|e| e == t))
+    matches!(
+        content_range.and_then(parse_content_range),
+        Some(ParsedContentRange::Satisfied {
+            first_byte,
+            complete_length: Some(total),
+            ..
+        }) if first_byte == start && expected_total.is_none_or(|expected| expected == total)
+    )
 }
 
 /// Why a piece or segmented attempt failed (throttled = downgrade to single-stream; changed = fail terminally, never retry).
@@ -1168,8 +1178,15 @@ pub(crate) async fn fetch_piece(
             .get(reqwest::header::CONTENT_RANGE)
             .and_then(|v| v.to_str().ok());
         match parse_content_range(cr.unwrap_or_default()) {
-            Some((s, e, t)) if s == start && e == end && t == total => {}
-            Some((_, _, t)) if t != total => {
+            Some(ParsedContentRange::Satisfied {
+                first_byte,
+                last_byte,
+                complete_length: Some(response_total),
+            }) if first_byte == start && last_byte == end && response_total == total => {}
+            Some(ParsedContentRange::Satisfied {
+                complete_length: Some(response_total),
+                ..
+            }) if response_total != total => {
                 return Err(Changed(gettext("File changed on server")));
             }
             // Unparseable or wrong range: the host ignores ranges, so downgrade instead of retrying to Failed.

@@ -152,8 +152,10 @@ mod tests {
 
     #[test]
     fn progress_fraction_combines_completed_files_and_current_file() {
-        assert_eq!(progress_fraction(3, Some(50), 10), Some(0.35));
-        assert_eq!(progress_fraction(10, Some(50), 10), Some(1.0));
+        let partial = progress_fraction(3, Some(50), 10).expect("known total");
+        assert!((partial - 0.35).abs() < 1e-12);
+        let complete = progress_fraction(10, Some(50), 10).expect("known total");
+        assert!((complete - 1.0).abs() < 1e-12);
         assert_eq!(progress_fraction(0, None, 0), None);
         assert_eq!(progress_fraction(11, None, 10), None);
 
@@ -166,10 +168,9 @@ mod tests {
             resumed.feed(ProgressLine::Skipped("/b.jpg".to_string())),
             None
         );
-        assert_eq!(
-            progress_fraction(resumed.files_done(), Some(50), 4),
-            Some(0.625)
-        );
+        let resumed_fraction =
+            progress_fraction(resumed.files_done(), Some(50), 4).expect("known total");
+        assert!((resumed_fraction - 0.625).abs() < 1e-12);
     }
 
     #[test]

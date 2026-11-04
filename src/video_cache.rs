@@ -7,6 +7,7 @@
 
 use sha2::{Digest, Sha256};
 use std::collections::HashMap;
+use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{LazyLock, Mutex};
@@ -279,9 +280,8 @@ enum CacheScope {
     Playlist,
 }
 
-/// Playlist keys are scoped by the profile spec or the jar's path (never the
-/// cookie contents) and the playlist TTL bounds how long a rotation can go
-/// unnoticed.
+/// Playlist keys are scoped by the profile spec or the staged jar contents.
+/// Equivalent handoffs share a key while cookie rotation changes it.
 pub(crate) fn playlist_cache_key(
     raw_url: &str,
     youtube_bin: &Path,
@@ -322,16 +322,11 @@ fn identity_key(
     let has_cookie_file = identity_args
         .iter()
         .any(|argument| argument == "--cookies" || argument.starts_with("--cookies="));
-    // A staged extension handoff jar is the only source of `--cookies` in this
-    // argv, and its path is hashed into the key, so an entry is scoped to that
-    // jar: a new handoff stages a new path and cannot read the old entry. The
-    // staged name embeds the pid and a per-process counter, so a path could
-    // only repeat across restarts; the playlist TTL bounds that case. A live
-    // jar replaces the configured browser profile in the argv, so it is the
-    // auth source whenever it is present; a profile alone still refuses video
-    // metadata, which carries signed media URLs. Playlists may use either.
-    // shortcut: a future user-supplied `--cookies` file would be cached for
-    // video too, giving it its own decision then.
+    // A staged handoff jar replaces the configured browser profile. Its
+    // contents, not its ephemeral path, identify the authentication context:
+    // identical handoffs can reuse metadata, while cookie rotation changes
+    // the key. A profile alone still refuses video metadata because it carries
+    // signed media URLs; playlist listings may use either source.
     if matches!(scope, CacheScope::Video) && browser_profile_is_active && !has_cookie_file {
         return None;
     }
@@ -363,6 +358,7 @@ fn identity_key(
     // resolved Deno path: `find_deno` may only learn that path after the first
     // YouTube lookup, and the path does not change what is extracted.
     let mut skip_runtime_value = false;
+    let mut skip_cookie_path = false;
     for argument in identity_args {
         let argument = argument.as_str();
         if argument == "--" {
@@ -372,11 +368,29 @@ fn identity_key(
             skip_runtime_value = false;
             continue;
         }
+        if skip_cookie_path {
+            hash_cookie_file(&mut hasher, Path::new(argument))?;
+            skip_cookie_path = false;
+            continue;
+        }
         if argument == "--js-runtimes" {
             skip_runtime_value = true;
             continue;
         }
+        if argument == "--cookies" {
+            skip_cookie_path = true;
+            hash_field(&mut hasher, b"identity-arg", argument.as_bytes());
+            continue;
+        }
+        if let Some(path) = argument.strip_prefix("--cookies=") {
+            hash_cookie_file(&mut hasher, Path::new(path))?;
+            hash_field(&mut hasher, b"identity-arg", b"--cookies");
+            continue;
+        }
         hash_field(&mut hasher, b"identity-arg", argument.as_bytes());
+    }
+    if skip_cookie_path {
+        return None;
     }
 
     if let Some(proxy) = proxy {
@@ -411,6 +425,29 @@ fn identity_key(
         let _ = write!(&mut digest_hex, "{byte:02x}");
     }
     Some(format!("{schema}:{digest_hex}"))
+}
+
+/// Hash a staged cookie jar by content so per-handoff temporary paths do not
+/// split cache entries. The digest is folded into the extraction key; raw
+/// cookies are never stored in the key or persistent metadata.
+fn hash_cookie_file(hasher: &mut Sha256, path: &Path) -> Option<()> {
+    let metadata = std::fs::symlink_metadata(path).ok()?;
+    if metadata.file_type().is_symlink() || !metadata.is_file() {
+        return None;
+    }
+
+    let mut file = std::fs::File::open(path).ok()?;
+    let mut cookie_hasher = Sha256::new();
+    let mut buffer = [0; 8192];
+    loop {
+        let read = file.read(&mut buffer).ok()?;
+        if read == 0 {
+            break;
+        }
+        cookie_hasher.update(&buffer[..read]);
+    }
+    hash_field(hasher, b"cookie-jar-content", &cookie_hasher.finalize());
+    Some(())
 }
 
 fn hash_field(hasher: &mut Sha256, name: &[u8], value: &[u8]) {
@@ -651,17 +688,45 @@ mod tests {
             "both --cookies spellings are cacheable"
         );
 
+        let equivalent_jar = directory.path().join("equivalent-handoff.cookies");
+        std::fs::write(&equivalent_jar, "# Netscape HTTP Cookie File\n")
+            .expect("write equivalent cookie jar");
+        let equivalent_handoff = vec![
+            "--cookies".to_string(),
+            equivalent_jar.to_string_lossy().into_owned(),
+            "--user-agent".to_string(),
+            "Browser/1".to_string(),
+            "--".to_string(),
+            url.to_string(),
+        ];
+        assert_eq!(
+            Some(handoff_key.clone()),
+            cache_key(
+                url,
+                &binary,
+                "2026.10.23",
+                "none",
+                None,
+                &equivalent_handoff
+            ),
+            "identical cookie contents at a new staged path must reuse the in-memory preview"
+        );
+
         let other_jar = directory.path().join("other-handoff.cookies");
+        std::fs::write(&other_jar, "# Netscape HTTP Cookie File\nchanged-cookie\n")
+            .expect("write changed cookie jar");
         let other_handoff = vec![
             "--cookies".to_string(),
             other_jar.to_string_lossy().into_owned(),
+            "--user-agent".to_string(),
+            "Browser/1".to_string(),
             "--".to_string(),
             url.to_string(),
         ];
         assert_ne!(
             Some(handoff_key),
             cache_key(url, &binary, "2026.10.23", "none", None, &other_handoff),
-            "each staged jar must get its own video entry"
+            "changed cookie contents must not reuse authenticated metadata"
         );
     }
 
@@ -976,9 +1041,11 @@ mod tests {
                 .is_some(),
             "a playlist listing has no signed URLs and may be cached per profile"
         );
+        let handoff_jar = directory.path().join("handoff.jar");
+        std::fs::write(&handoff_jar, "# Netscape HTTP Cookie File\n").expect("write cookie jar");
         let handoff_args = vec![
             "--cookies".to_string(),
-            "/tmp/handoff.jar".to_string(),
+            handoff_jar.to_string_lossy().into_owned(),
             "--".to_string(),
             url.to_string(),
         ];
@@ -1000,9 +1067,12 @@ mod tests {
             playlist_cache_key(url, &binary, "2026.10.23", "none", None, &anonymous_args),
             "an anonymous lookup must not read a jar-scoped entry"
         );
+        let other_jar = directory.path().join("other-handoff.jar");
+        std::fs::write(&other_jar, "# Netscape HTTP Cookie File\nchanged-cookie\n")
+            .expect("write changed cookie jar");
         let other_jar_args = vec![
             "--cookies".to_string(),
-            "/tmp/other-handoff.jar".to_string(),
+            other_jar.to_string_lossy().into_owned(),
             "--".to_string(),
             url.to_string(),
         ];

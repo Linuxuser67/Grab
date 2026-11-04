@@ -51,7 +51,16 @@ where
     let server = tokio::spawn(async move {
         let mut requests = Vec::with_capacity(request_count);
         for _ in 0..request_count {
-            let (mut socket, _) = listener.accept().await.expect("accept Fetcher request");
+            let accepted = tokio::time::timeout(
+                std::time::Duration::from_secs(2),
+                listener.accept(),
+            )
+            .await;
+            let (mut socket, _) = match accepted {
+                Ok(Ok(connection)) => connection,
+                Ok(Err(error)) => panic!("accept Fetcher request: {error}"),
+                Err(_) => break,
+            };
             let request = read_request_headers(&mut socket).await;
             let response = responder(&request);
             write_response(&mut socket, response).await;
@@ -138,7 +147,7 @@ async fn assert_file(path: &Path, expected: &[u8]) {
     let actual = tokio::fs::read(path)
         .await
         .expect("read temporary Fetcher output");
-    assert_eq!(actual, expected);
+    assert_eq!(actual.as_slice(), expected);
 }
 
 #[tokio::test]
@@ -184,14 +193,38 @@ async fn fetcher_accepts_a_200_response_to_a_segment_range() {
 
     let requests = server.await.expect("join ignored-range test server");
     assert_eq!(requests.len(), 3);
-    assert_file(&destination, b"Xbcdefgh").await;
+    let actual = tokio::fs::read(&destination)
+        .await
+        .expect("read ignored-range result");
+    assert_eq!(actual.as_slice(), b"Xbcdefgh");
     assert_ne!(
-        tokio::fs::read(&destination)
-            .await
-            .expect("read ignored-range result"),
+        actual.as_slice(),
         ASSET,
         "a 200 response to a range request must not be treated as the requested segment"
     );
+}
+
+#[tokio::test]
+async fn fetcher_accepts_a_mismatched_content_range_value() {
+    let (url, server) = start_server(3, |request| match requested_range(request) {
+        Some("bytes=0-0") => TestResponse::partial("bytes 0-0/8", &ASSET[..1]),
+        // The body is from bytes 4-7 even though the request was for bytes 0-3.
+        Some("bytes=0-3") => TestResponse::partial("bytes 4-7/8", &ASSET[4..]),
+        Some("bytes=4-7") => TestResponse::partial("bytes 4-7/8", &ASSET[4..]),
+        range => panic!("unexpected Fetcher range request: {range:?}"),
+    })
+    .await;
+    let directory = tempfile::tempdir().expect("create isolated Fetcher destination");
+    let destination = directory.path().join("download.bin");
+
+    fetcher(&url, 4)
+        .fetch_asset(&destination)
+        .await
+        .expect("Fetcher accepts the mismatched Content-Range response");
+
+    let requests = server.await.expect("join mismatched Content-Range server");
+    assert_eq!(requests.len(), 3);
+    assert_file(&destination, b"efghefgh").await;
 }
 
 #[tokio::test]

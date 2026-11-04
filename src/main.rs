@@ -6,14 +6,14 @@ mod content_range;
 mod cookies;
 mod download;
 mod download_fetch;
-#[cfg(test)]
-mod download_ytdlp_fetcher_poc;
 mod download_intake;
 mod download_net;
 mod download_pieces;
 mod download_rate;
 mod download_row;
 mod download_store;
+#[cfg(test)]
+mod download_ytdlp_fetcher_poc;
 mod engine_msg;
 mod extension_server;
 mod file_names;

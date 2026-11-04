@@ -6,12 +6,12 @@ use sha2::{Digest, Sha256};
 use thiserror::Error;
 use url::Url;
 
+use super::dash_roles::{self, DASH_ROLE_SCHEME};
 use super::{MAX_MANIFEST_BYTES, ManifestByteRange};
 const MAX_REPRESENTATIONS: usize = 1_024;
 const MAX_SEGMENTS: usize = 100_000;
 const MIN_DYNAMIC_UPDATE_PERIOD: Duration = Duration::from_millis(500);
 const MAX_DYNAMIC_UPDATE_PERIOD: Duration = Duration::from_secs(300);
-const DASH_ROLE_SCHEME: &str = "urn:mpeg:dash:role:2011";
 // DASH-IF's current HTTPS identifier, the HTTP identifier emitted by FFmpeg,
 // and the ISO trick-mode URN used by other DASH packagers.
 const DASH_TRICK_MODE_SCHEMES: [&str; 3] = [
@@ -285,6 +285,20 @@ pub(crate) fn parse_dash_manifest_at(
     let [period] = mpd.periods.as_slice() else {
         return Err(DashError::UnsupportedPresentation);
     };
+    let representation_main_roles =
+        dash_roles::representation_main_roles(body.as_bytes(), MAX_REPRESENTATIONS)
+            .ok_or(DashError::Parse)?;
+    // The typed parser and the metadata pass must describe the same source-order
+    // structure; otherwise a foreign or unsupported element could shift role indexes.
+    if representation_main_roles.len() != period.adaptations.len()
+        || period
+            .adaptations
+            .iter()
+            .zip(&representation_main_roles)
+            .any(|(adaptation, roles)| adaptation.representations.len() != roles.len())
+    {
+        return Err(DashError::Parse);
+    }
     if period.href.is_some() || !period.ContentProtection.is_empty() {
         return Err(DashError::UnsupportedPresentation);
     }
@@ -317,7 +331,8 @@ pub(crate) fn parse_dash_manifest_at(
     let mut audio_representations = Vec::new();
     let mut subtitle_representations = Vec::new();
 
-    for adaptation in &period.adaptations {
+    for (adaptation_index, adaptation) in period.adaptations.iter().enumerate() {
+        let adaptation_main_roles = &representation_main_roles[adaptation_index];
         if adaptation.href.is_some() || !adaptation.ContentProtection.is_empty() {
             return Err(DashError::UnsupportedPresentation);
         }
@@ -329,7 +344,12 @@ pub(crate) fn parse_dash_manifest_at(
         }
 
         let adaptation_base = resolve_base_url(period_base.clone(), &adaptation.BaseURL)?;
-        for representation in &adaptation.representations {
+        for (representation_index, representation) in
+            adaptation.representations.iter().enumerate()
+        {
+            let representation_is_main = *adaptation_main_roles
+                .get(representation_index)
+                .ok_or(DashError::Parse)?;
             if representation.href.is_some() || !representation.ContentProtection.is_empty() {
                 return Err(DashError::UnsupportedPresentation);
             }
@@ -365,14 +385,11 @@ pub(crate) fn parse_dash_manifest_at(
                 // Text, metadata, and unknown adaptation sets are not media inputs.
                 continue;
             };
-            // dash-mpd-core 0.1.0 exposes Role only on AdaptationSet, not
-            // Representation. A spec-valid Representation-level Role=main
-            // is therefore ignored; default_audio() falls back to the first
-            // audio representation unless its AdaptationSet declares main.
-            let is_default_audio = kind == DashTrackKind::Audio
-                && adaptation.Role.iter().any(|role| {
+            let is_main = representation_is_main
+                || adaptation.Role.iter().any(|role| {
                     role.schemeIdUri == DASH_ROLE_SCHEME && role.value.as_deref() == Some("main")
                 });
+            let is_default_audio = kind == DashTrackKind::Audio && is_main;
 
             let representation_base =
                 resolve_base_url(adaptation_base.clone(), &representation.BaseURL)?;
@@ -425,12 +442,8 @@ pub(crate) fn parse_dash_manifest_at(
                 codecs,
                 language,
                 kind,
-                is_default_audio: kind == DashTrackKind::Audio && is_default_audio,
-                is_default_subtitle: kind == DashTrackKind::Subtitle
-                    && adaptation.Role.iter().any(|role| {
-                        role.schemeIdUri == DASH_ROLE_SCHEME
-                            && role.value.as_deref() == Some("main")
-                    }),
+                is_default_audio,
+                is_default_subtitle: kind == DashTrackKind::Subtitle && is_main,
                 source: DashRepresentationSource {
                     base_url: representation_base,
                     addressing,
@@ -1801,7 +1814,7 @@ mod tests {
     }
 
     #[test]
-    fn representation_level_main_role_falls_back_to_first_audio_track() {
+    fn representation_level_main_role_selects_the_declared_audio_track() {
         let body = r#"<?xml version="1.0"?>
 <MPD xmlns="urn:mpeg:dash:schema:mpd:2011" type="static" mediaPresentationDuration="PT10S">
   <Period duration="PT10S">
@@ -1822,19 +1835,16 @@ mod tests {
   </Period>
 </MPD>"#;
         let plan = parse_dash_manifest(BASE_URL, body)
-            .expect("Representation-level Role is ignored by dash-mpd-core 0.1.0");
+            .expect("a representation-level main role should be preserved");
 
         assert_eq!(plan.audio_representations.len(), 2);
-        assert!(
-            plan.audio_representations
-                .iter()
-                .all(|track| !track.is_default_audio)
-        );
+        assert!(!plan.audio_representations[0].is_default_audio);
+        assert!(plan.audio_representations[1].is_default_audio);
         assert_eq!(
             plan.default_audio()
                 .and_then(|track| track.representation_id.as_deref()),
-            Some("first"),
-            "without an AdaptationSet Role=main, the first audio track is the fallback"
+            Some("declared-main"),
+            "Representation-level Role=main must override the first-track fallback"
         );
     }
 

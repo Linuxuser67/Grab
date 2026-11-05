@@ -1179,19 +1179,19 @@ mod tests {
         )
         .expect("write synthetic DASH fragment");
 
-        let init_range = options.use_byte_ranges.then_some(
-            crate::manifest::ManifestByteRange {
+        let init_range = options
+            .use_byte_ranges
+            .then_some(crate::manifest::ManifestByteRange {
                 offset: 0,
                 length: u64::try_from(init.len()).expect("synthetic init length fits u64"),
-            },
-        );
-        let segment_range = options.use_byte_ranges.then_some(
-            crate::manifest::ManifestByteRange {
+            });
+        let segment_range = options
+            .use_byte_ranges
+            .then_some(crate::manifest::ManifestByteRange {
                 offset: 100,
                 length: u64::try_from(synthetic_fragment(ciphertext, &iv).len())
                     .expect("synthetic fragment length fits u64"),
-            },
-        );
+            });
         let resources = [
             DashResource {
                 url: url::Url::parse("https://example.invalid/init.mp4")
@@ -1249,18 +1249,17 @@ mod tests {
             (EncryptionScheme::Cenc, b"cenc", 0, cenc_ciphertext),
             (EncryptionScheme::Cbcs, b"cbcs", 1, cbcs_ciphertext),
         ] {
-            let decrypted =
-                decrypt_synthetic_track(
-                    scheme,
-                    fourcc,
-                    version,
-                    iv,
-                    &ciphertext,
-                    SyntheticTrackOptions {
-                        pattern: (0, 0),
-                        use_byte_ranges: false,
-                    },
-                );
+            let decrypted = decrypt_synthetic_track(
+                scheme,
+                fourcc,
+                version,
+                iv,
+                &ciphertext,
+                SyntheticTrackOptions {
+                    pattern: (0, 0),
+                    use_byte_ranges: false,
+                },
+            );
             let boxes = parse_box_spans(&decrypted, 0, decrypted.len())
                 .expect("decrypted file has complete MP4 boxes");
             let mdat = boxes
@@ -1342,16 +1341,16 @@ mod tests {
     #[test]
     fn decrypts_indexed_segment_base_resources_with_byte_ranges() {
         let plaintext = [
-            0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07,
-            0x08, 0x09, 0x0a, 0x0b, 0x0c, 0x0d, 0x0e, 0x0f,
+            0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0a, 0x0b, 0x0c, 0x0d,
+            0x0e, 0x0f,
         ];
         let ciphertext = [
-            0xb8, 0x78, 0xd8, 0x9b, 0xed, 0xdb, 0x8e, 0x7e,
-            0xfb, 0x0c, 0xde, 0xfb, 0xb0, 0x92, 0x5c, 0xb5,
+            0xb8, 0x78, 0xd8, 0x9b, 0xed, 0xdb, 0x8e, 0x7e, 0xfb, 0x0c, 0xde, 0xfb, 0xb0, 0x92,
+            0x5c, 0xb5,
         ];
         let iv = [
-            0x20, 0x21, 0x22, 0x23, 0x24, 0x25, 0x26, 0x27,
-            0x28, 0x29, 0x2a, 0x2b, 0x2c, 0x2d, 0x2e, 0x2f,
+            0x20, 0x21, 0x22, 0x23, 0x24, 0x25, 0x26, 0x27, 0x28, 0x29, 0x2a, 0x2b, 0x2c, 0x2d,
+            0x2e, 0x2f,
         ];
         let decrypted = decrypt_synthetic_track(
             EncryptionScheme::Cenc,

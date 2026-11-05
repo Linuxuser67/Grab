@@ -532,7 +532,9 @@ fn validate_fragment(bytes: &[u8], init: InitEncryption) -> Result<(), String> {
         return Err("DASH trun and senc sample counts do not match".to_string());
     }
     let mut senc_offset = 8_usize;
+    let mut sample_auxiliary_sizes = Vec::with_capacity(sample_count);
     for sample_size in sample_sizes {
+        let sample_auxiliary_start = senc_offset;
         if init.iv_size > 0 {
             senc_offset = senc_offset
                 .checked_add(usize::from(init.iv_size))
@@ -564,9 +566,27 @@ fn validate_fragment(bytes: &[u8], init: InitEncryption) -> Result<(), String> {
         if covered != u64::from(sample_size) {
             return Err("DASH senc subsamples do not exactly cover their sample".to_string());
         }
+        let entry_size = senc_offset
+            .checked_sub(sample_auxiliary_start)
+            .ok_or_else(|| "DASH senc sample entry offset underflows".to_string())?;
+        sample_auxiliary_sizes.push(
+            u8::try_from(entry_size)
+                .map_err(|_| "DASH senc sample auxiliary entry exceeds 255 bytes".to_string())?,
+        );
     }
     if senc_offset != senc_payload.len() {
         return Err("DASH senc contains trailing or unsupported encryption data".to_string());
+    }
+
+    if let (Some(saiz), Some(saio)) = (saiz.first(), saio.first()) {
+        validate_auxiliary_information(
+            bytes,
+            moof,
+            *senc,
+            **saiz,
+            **saio,
+            &sample_auxiliary_sizes,
+        )?;
     }
 
     Ok(())

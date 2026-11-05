@@ -520,6 +520,7 @@ struct ManifestPreparation {
     audio_dir: PathBuf,
     client: reqwest::Client,
     tracks: Tracks,
+    drm_keys: Option<crate::dash_drm::DashKeyMap>,
     guarded_child_hosts: std::collections::HashSet<String>,
     has_audio: bool,
     live_hls: bool,
@@ -665,6 +666,35 @@ async fn prepare_manifest_attempt(
         guarded_child_hosts,
         has_audio,
     } = resolve_manifest_tracks(job, offline_tracks, finish_requested).await?;
+    let drm_keys = match &tracks {
+        Tracks::Dash {
+            video,
+            audio,
+            subtitle,
+            ..
+        } => {
+            if subtitle
+                .as_ref()
+                .is_some_and(|track| track.representation.encryption.is_some())
+            {
+                return Err(ManifestRunError::Unsupported(
+                    "Native DASH DRM decryption is currently limited to selected video and audio tracks"
+                        .to_string(),
+                ));
+            }
+            let mut encryptions = Vec::new();
+            if let Some(encryption) = video.representation.encryption {
+                encryptions.push(encryption);
+            }
+            if let Some(audio) = audio.as_ref()
+                && let Some(encryption) = audio.representation.encryption
+            {
+                encryptions.push(encryption);
+            }
+            crate::dash_drm::load_required_keys(&encryptions).map_err(ManifestRunError::Failed)?
+        }
+        Tracks::Hls { .. } | Tracks::DashLiveOffline { .. } => None,
+    };
     if has_audio {
         ensure_track_dir(&audio_dir).await?;
     }
@@ -711,6 +741,7 @@ async fn prepare_manifest_attempt(
         audio_dir,
         client,
         tracks,
+        drm_keys,
         guarded_child_hosts,
         has_audio,
         live_hls,
@@ -834,6 +865,7 @@ async fn resolve_manifest_tracks(
 struct ManifestStaticTransfer<'a> {
     client: &'a reqwest::Client,
     tracks: &'a Tracks,
+    drm_keys: Option<&'a crate::dash_drm::DashKeyMap>,
     destination_parts: bool,
     staging: &'a Path,
     destination: &'a Path,
@@ -855,6 +887,7 @@ async fn transfer_static_manifest_tracks(
     let ManifestStaticTransfer {
         client,
         tracks,
+        drm_keys,
         destination_parts,
         staging,
         destination,
@@ -974,6 +1007,7 @@ async fn transfer_static_manifest_tracks(
                 client,
                 staging,
                 plan: video,
+                keys: drm_keys,
                 directory: video_dir,
                 filename: "video-track.mp4",
                 destination,
@@ -993,6 +1027,7 @@ async fn transfer_static_manifest_tracks(
                     client,
                     staging,
                     plan: audio,
+                    keys: drm_keys,
                     directory: audio_dir,
                     filename: "audio-track.mp4",
                     destination,
@@ -1037,6 +1072,7 @@ async fn transfer_static_manifest_tracks(
                     client,
                     staging,
                     plan: subtitle,
+                    keys: None,
                     directory: &subtitle_dir,
                     filename: "subtitle-track.mp4",
                     destination,
@@ -1544,6 +1580,7 @@ pub(crate) async fn run_manifest_download(
         audio_dir,
         client,
         tracks,
+        drm_keys,
         mut guarded_child_hosts,
         mut has_audio,
         live_hls,
@@ -1654,6 +1691,7 @@ pub(crate) async fn run_manifest_download(
         match transfer_static_manifest_tracks(ManifestStaticTransfer {
             client: &client,
             tracks: &tracks,
+            drm_keys: drm_keys.as_ref(),
             destination_parts: static_destination_parts,
             staging: &staging,
             destination: &job.dest,
@@ -1724,6 +1762,20 @@ struct ManifestFinalization<'a> {
     downloaded: &'a AtomicU64,
 }
 
+async fn require_decrypted_track(path: &Path, label: &str) -> Result<(), ManifestRunError> {
+    let metadata = tokio::fs::symlink_metadata(path).await.map_err(|error| {
+        ManifestRunError::Failed(format!(
+            "Could not inspect the decrypted DASH {label} track: {error}"
+        ))
+    })?;
+    if metadata.file_type().is_symlink() || !metadata.is_file() || metadata.len() == 0 {
+        return Err(ManifestRunError::Failed(format!(
+            "The decrypted DASH {label} track is not a regular, non-empty staging file"
+        )));
+    }
+    Ok(())
+}
+
 /// Mux the staged tracks, validate the output, and publish it without clobbering.
 ///
 /// The staging data is retained on every failure before publication so the queue
@@ -1753,7 +1805,15 @@ async fn finalize_manifest_download(
     tx.send(EngineMsg::Phase("Merging audio and video…".to_string()))
         .ok();
 
-    let video_input = if destination_parts {
+    let video_encrypted = matches!(
+        &tracks,
+        Tracks::Dash { video, .. } if video.representation.encryption.is_some()
+    );
+    let video_input = if video_encrypted {
+        let path = video_dir.join("video-track.mp4.decrypted");
+        require_decrypted_track(&path, "video").await?;
+        path
+    } else if destination_parts {
         crate::manifest_destination::part_path_async(
             staging.to_path_buf(),
             job.dest.clone(),
@@ -1770,8 +1830,16 @@ async fn finalize_manifest_download(
             }
         }
     };
+    let audio_encrypted = matches!(
+        &tracks,
+        Tracks::Dash { audio: Some(audio), .. } if audio.representation.encryption.is_some()
+    );
     let audio_input = if has_audio {
-        Some(if destination_parts {
+        Some(if audio_encrypted {
+            let path = audio_dir.join("audio-track.mp4.decrypted");
+            require_decrypted_track(&path, "audio").await?;
+            path
+        } else if destination_parts {
             crate::manifest_destination::part_path_async(
                 staging.to_path_buf(),
                 job.dest.clone(),
@@ -2875,6 +2943,7 @@ struct ManifestDashTrackTransfer<'a> {
     client: &'a reqwest::Client,
     staging: &'a Path,
     plan: &'a DashRepresentationPlan,
+    keys: Option<&'a crate::dash_drm::DashKeyMap>,
     directory: &'a Path,
     filename: &'a str,
     destination: &'a Path,
@@ -2893,6 +2962,7 @@ async fn fetch_and_write_dash_track(
         client,
         staging,
         plan,
+        keys,
         directory,
         filename,
         destination,
@@ -2903,7 +2973,8 @@ async fn fetch_and_write_dash_track(
         downloaded,
         abort,
     } = context;
-    let resources = if let Some(index) = plan.segment_base_index.as_ref() {
+    let encryption = plan.representation.encryption;
+    let (resources, drm_resources) = if let Some(index) = plan.segment_base_index.as_ref() {
         let Some((bytes, total_length)) =
             fetch_dash_index_bytes(client, &index.url, index.index_range, abort).await?
         else {
@@ -2916,13 +2987,21 @@ async fn fetch_and_write_dash_track(
                         "The DASH SegmentBase index is unsupported: {error}"
                     ))
                 })?;
+        let drm_resources = encryption.map(|_| {
+            let mut resources = plan.resources.to_vec();
+            resources.extend(media_resources.iter().cloned());
+            resources
+        });
         let mut resources = dash_resources(plan);
         resources.extend(dash_resources_from(&media_resources));
-        resources
+        (resources, drm_resources)
     } else {
-        dash_resources(plan)
+        (
+            dash_resources(plan),
+            encryption.map(|_| plan.resources.to_vec()),
+        )
     };
-    fetch_and_write_ordered_track(ManifestOrderedTrackTransfer {
+    let completed = fetch_and_write_ordered_track(ManifestOrderedTrackTransfer {
         client,
         staging,
         resources,
@@ -2935,9 +3014,64 @@ async fn fetch_and_write_dash_track(
         tx,
         downloaded,
         abort,
-        format: OrderedTrackFormat::Any,
+        format: if encryption.is_some() {
+            OrderedTrackFormat::Fmp4
+        } else {
+            OrderedTrackFormat::Any
+        },
+        retain_sources: encryption.is_some(),
     })
-    .await
+    .await?;
+    if !completed {
+        return Ok(false);
+    }
+    if let Some(encryption) = encryption {
+        let keys = keys.ok_or_else(|| {
+            ManifestRunError::Failed(
+                "Encrypted DASH track reached transfer without a loaded content-key map"
+                    .to_string(),
+            )
+        })?;
+        let key = keys.key_for(encryption).map_err(ManifestRunError::Failed)?;
+        let resources = drm_resources.ok_or_else(|| {
+            ManifestRunError::Failed("Encrypted DASH resource plan is missing".to_string())
+        })?;
+        let directory = directory.to_path_buf();
+        let output = directory.join(format!("{filename}.decrypted"));
+        let cancelled = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let worker_cancelled = std::sync::Arc::clone(&cancelled);
+        let mut decryption = tokio::task::spawn_blocking(move || {
+            crate::dash_drm::decrypt_track(
+                &resources,
+                &directory,
+                &output,
+                encryption,
+                &key,
+                &worker_cancelled,
+            )
+        });
+        tokio::select! {
+            biased;
+            _ = &mut *abort => {
+                cancelled.store(true, Ordering::Release);
+                let _decryption_result = decryption.await.map_err(|error| {
+                    ManifestRunError::Failed(format!("DASH decryption task failed: {error}"))
+                })?;
+                return Ok(false);
+            }
+            result = &mut decryption => {
+                let completed = result
+                    .map_err(|error| {
+                        ManifestRunError::Failed(format!("DASH decryption task failed: {error}"))
+                    })?
+                    .map_err(ManifestRunError::Unsupported)?;
+                if !completed {
+                    return Ok(false);
+                }
+            }
+        }
+    }
+    Ok(true)
 }
 
 struct ManifestHlsTrackTransfer<'a> {
@@ -3275,6 +3409,7 @@ struct ManifestOrderedTrackTransfer<'a> {
     downloaded: &'a Arc<AtomicU64>,
     abort: &'a mut tokio::sync::oneshot::Receiver<crate::video::StopIntent>,
     format: OrderedTrackFormat,
+    retain_sources: bool,
 }
 
 async fn fetch_and_write_ordered_track(
@@ -3294,12 +3429,24 @@ async fn fetch_and_write_ordered_track(
         downloaded,
         abort,
         format,
+        retain_sources,
     } = context;
     let resource_names = resources
         .iter()
         .map(|resource| resource.filename.clone())
         .collect::<Vec<_>>();
-    let (writer, committed_bytes) =
+    let (writer, committed_bytes) = if retain_sources {
+        crate::manifest_writer::OrderedTrackWriter::open_destination_part_retaining_sources(
+            resource_names.clone(),
+            directory,
+            staging,
+            filename,
+            destination,
+            item_id,
+            track,
+        )
+        .await?
+    } else {
         crate::manifest_writer::OrderedTrackWriter::open_destination_part(
             resource_names.clone(),
             directory,
@@ -3309,7 +3456,8 @@ async fn fetch_and_write_ordered_track(
             item_id,
             track,
         )
-        .await?;
+        .await?
+    };
     if committed_bytes > 0 {
         let total = reserve_download_bytes(downloaded, committed_bytes)?;
         tx.send(progress_message(total)).ok();
@@ -4346,6 +4494,7 @@ segment-2.m4s
                 item_id: 42,
                 track: crate::manifest_destination::TrackKind::Video,
                 connections: 2,
+                keys: None,
                 tx: &tx,
                 downloaded: &downloaded,
                 abort: &mut abort,

@@ -108,6 +108,12 @@ That digest detects corrupted or truncated downloads, not a compromised
 release — it shares the release's trust root. If you need a separate trust
 root, install the tools from your distribution instead.
 
+### Native DASH decryption
+
+Static DASH CENC/CBCS downloads can use explicitly supplied KID-to-key pairs.
+The supported subset, private key-file format, and current limitations are
+documented in [Native DASH DRM](docs/dash-drm.md).
+
 ## Browser extension
 
 Send browser downloads and links straight to Grab with the

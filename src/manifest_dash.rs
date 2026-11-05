@@ -29,6 +29,8 @@ pub(crate) enum DashError {
     Parse,
     #[error("DASH presentation uses an unsupported period layout")]
     UnsupportedPresentation,
+    #[error("DASH content protection is unsupported: {0}")]
+    UnsupportedProtection(String),
     #[error("DASH addressing or resource URL is unsupported")]
     UnsupportedAddressing,
     #[error("DASH segment description is invalid")]
@@ -63,6 +65,7 @@ pub(crate) struct DashRepresentation {
     pub(crate) codecs: Option<String>,
     pub(crate) language: Option<String>,
     pub(crate) kind: DashTrackKind,
+    pub(crate) encryption: Option<crate::dash_drm::DashEncryption>,
     pub(crate) is_default_audio: bool,
     pub(crate) is_default_subtitle: bool,
     adaptation_id: Option<String>,
@@ -203,6 +206,7 @@ struct RepresentationIdentity<'a> {
     mime_type: Option<&'a str>,
     codecs: Option<&'a str>,
     language: Option<&'a str>,
+    encryption: Option<crate::dash_drm::DashEncryption>,
     base_url: &'a Url,
     addressing: &'a DashAddressing,
 }
@@ -266,11 +270,13 @@ pub(crate) fn parse_dash_manifest(
 /// flat SIDX and an Initialization range. Single-file assets are still subject
 /// to the 1 GiB per-resource limit. Multiple static periods require explicit DASH-IF
 /// period-continuity signaling, stable adaptation/representation IDs, and contiguous timing.
-/// DRM, XLink, adaptation-set
-/// Subset/Preselection combinations, dynamic SegmentList, LL-DASH, SegmentBase
-/// with an Initialization@sourceURL or non-zero presentation-time offset,
-/// hierarchical SIDX, non-zero offsets on dynamic SegmentTemplate, and WebM
-/// remain on yt-dlp fallback.
+/// Native DRM is limited to one static Period with one default KID per selected
+/// track. Indexed SegmentBase DRM requires an explicit Initialization byte range
+/// and a flat SIDX; unindexed single-file SegmentBase remains on yt-dlp fallback.
+/// XLink, adaptation-set Subset/Preselection combinations, dynamic SegmentList,
+/// LL-DASH, SegmentBase with an Initialization@sourceURL or non-zero
+/// presentation-time offset, hierarchical SIDX, non-zero offsets on dynamic
+/// SegmentTemplate, and WebM remain on yt-dlp fallback.
 ///
 /// # Errors
 /// Returns an error when the MPD is malformed, exceeds the input limit, uses
@@ -290,8 +296,9 @@ pub(crate) fn parse_dash_manifest_at(
     // OutputProtection describes the rendering device's output link (for example,
     // an HDCP requirement), not media encryption or segment addressing. Grab
     // downloads the encoded resources and does not render them, so this descriptor
-    // does not restrict native download planning. ContentProtection remains
-    // explicitly rejected below because it signals protected media.
+    // does not restrict native download planning. ContentProtection is parsed
+    // below; only encryption schemes and layouts supported by the DRM adapter
+    // are routed to the native decryption path.
     let mpd = dash_mpd_core::parse(body).map_err(|_| DashError::Parse)?;
 
     let mut presentation = match mpd.mpdtype.as_deref() {
@@ -343,7 +350,6 @@ pub(crate) fn parse_dash_manifest_at(
     if !mpd.PatchLocation.is_empty()
         || mpd.periods.is_empty()
         || mpd.periods.len() > dash_roles::MAX_PERIODS
-        || !mpd.ContentProtection.is_empty()
         || (is_dynamic && mpd.periods.len() != 1)
     {
         return Err(DashError::UnsupportedPresentation);
@@ -388,7 +394,6 @@ pub(crate) fn parse_dash_manifest_at(
         mpd.periods.iter().zip(&representation_metadata).enumerate()
     {
         if period.href.is_some()
-            || !period.ContentProtection.is_empty()
             || !period.subsets.is_empty()
             || !period.pre_selections.is_empty()
             || (mpd.periods.len() > 1 && !period.empty_adaptations.is_empty())
@@ -466,7 +471,7 @@ pub(crate) fn parse_dash_manifest_at(
 
         for (adaptation_index, adaptation) in period.adaptations.iter().enumerate() {
             let adaptation_metadata = &period_metadata[adaptation_index];
-            if adaptation.href.is_some() || !adaptation.ContentProtection.is_empty() {
+            if adaptation.href.is_some() {
                 return Err(DashError::UnsupportedPresentation);
             }
             if has_trick_mode_properties(
@@ -484,7 +489,7 @@ pub(crate) fn parse_dash_manifest_at(
                     .get(representation_index)
                     .ok_or(DashError::Parse)?
                     .is_main;
-                if representation.href.is_some() || !representation.ContentProtection.is_empty() {
+                if representation.href.is_some() {
                     return Err(DashError::UnsupportedPresentation);
                 }
                 if has_trick_mode_properties(
@@ -553,6 +558,18 @@ pub(crate) fn parse_dash_manifest_at(
                     .lang
                     .clone()
                     .or_else(|| adaptation.lang.clone());
+                let encryption = crate::dash_drm::encryption_from_scopes(&[
+                    &mpd.ContentProtection,
+                    &period.ContentProtection,
+                    &adaptation.ContentProtection,
+                    &representation.ContentProtection,
+                ])
+                .map_err(DashError::UnsupportedProtection)?;
+                if encryption.is_some() && (is_dynamic || mpd.periods.len() != 1) {
+                    return Err(DashError::UnsupportedProtection(
+                        "Native DASH DRM currently requires one static Period".to_string(),
+                    ));
+                }
                 let identity = RepresentationIdentity {
                     id: representation_id.as_deref(),
                     kind,
@@ -562,6 +579,7 @@ pub(crate) fn parse_dash_manifest_at(
                     mime_type: mime_type.as_deref(),
                     codecs: codecs.as_deref(),
                     language: language.as_deref(),
+                    encryption,
                     base_url: &representation_base,
                     addressing: &addressing,
                 };
@@ -583,6 +601,7 @@ pub(crate) fn parse_dash_manifest_at(
                     codecs,
                     language,
                     kind,
+                    encryption,
                     is_default_audio,
                     is_default_subtitle: kind == DashTrackKind::Subtitle && is_main,
                     adaptation_id: adaptation.id.clone(),
@@ -1017,6 +1036,20 @@ fn validate_https_url(url: Url) -> Result<Url, DashError> {
     Ok(url)
 }
 
+fn hash_encryption(hasher: &mut Sha256, encryption: Option<crate::dash_drm::DashEncryption>) {
+    match encryption {
+        Some(encryption) => {
+            hasher.update(b"encrypted");
+            hasher.update(match encryption.scheme {
+                crate::dash_drm::EncryptionScheme::Cenc => b"cenc".as_slice(),
+                crate::dash_drm::EncryptionScheme::Cbcs => b"cbcs".as_slice(),
+            });
+            hasher.update(encryption.default_kid);
+        }
+        None => hasher.update(b"clear"),
+    }
+}
+
 /// Stable identifier for a DASH representation, independent of adaptation
 /// and representation order. Query signatures are excluded from BaseURL identity.
 fn stable_representation_key(identity: RepresentationIdentity<'_>) -> String {
@@ -1029,6 +1062,7 @@ fn stable_representation_key(identity: RepresentationIdentity<'_>) -> String {
         mime_type,
         codecs,
         language,
+        encryption,
         base_url,
         addressing,
     } = identity;
@@ -1045,6 +1079,7 @@ fn stable_representation_key(identity: RepresentationIdentity<'_>) -> String {
     hash_optional_text(&mut hasher, mime_type);
     hash_optional_text(&mut hasher, codecs);
     hash_optional_text(&mut hasher, language);
+    hash_encryption(&mut hasher, encryption);
     hash_optional_number(&mut hasher, bandwidth);
     hash_optional_number(&mut hasher, width);
     hash_optional_number(&mut hasher, height);
@@ -1133,6 +1168,7 @@ fn stable_live_representation_key(identity: RepresentationIdentity<'_>) -> Strin
         mime_type,
         codecs,
         language,
+        encryption,
         base_url,
         addressing,
     } = identity;
@@ -1149,6 +1185,7 @@ fn stable_live_representation_key(identity: RepresentationIdentity<'_>) -> Strin
     hash_optional_text(&mut hasher, mime_type);
     hash_optional_text(&mut hasher, codecs);
     hash_optional_text(&mut hasher, language);
+    hash_encryption(&mut hasher, encryption);
     hash_optional_number(&mut hasher, bandwidth);
     hash_optional_number(&mut hasher, width);
     hash_optional_number(&mut hasher, height);
@@ -2666,6 +2703,44 @@ mod tests {
         assert_eq!(plan.resources.len(), 1);
         assert_eq!(plan.resources[0].kind, DashResourceKind::Initialization);
         assert_eq!(plan.resources[0].range, Some(index.initialization_range));
+    }
+
+    #[test]
+    fn plans_encrypted_indexed_segment_base_for_native_decryption() {
+        let body = r#"<?xml version="1.0"?>
+<MPD xmlns="urn:mpeg:dash:schema:mpd:2011"
+     xmlns:cenc="urn:mpeg:cenc:2013"
+     type="static" mediaPresentationDuration="PT2S">
+  <BaseURL>media.mp4</BaseURL>
+  <Period duration="PT2S">
+    <AdaptationSet contentType="video" mimeType="video/mp4">
+      <ContentProtection schemeIdUri="urn:mpeg:dash:mp4protection:2011"
+                         value="cenc"
+                         cenc:default_KID="00112233-4455-6677-8899-aabbccddeeff"/>
+      <Representation id="v1">
+        <SegmentBase timescale="1000" indexRange="100-143" indexRangeExact="true">
+          <Initialization range="0-99"/>
+        </SegmentBase>
+      </Representation>
+    </AdaptationSet>
+  </Period>
+</MPD>"#;
+        let manifest = parse_dash_manifest(BASE_URL, body)
+            .expect("encrypted indexed SegmentBase should parse");
+        let representation = &manifest.video_representations[0];
+        assert_eq!(
+            representation
+                .encryption
+                .expect("default KID is parsed")
+                .scheme,
+            crate::dash_drm::EncryptionScheme::Cenc
+        );
+
+        let plan = plan_dash_representation(&manifest, &representation.key)
+            .expect("encrypted indexed SegmentBase should produce a decryption plan");
+        assert!(plan.segment_base_index.is_some());
+        assert_eq!(plan.resources.len(), 1);
+        assert_eq!(plan.resources[0].kind, DashResourceKind::Initialization);
     }
 
     #[test]
@@ -4251,6 +4326,87 @@ mod tests {
                 length: 1_000
             })
         );
+    }
+
+    #[test]
+    fn parses_static_cenc_and_cbcs_default_kids_at_inherited_scopes() {
+        for (scheme, kid, expected, expected_kid) in [
+            (
+                "cenc",
+                "00112233-4455-6677-8899-aabbccddeeff",
+                crate::dash_drm::EncryptionScheme::Cenc,
+                [
+                    0x00, 0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88, 0x99, 0xaa, 0xbb, 0xcc,
+                    0xdd, 0xee, 0xff,
+                ],
+            ),
+            (
+                "cbcs",
+                "ffeeddcc-bbaa-9988-7766-554433221100",
+                crate::dash_drm::EncryptionScheme::Cbcs,
+                [
+                    0xff, 0xee, 0xdd, 0xcc, 0xbb, 0xaa, 0x99, 0x88, 0x77, 0x66, 0x55, 0x44, 0x33,
+                    0x22, 0x11, 0x00,
+                ],
+            ),
+        ] {
+            let body = TEMPLATE_MPD.replace(
+                "</Period>",
+                &format!(
+                    r#"
+    <AdaptationSet contentType="video" mimeType="video/mp4">
+      <ContentProtection schemeIdUri="urn:mpeg:dash:mp4protection:2011" value="{scheme}" default_KID="{kid}"/>
+      <Representation id="protected" bandwidth="1000">
+        <SegmentTemplate timescale="1" duration="5" initialization="protected-init.mp4" media="protected-$Number$.m4s"/>
+      </Representation>
+    </AdaptationSet>
+</Period>"#
+                ),
+            );
+            let manifest =
+                parse_dash_manifest(BASE_URL, &body).expect("supported static CENC/CBCS MPD");
+            let protected = manifest
+                .video_representations
+                .iter()
+                .find(|item| item.representation_id.as_deref() == Some("protected"))
+                .expect("protected representation");
+            let encryption = protected.encryption.expect("parsed encryption metadata");
+            assert_eq!(encryption.scheme, expected);
+            assert_eq!(encryption.default_kid, expected_kid);
+            let planned = plan_dash_representation(&manifest, &protected.key)
+                .expect("protected representation plan");
+            assert_eq!(planned.representation.encryption, Some(encryption));
+        }
+    }
+
+    #[test]
+    fn rejects_unsupported_or_conflicting_dash_protection_descriptors() {
+        let unknown = TEMPLATE_MPD.replace(
+            "</Period>",
+            r#"
+    <AdaptationSet contentType="video" mimeType="video/mp4">
+      <ContentProtection schemeIdUri="urn:mpeg:dash:mp4protection:2011" value="cens" default_KID="00112233445566778899aabbccddeeff"/>
+      <Representation id="protected" bandwidth="1000">
+        <SegmentTemplate timescale="1" duration="5" initialization="protected-init.mp4" media="protected-$Number$.m4s"/>
+      </Representation>
+    </AdaptationSet>
+</Period>"#,
+        );
+        assert!(parse_dash_manifest(BASE_URL, &unknown).is_err());
+
+        let conflicting = TEMPLATE_MPD.replace(
+            "</Period>",
+            r#"
+    <AdaptationSet contentType="video" mimeType="video/mp4">
+      <ContentProtection schemeIdUri="urn:mpeg:dash:mp4protection:2011" value="cenc" default_KID="00112233445566778899aabbccddeeff"/>
+      <Representation id="protected" bandwidth="1000">
+        <ContentProtection schemeIdUri="urn:mpeg:dash:mp4protection:2011" value="cbcs" default_KID="00112233445566778899aabbccddeeff"/>
+        <SegmentTemplate timescale="1" duration="5" initialization="protected-init.mp4" media="protected-$Number$.m4s"/>
+      </Representation>
+    </AdaptationSet>
+</Period>"#,
+        );
+        assert!(parse_dash_manifest(BASE_URL, &conflicting).is_err());
     }
 
     #[test]

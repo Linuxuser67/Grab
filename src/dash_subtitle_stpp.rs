@@ -1166,7 +1166,7 @@ mod tests {
             r#"<tt xmlns="{TTML1_NAMESPACE}" xmlns:ttp="{TTML1_PARAMETER_NAMESPACE}" ttp:timeBase="media"><body><div><p begin="0s" end="1s">text</p></div></body></tt>"#
         );
         assert_eq!(
-            parse_ttml_document_with_namespace(&xml, 0, 1_000, TTML1_NAMESPACE)
+            parse_ttml_document_with_namespace(xml.as_bytes(), 0, 1_000, TTML1_NAMESPACE)
                 .expect("parse TTML1 media-time sample")[0]
                 .text,
             "text"

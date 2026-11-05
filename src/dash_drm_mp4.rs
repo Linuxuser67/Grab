@@ -433,7 +433,7 @@ fn parse_init_encryption(init: &[u8], expected: DashEncryption) -> Result<InitEn
     } else {
         return Err("Unsupported DASH tkhd version".to_string());
     };
-    let track_id = read_u32(tkhd, track_id_offset)?;
+    let track_id = read_u32(&tkhd, track_id_offset)?;
     if track_id == 0 {
         return Err("DASH initialization contains a zero track ID".to_string());
     }
@@ -444,8 +444,8 @@ fn parse_init_encryption(init: &[u8], expected: DashEncryption) -> Result<InitEn
     if trex_payload.len() != 24
         || trex_payload[0] != 0
         || trex_payload[1..4] != [0, 0, 0]
-        || read_u32(trex_payload, 4)? != track_id
-        || read_u32(trex_payload, 8)? != 1
+        || read_u32(&trex_payload, 4)? != track_id
+        || read_u32(&trex_payload, 8)? != 1
     {
         return Err(
             "DASH trex must match the protected track and select its only sample description"

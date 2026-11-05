@@ -6,6 +6,7 @@ mod content_range;
 mod cookies;
 mod dash_subtitle;
 mod dash_subtitle_stpp;
+mod dash_drm;
 mod download;
 mod download_fetch;
 mod download_intake;

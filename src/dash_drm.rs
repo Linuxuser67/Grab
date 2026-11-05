@@ -314,7 +314,7 @@ mod tests {
         assert_eq!(cenc_result.scheme, EncryptionScheme::Cenc);
         assert_eq!(
             cenc_result.default_kid,
-                        [
+            [
                 0x00, 0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88, 0x99, 0xaa, 0xbb, 0xcc, 0xdd,
                 0xee, 0xff,
             ]
@@ -326,7 +326,7 @@ mod tests {
         assert_eq!(cbcs_result.scheme, EncryptionScheme::Cbcs);
         assert_eq!(
             cbcs_result.default_kid,
-                        [
+            [
                 0xff, 0xee, 0xdd, 0xcc, 0xbb, 0xaa, 0x99, 0x88, 0x77, 0x66, 0x55, 0x44, 0x33, 0x22,
                 0x11, 0x00,
             ]

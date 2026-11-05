@@ -211,7 +211,8 @@ fn parse_init_encryption(init: &[u8], expected: DashEncryption) -> Result<InitEn
         false,
     )
     .map_err(|error| format!("Could not parse DASH encryption initialization boxes: {error}"))?;
-    if !boxes.iter().any(|box_| box_.typ == "ftyp") || !boxes.iter().any(|box_| box_.typ == "moov") {
+    if !boxes.iter().any(|box_| box_.typ == "ftyp") || !boxes.iter().any(|box_| box_.typ == "moov")
+    {
         return Err(
             "Encrypted DASH initialization resource must contain ftyp and moov".to_string(),
         );
@@ -1284,14 +1285,8 @@ mod tests {
             0x20, 0x21, 0x22, 0x23, 0x24, 0x25, 0x26, 0x27, 0x28, 0x29, 0x2a, 0x2b, 0x2c, 0x2d,
             0x2e, 0x2f,
         ];
-        let decrypted = decrypt_synthetic_track(
-            EncryptionScheme::Cbcs,
-            b"cbcs",
-            1,
-            iv,
-            &ciphertext,
-            (1, 9),
-        );
+        let decrypted =
+            decrypt_synthetic_track(EncryptionScheme::Cbcs, b"cbcs", 1, iv, &ciphertext, (1, 9));
         let boxes = parse_box_spans(&decrypted, 0, decrypted.len())
             .expect("decrypted CBCS file has complete MP4 boxes");
         let mdat = boxes

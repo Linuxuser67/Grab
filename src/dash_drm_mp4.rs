@@ -927,6 +927,12 @@ mod tests {
         output
     }
 
+    #[derive(Default)]
+    struct TestFragmentOptions {
+        sample_description_index: Option<u32>,
+        extra_traf: bool,
+    }
+
     fn test_fragment(
         track_id: u32,
         trun_flags: u32,
@@ -936,29 +942,32 @@ mod tests {
         subsample_encrypted_bytes: u32,
         extra_traf: bool,
     ) -> Vec<u8> {
-        test_fragment_with_sample_description_index(
+        test_fragment_with_options(
             track_id,
             trun_flags,
             senc_count,
             offset_adjustment,
             use_subsamples,
             subsample_encrypted_bytes,
-            (None, extra_traf),
+            TestFragmentOptions {
+                extra_traf,
+                ..TestFragmentOptions::default()
+            },
         )
     }
 
-    fn test_fragment_with_sample_description_index(
+    fn test_fragment_with_options(
         track_id: u32,
         trun_flags: u32,
         senc_count: u32,
         offset_adjustment: i32,
         use_subsamples: bool,
         subsample_encrypted_bytes: u32,
-        sample_description: (Option<u32>, bool),
+        options: TestFragmentOptions,
     ) -> Vec<u8> {
         let mut tfhd_fields = track_id.to_be_bytes().to_vec();
         let mut tfhd_flags = 0x020000;
-        if let Some(index) = sample_description.0 {
+        if let Some(index) = options.sample_description_index {
             tfhd_flags |= 0x000002;
             tfhd_fields.extend_from_slice(&index.to_be_bytes());
         }
@@ -991,7 +1000,7 @@ mod tests {
             let traf = box_bytes(b"traf", &traf_fields);
             let mut moof_fields = mfhd;
             moof_fields.extend_from_slice(&traf);
-            if sample_description.1 {
+            if options.extra_traf {
                 moof_fields.extend_from_slice(&traf);
             }
             box_bytes(b"moof", &moof_fields)
@@ -1359,23 +1368,29 @@ mod tests {
 
     #[test]
     fn accepts_only_the_validated_sample_description_index() {
-        let valid = test_fragment_with_sample_description_index(
+        let valid = test_fragment_with_options(
             7,
             0x000201,
             1,
             0,
             false,
             0,
-            (Some(1), false),
+            TestFragmentOptions {
+                sample_description_index: Some(1),
+                ..TestFragmentOptions::default()
+            },
         );
-        let invalid = test_fragment_with_sample_description_index(
+        let invalid = test_fragment_with_options(
             7,
             0x000201,
             1,
             0,
             false,
             0,
-            (Some(2), false),
+            TestFragmentOptions {
+                sample_description_index: Some(2),
+                ..TestFragmentOptions::default()
+            },
         );
         assert!(validate_fragment(&valid, test_init_encryption()).is_ok());
         assert!(validate_fragment(&invalid, test_init_encryption()).is_err());

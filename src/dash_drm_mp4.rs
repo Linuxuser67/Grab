@@ -201,6 +201,35 @@ fn mp4_payload<'a>(bytes: &'a [u8], box_: &mp4box::Box) -> Result<&'a [u8], Stri
     })
 }
 
+/// Rebuild the complete FullBox payload from mp4box's split metadata.
+///
+/// mp4box exposes the version and flags as Box fields and starts payload_offset
+/// after those four bytes. The DRM validators below intentionally parse the
+/// on-disk FullBox layout, so restore that prefix before validating field offsets.
+fn mp4_full_box_payload(bytes: &[u8], box_: &mp4box::Box) -> Result<Vec<u8>, String> {
+    let version = box_
+        .version
+        .ok_or_else(|| format!("MP4 {} full box has no version", box_.typ))?;
+    let flags = box_
+        .flags
+        .ok_or_else(|| format!("MP4 {} full box has no flags", box_.typ))?;
+    let flag_bytes = flags.to_be_bytes();
+    if flag_bytes[0] != 0 {
+        return Err(format!("MP4 {} full box flags exceed 24 bits", box_.typ));
+    }
+
+    let data = mp4_payload(bytes, box_)?;
+    let capacity = data
+        .len()
+        .checked_add(4)
+        .ok_or_else(|| format!("MP4 {} full box payload size overflows", box_.typ))?;
+    let mut payload = Vec::with_capacity(capacity);
+    payload.push(version);
+    payload.extend_from_slice(&flag_bytes[1..]);
+    payload.extend_from_slice(data);
+    Ok(payload)
+}
+
 fn parse_init_encryption(init: &[u8], expected: DashEncryption) -> Result<InitEncryption, String> {
     let boxes = mp4box::get_boxes(
         &mut Cursor::new(init),
@@ -282,7 +311,7 @@ fn parse_init_encryption(init: &[u8], expected: DashEncryption) -> Result<InitEn
         return Err("DASH original-format box is truncated or contains trailing data".to_string());
     }
 
-    let schm = mp4_payload(init, schm_box)?;
+    let schm = mp4_full_box_payload(init, schm_box)?;
     if schm.len() < 12 || schm[0] != 0 {
         return Err("DASH scheme box is truncated or uses an unsupported version".to_string());
     }
@@ -302,7 +331,7 @@ fn parse_init_encryption(init: &[u8], expected: DashEncryption) -> Result<InitEn
         return Err("DASH MPD encryption scheme does not match the MP4 initialization".to_string());
     }
 
-    let tenc = mp4_payload(init, tenc_box)?;
+    let tenc = mp4_full_box_payload(init, tenc_box)?;
     if tenc.len() < 23 {
         return Err("DASH track-encryption box is truncated".to_string());
     }
@@ -393,7 +422,7 @@ fn parse_init_encryption(init: &[u8], expected: DashEncryption) -> Result<InitEn
         return Err("DASH tenc contains unsupported trailing encryption metadata".to_string());
     }
 
-    let tkhd = mp4_payload(init, tkhd_box)?;
+    let tkhd = mp4_full_box_payload(init, tkhd_box)?;
     let version = *tkhd
         .first()
         .ok_or_else(|| "DASH tkhd is truncated".to_string())?;
@@ -411,7 +440,7 @@ fn parse_init_encryption(init: &[u8], expected: DashEncryption) -> Result<InitEn
 
     let mvex = find_one_mp4_child(mp4_children(moov)?, "mvex")?;
     let trex = find_one_mp4_child(mp4_children(mvex)?, "trex")?;
-    let trex_payload = mp4_payload(init, trex)?;
+    let trex_payload = mp4_full_box_payload(init, trex)?;
     if trex_payload.len() != 24
         || trex_payload[0] != 0
         || trex_payload[1..4] != [0, 0, 0]
@@ -1155,6 +1184,23 @@ mod tests {
     struct SyntheticTrackOptions {
         pattern: (u8, u8),
         use_byte_ranges: bool,
+    }
+
+    #[test]
+    fn restores_full_box_headers_before_validating_encryption_metadata() {
+        let (init, kid) = synthetic_init(b"cenc", 0, (0, 0), false);
+        let parsed = parse_init_encryption(
+            &init,
+            DashEncryption {
+                scheme: EncryptionScheme::Cenc,
+                default_kid: kid,
+            },
+        )
+        .expect("synthetic FullBox encryption metadata should parse");
+
+        assert_eq!(parsed.track_id, 7);
+        assert_eq!(parsed.iv_size, 16);
+        assert_eq!(parsed.constant_iv, None);
     }
 
     fn decrypt_synthetic_track(

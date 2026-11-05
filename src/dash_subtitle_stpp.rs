@@ -342,11 +342,12 @@ fn validate_stpp_sample_entry(
         .map(|child| child.offset)
         .min()
         .unwrap_or(entry_end);
-    let remaining = strings_end
-        .checked_sub(strings_start)
-        .ok_or(DashSubtitleError::Unsupported(
-            "The STPP sample-entry metadata range is invalid",
-        ))?;
+    let remaining =
+        strings_end
+            .checked_sub(strings_start)
+            .ok_or(DashSubtitleError::Unsupported(
+                "The STPP sample-entry metadata range is invalid",
+            ))?;
     let read_len = usize::try_from(remaining).map_err(|_| {
         DashSubtitleError::Unsupported("The STPP sample-entry metadata size is out of range")
     })?;
@@ -365,8 +366,11 @@ fn validate_stpp_sample_entry(
             ))
         })?;
 
-    let [namespace_bytes, schema_location_bytes, auxiliary_mime_types_bytes] =
-        split_sample_entry_fields(&bytes)?;
+    let [
+        namespace_bytes,
+        schema_location_bytes,
+        auxiliary_mime_types_bytes,
+    ] = split_sample_entry_fields(&bytes)?;
     let namespace = std::str::from_utf8(namespace_bytes).map_err(|_| {
         DashSubtitleError::Unsupported("The STPP namespace field is not valid UTF-8")
     })?;
@@ -420,7 +424,12 @@ fn split_sample_entry_fields(bytes: &[u8]) -> Result<[&[u8]; 3], DashSubtitleErr
         ));
     }
 
-    let [Some(namespace), Some(schema_location), Some(auxiliary_mime_types)] = fields else {
+    let [
+        Some(namespace),
+        Some(schema_location),
+        Some(auxiliary_mime_types),
+    ] = fields
+    else {
         return Err(DashSubtitleError::Unsupported(
             "The STPP sample entry is missing a required metadata field",
         ));
@@ -1141,7 +1150,11 @@ mod tests {
         assert_eq!(
             split_sample_entry_fields(b"http://www.w3.org/ns/ttml\0\0\0")
                 .expect("three STPP sample-entry fields"),
-            [b"http://www.w3.org/ns/ttml".as_slice(), b"".as_slice(), b"".as_slice()]
+            [
+                b"http://www.w3.org/ns/ttml".as_slice(),
+                b"".as_slice(),
+                b"".as_slice()
+            ]
         );
         assert!(
             split_sample_entry_fields(b"namespace\0schema\0aux\0tail").is_err(),

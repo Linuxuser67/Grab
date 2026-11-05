@@ -34,21 +34,36 @@ pub(crate) struct DashEncryption {
     pub(crate) default_kid: [u8; 16],
 }
 
+#[derive(Clone)]
 pub(crate) struct DashKeyMap {
     keys: BTreeMap<[u8; 16], Zeroizing<[u8; 16]>>,
 }
 
 impl DashKeyMap {
+    pub(crate) fn contains_kid(&self, kid: &[u8; 16]) -> bool {
+        self.keys.contains_key(kid)
+    }
+
     pub(crate) fn key_for_kid(&self, kid: &[u8; 16]) -> Result<Zeroizing<[u8; 16]>, String> {
         self.keys
             .get(kid)
             .map(|key| Zeroizing::new(**key))
             .ok_or_else(|| {
-                format!(
-                    "The DASH license response did not include selected KID {}",
-                    hex_string(kid)
-                )
+                format!("The DASH license response did not include selected KID {}", hex_string(kid))
             })
+    }
+
+    pub(crate) fn merge(&mut self, additional: Self) -> Result<(), String> {
+        for (kid, key) in additional.keys {
+            if let Some(previous) = self.keys.get(&kid) {
+                if **previous != *key {
+                    return Err("DASH license servers returned conflicting keys for one KID".to_string());
+                }
+            } else {
+                self.keys.insert(kid, key);
+            }
+        }
+        Ok(())
     }
 }
 

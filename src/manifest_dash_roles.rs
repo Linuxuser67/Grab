@@ -12,6 +12,8 @@ use quick_xml::reader::NsReader;
 const DASH_MPD_NAMESPACE: &str = "urn:mpeg:dash:schema:mpd:2011";
 /// Maximum XML nesting accepted by this small metadata pass.
 const MAX_ELEMENT_DEPTH: usize = 32;
+/// Bound period metadata retained from an untrusted MPD.
+pub(super) const MAX_PERIODS: usize = 32;
 /// Role scheme used to identify the main audio or subtitle representation.
 pub(super) const DASH_ROLE_SCHEME: &str = "urn:mpeg:dash:role:2011";
 
@@ -31,14 +33,14 @@ enum Element {
     Other,
 }
 
-/// Return representation IDs and Role=main flags in MPD source order.
+/// Return representation IDs and Role=main flags grouped by Period, AdaptationSet, and source order.
 ///
 /// IDs allow the caller to verify that this pass and the typed MPD parser
 /// identify the same representation at each source-order position.
 pub(super) fn representation_metadata(
     body: &[u8],
     max_representations: usize,
-) -> Option<Vec<Vec<RepresentationRoleMetadata>>> {
+) -> Option<Vec<Vec<Vec<RepresentationRoleMetadata>>>> {
     let mut reader = NsReader::from_reader(body);
     let mut buffer = Vec::new();
     let mut stack = Vec::new();
@@ -79,11 +81,11 @@ pub(super) fn representation_metadata(
         buffer.clear();
     }
 
-    if !stack.is_empty() || periods.len() != 1 {
+    if !stack.is_empty() || periods.is_empty() || periods.len() > MAX_PERIODS {
         return None;
     }
 
-    periods.pop()
+    Some(periods)
 }
 
 fn push_element(
@@ -108,7 +110,7 @@ fn push_element(
     let element = match (stack.last().copied(), name, in_mpd_namespace) {
         (None, "MPD", true) => Element::Mpd,
         (Some(Element::Mpd), "Period", true) => {
-            if !periods.is_empty() {
+            if periods.len() >= MAX_PERIODS {
                 return None;
             }
             periods.push(Vec::new());
@@ -215,13 +217,14 @@ mod tests {
 </MPD>"#;
 
         let metadata = representation_metadata(body, 3).expect("valid MPD representation metadata");
-        assert_eq!(metadata.len(), 2);
-        assert_eq!(metadata[0][0].id.as_deref(), Some("first"));
-        assert!(!metadata[0][0].is_main);
-        assert_eq!(metadata[0][1].id.as_deref(), Some("main"));
-        assert!(metadata[0][1].is_main);
-        assert_eq!(metadata[1][0].id.as_deref(), Some("other"));
-        assert!(!metadata[1][0].is_main);
+        assert_eq!(metadata.len(), 1);
+        assert_eq!(metadata[0].len(), 2);
+        assert_eq!(metadata[0][0][0].id.as_deref(), Some("first"));
+        assert!(!metadata[0][0][0].is_main);
+        assert_eq!(metadata[0][0][1].id.as_deref(), Some("main"));
+        assert!(metadata[0][0][1].is_main);
+        assert_eq!(metadata[0][1][0].id.as_deref(), Some("other"));
+        assert!(!metadata[0][1][0].is_main);
     }
 
     #[test]
@@ -237,8 +240,8 @@ mod tests {
 </mpd:MPD>"#;
 
         let metadata = representation_metadata(body, 1).expect("valid MPD representation metadata");
-        assert_eq!(metadata[0][0].id.as_deref(), Some("main"));
-        assert!(metadata[0][0].is_main);
+        assert_eq!(metadata[0][0][0].id.as_deref(), Some("main"));
+        assert!(metadata[0][0][0].is_main);
     }
 
     #[test]
@@ -258,8 +261,8 @@ mod tests {
 </MPD>"#;
 
         let metadata = representation_metadata(body, 1).expect("valid MPD representation metadata");
-        assert_eq!(metadata[0][0].id.as_deref(), Some("main"));
-        assert!(metadata[0][0].is_main);
+        assert_eq!(metadata[0][0][0].id.as_deref(), Some("main"));
+        assert!(metadata[0][0][0].is_main);
     }
 
     #[test]
@@ -277,8 +280,8 @@ mod tests {
 
         let metadata =
             representation_metadata(body, 1).expect("foreign attributes do not invalidate the MPD");
-        assert_eq!(metadata[0][0].id.as_deref(), Some("main"));
-        assert!(!metadata[0][0].is_main);
+        assert_eq!(metadata[0][0][0].id.as_deref(), Some("main"));
+        assert!(!metadata[0][0][0].is_main);
     }
 
     #[test]
@@ -290,6 +293,18 @@ mod tests {
   <Representation id="two"/>
 </AdaptationSet></Period></MPD>"#;
         assert_eq!(representation_metadata(too_many, 1), None);
+    }
+
+    #[test]
+    fn preserves_period_boundaries_in_metadata() {
+        let body = br#"<MPD xmlns="urn:mpeg:dash:schema:mpd:2011">
+  <Period><AdaptationSet><Representation id="first"/></AdaptationSet></Period>
+  <Period><AdaptationSet><Representation id="second"/></AdaptationSet></Period>
+</MPD>"#;
+        let metadata = representation_metadata(body, 2).expect("two-period metadata");
+        assert_eq!(metadata.len(), 2);
+        assert_eq!(metadata[0][0][0].id.as_deref(), Some("first"));
+        assert_eq!(metadata[1][0][0].id.as_deref(), Some("second"));
     }
 
     #[test]

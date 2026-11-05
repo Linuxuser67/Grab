@@ -66,6 +66,7 @@ pub(crate) struct DashRepresentation {
     pub(crate) language: Option<String>,
     pub(crate) kind: DashTrackKind,
     pub(crate) encryption: Option<crate::dash_drm::DashEncryption>,
+    pub(crate) widevine_pssh: Box<[String]>,
     pub(crate) is_default_audio: bool,
     pub(crate) is_default_subtitle: bool,
     adaptation_id: Option<String>,
@@ -558,13 +559,16 @@ pub(crate) fn parse_dash_manifest_at(
                     .lang
                     .clone()
                     .or_else(|| adaptation.lang.clone());
-                let encryption = crate::dash_drm::encryption_from_scopes(&[
+                let protection_scopes = [
                     &mpd.ContentProtection,
                     &period.ContentProtection,
                     &adaptation.ContentProtection,
                     &representation.ContentProtection,
-                ])
-                .map_err(DashError::UnsupportedProtection)?;
+                ];
+                let encryption = crate::dash_drm::encryption_from_scopes(&protection_scopes)
+                    .map_err(DashError::UnsupportedProtection)?;
+                let widevine_pssh =
+                    crate::dash_drm::widevine_pssh_from_scopes(&protection_scopes);
                 if encryption.is_some() && (is_dynamic || mpd.periods.len() != 1) {
                     return Err(DashError::UnsupportedProtection(
                         "Native DASH DRM currently requires one static Period".to_string(),
@@ -602,6 +606,7 @@ pub(crate) fn parse_dash_manifest_at(
                     language,
                     kind,
                     encryption,
+                    widevine_pssh,
                     is_default_audio,
                     is_default_subtitle: kind == DashTrackKind::Subtitle && is_main,
                     adaptation_id: adaptation.id.clone(),

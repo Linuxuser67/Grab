@@ -682,16 +682,23 @@ async fn prepare_manifest_attempt(
                         .to_string(),
                 ));
             }
-            let mut encryptions = Vec::new();
+            let mut selected_encryption = Vec::new();
             if let Some(encryption) = video.representation.encryption {
-                encryptions.push(encryption);
+                selected_encryption.push((encryption, video.representation.widevine_pssh.as_ref()));
             }
             if let Some(audio) = audio.as_ref()
                 && let Some(encryption) = audio.representation.encryption
             {
-                encryptions.push(encryption);
+                selected_encryption.push((encryption, audio.representation.widevine_pssh.as_ref()));
             }
-            crate::dash_drm::load_required_keys(&encryptions).map_err(ManifestRunError::Failed)?
+            crate::dash_drm::resolve_selected_keys(
+                job.proxy.as_ref(),
+                &job.source.url,
+                &selected_encryption,
+                &mut guarded_child_hosts,
+            )
+            .await
+            .map_err(ManifestRunError::Failed)?
         }
         Tracks::Hls { .. } | Tracks::DashLiveOffline { .. } => None,
     };

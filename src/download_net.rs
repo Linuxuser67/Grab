@@ -300,6 +300,22 @@ fn apply_proxies(
     builder
 }
 
+/// Build an attempt-scoped HTTP client for DRM license exchanges.
+///
+/// Unlike media-resource clients, license requests do not follow redirects: a
+/// configured authorization header must never be forwarded to a redirect target.
+pub(crate) fn license_http_client(
+    proxy: Option<&ResolvedProxy>,
+) -> Result<reqwest::Client, String> {
+    let (_, resolver) = guarded_network_policy();
+    let builder = client_builder_with_policy(reqwest::redirect::Policy::none(), resolver)
+        .https_only(true)
+        .timeout(std::time::Duration::from_secs(30));
+    apply_proxies(builder, proxy)
+        .build()
+        .map_err(|_| "Could not create the guarded DRM license HTTP client".to_string())
+}
+
 /// Build one client per download attempt. Connection pooling stays shared within
 /// its requests and range workers, but DNS policy does not leak to other rows.
 pub(crate) fn http_client_for(proxy: Option<&ResolvedProxy>) -> Result<reqwest::Client, String> {

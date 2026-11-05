@@ -835,6 +835,233 @@ mod tests {
         }
     }
 
+    fn synthetic_init(scheme: &[u8; 4], tenc_version: u8) -> (Vec<u8>, [u8; 16]) {
+        let kid = [0x33; 16];
+
+        let mut tenc_fields = Vec::new();
+        tenc_fields.push(0); // reserved
+        if tenc_version == 0 {
+            tenc_fields.push(0); // reserved
+        } else {
+            tenc_fields.push(0); // crypt_byte_block = 0, skip_byte_block = 0
+        }
+        tenc_fields.push(1); // is_protected
+        tenc_fields.push(16); // per_sample_iv_size
+        tenc_fields.extend_from_slice(&kid);
+        let tenc = box_bytes(b"tenc", &full_box(tenc_version, 0, &tenc_fields));
+
+        let frma = box_bytes(b"frma", b"avc1");
+        let mut schm_fields = scheme.to_vec();
+        schm_fields.extend_from_slice(&0x0001_0000_u32.to_be_bytes());
+        let schm = box_bytes(b"schm", &full_box(0, 0, &schm_fields));
+        let schi = box_bytes(b"schi", &tenc);
+        let mut sinf_fields = frma;
+        sinf_fields.extend_from_slice(&schm);
+        sinf_fields.extend_from_slice(&schi);
+        let sinf = box_bytes(b"sinf", &sinf_fields);
+
+        let mut encv_fields = vec![0_u8; 78];
+        encv_fields.extend_from_slice(&sinf);
+        let encv = box_bytes(b"encv", &encv_fields);
+        let mut stsd_fields = 1_u32.to_be_bytes().to_vec();
+        stsd_fields.extend_from_slice(&encv);
+        let stsd = box_bytes(b"stsd", &full_box(0, 0, &stsd_fields));
+        let stbl = box_bytes(b"stbl", &stsd);
+        let minf = box_bytes(b"minf", &stbl);
+        let mdia = box_bytes(b"mdia", &minf);
+
+        let mut tkhd_fields = Vec::new();
+        tkhd_fields.extend_from_slice(&0_u32.to_be_bytes()); // creation_time
+        tkhd_fields.extend_from_slice(&0_u32.to_be_bytes()); // modification_time
+        tkhd_fields.extend_from_slice(&7_u32.to_be_bytes()); // track_ID
+        tkhd_fields.extend_from_slice(&0_u32.to_be_bytes()); // reserved
+        tkhd_fields.extend_from_slice(&0_u32.to_be_bytes()); // duration
+        tkhd_fields.extend_from_slice(&[0_u8; 8]); // reserved
+        tkhd_fields.extend_from_slice(&0_u16.to_be_bytes()); // layer
+        tkhd_fields.extend_from_slice(&0_u16.to_be_bytes()); // alternate_group
+        tkhd_fields.extend_from_slice(&0_u16.to_be_bytes()); // volume
+        tkhd_fields.extend_from_slice(&0_u16.to_be_bytes()); // reserved
+        for matrix_value in [
+            0x0001_0000_u32,
+            0,
+            0,
+            0,
+            0x0001_0000,
+            0,
+            0,
+            0,
+            0x4000_0000,
+        ] {
+            tkhd_fields.extend_from_slice(&matrix_value.to_be_bytes());
+        }
+        tkhd_fields.extend_from_slice(&0_u32.to_be_bytes()); // width
+        tkhd_fields.extend_from_slice(&0_u32.to_be_bytes()); // height
+        let tkhd = box_bytes(b"tkhd", &full_box(0, 7, &tkhd_fields));
+
+        let mut trak_fields = tkhd;
+        trak_fields.extend_from_slice(&mdia);
+        let trak = box_bytes(b"trak", &trak_fields);
+        let moov = box_bytes(b"moov", &trak);
+
+        let mut ftyp_fields = b"isom".to_vec();
+        ftyp_fields.extend_from_slice(&0_u32.to_be_bytes());
+        ftyp_fields.extend_from_slice(b"isom");
+        let ftyp = box_bytes(b"ftyp", &ftyp_fields);
+
+        let mut init = ftyp;
+        init.extend_from_slice(&moov);
+        (init, kid)
+    }
+
+    fn synthetic_fragment(
+        ciphertext: &[u8; 16],
+        iv: &[u8; 16],
+    ) -> Vec<u8> {
+        let tfhd = box_bytes(
+            b"tfhd",
+            &full_box(0, 0x020000, &7_u32.to_be_bytes()),
+        );
+        let tfdt = box_bytes(b"tfdt", &full_box(0, 0, &0_u32.to_be_bytes()));
+        let mut senc_fields = 1_u32.to_be_bytes().to_vec();
+        senc_fields.extend_from_slice(iv);
+        let senc = box_bytes(b"senc", &full_box(0, 0, &senc_fields));
+
+        let make_trun = |data_offset: i32| {
+            let mut fields = 1_u32.to_be_bytes().to_vec();
+            fields.extend_from_slice(&data_offset.to_be_bytes());
+            fields.extend_from_slice(&16_u32.to_be_bytes());
+            box_bytes(b"trun", &full_box(0, 0x000201, &fields))
+        };
+        let make_moof = |trun: &[u8]| {
+            let mfhd = box_bytes(b"mfhd", &full_box(0, 0, &1_u32.to_be_bytes()));
+            let mut traf_fields = tfhd.clone();
+            traf_fields.extend_from_slice(&tfdt);
+            traf_fields.extend_from_slice(trun);
+            traf_fields.extend_from_slice(&senc);
+            let traf = box_bytes(b"traf", &traf_fields);
+            let mut moof_fields = mfhd;
+            moof_fields.extend_from_slice(&traf);
+            box_bytes(b"moof", &moof_fields)
+        };
+
+        let initial_moof = make_moof(&make_trun(0));
+        let offset = i32::try_from(initial_moof.len() + 8)
+            .expect("synthetic fragment offset fits i32");
+        let moof = make_moof(&make_trun(offset));
+        let mut fragment = moof;
+        fragment.extend_from_slice(&box_bytes(b"mdat", ciphertext));
+        fragment
+    }
+
+    fn decrypt_synthetic_track(
+        scheme: EncryptionScheme,
+        scheme_fourcc: &[u8; 4],
+        tenc_version: u8,
+        iv: [u8; 16],
+        ciphertext: [u8; 16],
+    ) -> Vec<u8> {
+        let (init, kid) = synthetic_init(scheme_fourcc, tenc_version);
+        let directory = tempfile::tempdir().expect("create encrypted DASH test directory");
+        let init_name = "init.mp4";
+        let segment_name = "segment.m4s";
+        std::fs::write(directory.path().join(init_name), &init)
+            .expect("write synthetic DASH initialization");
+        std::fs::write(
+            directory.path().join(segment_name),
+            synthetic_fragment(&ciphertext, &iv),
+        )
+        .expect("write synthetic DASH fragment");
+
+        let resources = [
+            DashResource {
+                url: url::Url::parse("https://example.invalid/init.mp4")
+                    .expect("valid test initialization URL"),
+                range: None,
+                filename: init_name.to_string(),
+                kind: DashResourceKind::Initialization,
+                segment_number: None,
+            },
+            DashResource {
+                url: url::Url::parse("https://example.invalid/segment.m4s")
+                    .expect("valid test segment URL"),
+                range: None,
+                filename: segment_name.to_string(),
+                kind: DashResourceKind::Segment,
+                segment_number: Some(1),
+            },
+        ];
+        let output = directory.path().join("decrypted.mp4");
+        decrypt_track(
+            &resources,
+            directory.path(),
+            &output,
+            DashEncryption {
+                scheme,
+                default_kid: kid,
+            },
+            &[0x10; 16],
+        )
+        .expect("decrypt synthetic DASH track");
+        std::fs::read(output).expect("read decrypted DASH track")
+    }
+
+    #[test]
+    fn decrypts_cenc_and_cbcs_fragmented_tracks_end_to_end() {
+        let plaintext = [
+            0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07,
+            0x08, 0x09, 0x0a, 0x0b, 0x0c, 0x0d, 0x0e, 0x0f,
+        ];
+        let iv = [
+            0x20, 0x21, 0x22, 0x23, 0x24, 0x25, 0x26, 0x27,
+            0x28, 0x29, 0x2a, 0x2b, 0x2c, 0x2d, 0x2e, 0x2f,
+        ];
+        let cenc_ciphertext = [
+            0xb8, 0x78, 0xd8, 0x9b, 0xed, 0xdb, 0x8e, 0x7e,
+            0xfb, 0x0c, 0xde, 0xfb, 0xb0, 0x92, 0x5c, 0xb5,
+        ];
+        let cbcs_ciphertext = [
+            0x13, 0x13, 0xf2, 0xa7, 0x28, 0x0f, 0x62, 0xb8,
+            0xde, 0x96, 0x01, 0x95, 0xf9, 0x83, 0xb3, 0x2a,
+        ];
+
+        for (scheme, fourcc, version, ciphertext) in [
+            (
+                EncryptionScheme::Cenc,
+                b"cenc",
+                0,
+                cenc_ciphertext,
+            ),
+            (
+                EncryptionScheme::Cbcs,
+                b"cbcs",
+                1,
+                cbcs_ciphertext,
+            ),
+        ] {
+            let decrypted = decrypt_synthetic_track(
+                scheme,
+                fourcc,
+                version,
+                iv,
+                ciphertext,
+            );
+            let boxes = parse_box_spans(&decrypted, 0, decrypted.len())
+                .expect("decrypted file has complete MP4 boxes");
+            let mdat = boxes
+                .iter()
+                .find(|span| &span.kind == b"mdat")
+                .copied()
+                .expect("decrypted track contains mdat");
+            let start = mdat.payload_start().expect("mdat payload start");
+            let end = mdat.end().expect("mdat end");
+            assert_eq!(
+                decrypted.get(start..end),
+                Some(plaintext.as_slice()),
+                "{scheme:?} sample should be plaintext after VSD decryption",
+            );
+        }
+    }
+
     #[test]
     fn parses_hyphenated_and_compact_hex_identifiers() {
         let value = "00112233-4455-6677-8899-aabbccddeeff";

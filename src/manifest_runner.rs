@@ -2974,12 +2974,6 @@ async fn fetch_and_write_dash_track(
         abort,
     } = context;
     let encryption = plan.representation.encryption;
-    if encryption.is_some() && plan.segment_base_index.is_some() {
-        return Err(ManifestRunError::Unsupported(
-            "Native DASH DRM decryption does not yet support SegmentBase byte-range addressing"
-                .to_string(),
-        ));
-    }
     let resources = if let Some(index) = plan.segment_base_index.as_ref() {
         let Some((bytes, total_length)) =
             fetch_dash_index_bytes(client, &index.url, index.index_range, abort).await?
@@ -2999,7 +2993,8 @@ async fn fetch_and_write_dash_track(
     } else {
         dash_resources(plan)
     };
-    let drm_resources = encryption.map(|_| plan.resources.to_vec());
+    // Include the SIDX-expanded media ranges as well as the initialization resource.
+    let drm_resources = encryption.map(|_| resources.clone());
     let completed = fetch_and_write_ordered_track(ManifestOrderedTrackTransfer {
         client,
         staging,

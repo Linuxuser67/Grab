@@ -33,10 +33,13 @@ queue state or application logs.
 
 The current native subset requires one encrypted track in each selected
 initialization resource, one track fragment per media resource, explicit
-sample sizes and offsets, and in-band sample encryption metadata. Key rotation,
-multiple KIDs, auxiliary encryption information, byte-range SegmentBase
-addressing, dynamic/multi-Period presentations, and encrypted subtitles are
-not supported by this increment. Unsupported layouts retain the existing
+sample sizes and offsets, and in-band sample encryption metadata. Indexed
+SegmentBase is supported when the initialization byte range and a flat SIDX
+are present; unindexed single-file SegmentBase remains on fallback because its
+initialization and media fragments are not separately addressable by this
+adapter. Key rotation, multiple KIDs, auxiliary encryption information,
+dynamic/multi-Period presentations, and encrypted subtitles are not supported
+by this increment. Unsupported layouts retain the existing
 fallback behavior; a missing configured key is reported as an error rather
 than publishing ciphertext as a successful media download.
 

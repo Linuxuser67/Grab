@@ -270,11 +270,13 @@ pub(crate) fn parse_dash_manifest(
 /// flat SIDX and an Initialization range. Single-file assets are still subject
 /// to the 1 GiB per-resource limit. Multiple static periods require explicit DASH-IF
 /// period-continuity signaling, stable adaptation/representation IDs, and contiguous timing.
-/// DRM, XLink, adaptation-set
-/// Subset/Preselection combinations, dynamic SegmentList, LL-DASH, SegmentBase
-/// with an Initialization@sourceURL or non-zero presentation-time offset,
-/// hierarchical SIDX, non-zero offsets on dynamic SegmentTemplate, and WebM
-/// remain on yt-dlp fallback.
+/// Native DRM is limited to one static Period with one default KID per selected
+/// track. Indexed SegmentBase DRM requires an explicit Initialization byte range
+/// and a flat SIDX; unindexed single-file SegmentBase remains on yt-dlp fallback.
+/// XLink, adaptation-set Subset/Preselection combinations, dynamic SegmentList,
+/// LL-DASH, SegmentBase with an Initialization@sourceURL or non-zero
+/// presentation-time offset, hierarchical SIDX, non-zero offsets on dynamic
+/// SegmentTemplate, and WebM remain on yt-dlp fallback.
 ///
 /// # Errors
 /// Returns an error when the MPD is malformed, exceeds the input limit, uses
@@ -294,8 +296,9 @@ pub(crate) fn parse_dash_manifest_at(
     // OutputProtection describes the rendering device's output link (for example,
     // an HDCP requirement), not media encryption or segment addressing. Grab
     // downloads the encoded resources and does not render them, so this descriptor
-    // does not restrict native download planning. ContentProtection remains
-    // explicitly rejected below because it signals protected media.
+    // does not restrict native download planning. ContentProtection is parsed
+    // below; only encryption schemes and layouts supported by the DRM adapter
+    // are routed to the native decryption path.
     let mpd = dash_mpd_core::parse(body).map_err(|_| DashError::Parse)?;
 
     let mut presentation = match mpd.mpdtype.as_deref() {
@@ -2700,6 +2703,44 @@ mod tests {
         assert_eq!(plan.resources.len(), 1);
         assert_eq!(plan.resources[0].kind, DashResourceKind::Initialization);
         assert_eq!(plan.resources[0].range, Some(index.initialization_range));
+    }
+
+    #[test]
+    fn plans_encrypted_indexed_segment_base_for_native_decryption() {
+        let body = r#"<?xml version="1.0"?>
+<MPD xmlns="urn:mpeg:dash:schema:mpd:2011"
+     xmlns:cenc="urn:mpeg:cenc:2013"
+     type="static" mediaPresentationDuration="PT2S">
+  <BaseURL>media.mp4</BaseURL>
+  <Period duration="PT2S">
+    <AdaptationSet contentType="video" mimeType="video/mp4">
+      <ContentProtection schemeIdUri="urn:mpeg:dash:mp4protection:2011"
+                         value="cenc"
+                         cenc:default_KID="00112233-4455-6677-8899-aabbccddeeff"/>
+      <Representation id="v1">
+        <SegmentBase timescale="1000" indexRange="100-143" indexRangeExact="true">
+          <Initialization range="0-99"/>
+        </SegmentBase>
+      </Representation>
+    </AdaptationSet>
+  </Period>
+</MPD>"#;
+        let manifest =
+            parse_dash_manifest(BASE_URL, body).expect("encrypted indexed SegmentBase should parse");
+        let representation = &manifest.video_representations[0];
+        assert_eq!(
+            representation.encryption.expect("default KID is parsed").scheme,
+            crate::dash_drm::EncryptionScheme::Cenc
+        );
+
+        let plan = plan_dash_representation(&manifest, &representation.key)
+            .expect("encrypted indexed SegmentBase should produce a decryption plan");
+        assert!(plan.segment_base_index.is_some());
+        assert_eq!(plan.resources.len(), 1);
+        assert_eq!(
+            plan.resources[0].kind,
+            DashResourceKind::Initialization
+        );
     }
 
     #[test]

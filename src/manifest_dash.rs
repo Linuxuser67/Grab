@@ -29,6 +29,8 @@ pub(crate) enum DashError {
     Parse,
     #[error("DASH presentation uses an unsupported period layout")]
     UnsupportedPresentation,
+    #[error("DASH content protection is unsupported: {0}")]
+    UnsupportedProtection(String),
     #[error("DASH addressing or resource URL is unsupported")]
     UnsupportedAddressing,
     #[error("DASH segment description is invalid")]
@@ -63,6 +65,7 @@ pub(crate) struct DashRepresentation {
     pub(crate) codecs: Option<String>,
     pub(crate) language: Option<String>,
     pub(crate) kind: DashTrackKind,
+    pub(crate) encryption: Option<crate::dash_drm::DashEncryption>,
     pub(crate) is_default_audio: bool,
     pub(crate) is_default_subtitle: bool,
     adaptation_id: Option<String>,
@@ -203,6 +206,7 @@ struct RepresentationIdentity<'a> {
     mime_type: Option<&'a str>,
     codecs: Option<&'a str>,
     language: Option<&'a str>,
+    encryption: Option<crate::dash_drm::DashEncryption>,
     base_url: &'a Url,
     addressing: &'a DashAddressing,
 }
@@ -343,7 +347,6 @@ pub(crate) fn parse_dash_manifest_at(
     if !mpd.PatchLocation.is_empty()
         || mpd.periods.is_empty()
         || mpd.periods.len() > dash_roles::MAX_PERIODS
-        || !mpd.ContentProtection.is_empty()
         || (is_dynamic && mpd.periods.len() != 1)
     {
         return Err(DashError::UnsupportedPresentation);
@@ -388,7 +391,6 @@ pub(crate) fn parse_dash_manifest_at(
         mpd.periods.iter().zip(&representation_metadata).enumerate()
     {
         if period.href.is_some()
-            || !period.ContentProtection.is_empty()
             || !period.subsets.is_empty()
             || !period.pre_selections.is_empty()
             || (mpd.periods.len() > 1 && !period.empty_adaptations.is_empty())
@@ -466,7 +468,7 @@ pub(crate) fn parse_dash_manifest_at(
 
         for (adaptation_index, adaptation) in period.adaptations.iter().enumerate() {
             let adaptation_metadata = &period_metadata[adaptation_index];
-            if adaptation.href.is_some() || !adaptation.ContentProtection.is_empty() {
+            if adaptation.href.is_some() {
                 return Err(DashError::UnsupportedPresentation);
             }
             if has_trick_mode_properties(
@@ -484,7 +486,7 @@ pub(crate) fn parse_dash_manifest_at(
                     .get(representation_index)
                     .ok_or(DashError::Parse)?
                     .is_main;
-                if representation.href.is_some() || !representation.ContentProtection.is_empty() {
+                if representation.href.is_some() {
                     return Err(DashError::UnsupportedPresentation);
                 }
                 if has_trick_mode_properties(
@@ -553,6 +555,13 @@ pub(crate) fn parse_dash_manifest_at(
                     .lang
                     .clone()
                     .or_else(|| adaptation.lang.clone());
+                let encryption = crate::dash_drm::encryption_from_scopes(&[
+                    &mpd.ContentProtection,
+                    &period.ContentProtection,
+                    &adaptation.ContentProtection,
+                    &representation.ContentProtection,
+                ])
+                .map_err(DashError::UnsupportedProtection)?;
                 let identity = RepresentationIdentity {
                     id: representation_id.as_deref(),
                     kind,
@@ -562,6 +571,7 @@ pub(crate) fn parse_dash_manifest_at(
                     mime_type: mime_type.as_deref(),
                     codecs: codecs.as_deref(),
                     language: language.as_deref(),
+                    encryption,
                     base_url: &representation_base,
                     addressing: &addressing,
                 };
@@ -583,6 +593,7 @@ pub(crate) fn parse_dash_manifest_at(
                     codecs,
                     language,
                     kind,
+                    encryption,
                     is_default_audio,
                     is_default_subtitle: kind == DashTrackKind::Subtitle && is_main,
                     adaptation_id: adaptation.id.clone(),
@@ -1017,6 +1028,20 @@ fn validate_https_url(url: Url) -> Result<Url, DashError> {
     Ok(url)
 }
 
+fn hash_encryption(hasher: &mut Sha256, encryption: Option<crate::dash_drm::DashEncryption>) {
+    match encryption {
+        Some(encryption) => {
+            hasher.update(b"encrypted");
+            hasher.update(match encryption.scheme {
+                crate::dash_drm::EncryptionScheme::Cenc => b"cenc".as_slice(),
+                crate::dash_drm::EncryptionScheme::Cbcs => b"cbcs".as_slice(),
+            });
+            hasher.update(encryption.default_kid);
+        }
+        None => hasher.update(b"clear"),
+    }
+}
+
 /// Stable identifier for a DASH representation, independent of adaptation
 /// and representation order. Query signatures are excluded from BaseURL identity.
 fn stable_representation_key(identity: RepresentationIdentity<'_>) -> String {
@@ -1029,6 +1054,7 @@ fn stable_representation_key(identity: RepresentationIdentity<'_>) -> String {
         mime_type,
         codecs,
         language,
+        encryption,
         base_url,
         addressing,
     } = identity;
@@ -1045,6 +1071,7 @@ fn stable_representation_key(identity: RepresentationIdentity<'_>) -> String {
     hash_optional_text(&mut hasher, mime_type);
     hash_optional_text(&mut hasher, codecs);
     hash_optional_text(&mut hasher, language);
+    hash_encryption(&mut hasher, encryption);
     hash_optional_number(&mut hasher, bandwidth);
     hash_optional_number(&mut hasher, width);
     hash_optional_number(&mut hasher, height);
@@ -1149,6 +1176,7 @@ fn stable_live_representation_key(identity: RepresentationIdentity<'_>) -> Strin
     hash_optional_text(&mut hasher, mime_type);
     hash_optional_text(&mut hasher, codecs);
     hash_optional_text(&mut hasher, language);
+    hash_encryption(&mut hasher, encryption);
     hash_optional_number(&mut hasher, bandwidth);
     hash_optional_number(&mut hasher, width);
     hash_optional_number(&mut hasher, height);
@@ -4251,6 +4279,73 @@ mod tests {
                 length: 1_000
             })
         );
+    }
+
+    #[test]
+    fn parses_static_cenc_and_cbcs_default_kids_at_inherited_scopes() {
+        for (scheme, kid, expected) in [
+            ("cenc", "00112233-4455-6677-8899-aabbccddeeff", crate::dash_drm::EncryptionScheme::Cenc),
+            ("cbcs", "ffeeddcc-bbaa-9988-7766-554433221100", crate::dash_drm::EncryptionScheme::Cbcs),
+        ] {
+            let body = TEMPLATE_MPD.replace(
+                "</Period>",
+                &format!(
+                    r#"
+    <AdaptationSet contentType="video" mimeType="video/mp4">
+      <ContentProtection schemeIdUri="urn:mpeg:dash:mp4protection:2011" value="{scheme}" default_KID="{kid}"/>
+      <Representation id="protected" bandwidth="1000">
+        <SegmentTemplate timescale="1" duration="5" initialization="protected-init.mp4" media="protected-$Number$.m4s"/>
+      </Representation>
+    </AdaptationSet>
+</Period>"#
+                ),
+            );
+            let manifest = parse_dash_manifest(BASE_URL, &body)
+                .expect("supported static CENC/CBCS MPD");
+            let protected = manifest.video_representations
+                .iter()
+                .find(|item| item.representation_id.as_deref() == Some("protected"))
+                .expect("protected representation");
+            let encryption = protected.encryption.expect("parsed encryption metadata");
+            assert_eq!(encryption.scheme, expected);
+            assert_eq!(
+                encryption.default_kid,
+                crate::dash_drm::parse_hex_16_for_test(kid).expect("test KID")
+            );
+            let planned = plan_dash_representation(&manifest, &protected.key)
+                .expect("protected representation plan");
+            assert_eq!(planned.representation.encryption, Some(encryption));
+        }
+    }
+
+    #[test]
+    fn rejects_unsupported_or_conflicting_dash_protection_descriptors() {
+        let unknown = TEMPLATE_MPD.replace(
+            "</Period>",
+            r#"
+    <AdaptationSet contentType="video" mimeType="video/mp4">
+      <ContentProtection schemeIdUri="urn:mpeg:dash:mp4protection:2011" value="cens" default_KID="00112233445566778899aabbccddeeff"/>
+      <Representation id="protected" bandwidth="1000">
+        <SegmentTemplate timescale="1" duration="5" initialization="protected-init.mp4" media="protected-$Number$.m4s"/>
+      </Representation>
+    </AdaptationSet>
+</Period>"#,
+        );
+        assert!(parse_dash_manifest(BASE_URL, &unknown).is_err());
+
+        let conflicting = TEMPLATE_MPD.replace(
+            "</Period>",
+            r#"
+    <AdaptationSet contentType="video" mimeType="video/mp4">
+      <ContentProtection schemeIdUri="urn:mpeg:dash:mp4protection:2011" value="cenc" default_KID="00112233445566778899aabbccddeeff"/>
+      <Representation id="protected" bandwidth="1000">
+        <ContentProtection schemeIdUri="urn:mpeg:dash:mp4protection:2011" value="cbcs" default_KID="00112233445566778899aabbccddeeff"/>
+        <SegmentTemplate timescale="1" duration="5" initialization="protected-init.mp4" media="protected-$Number$.m4s"/>
+      </Representation>
+    </AdaptationSet>
+</Period>"#,
+        );
+        assert!(parse_dash_manifest(BASE_URL, &conflicting).is_err());
     }
 
     #[test]

@@ -2725,11 +2725,14 @@ mod tests {
     </AdaptationSet>
   </Period>
 </MPD>"#;
-        let manifest =
-            parse_dash_manifest(BASE_URL, body).expect("encrypted indexed SegmentBase should parse");
+        let manifest = parse_dash_manifest(BASE_URL, body)
+            .expect("encrypted indexed SegmentBase should parse");
         let representation = &manifest.video_representations[0];
         assert_eq!(
-            representation.encryption.expect("default KID is parsed").scheme,
+            representation
+                .encryption
+                .expect("default KID is parsed")
+                .scheme,
             crate::dash_drm::EncryptionScheme::Cenc
         );
 
@@ -2737,10 +2740,7 @@ mod tests {
             .expect("encrypted indexed SegmentBase should produce a decryption plan");
         assert!(plan.segment_base_index.is_some());
         assert_eq!(plan.resources.len(), 1);
-        assert_eq!(
-            plan.resources[0].kind,
-            DashResourceKind::Initialization
-        );
+        assert_eq!(plan.resources[0].kind, DashResourceKind::Initialization);
     }
 
     #[test]

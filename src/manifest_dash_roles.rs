@@ -24,6 +24,12 @@ pub(super) struct RepresentationRoleMetadata {
     pub(super) is_main: bool,
 }
 
+/// Representation metadata for one Period, grouped by AdaptationSet.
+pub(super) type PeriodRepresentationMetadata = Vec<Vec<RepresentationRoleMetadata>>;
+
+/// Representation metadata grouped in MPD Period source order.
+pub(super) type RepresentationMetadata = Vec<PeriodRepresentationMetadata>;
+
 #[derive(Clone, Copy)]
 enum Element {
     Mpd,
@@ -44,7 +50,7 @@ pub(super) fn representation_metadata(
     let mut reader = NsReader::from_reader(body);
     let mut buffer = Vec::new();
     let mut stack = Vec::new();
-    let mut periods: Vec<Vec<Vec<RepresentationRoleMetadata>>> = Vec::new();
+    let mut periods: RepresentationMetadata = Vec::new();
     let mut representation_count = 0_usize;
     let mut adaptation_count = 0_usize;
 
@@ -92,7 +98,7 @@ fn push_element(
     start: &BytesStart<'_>,
     namespace: &ResolveResult<'_>,
     stack: &mut Vec<Element>,
-    periods: &mut Vec<Vec<Vec<RepresentationRoleMetadata>>>,
+    periods: &mut RepresentationMetadata,
     max_representations: usize,
     representation_count: &mut usize,
     adaptation_count: &mut usize,

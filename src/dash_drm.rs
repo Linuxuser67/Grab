@@ -341,7 +341,7 @@ fn parse_clear_key_license(
             continue;
         }
         if let Some(previous) = result.get(&kid) {
-            if &**previous != &*key {
+            if **previous != *key {
                 return Err(
                     "The DASH ClearKey response repeats a KID with different keys".to_string(),
                 );

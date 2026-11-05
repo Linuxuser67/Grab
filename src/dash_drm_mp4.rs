@@ -4,6 +4,8 @@ use std::io::{Cursor, Write};
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
 
+use zeroize::Zeroizing;
+
 use crate::bounded_file::read_regular_file_bounded;
 use crate::manifest::dash::{DashResource, DashResourceKind};
 
@@ -859,7 +861,7 @@ pub(crate) fn decrypt_track(
         return Err("Encrypted DASH initialization resource is empty".to_string());
     }
     let init_encryption = parse_init_encryption(&init, encryption)?;
-    let key_hex = hex_string(key);
+    let key_hex = Zeroizing::new(hex_string(key));
     let decrypter = vsd_mp4::decrypt::CencDecrypter::with_init(&key_hex, &init)
         .map_err(|error| format!("VSD could not initialize DASH decryption: {error}"))?;
 

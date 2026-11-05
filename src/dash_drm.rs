@@ -1,19 +1,26 @@
-//! Bounded DASH Common Encryption support for explicitly supplied content keys.
+//! Bounded DASH Common Encryption support using HTTPS ClearKey licenses.
 //!
 //! Grab keeps downloaded encrypted resources as its resumable source of truth.
-//! Decryption produces a separate private track for FFmpeg; the destination part
-//! and its digest journal therefore remain bound to the original ciphertext.
+//! License keys are held in zeroizing memory, and decryption produces a separate
+//! private track for FFmpeg without modifying encrypted source resources.
 
 use std::collections::{BTreeMap, BTreeSet};
-use std::fs::OpenOptions;
-use std::io::Read;
-use std::path::{Path, PathBuf};
+use std::time::Duration;
+
+use base64::Engine as _;
+use base64::engine::general_purpose::URL_SAFE_NO_PAD;
+use futures_util::StreamExt as _;
+use serde::{Deserialize, Serialize};
+use url::Url;
+use zeroize::{Zeroize as _, Zeroizing};
 
 const MP4_PROTECTION_SCHEME: &str = "urn:mpeg:dash:mp4protection:2011";
 const WIDEVINE_SCHEME: &str = "urn:uuid:edef8ba9-79d6-4ace-a3c8-27dcd51d21ed";
 const PLAYREADY_SCHEME: &str = "urn:uuid:9a04f079-9840-4286-ab92-e65be0885f95";
 const CLEARKEY_SCHEME: &str = "urn:uuid:e2719d58-a985-b3c9-781a-ab030af78d30";
-const MAX_KEY_FILE_BYTES: usize = 64 * 1024;
+const MAX_LICENSE_RESPONSE_BYTES: usize = 64 * 1024;
+const MAX_LICENSE_KEYS: usize = 64;
+const LICENSE_REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum EncryptionScheme {
@@ -28,19 +35,21 @@ pub(crate) struct DashEncryption {
 }
 
 pub(crate) struct DashKeyMap {
-    keys: BTreeMap<[u8; 16], [u8; 16]>,
+    keys: BTreeMap<[u8; 16], Zeroizing<[u8; 16]>>,
 }
 
 impl DashKeyMap {
-    pub(crate) fn key_for(&self, encryption: DashEncryption) -> Result<[u8; 16], String> {
+    pub(crate) fn key_for(
+        &self,
+        encryption: DashEncryption,
+    ) -> Result<Zeroizing<[u8; 16]>, String> {
         self.keys
             .get(&encryption.default_kid)
-            .copied()
+            .map(|key| Zeroizing::new(**key))
             .ok_or_else(|| {
                 format!(
-                    "No content key is configured for DASH KID {}. Add a KID:KEY entry to {}.",
-                    hex_string(&encryption.default_kid),
-                    key_file_path().display()
+                    "The DASH license response did not include selected KID {}",
+                    hex_string(&encryption.default_kid)
                 )
             })
     }
@@ -49,9 +58,9 @@ impl DashKeyMap {
 /// Resolve inherited DASH ContentProtection descriptors into one supported
 /// Common Encryption scheme and one default KID.
 ///
-/// This first implementation intentionally rejects key rotation and multiple
-/// default KIDs. Recognized Widevine, PlayReady and ClearKey UUID descriptors
-/// may accompany the MP4 protection descriptor; no license requests are made.
+/// Native license acquisition currently supports ClearKey only. Widevine and
+/// PlayReady descriptors are rejected until their CDM exchanges have a safe,
+/// reusable integration. Key rotation and multiple default KIDs are unsupported.
 pub(crate) fn encryption_from_scopes(
     scopes: &[&[dash_mpd_core::ContentProtection]],
 ) -> Result<Option<DashEncryption>, String> {
@@ -90,14 +99,16 @@ pub(crate) fn encryption_from_scopes(
                 );
             }
             selected = Some(encryption);
-        } else if descriptor.schemeIdUri.starts_with("urn:uuid:") {
-            if descriptor.schemeIdUri != WIDEVINE_SCHEME
-                && descriptor.schemeIdUri != PLAYREADY_SCHEME
-                && descriptor.schemeIdUri != CLEARKEY_SCHEME
-            {
-                return Err("DASH declares an unsupported protection system".to_string());
-            }
+        } else if descriptor.schemeIdUri == CLEARKEY_SCHEME {
             has_system_descriptor = true;
+        } else if descriptor.schemeIdUri == WIDEVINE_SCHEME
+            || descriptor.schemeIdUri == PLAYREADY_SCHEME
+        {
+            return Err(
+                "Native DASH license acquisition currently supports ClearKey only".to_string(),
+            );
+        } else if descriptor.schemeIdUri.starts_with("urn:uuid:") {
+            return Err("DASH declares an unsupported protection system".to_string());
         } else {
             return Err("DASH declares an unsupported ContentProtection scheme".to_string());
         }
@@ -113,133 +124,253 @@ pub(crate) fn encryption_from_scopes(
     Ok(selected)
 }
 
-/// Load the user's private KID-to-key file only when a selected representation
-/// is encrypted. Keys are not persisted by Grab.
-pub(crate) fn load_required_keys(
-    encryptions: &[DashEncryption],
+/// Resolve the ClearKey license URL across inherited protection scopes.
+///
+/// Relative license URLs are resolved against the MPD. URL user-info,
+/// fragments, and non-HTTPS schemes are rejected.
+pub(crate) fn license_url_from_scopes(
+    scopes: &[&[dash_mpd_core::ContentProtection]],
+    manifest_url: &Url,
+) -> Result<Option<Url>, String> {
+    let mut is_clear_key = false;
+    let mut selected: Option<Url> = None;
+
+    for descriptor in scopes.iter().flat_map(|scope| scope.iter()) {
+        if descriptor.schemeIdUri != CLEARKEY_SCHEME {
+            continue;
+        }
+        is_clear_key = true;
+        let raw = descriptor
+            .laurl
+            .as_ref()
+            .or(descriptor.clearkey_laurl.as_ref())
+            .and_then(|laurl| laurl.content.as_deref())
+            .map(str::trim)
+            .filter(|value| !value.is_empty());
+        let Some(raw) = raw else {
+            continue;
+        };
+        let url = manifest_url
+            .join(raw)
+            .map_err(|_| "DASH ClearKey license URL is invalid".to_string())?;
+        if url.scheme() != "https"
+            || url.host_str().is_none()
+            || !url.username().is_empty()
+            || url.password().is_some()
+            || url.fragment().is_some()
+        {
+            return Err(
+                "DASH ClearKey license URL must be HTTPS and contain no user-info or fragment"
+                    .to_string(),
+            );
+        }
+        // More specific inherited scopes may override the parent license URL.
+        selected = Some(url);
+    }
+
+    if is_clear_key && selected.is_none() {
+        return Err("DASH ClearKey protection has no license URL".to_string());
+    }
+    Ok(selected)
+}
+
+#[derive(Serialize)]
+struct ClearKeyLicenseRequest<'a> {
+    kids: Vec<String>,
+    #[serde(rename = "type")]
+    license_type: &'a str,
+}
+
+#[derive(Deserialize)]
+struct ClearKeyLicenseResponse {
+    keys: Vec<ClearKeyJwk>,
+    #[serde(rename = "type")]
+    license_type: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct ClearKeyJwk {
+    kty: Zeroizing<String>,
+    kid: Zeroizing<String>,
+    k: Zeroizing<String>,
+}
+
+/// Acquire all selected track keys from their HTTPS ClearKey license endpoints.
+///
+/// Keys are retained only in zeroizing memory and are never written to disk or logs.
+pub(crate) async fn acquire_required_keys(
+    client: &reqwest::Client,
+    requests: &[(DashEncryption, Url)],
 ) -> Result<Option<DashKeyMap>, String> {
-    let required: BTreeSet<_> = encryptions
-        .iter()
-        .map(|encryption| encryption.default_kid)
-        .collect();
-    if required.is_empty() {
+    if requests.is_empty() {
         return Ok(None);
     }
 
-    let path = key_file_path();
-    let bytes = read_private_key_file(&path)?;
-    let text = std::str::from_utf8(&bytes)
-        .map_err(|_| format!("{} must contain UTF-8 KID:KEY entries", path.display()))?;
-    let mut keys = BTreeMap::new();
+    let mut groups: Vec<(Url, BTreeSet<[u8; 16]>)> = Vec::new();
+    for (encryption, license_url) in requests {
+        if let Some((_, kids)) = groups.iter_mut().find(|(url, _)| url == license_url) {
+            kids.insert(encryption.default_kid);
+        } else {
+            groups.push((
+                license_url.clone(),
+                BTreeSet::from([encryption.default_kid]),
+            ));
+        }
+    }
 
-    for (line_index, line) in text.lines().enumerate() {
-        let line = line.trim();
-        if line.is_empty() || line.starts_with('#') {
+    let mut keys: BTreeMap<[u8; 16], Zeroizing<[u8; 16]>> = BTreeMap::new();
+    for (license_url, required) in groups {
+        let kids = required
+            .iter()
+            .map(|kid| URL_SAFE_NO_PAD.encode(kid))
+            .collect();
+        let request = ClearKeyLicenseRequest {
+            kids,
+            license_type: "temporary",
+        };
+        let request_body = serde_json::to_vec(&request)
+            .map_err(|_| "Could not encode the DASH ClearKey license request".to_string())?;
+        let response = tokio::time::timeout(
+            LICENSE_REQUEST_TIMEOUT,
+            client
+                .post(license_url)
+                .timeout(LICENSE_REQUEST_TIMEOUT)
+                .header(reqwest::header::CONTENT_TYPE, "application/json")
+                .header(reqwest::header::ACCEPT, "application/json")
+                .body(request_body)
+                .send(),
+        )
+        .await
+        .map_err(|_| "The DASH ClearKey license request timed out".to_string())?
+        .map_err(|error| {
+            format!(
+                "Could not contact the DASH ClearKey license server: {}",
+                error.without_url()
+            )
+        })?;
+        let status = response.status();
+        if !status.is_success() {
+            return Err(format!(
+                "The DASH ClearKey license server returned HTTP {}",
+                status.as_u16()
+            ));
+        }
+        if response
+            .content_length()
+            .is_some_and(|length| length > MAX_LICENSE_RESPONSE_BYTES as u64)
+        {
+            return Err("The DASH ClearKey license response exceeds its size limit".to_string());
+        }
+
+        let mut body = Zeroizing::new(Vec::with_capacity(MAX_LICENSE_RESPONSE_BYTES));
+        let mut stream = response.bytes_stream();
+        while let Some(chunk) = tokio::time::timeout(LICENSE_REQUEST_TIMEOUT, stream.next())
+            .await
+            .map_err(|_| "The DASH ClearKey license response timed out".to_string())?
+        {
+            let chunk = chunk.map_err(|error| {
+                format!(
+                    "Could not read the DASH ClearKey license response: {}",
+                    error.without_url()
+                )
+            })?;
+            let next_len = body
+                .len()
+                .checked_add(chunk.len())
+                .filter(|length| *length <= MAX_LICENSE_RESPONSE_BYTES)
+                .ok_or_else(|| {
+                    "The DASH ClearKey license response exceeds its size limit".to_string()
+                })?;
+            body.extend_from_slice(&chunk);
+            debug_assert_eq!(body.len(), next_len);
+        }
+
+        let received = parse_clear_key_license(&mut body, &required)?;
+        for (kid, key) in received {
+            if let Some(previous) = keys.get(&kid) {
+                if **previous != *key {
+                    return Err(
+                        "DASH license servers returned conflicting keys for one KID".to_string()
+                    );
+                }
+            } else {
+                keys.insert(kid, key);
+            }
+        }
+    }
+
+    for (encryption, _) in requests {
+        if !keys.contains_key(&encryption.default_kid) {
+            return Err(format!(
+                "The DASH ClearKey license response did not include selected KID {}",
+                hex_string(&encryption.default_kid)
+            ));
+        }
+    }
+    Ok(Some(DashKeyMap { keys }))
+}
+
+fn parse_clear_key_license(
+    body: &mut Vec<u8>,
+    required: &BTreeSet<[u8; 16]>,
+) -> Result<BTreeMap<[u8; 16], Zeroizing<[u8; 16]>>, String> {
+    let parsed = serde_json::from_slice::<ClearKeyLicenseResponse>(body);
+    body.zeroize();
+    let mut response = parsed
+        .map_err(|_| "The DASH ClearKey license response is not a valid JWK Set".to_string())?;
+    if response
+        .license_type
+        .as_deref()
+        .is_some_and(|license_type| license_type != "temporary")
+        || response.keys.is_empty()
+        || response.keys.len() > MAX_LICENSE_KEYS
+    {
+        return Err(
+            "The DASH ClearKey license response has an unsupported type or key count".to_string(),
+        );
+    }
+
+    let mut result: BTreeMap<[u8; 16], Zeroizing<[u8; 16]>> = BTreeMap::new();
+    for jwk in response.keys.drain(..) {
+        if jwk.kty.as_str() != "oct" {
+            return Err("The DASH ClearKey response contains a non-octet key".to_string());
+        }
+        let kid = decode_clear_key_value(&jwk.kid)?;
+        let key = Zeroizing::new(decode_clear_key_value(&jwk.k)?);
+        if !required.contains(&kid) {
             continue;
         }
-        let (kid_text, key_text) = line.split_once(':').ok_or_else(|| {
-            format!(
-                "{}:{} must use KID:KEY format",
-                path.display(),
-                line_index + 1
-            )
-        })?;
-        let kid = parse_hex_16(kid_text).ok_or_else(|| {
-            format!(
-                "{}:{} contains an invalid 128-bit KID",
-                path.display(),
-                line_index + 1
-            )
-        })?;
-        let key = parse_hex_16(key_text).ok_or_else(|| {
-            format!(
-                "{}:{} contains an invalid 128-bit content key",
-                path.display(),
-                line_index + 1
-            )
-        })?;
-        if keys.insert(kid, key).is_some() {
-            return Err(format!(
-                "{}:{} repeats a KID; each KID must have exactly one key",
-                path.display(),
-                line_index + 1
-            ));
+        if let Some(previous) = result.get(&kid) {
+            if **previous != *key {
+                return Err(
+                    "The DASH ClearKey response repeats a KID with different keys".to_string(),
+                );
+            }
+        } else {
+            result.insert(kid, key);
         }
     }
 
     for kid in required {
-        if !keys.contains_key(&kid) {
+        if !result.contains_key(kid) {
             return Err(format!(
-                "No content key is configured for selected DASH KID {}. Add a KID:KEY entry to {}.",
-                hex_string(&kid),
-                path.display()
+                "The DASH ClearKey license response did not include selected KID {}",
+                hex_string(kid)
             ));
         }
     }
-
-    Ok(Some(DashKeyMap { keys }))
+    Ok(result)
 }
 
-fn key_file_path() -> PathBuf {
-    glib::user_config_dir().join("grab/drm-keys.txt")
-}
-
-fn read_private_key_file(path: &Path) -> Result<Vec<u8>, String> {
-    let mut options = OpenOptions::new();
-    options.read(true);
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::OpenOptionsExt as _;
-        options.custom_flags(libc::O_CLOEXEC | libc::O_NOFOLLOW | libc::O_NONBLOCK);
-    }
-    let file = options.open(path).map_err(|error| {
-        if error.kind() == std::io::ErrorKind::NotFound {
-            format!(
-                "DASH decryption needs explicit content keys. Create {} with one KID:KEY pair per line and restrict it to mode 0600.",
-                path.display()
-            )
-        } else {
-            format!("Could not safely open {}: {error}", path.display())
-        }
-    })?;
-    let metadata = file
-        .metadata()
-        .map_err(|error| format!("Could not inspect {}: {error}", path.display()))?;
-    if !metadata.is_file() {
-        return Err(format!("{} is not a regular file", path.display()));
-    }
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::MetadataExt as _;
-        // SAFETY: geteuid has no preconditions and only reads the effective user ID.
-        let effective_uid = unsafe { libc::geteuid() };
-        if metadata.uid() != effective_uid || metadata.mode() & 0o077 != 0 {
-            return Err(format!(
-                "{} must be owned by the current user and have no group/other permissions (chmod 600)",
-                path.display()
-            ));
-        }
-    }
-    if metadata.len() > u64::try_from(MAX_KEY_FILE_BYTES).unwrap_or(u64::MAX) {
-        return Err(format!(
-            "{} exceeds the {}-byte limit",
-            path.display(),
-            MAX_KEY_FILE_BYTES
-        ));
-    }
-    let mut bytes =
-        Vec::with_capacity(usize::try_from(metadata.len()).unwrap_or(MAX_KEY_FILE_BYTES));
-    file.take(u64::try_from(MAX_KEY_FILE_BYTES + 1).unwrap_or(u64::MAX))
-        .read_to_end(&mut bytes)
-        .map_err(|error| format!("Could not read {}: {error}", path.display()))?;
-    if bytes.len() > MAX_KEY_FILE_BYTES {
-        return Err(format!(
-            "{} exceeds the {}-byte limit",
-            path.display(),
-            MAX_KEY_FILE_BYTES
-        ));
-    }
-    Ok(bytes)
+fn decode_clear_key_value(value: &str) -> Result<[u8; 16], String> {
+    let decoded =
+        Zeroizing::new(URL_SAFE_NO_PAD.decode(value.as_bytes()).map_err(|_| {
+            "The DASH ClearKey license contains invalid base64url data".to_string()
+        })?);
+    decoded
+        .as_slice()
+        .try_into()
+        .map_err(|_| "The DASH ClearKey license contains a value that is not 128 bits".to_string())
 }
 
 fn parse_hex_16(value: &str) -> Option<[u8; 16]> {
@@ -373,6 +504,136 @@ mod tests {
         let malformed = protection("cenc", "00112233445566778899aabbccddeef");
         assert!(encryption_from_scopes(&[std::slice::from_ref(&unsupported)]).is_err());
         assert!(encryption_from_scopes(&[std::slice::from_ref(&malformed)]).is_err());
+    }
+
+    #[test]
+    fn clear_key_license_url_resolves_relative_to_the_mpd() {
+        let descriptor = dash_mpd_core::ContentProtection {
+            schemeIdUri: CLEARKEY_SCHEME.to_string(),
+            laurl: Some(dash_mpd_core::Laurl {
+                content: Some("../license".to_string()),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        let url = license_url_from_scopes(
+            &[std::slice::from_ref(&descriptor)],
+            &Url::parse("https://media.example.test/path/manifest.mpd").expect("test MPD URL"),
+        )
+        .expect("ClearKey license URL should parse")
+        .expect("ClearKey URL should be present");
+        assert_eq!(url.as_str(), "https://media.example.test/license");
+    }
+
+    #[test]
+    fn rejects_clear_key_license_urls_without_secure_origin() {
+        for value in ["http://license.example.test/key", "javascript:alert(1)"] {
+            let descriptor = dash_mpd_core::ContentProtection {
+                schemeIdUri: CLEARKEY_SCHEME.to_string(),
+                laurl: Some(dash_mpd_core::Laurl {
+                    content: Some(value.to_string()),
+                    ..Default::default()
+                }),
+                ..Default::default()
+            };
+            assert!(
+                license_url_from_scopes(
+                    &[std::slice::from_ref(&descriptor)],
+                    &Url::parse("https://media.example.test/manifest.mpd").expect("test MPD URL"),
+                )
+                .is_err(),
+                "insecure license URL should be rejected: {value}"
+            );
+        }
+    }
+
+    #[test]
+    fn clear_key_request_uses_the_eme_temporary_request_shape() {
+        let request = ClearKeyLicenseRequest {
+            kids: vec![URL_SAFE_NO_PAD.encode([0x11; 16])],
+            license_type: "temporary",
+        };
+        let value = serde_json::to_value(request).expect("serialize ClearKey request");
+        assert_eq!(
+            value,
+            serde_json::json!({
+                "kids": [URL_SAFE_NO_PAD.encode([0x11; 16])],
+                "type": "temporary"
+            })
+        );
+    }
+
+    #[test]
+    fn clear_key_license_response_returns_only_requested_128_bit_keys() {
+        let kid = [0x11; 16];
+        let key = [0x22; 16];
+        let extra_kid = [0x33; 16];
+        let extra_key = [0x44; 16];
+        let body = serde_json::json!({
+            "type": "temporary",
+            "keys": [
+                {
+                    "kty": "oct",
+                    "kid": URL_SAFE_NO_PAD.encode(kid),
+                    "k": URL_SAFE_NO_PAD.encode(key)
+                },
+                {
+                    "kty": "oct",
+                    "kid": URL_SAFE_NO_PAD.encode(extra_kid),
+                    "k": URL_SAFE_NO_PAD.encode(extra_key)
+                }
+            ]
+        });
+        let mut bytes = serde_json::to_vec(&body).expect("serialize test JWK Set");
+        let parsed = parse_clear_key_license(&mut bytes, &BTreeSet::from([kid]))
+            .expect("valid ClearKey license response");
+        assert!(bytes.iter().all(|byte| *byte == 0));
+        assert_eq!(parsed.len(), 1);
+        assert_eq!(&**parsed.get(&kid).expect("requested key"), &key);
+        assert!(!parsed.contains_key(&extra_kid));
+    }
+
+    #[test]
+    fn rejects_clear_key_license_responses_with_missing_or_malformed_keys() {
+        let kid = [0x11; 16];
+        let required = BTreeSet::from([kid]);
+        let missing = serde_json::json!({"keys": []});
+        let mut missing_bytes = serde_json::to_vec(&missing).expect("serialize missing keyset");
+        assert!(parse_clear_key_license(&mut missing_bytes, &required).is_err());
+
+        let malformed = serde_json::json!({
+            "keys": [{
+                "kty": "oct",
+                "kid": URL_SAFE_NO_PAD.encode(kid),
+                "k": "not-a-128-bit-key"
+            }]
+        });
+        let mut malformed_bytes =
+            serde_json::to_vec(&malformed).expect("serialize malformed keyset");
+        assert!(parse_clear_key_license(&mut malformed_bytes, &required).is_err());
+
+        let wrong_type = serde_json::json!({
+            "type": "persistent-license",
+            "keys": [{
+                "kty": "oct",
+                "kid": URL_SAFE_NO_PAD.encode(kid),
+                "k": URL_SAFE_NO_PAD.encode([0x22; 16])
+            }]
+        });
+        let mut wrong_type_bytes =
+            serde_json::to_vec(&wrong_type).expect("serialize persistent keyset");
+        assert!(parse_clear_key_license(&mut wrong_type_bytes, &required).is_err());
+    }
+
+    #[test]
+    fn rejects_widevine_and_playready_without_cdms() {
+        for scheme in [WIDEVINE_SCHEME, PLAYREADY_SCHEME] {
+            let descriptor = dash_mpd_core::ContentProtection {
+                schemeIdUri: scheme.to_string(),
+                ..Default::default()
+            };
+            assert!(encryption_from_scopes(&[std::slice::from_ref(&descriptor)]).is_err());
+        }
     }
 
     #[test]

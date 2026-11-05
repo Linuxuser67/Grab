@@ -1,48 +1,57 @@
 # Native DASH Common Encryption
 
-Native DASH decryption is currently limited to static, single-Period fragmented
+Native DASH decryption currently supports static, single-Period fragmented
 MP4 presentations using CENC or CBCS and one default KID per selected video
-or audio representation. Grab does not acquire license responses, extract
-browser secrets, or contact DRM license servers. Content keys must be supplied
-by the user.
+or audio representation, provided the MPD declares a ClearKey protection
+descriptor and an HTTPS license URL.
 
-Create this file:
+Grab sends the selected KIDs to the MPD's ClearKey license URL using the
+Encrypted Media Extensions ClearKey request format:
 
-```text
-${XDG_CONFIG_HOME:-~/.config}/grab/drm-keys.txt
+```json
+{
+  "kids": ["base64url-encoded-kid"],
+  "type": "temporary"
+}
 ```
 
-Use one KID-to-key mapping per line. KIDs may be a UUID with hyphens or 32
-hexadecimal characters; content keys must be 32 hexadecimal characters:
+The response must be a JSON Web Key Set containing 128-bit octet keys:
 
-```text
-# KID:KEY
-00112233-4455-6677-8899-aabbccddeeff:0123456789abcdef0123456789abcdef
+```json
+{
+  "keys": [{
+    "kty": "oct",
+    "kid": "base64url-encoded-kid",
+    "k": "base64url-encoded-content-key"
+  }],
+  "type": "temporary"
+}
 ```
 
-Restrict the file to the current user:
+The `dashif:Laurl` (or supported legacy ClearKey `Laurl`) value is resolved
+against the MPD URL. License endpoints must use HTTPS and pass Grab's existing
+public-host validation. Requests are bounded by a 30-second timeout and a
+64 KiB response limit. Keys are held only in zeroizing memory; Grab does not
+persist them, log them, or fall back to a local key file. The former
+`drm-keys.txt` configuration is no longer read.
 
-```sh
-mkdir -p "${XDG_CONFIG_HOME:-$HOME/.config}/grab"
-chmod 600 "${XDG_CONFIG_HOME:-$HOME/.config}/grab/drm-keys.txt"
-```
+Widevine and PlayReady license exchanges are not supported by this increment.
+They require system-specific CDM challenges and device provisioning; such
+presentations remain on the existing fallback path. License servers that
+require custom authorization headers or challenge formats beyond the ClearKey
+JSON exchange are also not supported yet.
 
-Grab rejects symlinks, files owned by another user, and files with group or
-other permissions. The file is size-bounded. Key contents are not written to
-queue state or application logs.
-
-The current native subset requires one encrypted track in each selected
+The current native media subset requires one encrypted track in each selected
 initialization resource, one track fragment per media resource, explicit
 sample sizes and offsets, and in-band sample encryption metadata. Indexed
 SegmentBase is supported when the initialization byte range and a flat SIDX
 are present; unindexed single-file SegmentBase remains on fallback because its
 initialization and media fragments are not separately addressable by this
-adapter. In-track key rotation and sample-group KID overrides, dynamic/multi-Period
-presentations, and encrypted subtitles are not supported by this increment.
-Different selected tracks may each use their own default KID and key. The
-current CENC adapter accepts only in-band senc metadata; auxiliary information
-must be validated as pointing to that same senc data. Unsupported layouts retain the existing
-fallback behavior; a missing configured key is reported as an error rather
-than publishing ciphertext as a successful media download.
+adapter. In-track key rotation and sample-group KID overrides, dynamic or
+multi-Period presentations, and encrypted subtitles are not supported.
 
-Only configure keys for media you are authorized to decrypt.
+Different selected audio and video tracks may each use their own default KID
+and license URL. The current CENC adapter accepts only in-band `senc`
+metadata; auxiliary information must be validated as pointing to that same
+`senc` data. Unsupported layouts retain the existing fallback behavior.
+Only acquire licenses for media you are authorized to decrypt.

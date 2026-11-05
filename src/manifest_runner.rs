@@ -317,13 +317,13 @@ struct Resource {
 
 enum Tracks {
     Hls {
-        video: HlsPlan,
-        audio: Option<HlsPlan>,
+        video: Box<HlsPlan>,
+        audio: Option<Box<HlsPlan>>,
         subtitle: Option<Box<HlsPlan>>,
         subtitle_language: Option<String>,
     },
     Dash {
-        video: DashRepresentationPlan,
+        video: Box<DashRepresentationPlan>,
         audio: Option<Box<DashRepresentationPlan>>,
         subtitle: Option<Box<DashRepresentationPlan>>,
         subtitle_language: Option<String>,
@@ -339,7 +339,7 @@ impl Tracks {
             Self::Hls { video, audio, .. } => {
                 video.is_destination_assemblable_candidate()
                     && audio
-                        .as_ref()
+                        .as_deref()
                         .is_none_or(HlsPlan::is_destination_assemblable_candidate)
             }
             Self::Dash { .. } => true,
@@ -663,7 +663,7 @@ async fn prepare_manifest_attempt(
     let ResolvedManifestTracks {
         client,
         tracks,
-        guarded_child_hosts,
+        mut guarded_child_hosts,
         has_audio,
     } = resolve_manifest_tracks(job, offline_tracks, finish_requested).await?;
     let drm_keys = match &tracks {
@@ -682,16 +682,31 @@ async fn prepare_manifest_attempt(
                         .to_string(),
                 ));
             }
-            let mut encryptions = Vec::new();
+            let mut license_requests = Vec::new();
             if let Some(encryption) = video.representation.encryption {
-                encryptions.push(encryption);
+                let license_url = video.representation.license_url.as_ref().ok_or_else(|| {
+                    ManifestRunError::Unsupported(
+                        "The selected DASH representation has no ClearKey license URL".to_string(),
+                    )
+                })?;
+                guard_manifest_child_url(&job.source.url, license_url, &mut guarded_child_hosts)?;
+                license_requests.push((encryption, license_url.clone()));
             }
             if let Some(audio) = audio.as_ref()
                 && let Some(encryption) = audio.representation.encryption
             {
-                encryptions.push(encryption);
+                let license_url = audio.representation.license_url.as_ref().ok_or_else(|| {
+                    ManifestRunError::Unsupported(
+                        "The selected DASH audio representation has no ClearKey license URL"
+                            .to_string(),
+                    )
+                })?;
+                guard_manifest_child_url(&job.source.url, license_url, &mut guarded_child_hosts)?;
+                license_requests.push((encryption, license_url.clone()));
             }
-            crate::dash_drm::load_required_keys(&encryptions).map_err(ManifestRunError::Failed)?
+            crate::dash_drm::acquire_required_keys(&client, &license_requests)
+                .await
+                .map_err(ManifestRunError::Failed)?
         }
         Tracks::Hls { .. } | Tracks::DashLiveOffline { .. } => None,
     };
@@ -1607,7 +1622,7 @@ pub(crate) async fn run_manifest_download(
             staging: &staging,
             finish_only: finish_requested,
             video,
-            audio: audio.as_ref(),
+            audio: audio.as_deref(),
             video_dir: &video_dir,
             audio_dir: &audio_dir,
             concurrency,
@@ -1647,7 +1662,7 @@ pub(crate) async fn run_manifest_download(
         }
     } else if live_dash {
         let (video_plan, audio_plan) = match &tracks {
-            Tracks::Dash { video, audio, .. } => (Some(video), audio.as_deref()),
+            Tracks::Dash { video, audio, .. } => (Some(video.as_ref()), audio.as_deref()),
             Tracks::DashLiveOffline { .. } => (None, None),
             Tracks::Hls { .. } => {
                 return Err(ManifestRunError::Failed(
@@ -2100,7 +2115,7 @@ async fn resolve_tracks(
         ManifestDownloadPlan::HlsMedia(video) => {
             guard_hls_resources(&source.url, &video, guarded_child_hosts)?;
             Ok(Tracks::Hls {
-                video: *video,
+                video,
                 audio: None,
                 subtitle: None,
                 subtitle_language: None,
@@ -2152,8 +2167,8 @@ async fn resolve_tracks(
                 ));
             }
             Ok(Tracks::Hls {
-                video,
-                audio,
+                video: Box::new(video),
+                audio: audio.map(Box::new),
                 subtitle,
                 subtitle_language,
             })
@@ -2180,7 +2195,7 @@ async fn resolve_tracks(
                 .as_ref()
                 .and_then(|track| track.representation.language.clone());
             Ok(Tracks::Dash {
-                video: *video,
+                video,
                 audio,
                 subtitle,
                 subtitle_language,

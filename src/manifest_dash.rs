@@ -66,6 +66,7 @@ pub(crate) struct DashRepresentation {
     pub(crate) language: Option<String>,
     pub(crate) kind: DashTrackKind,
     pub(crate) encryption: Option<crate::dash_drm::DashEncryption>,
+    pub(crate) license_url: Option<Url>,
     pub(crate) is_default_audio: bool,
     pub(crate) is_default_subtitle: bool,
     adaptation_id: Option<String>,
@@ -558,13 +559,20 @@ pub(crate) fn parse_dash_manifest_at(
                     .lang
                     .clone()
                     .or_else(|| adaptation.lang.clone());
-                let encryption = crate::dash_drm::encryption_from_scopes(&[
-                    &mpd.ContentProtection,
-                    &period.ContentProtection,
-                    &adaptation.ContentProtection,
-                    &representation.ContentProtection,
-                ])
-                .map_err(DashError::UnsupportedProtection)?;
+                let protection_scopes = [
+                    &mpd.ContentProtection[..],
+                    &period.ContentProtection[..],
+                    &adaptation.ContentProtection[..],
+                    &representation.ContentProtection[..],
+                ];
+                let encryption = crate::dash_drm::encryption_from_scopes(&protection_scopes)
+                    .map_err(DashError::UnsupportedProtection)?;
+                let license_url =
+                    crate::dash_drm::license_url_from_scopes(&protection_scopes, &manifest_url)
+                        .map_err(DashError::UnsupportedProtection)?;
+                // Preserve protection metadata during planning even when the MPD
+                // omits a license URL. The selected-track runner requires a URL
+                // before acquiring keys and falls back when one is unavailable.
                 if encryption.is_some() && (is_dynamic || mpd.periods.len() != 1) {
                     return Err(DashError::UnsupportedProtection(
                         "Native DASH DRM currently requires one static Period".to_string(),
@@ -602,6 +610,7 @@ pub(crate) fn parse_dash_manifest_at(
                     language,
                     kind,
                     encryption,
+                    license_url,
                     is_default_audio,
                     is_default_subtitle: kind == DashTrackKind::Subtitle && is_main,
                     adaptation_id: adaptation.id.clone(),
@@ -4377,6 +4386,64 @@ mod tests {
                 .expect("protected representation plan");
             assert_eq!(planned.representation.encryption, Some(encryption));
         }
+    }
+
+    #[test]
+    fn parses_clear_key_license_url_for_encrypted_representation() {
+        let body = TEMPLATE_MPD.replace(
+            "</Period>",
+            r#"
+    <AdaptationSet contentType="video" mimeType="video/mp4">
+      <ContentProtection schemeIdUri="urn:mpeg:dash:mp4protection:2011"
+                         value="cenc"
+                         default_KID="00112233-4455-6677-8899-aabbccddeeff"/>
+      <ContentProtection schemeIdUri="urn:uuid:e2719d58-a985-b3c9-781a-ab030af78d30">
+        <laurl>https://license.example.test/clearkey</laurl>
+      </ContentProtection>
+      <Representation id="protected" bandwidth="1000">
+        <SegmentTemplate timescale="1" duration="5" initialization="protected-init.mp4" media="protected-$Number$.m4s"/>
+      </Representation>
+    </AdaptationSet>
+</Period>"#,
+        );
+        let manifest =
+            parse_dash_manifest(BASE_URL, &body).expect("ClearKey-protected MPD should parse");
+        let protected = manifest
+            .video_representations
+            .iter()
+            .find(|item| item.representation_id.as_deref() == Some("protected"))
+            .expect("protected representation");
+        assert!(protected.encryption.is_some());
+        assert_eq!(
+            protected.license_url.as_ref().map(Url::as_str),
+            Some("https://license.example.test/clearkey")
+        );
+    }
+
+    #[test]
+    fn retains_encryption_metadata_when_license_url_is_not_in_the_mpd() {
+        let body = TEMPLATE_MPD.replace(
+            "</Period>",
+            r#"
+    <AdaptationSet contentType="video" mimeType="video/mp4">
+      <ContentProtection schemeIdUri="urn:mpeg:dash:mp4protection:2011"
+                         value="cenc"
+                         default_KID="00112233-4455-6677-8899-aabbccddeeff"/>
+      <Representation id="protected" bandwidth="1000">
+        <SegmentTemplate timescale="1" duration="5" initialization="protected-init.mp4" media="protected-$Number$.m4s"/>
+      </Representation>
+    </AdaptationSet>
+</Period>"#,
+        );
+        let manifest = parse_dash_manifest(BASE_URL, &body)
+            .expect("protection metadata should remain available during planning");
+        let protected = manifest
+            .video_representations
+            .iter()
+            .find(|item| item.representation_id.as_deref() == Some("protected"))
+            .expect("protected representation");
+        assert!(protected.encryption.is_some());
+        assert!(protected.license_url.is_none());
     }
 
     #[test]

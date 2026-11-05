@@ -735,7 +735,7 @@ fn period_duration_to_ticks(duration: Duration, timescale: u64) -> Result<u64, D
 }
 
 fn representation_keys_are_unambiguous<'a>(
-    representations: impl Iterator<Item = &'a DashRepresentation>,
+    mut representations: impl Iterator<Item = &'a DashRepresentation>,
 ) -> bool {
     let mut keys = std::collections::HashSet::new();
     representations.all(|representation| {

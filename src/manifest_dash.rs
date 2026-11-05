@@ -562,6 +562,11 @@ pub(crate) fn parse_dash_manifest_at(
                     &representation.ContentProtection,
                 ])
                 .map_err(DashError::UnsupportedProtection)?;
+                if encryption.is_some() && (is_dynamic || mpd.periods.len() != 1) {
+                    return Err(DashError::UnsupportedProtection(
+                        "Native DASH DRM currently requires one static Period".to_string(),
+                    ));
+                }
                 let identity = RepresentationIdentity {
                     id: representation_id.as_deref(),
                     kind,

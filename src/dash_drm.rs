@@ -176,7 +176,7 @@ fn read_private_key_file(path: &Path) -> Result<Vec<u8>, String> {
         use std::os::unix::fs::OpenOptionsExt as _;
         options.custom_flags(libc::O_CLOEXEC | libc::O_NOFOLLOW | libc::O_NONBLOCK);
     }
-    let mut file = options.open(path).map_err(|error| {
+    let file = options.open(path).map_err(|error| {
         if error.kind() == std::io::ErrorKind::NotFound {
             format!(
                 "DASH decryption needs explicit content keys. Create {} with one KID:KEY pair per line and restrict it to mode 0600.",

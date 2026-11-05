@@ -689,7 +689,7 @@ fn validate_fragment(bytes: &[u8], init: InitEncryption) -> Result<(), String> {
     if let (Some(saiz), Some(saio)) = (saiz.first(), saio.first()) {
         validate_auxiliary_information(
             bytes,
-            moof,
+            *moof,
             *senc,
             **saiz,
             **saio,
@@ -769,7 +769,7 @@ fn validate_auxiliary_information(
 
 /// Decrypt one independently planned fragmented-MP4 representation into a
 /// private XDG-staging file. Encrypted source resources are never modified.
-pub(super) fn decrypt_track(
+pub(crate) fn decrypt_track(
     resources: &[DashResource],
     directory: &Path,
     output: &Path,
@@ -949,7 +949,7 @@ mod tests {
         };
 
         let make_moof = |trun_box: &[u8]| {
-            let mut mfhd_fields = 1_u32.to_be_bytes().to_vec();
+            let mfhd_fields = 1_u32.to_be_bytes().to_vec();
             let mfhd = box_bytes(b"mfhd", &full_box(0, 0, &mfhd_fields));
             let mut traf_fields = tfhd_box.clone();
             traf_fields.extend_from_slice(trun_box);

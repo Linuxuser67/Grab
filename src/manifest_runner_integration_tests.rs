@@ -2352,6 +2352,30 @@ async fn hls_sample_aes_mpegts_is_decrypted_by_ffmpeg_after_localization() {
     write_playlist(&video_dir, &plan)
         .await
         .expect("write localized SAMPLE-AES playlist");
+    let local_playlist_bytes = tokio::fs::read(video_dir.join("local.m3u8"))
+        .await
+        .expect("read localized SAMPLE-AES playlist");
+    let local_playlist_text = String::from_utf8_lossy(&local_playlist_bytes);
+    assert!(local_playlist_text.contains("METHOD=SAMPLE-AES"));
+    assert!(local_playlist_text.contains(&format!("IV=0x{iv_hex}")));
+    let local_playlist = m3u8_rs::parse_media_playlist_res(&local_playlist_bytes)
+        .expect("parse localized SAMPLE-AES playlist");
+    let local_key_uri = local_playlist.segments[0]
+        .key
+        .as_ref()
+        .and_then(|key| key.uri.as_deref())
+        .expect("localized playlist should reference a staged key");
+    assert!(
+        local_playlist.segments[0]
+            .key
+            .as_ref()
+            .is_some_and(|key| key.iv.is_some()),
+        "localized playlist must preserve the SAMPLE-AES IV"
+    );
+    let localized_key = tokio::fs::read(video_dir.join(local_key_uri))
+        .await
+        .expect("read staged SAMPLE-AES key");
+    assert_eq!(localized_key, key, "staged key bytes must match the fetched key");
     let output = root.path().join("sample-aes-output.mkv");
     assert!(
         run_ffmpeg(
@@ -2383,7 +2407,7 @@ async fn hls_sample_aes_mpegts_is_decrypted_by_ffmpeg_after_localization() {
             "-i",
         ])
         .arg(video_dir.join("local.m3u8"))
-        .args(["-f", "null", "-"])
+        .args(["-map", "0:a:0", "-vn", "-f", "null", "-"])
         .output()
         .expect("decode the SAMPLE-AES source to validate decrypted frames");
     assert_command_succeeded(&decoded, "FFmpeg could not decode the SAMPLE-AES source");

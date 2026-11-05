@@ -2382,7 +2382,7 @@ async fn hls_sample_aes_mpegts_is_decrypted_by_ffmpeg_after_localization() {
             "-xerror",
             "-i",
         ])
-        .arg(&video_dir.join("local.m3u8"))
+        .arg(video_dir.join("local.m3u8"))
         .args(["-f", "null", "-"])
         .output()
         .expect("decode the SAMPLE-AES source to validate decrypted frames");

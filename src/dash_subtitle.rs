@@ -119,7 +119,9 @@ pub(crate) fn extract_to_vtt(
     }
 
     file.seek(SeekFrom::Start(0)).map_err(|error| {
-        DashSubtitleError::Failed(format!("Could not rewind the staged DASH subtitle track: {error}"))
+        DashSubtitleError::Failed(format!(
+            "Could not rewind the staged DASH subtitle track: {error}"
+        ))
     })?;
     let tracks = mp4box::track_samples_from_reader(&mut file).map_err(|error| {
         DashSubtitleError::UnsupportedMp4(format!(
@@ -284,10 +286,7 @@ fn count_boxes(boxes: &[mp4box::Box], kind: &str) -> usize {
         .sum()
 }
 
-fn find_box<'boxes>(
-    boxes: &'boxes [mp4box::Box],
-    kind: &str,
-) -> Option<&'boxes mp4box::Box> {
+fn find_box<'boxes>(boxes: &'boxes [mp4box::Box], kind: &str) -> Option<&'boxes mp4box::Box> {
     for box_ in boxes {
         if box_.typ == kind {
             return Some(box_);
@@ -318,9 +317,12 @@ fn read_vtt_header(
     let stsd = find_box(boxes, "stsd").ok_or(DashSubtitleError::Unsupported(
         "The WVTT sample description is missing",
     ))?;
-    let entries = stsd.children.as_deref().ok_or(DashSubtitleError::Unsupported(
-        "The WVTT sample description has no sample entry",
-    ))?;
+    let entries = stsd
+        .children
+        .as_deref()
+        .ok_or(DashSubtitleError::Unsupported(
+            "The WVTT sample description has no sample entry",
+        ))?;
     let sample_entry = entries.first().filter(|entry| entry.typ == "wvtt").ok_or(
         DashSubtitleError::Unsupported("The WVTT sample entry is missing"),
     )?;
@@ -412,9 +414,7 @@ fn normalize_vtt_header(bytes: &[u8]) -> Result<String, DashSubtitleError> {
 }
 
 fn has_fragmented_wvtt_structure(boxes: &[mp4box::Box]) -> bool {
-    contains_box(boxes, "moof")
-        && contains_box(boxes, "trun")
-        && contains_box(boxes, "mdat")
+    contains_box(boxes, "moof") && contains_box(boxes, "trun") && contains_box(boxes, "mdat")
 }
 
 fn sample_is_within_media_data(
@@ -429,8 +429,7 @@ fn sample_is_within_media_data(
         if box_.typ != "mdat" {
             return false;
         }
-        let (Some(data_start), Some(data_size)) = (box_.payload_offset, box_.payload_size)
-        else {
+        let (Some(data_start), Some(data_size)) = (box_.payload_offset, box_.payload_size) else {
             return false;
         };
         data_start
@@ -446,25 +445,30 @@ fn count_fragment_samples(
 ) -> Result<(), DashSubtitleError> {
     for box_ in boxes {
         if box_.typ == "trun" {
-            let payload_offset = box_.payload_offset.ok_or(
-                DashSubtitleError::Unsupported("A DASH fragment run has no payload offset"),
-            )?;
-            let payload_size = box_.payload_size.ok_or(
-                DashSubtitleError::Unsupported("A DASH fragment run has no payload size"),
-            )?;
+            let payload_offset = box_.payload_offset.ok_or(DashSubtitleError::Unsupported(
+                "A DASH fragment run has no payload offset",
+            ))?;
+            let payload_size = box_.payload_size.ok_or(DashSubtitleError::Unsupported(
+                "A DASH fragment run has no payload size",
+            ))?;
             if payload_size < 8 {
                 return Err(DashSubtitleError::Unsupported(
                     "A DASH fragment run has a truncated sample count",
                 ));
             }
-            let count_offset = payload_offset.checked_add(4).ok_or(
-                DashSubtitleError::Unsupported("A DASH fragment run sample-count offset overflows"),
-            )?;
-            reader.seek(SeekFrom::Start(count_offset)).map_err(|error| {
-                DashSubtitleError::Failed(format!(
-                    "Could not inspect a DASH fragment run: {error}"
-                ))
-            })?;
+            let count_offset =
+                payload_offset
+                    .checked_add(4)
+                    .ok_or(DashSubtitleError::Unsupported(
+                        "A DASH fragment run sample-count offset overflows",
+                    ))?;
+            reader
+                .seek(SeekFrom::Start(count_offset))
+                .map_err(|error| {
+                    DashSubtitleError::Failed(format!(
+                        "Could not inspect a DASH fragment run: {error}"
+                    ))
+                })?;
             let mut bytes = [0_u8; 4];
             reader.read_exact(&mut bytes).map_err(|error| {
                 DashSubtitleError::Failed(format!(
@@ -517,13 +521,19 @@ fn write_private_output(destination: &Path, bytes: &[u8]) -> Result<(), DashSubt
         DashSubtitleError::Failed("The normalized DASH subtitle path has no parent".to_string())
     })?;
     let temporary = tempfile::NamedTempFile::new_in(parent).map_err(|error| {
-        DashSubtitleError::Failed(format!("Could not create private subtitle staging: {error}"))
+        DashSubtitleError::Failed(format!(
+            "Could not create private subtitle staging: {error}"
+        ))
     })?;
     temporary.as_file().write_all(bytes).map_err(|error| {
-        DashSubtitleError::Failed(format!("Could not write normalized DASH subtitles: {error}"))
+        DashSubtitleError::Failed(format!(
+            "Could not write normalized DASH subtitles: {error}"
+        ))
     })?;
     temporary.as_file().sync_all().map_err(|error| {
-        DashSubtitleError::Failed(format!("Could not flush normalized DASH subtitles: {error}"))
+        DashSubtitleError::Failed(format!(
+            "Could not flush normalized DASH subtitles: {error}"
+        ))
     })?;
     temporary.persist_noclobber(destination).map_err(|error| {
         DashSubtitleError::Failed(format!(
@@ -546,9 +556,8 @@ fn units_to_millis(units: u64, timescale: u32) -> Result<u64, DashSubtitleError>
             "A DASH subtitle timestamp overflows the supported time range",
         ))?
         / u128::from(timescale);
-    u64::try_from(millis).map_err(|_| {
-        DashSubtitleError::Unsupported("A DASH subtitle timestamp is out of range")
-    })
+    u64::try_from(millis)
+        .map_err(|_| DashSubtitleError::Unsupported("A DASH subtitle timestamp is out of range"))
 }
 
 fn add_cue(
@@ -575,12 +584,14 @@ fn add_cue(
             "The DASH subtitle track exceeds the 50,000 cue limit",
         ));
     }
-    if cue.identifier.as_ref().is_some_and(|value| {
-        value.contains('\n') || value.contains('\r') || value.contains("-->")
-    }) || cue
-        .settings
+    if cue
+        .identifier
         .as_ref()
-        .is_some_and(|value| value.contains('\n') || value.contains('\r'))
+        .is_some_and(|value| value.contains('\n') || value.contains('\r') || value.contains("-->"))
+        || cue
+            .settings
+            .as_ref()
+            .is_some_and(|value| value.contains('\n') || value.contains('\r'))
     {
         return Err(DashSubtitleError::Unsupported(
             "A WVTT cue contains an invalid identifier or settings line",
@@ -656,9 +667,12 @@ fn parse_sample_boxes(bytes: &[u8]) -> Result<Vec<SampleBox<'_>>, DashSubtitleEr
                 "A WVTT sample contains too many cue boxes",
             ));
         }
-        let header = bytes.get(offset..offset.saturating_add(8)).ok_or(
-            DashSubtitleError::Unsupported("A WVTT sample contains a truncated box header"),
-        )?;
+        let header =
+            bytes
+                .get(offset..offset.saturating_add(8))
+                .ok_or(DashSubtitleError::Unsupported(
+                    "A WVTT sample contains a truncated box header",
+                ))?;
         let size_32 = u32::from_be_bytes(header[..4].try_into().map_err(|_| {
             DashSubtitleError::Unsupported("A WVTT sample contains an invalid box size")
         })?);
@@ -675,7 +689,9 @@ fn parse_sample_boxes(bytes: &[u8]) -> Result<Vec<SampleBox<'_>>, DashSubtitleEr
                         "A WVTT sample contains a truncated extended box header",
                     ))?;
                 let size = u64::from_be_bytes(extended.try_into().map_err(|_| {
-                    DashSubtitleError::Unsupported("A WVTT sample contains an invalid extended size")
+                    DashSubtitleError::Unsupported(
+                        "A WVTT sample contains an invalid extended size",
+                    )
                 })?);
                 (
                     usize::try_from(size).map_err(|_| {
@@ -684,18 +700,24 @@ fn parse_sample_boxes(bytes: &[u8]) -> Result<Vec<SampleBox<'_>>, DashSubtitleEr
                     16_usize,
                 )
             }
-            size => (usize::try_from(size).map_err(|_| {
-                DashSubtitleError::Unsupported("A WVTT sample box size is out of range")
-            })?, 8_usize),
+            size => (
+                usize::try_from(size).map_err(|_| {
+                    DashSubtitleError::Unsupported("A WVTT sample box size is out of range")
+                })?,
+                8_usize,
+            ),
         };
         if box_size < header_size {
             return Err(DashSubtitleError::Unsupported(
                 "A WVTT sample contains a box smaller than its header",
             ));
         }
-        let end = offset.checked_add(box_size).filter(|end| *end <= bytes.len()).ok_or(
-            DashSubtitleError::Unsupported("A WVTT sample box extends beyond its sample"),
-        )?;
+        let end = offset
+            .checked_add(box_size)
+            .filter(|end| *end <= bytes.len())
+            .ok_or(DashSubtitleError::Unsupported(
+                "A WVTT sample box extends beyond its sample",
+            ))?;
         boxes.push(SampleBox {
             kind,
             payload: &bytes[offset + header_size..end],
@@ -853,12 +875,16 @@ mod tests {
     #[test]
     fn wvtt_empty_cue_samples_produce_no_cues() {
         let sample = box_bytes(b"vtte", &[]);
-        assert!(parse_wvtt_sample(&sample, 0, 1_000)
-            .expect("parse empty WVTT cue")
-            .is_empty());
-        assert!(parse_wvtt_sample(&[], 0, 1_000)
-            .expect("parse empty sample")
-            .is_empty());
+        assert!(
+            parse_wvtt_sample(&sample, 0, 1_000)
+                .expect("parse empty WVTT cue")
+                .is_empty()
+        );
+        assert!(
+            parse_wvtt_sample(&[], 0, 1_000)
+                .expect("parse empty sample")
+                .is_empty()
+        );
     }
 
     #[test]
@@ -870,10 +896,7 @@ mod tests {
 
     #[test]
     fn wvtt_payload_cannot_smuggle_multiple_text_cues() {
-        let sample = box_bytes(
-            b"vttc",
-            &box_bytes(b"payl", b"first\n\nsecond"),
-        );
+        let sample = box_bytes(b"vttc", &box_bytes(b"payl", b"first\n\nsecond"));
         assert!(parse_wvtt_sample(&sample, 0, 1_000).is_err());
         let missing_payload = box_bytes(b"vttc", &box_bytes(b"iden", b"cue-1"));
         assert!(parse_wvtt_sample(&missing_payload, 0, 1_000).is_err());
@@ -939,10 +962,10 @@ mod tests {
     #[test]
     fn fragmented_track_requires_moof_trun_and_mdat() {
         let boxes = [
-            make_box("moof", Some(vec![make_box(
-                "traf",
-                Some(vec![make_box("trun", None)]),
-            )])),
+            make_box(
+                "moof",
+                Some(vec![make_box("traf", Some(vec![make_box("trun", None)]))]),
+            ),
             make_box("mdat", None),
         ];
         assert!(has_fragmented_wvtt_structure(&boxes));
@@ -998,12 +1021,14 @@ mod tests {
             )]),
         )];
         let mut file = File::open(&path).expect("open subtitle init");
-        assert!(read_vtt_header(
-            &boxes,
-            &mut file,
-            u64::try_from(header.len()).expect("track length fits")
-        )
-        .is_err());
+        assert!(
+            read_vtt_header(
+                &boxes,
+                &mut file,
+                u64::try_from(header.len()).expect("track length fits")
+            )
+            .is_err()
+        );
     }
 
     #[test]
@@ -1067,8 +1092,7 @@ mod tests {
                 payload_size: Some(8),
                 ..make_box("trun", None)
             };
-            count_fragment_samples(&[run], &mut reader, &mut count)
-                .expect("count bounded samples");
+            count_fragment_samples(&[run], &mut reader, &mut count).expect("count bounded samples");
         }
         assert_eq!(count, 3);
 
@@ -1098,8 +1122,7 @@ mod tests {
             "WEBVTT\nKind: subtitles"
         );
         assert_eq!(
-            normalize_vtt_header(b"\xef\xbb\xbfWEBVTT")
-                .expect("accept a UTF-8 BOM"),
+            normalize_vtt_header(b"\xef\xbb\xbfWEBVTT").expect("accept a UTF-8 BOM"),
             "WEBVTT"
         );
         assert!(normalize_vtt_header(b"NOTE not a header").is_err());

@@ -4,6 +4,7 @@ mod backend_debug;
 mod bounded_file;
 mod content_range;
 mod cookies;
+mod dash_subtitle;
 mod download;
 mod download_fetch;
 mod download_intake;

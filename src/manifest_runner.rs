@@ -1805,7 +1805,7 @@ async fn finalize_manifest_download(
                     )));
                 }
             }
-        },
+        }
         _ => None,
     };
     if destination_parts {

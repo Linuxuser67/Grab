@@ -2676,6 +2676,139 @@ impl ManifestOutputContainer {
 const DASH_LIVE_STATE_NAME: &str = "live-dash-state.json";
 const DASH_LIVE_STATE_VERSION: u32 = 1;
 
+const MAX_DASH_INDEX_RANGE_BYTES: u64 = 1024 * 1024;
+
+/// Fetch the bounded SIDX control range without staging or counting index bytes
+/// as downloaded media. Media byte ranges still use the normal journaled writer.
+async fn fetch_dash_index_bytes(
+    client: &reqwest::Client,
+    index: &DashSegmentBaseIndex,
+    abort: &mut tokio::sync::oneshot::Receiver<crate::video::StopIntent>,
+) -> Result<Option<(Vec<u8>, u64)>, ManifestRunError> {
+    let range = index.index_range;
+    let end = range
+        .offset
+        .checked_add(range.length)
+        .and_then(|value| value.checked_sub(1))
+        .filter(|_| range.length > 0 && range.length <= MAX_DASH_INDEX_RANGE_BYTES)
+        .ok_or_else(|| {
+            ManifestRunError::Unsupported(
+                "The DASH SegmentBase index range exceeds the supported limit".to_string(),
+            )
+        })?;
+    let request = client
+        .get(index.url.clone())
+        .header(
+            reqwest::header::RANGE,
+            format!("bytes={}-{end}", range.offset),
+        );
+    let response = tokio::select! {
+        biased;
+        stop = &mut *abort => {
+            let _ = stop;
+            return Ok(None);
+        }
+        response = tokio::time::timeout(RESOURCE_IDLE_TIMEOUT, request.send()) => {
+            response
+                .map_err(|_| ManifestRunError::Retryable(
+                    "Timed out while requesting the DASH segment index".to_string(),
+                ))?
+                .map_err(|error| ManifestRunError::Retryable(format!(
+                    "Could not retrieve the DASH segment index: {}",
+                    error.without_url()
+                )))?
+        }
+    };
+    let status = response.status();
+    if status != reqwest::StatusCode::PARTIAL_CONTENT {
+        if is_retryable_resource_status(status) {
+            return Err(ManifestRunError::Retryable(format!(
+                "The stream server returned HTTP {} for the DASH segment index",
+                status.as_u16()
+            )));
+        }
+        return Err(ManifestRunError::Unsupported(
+            "The stream server did not honor the DASH segment-index byte range".to_string(),
+        ));
+    }
+
+    let content_range = response
+        .headers()
+        .get(reqwest::header::CONTENT_RANGE)
+        .and_then(|value| value.to_str().ok());
+    if !content_range_matches(content_range, range) {
+        return Err(ManifestRunError::Unsupported(
+            "The stream server returned an invalid Content-Range for the DASH segment index"
+                .to_string(),
+        ));
+    }
+    let total_length = match content_range.and_then(parse_content_range) {
+        Some(ParsedContentRange::Satisfied {
+            complete_length: Some(total),
+            ..
+        }) => total,
+        _ => {
+            return Err(ManifestRunError::Unsupported(
+                "The DASH segment index response omitted the complete resource length".to_string(),
+            ));
+        }
+    };
+    if response
+        .content_length()
+        .is_some_and(|length| length != range.length)
+    {
+        return Err(ManifestRunError::Unsupported(
+            "The DASH segment index response length did not match its byte range".to_string(),
+        ));
+    }
+
+    let capacity = usize::try_from(range.length).map_err(|_| {
+        ManifestRunError::Unsupported("The DASH segment index is too large".to_string())
+    })?;
+    let mut bytes = Vec::with_capacity(capacity);
+    let mut stream = response.bytes_stream();
+    loop {
+        let next = tokio::select! {
+            biased;
+            stop = &mut *abort => {
+                let _ = stop;
+                return Ok(None);
+            }
+            chunk = tokio::time::timeout(RESOURCE_IDLE_TIMEOUT, stream.next()) => {
+                chunk.map_err(|_| ManifestRunError::Retryable(
+                    "The DASH segment index stopped making progress".to_string(),
+                ))?
+            }
+        };
+        let Some(chunk) = next else {
+            break;
+        };
+        let chunk = chunk.map_err(|error| ManifestRunError::Retryable(format!(
+            "The DASH segment-index transfer failed: {}",
+            error.without_url()
+        )))?;
+        let chunk_length = u64::try_from(chunk.len()).map_err(|_| {
+            ManifestRunError::Unsupported("The DASH segment index is too large".to_string())
+        })?;
+        if u64::try_from(bytes.len())
+            .ok()
+            .and_then(|length| length.checked_add(chunk_length))
+            .is_none_or(|length| length > range.length)
+        {
+            return Err(ManifestRunError::Unsupported(
+                "The stream server returned more bytes than the DASH index range".to_string(),
+            ));
+        }
+        bytes.extend_from_slice(&chunk);
+    }
+    if u64::try_from(bytes.len()).ok() != Some(range.length) {
+        return Err(ManifestRunError::Unsupported(
+            "The stream server returned an incomplete DASH segment index".to_string(),
+        ));
+    }
+    Ok(Some((bytes, total_length)))
+}
+
 struct ManifestDashTrackTransfer<'a> {
     client: &'a reqwest::Client,
     staging: &'a Path,
@@ -2708,10 +2841,28 @@ async fn fetch_and_write_dash_track(
         downloaded,
         abort,
     } = context;
+    let resources = if let Some(index) = plan.segment_base_index.as_ref() {
+        let Some((bytes, total_length)) = fetch_dash_index_bytes(client, index, abort).await?
+        else {
+            return Ok(false);
+        };
+        let media_resources =
+            crate::manifest::dash::resolve_segment_base_index(index, &bytes, total_length)
+                .map_err(|error| {
+                    ManifestRunError::Unsupported(format!(
+                        "The DASH SegmentBase index is unsupported: {error}"
+                    ))
+                })?;
+        let mut resources = dash_resources(plan);
+        resources.extend(dash_resources_from(&media_resources));
+        resources
+    } else {
+        dash_resources(plan)
+    };
     fetch_and_write_ordered_track(ManifestOrderedTrackTransfer {
         client,
         staging,
-        resources: dash_resources(plan),
+        resources,
         directory,
         filename,
         destination,

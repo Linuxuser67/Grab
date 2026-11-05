@@ -46,7 +46,7 @@ enum Element {
 pub(super) fn representation_metadata(
     body: &[u8],
     max_representations: usize,
-) -> Option<Vec<Vec<Vec<RepresentationRoleMetadata>>>> {
+) -> Option<RepresentationMetadata> {
     let mut reader = NsReader::from_reader(body);
     let mut buffer = Vec::new();
     let mut stack = Vec::new();

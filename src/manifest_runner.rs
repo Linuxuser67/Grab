@@ -984,8 +984,10 @@ async fn transfer_static_manifest_tracks(
                     return Ok(false);
                 }
                 write_playlist(video_dir, video).await?;
+                decrypt_hls_sample_aes_segments(video_dir, video).await?;
                 if let Some(audio) = audio {
                     write_playlist(audio_dir, audio).await?;
+                    decrypt_hls_sample_aes_segments(audio_dir, audio).await?;
                 }
             }
             if let Some(subtitle) = subtitle {
@@ -2384,6 +2386,199 @@ async fn write_playlist(directory: &Path, plan: &HlsPlan) -> Result<(), String> 
     drop(file);
     crate::file_names::rename_noreplace(&part, &target)
         .map_err(|error| format!("Could not publish the local HLS playlist: {error}"))
+}
+
+/// Decrypt identity SAMPLE-AES MPEG-TS segments with the same VSD implementation
+/// used by VSD itself, then remove the corresponding key tags from the local playlist.
+async fn decrypt_hls_sample_aes_segments(
+    directory: &Path,
+    plan: &HlsPlan,
+) -> Result<(), ManifestRunError> {
+    let playlist_bytes = plan
+        .local_playlist_bytes()
+        .map_err(|error| ManifestRunError::Failed(error.to_string()))?;
+    let mut playlist = m3u8_rs::parse_media_playlist_res(&playlist_bytes)
+        .map_err(|error| ManifestRunError::Failed(format!("Could not parse the localized HLS playlist: {error}")))?;
+    let mut changed = false;
+
+    for (index, segment) in playlist.segments.iter_mut().enumerate() {
+        let Some(key_tag) = segment
+            .key
+            .as_ref()
+            .filter(|key| key.method == m3u8_rs::KeyMethod::SampleAES)
+        else {
+            continue;
+        };
+
+        let key_uri = key_tag.uri.as_deref().ok_or_else(|| {
+            ManifestRunError::Unsupported("The HLS SAMPLE-AES key URI is missing".to_string())
+        })?;
+        let key_path = local_hls_resource_path(directory, key_uri)?;
+        let key_metadata = tokio::fs::symlink_metadata(&key_path)
+            .await
+            .map_err(|error| ManifestRunError::Failed(format!("Could not inspect the staged HLS SAMPLE-AES key: {error}")))?;
+        if key_metadata.file_type().is_symlink() || !key_metadata.is_file() {
+            return Err(ManifestRunError::Failed(
+                "The staged HLS SAMPLE-AES key is not a regular file".to_string(),
+            ));
+        }
+        let key_bytes = tokio::fs::read(&key_path)
+            .await
+            .map_err(|error| ManifestRunError::Failed(format!("Could not read the staged HLS SAMPLE-AES key: {error}")))?;
+        let key: [u8; 16] = key_bytes.as_slice().try_into().map_err(|_| {
+            ManifestRunError::Unsupported("The HLS identity key is not 16 bytes".to_string())
+        })?;
+
+        let sequence_offset = u64::try_from(index).map_err(|_| {
+            ManifestRunError::Failed("The HLS media sequence overflowed".to_string())
+        })?;
+        let media_sequence = playlist.media_sequence.checked_add(sequence_offset).ok_or_else(|| {
+            ManifestRunError::Failed("The HLS media sequence overflowed".to_string())
+        })?;
+        let iv = hls_sample_aes_iv(key_tag.iv.as_deref(), media_sequence)?;
+
+        let segment_uri = segment.uri.clone();
+        let segment_path = local_hls_resource_path(directory, &segment_uri)?;
+        let segment_metadata = tokio::fs::symlink_metadata(&segment_path)
+            .await
+            .map_err(|error| ManifestRunError::Failed(format!("Could not inspect the staged HLS segment: {error}")))?;
+        if segment_metadata.file_type().is_symlink() || !segment_metadata.is_file() {
+            return Err(ManifestRunError::Failed(
+                "The staged HLS SAMPLE-AES segment is not a regular file".to_string(),
+            ));
+        }
+        let encrypted = tokio::fs::read(&segment_path)
+            .await
+            .map_err(|error| ManifestRunError::Failed(format!("Could not read the staged HLS SAMPLE-AES segment: {error}")))?;
+
+        let decrypted = tokio::task::spawn_blocking(move || {
+            let decrypter = vsd_mp4::decrypt::HlsSampleAesDecrypter::new(&key, &iv);
+            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| decrypter.decrypt(encrypted)))
+        })
+        .await
+        .map_err(|error| ManifestRunError::Failed(format!("The HLS SAMPLE-AES worker failed: {error}")))?
+        .map_err(|_| {
+            ManifestRunError::Unsupported(
+                "VSD could not decrypt the HLS SAMPLE-AES segment".to_string(),
+            )
+        })?;
+
+        let mut validator = TransportStreamValidator::new();
+        validator.observe(&decrypted);
+        let decrypted_size = u64::try_from(decrypted.len()).map_err(|_| {
+            ManifestRunError::Failed("The decrypted HLS segment is too large".to_string())
+        })?;
+        if !validator.is_valid_complete(decrypted_size) {
+            return Err(ManifestRunError::Unsupported(
+                "VSD produced an invalid MPEG-TS SAMPLE-AES segment".to_string(),
+            ));
+        }
+
+        let temporary = directory.join(format!("{segment_uri}.sample-aes.part"));
+        remove_regular_file_if_present(&temporary)
+            .await
+            .map_err(ManifestRunError::Failed)?;
+        let write_result = async {
+            let mut file = tokio::fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(&temporary)
+                .await
+                .map_err(|error| format!("Could not create decrypted HLS segment staging: {error}"))?;
+            file.write_all(&decrypted)
+                .await
+                .map_err(|error| format!("Could not write decrypted HLS segment staging: {error}"))?;
+            file.sync_all()
+                .await
+                .map_err(|error| format!("Could not flush decrypted HLS segment staging: {error}"))?;
+            drop(file);
+            tokio::fs::rename(&temporary, &segment_path)
+                .await
+                .map_err(|error| format!("Could not publish the decrypted HLS segment: {error}"))
+        }
+        .await;
+        if let Err(error) = write_result {
+            let _ = remove_regular_file_if_present(&temporary).await;
+            return Err(ManifestRunError::Failed(error));
+        }
+
+        segment.key = None;
+        changed = true;
+    }
+
+    if changed {
+        let mut rewritten = Vec::new();
+        playlist
+            .write_to(&mut rewritten)
+            .map_err(|error| ManifestRunError::Failed(format!("Could not serialize the decrypted HLS playlist: {error}")))?;
+        let target = directory.join("local.m3u8");
+        let temporary = directory.join("local.m3u8.sample-aes.part");
+        remove_regular_file_if_present(&temporary)
+            .await
+            .map_err(ManifestRunError::Failed)?;
+        let write_result = async {
+            let mut file = tokio::fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(&temporary)
+                .await
+                .map_err(|error| format!("Could not create the decrypted HLS playlist staging: {error}"))?;
+            file.write_all(&rewritten)
+                .await
+                .map_err(|error| format!("Could not write the decrypted HLS playlist staging: {error}"))?;
+            file.sync_all()
+                .await
+                .map_err(|error| format!("Could not flush the decrypted HLS playlist staging: {error}"))?;
+            drop(file);
+            tokio::fs::rename(&temporary, &target)
+                .await
+                .map_err(|error| format!("Could not publish the decrypted HLS playlist: {error}"))
+        }
+        .await;
+        if let Err(error) = write_result {
+            let _ = remove_regular_file_if_present(&temporary).await;
+            return Err(ManifestRunError::Failed(error));
+        }
+        sync_staging_directory(directory)
+            .await
+            .map_err(ManifestRunError::Failed)?;
+    }
+
+    Ok(())
+}
+
+fn local_hls_resource_path(directory: &Path, uri: &str) -> Result<PathBuf, ManifestRunError> {
+    let mut components = Path::new(uri).components();
+    if !matches!(components.next(), Some(std::path::Component::Normal(_)))
+        || components.next().is_some()
+    {
+        return Err(ManifestRunError::Unsupported(
+            "The localized HLS playlist contains an unsafe resource path".to_string(),
+        ));
+    }
+    Ok(directory.join(uri))
+}
+
+fn hls_sample_aes_iv(iv: Option<&str>, media_sequence: u64) -> Result<[u8; 16], ManifestRunError> {
+    let Some(iv) = iv else {
+        return Ok(u128::from(media_sequence).to_be_bytes());
+    };
+    let hex = iv
+        .strip_prefix("0x")
+        .or_else(|| iv.strip_prefix("0X"))
+        .unwrap_or(iv);
+    if hex.len() != 32 {
+        return Err(ManifestRunError::Unsupported(
+            "The HLS SAMPLE-AES IV is not 128 bits".to_string(),
+        ));
+    }
+    let mut parsed = [0_u8; 16];
+    for (index, byte) in parsed.iter_mut().enumerate() {
+        *byte = u8::from_str_radix(&hex[index * 2..index * 2 + 2], 16).map_err(|_| {
+            ManifestRunError::Unsupported("The HLS SAMPLE-AES IV is invalid".to_string())
+        })?;
+    }
+    Ok(parsed)
 }
 
 async fn fetch_resources(

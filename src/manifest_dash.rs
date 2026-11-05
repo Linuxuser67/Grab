@@ -971,6 +971,7 @@ fn effective_addressing(
             if base
                 .presentationTimeOffset
                 .is_some_and(|offset| offset != 0)
+                || base.timescale == Some(0)
                 || base
                     .availabilityTimeOffset
                     .is_some_and(|offset| offset != 0.0)
@@ -994,6 +995,10 @@ fn effective_addressing(
                 // missing range must not silently reuse the parent's range.
                 initialization_range = Some(initialization.range.as_deref());
             }
+        }
+
+        if index_range.is_none() && index_range_exact.is_some() {
+            return Err(DashError::UnsupportedAddressing);
         }
 
         if let Some(index_range) = index_range {
@@ -1963,6 +1968,7 @@ pub(crate) fn resolve_segment_base_index(
         || u64::try_from(bytes.len()).ok() != Some(index.index_range.length)
         || index_range_end > total_length
         || index.initialization_range.length == 0
+        || index.initialization_range.length > crate::manifest_writer::MAX_RESOURCE_BYTES
     {
         return Err(DashError::InvalidSegment);
     }
@@ -2027,6 +2033,9 @@ pub(crate) fn resolve_segment_base_index(
             return Err(DashError::UnsupportedAddressing);
         }
         let length = u64::from(reference.referenced_size);
+        if length > crate::manifest_writer::MAX_RESOURCE_BYTES {
+            return Err(DashError::LimitExceeded);
+        }
         let end = media_offset
             .checked_add(length)
             .filter(|end| *end <= total_length)
@@ -2262,6 +2271,42 @@ mod tests {
       <Representation id="v1">
         <SegmentBase indexRange="100-143"/>
       </Representation>
+    </AdaptationSet>
+  </Period>
+</MPD>"#;
+        assert_eq!(
+            parse_dash_manifest(BASE_URL, body).err(),
+            Some(DashError::UnsupportedAddressing)
+        );
+    }
+
+    #[test]
+    fn rejects_index_range_exact_without_an_effective_index_range() {
+        let body = r#"<?xml version="1.0"?>
+<MPD xmlns="urn:mpeg:dash:schema:mpd:2011" type="static" mediaPresentationDuration="PT2S">
+  <BaseURL>media.mp4</BaseURL>
+  <Period duration="PT2S">
+    <AdaptationSet contentType="video" mimeType="video/mp4">
+      <SegmentBase indexRangeExact="true"/>
+      <Representation id="v1"/>
+    </AdaptationSet>
+  </Period>
+</MPD>"#;
+        assert_eq!(
+            parse_dash_manifest(BASE_URL, body).err(),
+            Some(DashError::UnsupportedAddressing)
+        );
+    }
+
+    #[test]
+    fn rejects_zero_segment_base_timescale_without_an_index_range() {
+        let body = r#"<?xml version="1.0"?>
+<MPD xmlns="urn:mpeg:dash:schema:mpd:2011" type="static" mediaPresentationDuration="PT2S">
+  <BaseURL>media.mp4</BaseURL>
+  <Period duration="PT2S">
+    <AdaptationSet contentType="video" mimeType="video/mp4">
+      <SegmentBase timescale="0"/>
+      <Representation id="v1"/>
     </AdaptationSet>
   </Period>
 </MPD>"#;

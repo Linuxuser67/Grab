@@ -690,7 +690,10 @@ async fn prepare_manifest_attempt(
                     )
                 })?;
                 guard_manifest_child_url(&job.source.url, license_url, &mut guarded_child_hosts)?;
-                license_requests.push((license_url.clone(), std::collections::BTreeSet::from([encryption.default_kid])));
+                license_requests.push((
+                    license_url.clone(),
+                    std::collections::BTreeSet::from([encryption.default_kid]),
+                ));
             }
             if let Some(audio) = audio.as_ref()
                 && let Some(encryption) = audio.representation.encryption
@@ -702,7 +705,10 @@ async fn prepare_manifest_attempt(
                     )
                 })?;
                 guard_manifest_child_url(&job.source.url, license_url, &mut guarded_child_hosts)?;
-                license_requests.push((license_url.clone(), std::collections::BTreeSet::from([encryption.default_kid])));
+                license_requests.push((
+                    license_url.clone(),
+                    std::collections::BTreeSet::from([encryption.default_kid]),
+                ));
             }
             crate::dash_drm::acquire_required_keys(&client, &license_requests)
                 .await

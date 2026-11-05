@@ -151,6 +151,7 @@ struct InitEncryption {
     default_kid: [u8; 16],
     iv_size: u8,
     constant_iv: Option<[u8; 16]>,
+    constant_iv_size: Option<u8>,
     crypt_blocks: u8,
     skip_blocks: u8,
 }
@@ -396,11 +397,13 @@ fn parse_init_encryption(init: &[u8], expected: DashEncryption) -> Result<InitEn
         return Err("DASH tenc is not protected by the selected MPD default_KID".to_string());
     }
 
+    let mut constant_iv_size = None;
     let constant_iv = if iv_size == 0 {
         let size =
             usize::from(*tenc.get(offset).ok_or_else(|| {
                 "DASH tenc uses a constant IV but does not provide one".to_string()
             })?);
+        constant_iv_size = u8::try_from(size).ok();
         offset += 1;
         if size != 8 && size != 16 {
             return Err("DASH tenc constant IV must contain 8 or 16 bytes".to_string());
@@ -464,6 +467,7 @@ fn parse_init_encryption(init: &[u8], expected: DashEncryption) -> Result<InitEn
         default_kid: kid,
         iv_size,
         constant_iv,
+        constant_iv_size,
         crypt_blocks,
         skip_blocks,
     })
@@ -787,8 +791,14 @@ fn sample_group_kids(
     sample_count: usize,
     init: InitEncryption,
 ) -> Result<Vec<[u8; 16]>, String> {
-    let sgpd: Vec<_> = traf_children.iter().filter(|span| &span.kind == b"sgpd").collect();
-    let sbgp: Vec<_> = traf_children.iter().filter(|span| &span.kind == b"sbgp").collect();
+    let sgpd: Vec<_> = traf_children
+        .iter()
+        .filter(|span| &span.kind == b"sgpd")
+        .collect();
+    let sbgp: Vec<_> = traf_children
+        .iter()
+        .filter(|span| &span.kind == b"sbgp")
+        .collect();
     if sgpd.len() > 1 || sbgp.len() > 1 || sgpd.is_empty() != sbgp.is_empty() {
         return Err("DASH key rotation requires one matching sgpd/sbgp seig pair".to_string());
     }
@@ -802,7 +812,9 @@ fn sample_group_kids(
         || descriptions_payload[1..4] != [0, 0, 0]
         || descriptions_payload.get(4..8) != Some(b"seig".as_slice())
     {
-        return Err("DASH sgpd must be a version-one seig Sample Group Description box".to_string());
+        return Err(
+            "DASH sgpd must be a version-one seig Sample Group Description box".to_string(),
+        );
     }
     let default_length = usize::try_from(read_u32(descriptions_payload, 8)?)
         .map_err(|_| "DASH sgpd default entry length is out of range".to_string())?;
@@ -832,7 +844,10 @@ fn sample_group_kids(
             .get(offset..end)
             .ok_or_else(|| "DASH seig entry is truncated".to_string())?;
         if entry.len() < 20 || entry[0] != 0 || entry[2] > 1 {
-            return Err("DASH seig entry is truncated or uses unsupported reserved/protection fields".to_string());
+            return Err(
+                "DASH seig entry is truncated or uses unsupported reserved/protection fields"
+                    .to_string(),
+            );
         }
         let pattern = entry[1];
         let is_protected = entry[2] == 1;
@@ -845,7 +860,10 @@ fn sample_group_kids(
                 || (pattern & 0x0f) != init.skip_blocks
                 || iv_size != init.iv_size
             {
-                return Err("DASH seig changes IV or CBCS pattern parameters; only KID rotation is supported".to_string());
+                return Err(
+                    "DASH seig changes IV or CBCS pattern parameters; only KID rotation is supported"
+                        .to_string(),
+                );
             }
             if iv_size == 0 {
                 let constant_size = usize::from(*entry.get(entry_offset).ok_or_else(|| {
@@ -864,13 +882,20 @@ fn sample_group_kids(
                 let Some(expected) = init.constant_iv else {
                     return Err("DASH seig introduces a constant IV absent from tenc".to_string());
                 };
-                if constant != &expected[..constant_size] {
-                    return Err("DASH seig constant IV differs from the validated tenc IV".to_string());
+                if init.constant_iv_size.map(usize::from) != Some(constant_size)
+                    || constant != &expected[..constant_size]
+                {
+                    return Err(
+                        "DASH seig constant IV differs from the validated tenc IV".to_string(),
+                    );
                 }
                 entry_offset = constant_end;
             }
         } else {
-            return Err("Unprotected DASH seig entries are not supported by the encrypted-track adapter".to_string());
+            return Err(
+                "Unprotected DASH seig entries are not supported by the encrypted-track adapter"
+                    .to_string(),
+            );
         }
         if entry_offset != entry.len() {
             return Err("DASH seig entry contains unsupported trailing metadata".to_string());
@@ -1016,8 +1041,8 @@ fn fragment_samples(
             auxiliary,
             trun_record: record,
             kid: *sample_kids.get(sample_index).ok_or_else(|| {
-            "DASH sample-group mapping does not cover the parsed sample".to_string()
-        })?,
+                "DASH sample-group mapping does not cover the parsed sample".to_string()
+            })?,
         });
         data_offset = data_offset
             .checked_add(size)
@@ -1031,7 +1056,9 @@ fn box_bytes(kind: &[u8; 4], payload: &[u8]) -> Result<Vec<u8>, String> {
         .len()
         .checked_add(8)
         .and_then(|size| u32::try_from(size).ok())
-        .ok_or_else(|| "Synthetic DASH fragment box exceeds the 32-bit size limit".to_string())?;
+        .ok_or_else(|| {
+            "Synthetic DASH fragment box exceeds the 32-bit size limit".to_string()
+        })?;
     let mut output = Vec::with_capacity(payload.len() + 8);
     output.extend_from_slice(&size.to_be_bytes());
     output.extend_from_slice(kind);
@@ -1181,6 +1208,9 @@ fn decrypt_fragment_with_keys(
             .data_offset
             .checked_add(sample.size)
             .ok_or_else(|| "DASH sample output range overflows".to_string())?;
+        if plaintext.len() != sample.size {
+            return Err("VSD changed the length of a validated DASH sample".to_string());
+        }
         output
             .get_mut(sample.data_offset..end)
             .ok_or_else(|| "DASH sample output range exceeds its fragment".to_string())?
@@ -1499,6 +1529,7 @@ mod tests {
             default_kid: [0x33; 16],
             iv_size: 16,
             constant_iv: None,
+            constant_iv_size: None,
             crypt_blocks: 0,
             skip_blocks: 0,
         }
@@ -1658,7 +1689,8 @@ mod tests {
         let parsed_init = parse_init_encryption(
             &init,
             DashEncryption { scheme: EncryptionScheme::Cenc, default_kid },
-        ).expect("parse synthetic init");
+        )
+        .expect("parse synthetic init");
         let keys = super::super::DashKeyMap {
             keys: BTreeMap::from([
                 (first_kid, Zeroizing::new([0x10; 16])),
@@ -1669,8 +1701,11 @@ mod tests {
             .expect("decrypt both KID groups in one fragment");
         let boxes = parse_box_spans(&decrypted, 0, decrypted.len())
             .expect("decrypted fragment boxes");
-        let mdat = boxes.iter().find(|span| &span.kind == b"mdat")
-            .copied().expect("decrypted mdat");
+        let mdat = boxes
+            .iter()
+            .find(|span| &span.kind == b"mdat")
+            .copied()
+            .expect("decrypted mdat");
         let start = mdat.payload_start().expect("mdat payload start");
         let end = mdat.end().expect("mdat end");
         let expected = [
@@ -1715,7 +1750,8 @@ mod tests {
         let parsed_init = parse_init_encryption(
             &init,
             DashEncryption { scheme: EncryptionScheme::Cenc, default_kid },
-        ).expect("parse synthetic init");
+        )
+        .expect("parse synthetic init");
         let samples = fragment_samples(&fragment, parsed_init)
             .expect("parse rotated sample group");
         assert_eq!(samples.len(), 1);

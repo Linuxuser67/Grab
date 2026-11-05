@@ -1160,6 +1160,7 @@ fn stable_live_representation_key(identity: RepresentationIdentity<'_>) -> Strin
         mime_type,
         codecs,
         language,
+        encryption,
         base_url,
         addressing,
     } = identity;
@@ -4283,9 +4284,19 @@ mod tests {
 
     #[test]
     fn parses_static_cenc_and_cbcs_default_kids_at_inherited_scopes() {
-        for (scheme, kid, expected) in [
-            ("cenc", "00112233-4455-6677-8899-aabbccddeeff", crate::dash_drm::EncryptionScheme::Cenc),
-            ("cbcs", "ffeeddcc-bbaa-9988-7766-554433221100", crate::dash_drm::EncryptionScheme::Cbcs),
+        for (scheme, kid, expected, expected_kid) in [
+            (
+                "cenc",
+                "00112233-4455-6677-8899-aabbccddeeff",
+                crate::dash_drm::EncryptionScheme::Cenc,
+                [0x00, 0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88, 0x99, 0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff],
+            ),
+            (
+                "cbcs",
+                "ffeeddcc-bbaa-9988-7766-554433221100",
+                crate::dash_drm::EncryptionScheme::Cbcs,
+                [0xff, 0xee, 0xdd, 0xcc, 0xbb, 0xaa, 0x99, 0x88, 0x77, 0x66, 0x55, 0x44, 0x33, 0x22, 0x11, 0x00],
+            ),
         ] {
             let body = TEMPLATE_MPD.replace(
                 "</Period>",
@@ -4310,7 +4321,7 @@ mod tests {
             assert_eq!(encryption.scheme, expected);
             assert_eq!(
                 encryption.default_kid,
-                crate::dash_drm::parse_hex_16_for_test(kid).expect("test KID")
+                expected_kid
             );
             let planned = plan_dash_representation(&manifest, &protected.key)
                 .expect("protected representation plan");

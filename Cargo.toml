@@ -26,6 +26,9 @@ mpeg-ts = { version = "=0.6.2", default-features = false, features = ["std"] }
 mp4box = { version = "=0.14.0", default-features = false }
 # Reuse VSD's sample-level CENC/CBCS cryptographic transforms; Grab validates boxes first.
 vsd-mp4 = { version = "=0.2.1", default-features = false, features = ["decrypt-cenc"] }
+# CDM implementations for license-backed keys; only used for explicitly configured devices.
+widevine = "=0.1.0"
+playready = "=0.3.0"
 # Parse HLS diagnostics without exposing playlist contents. m3u8-rs exposes nom 7 parser errors.
 nom = "7"
 # DASH MPD parsing and serialization for native VOD downloads; pin the untrusted-input parser release.

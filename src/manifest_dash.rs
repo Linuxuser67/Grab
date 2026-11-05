@@ -4316,18 +4316,16 @@ mod tests {
 </Period>"#
                 ),
             );
-            let manifest = parse_dash_manifest(BASE_URL, &body)
-                .expect("supported static CENC/CBCS MPD");
-            let protected = manifest.video_representations
+            let manifest =
+                parse_dash_manifest(BASE_URL, &body).expect("supported static CENC/CBCS MPD");
+            let protected = manifest
+                .video_representations
                 .iter()
                 .find(|item| item.representation_id.as_deref() == Some("protected"))
                 .expect("protected representation");
             let encryption = protected.encryption.expect("parsed encryption metadata");
             assert_eq!(encryption.scheme, expected);
-            assert_eq!(
-                encryption.default_kid,
-                expected_kid
-            );
+            assert_eq!(encryption.default_kid, expected_kid);
             let planned = plan_dash_representation(&manifest, &protected.key)
                 .expect("protected representation plan");
             assert_eq!(planned.representation.encryption, Some(encryption));

@@ -691,8 +691,7 @@ async fn prepare_manifest_attempt(
             {
                 encryptions.push(encryption);
             }
-            crate::dash_drm::load_required_keys(&encryptions)
-                .map_err(ManifestRunError::Failed)?
+            crate::dash_drm::load_required_keys(&encryptions).map_err(ManifestRunError::Failed)?
         }
         Tracks::Hls { .. } | Tracks::DashLiveOffline { .. } => None,
     };

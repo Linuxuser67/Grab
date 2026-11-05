@@ -54,7 +54,9 @@ fn parse_box_spans(bytes: &[u8], start: usize, end: usize) -> Result<Vec<BoxSpan
             usize::try_from(read_u64(bytes, offset + 8)?)
                 .map_err(|_| "MP4 extended box size is out of range".to_string())?
         } else if size32 == 0 {
-            return Err("MP4 boxes with size zero are not supported in encrypted resources".to_string());
+            return Err(
+                "MP4 boxes with size zero are not supported in encrypted resources".to_string(),
+            );
         } else {
             usize::try_from(size32).map_err(|_| "MP4 box size is out of range".to_string())?
         };
@@ -125,9 +127,12 @@ fn span_payload<'a>(bytes: &'a [u8], span: BoxSpan) -> Result<&'a [u8], String> 
 
 fn find_one<'a>(spans: &'a [BoxSpan], kind: &[u8; 4]) -> Result<&'a BoxSpan, String> {
     let mut matches = spans.iter().filter(|span| &span.kind == kind);
-    let found = matches
-        .next()
-        .ok_or_else(|| format!("MP4 fragment is missing {} box", String::from_utf8_lossy(kind)))?;
+    let found = matches.next().ok_or_else(|| {
+        format!(
+            "MP4 fragment is missing {} box",
+            String::from_utf8_lossy(kind)
+        )
+    })?;
     if matches.next().is_some() {
         return Err(format!(
             "MP4 fragment contains multiple {} boxes",
@@ -146,11 +151,7 @@ struct InitEncryption {
     skip_blocks: u8,
 }
 
-fn collect_mp4_boxes<'a>(
-    boxes: &'a [mp4box::Box],
-    kind: &str,
-    output: &mut Vec<&'a mp4box::Box>,
-) {
+fn collect_mp4_boxes<'a>(boxes: &'a [mp4box::Box], kind: &str, output: &mut Vec<&'a mp4box::Box>) {
     for box_ in boxes {
         if box_.typ == kind {
             output.push(box_);
@@ -162,21 +163,20 @@ fn collect_mp4_boxes<'a>(
 }
 
 fn mp4_children(box_: &mp4box::Box) -> Result<&[mp4box::Box], String> {
-    box_.children.as_deref().ok_or_else(|| {
-        format!("MP4 {} box does not expose its child boxes", box_.typ)
-    })
+    box_.children
+        .as_deref()
+        .ok_or_else(|| format!("MP4 {} box does not expose its child boxes", box_.typ))
 }
 
-fn find_one_mp4_child<'a>(
-    boxes: &'a [mp4box::Box],
-    kind: &str,
-) -> Result<&'a mp4box::Box, String> {
+fn find_one_mp4_child<'a>(boxes: &'a [mp4box::Box], kind: &str) -> Result<&'a mp4box::Box, String> {
     let mut matches = boxes.iter().filter(|box_| box_.typ == kind);
-    let found = matches
-        .next()
-        .ok_or_else(|| format!("MP4 initialization is missing {kind} box in its required parent"))?;
+    let found = matches.next().ok_or_else(|| {
+        format!("MP4 initialization is missing {kind} box in its required parent")
+    })?;
     if matches.next().is_some() {
-        return Err(format!("MP4 initialization contains multiple {kind} boxes in one parent"));
+        return Err(format!(
+            "MP4 initialization contains multiple {kind} boxes in one parent"
+        ));
     }
     Ok(found)
 }
@@ -195,25 +195,26 @@ fn mp4_payload<'a>(bytes: &'a [u8], box_: &mp4box::Box) -> Result<&'a [u8], Stri
     let end = start
         .checked_add(size)
         .ok_or_else(|| format!("MP4 {} payload range overflows", box_.typ))?;
-    bytes
-        .get(start..end)
-        .ok_or_else(|| format!("MP4 {} payload exceeds the initialization resource", box_.typ))
+    bytes.get(start..end).ok_or_else(|| {
+        format!(
+            "MP4 {} payload exceeds the initialization resource",
+            box_.typ
+        )
+    })
 }
 
-fn parse_init_encryption(
-    init: &[u8],
-    expected: DashEncryption,
-) -> Result<InitEncryption, String> {
+fn parse_init_encryption(init: &[u8], expected: DashEncryption) -> Result<InitEncryption, String> {
     let boxes = mp4box::get_boxes(
         &mut Cursor::new(init),
-        u64::try_from(init.len()).map_err(|_| "DASH initialization size is out of range".to_string())?,
+        u64::try_from(init.len())
+            .map_err(|_| "DASH initialization size is out of range".to_string())?,
         false,
     )
     .map_err(|error| format!("Could not parse DASH encryption initialization boxes: {error}"))?;
-    if !boxes.iter().any(|box_| box_.typ == "ftyp")
-        || !boxes.iter().any(|box_| box_.typ == "moov")
-    {
-        return Err("Encrypted DASH initialization resource must contain ftyp and moov".to_string());
+    if !boxes.iter().any(|box_| box_.typ == "ftyp") || !boxes.iter().any(|box_| box_.typ == "moov") {
+        return Err(
+            "Encrypted DASH initialization resource must contain ftyp and moov".to_string(),
+        );
     }
 
     let mut movie_headers = Vec::new();
@@ -257,9 +258,7 @@ fn parse_init_encryption(
     let stbl = find_one_mp4_child(mp4_children(minf)?, "stbl")?;
     let stsd = find_one_mp4_child(mp4_children(stbl)?, "stsd")?;
     let sample_entries = mp4_children(stsd)?;
-    if sample_entries.len() != 1
-        || !matches!(sample_entries[0].typ.as_str(), "encv" | "enca")
-    {
+    if sample_entries.len() != 1 || !matches!(sample_entries[0].typ.as_str(), "encv" | "enca") {
         return Err(
             "Encrypted DASH initialization must contain exactly one encv or enca sample entry"
                 .to_string(),
@@ -320,7 +319,9 @@ fn parse_init_encryption(
     let (crypt_blocks, skip_blocks) = match version {
         0 => {
             if tenc[offset] != 0 {
-                return Err("DASH version-zero track-encryption reserved byte is nonzero".to_string());
+                return Err(
+                    "DASH version-zero track-encryption reserved byte is nonzero".to_string(),
+                );
             }
             offset += 1;
             (0, 0)
@@ -362,9 +363,10 @@ fn parse_init_encryption(
     }
 
     let constant_iv = if iv_size == 0 {
-        let size = usize::from(*tenc.get(offset).ok_or_else(|| {
-            "DASH tenc uses a constant IV but does not provide one".to_string()
-        })?);
+        let size =
+            usize::from(*tenc.get(offset).ok_or_else(|| {
+                "DASH tenc uses a constant IV but does not provide one".to_string()
+            })?);
         offset += 1;
         if size != 8 && size != 16 {
             return Err("DASH tenc constant IV must contain 8 or 16 bytes".to_string());
@@ -458,16 +460,17 @@ fn validate_fragment(bytes: &[u8], init: InitEncryption) -> Result<(), String> {
     let moof_children = parse_box_spans(bytes, moof.payload_start()?, moof.end()?)?;
     let mfhd = find_one(&moof_children, b"mfhd")?;
     let traf = find_one(&moof_children, b"traf")?;
-    if moof_children.len() != 2 || moof_children.iter().any(|span| {
-        &span.kind != b"mfhd" && &span.kind != b"traf"
-    }) {
-        return Err("Encrypted DASH fragments must contain exactly one mfhd and one traf".to_string());
+    if moof_children.len() != 2
+        || moof_children
+            .iter()
+            .any(|span| &span.kind != b"mfhd" && &span.kind != b"traf")
+    {
+        return Err(
+            "Encrypted DASH fragments must contain exactly one mfhd and one traf".to_string(),
+        );
     }
     let mfhd_payload = span_payload(bytes, *mfhd)?;
-    if mfhd_payload.len() != 8
-        || mfhd_payload[0] != 0
-        || mfhd_payload[1..4] != [0, 0, 0]
-    {
+    if mfhd_payload.len() != 8 || mfhd_payload[0] != 0 || mfhd_payload[1..4] != [0, 0, 0] {
         return Err("DASH mfhd is truncated or uses unsupported version/flags".to_string());
     }
 
@@ -478,22 +481,31 @@ fn validate_fragment(bytes: &[u8], init: InitEncryption) -> Result<(), String> {
             b"tfhd" | b"tfdt" | b"trun" | b"saiz" | b"saio" | b"senc"
         )
     }) {
-        return Err("Encrypted DASH fragment uses unsupported key-rotation or sample-group metadata".to_string());
+        return Err(
+            "Encrypted DASH fragment uses unsupported key-rotation or sample-group metadata"
+                .to_string(),
+        );
     }
-    if traf_children.iter().filter(|span| &span.kind == b"tfdt").count() > 1 {
+    if traf_children
+        .iter()
+        .filter(|span| &span.kind == b"tfdt")
+        .count()
+        > 1
+    {
         return Err("Encrypted DASH fragment contains multiple tfdt boxes".to_string());
     }
     if let Some(tfdt) = traf_children.iter().find(|span| &span.kind == b"tfdt") {
         let payload = span_payload(bytes, *tfdt)?;
         let flags = if payload.len() >= 4 {
-            (u32::from(payload[1]) << 16)
-                | (u32::from(payload[2]) << 8)
-                | u32::from(payload[3])
+            (u32::from(payload[1]) << 16) | (u32::from(payload[2]) << 8) | u32::from(payload[3])
         } else {
             u32::MAX
         };
         if flags != 0
-            || !matches!((payload.first().copied(), payload.len()), (Some(0), 8) | (Some(1), 12))
+            || !matches!(
+                (payload.first().copied(), payload.len()),
+                (Some(0), 8) | (Some(1), 12)
+            )
         {
             return Err("DASH tfdt is truncated or uses an unsupported version/flags".to_string());
         }
@@ -501,11 +513,29 @@ fn validate_fragment(bytes: &[u8], init: InitEncryption) -> Result<(), String> {
     let tfhd = find_one(&traf_children, b"tfhd")?;
     let trun = find_one(&traf_children, b"trun")?;
     let senc = find_one(&traf_children, b"senc")?;
-    let saiz: Vec<_> = traf_children.iter().filter(|span| &span.kind == b"saiz").collect();
-    let saio: Vec<_> = traf_children.iter().filter(|span| &span.kind == b"saio").collect();
-    if traf_children.iter().filter(|span| &span.kind == b"tfhd").count() != 1
-        || traf_children.iter().filter(|span| &span.kind == b"trun").count() != 1
-        || traf_children.iter().filter(|span| &span.kind == b"senc").count() != 1
+    let saiz: Vec<_> = traf_children
+        .iter()
+        .filter(|span| &span.kind == b"saiz")
+        .collect();
+    let saio: Vec<_> = traf_children
+        .iter()
+        .filter(|span| &span.kind == b"saio")
+        .collect();
+    if traf_children
+        .iter()
+        .filter(|span| &span.kind == b"tfhd")
+        .count()
+        != 1
+        || traf_children
+            .iter()
+            .filter(|span| &span.kind == b"trun")
+            .count()
+            != 1
+        || traf_children
+            .iter()
+            .filter(|span| &span.kind == b"senc")
+            .count()
+            != 1
         || saiz.len() > 1
         || saio.len() > 1
         || (saiz.is_empty() != saio.is_empty())
@@ -520,8 +550,8 @@ fn validate_fragment(bytes: &[u8], init: InitEncryption) -> Result<(), String> {
     let tfhd_flags = (u32::from(tfhd_payload[1]) << 16)
         | (u32::from(tfhd_payload[2]) << 8)
         | u32::from(tfhd_payload[3]);
-    const TFHD_SUPPORTED_FLAGS: u32 = 0x0000_0002 | 0x0000_0008 | 0x0000_0010
-        | 0x0000_0020 | 0x0002_0000;
+    const TFHD_SUPPORTED_FLAGS: u32 =
+        0x0000_0002 | 0x0000_0008 | 0x0000_0010 | 0x0000_0020 | 0x0002_0000;
     if tfhd_flags & !TFHD_SUPPORTED_FLAGS != 0
         || tfhd_flags & 0x0002_0000 == 0
         || read_u32(tfhd_payload, 4)? != init.track_id
@@ -529,10 +559,11 @@ fn validate_fragment(bytes: &[u8], init: InitEncryption) -> Result<(), String> {
         return Err("DASH tfhd uses unsupported flags or a different track ID".to_string());
     }
     let mut tfhd_offset = 8_usize;
-    if tfhd_flags & 0x0000_0002 != 0
-        && read_u32(tfhd_payload, tfhd_offset)? != 1
-    {
-        return Err("DASH tfhd selects a sample description other than the only validated entry".to_string());
+    if tfhd_flags & 0x0000_0002 != 0 && read_u32(tfhd_payload, tfhd_offset)? != 1 {
+        return Err(
+            "DASH tfhd selects a sample description other than the only validated entry"
+                .to_string(),
+        );
     }
     for flag in [0x0000_0002, 0x0000_0008, 0x0000_0010, 0x0000_0020] {
         if tfhd_flags & flag != 0 {
@@ -552,19 +583,24 @@ fn validate_fragment(bytes: &[u8], init: InitEncryption) -> Result<(), String> {
     let trun_flags = (u32::from(trun_payload[1]) << 16)
         | (u32::from(trun_payload[2]) << 8)
         | u32::from(trun_payload[3]);
-    const TRUN_SUPPORTED_FLAGS: u32 = 0x0000_0001 | 0x0000_0004 | 0x0000_0100
-        | 0x0000_0200 | 0x0000_0400 | 0x0000_0800;
+    const TRUN_SUPPORTED_FLAGS: u32 =
+        0x0000_0001 | 0x0000_0004 | 0x0000_0100 | 0x0000_0200 | 0x0000_0400 | 0x0000_0800;
     if trun_flags & !TRUN_SUPPORTED_FLAGS != 0
         || trun_flags & 0x0000_0001 == 0
         || trun_flags & 0x0000_0200 == 0
         || (trun_flags & 0x0000_0004 != 0 && trun_flags & 0x0000_0400 != 0)
     {
-        return Err("DASH trun must declare one data offset and explicit sample sizes with supported flags".to_string());
+        return Err(
+            "DASH trun must declare one data offset and explicit sample sizes with supported flags"
+                .to_string(),
+        );
     }
     let sample_count = usize::try_from(read_u32(trun_payload, 4)?)
         .map_err(|_| "DASH trun sample count is out of range".to_string())?;
     if sample_count == 0 || sample_count > MAX_SAMPLES_PER_FRAGMENT {
-        return Err("DASH fragment sample count is empty or exceeds the configured limit".to_string());
+        return Err(
+            "DASH fragment sample count is empty or exceeds the configured limit".to_string(),
+        );
     }
     let mut cursor = 8_usize;
     let data_offset = read_i32(trun_payload, cursor)?;
@@ -791,8 +827,9 @@ pub(crate) fn decrypt_track(
     }
 
     let init_path = directory.join(&resources[0].filename);
-    let init = read_regular_file_bounded(&init_path, MAX_INIT_BYTES)
-        .map_err(|error| format!("Could not read encrypted DASH initialization resource: {error}"))?;
+    let init = read_regular_file_bounded(&init_path, MAX_INIT_BYTES).map_err(|error| {
+        format!("Could not read encrypted DASH initialization resource: {error}")
+    })?;
     if init.is_empty() {
         return Err("Encrypted DASH initialization resource is empty".to_string());
     }
@@ -844,7 +881,9 @@ pub(crate) fn decrypt_track(
         total = total
             .checked_add(length)
             .filter(|size| *size <= MAX_TRACK_BYTES)
-            .ok_or_else(|| "Decrypted DASH track exceeds Grab's 1 TiB native track limit".to_string())?;
+            .ok_or_else(|| {
+                "Decrypted DASH track exceeds Grab's 1 TiB native track limit".to_string()
+            })?;
         writer
             .as_file_mut()
             .write_all(&decrypted)
@@ -1040,17 +1079,7 @@ mod tests {
         tkhd_fields.extend_from_slice(&0_u16.to_be_bytes()); // alternate_group
         tkhd_fields.extend_from_slice(&0_u16.to_be_bytes()); // volume
         tkhd_fields.extend_from_slice(&0_u16.to_be_bytes()); // reserved
-        for matrix_value in [
-            0x0001_0000_u32,
-            0,
-            0,
-            0,
-            0x0001_0000,
-            0,
-            0,
-            0,
-            0x4000_0000,
-        ] {
+        for matrix_value in [0x0001_0000_u32, 0, 0, 0, 0x0001_0000, 0, 0, 0, 0x4000_0000] {
             tkhd_fields.extend_from_slice(&matrix_value.to_be_bytes());
         }
         tkhd_fields.extend_from_slice(&0_u32.to_be_bytes()); // width
@@ -1083,14 +1112,8 @@ mod tests {
         (init, kid)
     }
 
-    fn synthetic_fragment(
-        ciphertext: &[u8],
-        iv: &[u8; 16],
-    ) -> Vec<u8> {
-        let tfhd = box_bytes(
-            b"tfhd",
-            &full_box(0, 0x020000, &7_u32.to_be_bytes()),
-        );
+    fn synthetic_fragment(ciphertext: &[u8], iv: &[u8; 16]) -> Vec<u8> {
+        let tfhd = box_bytes(b"tfhd", &full_box(0, 0x020000, &7_u32.to_be_bytes()));
         let tfdt = box_bytes(b"tfdt", &full_box(0, 0, &0_u32.to_be_bytes()));
         let mut senc_fields = 1_u32.to_be_bytes().to_vec();
         senc_fields.extend_from_slice(iv);
@@ -1119,8 +1142,8 @@ mod tests {
         };
 
         let initial_moof = make_moof(&make_trun(0));
-        let offset = i32::try_from(initial_moof.len() + 8)
-            .expect("synthetic fragment offset fits i32");
+        let offset =
+            i32::try_from(initial_moof.len() + 8).expect("synthetic fragment offset fits i32");
         let moof = make_moof(&make_trun(offset));
         let mut fragment = moof;
         fragment.extend_from_slice(&box_bytes(b"mdat", ciphertext));
@@ -1183,45 +1206,29 @@ mod tests {
 
     #[test]
     fn decrypts_cenc_and_cbcs_fragmented_tracks_end_to_end() {
-        let plaintext = [
-            0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07,
-            0x08, 0x09, 0x0a, 0x0b, 0x0c, 0x0d, 0x0e, 0x0f,
+        let plaintext =         let plaintext = [
+            0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0a, 0x0b, 0x0c, 0x0d,
+            0x0e, 0x0f,
         ];
-        let iv = [
-            0x20, 0x21, 0x22, 0x23, 0x24, 0x25, 0x26, 0x27,
-            0x28, 0x29, 0x2a, 0x2b, 0x2c, 0x2d, 0x2e, 0x2f,
+        let iv =         let iv = [
+            0x20, 0x21, 0x22, 0x23, 0x24, 0x25, 0x26, 0x27, 0x28, 0x29, 0x2a, 0x2b, 0x2c, 0x2d,
+            0x2e, 0x2f,
         ];
-        let cenc_ciphertext = [
-            0xb8, 0x78, 0xd8, 0x9b, 0xed, 0xdb, 0x8e, 0x7e,
-            0xfb, 0x0c, 0xde, 0xfb, 0xb0, 0x92, 0x5c, 0xb5,
+        let cenc_ciphertext =         let cenc_ciphertext = [
+            0xb8, 0x78, 0xd8, 0x9b, 0xed, 0xdb, 0x8e, 0x7e, 0xfb, 0x0c, 0xde, 0xfb, 0xb0, 0x92,
+            0x5c, 0xb5,
         ];
-        let cbcs_ciphertext = [
-            0x13, 0x13, 0xf2, 0xa7, 0x28, 0x0f, 0x62, 0xb8,
-            0xde, 0x96, 0x01, 0x95, 0xf9, 0x83, 0xb3, 0x2a,
+        let cbcs_ciphertext =         let cbcs_ciphertext = [
+            0x13, 0x13, 0xf2, 0xa7, 0x28, 0x0f, 0x62, 0xb8, 0xde, 0x96, 0x01, 0x95, 0xf9, 0x83,
+            0xb3, 0x2a,
         ];
 
         for (scheme, fourcc, version, ciphertext) in [
-            (
-                EncryptionScheme::Cenc,
-                b"cenc",
-                0,
-                cenc_ciphertext,
-            ),
-            (
-                EncryptionScheme::Cbcs,
-                b"cbcs",
-                1,
-                cbcs_ciphertext,
-            ),
+            (EncryptionScheme::Cenc, b"cenc", 0, cenc_ciphertext),
+            (EncryptionScheme::Cbcs, b"cbcs", 1, cbcs_ciphertext),
         ] {
-            let decrypted = decrypt_synthetic_track(
-                scheme,
-                fourcc,
-                version,
-                iv,
-                &ciphertext,
-                (0, 0),
-            );
+            let decrypted =
+                decrypt_synthetic_track(scheme, fourcc, version, iv, &ciphertext, (0, 0));
             let boxes = parse_box_spans(&decrypted, 0, decrypted.len())
                 .expect("decrypted file has complete MP4 boxes");
             let mdat = boxes
@@ -1241,45 +1248,41 @@ mod tests {
 
     #[test]
     fn decrypts_cbcs_crypt_skip_patterns_without_touching_clear_blocks() {
-        let plaintext: [u8; 192] = [
-            0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0a, 0x0b,
-            0x0c, 0x0d, 0x0e, 0x0f, 0x10, 0x11, 0x12, 0x13, 0x14, 0x15, 0x16, 0x17,
-            0x18, 0x19, 0x1a, 0x1b, 0x1c, 0x1d, 0x1e, 0x1f, 0x20, 0x21, 0x22, 0x23,
-            0x24, 0x25, 0x26, 0x27, 0x28, 0x29, 0x2a, 0x2b, 0x2c, 0x2d, 0x2e, 0x2f,
-            0x30, 0x31, 0x32, 0x33, 0x34, 0x35, 0x36, 0x37, 0x38, 0x39, 0x3a, 0x3b,
-            0x3c, 0x3d, 0x3e, 0x3f, 0x40, 0x41, 0x42, 0x43, 0x44, 0x45, 0x46, 0x47,
-            0x48, 0x49, 0x4a, 0x4b, 0x4c, 0x4d, 0x4e, 0x4f, 0x50, 0x51, 0x52, 0x53,
-            0x54, 0x55, 0x56, 0x57, 0x58, 0x59, 0x5a, 0x5b, 0x5c, 0x5d, 0x5e, 0x5f,
-            0x60, 0x61, 0x62, 0x63, 0x64, 0x65, 0x66, 0x67, 0x68, 0x69, 0x6a, 0x6b,
-            0x6c, 0x6d, 0x6e, 0x6f, 0x70, 0x71, 0x72, 0x73, 0x74, 0x75, 0x76, 0x77,
-            0x78, 0x79, 0x7a, 0x7b, 0x7c, 0x7d, 0x7e, 0x7f, 0x80, 0x81, 0x82, 0x83,
-            0x84, 0x85, 0x86, 0x87, 0x88, 0x89, 0x8a, 0x8b, 0x8c, 0x8d, 0x8e, 0x8f,
-            0x90, 0x91, 0x92, 0x93, 0x94, 0x95, 0x96, 0x97, 0x98, 0x99, 0x9a, 0x9b,
-            0x9c, 0x9d, 0x9e, 0x9f, 0xa0, 0xa1, 0xa2, 0xa3, 0xa4, 0xa5, 0xa6, 0xa7,
-            0xa8, 0xa9, 0xaa, 0xab, 0xac, 0xad, 0xae, 0xaf, 0xb0, 0xb1, 0xb2, 0xb3,
-            0xb4, 0xb5, 0xb6, 0xb7, 0xb8, 0xb9, 0xba, 0xbb, 0xbc, 0xbd, 0xbe, 0xbf,
+        let plaintext: [u8; 192] =         let plaintext: [u8; 192] = [
+            0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0a, 0x0b, 0x0c, 0x0d,
+            0x0e, 0x0f, 0x10, 0x11, 0x12, 0x13, 0x14, 0x15, 0x16, 0x17, 0x18, 0x19, 0x1a, 0x1b,
+            0x1c, 0x1d, 0x1e, 0x1f, 0x20, 0x21, 0x22, 0x23, 0x24, 0x25, 0x26, 0x27, 0x28, 0x29,
+            0x2a, 0x2b, 0x2c, 0x2d, 0x2e, 0x2f, 0x30, 0x31, 0x32, 0x33, 0x34, 0x35, 0x36, 0x37,
+            0x38, 0x39, 0x3a, 0x3b, 0x3c, 0x3d, 0x3e, 0x3f, 0x40, 0x41, 0x42, 0x43, 0x44, 0x45,
+            0x46, 0x47, 0x48, 0x49, 0x4a, 0x4b, 0x4c, 0x4d, 0x4e, 0x4f, 0x50, 0x51, 0x52, 0x53,
+            0x54, 0x55, 0x56, 0x57, 0x58, 0x59, 0x5a, 0x5b, 0x5c, 0x5d, 0x5e, 0x5f, 0x60, 0x61,
+            0x62, 0x63, 0x64, 0x65, 0x66, 0x67, 0x68, 0x69, 0x6a, 0x6b, 0x6c, 0x6d, 0x6e, 0x6f,
+            0x70, 0x71, 0x72, 0x73, 0x74, 0x75, 0x76, 0x77, 0x78, 0x79, 0x7a, 0x7b, 0x7c, 0x7d,
+            0x7e, 0x7f, 0x80, 0x81, 0x82, 0x83, 0x84, 0x85, 0x86, 0x87, 0x88, 0x89, 0x8a, 0x8b,
+            0x8c, 0x8d, 0x8e, 0x8f, 0x90, 0x91, 0x92, 0x93, 0x94, 0x95, 0x96, 0x97, 0x98, 0x99,
+            0x9a, 0x9b, 0x9c, 0x9d, 0x9e, 0x9f, 0xa0, 0xa1, 0xa2, 0xa3, 0xa4, 0xa5, 0xa6, 0xa7,
+            0xa8, 0xa9, 0xaa, 0xab, 0xac, 0xad, 0xae, 0xaf, 0xb0, 0xb1, 0xb2, 0xb3, 0xb4, 0xb5,
+            0xb6, 0xb7, 0xb8, 0xb9, 0xba, 0xbb, 0xbc, 0xbd, 0xbe, 0xbf,
         ];
-        let ciphertext: [u8; 192] = [
-            0x13, 0x13, 0xf2, 0xa7, 0x28, 0x0f, 0x62, 0xb8, 0xde, 0x96, 0x01, 0x95,
-            0xf9, 0x83, 0xb3, 0x2a, 0x10, 0x11, 0x12, 0x13, 0x14, 0x15, 0x16, 0x17,
-            0x18, 0x19, 0x1a, 0x1b, 0x1c, 0x1d, 0x1e, 0x1f, 0x20, 0x21, 0x22, 0x23,
-            0x24, 0x25, 0x26, 0x27, 0x28, 0x29, 0x2a, 0x2b, 0x2c, 0x2d, 0x2e, 0x2f,
-            0x30, 0x31, 0x32, 0x33, 0x34, 0x35, 0x36, 0x37, 0x38, 0x39, 0x3a, 0x3b,
-            0x3c, 0x3d, 0x3e, 0x3f, 0x40, 0x41, 0x42, 0x43, 0x44, 0x45, 0x46, 0x47,
-            0x48, 0x49, 0x4a, 0x4b, 0x4c, 0x4d, 0x4e, 0x4f, 0x50, 0x51, 0x52, 0x53,
-            0x54, 0x55, 0x56, 0x57, 0x58, 0x59, 0x5a, 0x5b, 0x5c, 0x5d, 0x5e, 0x5f,
-            0x60, 0x61, 0x62, 0x63, 0x64, 0x65, 0x66, 0x67, 0x68, 0x69, 0x6a, 0x6b,
-            0x6c, 0x6d, 0x6e, 0x6f, 0x70, 0x71, 0x72, 0x73, 0x74, 0x75, 0x76, 0x77,
-            0x78, 0x79, 0x7a, 0x7b, 0x7c, 0x7d, 0x7e, 0x7f, 0x80, 0x81, 0x82, 0x83,
-            0x84, 0x85, 0x86, 0x87, 0x88, 0x89, 0x8a, 0x8b, 0x8c, 0x8d, 0x8e, 0x8f,
-            0x90, 0x91, 0x92, 0x93, 0x94, 0x95, 0x96, 0x97, 0x98, 0x99, 0x9a, 0x9b,
-            0x9c, 0x9d, 0x9e, 0x9f, 0x31, 0x94, 0x9c, 0x67, 0x78, 0x30, 0x31, 0x45,
-            0x52, 0xa9, 0xfc, 0x3c, 0x71, 0x05, 0xa9, 0x3f, 0xb0, 0xb1, 0xb2, 0xb3,
-            0xb4, 0xb5, 0xb6, 0xb7, 0xb8, 0xb9, 0xba, 0xbb, 0xbc, 0xbd, 0xbe, 0xbf,
+        let ciphertext: [u8; 192] =         let ciphertext: [u8; 192] = [
+            0x13, 0x13, 0xf2, 0xa7, 0x28, 0x0f, 0x62, 0xb8, 0xde, 0x96, 0x01, 0x95, 0xf9, 0x83,
+            0xb3, 0x2a, 0x10, 0x11, 0x12, 0x13, 0x14, 0x15, 0x16, 0x17, 0x18, 0x19, 0x1a, 0x1b,
+            0x1c, 0x1d, 0x1e, 0x1f, 0x20, 0x21, 0x22, 0x23, 0x24, 0x25, 0x26, 0x27, 0x28, 0x29,
+            0x2a, 0x2b, 0x2c, 0x2d, 0x2e, 0x2f, 0x30, 0x31, 0x32, 0x33, 0x34, 0x35, 0x36, 0x37,
+            0x38, 0x39, 0x3a, 0x3b, 0x3c, 0x3d, 0x3e, 0x3f, 0x40, 0x41, 0x42, 0x43, 0x44, 0x45,
+            0x46, 0x47, 0x48, 0x49, 0x4a, 0x4b, 0x4c, 0x4d, 0x4e, 0x4f, 0x50, 0x51, 0x52, 0x53,
+            0x54, 0x55, 0x56, 0x57, 0x58, 0x59, 0x5a, 0x5b, 0x5c, 0x5d, 0x5e, 0x5f, 0x60, 0x61,
+            0x62, 0x63, 0x64, 0x65, 0x66, 0x67, 0x68, 0x69, 0x6a, 0x6b, 0x6c, 0x6d, 0x6e, 0x6f,
+            0x70, 0x71, 0x72, 0x73, 0x74, 0x75, 0x76, 0x77, 0x78, 0x79, 0x7a, 0x7b, 0x7c, 0x7d,
+            0x7e, 0x7f, 0x80, 0x81, 0x82, 0x83, 0x84, 0x85, 0x86, 0x87, 0x88, 0x89, 0x8a, 0x8b,
+            0x8c, 0x8d, 0x8e, 0x8f, 0x90, 0x91, 0x92, 0x93, 0x94, 0x95, 0x96, 0x97, 0x98, 0x99,
+            0x9a, 0x9b, 0x9c, 0x9d, 0x9e, 0x9f, 0x31, 0x94, 0x9c, 0x67, 0x78, 0x30, 0x31, 0x45,
+            0x52, 0xa9, 0xfc, 0x3c, 0x71, 0x05, 0xa9, 0x3f, 0xb0, 0xb1, 0xb2, 0xb3, 0xb4, 0xb5,
+            0xb6, 0xb7, 0xb8, 0xb9, 0xba, 0xbb, 0xbc, 0xbd, 0xbe, 0xbf,
         ];
-        let iv = [
-            0x20, 0x21, 0x22, 0x23, 0x24, 0x25, 0x26, 0x27,
-            0x28, 0x29, 0x2a, 0x2b, 0x2c, 0x2d, 0x2e, 0x2f,
+        let iv =         let iv = [
+            0x20, 0x21, 0x22, 0x23, 0x24, 0x25, 0x26, 0x27, 0x28, 0x29, 0x2a, 0x2b, 0x2c, 0x2d,
+            0x2e, 0x2f,
         ];
         let decrypted = decrypt_synthetic_track(
             EncryptionScheme::Cbcs,
@@ -1304,17 +1307,23 @@ mod tests {
     #[test]
     fn parses_hyphenated_and_compact_hex_identifiers() {
         let value = "00112233-4455-6677-8899-aabbccddeeff";
-        let expected = [
-            0x00, 0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77,
-            0x88, 0x99, 0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff,
+        let expected =         let expected = [
+            0x00, 0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88, 0x99, 0xaa, 0xbb, 0xcc, 0xdd,
+            0xee, 0xff,
         ];
         assert_eq!(super::super::parse_hex_16(value), Some(expected));
         assert_eq!(
             super::super::parse_hex_16("00112233445566778899aabbccddeeff"),
             Some(expected)
         );
-        assert_eq!(super::super::parse_hex_16("00112233445566778899aabbccddeef"), None);
-        assert_eq!(super::super::parse_hex_16("zz112233445566778899aabbccddeeff"), None);
+        assert_eq!(
+            super::super::parse_hex_16("00112233445566778899aabbccddeef"),
+            None
+        );
+        assert_eq!(
+            super::super::parse_hex_16("zz112233445566778899aabbccddeeff"),
+            None
+        );
     }
 
     #[test]
@@ -1327,7 +1336,10 @@ mod tests {
                 default_kid: kid,
             },
         );
-        assert!(result.is_err(), "a misplaced decoy tenc must not enable decryption");
+        assert!(
+            result.is_err(),
+            "a misplaced decoy tenc must not enable decryption"
+        );
     }
 
     #[test]
@@ -1359,10 +1371,24 @@ mod tests {
     #[test]
     fn accepts_only_the_validated_sample_description_index() {
         let valid = test_fragment_with_sample_description_index(
-            7, 0x000201, 1, 0, false, 0, Some(1), false,
+            7,
+            0x000201,
+            1,
+            0,
+            false,
+            0,
+            Some(1),
+            false,
         );
         let invalid = test_fragment_with_sample_description_index(
-            7, 0x000201, 1, 0, false, 0, Some(2), false,
+            7,
+            0x000201,
+            1,
+            0,
+            false,
+            0,
+            Some(2),
+            false,
         );
         assert!(validate_fragment(&valid, test_init_encryption()).is_ok());
         assert!(validate_fragment(&invalid, test_init_encryption()).is_err());

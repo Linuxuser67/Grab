@@ -9,7 +9,6 @@ use std::fs::OpenOptions;
 use std::io::Read;
 use std::path::{Path, PathBuf};
 
-
 const MP4_PROTECTION_SCHEME: &str = "urn:mpeg:dash:mp4protection:2011";
 const WIDEVINE_SCHEME: &str = "urn:uuid:edef8ba9-79d6-4ace-a3c8-27dcd51d21ed";
 const PLAYREADY_SCHEME: &str = "urn:uuid:9a04f079-9840-4286-ab92-e65be0885f95";
@@ -61,7 +60,12 @@ pub(crate) fn encryption_from_scopes(
 
     for descriptor in scopes.iter().flat_map(|scope| scope.iter()) {
         if descriptor.schemeIdUri == MP4_PROTECTION_SCHEME {
-            let scheme = match descriptor.value.as_deref().map(str::to_ascii_lowercase).as_deref() {
+            let scheme = match descriptor
+                .value
+                .as_deref()
+                .map(str::to_ascii_lowercase)
+                .as_deref()
+            {
                 Some("cenc") => EncryptionScheme::Cenc,
                 Some("cbcs") => EncryptionScheme::Cbcs,
                 _ => {
@@ -134,13 +138,25 @@ pub(crate) fn load_required_keys(
             continue;
         }
         let (kid_text, key_text) = line.split_once(':').ok_or_else(|| {
-            format!("{}:{} must use KID:KEY format", path.display(), line_index + 1)
+            format!(
+                "{}:{} must use KID:KEY format",
+                path.display(),
+                line_index + 1
+            )
         })?;
         let kid = parse_hex_16(kid_text).ok_or_else(|| {
-            format!("{}:{} contains an invalid 128-bit KID", path.display(), line_index + 1)
+            format!(
+                "{}:{} contains an invalid 128-bit KID",
+                path.display(),
+                line_index + 1
+            )
         })?;
         let key = parse_hex_16(key_text).ok_or_else(|| {
-            format!("{}:{} contains an invalid 128-bit content key", path.display(), line_index + 1)
+            format!(
+                "{}:{} contains an invalid 128-bit content key",
+                path.display(),
+                line_index + 1
+            )
         })?;
         if keys.insert(kid, key).is_some() {
             return Err(format!(
@@ -227,7 +243,10 @@ fn read_private_key_file(path: &Path) -> Result<Vec<u8>, String> {
 }
 
 fn parse_hex_16(value: &str) -> Option<[u8; 16]> {
-    let compact: String = value.chars().filter(|character| *character != '-').collect();
+    let compact: String = value
+        .chars()
+        .filter(|character| *character != '-')
+        .collect();
     if compact.len() != 32 || !compact.bytes().all(|byte| byte.is_ascii_hexdigit()) {
         return None;
     }
@@ -263,7 +282,6 @@ mod mp4;
 
 pub(crate) use mp4::decrypt_track;
 
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -296,9 +314,9 @@ mod tests {
         assert_eq!(cenc_result.scheme, EncryptionScheme::Cenc);
         assert_eq!(
             cenc_result.default_kid,
-            [
-                0x00, 0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77,
-                0x88, 0x99, 0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff,
+                        [
+                0x00, 0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88, 0x99, 0xaa, 0xbb, 0xcc, 0xdd,
+                0xee, 0xff,
             ]
         );
 
@@ -308,9 +326,9 @@ mod tests {
         assert_eq!(cbcs_result.scheme, EncryptionScheme::Cbcs);
         assert_eq!(
             cbcs_result.default_kid,
-            [
-                0xff, 0xee, 0xdd, 0xcc, 0xbb, 0xaa, 0x99, 0x88,
-                0x77, 0x66, 0x55, 0x44, 0x33, 0x22, 0x11, 0x00,
+                        [
+                0xff, 0xee, 0xdd, 0xcc, 0xbb, 0xaa, 0x99, 0x88, 0x77, 0x66, 0x55, 0x44, 0x33, 0x22,
+                0x11, 0x00,
             ]
         );
     }
@@ -329,16 +347,20 @@ mod tests {
         let inherited = protection("cenc", "00112233445566778899aabbccddeeff");
         let conflicting_kid = protection("cenc", "ffeeddccbbaa99887766554433221100");
         let conflicting_scheme = protection("cbcs", "00112233445566778899aabbccddeeff");
-        assert!(encryption_from_scopes(&[
-            std::slice::from_ref(&inherited),
-            std::slice::from_ref(&conflicting_kid),
-        ])
-        .is_err());
-        assert!(encryption_from_scopes(&[
-            std::slice::from_ref(&inherited),
-            std::slice::from_ref(&conflicting_scheme),
-        ])
-        .is_err());
+        assert!(
+            encryption_from_scopes(&[
+                std::slice::from_ref(&inherited),
+                std::slice::from_ref(&conflicting_kid),
+            ])
+            .is_err()
+        );
+        assert!(
+            encryption_from_scopes(&[
+                std::slice::from_ref(&inherited),
+                std::slice::from_ref(&conflicting_scheme),
+            ])
+            .is_err()
+        );
     }
 
     #[test]

@@ -786,7 +786,7 @@ fn sample_group_kids(
     traf_children: &[BoxSpan],
     sample_count: usize,
     init: InitEncryption,
-) -> Result<Vec<Option<[u8; 16]>>, String> {
+) -> Result<Vec<[u8; 16]>, String> {
     let sgpd: Vec<_> = traf_children.iter().filter(|span| &span.kind == b"sgpd").collect();
     let sbgp: Vec<_> = traf_children.iter().filter(|span| &span.kind == b"sbgp").collect();
     if sgpd.len() > 1 || sbgp.len() > 1 || sgpd.is_empty() != sbgp.is_empty() {
@@ -1719,7 +1719,7 @@ mod tests {
         let samples = fragment_samples(&fragment, parsed_init)
             .expect("parse rotated sample group");
         assert_eq!(samples.len(), 1);
-        assert_eq!(samples[0].kid, Some(rotated_kid));
+        assert_eq!(samples[0].kid, rotated_kid);
         let plaintext = decrypt_one_sample(&fragment, &init, &samples[0], &[0x10; 16])
             .expect("decrypt rotated sample using its selected KID key");
         assert_eq!(plaintext, [

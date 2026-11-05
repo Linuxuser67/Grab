@@ -151,6 +151,7 @@ struct InitEncryption {
     default_kid: [u8; 16],
     iv_size: u8,
     constant_iv: Option<[u8; 16]>,
+    constant_iv_size: Option<u8>,
     crypt_blocks: u8,
     skip_blocks: u8,
 }
@@ -396,6 +397,7 @@ fn parse_init_encryption(init: &[u8], expected: DashEncryption) -> Result<InitEn
         return Err("DASH tenc is not protected by the selected MPD default_KID".to_string());
     }
 
+    let mut constant_iv_size = None;
     let constant_iv = if iv_size == 0 {
         let size =
             usize::from(*tenc.get(offset).ok_or_else(|| {
@@ -405,6 +407,9 @@ fn parse_init_encryption(init: &[u8], expected: DashEncryption) -> Result<InitEn
         if size != 8 && size != 16 {
             return Err("DASH tenc constant IV must contain 8 or 16 bytes".to_string());
         }
+        constant_iv_size = Some(u8::try_from(size).map_err(|_| {
+            "DASH tenc constant IV size is out of range".to_string()
+        })?);
         if expected.scheme == EncryptionScheme::Cenc {
             return Err("CENC initialization must use per-sample IVs".to_string());
         }
@@ -464,6 +469,7 @@ fn parse_init_encryption(init: &[u8], expected: DashEncryption) -> Result<InitEn
         default_kid: kid,
         iv_size,
         constant_iv,
+        constant_iv_size,
         crypt_blocks,
         skip_blocks,
     })
@@ -778,7 +784,7 @@ struct FragmentSample {
     size: usize,
     auxiliary: Vec<u8>,
     trun_record: Vec<u8>,
-    kid: Option<[u8; 16]>,
+    kid: [u8; 16],
 }
 
 fn sample_group_kids(
@@ -786,14 +792,23 @@ fn sample_group_kids(
     traf_children: &[BoxSpan],
     sample_count: usize,
     init: InitEncryption,
-) -> Result<Vec<Option<[u8; 16]>>, String> {
-    let sgpd: Vec<_> = traf_children.iter().filter(|span| &span.kind == b"sgpd").collect();
-    let sbgp: Vec<_> = traf_children.iter().filter(|span| &span.kind == b"sbgp").collect();
-    if sgpd.len() > 1 || sbgp.len() > 1 || sgpd.is_empty() != sbgp.is_empty() {
+) -> Result<Vec<[u8; 16]>, String> {
+    let sgpd_boxes: Vec<_> = traf_children
+        .iter()
+        .filter(|span| &span.kind == b"sgpd")
+        .collect();
+    let sbgp_boxes: Vec<_> = traf_children
+        .iter()
+        .filter(|span| &span.kind == b"sbgp")
+        .collect();
+    if sgpd_boxes.len() > 1
+        || sbgp_boxes.len() > 1
+        || sgpd_boxes.is_empty() != sbgp_boxes.is_empty()
+    {
         return Err("DASH key rotation requires one matching sgpd/sbgp seig pair".to_string());
     }
-    let (Some(sgpd), Some(sbgp)) = (sgpd.first(), sbgp.first()) else {
-        return Ok(vec![Some(init.default_kid); sample_count]);
+    let (Some(sgpd), Some(sbgp)) = (sgpd_boxes.first(), sbgp_boxes.first()) else {
+        return Ok(vec![init.default_kid; sample_count]);
     };
 
     let descriptions_payload = span_payload(bytes, **sgpd)?;
@@ -802,7 +817,9 @@ fn sample_group_kids(
         || descriptions_payload[1..4] != [0, 0, 0]
         || descriptions_payload.get(4..8) != Some(b"seig".as_slice())
     {
-        return Err("DASH sgpd must be a version-one seig Sample Group Description box".to_string());
+        return Err(
+            "DASH sgpd must be a version-one seig Sample Group Description box".to_string(),
+        );
     }
     let default_length = usize::try_from(read_u32(descriptions_payload, 8)?)
         .map_err(|_| "DASH sgpd default entry length is out of range".to_string())?;
@@ -831,51 +848,58 @@ fn sample_group_kids(
         let entry = descriptions_payload
             .get(offset..end)
             .ok_or_else(|| "DASH seig entry is truncated".to_string())?;
-        if entry.len() < 20 || entry[0] != 0 || entry[2] > 1 {
-            return Err("DASH seig entry is truncated or uses unsupported reserved/protection fields".to_string());
+        if entry.len() < 20 || entry[0] != 0 || entry[2] != 1 {
+            return Err(
+                "DASH seig entry is truncated or does not describe a protected sample"
+                    .to_string(),
+            );
         }
+
         let pattern = entry[1];
-        let is_protected = entry[2] == 1;
         let iv_size = entry[3];
+        if (pattern >> 4) != init.crypt_blocks
+            || (pattern & 0x0f) != init.skip_blocks
+            || iv_size != init.iv_size
+        {
+            return Err(
+                "DASH seig changes IV or CBCS pattern parameters; only KID rotation is supported"
+                    .to_string(),
+            );
+        }
+
         let mut kid = [0_u8; 16];
         kid.copy_from_slice(&entry[4..20]);
         let mut entry_offset = 20_usize;
-        if is_protected {
-            if (pattern >> 4) != init.crypt_blocks
-                || (pattern & 0x0f) != init.skip_blocks
-                || iv_size != init.iv_size
+        if iv_size == 0 {
+            let constant_size = usize::from(*entry.get(entry_offset).ok_or_else(|| {
+                "DASH seig constant IV size is missing".to_string()
+            })?);
+            entry_offset += 1;
+            if constant_size != 8 && constant_size != 16 {
+                return Err("DASH seig constant IV must contain 8 or 16 bytes".to_string());
+            }
+            let constant_end = entry_offset
+                .checked_add(constant_size)
+                .ok_or_else(|| "DASH seig constant IV range overflows".to_string())?;
+            let constant = entry
+                .get(entry_offset..constant_end)
+                .ok_or_else(|| "DASH seig constant IV is truncated".to_string())?;
+            let expected = init.constant_iv.ok_or_else(|| {
+                "DASH seig introduces a constant IV absent from tenc".to_string()
+            })?;
+            if init.constant_iv_size.map(usize::from) != Some(constant_size)
+                || constant != &expected[..constant_size]
             {
-                return Err("DASH seig changes IV or CBCS pattern parameters; only KID rotation is supported".to_string());
+                return Err(
+                    "DASH seig constant IV differs from the validated tenc IV".to_string(),
+                );
             }
-            if iv_size == 0 {
-                let constant_size = usize::from(*entry.get(entry_offset).ok_or_else(|| {
-                    "DASH seig constant IV size is missing".to_string()
-                })?);
-                entry_offset += 1;
-                if constant_size != 8 && constant_size != 16 {
-                    return Err("DASH seig constant IV must contain 8 or 16 bytes".to_string());
-                }
-                let constant_end = entry_offset
-                    .checked_add(constant_size)
-                    .ok_or_else(|| "DASH seig constant IV range overflows".to_string())?;
-                let constant = entry.get(entry_offset..constant_end).ok_or_else(|| {
-                    "DASH seig constant IV is truncated".to_string()
-                })?;
-                let Some(expected) = init.constant_iv else {
-                    return Err("DASH seig introduces a constant IV absent from tenc".to_string());
-                };
-                if constant != &expected[..constant_size] {
-                    return Err("DASH seig constant IV differs from the validated tenc IV".to_string());
-                }
-                entry_offset = constant_end;
-            }
-        } else {
-            return Err("Unprotected DASH seig entries are not supported by the encrypted-track adapter".to_string());
+            entry_offset = constant_end;
         }
         if entry_offset != entry.len() {
             return Err("DASH seig entry contains unsupported trailing metadata".to_string());
         }
-        descriptions.push(if is_protected { Some(kid) } else { None });
+        descriptions.push(kid);
         offset = end;
     }
     if offset != descriptions_payload.len() {
@@ -896,9 +920,11 @@ fn sample_group_kids(
         return Err("DASH sbgp run count is empty or exceeds the configured limit".to_string());
     }
     let expected_length = 12_usize
-        .checked_add(run_count.checked_mul(8).ok_or_else(|| {
-            "DASH sbgp entry size overflows".to_string()
-        })?)
+        .checked_add(
+            run_count
+                .checked_mul(8)
+                .ok_or_else(|| "DASH sbgp entry size overflows".to_string())?,
+        )
         .ok_or_else(|| "DASH sbgp size overflows".to_string())?;
     if groups_payload.len() != expected_length {
         return Err("DASH sbgp entries are truncated or contain trailing data".to_string());
@@ -915,16 +941,16 @@ fn sample_group_kids(
             return Err("DASH sbgp contains an empty sample run".to_string());
         }
         let kid = if group_index == 0 {
-            Some(init.default_kid)
+            init.default_kid
         } else {
             if group_index >= 0x1_0000 {
                 return Err("DASH sbgp references a track-level group description".to_string());
             }
             let index = usize::try_from(group_index - 1)
                 .map_err(|_| "DASH sbgp group index is out of range".to_string())?;
-            Some(*descriptions.get(index).ok_or_else(|| {
+            *descriptions.get(index).ok_or_else(|| {
                 "DASH sbgp references a missing seig description".to_string()
-            })?).flatten()
+            })?
         };
         let next_len = sample_kids
             .len()
@@ -1016,8 +1042,8 @@ fn fragment_samples(
             auxiliary,
             trun_record: record,
             kid: *sample_kids.get(sample_index).ok_or_else(|| {
-            "DASH sample-group mapping does not cover the parsed sample".to_string()
-        })?,
+                "DASH sample-group mapping does not cover the parsed sample".to_string()
+            })?,
         });
         data_offset = data_offset
             .checked_add(size)
@@ -1105,9 +1131,8 @@ fn decrypt_one_sample(
         .checked_add(8)
         .and_then(|offset| i32::try_from(offset).ok())
         .ok_or_else(|| "Synthetic DASH sample data offset exceeds i32".to_string())?;
-    let trun_data_offset = 8_usize
-        .checked_add(mfhd.size)
-        .and_then(|offset| offset.checked_add(8))
+    let trun_data_offset = mfhd.size
+        .checked_add(8)
         .and_then(|offset| offset.checked_add(tfhd.size))
         .and_then(|offset| offset.checked_add(tfdt.map_or(0, |span| span.size)))
         .and_then(|offset| offset.checked_add(8 + 8))
@@ -1157,14 +1182,12 @@ fn decrypt_fragment_with_keys(
     keys: &super::DashKeyMap,
 ) -> Result<Vec<u8>, String> {
     let samples = fragment_samples(fragment, init_encryption)?;
-    let protected_kids: BTreeSet<_> = samples.iter().filter_map(|sample| sample.kid).collect();
-    if protected_kids.is_empty() {
-        return Ok(fragment.to_vec());
-    }
-    if protected_kids.len() == 1 && samples.iter().all(|sample| sample.kid.is_some()) {
-        let kid = *protected_kids.iter().next().ok_or_else(|| {
-            "DASH fragment has no protected sample KID".to_string()
-        })?;
+    let sample_kids: BTreeSet<_> = samples.iter().map(|sample| sample.kid).collect();
+    if sample_kids.len() == 1 {
+        let kid = *sample_kids
+            .iter()
+            .next()
+            .ok_or_else(|| "DASH fragment has no sample KID".to_string())?;
         let key = keys.key_for_kid(&kid)?;
         let key_hex = Zeroizing::new(hex_string(&key));
         let decrypter = vsd_mp4::decrypt::CencDecrypter::with_init(&key_hex, init)
@@ -1176,11 +1199,11 @@ fn decrypt_fragment_with_keys(
 
     let mut output = fragment.to_vec();
     for sample in &samples {
-        let Some(kid) = sample.kid else {
-            continue;
-        };
-        let key = keys.key_for_kid(&kid)?;
+        let key = keys.key_for_kid(&sample.kid)?;
         let plaintext = decrypt_one_sample(fragment, init, sample, &key)?;
+        if plaintext.len() != sample.size {
+            return Err("VSD changed the length of a validated DASH sample".to_string());
+        }
         let end = sample
             .data_offset
             .checked_add(sample.size)
@@ -1204,7 +1227,10 @@ pub(crate) fn required_kids(
             .iter()
             .any(|resource| resource.kind != DashResourceKind::Segment)
     {
-        return Err("Encrypted native DASH requires one initialization resource followed by media segments".to_string());
+        return Err(
+            "Encrypted native DASH requires one initialization resource followed by media segments"
+                .to_string(),
+        );
     }
     let init_path = directory.join(&resources[0].filename);
     let init = read_regular_file_bounded(&init_path, MAX_INIT_BYTES)
@@ -1216,10 +1242,11 @@ pub(crate) fn required_kids(
         let fragment = read_regular_file_bounded(&path, MAX_FRAGMENT_BYTES)
             .map_err(|error| format!("Could not read encrypted DASH media segment: {error}"))?;
         for sample in fragment_samples(&fragment, init_encryption)? {
-            if let Some(kid) = sample.kid {
-                required.insert(kid);
-            }
+            required.insert(sample.kid);
         }
+    }
+    if required.is_empty() {
+        return Err("Encrypted DASH media contains no protected sample KIDs".to_string());
     }
     Ok(required)
 }
@@ -1505,6 +1532,7 @@ mod tests {
             default_kid: [0x33; 16],
             iv_size: 16,
             constant_iv: None,
+            constant_iv_size: None,
             crypt_blocks: 0,
             skip_blocks: 0,
         }
@@ -1571,6 +1599,140 @@ mod tests {
         output
     }
 
+
+    fn synthetic_two_sample_fragment(
+        first_ciphertext: &[u8; 16],
+        first_iv: &[u8; 16],
+        second_ciphertext: &[u8; 16],
+        second_iv: &[u8; 16],
+    ) -> Vec<u8> {
+        let tfhd = box_bytes(b"tfhd", &full_box(0, 0x020000, &7_u32.to_be_bytes()));
+        let tfdt = box_bytes(b"tfdt", &full_box(0, 0, &0_u32.to_be_bytes()));
+        let mut senc_fields = 2_u32.to_be_bytes().to_vec();
+        senc_fields.extend_from_slice(first_iv);
+        senc_fields.extend_from_slice(second_iv);
+        let senc = box_bytes(b"senc", &full_box(0, 0, &senc_fields));
+        let make_trun = |data_offset: i32| {
+            let mut fields = 2_u32.to_be_bytes().to_vec();
+            fields.extend_from_slice(&data_offset.to_be_bytes());
+            fields.extend_from_slice(&16_u32.to_be_bytes());
+            fields.extend_from_slice(&16_u32.to_be_bytes());
+            box_bytes(b"trun", &full_box(0, 0x000201, &fields))
+        };
+        let make_moof = |trun: &[u8]| {
+            let mfhd = box_bytes(b"mfhd", &full_box(0, 0, &1_u32.to_be_bytes()));
+            let mut traf_fields = tfhd.clone();
+            traf_fields.extend_from_slice(&tfdt);
+            traf_fields.extend_from_slice(trun);
+            traf_fields.extend_from_slice(&senc);
+            let traf = box_bytes(b"traf", &traf_fields);
+            let mut moof_fields = mfhd;
+            moof_fields.extend_from_slice(&traf);
+            box_bytes(b"moof", &moof_fields)
+        };
+        let initial_moof = make_moof(&make_trun(0));
+        let offset = i32::try_from(initial_moof.len() + 8).expect("two-sample offset fits i32");
+        let mut ciphertext = Vec::with_capacity(32);
+        ciphertext.extend_from_slice(first_ciphertext);
+        ciphertext.extend_from_slice(second_ciphertext);
+        let mut fragment = make_moof(&make_trun(offset));
+        fragment.extend_from_slice(&box_bytes(b"mdat", &ciphertext));
+        fragment
+    }
+
+    #[test]
+    fn decrypts_samples_with_distinct_seig_kids_in_one_fragment() {
+        let first_kid = [0x44; 16];
+        let second_kid = [0x55; 16];
+        let first_iv = [
+            0x20, 0x21, 0x22, 0x23, 0x24, 0x25, 0x26, 0x27,
+            0x28, 0x29, 0x2a, 0x2b, 0x2c, 0x2d, 0x2e, 0x2f,
+        ];
+        let second_iv = [
+            0x40, 0x41, 0x42, 0x43, 0x44, 0x45, 0x46, 0x47,
+            0x48, 0x49, 0x4a, 0x4b, 0x4c, 0x4d, 0x4e, 0x4f,
+        ];
+        let cenc_first = [
+            0xb8, 0x78, 0xd8, 0x9b, 0xed, 0xdb, 0x8e, 0x7e,
+            0xfb, 0x0c, 0xde, 0xfb, 0xb0, 0x92, 0x5c, 0xb5,
+        ];
+        let cenc_second = [
+            0x1c, 0x8d, 0xa0, 0xcb, 0x06, 0x69, 0xfc, 0x76,
+            0xf2, 0xba, 0x1e, 0x78, 0xc8, 0x03, 0x4c, 0x6e,
+        ];
+        let cbcs_first = [
+            0x13, 0x13, 0xf2, 0xa7, 0x28, 0x0f, 0x62, 0xb8,
+            0xde, 0x96, 0x01, 0x95, 0xf9, 0x83, 0xb3, 0x2a,
+        ];
+        let cbcs_second = [
+            0x0e, 0xbc, 0xde, 0x5e, 0x8c, 0x8c, 0x3e, 0xfd,
+            0x57, 0x3d, 0x0e, 0x8b, 0x91, 0x5d, 0x88, 0x82,
+        ];
+        let expected = [
+            0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07,
+            0x08, 0x09, 0x0a, 0x0b, 0x0c, 0x0d, 0x0e, 0x0f,
+            0x10, 0x11, 0x12, 0x13, 0x14, 0x15, 0x16, 0x17,
+            0x18, 0x19, 0x1a, 0x1b, 0x1c, 0x1d, 0x1e, 0x1f,
+        ];
+
+        for (scheme, fourcc, version, first_ciphertext, second_ciphertext) in [
+            (EncryptionScheme::Cenc, b"cenc", 0, cenc_first, cenc_second),
+            (EncryptionScheme::Cbcs, b"cbcs", 1, cbcs_first, cbcs_second),
+        ] {
+            let (init, default_kid) = synthetic_init(fourcc, version, (0, 0), false);
+            let mut first_entry = vec![0, 0, 1, 16];
+            first_entry.extend_from_slice(&first_kid);
+            let mut second_entry = vec![0, 0, 1, 16];
+            second_entry.extend_from_slice(&second_kid);
+            let mut sgpd_fields = b"seig".to_vec();
+            sgpd_fields.extend_from_slice(&20_u32.to_be_bytes());
+            sgpd_fields.extend_from_slice(&2_u32.to_be_bytes());
+            sgpd_fields.extend_from_slice(&first_entry);
+            sgpd_fields.extend_from_slice(&second_entry);
+            let sgpd = box_bytes(b"sgpd", &full_box(1, 0, &sgpd_fields));
+            let mut sbgp_fields = b"seig".to_vec();
+            sbgp_fields.extend_from_slice(&2_u32.to_be_bytes());
+            sbgp_fields.extend_from_slice(&1_u32.to_be_bytes());
+            sbgp_fields.extend_from_slice(&1_u32.to_be_bytes());
+            sbgp_fields.extend_from_slice(&1_u32.to_be_bytes());
+            sbgp_fields.extend_from_slice(&2_u32.to_be_bytes());
+            let sbgp = box_bytes(b"sbgp", &full_box(0, 0, &sbgp_fields));
+            let fragment = add_fragment_sample_groups(
+                &synthetic_two_sample_fragment(
+                    &first_ciphertext,
+                    &first_iv,
+                    &second_ciphertext,
+                    &second_iv,
+                ),
+                &sgpd,
+                &sbgp,
+            );
+            let parsed_init = parse_init_encryption(
+                &init,
+                DashEncryption { scheme, default_kid },
+            )
+            .expect("parse synthetic init");
+            let keys = super::super::DashKeyMap {
+                keys: BTreeMap::from([
+                    (first_kid, Zeroizing::new([0x10; 16])),
+                    (second_kid, Zeroizing::new([0x11; 16])),
+                ]),
+            };
+            let decrypted = decrypt_fragment_with_keys(&fragment, &init, parsed_init, &keys)
+                .expect("decrypt both KID groups in one fragment");
+            let boxes = parse_box_spans(&decrypted, 0, decrypted.len())
+                .expect("decrypted fragment boxes");
+            let mdat = boxes
+                .iter()
+                .find(|span| &span.kind == b"mdat")
+                .copied()
+                .expect("decrypted mdat");
+            let start = mdat.payload_start().expect("mdat payload start");
+            let end = mdat.end().expect("mdat end");
+            assert_eq!(decrypted.get(start..end), Some(expected.as_slice()));
+        }
+    }
+
     #[test]
     fn resolves_fragment_local_seig_kid_rotation_and_decrypts_with_rotated_key() {
         let (init, default_kid) = synthetic_init(b"cenc", 0, (0, 0), false);
@@ -1608,7 +1770,7 @@ mod tests {
         let samples = fragment_samples(&fragment, parsed_init)
             .expect("parse rotated sample group");
         assert_eq!(samples.len(), 1);
-        assert_eq!(samples[0].kid, Some(rotated_kid));
+        assert_eq!(samples[0].kid, rotated_kid);
         let plaintext = decrypt_one_sample(&fragment, &init, &samples[0], &[0x10; 16])
             .expect("decrypt rotated sample using its selected KID key");
         assert_eq!(plaintext, [

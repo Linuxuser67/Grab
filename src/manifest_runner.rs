@@ -2996,7 +2996,10 @@ async fn fetch_and_write_dash_track(
         resources.extend(dash_resources_from(&media_resources));
         (resources, drm_resources)
     } else {
-        (dash_resources(plan), encryption.map(|_| plan.resources.to_vec()))
+        (
+            dash_resources(plan),
+            encryption.map(|_| plan.resources.to_vec()),
+        )
     };
     let completed = fetch_and_write_ordered_track(ManifestOrderedTrackTransfer {
         client,

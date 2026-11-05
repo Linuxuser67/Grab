@@ -50,15 +50,37 @@ Acceptance: ordered multi-period video/audio plans, period-local initialization,
 time/byte-range validation, representation selection stable across MPD reorder,
 and fixtures covering discontinuities and differing codec/init metadata.
 
-### 3. Fragmented-MP4 subtitle extraction
+### 3a. Fragmented-MP4 WVTT extraction — initial implementation
 
-Use typed ISO BMFF parsing to identify WVTT and STPP sample entries and extract
-sample payloads/timing into a normalized subtitle representation (VTT/SRT).
-Keep extraction separate from DASH resource planning and FFmpeg muxing. Preserve
-language and track selection, and bound sample counts, cue sizes, and output bytes.
+The selected static DASH WVTT representation is assembled through the existing
+destination-part writer, then decoded separately from DASH planning and FFmpeg
+muxing. Use mp4box sample tables for sample offsets and presentation timestamps.
+Preserve WebVTT cue identifiers, settings, and payloads; normalize cue times to
+a private WebVTT staging file. FFmpeg remains responsible for sidecar conversion
+and embedded output.
 
-Acceptance: fixtures for WVTT/STPP, timestamp normalization, empty cues,
-malformed fragments, and sidecar/embedded output behavior.
+The initial timestamp mapping is intentionally limited to a single zero-origin
+Period using SegmentTemplate with no presentation-time offset. Non-zero Period
+starts, non-zero presentation-time offsets, multi-Period presentations, other
+addressing modes, edit lists, malformed or unsupported sample boxes, and
+explicit cue-time extensions remain on yt-dlp fallback. Bound the assembled
+track to 64 MiB, fragment sample count to 50,000, individual samples to 256 KiB,
+total sample payload to 48 MiB, cue count to 50,000, cue text to 12 MiB, and
+normalized output to 16 MiB. Empty cues are ignored; an entirely empty subtitle
+track does not block media finalization.
+
+Acceptance: parser tests for cue box parsing, timestamp normalization, empty
+cues, malformed boxes, bounds, timestamp eligibility, and sidecar/embedded
+FFmpeg handling.
+
+### 3b. Fragmented-MP4 STPP extraction
+
+Implement TTML sample parsing only after confirming how the selected DASH
+representation's Period start and presentation-time offset map to the in-band
+TTML media timebase. Support a standards-defined, explicitly bounded timing
+subset; inherited container timing, frame-based timing, unsupported profiles,
+and unsupported XML constructs remain on yt-dlp fallback. Do not add a TTML
+dependency without a separate maintenance/API review.
 
 ### 4. Explicit-key encrypted media support
 

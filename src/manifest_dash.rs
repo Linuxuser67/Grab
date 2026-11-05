@@ -138,6 +138,26 @@ pub(crate) struct DashRepresentationPlan {
     pub(crate) segment_base_index: Option<DashSegmentBaseIndex>,
 }
 
+impl DashRepresentationPlan {
+    /// Whether MP4 sample timestamps already use the MPD's zero-origin
+    /// presentation timeline for a single static DASH Period.
+    ///
+    /// The mapping is not safe when a Period has a non-zero start, the media
+    /// timeline uses presentationTimeOffset, or multiple Period-local tracks
+    /// have been concatenated.
+    #[must_use]
+    pub(crate) fn has_zero_origin_wvtt_timeline(&self) -> bool {
+        matches!(&self.presentation, DashPresentation::Static)
+            && self.representation.additional_sources.is_empty()
+            && self.representation.source.period_start.is_zero()
+            && matches!(
+                &self.representation.source.addressing,
+                DashAddressing::Template(template)
+                    if template.presentation_time_offset == 0
+            )
+    }
+}
+
 /// Information needed to resolve a static SegmentBase index into media ranges.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct DashSegmentBaseIndex {
@@ -152,6 +172,7 @@ pub(crate) struct DashSegmentBaseIndex {
 struct DashRepresentationSource {
     base_url: Url,
     addressing: DashAddressing,
+    period_start: Duration,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -568,6 +589,7 @@ pub(crate) fn parse_dash_manifest_at(
                     source: DashRepresentationSource {
                         base_url: representation_base,
                         addressing,
+                        period_start,
                     },
                     additional_sources: Vec::new(),
                 };
@@ -3073,6 +3095,41 @@ mod tests {
             .expect("subtitle representation should be plannable");
         assert_eq!(download.representation.key, subtitle.key);
         assert_eq!(download.resources.len(), 3);
+        assert!(download.has_zero_origin_wvtt_timeline());
+    }
+
+    #[test]
+    fn wvtt_sample_timing_rejects_nonzero_period_start_and_presentation_offset() {
+        let body = TEMPLATE_MPD.replace(
+            "</Period>",
+            r#"
+    <AdaptationSet contentType="text" mimeType="application/mp4" lang="en">
+      <SegmentTemplate timescale="1" duration="5" initialization="sub-init.mp4" media="sub-$Number$.m4s"/>
+      <Representation id="sub-en" bandwidth="1000" codecs="wvtt"/>
+    </AdaptationSet>
+</Period>"#,
+        );
+        let offset_body = body.replace(
+            r#"timescale="1" duration="5" initialization="sub-init.mp4""#,
+            r#"timescale="1" duration="5" presentationTimeOffset="3" initialization="sub-init.mp4""#,
+        );
+        let offset_manifest = parse_dash_manifest(BASE_URL, &offset_body)
+            .expect("a supported nonzero-PTO DASH manifest should parse");
+        let offset_choice = &offset_manifest.subtitle_representations[0];
+        let offset_plan = plan_dash_representation(&offset_manifest, &offset_choice.key)
+            .expect("nonzero-PTO subtitle should remain plannable");
+        assert!(!offset_plan.has_zero_origin_wvtt_timeline());
+
+        let period_body = body.replace(
+            r#"<Period duration="PT10S">"#,
+            r#"<Period start="PT2S" duration="PT8S">"#,
+        );
+        let period_manifest = parse_dash_manifest(BASE_URL, &period_body)
+            .expect("a supported single Period with an explicit start should parse");
+        let period_choice = &period_manifest.subtitle_representations[0];
+        let period_plan = plan_dash_representation(&period_manifest, &period_choice.key)
+            .expect("nonzero-start subtitle should remain plannable");
+        assert!(!period_plan.has_zero_origin_wvtt_timeline());
     }
 
     #[test]

@@ -1010,6 +1010,18 @@ async fn transfer_static_manifest_tracks(
             if let Some(subtitle) = subtitle {
                 let subtitle_dir = staging.join("subtitles");
                 ensure_track_dir(&subtitle_dir).await?;
+                if !subtitle.has_zero_origin_wvtt_timeline() {
+                    return Err(ManifestRunError::Unsupported(
+                        "Native WVTT extraction requires a single zero-origin DASH Period with no presentation-time offset"
+                            .to_string(),
+                    ));
+                }
+                let codecs = subtitle.representation.codecs.clone().unwrap_or_default();
+                if !crate::dash_subtitle::is_wvtt_codec(&codecs) {
+                    return Err(ManifestRunError::Unsupported(
+                        "Native DASH subtitle extraction currently supports WVTT only".to_string(),
+                    ));
+                }
                 if !fetch_and_write_dash_track(ManifestDashTrackTransfer {
                     client,
                     staging,
@@ -1027,6 +1039,40 @@ async fn transfer_static_manifest_tracks(
                 .await?
                 {
                     return Ok(false);
+                }
+                let source = if destination_parts {
+                    crate::manifest_destination::part_path_async(
+                        staging.to_path_buf(),
+                        destination.to_path_buf(),
+                        item_id,
+                        crate::manifest_destination::TrackKind::Subtitles,
+                    )
+                    .await
+                    .map_err(ManifestRunError::Failed)?
+                } else {
+                    subtitle_dir.join("subtitle-track.mp4")
+                };
+                let output = staging.join("subtitles/subtitle-track.vtt");
+                match tokio::task::spawn_blocking(move || {
+                    crate::dash_subtitle::extract_to_vtt(&source, &output, &codecs)
+                })
+                .await
+                {
+                    Ok(Ok(_)) => {}
+                    Ok(Err(crate::dash_subtitle::DashSubtitleError::Unsupported(message))) => {
+                        return Err(ManifestRunError::Unsupported(message.to_string()));
+                    }
+                    Ok(Err(crate::dash_subtitle::DashSubtitleError::UnsupportedMp4(message))) => {
+                        return Err(ManifestRunError::Unsupported(message));
+                    }
+                    Ok(Err(crate::dash_subtitle::DashSubtitleError::Failed(message))) => {
+                        return Err(ManifestRunError::Failed(message));
+                    }
+                    Err(error) => {
+                        return Err(ManifestRunError::Failed(format!(
+                            "DASH subtitle extraction task failed: {error}"
+                        )));
+                    }
                 }
             }
         }
@@ -1740,19 +1786,26 @@ async fn finalize_manifest_download(
         } => Some(staging.join("subtitles/local.m3u8")),
         Tracks::Dash {
             subtitle: Some(_), ..
-        } if destination_parts => Some(
-            crate::manifest_destination::part_path_async(
-                staging.to_path_buf(),
-                job.dest.clone(),
-                job.item_id,
-                crate::manifest_destination::TrackKind::Subtitles,
-            )
-            .await
-            .map_err(ManifestRunError::Failed)?,
-        ),
-        Tracks::Dash {
-            subtitle: Some(_), ..
-        } => Some(staging.join("subtitles/subtitle-track.mp4")),
+        } => {
+            let path = staging.join("subtitles/subtitle-track.vtt");
+            match tokio::fs::symlink_metadata(&path).await {
+                Ok(metadata) if !metadata.file_type().is_symlink() && metadata.is_file() => {
+                    Some(path)
+                }
+                Ok(_) => {
+                    return Err(ManifestRunError::Failed(
+                        "The normalized DASH subtitle staging path is not a regular file"
+                            .to_string(),
+                    ));
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+                Err(error) => {
+                    return Err(ManifestRunError::Failed(format!(
+                        "Could not inspect normalized DASH subtitle staging: {error}"
+                    )));
+                }
+            }
+        }
         _ => None,
     };
     if destination_parts {

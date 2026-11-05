@@ -1681,14 +1681,22 @@ mod tests {
             0x18, 0x19, 0x1a, 0x1b, 0x1c, 0x1d, 0x1e, 0x1f,
         ];
 
-        for (scheme, fourcc, version, first_ciphertext, second_ciphertext) in [
-            (EncryptionScheme::Cenc, b"cenc", 0, cenc_first, cenc_second),
-            (EncryptionScheme::Cbcs, b"cbcs", 1, cbcs_first, cbcs_second),
+        for (
+            scheme,
+            fourcc,
+            version,
+            pattern,
+            pattern_byte,
+            first_ciphertext,
+            second_ciphertext,
+        ) in [
+            (EncryptionScheme::Cenc, b"cenc", 0, (0, 0), 0, cenc_first, cenc_second),
+            (EncryptionScheme::Cbcs, b"cbcs", 1, (1, 9), 0x19, cbcs_first, cbcs_second),
         ] {
-            let (init, default_kid) = synthetic_init(fourcc, version, (0, 0), false);
-            let mut first_entry = vec![0, 0, 1, 16];
+            let (init, default_kid) = synthetic_init(fourcc, version, pattern, false);
+            let mut first_entry = vec![0, pattern_byte, 1, 16];
             first_entry.extend_from_slice(&first_kid);
-            let mut second_entry = vec![0, 0, 1, 16];
+            let mut second_entry = vec![0, pattern_byte, 1, 16];
             second_entry.extend_from_slice(&second_kid);
             let mut sgpd_fields = b"seig".to_vec();
             sgpd_fields.extend_from_slice(&20_u32.to_be_bytes());

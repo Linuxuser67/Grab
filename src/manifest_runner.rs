@@ -1036,7 +1036,7 @@ async fn transfer_static_manifest_tracks(
                     client,
                     staging,
                     plan: audio,
-                        directory: audio_dir,
+                    directory: audio_dir,
                     filename: "audio-track.mp4",
                     destination,
                     item_id,

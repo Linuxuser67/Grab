@@ -1,6 +1,6 @@
 //! Strict fragmented-MP4 validation and decryption for native DASH tracks.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::io::{Cursor, Write};
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -1069,7 +1069,7 @@ fn decrypt_one_sample(
     fragment: &[u8],
     init: &[u8],
     sample: &FragmentSample,
-    key: &[u8; 16],
+    decrypter: &vsd_mp4::decrypt::CencDecrypter,
 ) -> Result<Vec<u8>, String> {
     let top = parse_box_spans(fragment, 0, fragment.len())?;
     let moof = find_one(&top, b"moof")?;
@@ -1159,9 +1159,6 @@ fn decrypt_one_sample(
     let mut single_sample = moof_box;
     single_sample.extend_from_slice(&mdat_box);
 
-    let key_hex = Zeroizing::new(hex_string(key));
-    let decrypter = vsd_mp4::decrypt::CencDecrypter::with_init(&key_hex, init)
-        .map_err(|error| format!("VSD could not initialize DASH sample decryption: {error}"))?;
     let decrypted = decrypter
         .decrypt_fragment(single_sample, Some(init))
         .map_err(|error| format!("VSD could not decrypt a rotated DASH sample: {error}"))?;
@@ -1197,10 +1194,21 @@ fn decrypt_fragment_with_keys(
             .map_err(|error| format!("VSD could not decrypt a DASH media fragment: {error}"));
     }
 
+    let mut decrypters = BTreeMap::new();
+    for kid in &sample_kids {
+        let key = keys.key_for_kid(kid)?;
+        let key_hex = Zeroizing::new(hex_string(&key));
+        let decrypter = vsd_mp4::decrypt::CencDecrypter::with_init(&key_hex, init)
+            .map_err(|error| format!("VSD could not initialize DASH sample decryption: {error}"))?;
+        decrypters.insert(*kid, decrypter);
+    }
+
     let mut output = fragment.to_vec();
     for sample in &samples {
-        let key = keys.key_for_kid(&sample.kid)?;
-        let plaintext = decrypt_one_sample(fragment, init, sample, &key)?;
+        let decrypter = decrypters.get(&sample.kid).ok_or_else(|| {
+            "DASH sample KID has no initialized decrypter".to_string()
+        })?;
+        let plaintext = decrypt_one_sample(fragment, init, sample, decrypter)?;
         if plaintext.len() != sample.size {
             return Err("VSD changed the length of a validated DASH sample".to_string());
         }

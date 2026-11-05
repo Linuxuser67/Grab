@@ -3033,20 +3033,36 @@ async fn fetch_and_write_dash_track(
         let resources = drm_resources.ok_or_else(|| {
             ManifestRunError::Failed("Encrypted DASH resource plan is missing".to_string())
         })?;
-        let required_kids = crate::dash_drm::required_kids(&resources, directory, encryption)
-            .map_err(ManifestRunError::Unsupported)?;
+        let scan_resources = resources.clone();
+        let scan_directory = directory.to_path_buf();
+        let mut kid_scan = tokio::task::spawn_blocking(move || {
+            crate::dash_drm::required_kids(&scan_resources, &scan_directory, encryption)
+        });
+        let required_kids = tokio::select! {
+            biased;
+            _ = &mut *abort => return Ok(false),
+            result = &mut kid_scan => result
+                .map_err(|error| {
+                    ManifestRunError::Failed(format!("DASH KID scan task failed: {error}"))
+                })?
+                .map_err(ManifestRunError::Unsupported)?,
+        };
         let license_url = plan.representation.license_url.as_ref().ok_or_else(|| {
             ManifestRunError::Unsupported(
                 "The selected DASH representation has no ClearKey license URL".to_string(),
             )
         })?;
-        let track_keys = crate::dash_drm::acquire_required_keys(
+        let license_requests = [(license_url.clone(), required_kids)];
+        let mut key_request = Box::pin(crate::dash_drm::acquire_required_keys(
             client,
-            &[(license_url.clone(), required_kids)],
-        )
-        .await
-        .map_err(ManifestRunError::Failed)?
-        .ok_or_else(|| {
+            &license_requests,
+        ));
+        let acquired_keys = tokio::select! {
+            biased;
+            _ = &mut *abort => return Ok(false),
+            result = &mut key_request => result.map_err(ManifestRunError::Failed)?,
+        };
+        let track_keys = acquired_keys.ok_or_else(|| {
             ManifestRunError::Failed("DASH ClearKey acquisition returned no content keys".to_string())
         })?;
         let directory = directory.to_path_buf();

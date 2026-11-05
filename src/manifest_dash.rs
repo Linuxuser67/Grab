@@ -3440,6 +3440,12 @@ mod tests {
             parse_dash_manifest(BASE_URL, &changed_initialization).err(),
             Some(DashError::UnsupportedPresentation)
         );
+
+        let crossing_segment = body.replace(r#"duration="1""#, r#"duration="3""#);
+        assert_eq!(
+            parse_dash_manifest(BASE_URL, &crossing_segment).err(),
+            Some(DashError::UnsupportedPresentation)
+        );
     }
 
     #[test]

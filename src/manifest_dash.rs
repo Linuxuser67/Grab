@@ -3095,7 +3095,7 @@ mod tests {
             .expect("subtitle representation should be plannable");
         assert_eq!(download.representation.key, subtitle.key);
         assert_eq!(download.resources.len(), 3);
-        assert!(download.has_zero_origin_wvtt_timeline());
+        assert!(download.has_zero_origin_fragmented_subtitle_timeline());
     }
 
     #[test]
@@ -3142,7 +3142,7 @@ mod tests {
         let offset_choice = &offset_manifest.subtitle_representations[0];
         let offset_plan = plan_dash_representation(&offset_manifest, &offset_choice.key)
             .expect("nonzero-PTO subtitle should remain plannable");
-        assert!(!offset_plan.has_zero_origin_wvtt_timeline());
+        assert!(!offset_plan.has_zero_origin_fragmented_subtitle_timeline());
 
         let period_body = body.replace(
             r#"<Period duration="PT10S">"#,
@@ -3153,7 +3153,7 @@ mod tests {
         let period_choice = &period_manifest.subtitle_representations[0];
         let period_plan = plan_dash_representation(&period_manifest, &period_choice.key)
             .expect("nonzero-start subtitle should remain plannable");
-        assert!(!period_plan.has_zero_origin_wvtt_timeline());
+        assert!(!period_plan.has_zero_origin_fragmented_subtitle_timeline());
     }
 
     #[test]

@@ -2256,11 +2256,8 @@ mod tests {
     </AdaptationSet>
   </Period>
 </MPD>"#;
-        let manifest = parse_dash_manifest(BASE_URL, body)
-            .expect("unsupported index metadata should not reject the MPD");
-        let representation = &manifest.video_representations[0];
         assert_eq!(
-            plan_dash_representation(&manifest, &representation.key).err(),
+            parse_dash_manifest(BASE_URL, body).err(),
             Some(DashError::UnsupportedAddressing)
         );
     }
@@ -2331,7 +2328,7 @@ mod tests {
     }
 
     #[test]
-    fn rejects_mismatched_sidx_timescale_and_inexact_box_extent() {
+    fn rejects_mismatched_sidx_timescale_and_truncated_index_bytes() {
         let bytes = build_sidx_box(0, &[(64, 1_000, 0x9000_0000)]);
         let mut index = indexed_base_plan(
             ManifestByteRange { offset: 0, length: 100 },
@@ -2348,6 +2345,42 @@ mod tests {
         index.index_range_exact = true;
         assert_eq!(
             resolve_segment_base_index(&index, &bytes[..bytes.len() - 1], 1_000).err(),
+            Some(DashError::InvalidSegment)
+        );
+    }
+
+    #[test]
+    fn rejects_extra_box_when_index_range_is_declared_exact() {
+        let mut bytes = vec![0, 0, 0, 8, b'f', b'r', b'e', b'e'];
+        bytes.extend_from_slice(&build_sidx_box(0, &[(64, 1_000, 0x9000_0000)]));
+        let index = indexed_base_plan(
+            ManifestByteRange { offset: 0, length: 100 },
+            ManifestByteRange {
+                offset: 100,
+                length: u64::try_from(bytes.len()).expect("test SIDX length"),
+            },
+            true,
+        );
+        assert_eq!(
+            resolve_segment_base_index(&index, &bytes, 1_000).err(),
+            Some(DashError::UnsupportedAddressing)
+        );
+    }
+
+    #[test]
+    fn rejects_index_range_offset_overflow() {
+        let bytes = build_sidx_box(0, &[(64, 1_000, 0x9000_0000)]);
+        let mut index = indexed_base_plan(
+            ManifestByteRange { offset: 0, length: 100 },
+            ManifestByteRange {
+                offset: u64::MAX - 10,
+                length: u64::try_from(bytes.len()).expect("test SIDX length"),
+            },
+            true,
+        );
+        index.index_range.length = 20;
+        assert_eq!(
+            resolve_segment_base_index(&index, &bytes, u64::MAX).err(),
             Some(DashError::InvalidSegment)
         );
     }

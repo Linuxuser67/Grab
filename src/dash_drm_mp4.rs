@@ -2,6 +2,7 @@
 
 use std::io::{Cursor, Write};
 use std::path::Path;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use crate::bounded_file::read_regular_file_bounded;
 use crate::manifest::dash::{DashResource, DashResourceKind};
@@ -160,6 +161,26 @@ fn collect_mp4_boxes<'a>(
     }
 }
 
+fn mp4_children(box_: &mp4box::Box) -> Result<&[mp4box::Box], String> {
+    box_.children.as_deref().ok_or_else(|| {
+        format!("MP4 {} box does not expose its child boxes", box_.typ)
+    })
+}
+
+fn find_one_mp4_child<'a>(
+    boxes: &'a [mp4box::Box],
+    kind: &str,
+) -> Result<&'a mp4box::Box, String> {
+    let mut matches = boxes.iter().filter(|box_| box_.typ == kind);
+    let found = matches
+        .next()
+        .ok_or_else(|| format!("MP4 initialization is missing {kind} box in its required parent"))?;
+    if matches.next().is_some() {
+        return Err(format!("MP4 initialization contains multiple {kind} boxes in one parent"));
+    }
+    Ok(found)
+}
+
 fn mp4_payload<'a>(bytes: &'a [u8], box_: &mp4box::Box) -> Result<&'a [u8], String> {
     let offset = box_
         .payload_offset
@@ -201,28 +222,71 @@ fn parse_init_encryption(
     let mut tenc_boxes = Vec::new();
     let mut schm_boxes = Vec::new();
     let mut tkhd_boxes = Vec::new();
+    let mut trex_boxes = Vec::new();
     collect_mp4_boxes(&boxes, "moov", &mut movie_headers);
     collect_mp4_boxes(&boxes, "ftyp", &mut file_types);
     collect_mp4_boxes(&boxes, "trak", &mut track_boxes);
     collect_mp4_boxes(&boxes, "tenc", &mut tenc_boxes);
     collect_mp4_boxes(&boxes, "schm", &mut schm_boxes);
     collect_mp4_boxes(&boxes, "tkhd", &mut tkhd_boxes);
+    collect_mp4_boxes(&boxes, "trex", &mut trex_boxes);
     if movie_headers.len() != 1
         || file_types.len() != 1
         || track_boxes.len() != 1
         || tenc_boxes.len() != 1
         || schm_boxes.len() != 1
         || tkhd_boxes.len() != 1
+        || trex_boxes.len() != 1
     {
         return Err(
-            "Encrypted DASH initialization must contain one ftyp, one moov and exactly one protected track"
+            "Encrypted DASH initialization must contain one ftyp, one moov and exactly one protected fragmented track"
                 .to_string(),
         );
     }
 
-    let schm = mp4_payload(init, schm_boxes[0])?;
-    if schm.len() < 12 {
-        return Err("DASH scheme box is truncated".to_string());
+    // VSD only discovers tenc and schm through the standard encrypted sample-entry
+    // hierarchy. Validate that ancestry before handing the init to its parser;
+    // recursive presence checks alone could accept unrelated decoy boxes.
+    let _ftyp = find_one_mp4_child(&boxes, "ftyp")?;
+    let moov = find_one_mp4_child(&boxes, "moov")?;
+    let trak = find_one_mp4_child(mp4_children(moov)?, "trak")?;
+    let trak_children = mp4_children(trak)?;
+    let tkhd_box = find_one_mp4_child(trak_children, "tkhd")?;
+    let mdia = find_one_mp4_child(trak_children, "mdia")?;
+    let minf = find_one_mp4_child(mp4_children(mdia)?, "minf")?;
+    let stbl = find_one_mp4_child(mp4_children(minf)?, "stbl")?;
+    let stsd = find_one_mp4_child(mp4_children(stbl)?, "stsd")?;
+    let sample_entries = mp4_children(stsd)?;
+    if sample_entries.len() != 1
+        || !matches!(sample_entries[0].typ.as_str(), "encv" | "enca")
+    {
+        return Err(
+            "Encrypted DASH initialization must contain exactly one encv or enca sample entry"
+                .to_string(),
+        );
+    }
+    let sample_entry = &sample_entries[0];
+    let sinf = find_one_mp4_child(mp4_children(sample_entry)?, "sinf")?;
+    let sinf_children = mp4_children(sinf)?;
+    if sinf_children.len() != 3 {
+        return Err("Encrypted DASH sinf must contain only frma, schm and schi".to_string());
+    }
+    let frma_box = find_one_mp4_child(sinf_children, "frma")?;
+    let schm_box = find_one_mp4_child(sinf_children, "schm")?;
+    let schi = find_one_mp4_child(sinf_children, "schi")?;
+    let schi_children = mp4_children(schi)?;
+    if schi_children.len() != 1 {
+        return Err("Encrypted DASH schi must contain exactly one tenc box".to_string());
+    }
+    let tenc_box = find_one_mp4_child(schi_children, "tenc")?;
+    let frma = mp4_payload(init, frma_box)?;
+    if frma.len() != 4 {
+        return Err("DASH original-format box is truncated or contains trailing data".to_string());
+    }
+
+    let schm = mp4_payload(init, schm_box)?;
+    if schm.len() < 12 || schm[0] != 0 {
+        return Err("DASH scheme box is truncated or uses an unsupported version".to_string());
     }
     let schm_flags = (u32::from(schm[1]) << 16) | (u32::from(schm[2]) << 8) | u32::from(schm[3]);
     if schm_flags & !0x000001 != 0 {
@@ -240,7 +304,7 @@ fn parse_init_encryption(
         return Err("DASH MPD encryption scheme does not match the MP4 initialization".to_string());
     }
 
-    let tenc = mp4_payload(init, tenc_boxes[0])?;
+    let tenc = mp4_payload(init, tenc_box)?;
     if tenc.len() < 23 {
         return Err("DASH track-encryption box is truncated".to_string());
     }
@@ -248,10 +312,16 @@ fn parse_init_encryption(
     if tenc[1..4] != [0, 0, 0] {
         return Err("DASH track-encryption box uses unsupported flags".to_string());
     }
+    if tenc[4] != 0 {
+        return Err("DASH track-encryption reserved byte is nonzero".to_string());
+    }
     let mut offset = 4_usize;
     offset += 1;
     let (crypt_blocks, skip_blocks) = match version {
         0 => {
+            if tenc[offset] != 0 {
+                return Err("DASH version-zero track-encryption reserved byte is nonzero".to_string());
+            }
             offset += 1;
             (0, 0)
         }
@@ -322,7 +392,7 @@ fn parse_init_encryption(
         return Err("DASH tenc contains unsupported trailing encryption metadata".to_string());
     }
 
-    let tkhd = mp4_payload(init, tkhd_boxes[0])?;
+    let tkhd = mp4_payload(init, tkhd_box)?;
     let version = *tkhd
         .first()
         .ok_or_else(|| "DASH tkhd is truncated".to_string())?;
@@ -336,6 +406,21 @@ fn parse_init_encryption(
     let track_id = read_u32(tkhd, track_id_offset)?;
     if track_id == 0 {
         return Err("DASH initialization contains a zero track ID".to_string());
+    }
+
+    let mvex = find_one_mp4_child(mp4_children(moov)?, "mvex")?;
+    let trex = find_one_mp4_child(mp4_children(mvex)?, "trex")?;
+    let trex_payload = mp4_payload(init, trex)?;
+    if trex_payload.len() != 24
+        || trex_payload[0] != 0
+        || trex_payload[1..4] != [0, 0, 0]
+        || read_u32(trex_payload, 4)? != track_id
+        || read_u32(trex_payload, 8)? != 1
+    {
+        return Err(
+            "DASH trex must match the protected track and select its only sample description"
+                .to_string(),
+        );
     }
 
     Ok(InitEncryption {
@@ -379,8 +464,11 @@ fn validate_fragment(bytes: &[u8], init: InitEncryption) -> Result<(), String> {
         return Err("Encrypted DASH fragments must contain exactly one mfhd and one traf".to_string());
     }
     let mfhd_payload = span_payload(bytes, *mfhd)?;
-    if mfhd_payload.len() != 8 || mfhd_payload[0] != 0 {
-        return Err("DASH mfhd is truncated or uses an unsupported version".to_string());
+    if mfhd_payload.len() != 8
+        || mfhd_payload[0] != 0
+        || mfhd_payload[1..4] != [0, 0, 0]
+    {
+        return Err("DASH mfhd is truncated or uses unsupported version/flags".to_string());
     }
 
     let traf_children = parse_box_spans(bytes, traf.payload_start()?, traf.end()?)?;
@@ -394,6 +482,21 @@ fn validate_fragment(bytes: &[u8], init: InitEncryption) -> Result<(), String> {
     }
     if traf_children.iter().filter(|span| &span.kind == b"tfdt").count() > 1 {
         return Err("Encrypted DASH fragment contains multiple tfdt boxes".to_string());
+    }
+    if let Some(tfdt) = traf_children.iter().find(|span| &span.kind == b"tfdt") {
+        let payload = span_payload(bytes, *tfdt)?;
+        let flags = if payload.len() >= 4 {
+            (u32::from(payload[1]) << 16)
+                | (u32::from(payload[2]) << 8)
+                | u32::from(payload[3])
+        } else {
+            u32::MAX
+        };
+        if flags != 0
+            || !matches!((payload.first().copied(), payload.len()), (Some(0), 8) | (Some(1), 12))
+        {
+            return Err("DASH tfdt is truncated or uses an unsupported version/flags".to_string());
+        }
     }
     let tfhd = find_one(&traf_children, b"tfhd")?;
     let trun = find_one(&traf_children, b"trun")?;
@@ -426,6 +529,11 @@ fn validate_fragment(bytes: &[u8], init: InitEncryption) -> Result<(), String> {
         return Err("DASH tfhd uses unsupported flags or a different track ID".to_string());
     }
     let mut tfhd_offset = 8_usize;
+    if tfhd_flags & 0x0000_0002 != 0
+        && read_u32(tfhd_payload, tfhd_offset)? != 1
+    {
+        return Err("DASH tfhd selects a sample description other than the only validated entry".to_string());
+    }
     for flag in [0x0000_0002, 0x0000_0008, 0x0000_0010, 0x0000_0020] {
         if tfhd_flags & flag != 0 {
             tfhd_offset = tfhd_offset
@@ -667,7 +775,11 @@ pub(super) fn decrypt_track(
     output: &Path,
     encryption: DashEncryption,
     key: &[u8; 16],
-) -> Result<(), String> {
+    cancelled: &AtomicBool,
+) -> Result<bool, String> {
+    if cancelled.load(Ordering::Acquire) {
+        return Ok(false);
+    }
     if resources.len() < 2
         || resources[0].kind != DashResourceKind::Initialization
         || resources[0].range.is_some()
@@ -710,6 +822,9 @@ pub(super) fn decrypt_track(
         .map_err(|_| "DASH decrypted track size is out of range".to_string())?;
 
     for resource in &resources[1..] {
+        if cancelled.load(Ordering::Acquire) {
+            return Ok(false);
+        }
         let path = directory.join(&resource.filename);
         let fragment = read_regular_file_bounded(&path, MAX_FRAGMENT_BYTES)
             .map_err(|error| format!("Could not read encrypted DASH media segment: {error}"))?;
@@ -720,6 +835,9 @@ pub(super) fn decrypt_track(
             .map_err(|error| format!("VSD could not decrypt a DASH media fragment: {error}"))?;
         if decrypted.len() != encrypted_length {
             return Err("VSD changed the length of a validated DASH fragment".to_string());
+        }
+        if cancelled.load(Ordering::Acquire) {
+            return Ok(false);
         }
         let length = u64::try_from(decrypted.len())
             .map_err(|_| "DASH decrypted fragment size is out of range".to_string())?;
@@ -733,6 +851,9 @@ pub(super) fn decrypt_track(
             .map_err(|error| format!("Could not write decrypted DASH media: {error}"))?;
     }
 
+    if cancelled.load(Ordering::Acquire) {
+        return Ok(false);
+    }
     writer
         .as_file()
         .sync_all()
@@ -743,7 +864,7 @@ pub(super) fn decrypt_track(
             error.error
         )
     })?;
-    Ok(())
+    Ok(true)
 }
 
 #[cfg(test)]
@@ -779,8 +900,35 @@ mod tests {
         subsample_encrypted_bytes: u32,
         extra_traf: bool,
     ) -> Vec<u8> {
+        test_fragment_with_sample_description_index(
+            track_id,
+            trun_flags,
+            senc_count,
+            offset_adjustment,
+            use_subsamples,
+            subsample_encrypted_bytes,
+            None,
+            extra_traf,
+        )
+    }
+
+    fn test_fragment_with_sample_description_index(
+        track_id: u32,
+        trun_flags: u32,
+        senc_count: u32,
+        offset_adjustment: i32,
+        use_subsamples: bool,
+        subsample_encrypted_bytes: u32,
+        sample_description_index: Option<u32>,
+        extra_traf: bool,
+    ) -> Vec<u8> {
         let mut tfhd_fields = track_id.to_be_bytes().to_vec();
-        let tfhd_payload = full_box(0, 0x020000, &tfhd_fields);
+        let mut tfhd_flags = 0x020000;
+        if let Some(index) = sample_description_index {
+            tfhd_flags |= 0x000002;
+            tfhd_fields.extend_from_slice(&index.to_be_bytes());
+        }
+        let tfhd_payload = full_box(0, tfhd_flags, &tfhd_fields);
         let tfhd_box = box_bytes(b"tfhd", &tfhd_payload);
 
         let mut senc_fields = senc_count.to_be_bytes().to_vec();
@@ -835,7 +983,12 @@ mod tests {
         }
     }
 
-    fn synthetic_init(scheme: &[u8; 4], tenc_version: u8) -> (Vec<u8>, [u8; 16]) {
+    fn synthetic_init(
+        scheme: &[u8; 4],
+        tenc_version: u8,
+        pattern: (u8, u8),
+        misplaced_sinf: bool,
+    ) -> (Vec<u8>, [u8; 16]) {
         let kid = [0x33; 16];
 
         let mut tenc_fields = Vec::new();
@@ -843,7 +996,7 @@ mod tests {
         if tenc_version == 0 {
             tenc_fields.push(0); // reserved
         } else {
-            tenc_fields.push(0); // crypt_byte_block = 0, skip_byte_block = 0
+            tenc_fields.push((pattern.0 << 4) | pattern.1);
         }
         tenc_fields.push(1); // is_protected
         tenc_fields.push(16); // per_sample_iv_size
@@ -861,13 +1014,19 @@ mod tests {
         let sinf = box_bytes(b"sinf", &sinf_fields);
 
         let mut encv_fields = vec![0_u8; 78];
-        encv_fields.extend_from_slice(&sinf);
+        if !misplaced_sinf {
+            encv_fields.extend_from_slice(&sinf);
+        }
         let encv = box_bytes(b"encv", &encv_fields);
         let mut stsd_fields = 1_u32.to_be_bytes().to_vec();
         stsd_fields.extend_from_slice(&encv);
         let stsd = box_bytes(b"stsd", &full_box(0, 0, &stsd_fields));
         let stbl = box_bytes(b"stbl", &stsd);
-        let minf = box_bytes(b"minf", &stbl);
+        let mut minf_fields = stbl;
+        if misplaced_sinf {
+            minf_fields.extend_from_slice(&sinf);
+        }
+        let minf = box_bytes(b"minf", &minf_fields);
         let mdia = box_bytes(b"mdia", &minf);
 
         let mut tkhd_fields = Vec::new();
@@ -901,7 +1060,18 @@ mod tests {
         let mut trak_fields = tkhd;
         trak_fields.extend_from_slice(&mdia);
         let trak = box_bytes(b"trak", &trak_fields);
-        let moov = box_bytes(b"moov", &trak);
+
+        let mut trex_fields = Vec::new();
+        trex_fields.extend_from_slice(&7_u32.to_be_bytes()); // track_ID
+        trex_fields.extend_from_slice(&1_u32.to_be_bytes()); // default_sample_description_index
+        trex_fields.extend_from_slice(&0_u32.to_be_bytes()); // default_sample_duration
+        trex_fields.extend_from_slice(&0_u32.to_be_bytes()); // default_sample_size
+        trex_fields.extend_from_slice(&0_u32.to_be_bytes()); // default_sample_flags
+        let trex = box_bytes(b"trex", &full_box(0, 0, &trex_fields));
+        let mvex = box_bytes(b"mvex", &trex);
+        let mut moov_fields = trak;
+        moov_fields.extend_from_slice(&mvex);
+        let moov = box_bytes(b"moov", &moov_fields);
 
         let mut ftyp_fields = b"isom".to_vec();
         ftyp_fields.extend_from_slice(&0_u32.to_be_bytes());
@@ -914,7 +1084,7 @@ mod tests {
     }
 
     fn synthetic_fragment(
-        ciphertext: &[u8; 16],
+        ciphertext: &[u8],
         iv: &[u8; 16],
     ) -> Vec<u8> {
         let tfhd = box_bytes(
@@ -929,7 +1099,11 @@ mod tests {
         let make_trun = |data_offset: i32| {
             let mut fields = 1_u32.to_be_bytes().to_vec();
             fields.extend_from_slice(&data_offset.to_be_bytes());
-            fields.extend_from_slice(&16_u32.to_be_bytes());
+            fields.extend_from_slice(
+                &u32::try_from(ciphertext.len())
+                    .expect("synthetic sample size fits u32")
+                    .to_be_bytes(),
+            );
             box_bytes(b"trun", &full_box(0, 0x000201, &fields))
         };
         let make_moof = |trun: &[u8]| {
@@ -958,9 +1132,10 @@ mod tests {
         scheme_fourcc: &[u8; 4],
         tenc_version: u8,
         iv: [u8; 16],
-        ciphertext: [u8; 16],
+        ciphertext: &[u8],
+        pattern: (u8, u8),
     ) -> Vec<u8> {
-        let (init, kid) = synthetic_init(scheme_fourcc, tenc_version);
+        let (init, kid) = synthetic_init(scheme_fourcc, tenc_version, pattern, false);
         let directory = tempfile::tempdir().expect("create encrypted DASH test directory");
         let init_name = "init.mp4";
         let segment_name = "segment.m4s";
@@ -968,7 +1143,7 @@ mod tests {
             .expect("write synthetic DASH initialization");
         std::fs::write(
             directory.path().join(segment_name),
-            synthetic_fragment(&ciphertext, &iv),
+            synthetic_fragment(ciphertext, &iv),
         )
         .expect("write synthetic DASH fragment");
 
@@ -1000,6 +1175,7 @@ mod tests {
                 default_kid: kid,
             },
             &[0x10; 16],
+            &AtomicBool::new(false),
         )
         .expect("decrypt synthetic DASH track");
         std::fs::read(output).expect("read decrypted DASH track")
@@ -1043,7 +1219,8 @@ mod tests {
                 fourcc,
                 version,
                 iv,
-                ciphertext,
+                &ciphertext,
+                (0, 0),
             );
             let boxes = parse_box_spans(&decrypted, 0, decrypted.len())
                 .expect("decrypted file has complete MP4 boxes");
@@ -1063,6 +1240,68 @@ mod tests {
     }
 
     #[test]
+    fn decrypts_cbcs_crypt_skip_patterns_without_touching_clear_blocks() {
+        let plaintext: [u8; 192] = [
+            0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0a, 0x0b,
+            0x0c, 0x0d, 0x0e, 0x0f, 0x10, 0x11, 0x12, 0x13, 0x14, 0x15, 0x16, 0x17,
+            0x18, 0x19, 0x1a, 0x1b, 0x1c, 0x1d, 0x1e, 0x1f, 0x20, 0x21, 0x22, 0x23,
+            0x24, 0x25, 0x26, 0x27, 0x28, 0x29, 0x2a, 0x2b, 0x2c, 0x2d, 0x2e, 0x2f,
+            0x30, 0x31, 0x32, 0x33, 0x34, 0x35, 0x36, 0x37, 0x38, 0x39, 0x3a, 0x3b,
+            0x3c, 0x3d, 0x3e, 0x3f, 0x40, 0x41, 0x42, 0x43, 0x44, 0x45, 0x46, 0x47,
+            0x48, 0x49, 0x4a, 0x4b, 0x4c, 0x4d, 0x4e, 0x4f, 0x50, 0x51, 0x52, 0x53,
+            0x54, 0x55, 0x56, 0x57, 0x58, 0x59, 0x5a, 0x5b, 0x5c, 0x5d, 0x5e, 0x5f,
+            0x60, 0x61, 0x62, 0x63, 0x64, 0x65, 0x66, 0x67, 0x68, 0x69, 0x6a, 0x6b,
+            0x6c, 0x6d, 0x6e, 0x6f, 0x70, 0x71, 0x72, 0x73, 0x74, 0x75, 0x76, 0x77,
+            0x78, 0x79, 0x7a, 0x7b, 0x7c, 0x7d, 0x7e, 0x7f, 0x80, 0x81, 0x82, 0x83,
+            0x84, 0x85, 0x86, 0x87, 0x88, 0x89, 0x8a, 0x8b, 0x8c, 0x8d, 0x8e, 0x8f,
+            0x90, 0x91, 0x92, 0x93, 0x94, 0x95, 0x96, 0x97, 0x98, 0x99, 0x9a, 0x9b,
+            0x9c, 0x9d, 0x9e, 0x9f, 0xa0, 0xa1, 0xa2, 0xa3, 0xa4, 0xa5, 0xa6, 0xa7,
+            0xa8, 0xa9, 0xaa, 0xab, 0xac, 0xad, 0xae, 0xaf, 0xb0, 0xb1, 0xb2, 0xb3,
+            0xb4, 0xb5, 0xb6, 0xb7, 0xb8, 0xb9, 0xba, 0xbb, 0xbc, 0xbd, 0xbe, 0xbf,
+        ];
+        let ciphertext: [u8; 192] = [
+            0x13, 0x13, 0xf2, 0xa7, 0x28, 0x0f, 0x62, 0xb8, 0xde, 0x96, 0x01, 0x95,
+            0xf9, 0x83, 0xb3, 0x2a, 0x10, 0x11, 0x12, 0x13, 0x14, 0x15, 0x16, 0x17,
+            0x18, 0x19, 0x1a, 0x1b, 0x1c, 0x1d, 0x1e, 0x1f, 0x20, 0x21, 0x22, 0x23,
+            0x24, 0x25, 0x26, 0x27, 0x28, 0x29, 0x2a, 0x2b, 0x2c, 0x2d, 0x2e, 0x2f,
+            0x30, 0x31, 0x32, 0x33, 0x34, 0x35, 0x36, 0x37, 0x38, 0x39, 0x3a, 0x3b,
+            0x3c, 0x3d, 0x3e, 0x3f, 0x40, 0x41, 0x42, 0x43, 0x44, 0x45, 0x46, 0x47,
+            0x48, 0x49, 0x4a, 0x4b, 0x4c, 0x4d, 0x4e, 0x4f, 0x50, 0x51, 0x52, 0x53,
+            0x54, 0x55, 0x56, 0x57, 0x58, 0x59, 0x5a, 0x5b, 0x5c, 0x5d, 0x5e, 0x5f,
+            0x60, 0x61, 0x62, 0x63, 0x64, 0x65, 0x66, 0x67, 0x68, 0x69, 0x6a, 0x6b,
+            0x6c, 0x6d, 0x6e, 0x6f, 0x70, 0x71, 0x72, 0x73, 0x74, 0x75, 0x76, 0x77,
+            0x78, 0x79, 0x7a, 0x7b, 0x7c, 0x7d, 0x7e, 0x7f, 0x80, 0x81, 0x82, 0x83,
+            0x84, 0x85, 0x86, 0x87, 0x88, 0x89, 0x8a, 0x8b, 0x8c, 0x8d, 0x8e, 0x8f,
+            0x90, 0x91, 0x92, 0x93, 0x94, 0x95, 0x96, 0x97, 0x98, 0x99, 0x9a, 0x9b,
+            0x9c, 0x9d, 0x9e, 0x9f, 0x31, 0x94, 0x9c, 0x67, 0x78, 0x30, 0x31, 0x45,
+            0x52, 0xa9, 0xfc, 0x3c, 0x71, 0x05, 0xa9, 0x3f, 0xb0, 0xb1, 0xb2, 0xb3,
+            0xb4, 0xb5, 0xb6, 0xb7, 0xb8, 0xb9, 0xba, 0xbb, 0xbc, 0xbd, 0xbe, 0xbf,
+        ];
+        let iv = [
+            0x20, 0x21, 0x22, 0x23, 0x24, 0x25, 0x26, 0x27,
+            0x28, 0x29, 0x2a, 0x2b, 0x2c, 0x2d, 0x2e, 0x2f,
+        ];
+        let decrypted = decrypt_synthetic_track(
+            EncryptionScheme::Cbcs,
+            b"cbcs",
+            1,
+            iv,
+            &ciphertext,
+            (1, 9),
+        );
+        let boxes = parse_box_spans(&decrypted, 0, decrypted.len())
+            .expect("decrypted CBCS file has complete MP4 boxes");
+        let mdat = boxes
+            .iter()
+            .find(|span| &span.kind == b"mdat")
+            .copied()
+            .expect("decrypted CBCS track contains mdat");
+        let start = mdat.payload_start().expect("mdat payload start");
+        let end = mdat.end().expect("mdat end");
+        assert_eq!(decrypted.get(start..end), Some(plaintext.as_slice()));
+    }
+
+    #[test]
     fn parses_hyphenated_and_compact_hex_identifiers() {
         let value = "00112233-4455-6677-8899-aabbccddeeff";
         let expected = [
@@ -1079,10 +1318,54 @@ mod tests {
     }
 
     #[test]
+    fn rejects_tenc_outside_the_encrypted_sample_entry_hierarchy() {
+        let (init, kid) = synthetic_init(b"cenc", 0, (0, 0), true);
+        let result = parse_init_encryption(
+            &init,
+            DashEncryption {
+                scheme: EncryptionScheme::Cenc,
+                default_kid: kid,
+            },
+        );
+        assert!(result.is_err(), "a misplaced decoy tenc must not enable decryption");
+    }
+
+    #[test]
+    fn cancelled_decryption_does_not_publish_a_track() {
+        let directory = tempfile::tempdir().expect("create cancelled DRM staging directory");
+        let output = directory.path().join("decrypted.mp4");
+        let result = decrypt_track(
+            &[],
+            directory.path(),
+            &output,
+            DashEncryption {
+                scheme: EncryptionScheme::Cenc,
+                default_kid: [0x33; 16],
+            },
+            &[0x10; 16],
+            &AtomicBool::new(true),
+        );
+        assert!(matches!(result, Ok(false)));
+        assert!(!output.exists());
+    }
+
+    #[test]
     fn rejects_fragment_boxes_with_truncated_or_oversized_headers() {
         assert!(parse_box_spans(b"\0\0\0", 0, 3).is_err());
         assert!(parse_box_spans(b"\0\0\0\x01moof", 0, 8).is_err());
         assert!(parse_box_spans(b"\0\0\0\x04moof", 0, 8).is_err());
+    }
+
+    #[test]
+    fn accepts_only_the_validated_sample_description_index() {
+        let valid = test_fragment_with_sample_description_index(
+            7, 0x000201, 1, 0, false, 0, Some(1), false,
+        );
+        let invalid = test_fragment_with_sample_description_index(
+            7, 0x000201, 1, 0, false, 0, Some(2), false,
+        );
+        assert!(validate_fragment(&valid, test_init_encryption()).is_ok());
+        assert!(validate_fragment(&invalid, test_init_encryption()).is_err());
     }
 
     #[test]

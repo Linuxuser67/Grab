@@ -3038,14 +3038,38 @@ async fn fetch_and_write_dash_track(
         })?;
         let directory = directory.to_path_buf();
         let output = directory.join(format!("{filename}.decrypted"));
-        tokio::task::spawn_blocking(move || {
-            crate::dash_drm::decrypt_track(&resources, &directory, &output, encryption, &key)
-        })
-        .await
-        .map_err(|error| {
-            ManifestRunError::Failed(format!("DASH decryption task failed: {error}"))
-        })?
-        .map_err(ManifestRunError::Unsupported)?;
+        let cancelled = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let worker_cancelled = std::sync::Arc::clone(&cancelled);
+        let mut decryption = tokio::task::spawn_blocking(move || {
+            crate::dash_drm::decrypt_track(
+                &resources,
+                &directory,
+                &output,
+                encryption,
+                &key,
+                &worker_cancelled,
+            )
+        });
+        tokio::select! {
+            biased;
+            _ = &mut *abort => {
+                cancelled.store(true, Ordering::Release);
+                let _decryption_result = decryption.await.map_err(|error| {
+                    ManifestRunError::Failed(format!("DASH decryption task failed: {error}"))
+                })?;
+                return Ok(false);
+            }
+            result = &mut decryption => {
+                let completed = result
+                    .map_err(|error| {
+                        ManifestRunError::Failed(format!("DASH decryption task failed: {error}"))
+                    })?
+                    .map_err(ManifestRunError::Unsupported)?;
+                if !completed {
+                    return Ok(false);
+                }
+            }
+        }
     }
     Ok(true)
 }

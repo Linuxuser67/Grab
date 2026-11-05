@@ -1105,9 +1105,8 @@ fn decrypt_one_sample(
         .checked_add(8)
         .and_then(|offset| i32::try_from(offset).ok())
         .ok_or_else(|| "Synthetic DASH sample data offset exceeds i32".to_string())?;
-    let trun_data_offset = 8_usize
-        .checked_add(mfhd.size)
-        .and_then(|offset| offset.checked_add(8))
+    let trun_data_offset = mfhd.size
+        .checked_add(8)
         .and_then(|offset| offset.checked_add(tfhd.size))
         .and_then(|offset| offset.checked_add(tfdt.map_or(0, |span| span.size)))
         .and_then(|offset| offset.checked_add(8 + 8))

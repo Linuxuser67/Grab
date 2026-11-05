@@ -187,7 +187,7 @@ pub(crate) fn extract_to_vtt(
 
         let mut bytes = vec![0_u8; sample_size];
         file.seek(SeekFrom::Start(sample.file_offset))
-            .and_then(|()| file.read_exact(&mut bytes))
+            .and_then(|_| file.read_exact(&mut bytes))
             .map_err(|error| {
                 DashSubtitleError::Failed(format!(
                     "Could not read a staged DASH subtitle sample ending at byte {sample_end}: {error}"
@@ -378,7 +378,7 @@ fn read_vtt_header(
     let mut bytes = vec![0_u8; size];
     reader
         .seek(SeekFrom::Start(offset))
-        .and_then(|()| reader.read_exact(&mut bytes))
+        .and_then(|_| reader.read_exact(&mut bytes))
         .map_err(|error| {
             DashSubtitleError::Failed(format!(
                 "Could not read the WebVTT configuration box ending at byte {end}: {error}"

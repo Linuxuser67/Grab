@@ -1020,8 +1020,6 @@ mod tests {
             track_id: 7,
             iv_size: 16,
             constant_iv: None,
-            crypt_blocks: 0,
-            skip_blocks: 0,
         }
     }
 

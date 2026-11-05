@@ -2974,7 +2974,7 @@ async fn fetch_and_write_dash_track(
         abort,
     } = context;
     let encryption = plan.representation.encryption;
-    let resources = if let Some(index) = plan.segment_base_index.as_ref() {
+    let (resources, drm_resources) = if let Some(index) = plan.segment_base_index.as_ref() {
         let Some((bytes, total_length)) =
             fetch_dash_index_bytes(client, &index.url, index.index_range, abort).await?
         else {
@@ -2987,14 +2987,17 @@ async fn fetch_and_write_dash_track(
                         "The DASH SegmentBase index is unsupported: {error}"
                     ))
                 })?;
+        let drm_resources = encryption.map(|_| {
+            let mut resources = plan.resources.to_vec();
+            resources.extend(media_resources.iter().cloned());
+            resources
+        });
         let mut resources = dash_resources(plan);
         resources.extend(dash_resources_from(&media_resources));
-        resources
+        (resources, drm_resources)
     } else {
-        dash_resources(plan)
+        (dash_resources(plan), encryption.map(|_| plan.resources.to_vec()))
     };
-    // Include the SIDX-expanded media ranges as well as the initialization resource.
-    let drm_resources = encryption.map(|_| resources.clone());
     let completed = fetch_and_write_ordered_track(ManifestOrderedTrackTransfer {
         client,
         staging,

@@ -384,7 +384,10 @@ pub(crate) fn parse_dash_manifest_at(
             return Err(DashError::UnsupportedPresentation);
         }
         let period_start = period.start.unwrap_or(previous_period_end);
-        if mpd.periods.len() > 1 && period_start != previous_period_end {
+        if mpd.periods.len() > 1
+            && ((period_index == 0 && period_start != Duration::ZERO)
+                || period_start != previous_period_end)
+        {
             return Err(DashError::UnsupportedPresentation);
         }
         let next_period_start = mpd
@@ -906,6 +909,25 @@ pub(crate) fn plan_dash_representation(
                         resource.range,
                     );
                 }
+            }
+        }
+
+        if period_index > 0 {
+            let previous_initialization = resources
+                .iter()
+                .find(|resource| resource.kind == DashResourceKind::Initialization);
+            let period_initialization = period_resources
+                .iter()
+                .find(|resource| resource.kind == DashResourceKind::Initialization);
+            let initialization_matches = match (previous_initialization, period_initialization) {
+                (Some(previous), Some(current)) => {
+                    previous.url == current.url && previous.range == current.range
+                }
+                (None, None) => true,
+                _ => false,
+            };
+            if !initialization_matches {
+                return Err(DashError::UnsupportedPresentation);
             }
         }
 
@@ -3475,6 +3497,22 @@ mod tests {
             Some(DashError::UnsupportedPresentation)
         );
 
+        let changed_initialization_url = body
+            .rsplit_once(r#"initialization="init.mp4""#)
+            .map(|(prefix, suffix)| format!(r#"{prefix}initialization="init2.mp4"{suffix}"#))
+            .expect("second period initialization exists");
+        let changed_init_manifest =
+            parse_dash_manifest(BASE_URL, &changed_initialization_url)
+                .expect("period init addressing parses before continuity is planned");
+        assert_eq!(
+            plan_dash_representation(
+                &changed_init_manifest,
+                &changed_init_manifest.video_representations[0].key,
+            )
+            .err(),
+            Some(DashError::UnsupportedPresentation)
+        );
+
         let crossing_segment = body.replace(r#"duration="1""#, r#"duration="3""#);
         let crossing_manifest = parse_dash_manifest(BASE_URL, &crossing_segment)
             .expect("period metadata is valid before segment-boundary planning");
@@ -3583,6 +3621,15 @@ mod tests {
             );
         assert_eq!(
             parse_dash_manifest(BASE_URL, &gap).err(),
+            Some(DashError::UnsupportedPresentation)
+        );
+
+        let nonzero_start = missing_continuity.replace(
+            r#"start="PT0S""#,
+            r#"start="PT1S""#,
+        );
+        assert_eq!(
+            parse_dash_manifest(BASE_URL, &nonzero_start).err(),
             Some(DashError::UnsupportedPresentation)
         );
     }

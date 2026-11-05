@@ -854,7 +854,7 @@ pub(crate) fn plan_dash_representation(
     for (period_index, source) in sources.iter().enumerate() {
         let mut period_representation = representation.clone();
         period_representation.source = source.clone();
-        let period_resources = match (&manifest.presentation, &source.addressing) {
+        let mut period_resources = match (&manifest.presentation, &source.addressing) {
             (DashPresentation::Dynamic(dynamic), DashAddressing::Template(template)) => {
                 expand_dynamic_template(&period_representation, &template.media, template, dynamic)?
             }
@@ -894,6 +894,20 @@ pub(crate) fn plan_dash_representation(
                 expand_list(&period_representation, list)?
             }
         };
+
+        if period_index > 0 {
+            let period_prefix = format!("dash-period-{period_index}");
+            for (resource_index, resource) in period_resources.iter_mut().enumerate() {
+                if resource.kind == DashResourceKind::Segment {
+                    resource.filename = super::resource_filename(
+                        &period_prefix,
+                        Some(resource_index),
+                        &resource.url,
+                        resource.range,
+                    );
+                }
+            }
+        }
 
         let period_segment_count = period_resources
             .iter()

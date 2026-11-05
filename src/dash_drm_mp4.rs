@@ -869,8 +869,8 @@ fn sample_group_kids(
                 }
                 entry_offset = constant_end;
             }
-        } else if iv_size != 0 || pattern != 0 {
-            return Err("Unprotected DASH seig entries must not declare IV or pattern parameters".to_string());
+        } else {
+            return Err("Unprotected DASH seig entries are not supported by the encrypted-track adapter".to_string());
         }
         if entry_offset != entry.len() {
             return Err("DASH seig entry contains unsupported trailing metadata".to_string());
@@ -1015,7 +1015,9 @@ fn fragment_samples(
             size,
             auxiliary,
             trun_record: record,
-            kid: sample_kids[sample_index],
+            kid: *sample_kids.get(sample_index).ok_or_else(|| {
+            "DASH sample-group mapping does not cover the parsed sample".to_string()
+        })?,
         });
         data_offset = data_offset
             .checked_add(size)
@@ -1059,11 +1061,12 @@ fn decrypt_one_sample(
         | (u32::from(trun_payload[2]) << 8)
         | u32::from(trun_payload[3]);
     let trun_flags = original_flags & !0x000004;
+    let flag_bytes = trun_flags.to_be_bytes();
     let mut trun_fields = vec![
         trun_payload[0],
-        ((trun_flags >> 16) & 0xff) as u8,
-        ((trun_flags >> 8) & 0xff) as u8,
-        (trun_flags & 0xff) as u8,
+        flag_bytes[1],
+        flag_bytes[2],
+        flag_bytes[3],
     ];
     trun_fields.extend_from_slice(&1_u32.to_be_bytes());
     trun_fields.extend_from_slice(&0_i32.to_be_bytes());
@@ -1097,10 +1100,14 @@ fn decrypt_one_sample(
     moof_fields.extend_from_slice(&traf_box);
     let mut moof_box = box_bytes(b"moof", &moof_fields)?;
 
-    let data_offset = i32::try_from(moof_box.len() + 8)
-        .map_err(|_| "Synthetic DASH sample data offset exceeds i32".to_string())?;
-    let trun_data_offset = mfhd.size
+    let data_offset = moof_box
+        .len()
         .checked_add(8)
+        .and_then(|offset| i32::try_from(offset).ok())
+        .ok_or_else(|| "Synthetic DASH sample data offset exceeds i32".to_string())?;
+    let trun_data_offset = 8_usize
+        .checked_add(mfhd.size)
+        .and_then(|offset| offset.checked_add(8))
         .and_then(|offset| offset.checked_add(tfhd.size))
         .and_then(|offset| offset.checked_add(tfdt.map_or(0, |span| span.size)))
         .and_then(|offset| offset.checked_add(8 + 8))
@@ -1108,8 +1115,11 @@ fn decrypt_one_sample(
     let patch_start = trun_data_offset
         .checked_add(8)
         .ok_or_else(|| "Synthetic DASH trun data-offset position overflows".to_string())?;
+    let patch_end = patch_start
+        .checked_add(4)
+        .ok_or_else(|| "Synthetic DASH trun data-offset range overflows".to_string())?;
     moof_box
-        .get_mut(patch_start..patch_start + 4)
+        .get_mut(patch_start..patch_end)
         .ok_or_else(|| "Synthetic DASH trun data-offset field is missing".to_string())?
         .copy_from_slice(&data_offset.to_be_bytes());
 
@@ -1498,6 +1508,135 @@ mod tests {
             crypt_blocks: 0,
             skip_blocks: 0,
         }
+    }
+
+
+    fn add_fragment_sample_groups(
+        fragment: &[u8],
+        sgpd: &[u8],
+        sbgp: &[u8],
+    ) -> Vec<u8> {
+        let top = parse_box_spans(fragment, 0, fragment.len()).expect("valid synthetic fragment");
+        let moof = find_one(&top, b"moof").expect("synthetic moof");
+        let moof_children = parse_box_spans(
+            fragment,
+            moof.payload_start().expect("moof payload"),
+            moof.end().expect("moof end"),
+        ).expect("valid synthetic moof children");
+        let mfhd = find_one(&moof_children, b"mfhd").expect("synthetic mfhd");
+        let traf = find_one(&moof_children, b"traf").expect("synthetic traf");
+        let traf_children = parse_box_spans(
+            fragment,
+            traf.payload_start().expect("traf payload"),
+            traf.end().expect("traf end"),
+        ).expect("valid synthetic traf children");
+        let trun = find_one(&traf_children, b"trun").expect("synthetic trun");
+
+        let make_moof = |data_offset: i32| {
+            let mut traf_fields = Vec::new();
+            for child in &traf_children {
+                if &child.kind == b"trun" {
+                    let mut payload = span_payload(fragment, *trun).expect("trun payload").to_vec();
+                    payload[8..12].copy_from_slice(&data_offset.to_be_bytes());
+                    traf_fields.extend_from_slice(&box_bytes(b"trun", &payload));
+                } else {
+                    traf_fields.extend_from_slice(
+                        fragment
+                            .get(child.start..child.end().expect("child end"))
+                            .expect("child bytes"),
+                    );
+                }
+            }
+            traf_fields.extend_from_slice(sgpd);
+            traf_fields.extend_from_slice(sbgp);
+            let traf_box = box_bytes(b"traf", &traf_fields);
+            let mut moof_fields = fragment
+                .get(mfhd.start..mfhd.end().expect("mfhd end"))
+                .expect("mfhd bytes")
+                .to_vec();
+            moof_fields.extend_from_slice(&traf_box);
+            box_bytes(b"moof", &moof_fields)
+        };
+
+        let initial = make_moof(0);
+        let offset = i32::try_from(initial.len() + 8).expect("sample data offset fits i32");
+        let moof = make_moof(offset);
+        let mdat = top.iter().find(|span| &span.kind == b"mdat").expect("synthetic mdat");
+        let mut output = moof;
+        output.extend_from_slice(
+            fragment
+                .get(mdat.start..mdat.end().expect("mdat end"))
+                .expect("mdat bytes"),
+        );
+        output
+    }
+
+    #[test]
+    fn resolves_fragment_local_seig_kid_rotation_and_decrypts_with_rotated_key() {
+        let (init, default_kid) = synthetic_init(b"cenc", 0, (0, 0), false);
+        let rotated_kid = [0x44; 16];
+        let mut entry = vec![0, 0, 1, 16];
+        entry.extend_from_slice(&rotated_kid);
+        let mut sgpd_fields = b"seig".to_vec();
+        sgpd_fields.extend_from_slice(&20_u32.to_be_bytes());
+        sgpd_fields.extend_from_slice(&1_u32.to_be_bytes());
+        sgpd_fields.extend_from_slice(&entry);
+        let sgpd = box_bytes(b"sgpd", &full_box(1, 0, &sgpd_fields));
+        let mut sbgp_fields = b"seig".to_vec();
+        sbgp_fields.extend_from_slice(&1_u32.to_be_bytes());
+        sbgp_fields.extend_from_slice(&1_u32.to_be_bytes());
+        sbgp_fields.extend_from_slice(&1_u32.to_be_bytes());
+        let sbgp = box_bytes(b"sbgp", &full_box(0, 0, &sbgp_fields));
+
+        let ciphertext = [
+            0xb8, 0x78, 0xd8, 0x9b, 0xed, 0xdb, 0x8e, 0x7e,
+            0xfb, 0x0c, 0xde, 0xfb, 0xb0, 0x92, 0x5c, 0xb5,
+        ];
+        let iv = [
+            0x20, 0x21, 0x22, 0x23, 0x24, 0x25, 0x26, 0x27,
+            0x28, 0x29, 0x2a, 0x2b, 0x2c, 0x2d, 0x2e, 0x2f,
+        ];
+        let fragment = add_fragment_sample_groups(
+            &synthetic_fragment(&ciphertext, &iv),
+            &sgpd,
+            &sbgp,
+        );
+        let parsed_init = parse_init_encryption(
+            &init,
+            DashEncryption { scheme: EncryptionScheme::Cenc, default_kid },
+        ).expect("parse synthetic init");
+        let samples = fragment_samples(&fragment, parsed_init)
+            .expect("parse rotated sample group");
+        assert_eq!(samples.len(), 1);
+        assert_eq!(samples[0].kid, Some(rotated_kid));
+        let plaintext = decrypt_one_sample(&fragment, &init, &samples[0], &[0x10; 16])
+            .expect("decrypt rotated sample using its selected KID key");
+        assert_eq!(plaintext, [
+            0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07,
+            0x08, 0x09, 0x0a, 0x0b, 0x0c, 0x0d, 0x0e, 0x0f,
+        ]);
+    }
+
+    #[test]
+    fn rejects_incomplete_seig_sample_group_coverage() {
+        let init = test_init_encryption();
+        let rotated_kid = [0x44; 16];
+        let mut entry = vec![0, 0, 1, 16];
+        entry.extend_from_slice(&rotated_kid);
+        let mut sgpd_fields = b"seig".to_vec();
+        sgpd_fields.extend_from_slice(&20_u32.to_be_bytes());
+        sgpd_fields.extend_from_slice(&1_u32.to_be_bytes());
+        sgpd_fields.extend_from_slice(&entry);
+        let sgpd = box_bytes(b"sgpd", &full_box(1, 0, &sgpd_fields));
+        let mut sbgp_fields = b"seig".to_vec();
+        sbgp_fields.extend_from_slice(&1_u32.to_be_bytes());
+        sbgp_fields.extend_from_slice(&1_u32.to_be_bytes());
+        sbgp_fields.extend_from_slice(&1_u32.to_be_bytes());
+        let sbgp = box_bytes(b"sbgp", &full_box(0, 0, &sbgp_fields));
+        let mut groups = sgpd;
+        groups.extend_from_slice(&sbgp);
+        let spans = parse_box_spans(&groups, 0, groups.len()).expect("sample group boxes");
+        assert!(sample_group_kids(&groups, &spans, 2, init).is_err());
     }
 
     fn synthetic_init(

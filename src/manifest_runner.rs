@@ -702,7 +702,7 @@ async fn prepare_manifest_attempt(
                     )
                 })?;
                 guard_manifest_child_url(&job.source.url, license_url, &mut guarded_child_hosts)?;
-                license_requests.push((encryption, license_url.clone()));
+                license_requests.push((license_url.clone(), std::collections::BTreeSet::from([encryption.default_kid])));
             }
             crate::dash_drm::acquire_required_keys(&client, &license_requests)
                 .await
@@ -3050,7 +3050,7 @@ async fn fetch_and_write_dash_track(
         let resources = drm_resources.ok_or_else(|| {
             ManifestRunError::Failed("Encrypted DASH resource plan is missing".to_string())
         })?;
-        let mut track_keys = keys.clone();
+        let mut track_keys = (*keys).clone();
         let required_kids = crate::dash_drm::required_kids(&resources, directory, encryption)
             .map_err(ManifestRunError::Unsupported)?;
         let missing_kids: std::collections::BTreeSet<_> = required_kids

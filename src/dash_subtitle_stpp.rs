@@ -394,8 +394,7 @@ fn validate_stpp_sample_entry(
             "Only plain TTML STPP samples without external resources are supported",
         ));
     }
-    let _schema_location = schema_location;
-    let _schema_location = schema_location;
+    let _ = schema_location;
     Ok(ttml_namespace)
 }
 

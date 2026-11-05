@@ -708,7 +708,7 @@ async fn prepare_manifest_attempt(
         Tracks::Hls { .. } | Tracks::DashLiveOffline { .. } => {}
     };
 
-    if has_audio {    if has_audio {
+    if has_audio {
         ensure_track_dir(&audio_dir).await?;
     }
 

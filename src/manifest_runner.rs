@@ -317,8 +317,8 @@ struct Resource {
 
 enum Tracks {
     Hls {
-        video: HlsPlan,
-        audio: Option<HlsPlan>,
+        video: Box<HlsPlan>,
+        audio: Option<Box<HlsPlan>>,
         subtitle: Option<Box<HlsPlan>>,
         subtitle_language: Option<String>,
     },
@@ -339,7 +339,7 @@ impl Tracks {
             Self::Hls { video, audio, .. } => {
                 video.is_destination_assemblable_candidate()
                     && audio
-                        .as_ref()
+                        .as_deref()
                         .is_none_or(HlsPlan::is_destination_assemblable_candidate)
             }
             Self::Dash { .. } => true,
@@ -1622,7 +1622,7 @@ pub(crate) async fn run_manifest_download(
             staging: &staging,
             finish_only: finish_requested,
             video,
-            audio: audio.as_ref(),
+            audio: audio.as_deref(),
             video_dir: &video_dir,
             audio_dir: &audio_dir,
             concurrency,
@@ -2115,7 +2115,7 @@ async fn resolve_tracks(
         ManifestDownloadPlan::HlsMedia(video) => {
             guard_hls_resources(&source.url, &video, guarded_child_hosts)?;
             Ok(Tracks::Hls {
-                video: *video,
+                video,
                 audio: None,
                 subtitle: None,
                 subtitle_language: None,
@@ -2167,8 +2167,8 @@ async fn resolve_tracks(
                 ));
             }
             Ok(Tracks::Hls {
-                video,
-                audio,
+                video: Box::new(video),
+                audio: audio.map(Box::new),
                 subtitle,
                 subtitle_language,
             })

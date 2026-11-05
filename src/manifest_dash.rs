@@ -139,14 +139,14 @@ pub(crate) struct DashRepresentationPlan {
 }
 
 impl DashRepresentationPlan {
-    /// Whether MP4 sample timestamps already use the MPD's zero-origin
+    /// Whether MP4 subtitle sample timestamps use the MPD's zero-origin
     /// presentation timeline for a single static DASH Period.
     ///
     /// The mapping is not safe when a Period has a non-zero start, the media
     /// timeline uses presentationTimeOffset, or multiple Period-local tracks
     /// have been concatenated.
     #[must_use]
-    pub(crate) fn has_zero_origin_wvtt_timeline(&self) -> bool {
+    pub(crate) fn has_zero_origin_fragmented_subtitle_timeline(&self) -> bool {
         matches!(&self.presentation, DashPresentation::Static)
             && self.representation.additional_sources.is_empty()
             && self.representation.source.period_start.is_zero()

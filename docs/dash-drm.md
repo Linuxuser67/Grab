@@ -2,11 +2,12 @@
 
 Native DASH decryption supports static, single-Period fragmented MP4
 presentations using CENC or CBCS, provided the MPD declares a ClearKey
-protection descriptor and an HTTPS license URL. Fragment-local `sgpd`/`sbgp`
+protection descriptor and an HTTPS license URL. Fragment-local `sgpd` version 1 / `sbgp` version 0
 `seig` sample groups may rotate KIDs between samples; Grab discovers every
 selected sample KID and requests the corresponding keys before decryption.
 Rotation is limited to KID changes that preserve the initialization segment's
-IV size, constant IV, and CBCS crypt/skip pattern.
+IV size, constant IV, and CBCS crypt/skip pattern, with at most 64 distinct
+KIDs per selected track.
 
 Grab sends the selected KIDs to the MPD's ClearKey license URL using the
 Encrypted Media Extensions ClearKey request format:

@@ -939,7 +939,7 @@ async fn transfer_static_manifest_tracks(
                         client,
                         staging,
                         plan: audio,
-                    directory: audio_dir,
+                        directory: audio_dir,
                         filename: "audio-track.ts",
                         destination,
                         item_id,
@@ -3063,7 +3063,9 @@ async fn fetch_and_write_dash_track(
             result = &mut key_request => result.map_err(ManifestRunError::Failed)?,
         };
         let track_keys = acquired_keys.ok_or_else(|| {
-            ManifestRunError::Failed("DASH ClearKey acquisition returned no content keys".to_string())
+            ManifestRunError::Failed(
+                "DASH ClearKey acquisition returned no content keys".to_string(),
+            )
         })?;
         let directory = directory.to_path_buf();
         let output = directory.join(format!("{filename}.decrypted"));

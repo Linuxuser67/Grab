@@ -224,10 +224,7 @@ pub(crate) async fn acquire_required_keys(
         }
     }
 
-    if groups
-        .iter()
-        .any(|(_, kids)| kids.len() > MAX_LICENSE_KEYS)
-    {
+    if groups.iter().any(|(_, kids)| kids.len() > MAX_LICENSE_KEYS) {
         return Err(format!(
             "DASH ClearKey requests cannot exceed {MAX_LICENSE_KEYS} distinct KIDs per license URL"
         ));

@@ -407,9 +407,10 @@ fn parse_init_encryption(init: &[u8], expected: DashEncryption) -> Result<InitEn
         if size != 8 && size != 16 {
             return Err("DASH tenc constant IV must contain 8 or 16 bytes".to_string());
         }
-        constant_iv_size = Some(u8::try_from(size).map_err(|_| {
-            "DASH tenc constant IV size is out of range".to_string()
-        })?);
+        constant_iv_size = Some(
+            u8::try_from(size)
+                .map_err(|_| "DASH tenc constant IV size is out of range".to_string())?,
+        );
         if expected.scheme == EncryptionScheme::Cenc {
             return Err("CENC initialization must use per-sample IVs".to_string());
         }
@@ -777,7 +778,6 @@ fn validate_fragment(bytes: &[u8], init: InitEncryption) -> Result<(), String> {
     Ok(())
 }
 
-
 #[derive(Clone, Debug)]
 struct FragmentSample {
     data_offset: usize,
@@ -850,8 +850,7 @@ fn sample_group_kids(
             .ok_or_else(|| "DASH seig entry is truncated".to_string())?;
         if entry.len() < 20 || entry[0] != 0 || entry[2] != 1 {
             return Err(
-                "DASH seig entry is truncated or does not describe a protected sample"
-                    .to_string(),
+                "DASH seig entry is truncated or does not describe a protected sample".to_string(),
             );
         }
 
@@ -871,9 +870,11 @@ fn sample_group_kids(
         kid.copy_from_slice(&entry[4..20]);
         let mut entry_offset = 20_usize;
         if iv_size == 0 {
-            let constant_size = usize::from(*entry.get(entry_offset).ok_or_else(|| {
-                "DASH seig constant IV size is missing".to_string()
-            })?);
+            let constant_size = usize::from(
+                *entry
+                    .get(entry_offset)
+                    .ok_or_else(|| "DASH seig constant IV size is missing".to_string())?,
+            );
             entry_offset += 1;
             if constant_size != 8 && constant_size != 16 {
                 return Err("DASH seig constant IV must contain 8 or 16 bytes".to_string());
@@ -884,9 +885,9 @@ fn sample_group_kids(
             let constant = entry
                 .get(entry_offset..constant_end)
                 .ok_or_else(|| "DASH seig constant IV is truncated".to_string())?;
-            let expected = init.constant_iv.ok_or_else(|| {
-                "DASH seig introduces a constant IV absent from tenc".to_string()
-            })?;
+            let expected = init
+                .constant_iv
+                .ok_or_else(|| "DASH seig introduces a constant IV absent from tenc".to_string())?;
             if init.constant_iv_size.map(usize::from) != Some(constant_size)
                 || constant != &expected[..constant_size]
             {
@@ -948,9 +949,9 @@ fn sample_group_kids(
             }
             let index = usize::try_from(group_index - 1)
                 .map_err(|_| "DASH sbgp group index is out of range".to_string())?;
-            *descriptions.get(index).ok_or_else(|| {
-                "DASH sbgp references a missing seig description".to_string()
-            })?
+            *descriptions
+                .get(index)
+                .ok_or_else(|| "DASH sbgp references a missing seig description".to_string())?
         };
         let next_len = sample_kids
             .len()
@@ -965,10 +966,7 @@ fn sample_group_kids(
     Ok(sample_kids)
 }
 
-fn fragment_samples(
-    bytes: &[u8],
-    init: InitEncryption,
-) -> Result<Vec<FragmentSample>, String> {
+fn fragment_samples(bytes: &[u8], init: InitEncryption) -> Result<Vec<FragmentSample>, String> {
     validate_fragment(bytes, init)?;
     let top = parse_box_spans(bytes, 0, bytes.len())?;
     let moof = find_one(&top, b"moof")?;
@@ -1088,12 +1086,7 @@ fn decrypt_one_sample(
         | u32::from(trun_payload[3]);
     let trun_flags = original_flags & !0x000004;
     let flag_bytes = trun_flags.to_be_bytes();
-    let mut trun_fields = vec![
-        trun_payload[0],
-        flag_bytes[1],
-        flag_bytes[2],
-        flag_bytes[3],
-    ];
+    let mut trun_fields = vec![trun_payload[0], flag_bytes[1], flag_bytes[2], flag_bytes[3]];
     trun_fields.extend_from_slice(&1_u32.to_be_bytes());
     trun_fields.extend_from_slice(&0_i32.to_be_bytes());
     trun_fields.extend_from_slice(&sample.trun_record);
@@ -1131,7 +1124,8 @@ fn decrypt_one_sample(
         .checked_add(8)
         .and_then(|offset| i32::try_from(offset).ok())
         .ok_or_else(|| "Synthetic DASH sample data offset exceeds i32".to_string())?;
-    let trun_data_offset = mfhd.size
+    let trun_data_offset = mfhd
+        .size
         .checked_add(8)
         .and_then(|offset| offset.checked_add(tfhd.size))
         .and_then(|offset| offset.checked_add(tfdt.map_or(0, |span| span.size)))
@@ -1240,8 +1234,9 @@ pub(crate) fn required_kids(
         );
     }
     let init_path = directory.join(&resources[0].filename);
-    let init = read_regular_file_bounded(&init_path, MAX_INIT_BYTES)
-        .map_err(|error| format!("Could not read encrypted DASH initialization resource: {error}"))?;
+    let init = read_regular_file_bounded(&init_path, MAX_INIT_BYTES).map_err(|error| {
+        format!("Could not read encrypted DASH initialization resource: {error}")
+    })?;
     let init_encryption = parse_init_encryption(&init, encryption)?;
     let mut required = BTreeSet::new();
     for resource in &resources[1..] {
@@ -1552,32 +1547,32 @@ mod tests {
     }
 
 
-    fn add_fragment_sample_groups(
-        fragment: &[u8],
-        sgpd: &[u8],
-        sbgp: &[u8],
-    ) -> Vec<u8> {
+    fn add_fragment_sample_groups(fragment: &[u8], sgpd: &[u8], sbgp: &[u8]) -> Vec<u8> {
         let top = parse_box_spans(fragment, 0, fragment.len()).expect("valid synthetic fragment");
         let moof = find_one(&top, b"moof").expect("synthetic moof");
         let moof_children = parse_box_spans(
             fragment,
             moof.payload_start().expect("moof payload"),
             moof.end().expect("moof end"),
-        ).expect("valid synthetic moof children");
+        )
+        .expect("valid synthetic moof children");
         let mfhd = find_one(&moof_children, b"mfhd").expect("synthetic mfhd");
         let traf = find_one(&moof_children, b"traf").expect("synthetic traf");
         let traf_children = parse_box_spans(
             fragment,
             traf.payload_start().expect("traf payload"),
             traf.end().expect("traf end"),
-        ).expect("valid synthetic traf children");
+        )
+        .expect("valid synthetic traf children");
         let trun = find_one(&traf_children, b"trun").expect("synthetic trun");
 
         let make_moof = |data_offset: i32| {
             let mut traf_fields = Vec::new();
             for child in &traf_children {
                 if &child.kind == b"trun" {
-                    let mut payload = span_payload(fragment, *trun).expect("trun payload").to_vec();
+                    let mut payload = span_payload(fragment, *trun)
+                        .expect("trun payload")
+                        .to_vec();
                     payload[8..12].copy_from_slice(&data_offset.to_be_bytes());
                     traf_fields.extend_from_slice(&box_bytes(b"trun", &payload));
                 } else {
@@ -1602,7 +1597,10 @@ mod tests {
         let initial = make_moof(0);
         let offset = i32::try_from(initial.len() + 8).expect("sample data offset fits i32");
         let moof = make_moof(offset);
-        let mdat = top.iter().find(|span| &span.kind == b"mdat").expect("synthetic mdat");
+        let mdat = top
+            .iter()
+            .find(|span| &span.kind == b"mdat")
+            .expect("synthetic mdat");
         let mut output = moof;
         output.extend_from_slice(
             fragment
@@ -1611,7 +1609,6 @@ mod tests {
         );
         output
     }
-
 
     fn synthetic_two_sample_fragment(
         first_ciphertext: &[u8; 16],
@@ -1729,10 +1726,13 @@ mod tests {
                 &sbgp,
             );
             let parsed_init = parse_init_encryption(
-                &init,
-                DashEncryption { scheme, default_kid },
-            )
-            .expect("parse synthetic init");
+            &init,
+            DashEncryption {
+                scheme,
+                default_kid,
+            },
+        )
+        .expect("parse synthetic init");
             let keys = super::super::DashKeyMap {
                 keys: BTreeMap::from([
                     (first_kid, Zeroizing::new([0x10; 16])),
@@ -1741,8 +1741,8 @@ mod tests {
             };
             let decrypted = decrypt_fragment_with_keys(&fragment, &init, parsed_init, &keys)
                 .expect("decrypt both KID groups in one fragment");
-            let boxes = parse_box_spans(&decrypted, 0, decrypted.len())
-                .expect("decrypted fragment boxes");
+            let boxes =
+                parse_box_spans(&decrypted, 0, decrypted.len()).expect("decrypted fragment boxes");
             let mdat = boxes
                 .iter()
                 .find(|span| &span.kind == b"mdat")
@@ -1779,17 +1779,17 @@ mod tests {
             0x20, 0x21, 0x22, 0x23, 0x24, 0x25, 0x26, 0x27,
             0x28, 0x29, 0x2a, 0x2b, 0x2c, 0x2d, 0x2e, 0x2f,
         ];
-        let fragment = add_fragment_sample_groups(
-            &synthetic_fragment(&ciphertext, &iv),
-            &sgpd,
-            &sbgp,
-        );
+        let fragment =
+            add_fragment_sample_groups(&synthetic_fragment(&ciphertext, &iv), &sgpd, &sbgp);
         let parsed_init = parse_init_encryption(
             &init,
-            DashEncryption { scheme: EncryptionScheme::Cenc, default_kid },
-        ).expect("parse synthetic init");
-        let samples = fragment_samples(&fragment, parsed_init)
-            .expect("parse rotated sample group");
+            DashEncryption {
+                scheme: EncryptionScheme::Cenc,
+                default_kid,
+            },
+        )
+        .expect("parse synthetic init");
+        let samples = fragment_samples(&fragment, parsed_init).expect("parse rotated sample group");
         assert_eq!(samples.len(), 1);
         assert_eq!(samples[0].kid, rotated_kid);
         let key_hex = Zeroizing::new(hex_string(&[0x10; 16]));
@@ -1797,10 +1797,13 @@ mod tests {
             .expect("initialize rotated sample decrypter");
         let plaintext = decrypt_one_sample(&fragment, &init, &samples[0], &decrypter)
             .expect("decrypt rotated sample using its selected KID key");
-        assert_eq!(plaintext, [
-            0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07,
-            0x08, 0x09, 0x0a, 0x0b, 0x0c, 0x0d, 0x0e, 0x0f,
-        ]);
+        assert_eq!(
+            plaintext,
+            [
+                0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0a, 0x0b, 0x0c, 0x0d,
+                0x0e, 0x0f,
+            ]
+        );
     }
 
     #[test]

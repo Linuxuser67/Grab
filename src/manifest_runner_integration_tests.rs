@@ -2289,7 +2289,7 @@ async fn live_hls_snapshot_appends_fetched_mpegts_fragments_to_visible_destinati
 }
 
 #[tokio::test]
-async fn hls_sample_aes_mpegts_is_decrypted_by_ffmpeg_after_localization() {
+async fn hls_sample_aes_mpegts_is_decrypted_by_vsd_before_ffmpeg_finalization() {
     if !tools_available() {
         return;
     }
@@ -2352,32 +2352,31 @@ async fn hls_sample_aes_mpegts_is_decrypted_by_ffmpeg_after_localization() {
     write_playlist(&video_dir, &plan)
         .await
         .expect("write localized SAMPLE-AES playlist");
+    decrypt_hls_sample_aes_segments(&video_dir, &plan)
+        .await
+        .expect("decrypt SAMPLE-AES segment with VSD");
     let local_playlist_bytes = tokio::fs::read(video_dir.join("local.m3u8"))
         .await
-        .expect("read localized SAMPLE-AES playlist");
+        .expect("read decrypted local HLS playlist");
     let local_playlist_text = String::from_utf8_lossy(&local_playlist_bytes);
-    assert!(local_playlist_text.contains("METHOD=SAMPLE-AES"));
-    assert!(local_playlist_text.contains(&format!("IV=0x{iv_hex}")));
-    let local_playlist = m3u8_rs::parse_media_playlist_res(&local_playlist_bytes)
-        .expect("parse localized SAMPLE-AES playlist");
-    let local_key_uri = local_playlist.segments[0]
-        .key
-        .as_ref()
-        .and_then(|key| key.uri.as_deref())
-        .expect("localized playlist should reference a staged key");
     assert!(
-        local_playlist.segments[0]
-            .key
-            .as_ref()
-            .is_some_and(|key| key.iv.is_some()),
-        "localized playlist must preserve the SAMPLE-AES IV"
+        !local_playlist_text.contains("METHOD=SAMPLE-AES"),
+        "the local playlist must not ask FFmpeg to decrypt already-clear media"
     );
-    let localized_key = tokio::fs::read(video_dir.join(local_key_uri))
+    let local_playlist = m3u8_rs::parse_media_playlist_res(&local_playlist_bytes)
+        .expect("parse decrypted local HLS playlist");
+    assert!(
+        local_playlist.segments[0].key.is_none(),
+        "the decrypted segment must no longer carry an encryption key tag"
+    );
+    let clear_segment = tokio::fs::read(video_dir.join(&local_playlist.segments[0].uri))
         .await
-        .expect("read staged SAMPLE-AES key");
-    assert_eq!(
-        localized_key, key,
-        "staged key bytes must match the fetched key"
+        .expect("read decrypted SAMPLE-AES segment");
+    let mut validator = crate::mpeg_ts_validation::TransportStreamValidator::new();
+    validator.observe(&clear_segment);
+    assert!(
+        validator.is_valid_complete(clear_segment.len() as u64),
+        "VSD output must remain a complete MPEG-TS resource"
     );
     let output = root.path().join("sample-aes-output.mkv");
     assert!(

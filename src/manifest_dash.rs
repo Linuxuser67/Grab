@@ -567,11 +567,9 @@ pub(crate) fn parse_dash_manifest_at(
                 ];
                 let encryption = crate::dash_drm::encryption_from_scopes(&protection_scopes)
                     .map_err(DashError::UnsupportedProtection)?;
-                let license_url = crate::dash_drm::license_url_from_scopes(
-                    &protection_scopes,
-                    &manifest_url,
-                )
-                .map_err(DashError::UnsupportedProtection)?;
+                let license_url =
+                    crate::dash_drm::license_url_from_scopes(&protection_scopes, &manifest_url)
+                        .map_err(DashError::UnsupportedProtection)?;
                 if encryption.is_some() && license_url.is_none() {
                     return Err(DashError::UnsupportedProtection(
                         "Native DASH decryption requires a ClearKey license URL".to_string(),

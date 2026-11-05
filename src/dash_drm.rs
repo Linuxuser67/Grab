@@ -290,7 +290,7 @@ pub(crate) async fn acquire_required_keys(
             if let Some(previous) = keys.get(&kid) {
                 if &**previous != &*key {
                     return Err(
-                        "DASH license servers returned conflicting keys for one KID".to_string(),
+                        "DASH license servers returned conflicting keys for one KID".to_string()
                     );
                 }
             } else {
@@ -326,8 +326,7 @@ fn parse_clear_key_license(
         || response.keys.len() > MAX_LICENSE_KEYS
     {
         return Err(
-            "The DASH ClearKey license response has an unsupported type or key count"
-                .to_string(),
+            "The DASH ClearKey license response has an unsupported type or key count".to_string(),
         );
     }
 
@@ -364,11 +363,10 @@ fn parse_clear_key_license(
 }
 
 fn decode_clear_key_value(value: &str) -> Result<[u8; 16], String> {
-    let decoded = Zeroizing::new(
-        URL_SAFE_NO_PAD
-            .decode(value.as_bytes())
-            .map_err(|_| "The DASH ClearKey license contains invalid base64url data".to_string())?,
-    );
+    let decoded =
+        Zeroizing::new(URL_SAFE_NO_PAD.decode(value.as_bytes()).map_err(|_| {
+            "The DASH ClearKey license contains invalid base64url data".to_string()
+        })?);
     decoded
         .as_slice()
         .try_into()
@@ -520,8 +518,7 @@ mod tests {
         };
         let url = license_url_from_scopes(
             &[std::slice::from_ref(&descriptor)],
-            &Url::parse("https://media.example.test/path/manifest.mpd")
-                .expect("test MPD URL"),
+            &Url::parse("https://media.example.test/path/manifest.mpd").expect("test MPD URL"),
         )
         .expect("ClearKey license URL should parse")
         .expect("ClearKey URL should be present");
@@ -542,8 +539,7 @@ mod tests {
             assert!(
                 license_url_from_scopes(
                     &[std::slice::from_ref(&descriptor)],
-                    &Url::parse("https://media.example.test/manifest.mpd")
-                        .expect("test MPD URL"),
+                    &Url::parse("https://media.example.test/manifest.mpd").expect("test MPD URL"),
                 )
                 .is_err(),
                 "insecure license URL should be rejected: {value}"

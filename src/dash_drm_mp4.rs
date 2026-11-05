@@ -117,7 +117,7 @@ fn read_i32(bytes: &[u8], offset: usize) -> Result<i32, String> {
     Ok(i32::from_be_bytes(read_u32(bytes, offset)?.to_be_bytes()))
 }
 
-fn span_payload<'a>(bytes: &'a [u8], span: BoxSpan) -> Result<&'a [u8], String> {
+fn span_payload(bytes: &[u8], span: BoxSpan) -> Result<&[u8], String> {
     let start = span.payload_start()?;
     let end = span.end()?;
     bytes
@@ -147,8 +147,6 @@ struct InitEncryption {
     track_id: u32,
     iv_size: u8,
     constant_iv: Option<[u8; 16]>,
-    crypt_blocks: u8,
-    skip_blocks: u8,
 }
 
 fn collect_mp4_boxes<'a>(boxes: &'a [mp4box::Box], kind: &str, output: &mut Vec<&'a mp4box::Box>) {
@@ -430,8 +428,6 @@ fn parse_init_encryption(init: &[u8], expected: DashEncryption) -> Result<InitEn
         track_id,
         iv_size,
         constant_iv,
-        crypt_blocks,
-        skip_blocks,
     })
 }
 
@@ -947,8 +943,7 @@ mod tests {
             offset_adjustment,
             use_subsamples,
             subsample_encrypted_bytes,
-            None,
-            extra_traf,
+            (None, extra_traf),
         )
     }
 
@@ -959,12 +954,11 @@ mod tests {
         offset_adjustment: i32,
         use_subsamples: bool,
         subsample_encrypted_bytes: u32,
-        sample_description_index: Option<u32>,
-        extra_traf: bool,
+        sample_description: (Option<u32>, bool),
     ) -> Vec<u8> {
         let mut tfhd_fields = track_id.to_be_bytes().to_vec();
         let mut tfhd_flags = 0x020000;
-        if let Some(index) = sample_description_index {
+        if let Some(index) = sample_description.0 {
             tfhd_flags |= 0x000002;
             tfhd_fields.extend_from_slice(&index.to_be_bytes());
         }
@@ -997,7 +991,7 @@ mod tests {
             let traf = box_bytes(b"traf", &traf_fields);
             let mut moof_fields = mfhd;
             moof_fields.extend_from_slice(&traf);
-            if extra_traf {
+            if sample_description.1 {
                 moof_fields.extend_from_slice(&traf);
             }
             box_bytes(b"moof", &moof_fields)
@@ -1372,8 +1366,7 @@ mod tests {
             0,
             false,
             0,
-            Some(1),
-            false,
+            (Some(1), false),
         );
         let invalid = test_fragment_with_sample_description_index(
             7,
@@ -1382,8 +1375,7 @@ mod tests {
             0,
             false,
             0,
-            Some(2),
-            false,
+            (Some(2), false),
         );
         assert!(validate_fragment(&valid, test_init_encryption()).is_ok());
         assert!(validate_fragment(&invalid, test_init_encryption()).is_err());

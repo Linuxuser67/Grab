@@ -250,8 +250,12 @@ fn parse_hex_16(value: &str) -> Option<[u8; 16]> {
     if compact.len() != 32 || !compact.bytes().all(|byte| byte.is_ascii_hexdigit()) {
         return None;
     }
+    let (pairs, remainder) = compact.as_bytes().as_chunks::<2>();
+    if !remainder.is_empty() {
+        return None;
+    }
     let mut output = [0_u8; 16];
-    for (index, pair) in compact.as_bytes().chunks_exact(2).enumerate() {
+    for (index, pair) in pairs.iter().enumerate() {
         let high = hex_nibble(pair[0])?;
         let low = hex_nibble(pair[1])?;
         output[index] = (high << 4) | low;

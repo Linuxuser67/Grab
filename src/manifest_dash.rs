@@ -995,9 +995,7 @@ fn effective_template(
         end_number = template.endNumber.or(end_number);
         timescale = template.timescale.or(timescale);
         // An explicitly supplied zero overrides an inherited non-zero offset.
-        presentation_time_offset = template
-            .presentationTimeOffset
-            .or(presentation_time_offset);
+        presentation_time_offset = template.presentationTimeOffset.or(presentation_time_offset);
 
         if let Some(duration) = template.duration {
             if !duration.is_finite()
@@ -1698,11 +1696,8 @@ fn segments_until_period_end(
     if segment_duration == 0 {
         return Err(DashError::InvalidSegment);
     }
-    let period_end_scaled = period_end_on_sample_timeline(
-        period_duration,
-        timescale,
-        presentation_time_offset,
-    )?;
+    let period_end_scaled =
+        period_end_on_sample_timeline(period_duration, timescale, presentation_time_offset)?;
     let start_scaled = u128::from(segment_start)
         .checked_mul(1_000_000_000)
         .ok_or(DashError::InvalidSegment)?;
@@ -1722,11 +1717,8 @@ fn time_precedes_period_end(
     timescale: u64,
     presentation_time_offset: u64,
 ) -> Result<bool, DashError> {
-    let period_end_scaled = period_end_on_sample_timeline(
-        period_duration,
-        timescale,
-        presentation_time_offset,
-    )?;
+    let period_end_scaled =
+        period_end_on_sample_timeline(period_duration, timescale, presentation_time_offset)?;
     let segment_start_scaled = u128::from(segment_start)
         .checked_mul(1_000_000_000)
         .ok_or(DashError::InvalidSegment)?;
@@ -2607,13 +2599,7 @@ mod tests {
             .filter(|resource| resource.kind == DashResourceKind::Segment)
             .map(|resource| resource.url.path().to_owned())
             .collect::<Vec<_>>();
-        assert_eq!(
-            urls,
-            [
-                "/path/seg-7-900000.m4s",
-                "/path/seg-8-902000.m4s"
-            ]
-        );
+        assert_eq!(urls, ["/path/seg-7-900000.m4s", "/path/seg-8-902000.m4s"]);
     }
 
     #[test]
@@ -2640,10 +2626,7 @@ mod tests {
             .filter(|resource| resource.kind == DashResourceKind::Segment)
             .map(|resource| resource.url.path().to_owned())
             .collect::<Vec<_>>();
-        assert_eq!(
-            urls,
-            ["/path/seg-900000.m4s", "/path/seg-902000.m4s"]
-        );
+        assert_eq!(urls, ["/path/seg-900000.m4s", "/path/seg-902000.m4s"]);
     }
 
     #[test]
@@ -2662,8 +2645,7 @@ mod tests {
     </AdaptationSet>
   </Period>
 </MPD>"#;
-        let plan = parse_dash_manifest(BASE_URL, body)
-            .expect("non-zero PTO timeline should parse");
+        let plan = parse_dash_manifest(BASE_URL, body).expect("non-zero PTO timeline should parse");
         let resources = plan_dash_representation(&plan, &plan.video_representations[0].key)
             .expect("negative repeat should reach the PTO-adjusted Period end");
 
@@ -2744,7 +2726,8 @@ mod tests {
     </AdaptationSet>
   </Period>
 </MPD>"#;
-        let plan = parse_dash_manifest(BASE_URL, inherited).expect("inherited templates should parse");
+        let plan =
+            parse_dash_manifest(BASE_URL, inherited).expect("inherited templates should parse");
         let resources = plan_dash_representation(&plan, &plan.video_representations[0].key)
             .expect("the most specific PTO should be used");
         assert_eq!(resources.resources[0].url.path(), "/path/seg-300.m4s");
@@ -2761,8 +2744,8 @@ mod tests {
     </AdaptationSet>
   </Period>
 </MPD>"#;
-        let plan =
-            parse_dash_manifest(BASE_URL, explicit_zero).expect("explicit zero should override PTO");
+        let plan = parse_dash_manifest(BASE_URL, explicit_zero)
+            .expect("explicit zero should override PTO");
         let resources = plan_dash_representation(&plan, &plan.video_representations[0].key)
             .expect("explicit zero PTO should be honored");
         assert_eq!(resources.resources[0].url.path(), "/path/seg-0.m4s");

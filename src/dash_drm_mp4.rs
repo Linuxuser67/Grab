@@ -367,15 +367,26 @@ fn validate_fragment(bytes: &[u8], init: InitEncryption) -> Result<(), String> {
     let moof = moofs[0];
     let mdat = mdats[0];
     let moof_children = parse_box_spans(bytes, moof.payload_start()?, moof.end()?)?;
+    let mfhd = find_one(&moof_children, b"mfhd")?;
     let traf = find_one(&moof_children, b"traf")?;
-    if moof_children.iter().filter(|span| &span.kind == b"traf").count() != 1 {
-        return Err("Encrypted DASH fragments must contain exactly one traf".to_string());
+    if moof_children.len() != 2 || moof_children.iter().any(|span| {
+        &span.kind != b"mfhd" && &span.kind != b"traf"
+    }) {
+        return Err("Encrypted DASH fragments must contain exactly one mfhd and one traf".to_string());
     }
+    let mfhd_payload = span_payload(bytes, *mfhd)?;
+    if mfhd_payload.len() != 8 || mfhd_payload[0] != 0 {
+        return Err("DASH mfhd is truncated or uses an unsupported version".to_string());
+    }
+
     let traf_children = parse_box_spans(bytes, traf.payload_start()?, traf.end()?)?;
     if traf_children.iter().any(|span| {
-        matches!(&span.kind, b"saiz" | b"saio" | b"sgpd" | b"sbgp" | b"uuid")
+        !matches!(&span.kind, b"tfhd" | b"tfdt" | b"trun" | b"senc")
     }) {
-        return Err("Encrypted DASH fragment uses unsupported auxiliary or key-rotation metadata".to_string());
+        return Err("Encrypted DASH fragment uses unsupported auxiliary, key-rotation or sample-group metadata".to_string());
+    }
+    if traf_children.iter().filter(|span| &span.kind == b"tfdt").count() > 1 {
+        return Err("Encrypted DASH fragment contains multiple tfdt boxes".to_string());
     }
     let tfhd = find_one(&traf_children, b"tfhd")?;
     let trun = find_one(&traf_children, b"trun")?;
@@ -640,6 +651,91 @@ pub(super) fn decrypt_track(
 mod tests {
     use super::*;
 
+    fn box_bytes(kind: &[u8; 4], payload: &[u8]) -> Vec<u8> {
+        let size = u32::try_from(payload.len() + 8).expect("test box size fits u32");
+        let mut output = Vec::with_capacity(payload.len() + 8);
+        output.extend_from_slice(&size.to_be_bytes());
+        output.extend_from_slice(kind);
+        output.extend_from_slice(payload);
+        output
+    }
+
+    fn full_box(version: u8, flags: u32, fields: &[u8]) -> Vec<u8> {
+        let mut output = vec![
+            version,
+            u8::try_from((flags >> 16) & 0xff).expect("flag byte"),
+            u8::try_from((flags >> 8) & 0xff).expect("flag byte"),
+            u8::try_from(flags & 0xff).expect("flag byte"),
+        ];
+        output.extend_from_slice(fields);
+        output
+    }
+
+    fn test_fragment(
+        track_id: u32,
+        trun_flags: u32,
+        senc_count: u32,
+        offset_adjustment: i32,
+        use_subsamples: bool,
+        subsample_encrypted_bytes: u32,
+        extra_traf: bool,
+    ) -> Vec<u8> {
+        let mut tfhd_fields = track_id.to_be_bytes().to_vec();
+        let tfhd_payload = full_box(0, 0x020000, &tfhd_fields);
+        let tfhd_box = box_bytes(b"tfhd", &tfhd_payload);
+
+        let mut senc_fields = senc_count.to_be_bytes().to_vec();
+        senc_fields.extend_from_slice(&[0x11; 16]);
+        if use_subsamples {
+            senc_fields.extend_from_slice(&1_u16.to_be_bytes());
+            senc_fields.extend_from_slice(&4_u16.to_be_bytes());
+            senc_fields.extend_from_slice(&subsample_encrypted_bytes.to_be_bytes());
+        }
+        let senc_payload = full_box(0, if use_subsamples { 2 } else { 0 }, &senc_fields);
+        let senc_box = box_bytes(b"senc", &senc_payload);
+
+        let make_trun = |data_offset: i32| {
+            let mut fields = 1_u32.to_be_bytes().to_vec();
+            fields.extend_from_slice(&data_offset.to_be_bytes());
+            fields.extend_from_slice(&16_u32.to_be_bytes());
+            box_bytes(b"trun", &full_box(0, trun_flags, &fields))
+        };
+
+        let make_moof = |trun_box: &[u8]| {
+            let mut mfhd_fields = 1_u32.to_be_bytes().to_vec();
+            let mfhd = box_bytes(b"mfhd", &full_box(0, 0, &mfhd_fields));
+            let mut traf_fields = tfhd_box.clone();
+            traf_fields.extend_from_slice(trun_box);
+            traf_fields.extend_from_slice(&senc_box);
+            let traf = box_bytes(b"traf", &traf_fields);
+            let mut moof_fields = mfhd;
+            moof_fields.extend_from_slice(&traf);
+            if extra_traf {
+                moof_fields.extend_from_slice(&traf);
+            }
+            box_bytes(b"moof", &moof_fields)
+        };
+
+        let first_moof = make_moof(&make_trun(0));
+        let data_offset = i32::try_from(first_moof.len() + 8)
+            .expect("test data offset fits i32")
+            .saturating_add(offset_adjustment);
+        let moof = make_moof(&make_trun(data_offset));
+        let mut output = moof;
+        output.extend_from_slice(&box_bytes(b"mdat", &[0x55; 16]));
+        output
+    }
+
+    fn test_init_encryption() -> InitEncryption {
+        InitEncryption {
+            track_id: 7,
+            iv_size: 16,
+            constant_iv: None,
+            crypt_blocks: 0,
+            skip_blocks: 0,
+        }
+    }
+
     #[test]
     fn parses_hyphenated_and_compact_hex_identifiers() {
         let value = "00112233-4455-6677-8899-aabbccddeeff";
@@ -647,10 +743,13 @@ mod tests {
             0x00, 0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77,
             0x88, 0x99, 0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff,
         ];
-        assert_eq!(parse_hex_16(value), Some(expected));
-        assert_eq!(parse_hex_16("00112233445566778899aabbccddeeff"), Some(expected));
-        assert_eq!(parse_hex_16("00112233445566778899aabbccddeef"), None);
-        assert_eq!(parse_hex_16("zz112233445566778899aabbccddeeff"), None);
+        assert_eq!(super::super::parse_hex_16(value), Some(expected));
+        assert_eq!(
+            super::super::parse_hex_16("00112233445566778899aabbccddeeff"),
+            Some(expected)
+        );
+        assert_eq!(super::super::parse_hex_16("00112233445566778899aabbccddeef"), None);
+        assert_eq!(super::super::parse_hex_16("zz112233445566778899aabbccddeeff"), None);
     }
 
     #[test]
@@ -661,16 +760,38 @@ mod tests {
     }
 
     #[test]
-    fn parses_a_complete_top_level_fragment() {
-        let mut bytes = Vec::new();
-        bytes.extend_from_slice(&16_u32.to_be_bytes());
-        bytes.extend_from_slice(b"moof");
-        bytes.extend_from_slice(&0_u32.to_be_bytes());
-        bytes.extend_from_slice(&8_u32.to_be_bytes());
-        bytes.extend_from_slice(b"mdat");
-        let spans = parse_box_spans(&bytes, 0, bytes.len()).expect("valid top-level boxes");
-        assert_eq!(spans.len(), 2);
-        assert_eq!(&spans[0].kind, b"moof");
-        assert_eq!(&spans[1].kind, b"mdat");
+    fn accepts_one_track_fragment_with_exact_sample_coverage() {
+        let fragment = test_fragment(7, 0x000201, 1, 0, false, 0, false);
+        assert!(validate_fragment(&fragment, test_init_encryption()).is_ok());
+    }
+
+    #[test]
+    fn accepts_exact_subsample_encryption_coverage() {
+        let fragment = test_fragment(7, 0x000201, 1, 0, true, 12, false);
+        assert!(validate_fragment(&fragment, test_init_encryption()).is_ok());
+    }
+
+    #[test]
+    fn rejects_wrong_track_ids_and_fragment_data_offsets() {
+        let wrong_track = test_fragment(8, 0x000201, 1, 0, false, 0, false);
+        let wrong_offset = test_fragment(7, 0x000201, 1, 1, false, 0, false);
+        assert!(validate_fragment(&wrong_track, test_init_encryption()).is_err());
+        assert!(validate_fragment(&wrong_offset, test_init_encryption()).is_err());
+    }
+
+    #[test]
+    fn rejects_count_mismatches_and_unknown_sample_flags() {
+        let wrong_senc_count = test_fragment(7, 0x000201, 2, 0, false, 0, false);
+        let unknown_trun_flag = test_fragment(7, 0x000241, 1, 0, false, 0, false);
+        assert!(validate_fragment(&wrong_senc_count, test_init_encryption()).is_err());
+        assert!(validate_fragment(&unknown_trun_flag, test_init_encryption()).is_err());
+    }
+
+    #[test]
+    fn rejects_multiple_track_fragments_and_bad_subsample_sizes() {
+        let multiple_tracks = test_fragment(7, 0x000201, 1, 0, false, 0, true);
+        let short_subsample = test_fragment(7, 0x000201, 1, 0, true, 11, false);
+        assert!(validate_fragment(&multiple_tracks, test_init_encryption()).is_err());
+        assert!(validate_fragment(&short_subsample, test_init_encryption()).is_err());
     }
 }

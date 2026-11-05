@@ -1,9 +1,13 @@
 # Native DASH Common Encryption
 
-Native DASH decryption currently supports static, single-Period fragmented
-MP4 presentations using CENC or CBCS and one default KID per selected video
-or audio representation, provided the MPD declares a ClearKey protection
-descriptor and an HTTPS license URL.
+Native DASH decryption supports static, single-Period fragmented MP4
+presentations using CENC or CBCS, provided the MPD declares a ClearKey
+protection descriptor and an HTTPS license URL. Fragment-local `sgpd` version 1 / `sbgp` version 0
+`seig` sample groups may rotate KIDs between samples; Grab discovers every
+selected sample KID and requests the corresponding keys before decryption.
+Rotation is limited to KID changes that preserve the initialization segment's
+IV size, constant IV, and CBCS crypt/skip pattern, with at most 64 distinct
+KIDs per selected track.
 
 Grab sends the selected KIDs to the MPD's ClearKey license URL using the
 Encrypted Media Extensions ClearKey request format:
@@ -47,8 +51,9 @@ sample sizes and offsets, and in-band sample encryption metadata. Indexed
 SegmentBase is supported when the initialization byte range and a flat SIDX
 are present; unindexed single-file SegmentBase remains on fallback because its
 initialization and media fragments are not separately addressable by this
-adapter. In-track key rotation and sample-group KID overrides, dynamic or
-multi-Period presentations, and encrypted subtitles are not supported.
+adapter. Track-level/global sample-group references, malformed or incomplete sample
+group runs, per-sample encryption-parameter changes, dynamic or multi-Period
+presentations, and encrypted subtitles remain unsupported and fail closed.
 
 Different selected audio and video tracks may each use their own default KID
 and license URL. The current CENC adapter accepts only in-band `senc`

@@ -39,17 +39,14 @@ pub(crate) struct DashKeyMap {
 }
 
 impl DashKeyMap {
-    pub(crate) fn key_for(
-        &self,
-        encryption: DashEncryption,
-    ) -> Result<Zeroizing<[u8; 16]>, String> {
+    pub(crate) fn key_for_kid(&self, kid: &[u8; 16]) -> Result<Zeroizing<[u8; 16]>, String> {
         self.keys
-            .get(&encryption.default_kid)
+            .get(kid)
             .map(|key| Zeroizing::new(**key))
             .ok_or_else(|| {
                 format!(
                     "The DASH license response did not include selected KID {}",
-                    hex_string(&encryption.default_kid)
+                    hex_string(kid)
                 )
             })
     }
@@ -60,7 +57,8 @@ impl DashKeyMap {
 ///
 /// Native license acquisition currently supports ClearKey only. Widevine and
 /// PlayReady descriptors are rejected until their CDM exchanges have a safe,
-/// reusable integration. Key rotation and multiple default KIDs are unsupported.
+/// reusable integration. Fragment-local seig KID rotation is resolved from
+/// media fragments; conflicting default KIDs across descriptor scopes remain unsupported.
 pub(crate) fn encryption_from_scopes(
     scopes: &[&[dash_mpd_core::ContentProtection]],
 ) -> Result<Option<DashEncryption>, String> {
@@ -200,22 +198,36 @@ struct ClearKeyJwk {
 /// Keys are retained only in zeroizing memory and are never written to disk or logs.
 pub(crate) async fn acquire_required_keys(
     client: &reqwest::Client,
-    requests: &[(DashEncryption, Url)],
+    requests: &[(Url, BTreeSet<[u8; 16]>)],
 ) -> Result<Option<DashKeyMap>, String> {
     if requests.is_empty() {
         return Ok(None);
     }
+    if requests.iter().any(|(_, kids)| kids.is_empty()) {
+        return Err("DASH ClearKey acquisition requires at least one sample KID".to_string());
+    }
+    if requests
+        .iter()
+        .any(|(_, kids)| kids.len() > MAX_LICENSE_KEYS)
+    {
+        return Err(format!(
+            "DASH ClearKey requests cannot exceed {MAX_LICENSE_KEYS} distinct KIDs per license URL"
+        ));
+    }
 
     let mut groups: Vec<(Url, BTreeSet<[u8; 16]>)> = Vec::new();
-    for (encryption, license_url) in requests {
+    for (license_url, required_kids) in requests {
         if let Some((_, kids)) = groups.iter_mut().find(|(url, _)| url == license_url) {
-            kids.insert(encryption.default_kid);
+            kids.extend(required_kids.iter().copied());
         } else {
-            groups.push((
-                license_url.clone(),
-                BTreeSet::from([encryption.default_kid]),
-            ));
+            groups.push((license_url.clone(), required_kids.clone()));
         }
+    }
+
+    if groups.iter().any(|(_, kids)| kids.len() > MAX_LICENSE_KEYS) {
+        return Err(format!(
+            "DASH ClearKey requests cannot exceed {MAX_LICENSE_KEYS} distinct KIDs per license URL"
+        ));
     }
 
     let mut keys: BTreeMap<[u8; 16], Zeroizing<[u8; 16]>> = BTreeMap::new();
@@ -299,12 +311,14 @@ pub(crate) async fn acquire_required_keys(
         }
     }
 
-    for (encryption, _) in requests {
-        if !keys.contains_key(&encryption.default_kid) {
-            return Err(format!(
-                "The DASH ClearKey license response did not include selected KID {}",
-                hex_string(&encryption.default_kid)
-            ));
+    for (_, required_kids) in requests {
+        for kid in required_kids {
+            if !keys.contains_key(kid) {
+                return Err(format!(
+                    "The DASH ClearKey license response did not include selected KID {}",
+                    hex_string(kid)
+                ));
+            }
         }
     }
     Ok(Some(DashKeyMap { keys }))
@@ -415,7 +429,7 @@ pub(super) fn hex_string(bytes: &[u8; 16]) -> String {
 #[path = "dash_drm_mp4.rs"]
 mod mp4;
 
-pub(crate) use mp4::decrypt_track;
+pub(crate) use mp4::{decrypt_track, required_kids};
 
 #[cfg(test)]
 mod tests {

@@ -139,14 +139,14 @@ pub(crate) struct DashRepresentationPlan {
 }
 
 impl DashRepresentationPlan {
-    /// Whether MP4 sample timestamps already use the MPD's zero-origin
+    /// Whether MP4 subtitle sample timestamps use the MPD's zero-origin
     /// presentation timeline for a single static DASH Period.
     ///
     /// The mapping is not safe when a Period has a non-zero start, the media
     /// timeline uses presentationTimeOffset, or multiple Period-local tracks
     /// have been concatenated.
     #[must_use]
-    pub(crate) fn has_zero_origin_wvtt_timeline(&self) -> bool {
+    pub(crate) fn has_zero_origin_fragmented_subtitle_timeline(&self) -> bool {
         matches!(&self.presentation, DashPresentation::Static)
             && self.representation.additional_sources.is_empty()
             && self.representation.source.period_start.is_zero()
@@ -3095,7 +3095,34 @@ mod tests {
             .expect("subtitle representation should be plannable");
         assert_eq!(download.representation.key, subtitle.key);
         assert_eq!(download.resources.len(), 3);
-        assert!(download.has_zero_origin_wvtt_timeline());
+        assert!(download.has_zero_origin_fragmented_subtitle_timeline());
+    }
+
+    #[test]
+    fn classifies_stpp_as_a_supported_zero_origin_mp4_subtitle() {
+        let body = TEMPLATE_MPD.replace(
+            "</Period>",
+            r#"
+    <AdaptationSet contentType="text" mimeType="application/mp4" lang="en">
+      <Role schemeIdUri="urn:mpeg:dash:role:2011" value="main"/>
+      <SegmentTemplate timescale="1" duration="5" initialization="ttml-init.mp4" media="ttml-$Number$.m4s"/>
+      <Representation id="sub-ttml" bandwidth="1000" codecs="stpp.ttml.im1t"/>
+    </AdaptationSet>
+</Period>"#,
+        );
+        let manifest =
+            parse_dash_manifest(BASE_URL, &body).expect("STPP representation should be recognized");
+        assert_eq!(manifest.subtitle_representations.len(), 1);
+        let representation = &manifest.subtitle_representations[0];
+        assert_eq!(
+            representation.representation_id.as_deref(),
+            Some("sub-ttml")
+        );
+        assert_eq!(representation.codecs.as_deref(), Some("stpp.ttml.im1t"));
+
+        let plan = plan_dash_representation(&manifest, &representation.key)
+            .expect("STPP representation should be plannable");
+        assert!(plan.has_zero_origin_fragmented_subtitle_timeline());
     }
 
     #[test]
@@ -3118,7 +3145,7 @@ mod tests {
         let offset_choice = &offset_manifest.subtitle_representations[0];
         let offset_plan = plan_dash_representation(&offset_manifest, &offset_choice.key)
             .expect("nonzero-PTO subtitle should remain plannable");
-        assert!(!offset_plan.has_zero_origin_wvtt_timeline());
+        assert!(!offset_plan.has_zero_origin_fragmented_subtitle_timeline());
 
         let period_body = body.replace(
             r#"<Period duration="PT10S">"#,
@@ -3129,7 +3156,7 @@ mod tests {
         let period_choice = &period_manifest.subtitle_representations[0];
         let period_plan = plan_dash_representation(&period_manifest, &period_choice.key)
             .expect("nonzero-start subtitle should remain plannable");
-        assert!(!period_plan.has_zero_origin_wvtt_timeline());
+        assert!(!period_plan.has_zero_origin_fragmented_subtitle_timeline());
     }
 
     #[test]

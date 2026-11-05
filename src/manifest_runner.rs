@@ -1010,18 +1010,29 @@ async fn transfer_static_manifest_tracks(
             if let Some(subtitle) = subtitle {
                 let subtitle_dir = staging.join("subtitles");
                 ensure_track_dir(&subtitle_dir).await?;
-                if !subtitle.has_zero_origin_wvtt_timeline() {
+                if !subtitle.has_zero_origin_fragmented_subtitle_timeline() {
                     return Err(ManifestRunError::Unsupported(
-                        "Native WVTT extraction requires a single zero-origin DASH Period with no presentation-time offset"
+                        "Native fragmented DASH subtitle extraction requires a single zero-origin Period with no presentation-time offset"
                             .to_string(),
                     ));
                 }
                 let codecs = subtitle.representation.codecs.clone().unwrap_or_default();
-                if !crate::dash_subtitle::is_wvtt_codec(&codecs) {
-                    return Err(ManifestRunError::Unsupported(
-                        "Native DASH subtitle extraction currently supports WVTT only".to_string(),
-                    ));
-                }
+                let extractor: fn(
+                    &Path,
+                    &Path,
+                    &str,
+                )
+                    -> Result<bool, crate::dash_subtitle::DashSubtitleError> =
+                    if crate::dash_subtitle::is_wvtt_codec(&codecs) {
+                        crate::dash_subtitle::extract_to_vtt
+                    } else if crate::dash_subtitle_stpp::is_stpp_codec(&codecs) {
+                        crate::dash_subtitle_stpp::extract_to_vtt
+                    } else {
+                        return Err(ManifestRunError::Unsupported(
+                            "Native DASH subtitle extraction currently supports WVTT and STPP only"
+                                .to_string(),
+                        ));
+                    };
                 if !fetch_and_write_dash_track(ManifestDashTrackTransfer {
                     client,
                     staging,
@@ -1053,10 +1064,8 @@ async fn transfer_static_manifest_tracks(
                     subtitle_dir.join("subtitle-track.mp4")
                 };
                 let output = staging.join("subtitles/subtitle-track.vtt");
-                match tokio::task::spawn_blocking(move || {
-                    crate::dash_subtitle::extract_to_vtt(&source, &output, &codecs)
-                })
-                .await
+                match tokio::task::spawn_blocking(move || extractor(&source, &output, &codecs))
+                    .await
                 {
                     Ok(Ok(_)) => {}
                     Ok(Err(crate::dash_subtitle::DashSubtitleError::Unsupported(message))) => {

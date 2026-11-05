@@ -10,19 +10,19 @@ use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::Path;
 
 /// Caps the assembled track before parsing its MP4 box tree.
-const MAX_TRACK_BYTES: u64 = 64 * 1024 * 1024;
+pub(super) const MAX_TRACK_BYTES: u64 = 64 * 1024 * 1024;
 /// Bounds the sample-table allocation performed by mp4box.
-const MAX_SAMPLE_COUNT: usize = 50_000;
+pub(super) const MAX_SAMPLE_COUNT: usize = 50_000;
 /// Prevents one subtitle sample from dominating parsing memory.
-const MAX_SAMPLE_BYTES: usize = 256 * 1024;
+pub(super) const MAX_SAMPLE_BYTES: usize = 256 * 1024;
 /// Bounds total bytes read from subtitle samples.
-const MAX_SAMPLE_TOTAL_BYTES: u64 = 48 * 1024 * 1024;
+pub(super) const MAX_SAMPLE_TOTAL_BYTES: u64 = 48 * 1024 * 1024;
 /// Bounds cue allocation and sorting work.
-const MAX_CUE_COUNT: usize = 50_000;
+pub(super) const MAX_CUE_COUNT: usize = 50_000;
 /// Bounds owned cue text, identifiers, and settings.
-const MAX_CUE_TEXT_BYTES: usize = 12 * 1024 * 1024;
+pub(super) const MAX_CUE_TEXT_BYTES: usize = 12 * 1024 * 1024;
 /// Bounds the normalized WebVTT staging file.
-const MAX_OUTPUT_BYTES: usize = 16 * 1024 * 1024;
+pub(super) const MAX_OUTPUT_BYTES: usize = 16 * 1024 * 1024;
 /// Bounds the nested cue boxes allocated for each sample.
 const MAX_WVTT_BOXES_PER_SAMPLE: usize = 256;
 /// Bounds the WebVTT configuration header copied from the sample entry.
@@ -234,7 +234,7 @@ pub(crate) fn is_wvtt_codec(codecs: &str) -> bool {
         })
 }
 
-fn open_source(source: &Path) -> Result<File, DashSubtitleError> {
+pub(super) fn open_source(source: &Path) -> Result<File, DashSubtitleError> {
     let mut options = OpenOptions::new();
     options.read(true);
     #[cfg(unix)]
@@ -263,7 +263,7 @@ fn open_source(source: &Path) -> Result<File, DashSubtitleError> {
     Ok(file)
 }
 
-fn contains_box(boxes: &[mp4box::Box], kind: &str) -> bool {
+pub(super) fn contains_box(boxes: &[mp4box::Box], kind: &str) -> bool {
     boxes.iter().any(|box_| {
         box_.typ == kind
             || box_
@@ -273,7 +273,7 @@ fn contains_box(boxes: &[mp4box::Box], kind: &str) -> bool {
     })
 }
 
-fn count_boxes(boxes: &[mp4box::Box], kind: &str) -> usize {
+pub(super) fn count_boxes(boxes: &[mp4box::Box], kind: &str) -> usize {
     boxes
         .iter()
         .map(|box_| {
@@ -286,7 +286,10 @@ fn count_boxes(boxes: &[mp4box::Box], kind: &str) -> usize {
         .sum()
 }
 
-fn find_box<'boxes>(boxes: &'boxes [mp4box::Box], kind: &str) -> Option<&'boxes mp4box::Box> {
+pub(super) fn find_box<'boxes>(
+    boxes: &'boxes [mp4box::Box],
+    kind: &str,
+) -> Option<&'boxes mp4box::Box> {
     for box_ in boxes {
         if box_.typ == kind {
             return Some(box_);
@@ -417,7 +420,7 @@ fn has_fragmented_wvtt_structure(boxes: &[mp4box::Box]) -> bool {
     contains_box(boxes, "moof") && contains_box(boxes, "trun") && contains_box(boxes, "mdat")
 }
 
-fn sample_is_within_media_data(
+pub(super) fn sample_is_within_media_data(
     boxes: &[mp4box::Box],
     sample_offset: u64,
     sample_size: u64,
@@ -438,7 +441,7 @@ fn sample_is_within_media_data(
     })
 }
 
-fn count_fragment_samples(
+pub(super) fn count_fragment_samples(
     boxes: &[mp4box::Box],
     reader: &mut File,
     total: &mut usize,
@@ -492,7 +495,7 @@ fn count_fragment_samples(
     Ok(())
 }
 
-fn clear_destination(destination: &Path) -> Result<(), DashSubtitleError> {
+pub(super) fn clear_destination(destination: &Path) -> Result<(), DashSubtitleError> {
     match fs::symlink_metadata(destination) {
         Ok(metadata) if metadata.file_type().is_symlink() || !metadata.is_file() => {
             Err(DashSubtitleError::Failed(
@@ -511,7 +514,10 @@ fn clear_destination(destination: &Path) -> Result<(), DashSubtitleError> {
     }
 }
 
-fn write_private_output(destination: &Path, bytes: &[u8]) -> Result<(), DashSubtitleError> {
+pub(super) fn write_private_output(
+    destination: &Path,
+    bytes: &[u8],
+) -> Result<(), DashSubtitleError> {
     if bytes.len() > MAX_OUTPUT_BYTES {
         return Err(DashSubtitleError::Unsupported(
             "The normalized DASH subtitle output exceeds the 16 MiB limit",
@@ -544,7 +550,7 @@ fn write_private_output(destination: &Path, bytes: &[u8]) -> Result<(), DashSubt
     Ok(())
 }
 
-fn units_to_millis(units: u64, timescale: u32) -> Result<u64, DashSubtitleError> {
+pub(super) fn units_to_millis(units: u64, timescale: u32) -> Result<u64, DashSubtitleError> {
     if timescale == 0 {
         return Err(DashSubtitleError::Unsupported(
             "A DASH subtitle track has a zero timescale",

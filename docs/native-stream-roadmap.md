@@ -73,14 +73,39 @@ Acceptance: parser tests for cue box parsing, timestamp normalization, empty
 cues, malformed boxes, bounds, timestamp eligibility, and sidecar/embedded
 FFmpeg handling.
 
-### 3b. Fragmented-MP4 STPP extraction
+### 3b. Fragmented-MP4 STPP extraction — bounded initial implementation
 
-Implement TTML sample parsing only after confirming how the selected DASH
-representation's Period start and presentation-time offset map to the in-band
-TTML media timebase. Support a standards-defined, explicitly bounded timing
-subset; inherited container timing, frame-based timing, unsupported profiles,
-and unsupported XML constructs remain on yt-dlp fallback. Do not add a TTML
-dependency without a separate maintenance/API review.
+The selected static DASH STPP representation uses the existing destination-part
+writer and is parsed with the project's existing mp4box and quick-xml
+dependencies. STPP sample entries must declare the supported TTML namespace,
+the subtitle handler must be subt, and the track must contain one fragmented
+STPP sample description. Tracks with edit lists, subsample resources, auxiliary
+MIME types, or unsupported sample-entry extensions remain on yt-dlp fallback.
+
+TTML timing is accepted only with media timeBase (the TTML default when the
+attribute is absent). Cue times are interpreted on the track presentation
+timeline, not relative to the containing sample or DASH segment. Each sample's
+document is clipped to its MP4 presentation interval [PTS, PTS + duration);
+adjacent repeated cues are coalesced. The accepted XML subset is limited to
+untimed, zero-origin body/div containers; plain p text with optional span and
+br children; and begin/end/dur expressed as millisecond-accurate clock-time or
+h, m, s, and ms offset-time. Empty documents are valid. TTML styling, regions, non-empty head metadata, external images,
+inherited/container timing, sequential time containers, frame/tick/wallclock
+expressions, CDATA, custom entities, and unsupported XML constructs remain on
+yt-dlp fallback. An absent or empty head is accepted; non-empty head content is
+rejected rather than silently discarded. The native parser does not attempt to
+render TTML layout or styles.
+
+Bounds: assembled track 64 MiB; 50,000 samples; 256 KiB per sample; 48 MiB
+total sample payload; 16 KiB sample-entry metadata; XML depth 32 and 20,000
+elements per document; 50,000 cues; 12 MiB cue text; 16 MiB normalized output.
+FFmpeg continues to consume the normalized WebVTT sidecar for sidecar and
+embedded subtitle finalization.
+
+Acceptance: tests for sample timeline clipping and duplicate sample snapshots,
+timeBase and time-expression validation, namespace/element restrictions,
+whitespace/entities, malformed or oversized XML, sample and output bounds,
+and unchanged WVTT and FFmpeg finalization paths.
 
 ### 4. Explicit-key encrypted media support
 

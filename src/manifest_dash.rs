@@ -881,14 +881,12 @@ pub(crate) fn plan_dash_representation(
                     sources.len() > 1,
                 )?
             }
-            (DashPresentation::Static, DashAddressing::Template(template)) => {
-                expand_template(
-                    &period_representation,
-                    &template.media,
-                    template,
-                    sources.len() > 1,
-                )?
-            }
+            (DashPresentation::Static, DashAddressing::Template(template)) => expand_template(
+                &period_representation,
+                &template.media,
+                template,
+                sources.len() > 1,
+            )?,
             (DashPresentation::Static, DashAddressing::List(_)) if live_selection => {
                 return Err(DashError::UnsupportedAddressing);
             }
@@ -1870,8 +1868,7 @@ fn expand_template(
 ) -> Result<Vec<DashResource>, DashError> {
     let segments = expand_segment_times(template)?;
     if require_period_alignment {
-        let period_ticks =
-            period_duration_to_ticks(template.period_duration, template.timescale)?;
+        let period_ticks = period_duration_to_ticks(template.period_duration, template.timescale)?;
         let expected_end = template
             .presentation_time_offset
             .checked_add(period_ticks)

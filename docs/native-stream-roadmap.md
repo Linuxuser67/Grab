@@ -89,10 +89,11 @@ document is clipped to its MP4 presentation interval [PTS, PTS + duration);
 adjacent repeated cues are coalesced. The accepted XML subset is limited to
 untimed, zero-origin body/div containers; plain p text with optional span and
 br children; and begin/end/dur expressed as millisecond-accurate clock-time or
-h, m, s, and ms offset-time. Empty documents are valid. TTML styling, regions,
-external images, inherited/container timing, sequential time containers,
-frame/tick/wallclock expressions, CDATA, custom entities, and unsupported XML
-constructs remain on yt-dlp fallback. The native parser does not attempt to
+h, m, s, and ms offset-time. Empty documents are valid. TTML styling, regions, non-empty head metadata, external images,
+inherited/container timing, sequential time containers, frame/tick/wallclock
+expressions, CDATA, custom entities, and unsupported XML constructs remain on
+yt-dlp fallback. An absent or empty head is accepted; non-empty head content is
+rejected rather than silently discarded. The native parser does not attempt to
 render TTML layout or styles.
 
 Bounds: assembled track 64 MiB; 50,000 samples; 256 KiB per sample; 48 MiB

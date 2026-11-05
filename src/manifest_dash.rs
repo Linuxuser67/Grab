@@ -3099,6 +3099,30 @@ mod tests {
     }
 
     #[test]
+    fn classifies_stpp_as_a_supported_zero_origin_mp4_subtitle() {
+        let body = TEMPLATE_MPD.replace(
+            "</Period>",
+            r#"
+    <AdaptationSet contentType="text" mimeType="application/mp4" lang="en">
+      <Role schemeIdUri="urn:mpeg:dash:role:2011" value="main"/>
+      <SegmentTemplate timescale="1" duration="5" initialization="ttml-init.mp4" media="ttml-$Number$.m4s"/>
+      <Representation id="sub-ttml" bandwidth="1000" codecs="stpp.ttml.im1t"/>
+    </AdaptationSet>
+</Period>"#,
+        );
+        let manifest =
+            parse_dash_manifest(BASE_URL, &body).expect("STPP representation should be recognized");
+        assert_eq!(manifest.subtitle_representations.len(), 1);
+        let representation = &manifest.subtitle_representations[0];
+        assert_eq!(representation.representation_id.as_deref(), Some("sub-ttml"));
+        assert_eq!(representation.codecs.as_deref(), Some("stpp.ttml.im1t"));
+
+        let plan = plan_dash_representation(&manifest, &representation.key)
+            .expect("STPP representation should be plannable");
+        assert!(plan.has_zero_origin_fragmented_subtitle_timeline());
+    }
+
+    #[test]
     fn wvtt_sample_timing_rejects_nonzero_period_start_and_presentation_offset() {
         let body = TEMPLATE_MPD.replace(
             "</Period>",

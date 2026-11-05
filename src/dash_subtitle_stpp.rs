@@ -3,12 +3,12 @@
 //! This deliberately accepts only simple, media-time TTML text. Each sample is
 //! a complete XML document whose cue times are on the track presentation
 //! timeline; the output is clipped to that sample's MP4 presentation interval.
-//! Styling, layout, external resources, and unsupported TTML timing stay on
-//! Grab's existing yt-dlp fallback path.
+//! Styling, layout, non-empty head metadata, external resources, and unsupported
+//! TTML timing stay on Grab's existing yt-dlp fallback path.
 
 use std::collections::BTreeMap;
-use std::fs::{self, File, OpenOptions};
-use std::io::{Read, Seek, SeekFrom, Write};
+use std::fs::File;
+use std::io::{Read, Seek, SeekFrom};
 use std::path::Path;
 
 use quick_xml::XmlVersion;
@@ -17,22 +17,21 @@ use quick_xml::events::{BytesStart, Event};
 use quick_xml::name::ResolveResult;
 use quick_xml::reader::NsReader;
 
-use crate::dash_subtitle::DashSubtitleError;
+use crate::dash_subtitle::{
+    DashSubtitleError, MAX_CUE_COUNT, MAX_CUE_TEXT_BYTES, MAX_OUTPUT_BYTES, MAX_SAMPLE_BYTES,
+    MAX_SAMPLE_COUNT, MAX_SAMPLE_TOTAL_BYTES, MAX_TRACK_BYTES, clear_destination, count_boxes,
+    count_fragment_samples, contains_box, find_box, open_source, sample_is_within_media_data,
+    units_to_millis, write_private_output,
+};
 
 const TTML_NAMESPACE: &str = "http://www.w3.org/ns/ttml";
 const TTML1_NAMESPACE: &str = "http://www.w3.org/2006/10/ttaf1";
 const TTML_PARAMETER_NAMESPACE: &str = "http://www.w3.org/ns/ttml#parameter";
+const TTML1_PARAMETER_NAMESPACE: &str = "http://www.w3.org/2006/10/ttaf1#parameter";
 
-const MAX_TRACK_BYTES: u64 = 64 * 1024 * 1024;
-const MAX_SAMPLE_COUNT: usize = 50_000;
-const MAX_SAMPLE_BYTES: usize = 256 * 1024;
-const MAX_SAMPLE_TOTAL_BYTES: u64 = 48 * 1024 * 1024;
 const MAX_SAMPLE_ENTRY_TEXT_BYTES: usize = 16 * 1024;
 const MAX_XML_DEPTH: usize = 32;
 const MAX_XML_ELEMENTS: usize = 20_000;
-const MAX_CUE_COUNT: usize = 50_000;
-const MAX_CUE_TEXT_BYTES: usize = 12 * 1024 * 1024;
-const MAX_OUTPUT_BYTES: usize = 16 * 1024 * 1024;
 const LINE_BREAK_MARKER: char = '\u{e000}';
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -56,7 +55,6 @@ struct Paragraph {
 enum Element {
     Tt,
     Head,
-    HeadContent,
     Body,
     Div,
     Paragraph,
@@ -70,7 +68,7 @@ pub(crate) fn is_stpp_codec(codecs: &str) -> bool {
     !codecs.is_empty()
         && codecs.split(',').all(|codec| {
             let codec = codec.trim().to_ascii_lowercase();
-            codec == "stpp" || codec.starts_with("stpp.")
+            codec == "stpp" || codec == "stpp.ttml.im1t"
         })
 }
 
@@ -116,21 +114,25 @@ pub(crate) fn extract_to_vtt(
             "The staged DASH subtitle track has malformed or unsupported MP4 boxes: {error}"
         ))
     })?;
-    if contains_box(&boxes, "edts")
-        || contains_box(&boxes, "elst")
-        || contains_box(&boxes, "subs")
+    if [
+        "edts", "elst", "subs", "sinf", "schm", "schi", "tenc", "senc", "saiz", "saio",
+    ]
+    .iter()
+    .any(|kind| contains_box(&boxes, kind))
     {
         return Err(DashSubtitleError::Unsupported(
             "STPP tracks with edit lists or external sample resources are not supported",
         ));
     }
-    if !has_fragmented_structure(&boxes) {
+    if !(contains_box(&boxes, "moof")
+        && contains_box(&boxes, "trun")
+        && contains_box(&boxes, "mdat")) {
         return Err(DashSubtitleError::Unsupported(
             "The staged DASH subtitle track is not fragmented MP4 with media data",
         ));
     }
     let sample_entry = single_stpp_sample_entry(&boxes)?;
-    validate_stpp_sample_entry(&mut file, sample_entry, track_bytes)?;
+    let ttml_namespace = validate_stpp_sample_entry(&mut file, sample_entry, track_bytes)?;
 
     let mut declared_samples = 0_usize;
     count_fragment_samples(&boxes, &mut file, &mut declared_samples)?;
@@ -235,9 +237,14 @@ pub(crate) fn extract_to_vtt(
                 ))
             })?;
 
-        for cue in parse_ttml_document(&bytes, start_ms, end_ms)? {
+        for cue in parse_ttml_document_with_namespace(&bytes, start_ms, end_ms, ttml_namespace)? {
+            let owned_text_bytes = cue.text.len()
+                .checked_add(cue.identifier.as_ref().map_or(0, String::len))
+                .ok_or(DashSubtitleError::Unsupported(
+                    "The DASH TTML cue text size overflows",
+                ))?;
             cue_text_bytes = cue_text_bytes
-                .checked_add(cue.text.len())
+                .checked_add(owned_text_bytes)
                 .filter(|size| *size <= MAX_CUE_TEXT_BYTES)
                 .ok_or(DashSubtitleError::Unsupported(
                     "The DASH TTML cues exceed the 12 MiB text limit",
@@ -263,79 +270,9 @@ pub(crate) fn extract_to_vtt(
             .then_with(|| left.text.cmp(&right.text))
     });
     let cues = merge_adjacent_cues(cues);
-    let output = serialize_vtt(&cues);
+    let output = serialize_vtt(&cues)?;
     write_private_output(destination, output.as_bytes())?;
     Ok(true)
-}
-
-fn open_source(source: &Path) -> Result<File, DashSubtitleError> {
-    let mut options = OpenOptions::new();
-    options.read(true);
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::OpenOptionsExt as _;
-        options.custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK);
-    }
-    let file = options.open(source).map_err(|error| {
-        DashSubtitleError::Failed(format!(
-            "Could not safely open the staged DASH subtitle track: {error}"
-        ))
-    })?;
-    if !file
-        .metadata()
-        .map_err(|error| {
-            DashSubtitleError::Failed(format!(
-                "Could not inspect the staged DASH subtitle track: {error}"
-            ))
-        })?
-        .is_file()
-    {
-        return Err(DashSubtitleError::Failed(
-            "The staged DASH subtitle track is not a regular file".to_string(),
-        ));
-    }
-    Ok(file)
-}
-
-fn contains_box(boxes: &[mp4box::Box], kind: &str) -> bool {
-    boxes.iter().any(|box_| {
-        box_.typ == kind
-            || box_
-                .children
-                .as_deref()
-                .is_some_and(|children| contains_box(children, kind))
-    })
-}
-
-fn count_boxes(boxes: &[mp4box::Box], kind: &str) -> usize {
-    boxes
-        .iter()
-        .map(|box_| {
-            usize::from(box_.typ == kind)
-                + box_
-                    .children
-                    .as_deref()
-                    .map_or(0, |children| count_boxes(children, kind))
-        })
-        .sum()
-}
-
-fn find_box<'boxes>(boxes: &'boxes [mp4box::Box], kind: &str) -> Option<&'boxes mp4box::Box> {
-    for box_ in boxes {
-        if box_.typ == kind {
-            return Some(box_);
-        }
-        if let Some(children) = box_.children.as_deref()
-            && let Some(found) = find_box(children, kind)
-        {
-            return Some(found);
-        }
-    }
-    None
-}
-
-fn has_fragmented_structure(boxes: &[mp4box::Box]) -> bool {
-    contains_box(boxes, "moof") && contains_box(boxes, "trun") && contains_box(boxes, "mdat")
 }
 
 fn single_stpp_sample_entry(
@@ -363,7 +300,7 @@ fn validate_stpp_sample_entry(
     reader: &mut File,
     entry: &mp4box::Box,
     track_bytes: u64,
-) -> Result<(), DashSubtitleError> {
+) -> Result<&'static str, DashSubtitleError> {
     if entry.header_size < 8 {
         return Err(DashSubtitleError::Unsupported(
             "The STPP sample entry has an invalid box header",
@@ -432,9 +369,16 @@ fn validate_stpp_sample_entry(
     let auxiliary_mime_types = std::str::from_utf8(fields[2]).map_err(|_| {
         DashSubtitleError::Unsupported("The STPP auxiliary MIME field is not valid UTF-8")
     })?;
-    if (namespace != TTML_NAMESPACE && namespace != TTML1_NAMESPACE)
-        || !auxiliary_mime_types.trim().is_empty()
-    {
+    let ttml_namespace = match namespace {
+        TTML_NAMESPACE => TTML_NAMESPACE,
+        TTML1_NAMESPACE => TTML1_NAMESPACE,
+        _ => {
+            return Err(DashSubtitleError::Unsupported(
+                "The STPP sample entry uses an unsupported TTML namespace",
+            ));
+        }
+    };
+    if !auxiliary_mime_types.is_empty() {
         return Err(DashSubtitleError::Unsupported(
             "Only plain TTML STPP samples without external resources are supported",
         ));
@@ -449,88 +393,23 @@ fn validate_stpp_sample_entry(
             "The STPP sample entry contains an unsupported extension box",
         ));
     }
-    Ok(())
+    Ok(ttml_namespace)
 }
 
-fn sample_is_within_media_data(
-    boxes: &[mp4box::Box],
-    sample_offset: u64,
-    sample_size: u64,
-) -> bool {
-    let Some(sample_end) = sample_offset.checked_add(sample_size) else {
-        return false;
-    };
-    boxes.iter().any(|box_| {
-        if box_.typ != "mdat" {
-            return false;
-        }
-        let (Some(data_start), Some(data_size)) = (box_.payload_offset, box_.payload_size) else {
-            return false;
-        };
-        data_start
-            .checked_add(data_size)
-            .is_some_and(|data_end| sample_offset >= data_start && sample_end <= data_end)
-    })
-}
-
-fn count_fragment_samples(
-    boxes: &[mp4box::Box],
-    reader: &mut File,
-    total: &mut usize,
-) -> Result<(), DashSubtitleError> {
-    for box_ in boxes {
-        if box_.typ == "trun" {
-            let payload_offset = box_.payload_offset.ok_or(DashSubtitleError::Unsupported(
-                "A DASH fragment run has no payload offset",
-            ))?;
-            let payload_size = box_.payload_size.ok_or(DashSubtitleError::Unsupported(
-                "A DASH fragment run has no payload size",
-            ))?;
-            if payload_size < 8 {
-                return Err(DashSubtitleError::Unsupported(
-                    "A DASH fragment run has a truncated sample count",
-                ));
-            }
-            let count_offset =
-                payload_offset
-                    .checked_add(4)
-                    .ok_or(DashSubtitleError::Unsupported(
-                        "A DASH fragment run sample-count offset overflows",
-                    ))?;
-            reader
-                .seek(SeekFrom::Start(count_offset))
-                .map_err(|error| {
-                    DashSubtitleError::Failed(format!(
-                        "Could not inspect a DASH fragment run: {error}"
-                    ))
-                })?;
-            let mut bytes = [0_u8; 4];
-            reader.read_exact(&mut bytes).map_err(|error| {
-                DashSubtitleError::Failed(format!(
-                    "Could not read a DASH fragment run sample count: {error}"
-                ))
-            })?;
-            let count = usize::try_from(u32::from_be_bytes(bytes)).map_err(|_| {
-                DashSubtitleError::Unsupported("A DASH fragment run sample count is out of range")
-            })?;
-            *total = total
-                .checked_add(count)
-                .filter(|count| *count <= MAX_SAMPLE_COUNT)
-                .ok_or(DashSubtitleError::Unsupported(
-                    "The DASH subtitle fragments exceed the 50,000 sample limit",
-                ))?;
-        }
-        if let Some(children) = box_.children.as_deref() {
-            count_fragment_samples(children, reader, total)?;
-        }
-    }
-    Ok(())
-}
-
+#[cfg(test)]
 fn parse_ttml_document(
     bytes: &[u8],
     sample_start_ms: u64,
     sample_end_ms: u64,
+) -> Result<Vec<Cue>, DashSubtitleError> {
+    parse_ttml_document_with_namespace(bytes, sample_start_ms, sample_end_ms, TTML_NAMESPACE)
+}
+
+fn parse_ttml_document_with_namespace(
+    bytes: &[u8],
+    sample_start_ms: u64,
+    sample_end_ms: u64,
+    expected_namespace: &str,
 ) -> Result<Vec<Cue>, DashSubtitleError> {
     if bytes.is_empty() || bytes.len() > MAX_SAMPLE_BYTES {
         return Err(DashSubtitleError::Unsupported(
@@ -555,10 +434,10 @@ fn parse_ttml_document(
     loop {
         let (namespace, event) = reader
             .read_resolved_event_into(&mut buffer)
-            .map_err(|error| {
-                DashSubtitleError::UnsupportedMp4(format!(
-                    "The DASH TTML sample contains malformed XML: {error}"
-                ))
+            .map_err(|_| {
+                DashSubtitleError::Unsupported(
+                    "The DASH TTML sample contains malformed XML",
+                )
             })?;
         match event {
             Event::Start(start) => {
@@ -570,8 +449,14 @@ fn parse_ttml_document(
                         "The DASH TTML sample exceeds the XML depth or element limit",
                     ));
                 }
-                let (element, next_paragraph) =
-                    classify_element(&start, &namespace, stack.last().copied(), &mut root_seen, &mut body_seen)?;
+                let (element, next_paragraph) = classify_element(
+                    &start,
+                    &namespace,
+                    stack.last().copied(),
+                    &mut root_seen,
+                    &mut body_seen,
+                    expected_namespace,
+                )?;
                 if element == Element::Break {
                     return Err(DashSubtitleError::Unsupported(
                         "TTML line breaks must use empty br elements",
@@ -596,8 +481,14 @@ fn parse_ttml_document(
                         "The DASH TTML sample exceeds the XML depth or element limit",
                     ));
                 }
-                let (element, next_paragraph) =
-                    classify_element(&start, &namespace, stack.last().copied(), &mut root_seen, &mut body_seen)?;
+                    let (element, next_paragraph) = classify_element(
+                    &start,
+                    &namespace,
+                    stack.last().copied(),
+                    &mut root_seen,
+                    &mut body_seen,
+                    expected_namespace,
+                )?;
                 match element {
                     Element::Paragraph => {
                         let paragraph = next_paragraph.ok_or(
@@ -637,7 +528,6 @@ fn parse_ttml_document(
                     Some(Element::Paragraph | Element::Span) => {
                         append_paragraph_text(&mut paragraph, &content)?;
                     }
-                    Some(Element::Head | Element::HeadContent) => {}
                     _ if content.trim().is_empty() => {}
                     _ => {
                         return Err(DashSubtitleError::Unsupported(
@@ -666,7 +556,6 @@ fn parse_ttml_document(
                         };
                         append_paragraph_text(&mut paragraph, &character)?;
                     }
-                    Some(Element::Head | Element::HeadContent) => {}
                     _ => {
                         return Err(DashSubtitleError::Unsupported(
                             "An XML entity reference outside TTML text is not supported",
@@ -704,28 +593,28 @@ fn classify_element(
     parent: Option<Element>,
     root_seen: &mut bool,
     body_seen: &mut bool,
+    expected_namespace: &str,
 ) -> Result<(Element, Option<Paragraph>), DashSubtitleError> {
     if !matches!(
         namespace,
         ResolveResult::Bound(namespace)
-            if namespace.into_inner() == TTML_NAMESPACE.as_bytes()
-                || namespace.into_inner() == TTML1_NAMESPACE.as_bytes()
+            if namespace.into_inner() == expected_namespace
     ) {
         return Err(DashSubtitleError::Unsupported(
             "The DASH TTML document uses an unsupported XML namespace",
         ));
     }
-    let name = std::str::from_utf8(start.name().local_name().as_ref()).map_err(|_| {
-        DashSubtitleError::Unsupported("A TTML element name is not valid UTF-8")
-    })?;
+    let name = start.name().local_name().as_ref();
 
-    if matches!(parent, Some(Element::Head | Element::HeadContent)) {
-        return Ok((Element::HeadContent, None));
+    if matches!(parent, Some(Element::Head)) {
+        return Err(DashSubtitleError::Unsupported(
+            "TTML head metadata, styling, and layout are not supported",
+        ));
     }
 
     match (parent, name) {
         (None, "tt") if !*root_seen => {
-            validate_root_attributes(start)?;
+            validate_root_attributes(start, expected_namespace)?;
             *root_seen = true;
             Ok((Element::Tt, None))
         }
@@ -768,9 +657,7 @@ fn read_attributes(
         let attribute = attribute.map_err(|_| {
             DashSubtitleError::Unsupported("A TTML element has malformed attributes")
         })?;
-        let key = std::str::from_utf8(attribute.key.as_ref()).map_err(|_| {
-            DashSubtitleError::Unsupported("A TTML attribute name is not valid UTF-8")
-        })?;
+        let key = attribute.key.as_ref();
         let value = attribute
             .normalized_value(XmlVersion::Implicit1_0)
             .map_err(|_| {
@@ -790,7 +677,10 @@ fn is_namespace_declaration(name: &str) -> bool {
     name == "xmlns" || name.starts_with("xmlns:")
 }
 
-fn validate_root_attributes(start: &BytesStart<'_>) -> Result<(), DashSubtitleError> {
+fn validate_root_attributes(
+    start: &BytesStart<'_>,
+    expected_namespace: &str,
+) -> Result<(), DashSubtitleError> {
     let attributes = read_attributes(start)?;
     for (name, value) in &attributes {
         if is_namespace_declaration(name) || name == "xml:lang" {
@@ -804,15 +694,20 @@ fn validate_root_attributes(start: &BytesStart<'_>) -> Result<(), DashSubtitleEr
             }
             continue;
         }
-        if name == "ttp:timeBase" || name == "ttp:profile" {
+        if name == "ttp:timeBase" {
+            let expected_parameter_namespace = if expected_namespace == TTML1_NAMESPACE {
+                TTML1_PARAMETER_NAMESPACE
+            } else {
+                TTML_PARAMETER_NAMESPACE
+            };
             if attributes.get("xmlns:ttp").map(String::as_str)
-                != Some(TTML_PARAMETER_NAMESPACE)
+                != Some(expected_parameter_namespace)
             {
                 return Err(DashSubtitleError::Unsupported(
                     "The TTML parameter attributes use an unexpected namespace",
                 ));
             }
-            if name == "ttp:timeBase" && value != "media" {
+            if value != "media" {
                 return Err(DashSubtitleError::Unsupported(
                     "Only TTML media timeBase is defined for native STPP extraction",
                 ));
@@ -887,9 +782,12 @@ fn parse_paragraph_attributes(
             "end" => paragraph.end_ms = Some(parse_ttml_time(&value)?),
             "dur" => paragraph.duration_ms = Some(parse_ttml_time(&value)?),
             "xml:id" => {
-                if value.contains('\n') || value.contains('\r') || value.is_empty() {
+                if value.is_empty()
+                    || value.contains("-->")
+                    || value.chars().any(|character| character.is_whitespace() || character.is_control())
+                {
                     return Err(DashSubtitleError::Unsupported(
-                        "A TTML paragraph identifier is empty or contains a line break",
+                        "A TTML paragraph identifier is not a safe WebVTT cue identifier",
                     ));
                 }
                 paragraph.identifier = Some(value);
@@ -1020,6 +918,13 @@ fn append_paragraph_break(paragraph: &mut Option<Paragraph>) -> Result<(), DashS
     Ok(())
 }
 
+fn is_xml_10_character(character: char) -> bool {
+    matches!(
+        u32::from(character),
+        0x9 | 0xA | 0xD | 0x20..=0xD7FF | 0xE000..=0xFFFD | 0x10000..=0x10FFFF
+    )
+}
+
 fn append_paragraph_text(
     paragraph: &mut Option<Paragraph>,
     value: &str,
@@ -1027,6 +932,11 @@ fn append_paragraph_text(
     let paragraph = paragraph.as_mut().ok_or(DashSubtitleError::Unsupported(
         "TTML text has no enclosing paragraph",
     ))?;
+    if !value.chars().all(is_xml_10_character) {
+        return Err(DashSubtitleError::Unsupported(
+            "The TTML text contains a character that is not permitted in XML 1.0",
+        ));
+    }
     if value.contains(LINE_BREAK_MARKER) {
         return Err(DashSubtitleError::Unsupported(
             "The TTML text contains a reserved line-break character",
@@ -1111,39 +1021,71 @@ fn normalize_ttml_text(text: &str) -> String {
 fn merge_adjacent_cues(cues: Vec<Cue>) -> Vec<Cue> {
     let mut merged: Vec<Cue> = Vec::with_capacity(cues.len());
     for cue in cues {
-        if let Some(previous) = merged.last_mut()
-            && previous.identifier == cue.identifier
-            && previous.text == cue.text
-            && cue.start_ms <= previous.end_ms
-        {
-            previous.end_ms = previous.end_ms.max(cue.end_ms);
-        } else {
+        let same_content = merged.last().is_some_and(|previous| {
+            previous.identifier == cue.identifier && previous.text == cue.text
+        });
+        let adjacent = merged
+            .last()
+            .is_some_and(|previous| same_content && cue.start_ms == previous.end_ms);
+        let duplicate = merged.last().is_some_and(|previous| {
+            same_content
+                && cue.start_ms == previous.start_ms
+                && cue.end_ms == previous.end_ms
+        });
+        if adjacent {
+            if let Some(previous) = merged.last_mut() {
+                previous.end_ms = cue.end_ms;
+            }
+        } else if !duplicate {
             merged.push(cue);
         }
     }
     merged
 }
 
-fn serialize_vtt(cues: &[Cue]) -> String {
+fn serialize_vtt(cues: &[Cue]) -> Result<String, DashSubtitleError> {
     let mut output = String::from("WEBVTT\n\n");
     for cue in cues {
         if let Some(identifier) = &cue.identifier {
-            output.push_str(identifier);
-            output.push('\n');
+            push_output(&mut output, identifier)?;
+            push_output(&mut output, "\n")?;
         }
-        output.push_str(&format_timestamp(cue.start_ms));
-        output.push_str(" --> ");
-        output.push_str(&format_timestamp(cue.end_ms));
-        output.push('\n');
+        push_output(&mut output, &format_timestamp(cue.start_ms))?;
+        push_output(&mut output, " --> ")?;
+        push_output(&mut output, &format_timestamp(cue.end_ms))?;
+        push_output(&mut output, "\n")?;
         for (index, line) in cue.text.split('\n').enumerate() {
             if index > 0 {
-                output.push('\n');
+                push_output(&mut output, "\n")?;
             }
-            output.push_str(&line.replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;"));
+            for character in line.chars() {
+                match character {
+                    '&' => push_output(&mut output, "&amp;")?,
+                    '<' => push_output(&mut output, "&lt;")?,
+                    '>' => push_output(&mut output, "&gt;")?,
+                    character => {
+                        let mut utf8 = [0_u8; 4];
+                        push_output(&mut output, character.encode_utf8(&mut utf8))?;
+                    }
+                }
+            }
         }
-        output.push_str("\n\n");
+        push_output(&mut output, "\n\n")?;
     }
-    output
+    Ok(output)
+}
+
+fn push_output(output: &mut String, value: &str) -> Result<(), DashSubtitleError> {
+    let new_len = output
+        .len()
+        .checked_add(value.len())
+        .filter(|length| *length <= MAX_OUTPUT_BYTES)
+        .ok_or(DashSubtitleError::Unsupported(
+            "The normalized DASH subtitle output exceeds the 16 MiB limit",
+        ))?;
+    output.reserve(new_len.saturating_sub(output.len()));
+    output.push_str(value);
+    Ok(())
 }
 
 fn format_timestamp(milliseconds: u64) -> String {
@@ -1152,74 +1094,6 @@ fn format_timestamp(milliseconds: u64) -> String {
     let seconds = (milliseconds / 1_000) % 60;
     let fraction = milliseconds % 1_000;
     format!("{hours:02}:{minutes:02}:{seconds:02}.{fraction:03}")
-}
-
-fn units_to_millis(units: u64, timescale: u32) -> Result<u64, DashSubtitleError> {
-    if timescale == 0 {
-        return Err(DashSubtitleError::Unsupported(
-            "A DASH subtitle track has a zero timescale",
-        ));
-    }
-    let millis = u128::from(units)
-        .checked_mul(1_000)
-        .ok_or(DashSubtitleError::Unsupported(
-            "A DASH subtitle timestamp overflows the supported time range",
-        ))?
-        / u128::from(timescale);
-    u64::try_from(millis)
-        .map_err(|_| DashSubtitleError::Unsupported("A DASH subtitle timestamp is out of range"))
-}
-
-fn clear_destination(destination: &Path) -> Result<(), DashSubtitleError> {
-    match fs::symlink_metadata(destination) {
-        Ok(metadata) if metadata.file_type().is_symlink() || !metadata.is_file() => {
-            Err(DashSubtitleError::Failed(
-                "The normalized DASH subtitle staging path is not a regular file".to_string(),
-            ))
-        }
-        Ok(_) => fs::remove_file(destination).map_err(|error| {
-            DashSubtitleError::Failed(format!(
-                "Could not clear an old normalized DASH subtitle file: {error}"
-            ))
-        }),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
-        Err(error) => Err(DashSubtitleError::Failed(format!(
-            "Could not inspect normalized DASH subtitle staging: {error}"
-        ))),
-    }
-}
-
-fn write_private_output(destination: &Path, bytes: &[u8]) -> Result<(), DashSubtitleError> {
-    if bytes.len() > MAX_OUTPUT_BYTES {
-        return Err(DashSubtitleError::Unsupported(
-            "The normalized DASH subtitle output exceeds the 16 MiB limit",
-        ));
-    }
-    let parent = destination.parent().ok_or_else(|| {
-        DashSubtitleError::Failed("The normalized DASH subtitle path has no parent".to_string())
-    })?;
-    let temporary = tempfile::NamedTempFile::new_in(parent).map_err(|error| {
-        DashSubtitleError::Failed(format!(
-            "Could not create private subtitle staging: {error}"
-        ))
-    })?;
-    temporary.as_file().write_all(bytes).map_err(|error| {
-        DashSubtitleError::Failed(format!(
-            "Could not write normalized DASH subtitles: {error}"
-        ))
-    })?;
-    temporary.as_file().sync_all().map_err(|error| {
-        DashSubtitleError::Failed(format!(
-            "Could not flush normalized DASH subtitles: {error}"
-        ))
-    })?;
-    temporary.persist_noclobber(destination).map_err(|error| {
-        DashSubtitleError::Failed(format!(
-            "Could not publish normalized DASH subtitle staging without clobbering: {}",
-            error.error
-        ))
-    })?;
-    Ok(())
 }
 
 #[cfg(test)]
@@ -1237,7 +1111,9 @@ mod tests {
     fn recognizes_stpp_codec_profiles_without_accepting_wvtt() {
         assert!(is_stpp_codec("stpp"));
         assert!(is_stpp_codec("stpp.ttml.im1t"));
-        assert!(is_stpp_codec("stpp, stpp.ttml.etd1"));
+        assert!(is_stpp_codec("stpp, stpp.ttml.im1t"));
+        assert!(!is_stpp_codec("stpp.ttml.im1i"));
+        assert!(!is_stpp_codec("stpp.unknown"));
         assert!(!is_stpp_codec("wvtt"));
         assert!(!is_stpp_codec("stppx"));
         assert!(!is_stpp_codec(""));
@@ -1285,6 +1161,37 @@ mod tests {
     }
 
     #[test]
+    fn accepts_ttml1_media_timebase_with_its_parameter_namespace() {
+        let xml = format!(
+            r#"<tt xmlns="{TTML1_NAMESPACE}" xmlns:ttp="{TTML1_PARAMETER_NAMESPACE}" ttp:timeBase="media"><body><div><p begin="0s" end="1s">text</p></div></body></tt>"#
+        );
+        assert_eq!(
+            parse_ttml_document_with_namespace(&xml, 0, 1_000, TTML1_NAMESPACE)
+                .expect("parse TTML1 media-time sample")[0]
+                .text,
+            "text"
+        );
+    }
+
+    #[test]
+    fn rejects_nonempty_head_metadata_and_styling() {
+        let styled_head = format!(
+            r#"<tt xmlns="{TTML_NAMESPACE}"><head><styling><style xml:id="caption"/></styling></head><body><div><p begin="0s" end="1s">text</p></div></body></tt>"#
+        );
+        assert!(parse_ttml_document(styled_head.as_bytes(), 0, 1_000).is_err());
+
+        let empty_head = format!(
+            r#"<tt xmlns="{TTML_NAMESPACE}"><head/><body><div><p begin="0s" end="1s">text</p></div></body></tt>"#
+        );
+        assert_eq!(
+            parse_ttml_document(empty_head.as_bytes(), 0, 1_000)
+                .expect("empty TTML head is allowed")[0]
+                .text,
+            "text"
+        );
+    }
+
+    #[test]
     fn rejects_non_media_timebases_and_inherited_or_sequential_timing() {
         let clock = format!(
             r#"<tt xmlns="{TTML_NAMESPACE}" xmlns:ttp="{TTML_PARAMETER_NAMESPACE}" ttp:timeBase="clock"><body><div><p>text</p></div></body></tt>"#
@@ -1322,7 +1229,7 @@ mod tests {
         let cues = parse_ttml_document(&xml, 0, 2_000).expect("parse TTML text");
         assert_eq!(cues[0].text, "hello world & all\nnext <line>");
         assert_eq!(
-            serialize_vtt(&cues),
+            serialize_vtt(&cues).expect("serialize bounded WebVTT"),
             "WEBVTT\n\n00:00:00.000 --> 00:00:02.000\nhello world &amp; all\nnext &lt;line&gt;\n\n"
         );
     }
@@ -1370,6 +1277,17 @@ mod tests {
             "<div>".repeat(MAX_XML_DEPTH + 1)
         );
         assert!(parse_ttml_document(nested.as_bytes(), 0, 1_000).is_err());
+    }
+
+    #[test]
+    fn normalized_vtt_output_is_bounded_before_growth() {
+        let cue = Cue {
+            start_ms: 0,
+            end_ms: 1,
+            identifier: Some("x".repeat(MAX_OUTPUT_BYTES)),
+            text: String::new(),
+        };
+        assert!(serialize_vtt(&[cue]).is_err());
     }
 
     #[test]

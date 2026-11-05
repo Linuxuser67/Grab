@@ -4702,6 +4702,7 @@ dependencies = [
  "cipher",
  "ctr",
  "hex",
+ "iori-ssa",
 ]
 
 [[package]]

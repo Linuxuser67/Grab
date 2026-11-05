@@ -2639,7 +2639,7 @@ async fn fetch_resource_once(
     }
     if resource.key && content_length.is_some_and(|length| length != 16) {
         return Err(ManifestRunError::Unsupported(
-            "The HLS AES-128 key is not 16 bytes".to_string(),
+            "The HLS identity key is not 16 bytes".to_string(),
         ));
     }
 
@@ -2689,7 +2689,7 @@ async fn fetch_resource_once(
             })?;
         if resource.key && size > 16 {
             return Err(ManifestRunError::Unsupported(
-                "The HLS AES-128 key is not 16 bytes".to_string(),
+                "The HLS identity key is not 16 bytes".to_string(),
             ));
         }
         file.write_all(&chunk)
@@ -2717,7 +2717,7 @@ async fn fetch_resource_once(
     }
     if size == 0 || (resource.key && size != 16) {
         return Err(ManifestRunError::Unsupported(if resource.key {
-            "The HLS AES-128 key is not 16 bytes".to_string()
+            "The HLS identity key is not 16 bytes".to_string()
         } else {
             "The stream server returned an empty segment".to_string()
         }));

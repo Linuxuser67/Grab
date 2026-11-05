@@ -2287,3 +2287,125 @@ async fn live_hls_snapshot_appends_fetched_mpegts_fragments_to_visible_destinati
         expected.len() as u64
     );
 }
+
+#[tokio::test]
+async fn hls_sample_aes_mpegts_is_decrypted_by_ffmpeg_after_localization() {
+    if !tools_available() {
+        return;
+    }
+
+    let root = TempRoot::new("sample-aes");
+    let encrypted_segment = include_bytes!("../tests/fixtures/hls-sample-aes/ac3.ts").to_vec();
+    let key = include_bytes!("../tests/fixtures/hls-sample-aes/key.bin").to_vec();
+    let iv = include_bytes!("../tests/fixtures/hls-sample-aes/iv.bin");
+    let iv_hex = iv
+        .iter()
+        .map(|byte| format!("{byte:02X}"))
+        .collect::<String>();
+    let playlist = format!(
+        "#EXTM3U\n#EXT-X-VERSION:5\n#EXT-X-TARGETDURATION:2\n#EXT-X-MEDIA-SEQUENCE:0\n#EXT-X-KEY:METHOD=SAMPLE-AES,URI=\"key.bin\",IV=0x{iv_hex}\n#EXTINF:2,\nsegment-0.ts\n#EXT-X-ENDLIST\n"
+    );
+    let mut plan = crate::manifest::plan_hls_media_playlist(
+        "https://origin.example.test/index.m3u8",
+        playlist.as_bytes(),
+    )
+    .expect("plan identity SAMPLE-AES MPEG-TS fixture");
+    assert!(
+        !plan.is_destination_assemblable_candidate(),
+        "encrypted HLS must use the local playlist path so FFmpeg sees the key tag"
+    );
+
+    let files = HashMap::from([
+        ("/segment-0.ts".to_string(), encrypted_segment),
+        ("/key.bin".to_string(), key.to_vec()),
+    ]);
+    let (base_url, server) = spawn_fixture_server(files, plan.resources.len()).await;
+    for resource in plan.resources.iter_mut() {
+        resource.url = loopback_resource_url(&base_url, &resource.url);
+    }
+
+    let video_dir = root.path().join("video");
+    tokio::fs::create_dir_all(&video_dir)
+        .await
+        .expect("create SAMPLE-AES staging directory");
+    let client = fixture_client();
+    let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+    let downloaded = Arc::new(AtomicU64::new(0));
+    let (_abort_tx, mut abort) = tokio::sync::oneshot::channel();
+    assert!(
+        fetch_resources(
+            &client,
+            hls_resources(&plan),
+            &video_dir,
+            2,
+            &tx,
+            &downloaded,
+            &mut abort,
+        )
+        .await
+        .expect("fetch SAMPLE-AES segment and identity key"),
+        "SAMPLE-AES resource fetch unexpectedly aborted"
+    );
+    wait_for_fixture_server(server).await;
+    assert_eq!(downloaded.load(Ordering::Relaxed), 65_440);
+
+    write_playlist(&video_dir, &plan)
+        .await
+        .expect("write localized SAMPLE-AES playlist");
+    let output = root.path().join("sample-aes-output.mkv");
+    assert!(
+        run_ffmpeg(
+            Path::new("ffmpeg"),
+            &video_dir.join("local.m3u8"),
+            None,
+            SubtitleOutput::default(),
+            &output,
+            &mut abort,
+        )
+        .await
+        .expect("finalize SAMPLE-AES fixture with FFmpeg"),
+        "SAMPLE-AES FFmpeg finalization unexpectedly aborted"
+    );
+
+    let decoded = Command::new("ffmpeg")
+        .args([
+            "-protocol_whitelist",
+            "file,crypto",
+            "-allowed_extensions",
+            "bin",
+            "-allowed_segment_extensions",
+            "bin",
+            "-extension_picky",
+            "0",
+            "-v",
+            "error",
+            "-xerror",
+            "-i",
+        ])
+        .arg(&video_dir.join("local.m3u8"))
+        .args(["-f", "null", "-"])
+        .output()
+        .expect("decode the SAMPLE-AES source to validate decrypted frames");
+    assert_command_succeeded(&decoded, "FFmpeg could not decode the SAMPLE-AES source");
+
+    let probe = Command::new("ffprobe")
+        .args([
+            "-v",
+            "error",
+            "-show_entries",
+            "stream=codec_name",
+            "-of",
+            "default=noprint_wrappers=1",
+        ])
+        .arg(&output)
+        .output()
+        .expect("probe decrypted SAMPLE-AES output");
+    assert_command_succeeded(&probe, "ffprobe rejected decrypted SAMPLE-AES output");
+    assert!(
+        String::from_utf8_lossy(&probe.stdout)
+            .lines()
+            .any(|line| line == "codec_name=ac3"),
+        "FFmpeg did not expose the decrypted AC-3 stream: {}",
+        String::from_utf8_lossy(&probe.stdout)
+    );
+}

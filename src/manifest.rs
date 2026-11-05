@@ -186,7 +186,7 @@ fn is_rotating_signature_parameter(name: &str) -> bool {
 pub(crate) enum HlsResourceKind {
     InitMap,
     Segment,
-    /// AES-128 identity key localized beside the rewritten media playlist.
+    /// HLS identity key localized beside the rewritten media playlist.
     Key,
 }
 
@@ -484,7 +484,9 @@ impl HlsLiveAccumulator {
                 return Err(ManifestError::UnsupportedPlaylist);
             }
             if let Some(key) = segment.key.as_ref() {
-                if key.method != KeyMethod::AES128
+                let sample_aes = key.method == KeyMethod::SampleAES;
+                if (key.method != KeyMethod::AES128 && !sample_aes)
+                    || (sample_aes && segment.map.is_some())
                     || (segment.map.is_some() && key.iv.is_none())
                     || key
                         .keyformat
@@ -1206,7 +1208,15 @@ fn build_hls_plan(base_url: Url, mut playlist: MediaPlaylist) -> Result<HlsPlan,
         }
 
         if let Some(key) = segment.key.as_mut() {
-            if key.method != KeyMethod::AES128 {
+            let sample_aes = key.method == KeyMethod::SampleAES;
+            if key.method != KeyMethod::AES128 && !sample_aes {
+                return Err(ManifestError::UnsupportedEncryption);
+            }
+            // FFmpeg's HLS demuxer implements SAMPLE-AES for MPEG-TS
+            // elementary streams. SAMPLE-AES in fragmented MP4 is the
+            // Common Encryption cbcs scheme and is deliberately not routed
+            // through this transport-stream path.
+            if sample_aes && segment.map.is_some() {
                 return Err(ManifestError::UnsupportedEncryption);
             }
             // RFC 8216 requires an explicit IV for AES-128-encrypted
@@ -1250,6 +1260,16 @@ fn build_hls_plan(base_url: Url, mut playlist: MediaPlaylist) -> Result<HlsPlan,
         }
 
         let segment_url = resolve_resource_url(&base_url, &segment.uri)?;
+        if segment
+            .key
+            .as_ref()
+            .is_some_and(|key| key.method == KeyMethod::SampleAES)
+            && [".m4s", ".mp4", ".cmfv", ".cmfa"]
+                .iter()
+                .any(|extension| segment_url.path().to_ascii_lowercase().ends_with(extension))
+        {
+            return Err(ManifestError::UnsupportedEncryption);
+        }
         let range = match segment.byte_range.as_ref() {
             Some(byte_range) => {
                 let resource_url = resource_cache_key(&segment_url);
@@ -1880,6 +1900,46 @@ media.mp4
     }
 
     #[test]
+    fn live_accumulator_restores_identity_sample_aes_key_tags() {
+        let mut accumulator = HlsLiveAccumulator::new();
+        let initial = plan_hls_media_playlist(
+            BASE_URL,
+            b"#EXTM3U\n#EXT-X-TARGETDURATION:4\n#EXT-X-MEDIA-SEQUENCE:100\n#EXT-X-KEY:METHOD=SAMPLE-AES,URI=\"key.bin\"\n#EXTINF:4,\n100.ts\n",
+        )
+        .expect("initial SAMPLE-AES live playlist");
+        let update = accumulator
+            .prepare_update(&initial)
+            .expect("prepare SAMPLE-AES live resources");
+        assert_eq!(update.resources.len(), 2, "one key and one segment");
+        accumulator
+            .commit_update_with_budget(update, 0, 0)
+            .expect("commit SAMPLE-AES live resources");
+
+        let staged = accumulator
+            .local_playlist_bytes()
+            .expect("serialize SAMPLE-AES local playlist");
+        let restored = HlsLiveAccumulator::from_local_playlist_bytes(&staged)
+            .expect("restore SAMPLE-AES live recording");
+        assert_eq!(restored.segment_count(), 1);
+        let local = m3u8_rs::parse_media_playlist_res(&staged)
+            .expect("parse restored SAMPLE-AES local playlist");
+        assert!(
+            local.segments[0]
+                .key
+                .as_ref()
+                .is_some_and(|key| key.method == KeyMethod::SampleAES)
+        );
+        assert!(
+            local.segments[0]
+                .key
+                .as_ref()
+                .and_then(|key| key.uri.as_deref())
+                .is_some_and(|uri| uri.starts_with("key-")),
+            "restored local playlist must retain its localized SAMPLE-AES key"
+        );
+    }
+
+    #[test]
     fn live_accumulator_preserves_last_commit_when_byte_limit_is_reached() {
         let mut accumulator = HlsLiveAccumulator::new();
         let initial = plan_hls_media_playlist(
@@ -2322,15 +2382,112 @@ video.m3u8
     }
 
     #[test]
-    fn rejects_sample_aes_instead_of_passing_unsupported_crypto_to_ffmpeg() {
+    fn sample_aes_identity_key_is_localized_for_ffmpeg_mpegts_decryption() {
         let body = br#"#EXTM3U
-#EXT-X-KEY:METHOD=SAMPLE-AES,URI="key.bin"
+#EXT-X-MEDIA-SEQUENCE:42
+#EXT-X-KEY:METHOD=SAMPLE-AES,URI="keys/media.key",KEYFORMAT="identity"
+#EXTINF:2,
+one.ts
+#EXT-X-ENDLIST
+"#;
+        let plan = plan_hls_media_playlist(BASE_URL, body)
+            .expect("identity SAMPLE-AES MPEG-TS should be planned for FFmpeg");
+
+        let bytes = plan
+            .local_playlist_bytes()
+            .expect("local SAMPLE-AES playlist should serialize");
+        let parsed =
+            m3u8_rs::parse_media_playlist_res(&bytes).expect("local playlist should parse");
+        let key = parsed.segments[0]
+            .key
+            .as_ref()
+            .expect("SAMPLE-AES key tag must remain for FFmpeg");
+        assert_eq!(key.method, KeyMethod::SampleAES);
+        assert_eq!(key.keyformat.as_deref(), Some("identity"));
+        assert_eq!(parsed.media_sequence, 42);
+        assert!(
+            key.iv.is_none(),
+            "the original media sequence must remain available for FFmpeg's default IV derivation"
+        );
+        assert!(
+            key.uri
+                .as_deref()
+                .is_some_and(|uri| uri.starts_with("key-")),
+            "FFmpeg must read the localized key rather than the remote URL"
+        );
+        assert_eq!(
+            plan.resources
+                .iter()
+                .find(|resource| resource.kind == HlsResourceKind::Key)
+                .map(|resource| resource.url.as_str()),
+            Some("https://cdn.example.test/keys/media.key")
+        );
+        assert!(!plan.is_destination_assemblable_candidate());
+    }
+
+    #[test]
+    fn sample_aes_key_rotation_keeps_each_identity_key_localized() {
+        let body = b"#EXTM3U\n#EXT-X-MEDIA-SEQUENCE:7\n#EXT-X-KEY:METHOD=SAMPLE-AES,URI=\"key-1.bin\"\n#EXTINF:2,\none.ts\n#EXT-X-KEY:METHOD=SAMPLE-AES,URI=\"key-2.bin\"\n#EXTINF:2,\ntwo.ts\n#EXT-X-ENDLIST\n";
+        let plan = plan_hls_media_playlist(BASE_URL, body)
+            .expect("SAMPLE-AES key rotation should be planned");
+
+        assert_eq!(
+            plan.resources
+                .iter()
+                .filter(|resource| resource.kind == HlsResourceKind::Key)
+                .count(),
+            2
+        );
+        let bytes = plan
+            .local_playlist_bytes()
+            .expect("rotating-key playlist should serialize");
+        let parsed =
+            m3u8_rs::parse_media_playlist_res(&bytes).expect("rotating-key playlist should parse");
+        let first_key = parsed.segments[0]
+            .key
+            .as_ref()
+            .and_then(|key| key.uri.as_deref())
+            .expect("first segment should retain its key URI");
+        let second_key = parsed.segments[1]
+            .key
+            .as_ref()
+            .and_then(|key| key.uri.as_deref())
+            .expect("second segment should retain its key URI");
+        assert_ne!(first_key, second_key);
+        assert!(first_key.starts_with("key-") && second_key.starts_with("key-"));
+    }
+
+    #[test]
+    fn rejects_sample_aes_ctr_until_its_encryption_scheme_is_supported() {
+        let body = b"#EXTM3U\n#EXT-X-KEY:METHOD=SAMPLE-AES-CTR,URI=\"key.bin\"\n#EXTINF:2,\none.ts\n#EXT-X-ENDLIST\n";
+        assert_eq!(
+            plan_hls_media_playlist(BASE_URL, body).err(),
+            Some(ManifestError::UnsupportedEncryption)
+        );
+    }
+
+    #[test]
+    fn rejects_sample_aes_fragmented_mp4_and_non_identity_key_formats() {
+        let fragmented = br#"#EXTM3U
+#EXT-X-KEY:METHOD=SAMPLE-AES,URI="key.bin",IV=0x00000000000000000000000000000001
+#EXT-X-MAP:URI="init.mp4"
+#EXTINF:2,
+one.m4s
+#EXT-X-ENDLIST
+"#;
+        assert_eq!(
+            plan_hls_media_playlist(BASE_URL, fragmented).err(),
+            Some(ManifestError::UnsupportedEncryption)
+        );
+
+        let fairplay = br#"#EXTM3U
+#EXT-X-KEY:METHOD=SAMPLE-AES,URI="skd://asset",KEYFORMAT="com.apple.streamingkeydelivery"
 #EXTINF:2,
 one.ts
 #EXT-X-ENDLIST
 "#;
         assert_eq!(
-            plan_hls_media_playlist(BASE_URL, body).err(),
+            plan_hls_media_playlist(BASE_URL, fairplay).err(),
             Some(ManifestError::UnsupportedEncryption)
         );
     }

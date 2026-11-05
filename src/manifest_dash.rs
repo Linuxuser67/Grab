@@ -2027,13 +2027,13 @@ pub(crate) fn resolve_segment_base_index(
             return Err(DashError::UnsupportedAddressing);
         }
         let length = u64::from(reference.referenced_size);
-        if length > crate::manifest_writer::MAX_RESOURCE_BYTES {
-            return Err(DashError::LimitExceeded);
-        }
         let end = media_offset
             .checked_add(length)
             .filter(|end| *end <= total_length)
             .ok_or(DashError::InvalidSegment)?;
+        if length > crate::manifest_writer::MAX_RESOURCE_BYTES {
+            return Err(DashError::LimitExceeded);
+        }
         let range = ManifestByteRange {
             offset: media_offset,
             length,
@@ -2425,6 +2425,10 @@ mod tests {
         assert_eq!(
             resolve_segment_base_index(&oversized_index, &oversized, 500).err(),
             Some(DashError::InvalidSegment)
+        );
+        assert_eq!(
+            resolve_segment_base_index(&oversized_index, &oversized, u64::MAX).err(),
+            Some(DashError::LimitExceeded)
         );
     }
 
@@ -3560,9 +3564,7 @@ mod tests {
     <AdaptationSet contentType="video" mimeType="video/mp4">
       <Representation id="v1" bandwidth="500000">
         <BaseURL>video.mp4</BaseURL>
-        <SegmentBase indexRange="0-999">
-          <Initialization range="0-999"/>
-        </SegmentBase>
+        <SegmentBase/>
       </Representation>
     </AdaptationSet>
   </Period>
@@ -3585,7 +3587,7 @@ mod tests {
 
     #[test]
     fn segment_base_inherits_adaptation_set_base_url() {
-        let body = r#"<MPD xmlns="urn:mpeg:dash:schema:mpd:2011" type="static" mediaPresentationDuration="PT4S"><Period duration="PT4S"><AdaptationSet contentType="video" mimeType="video/mp4"><BaseURL>clip.mp4</BaseURL><Representation id="v1" bandwidth="500000"><SegmentBase indexRange="0-999"/></Representation></AdaptationSet></Period></MPD>"#;
+        let body = r#"<MPD xmlns="urn:mpeg:dash:schema:mpd:2011" type="static" mediaPresentationDuration="PT4S"><Period duration="PT4S"><AdaptationSet contentType="video" mimeType="video/mp4"><BaseURL>clip.mp4</BaseURL><Representation id="v1" bandwidth="500000"><SegmentBase/></Representation></AdaptationSet></Period></MPD>"#;
         let plan = parse_dash_manifest(BASE_URL, body).expect("inherited SegmentBase should parse");
         let resources = plan_dash_representation(&plan, &plan.video_representations[0].key)
             .expect("inherited SegmentBase should expand");
@@ -3597,7 +3599,7 @@ mod tests {
 
     #[test]
     fn segment_base_rejects_webm_base_url() {
-        let body = r#"<MPD xmlns="urn:mpeg:dash:schema:mpd:2011" type="static" mediaPresentationDuration="PT2S"><Period duration="PT2S"><AdaptationSet contentType="video" mimeType="video/mp4"><Representation id="v1" bandwidth="500000"><BaseURL>video.webm</BaseURL><SegmentBase indexRange="0-999"/></Representation></AdaptationSet></Period></MPD>"#;
+        let body = r#"<MPD xmlns="urn:mpeg:dash:schema:mpd:2011" type="static" mediaPresentationDuration="PT2S"><Period duration="PT2S"><AdaptationSet contentType="video" mimeType="video/mp4"><Representation id="v1" bandwidth="500000"><BaseURL>video.webm</BaseURL><SegmentBase/></Representation></AdaptationSet></Period></MPD>"#;
         let plan = parse_dash_manifest(BASE_URL, body)
             .expect("SegmentBase with WebM base URL should parse");
         assert_eq!(

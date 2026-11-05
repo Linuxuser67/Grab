@@ -1985,10 +1985,8 @@ pub(crate) fn resolve_segment_base_index(
         .map_err(|_| DashError::Parse)?;
     let mut sidx = None;
     for box_ref in &boxes {
-        if box_ref.typ == "sidx" {
-            if sidx.replace(box_ref).is_some() {
-                return Err(DashError::UnsupportedAddressing);
-            }
+        if box_ref.typ == "sidx" && sidx.replace(box_ref).is_some() {
+            return Err(DashError::UnsupportedAddressing);
         }
     }
     let sidx = sidx.ok_or(DashError::UnsupportedAddressing)?;

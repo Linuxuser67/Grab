@@ -18,9 +18,7 @@ use crate::content_range::{ParsedContentRange, parse_content_range};
 use crate::engine_msg::EngineMsg;
 use crate::manifest::{
     HlsLiveAccumulator, HlsPlan, HlsResource, HlsResourceKind, ManifestByteRange,
-    dash::{
-        DashPresentation, DashRepresentationPlan, DashResource, DashResourceKind,
-    },
+    dash::{DashPresentation, DashRepresentationPlan, DashResource, DashResourceKind},
 };
 use crate::manifest_intake::ManifestLookup;
 #[cfg(test)]
@@ -4834,9 +4832,7 @@ segment-2.m4s
             let mut request = [0_u8; 1024];
             let _ = socket.read(&mut request).await.expect("read index request");
             socket
-                .write_all(
-                    b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
-                )
+                .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
                 .await
                 .expect("write un-ranged response");
         });

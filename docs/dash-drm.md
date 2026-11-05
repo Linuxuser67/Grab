@@ -37,9 +37,11 @@ sample sizes and offsets, and in-band sample encryption metadata. Indexed
 SegmentBase is supported when the initialization byte range and a flat SIDX
 are present; unindexed single-file SegmentBase remains on fallback because its
 initialization and media fragments are not separately addressable by this
-adapter. Key rotation, multiple KIDs, auxiliary encryption information,
-dynamic/multi-Period presentations, and encrypted subtitles are not supported
-by this increment. Unsupported layouts retain the existing
+adapter. In-track key rotation and sample-group KID overrides, dynamic/multi-Period
+presentations, and encrypted subtitles are not supported by this increment.
+Different selected tracks may each use their own default KID and key. The
+current CENC adapter accepts only in-band senc metadata; auxiliary information
+must be validated as pointing to that same senc data. Unsupported layouts retain the existing
 fallback behavior; a missing configured key is reported as an error rather
 than publishing ciphertext as a successful media download.
 

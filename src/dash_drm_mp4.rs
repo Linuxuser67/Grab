@@ -240,13 +240,6 @@ fn parse_init_encryption(
         return Err("DASH MPD encryption scheme does not match the MP4 initialization".to_string());
     }
 
-    if expected.scheme == EncryptionScheme::Cenc && (crypt_blocks != 0 || skip_blocks != 0) {
-        return Err("CENC initialization contains CBCS-style pattern parameters".to_string());
-    }
-    if expected.scheme == EncryptionScheme::Cbcs && crypt_blocks == 0 && skip_blocks != 0 {
-        return Err("CBCS initialization has a skip pattern without encrypted blocks".to_string());
-    }
-
     let tenc = mp4_payload(init, tenc_boxes[0])?;
     if tenc.len() < 23 {
         return Err("DASH track-encryption box is truncated".to_string());
@@ -271,6 +264,12 @@ fn parse_init_encryption(
         }
         _ => return Err("Unsupported DASH tenc version".to_string()),
     };
+    if expected.scheme == EncryptionScheme::Cenc && (crypt_blocks != 0 || skip_blocks != 0) {
+        return Err("CENC initialization contains CBCS-style pattern parameters".to_string());
+    }
+    if expected.scheme == EncryptionScheme::Cbcs && crypt_blocks == 0 && skip_blocks != 0 {
+        return Err("CBCS initialization has a skip pattern without encrypted blocks".to_string());
+    }
     let is_protected = *tenc
         .get(offset)
         .ok_or_else(|| "DASH tenc protection flag is missing".to_string())?;

@@ -1194,32 +1194,31 @@ fn decrypt_fragment_with_keys(
             .map_err(|error| format!("VSD could not decrypt a DASH media fragment: {error}"));
     }
 
-    let mut decrypters = BTreeMap::new();
-    for kid in &sample_kids {
-        let key = keys.key_for_kid(kid)?;
-        let key_hex = Zeroizing::new(hex_string(&key));
-        let decrypter = vsd_mp4::decrypt::CencDecrypter::with_init(&key_hex, init)
-            .map_err(|error| format!("VSD could not initialize DASH sample decryption: {error}"))?;
-        decrypters.insert(*kid, decrypter);
+    let mut samples_by_kid: BTreeMap<[u8; 16], Vec<&FragmentSample>> = BTreeMap::new();
+    for sample in &samples {
+        samples_by_kid.entry(sample.kid).or_default().push(sample);
     }
 
     let mut output = fragment.to_vec();
-    for sample in &samples {
-        let decrypter = decrypters.get(&sample.kid).ok_or_else(|| {
-            "DASH sample KID has no initialized decrypter".to_string()
-        })?;
-        let plaintext = decrypt_one_sample(fragment, init, sample, decrypter)?;
-        if plaintext.len() != sample.size {
-            return Err("VSD changed the length of a validated DASH sample".to_string());
+    for (kid, kid_samples) in samples_by_kid {
+        let key = keys.key_for_kid(&kid)?;
+        let key_hex = Zeroizing::new(hex_string(&key));
+        let decrypter = vsd_mp4::decrypt::CencDecrypter::with_init(&key_hex, init)
+            .map_err(|error| format!("VSD could not initialize DASH sample decryption: {error}"))?;
+        for sample in kid_samples {
+            let plaintext = decrypt_one_sample(fragment, init, sample, &decrypter)?;
+            if plaintext.len() != sample.size {
+                return Err("VSD changed the length of a validated DASH sample".to_string());
+            }
+            let end = sample
+                .data_offset
+                .checked_add(sample.size)
+                .ok_or_else(|| "DASH sample output range overflows".to_string())?;
+            output
+                .get_mut(sample.data_offset..end)
+                .ok_or_else(|| "DASH sample output range exceeds its fragment".to_string())?
+                .copy_from_slice(&plaintext);
         }
-        let end = sample
-            .data_offset
-            .checked_add(sample.size)
-            .ok_or_else(|| "DASH sample output range overflows".to_string())?;
-        output
-            .get_mut(sample.data_offset..end)
-            .ok_or_else(|| "DASH sample output range exceeds its fragment".to_string())?
-            .copy_from_slice(&plaintext);
     }
     Ok(output)
 }

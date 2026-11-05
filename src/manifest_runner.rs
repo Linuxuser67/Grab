@@ -1763,6 +1763,20 @@ struct ManifestFinalization<'a> {
     downloaded: &'a AtomicU64,
 }
 
+async fn require_decrypted_track(path: &Path, label: &str) -> Result<(), ManifestRunError> {
+    let metadata = tokio::fs::symlink_metadata(path).await.map_err(|error| {
+        ManifestRunError::Failed(format!(
+            "Could not inspect the decrypted DASH {label} track: {error}"
+        ))
+    })?;
+    if metadata.file_type().is_symlink() || !metadata.is_file() || metadata.len() == 0 {
+        return Err(ManifestRunError::Failed(format!(
+            "The decrypted DASH {label} track is not a regular, non-empty staging file"
+        )));
+    }
+    Ok(())
+}
+
 /// Mux the staged tracks, validate the output, and publish it without clobbering.
 ///
 /// The staging data is retained on every failure before publication so the queue
@@ -1792,7 +1806,15 @@ async fn finalize_manifest_download(
     tx.send(EngineMsg::Phase("Merging audio and video…".to_string()))
         .ok();
 
-    let video_input = if destination_parts {
+    let video_encrypted = matches!(
+        &tracks,
+        Tracks::Dash { video, .. } if video.representation.encryption.is_some()
+    );
+    let video_input = if video_encrypted {
+        let path = video_dir.join("video-track.mp4.decrypted");
+        require_decrypted_track(&path, "video").await?;
+        path
+    } else if destination_parts {
         crate::manifest_destination::part_path_async(
             staging.to_path_buf(),
             job.dest.clone(),
@@ -1809,8 +1831,16 @@ async fn finalize_manifest_download(
             }
         }
     };
+    let audio_encrypted = matches!(
+        &tracks,
+        Tracks::Dash { audio: Some(audio), .. } if audio.representation.encryption.is_some()
+    );
     let audio_input = if has_audio {
-        Some(if destination_parts {
+        Some(if audio_encrypted {
+            let path = audio_dir.join("audio-track.mp4.decrypted");
+            require_decrypted_track(&path, "audio").await?;
+            path
+        } else if destination_parts {
             crate::manifest_destination::part_path_async(
                 staging.to_path_buf(),
                 job.dest.clone(),
@@ -4440,6 +4470,7 @@ segment-2.m4s
                 item_id: 42,
                 track: crate::manifest_destination::TrackKind::Video,
                 connections: 2,
+                keys: None,
                 tx: &tx,
                 downloaded: &downloaded,
                 abort: &mut abort,

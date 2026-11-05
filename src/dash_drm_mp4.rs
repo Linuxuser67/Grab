@@ -1065,7 +1065,6 @@ fn box_bytes(kind: &[u8; 4], payload: &[u8]) -> Result<Vec<u8>, String> {
 
 fn decrypt_one_sample(
     fragment: &[u8],
-    init: &[u8],
     sample: &FragmentSample,
     decrypter: &vsd_mp4::decrypt::CencDecrypter,
 ) -> Result<Vec<u8>, String> {
@@ -1154,7 +1153,7 @@ fn decrypt_one_sample(
     single_sample.extend_from_slice(&mdat_box);
 
     let decrypted = decrypter
-        .decrypt_fragment(single_sample, Some(init))
+        .decrypt_fragment(single_sample, None)
         .map_err(|error| format!("VSD could not decrypt a rotated DASH sample: {error}"))?;
     let boxes = parse_box_spans(&decrypted, 0, decrypted.len())?;
     let mdat = find_one(&boxes, b"mdat")?;
@@ -1184,7 +1183,7 @@ fn decrypt_fragment_with_keys(
         let decrypter = vsd_mp4::decrypt::CencDecrypter::with_init(&key_hex, init)
             .map_err(|error| format!("VSD could not initialize DASH decryption: {error}"))?;
         return decrypter
-            .decrypt_fragment(fragment.to_vec(), Some(init))
+            .decrypt_fragment(fragment.to_vec(), None)
             .map_err(|error| format!("VSD could not decrypt a DASH media fragment: {error}"));
     }
 
@@ -1200,7 +1199,7 @@ fn decrypt_fragment_with_keys(
         let decrypter = vsd_mp4::decrypt::CencDecrypter::with_init(&key_hex, init)
             .map_err(|error| format!("VSD could not initialize DASH sample decryption: {error}"))?;
         for sample in kid_samples {
-            let plaintext = decrypt_one_sample(fragment, init, sample, &decrypter)?;
+            let plaintext = decrypt_one_sample(fragment, sample, &decrypter)?;
             if plaintext.len() != sample.size {
                 return Err("VSD changed the length of a validated DASH sample".to_string());
             }
@@ -1802,7 +1801,7 @@ mod tests {
         let key_hex = Zeroizing::new(hex_string(&[0x10; 16]));
         let decrypter = vsd_mp4::decrypt::CencDecrypter::with_init(&key_hex, &init)
             .expect("initialize rotated sample decrypter");
-        let plaintext = decrypt_one_sample(&fragment, &init, &samples[0], &decrypter)
+        let plaintext = decrypt_one_sample(&fragment, &samples[0], &decrypter)
             .expect("decrypt rotated sample using its selected KID key");
         assert_eq!(
             plaintext,

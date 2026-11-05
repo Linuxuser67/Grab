@@ -570,11 +570,9 @@ pub(crate) fn parse_dash_manifest_at(
                 let license_url =
                     crate::dash_drm::license_url_from_scopes(&protection_scopes, &manifest_url)
                         .map_err(DashError::UnsupportedProtection)?;
-                if encryption.is_some() && license_url.is_none() {
-                    return Err(DashError::UnsupportedProtection(
-                        "Native DASH decryption requires a ClearKey license URL".to_string(),
-                    ));
-                }
+                // Preserve protection metadata during planning even when the MPD
+                // omits a license URL. The selected-track runner requires a URL
+                // before acquiring keys and falls back when one is unavailable.
                 if encryption.is_some() && (is_dynamic || mpd.periods.len() != 1) {
                     return Err(DashError::UnsupportedProtection(
                         "Native DASH DRM currently requires one static Period".to_string(),
@@ -4423,7 +4421,7 @@ mod tests {
     }
 
     #[test]
-    fn encrypted_dash_requires_a_clear_key_license_url() {
+    fn retains_encryption_metadata_when_license_url_is_not_in_the_mpd() {
         let body = TEMPLATE_MPD.replace(
             "</Period>",
             r#"
@@ -4437,10 +4435,15 @@ mod tests {
     </AdaptationSet>
 </Period>"#,
         );
-        assert!(matches!(
-            parse_dash_manifest(BASE_URL, &body),
-            Err(DashError::UnsupportedProtection(_))
-        ));
+        let manifest = parse_dash_manifest(BASE_URL, &body)
+            .expect("protection metadata should remain available during planning");
+        let protected = manifest
+            .video_representations
+            .iter()
+            .find(|item| item.representation_id.as_deref() == Some("protected"))
+            .expect("protected representation");
+        assert!(protected.encryption.is_some());
+        assert!(protected.license_url.is_none());
     }
 
     #[test]

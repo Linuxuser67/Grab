@@ -874,10 +874,20 @@ pub(crate) fn plan_dash_representation(
                 expand_indexed_base(&period_representation, index)?
             }
             (DashPresentation::Static, DashAddressing::Template(template)) if live_selection => {
-                expand_static_live_template(&period_representation, &template.media, template)?
+                expand_static_live_template(
+                    &period_representation,
+                    &template.media,
+                    template,
+                    sources.len() > 1,
+                )?
             }
             (DashPresentation::Static, DashAddressing::Template(template)) => {
-                expand_template(&period_representation, &template.media, template)?
+                expand_template(
+                    &period_representation,
+                    &template.media,
+                    template,
+                    sources.len() > 1,
+                )?
             }
             (DashPresentation::Static, DashAddressing::List(_)) if live_selection => {
                 return Err(DashError::UnsupportedAddressing);
@@ -1692,8 +1702,14 @@ fn expand_static_live_template(
     representation: &DashRepresentation,
     media_template: &str,
     template: &DashTemplate,
+    require_period_alignment: bool,
 ) -> Result<Vec<DashResource>, DashError> {
-    let mut resources = expand_template(representation, media_template, template)?;
+    let mut resources = expand_template(
+        representation,
+        media_template,
+        template,
+        require_period_alignment,
+    )?;
     for resource in &mut resources {
         resource.filename = match resource.kind {
             DashResourceKind::Initialization => {
@@ -1850,8 +1866,29 @@ fn expand_template(
     representation: &DashRepresentation,
     media_template: &str,
     template: &DashTemplate,
+    require_period_alignment: bool,
 ) -> Result<Vec<DashResource>, DashError> {
     let segments = expand_segment_times(template)?;
+    if require_period_alignment {
+        let period_ticks =
+            period_duration_to_ticks(template.period_duration, template.timescale)?;
+        let expected_end = template
+            .presentation_time_offset
+            .checked_add(period_ticks)
+            .ok_or(DashError::UnsupportedPresentation)?;
+        let mut expected_start = template.presentation_time_offset;
+        for (_, start, duration) in &segments {
+            if *start != expected_start {
+                return Err(DashError::UnsupportedPresentation);
+            }
+            expected_start = start
+                .checked_add(*duration)
+                .ok_or(DashError::UnsupportedPresentation)?;
+        }
+        if expected_start != expected_end {
+            return Err(DashError::UnsupportedPresentation);
+        }
+    }
     if segments.is_empty() || segments.len() > MAX_SEGMENTS {
         return Err(if segments.len() > MAX_SEGMENTS {
             DashError::LimitExceeded

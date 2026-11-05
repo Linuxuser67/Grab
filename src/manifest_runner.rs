@@ -2699,12 +2699,10 @@ async fn fetch_dash_index_bytes(
                 "The DASH SegmentBase index range exceeds the supported limit".to_string(),
             )
         })?;
-    let request = client
-        .get(index.url.clone())
-        .header(
-            reqwest::header::RANGE,
-            format!("bytes={}-{end}", range.offset),
-        );
+    let request = client.get(index.url.clone()).header(
+        reqwest::header::RANGE,
+        format!("bytes={}-{end}", range.offset),
+    );
     let response = tokio::select! {
         biased;
         stop = &mut *abort => {
@@ -2786,10 +2784,12 @@ async fn fetch_dash_index_bytes(
         let Some(chunk) = next else {
             break;
         };
-        let chunk = chunk.map_err(|error| ManifestRunError::Retryable(format!(
-            "The DASH segment-index transfer failed: {}",
-            error.without_url()
-        )))?;
+        let chunk = chunk.map_err(|error| {
+            ManifestRunError::Retryable(format!(
+                "The DASH segment-index transfer failed: {}",
+                error.without_url()
+            ))
+        })?;
         let chunk_length = u64::try_from(chunk.len()).map_err(|_| {
             ManifestRunError::Unsupported("The DASH segment index is too large".to_string())
         })?;

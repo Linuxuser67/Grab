@@ -1935,12 +1935,8 @@ fn expand_indexed_base(
 ) -> Result<Vec<DashResource>, DashError> {
     let url = representation.source.base_url.clone();
     validate_media_url(&url)?;
-    let filename = super::resource_filename(
-        "dash-init",
-        Some(0),
-        &url,
-        Some(index.initialization_range),
-    );
+    let filename =
+        super::resource_filename("dash-init", Some(0), &url, Some(index.initialization_range));
     Ok(vec![DashResource {
         url,
         range: Some(index.initialization_range),
@@ -2407,7 +2403,10 @@ mod tests {
     fn rejects_hierarchical_sidx_and_out_of_file_references() {
         let hierarchical = build_sidx_box(0, &[(0x8000_0040, 1_000, 0x9000_0000)]);
         let index = indexed_base_plan(
-            ManifestByteRange { offset: 0, length: 100 },
+            ManifestByteRange {
+                offset: 0,
+                length: 100,
+            },
             test_range(&hierarchical),
             true,
         );
@@ -2435,7 +2434,10 @@ mod tests {
     fn rejects_mismatched_sidx_timescale_and_truncated_index_bytes() {
         let bytes = build_sidx_box(0, &[(64, 1_000, 0x9000_0000)]);
         let mut index = indexed_base_plan(
-            ManifestByteRange { offset: 0, length: 100 },
+            ManifestByteRange {
+                offset: 0,
+                length: 100,
+            },
             test_range(&bytes),
             true,
         );
@@ -2458,7 +2460,10 @@ mod tests {
         let mut bytes = vec![0, 0, 0, 8, b'f', b'r', b'e', b'e'];
         bytes.extend_from_slice(&build_sidx_box(0, &[(64, 1_000, 0x9000_0000)]));
         let index = indexed_base_plan(
-            ManifestByteRange { offset: 0, length: 100 },
+            ManifestByteRange {
+                offset: 0,
+                length: 100,
+            },
             test_range(&bytes),
             true,
         );
@@ -2479,7 +2484,10 @@ mod tests {
         let mut bytes = build_sidx_box(0, &[(64, 1_000, 0x9000_0000)]);
         bytes.extend_from_slice(&[0, 0, 0, 8, b'f', b'r', b'e', b'e']);
         let index = indexed_base_plan(
-            ManifestByteRange { offset: 0, length: 100 },
+            ManifestByteRange {
+                offset: 0,
+                length: 100,
+            },
             test_range(&bytes),
             true,
         );
@@ -2493,7 +2501,10 @@ mod tests {
     fn rejects_index_range_offset_overflow() {
         let bytes = build_sidx_box(0, &[(64, 1_000, 0x9000_0000)]);
         let mut index = indexed_base_plan(
-            ManifestByteRange { offset: 0, length: 100 },
+            ManifestByteRange {
+                offset: 0,
+                length: 100,
+            },
             ManifestByteRange {
                 offset: u64::MAX - 10,
                 length: u64::try_from(bytes.len()).expect("test SIDX length"),

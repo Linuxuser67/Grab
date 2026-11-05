@@ -891,9 +891,7 @@ fn sample_group_kids(
             if init.constant_iv_size.map(usize::from) != Some(constant_size)
                 || constant != &expected[..constant_size]
             {
-                return Err(
-                    "DASH seig constant IV differs from the validated tenc IV".to_string(),
-                );
+                return Err("DASH seig constant IV differs from the validated tenc IV".to_string());
             }
             entry_offset = constant_end;
         }
@@ -1544,7 +1542,6 @@ mod tests {
             skip_blocks: 0,
         }
     }
-
 
     fn add_fragment_sample_groups(fragment: &[u8], sgpd: &[u8], sbgp: &[u8]) -> Vec<u8> {
         let top = parse_box_spans(fragment, 0, fragment.len()).expect("valid synthetic fragment");

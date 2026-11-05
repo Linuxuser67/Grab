@@ -3435,6 +3435,22 @@ mod tests {
             .collect::<Vec<_>>();
         assert_eq!(segment_numbers, [Some(1), Some(2), Some(3), Some(4)]);
 
+        let repeated_url_body = body.replace("video-$Number$.m4s", "video.m4s");
+        let repeated_url_manifest = parse_dash_manifest(BASE_URL, &repeated_url_body)
+            .expect("repeated media URLs are valid with continuous period timing");
+        let repeated_url_plan = plan_dash_representation(
+            &repeated_url_manifest,
+            &repeated_url_manifest.video_representations[0].key,
+        )
+        .expect("period staging names should remain unique");
+        let mut filenames = std::collections::HashSet::new();
+        assert!(
+            repeated_url_plan
+                .resources
+                .iter()
+                .all(|resource| filenames.insert(resource.filename.as_str()))
+        );
+
         let different_asset = body.replacen(r#"value="asset-1""#, r#"value="asset-2""#, 1);
         assert_eq!(
             parse_dash_manifest(BASE_URL, &different_asset).err(),

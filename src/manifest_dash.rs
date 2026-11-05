@@ -1916,7 +1916,7 @@ fn expand_template(
         });
     }
 
-    for (index, (number, time)) in segments.into_iter().enumerate() {
+    for (index, (number, time, _duration)) in segments.into_iter().enumerate() {
         let uri = substitute_template(media_template, representation, number, time, true)?;
         let url = resolve_resource(&representation.source.base_url, &uri)?;
         let filename = super::resource_filename("dash-segment", Some(index), &url, None);
@@ -1932,7 +1932,7 @@ fn expand_template(
     Ok(resources)
 }
 
-fn expand_segment_times(template: &DashTemplate) -> Result<Vec<(u64, u64)>, DashError> {
+fn expand_segment_times(template: &DashTemplate) -> Result<Vec<(u64, u64, u64)>, DashError> {
     let mut output = Vec::new();
     let mut number = template.start_number;
 
@@ -2015,7 +2015,7 @@ fn expand_segment_times(template: &DashTemplate) -> Result<Vec<(u64, u64)>, Dash
                         // by the current resource planner; leave it to yt-dlp.
                         return Err(DashError::UnsupportedAddressing);
                     }
-                    output.push((number, time));
+                    output.push((number, time, entry.duration));
                 }
                 number = number.checked_add(1).ok_or(DashError::InvalidSegment)?;
             }
@@ -2069,7 +2069,7 @@ fn expand_segment_times(template: &DashTemplate) -> Result<Vec<(u64, u64)>, Dash
         )? {
             return Err(DashError::InvalidSegment);
         }
-        output.push((number, time));
+        output.push((number, time, duration_ticks));
         number = number.checked_add(1).ok_or(DashError::InvalidSegment)?;
     }
 

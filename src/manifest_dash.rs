@@ -722,34 +722,6 @@ fn validate_period_continuity(
     Ok(())
 }
 
-fn validate_template_period_segments(template: &DashTemplate) -> Result<(), DashError> {
-    let segments = expand_segment_times(template)?;
-    let period_ticks =
-        period_duration_to_ticks(template.period_duration, template.timescale)?;
-    let expected_end = template
-        .presentation_time_offset
-        .checked_add(period_ticks)
-        .ok_or(DashError::UnsupportedPresentation)?;
-    let mut expected_start = template.presentation_time_offset;
-
-    if segments.is_empty() {
-        return Err(DashError::UnsupportedPresentation);
-    }
-    for (_, start, duration) in segments {
-        if start != expected_start {
-            return Err(DashError::UnsupportedPresentation);
-        }
-        expected_start = start
-            .checked_add(duration)
-            .ok_or(DashError::UnsupportedPresentation)?;
-    }
-
-    if expected_start != expected_end {
-        return Err(DashError::UnsupportedPresentation);
-    }
-    Ok(())
-}
-
 fn period_duration_to_ticks(duration: Duration, timescale: u64) -> Result<u64, DashError> {
     let scaled_nanos = duration
         .as_nanos()
@@ -832,8 +804,6 @@ fn append_period_sources(
         if next_template.presentation_time_offset != expected_presentation_time_offset {
             return Err(DashError::UnsupportedPresentation);
         }
-        validate_template_period_segments(previous_template)?;
-        validate_template_period_segments(next_template)?;
         current.additional_sources.push(next.source);
     }
 

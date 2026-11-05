@@ -79,13 +79,3 @@ representation-level indexes, BaseURL byte ranges, and SegmentBase timing
 attributes such as presentation-time offsets. Each extension needs explicit
 standards-based semantics and separate tests; unsupported forms remain fallback.
 
-### 6. Low-latency HLS
-
-Treat LL-HLS part capture as its own live-capture phase. Model parts, preload hints,
-blocking reload, skip/delta updates, rendition reports, and discontinuity handling
-in a bounded snapshot state machine. Do not infer that stripping LL-HLS tags means
-the parts have been captured.
-
-Acceptance: deterministic playlist fixtures, overlap/gap tests, bounded refresh
-behavior, cancellation/resume behavior, and explicit behavior at end-list and
-unrecoverable continuity loss.

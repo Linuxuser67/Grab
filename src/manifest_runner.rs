@@ -1021,7 +1021,8 @@ async fn transfer_static_manifest_tracks(
                     &Path,
                     &Path,
                     &str,
-                ) -> Result<bool, crate::dash_subtitle::DashSubtitleError> =
+                )
+                    -> Result<bool, crate::dash_subtitle::DashSubtitleError> =
                     if crate::dash_subtitle::is_wvtt_codec(&codecs) {
                         crate::dash_subtitle::extract_to_vtt
                     } else if crate::dash_subtitle_stpp::is_stpp_codec(&codecs) {
@@ -1063,10 +1064,8 @@ async fn transfer_static_manifest_tracks(
                     subtitle_dir.join("subtitle-track.mp4")
                 };
                 let output = staging.join("subtitles/subtitle-track.vtt");
-                match tokio::task::spawn_blocking(move || {
-                    extractor(&source, &output, &codecs)
-                })
-                .await
+                match tokio::task::spawn_blocking(move || extractor(&source, &output, &codecs))
+                    .await
                 {
                     Ok(Ok(_)) => {}
                     Ok(Err(crate::dash_subtitle::DashSubtitleError::Unsupported(message))) => {

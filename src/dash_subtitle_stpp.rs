@@ -19,8 +19,8 @@ use quick_xml::reader::NsReader;
 
 use crate::dash_subtitle::{
     DashSubtitleError, MAX_CUE_COUNT, MAX_CUE_TEXT_BYTES, MAX_OUTPUT_BYTES, MAX_SAMPLE_BYTES,
-    MAX_SAMPLE_COUNT, MAX_SAMPLE_TOTAL_BYTES, MAX_TRACK_BYTES, clear_destination, count_boxes,
-    count_fragment_samples, contains_box, find_box, open_source, sample_is_within_media_data,
+    MAX_SAMPLE_COUNT, MAX_SAMPLE_TOTAL_BYTES, MAX_TRACK_BYTES, clear_destination, contains_box,
+    count_boxes, count_fragment_samples, find_box, open_source, sample_is_within_media_data,
     units_to_millis, write_private_output,
 };
 
@@ -126,7 +126,8 @@ pub(crate) fn extract_to_vtt(
     }
     if !(contains_box(&boxes, "moof")
         && contains_box(&boxes, "trun")
-        && contains_box(&boxes, "mdat")) {
+        && contains_box(&boxes, "mdat"))
+    {
         return Err(DashSubtitleError::Unsupported(
             "The staged DASH subtitle track is not fragmented MP4 with media data",
         ));
@@ -208,12 +209,11 @@ pub(crate) fn extract_to_vtt(
             ));
         }
 
-        let end_units = sample
-            .pts
-            .checked_add(u64::from(sample.duration))
-            .ok_or(DashSubtitleError::Unsupported(
+        let end_units = sample.pts.checked_add(u64::from(sample.duration)).ok_or(
+            DashSubtitleError::Unsupported(
                 "A DASH subtitle sample presentation interval overflows",
-            ))?;
+            ),
+        )?;
         if previous_sample_end.is_some_and(|previous_end| sample.pts < previous_end) {
             return Err(DashSubtitleError::Unsupported(
                 "DASH subtitle sample presentation intervals overlap or are unordered",
@@ -238,7 +238,9 @@ pub(crate) fn extract_to_vtt(
             })?;
 
         for cue in parse_ttml_document_with_namespace(&bytes, start_ms, end_ms, ttml_namespace)? {
-            let owned_text_bytes = cue.text.len()
+            let owned_text_bytes = cue
+                .text
+                .len()
                 .checked_add(cue.identifier.as_ref().map_or(0, String::len))
                 .ok_or(DashSubtitleError::Unsupported(
                     "The DASH TTML cue text size overflows",
@@ -275,9 +277,7 @@ pub(crate) fn extract_to_vtt(
     Ok(true)
 }
 
-fn single_stpp_sample_entry(
-    boxes: &[mp4box::Box],
-) -> Result<&mp4box::Box, DashSubtitleError> {
+fn single_stpp_sample_entry(boxes: &[mp4box::Box]) -> Result<&mp4box::Box, DashSubtitleError> {
     if count_boxes(boxes, "stsd") != 1 {
         return Err(DashSubtitleError::Unsupported(
             "The DASH subtitle track must contain exactly one sample description",
@@ -325,8 +325,8 @@ fn validate_stpp_sample_entry(
         .ok_or(DashSubtitleError::Unsupported(
             "The STPP sample entry is truncated",
         ))?;
-    let read_len = usize::try_from(remaining.min(MAX_SAMPLE_ENTRY_TEXT_BYTES as u64))
-        .map_err(|_| {
+    let read_len =
+        usize::try_from(remaining.min(MAX_SAMPLE_ENTRY_TEXT_BYTES as u64)).map_err(|_| {
             DashSubtitleError::Unsupported("The STPP sample-entry metadata size is out of range")
         })?;
     if read_len == 0 {
@@ -416,9 +416,8 @@ fn parse_ttml_document_with_namespace(
             "A DASH TTML sample is empty or exceeds the 256 KiB XML limit",
         ));
     }
-    std::str::from_utf8(bytes).map_err(|_| {
-        DashSubtitleError::Unsupported("A DASH TTML sample is not valid UTF-8")
-    })?;
+    std::str::from_utf8(bytes)
+        .map_err(|_| DashSubtitleError::Unsupported("A DASH TTML sample is not valid UTF-8"))?;
 
     let mut reader = NsReader::from_reader(bytes);
     reader.config_mut().trim_text(false);
@@ -432,18 +431,17 @@ fn parse_ttml_document_with_namespace(
     let mut element_count = 0_usize;
 
     loop {
-        let (namespace, event) = reader
-            .read_resolved_event_into(&mut buffer)
-            .map_err(|_| {
-                DashSubtitleError::Unsupported(
-                    "The DASH TTML sample contains malformed XML",
-                )
-            })?;
+        let (namespace, event) = reader.read_resolved_event_into(&mut buffer).map_err(|_| {
+            DashSubtitleError::Unsupported("The DASH TTML sample contains malformed XML")
+        })?;
         match event {
             Event::Start(start) => {
-                element_count = element_count.checked_add(1).ok_or(
-                    DashSubtitleError::Unsupported("The DASH TTML element count overflows"),
-                )?;
+                element_count =
+                    element_count
+                        .checked_add(1)
+                        .ok_or(DashSubtitleError::Unsupported(
+                            "The DASH TTML element count overflows",
+                        ))?;
                 if element_count > MAX_XML_ELEMENTS || stack.len() >= MAX_XML_DEPTH {
                     return Err(DashSubtitleError::Unsupported(
                         "The DASH TTML sample exceeds the XML depth or element limit",
@@ -473,15 +471,18 @@ fn parse_ttml_document_with_namespace(
                 stack.push(element);
             }
             Event::Empty(start) => {
-                element_count = element_count.checked_add(1).ok_or(
-                    DashSubtitleError::Unsupported("The DASH TTML element count overflows"),
-                )?;
+                element_count =
+                    element_count
+                        .checked_add(1)
+                        .ok_or(DashSubtitleError::Unsupported(
+                            "The DASH TTML element count overflows",
+                        ))?;
                 if element_count > MAX_XML_ELEMENTS || stack.len() >= MAX_XML_DEPTH {
                     return Err(DashSubtitleError::Unsupported(
                         "The DASH TTML sample exceeds the XML depth or element limit",
                     ));
                 }
-                    let (element, next_paragraph) = classify_element(
+                let (element, next_paragraph) = classify_element(
                     &start,
                     &namespace,
                     stack.last().copied(),
@@ -491,9 +492,9 @@ fn parse_ttml_document_with_namespace(
                 )?;
                 match element {
                     Element::Paragraph => {
-                        let paragraph = next_paragraph.ok_or(
-                            DashSubtitleError::Unsupported("A TTML paragraph has invalid timing"),
-                        )?;
+                        let paragraph = next_paragraph.ok_or(DashSubtitleError::Unsupported(
+                            "A TTML paragraph has invalid timing",
+                        ))?;
                         finish_paragraph(paragraph, sample_start_ms, sample_end_ms, &mut cues)?;
                     }
                     Element::Break => {
@@ -508,22 +509,20 @@ fn parse_ttml_document_with_namespace(
                     "The DASH TTML sample has an unexpected closing element",
                 ))?;
                 if element == Element::Paragraph {
-                    let paragraph = paragraph.take().ok_or(
-                        DashSubtitleError::Unsupported("A TTML paragraph lost its parser state"),
-                    )?;
+                    let paragraph = paragraph.take().ok_or(DashSubtitleError::Unsupported(
+                        "A TTML paragraph lost its parser state",
+                    ))?;
                     finish_paragraph(paragraph, sample_start_ms, sample_end_ms, &mut cues)?;
                 } else if element == Element::Tt {
                     root_closed = true;
                 }
             }
             Event::Text(text) => {
-                let content = text
-                    .xml_content(XmlVersion::Implicit1_0)
-                    .map_err(|_| {
-                        DashSubtitleError::Unsupported(
-                            "A DASH TTML text node cannot be decoded as XML 1.0",
-                        )
-                    })?;
+                let content = text.xml_content(XmlVersion::Implicit1_0).map_err(|_| {
+                    DashSubtitleError::Unsupported(
+                        "A DASH TTML text node cannot be decoded as XML 1.0",
+                    )
+                })?;
                 match stack.last().copied() {
                     Some(Element::Paragraph | Element::Span) => {
                         append_paragraph_text(&mut paragraph, &content)?;
@@ -536,33 +535,28 @@ fn parse_ttml_document_with_namespace(
                     }
                 }
             }
-            Event::GeneralRef(reference) => {
-                match stack.last().copied() {
-                    Some(Element::Paragraph | Element::Span) => {
-                        let character = if let Some(character) =
-                            reference.resolve_char_ref().map_err(|_| {
-                                DashSubtitleError::Unsupported(
-                                    "A TTML character reference is invalid",
-                                )
-                            })?
-                        {
-                            character.to_string()
-                        } else {
-                            resolve_predefined_entity(reference.as_ref())
-                                .ok_or(DashSubtitleError::Unsupported(
-                                    "Custom TTML XML entities are not supported",
-                                ))?
-                                .to_string()
-                        };
-                        append_paragraph_text(&mut paragraph, &character)?;
-                    }
-                    _ => {
-                        return Err(DashSubtitleError::Unsupported(
-                            "An XML entity reference outside TTML text is not supported",
-                        ));
-                    }
+            Event::GeneralRef(reference) => match stack.last().copied() {
+                Some(Element::Paragraph | Element::Span) => {
+                    let character = if let Some(character) =
+                        reference.resolve_char_ref().map_err(|_| {
+                            DashSubtitleError::Unsupported("A TTML character reference is invalid")
+                        })? {
+                        character.to_string()
+                    } else {
+                        resolve_predefined_entity(reference.as_ref())
+                            .ok_or(DashSubtitleError::Unsupported(
+                                "Custom TTML XML entities are not supported",
+                            ))?
+                            .to_string()
+                    };
+                    append_paragraph_text(&mut paragraph, &character)?;
                 }
-            }
+                _ => {
+                    return Err(DashSubtitleError::Unsupported(
+                        "An XML entity reference outside TTML text is not supported",
+                    ));
+                }
+            },
             Event::DocType(_) => {
                 return Err(DashSubtitleError::Unsupported(
                     "TTML documents with document types or custom entities are not supported",
@@ -649,9 +643,7 @@ fn classify_element(
     }
 }
 
-fn read_attributes(
-    start: &BytesStart<'_>,
-) -> Result<BTreeMap<String, String>, DashSubtitleError> {
+fn read_attributes(start: &BytesStart<'_>) -> Result<BTreeMap<String, String>, DashSubtitleError> {
     let mut attributes = BTreeMap::new();
     for attribute in start.attributes() {
         let attribute = attribute.map_err(|_| {
@@ -660,9 +652,7 @@ fn read_attributes(
         let key = attribute.key.as_ref();
         let value = attribute
             .normalized_value(XmlVersion::Implicit1_0)
-            .map_err(|_| {
-                DashSubtitleError::Unsupported("A TTML attribute value is malformed")
-            })?
+            .map_err(|_| DashSubtitleError::Unsupported("A TTML attribute value is malformed"))?
             .into_owned();
         if attributes.insert(key.to_string(), value).is_some() {
             return Err(DashSubtitleError::Unsupported(
@@ -700,8 +690,7 @@ fn validate_root_attributes(
             } else {
                 TTML_PARAMETER_NAMESPACE
             };
-            if attributes.get("xmlns:ttp").map(String::as_str)
-                != Some(expected_parameter_namespace)
+            if attributes.get("xmlns:ttp").map(String::as_str) != Some(expected_parameter_namespace)
             {
                 return Err(DashSubtitleError::Unsupported(
                     "The TTML parameter attributes use an unexpected namespace",
@@ -769,9 +758,7 @@ fn validate_span_attributes(start: &BytesStart<'_>) -> Result<(), DashSubtitleEr
     Ok(())
 }
 
-fn parse_paragraph_attributes(
-    start: &BytesStart<'_>,
-) -> Result<Paragraph, DashSubtitleError> {
+fn parse_paragraph_attributes(start: &BytesStart<'_>) -> Result<Paragraph, DashSubtitleError> {
     let mut paragraph = Paragraph::default();
     for (name, value) in read_attributes(start)? {
         if is_namespace_declaration(&name) {
@@ -784,7 +771,9 @@ fn parse_paragraph_attributes(
             "xml:id" => {
                 if value.is_empty()
                     || value.contains("-->")
-                    || value.chars().any(|character| character.is_whitespace() || character.is_control())
+                    || value
+                        .chars()
+                        .any(|character| character.is_whitespace() || character.is_control())
                 {
                     return Err(DashSubtitleError::Unsupported(
                         "A TTML paragraph identifier is not a safe WebVTT cue identifier",
@@ -839,7 +828,12 @@ fn parse_ttml_time(value: &str) -> Result<u64, DashSubtitleError> {
             .map_err(|_| DashSubtitleError::Unsupported("A TTML time is out of range"));
     }
 
-    for (unit, scale) in [("ms", 1_u128), ("h", 3_600_000), ("m", 60_000), ("s", 1_000)] {
+    for (unit, scale) in [
+        ("ms", 1_u128),
+        ("h", 3_600_000),
+        ("m", 60_000),
+        ("s", 1_000),
+    ] {
         if let Some(number) = value.strip_suffix(unit) {
             let millis = parse_decimal_scaled(number, scale)?;
             return u64::try_from(millis)
@@ -881,9 +875,9 @@ fn parse_decimal_scaled(value: &str, scale: u128) -> Result<u128, DashSubtitleEr
         .ok_or(DashSubtitleError::Unsupported(
             "A TTML decimal time expression is too precise",
         ))?;
-    let fraction = fraction.parse::<u128>().map_err(|_| {
-        DashSubtitleError::Unsupported("A TTML decimal time expression is invalid")
-    })?;
+    let fraction = fraction
+        .parse::<u128>()
+        .map_err(|_| DashSubtitleError::Unsupported("A TTML decimal time expression is invalid"))?;
     let scaled_fraction = fraction
         .checked_mul(scale)
         .ok_or(DashSubtitleError::Unsupported(
@@ -913,7 +907,9 @@ fn append_paragraph_break(paragraph: &mut Option<Paragraph>) -> Result<(), DashS
         .ok_or(DashSubtitleError::Unsupported(
             "A TTML paragraph exceeds the 12 MiB text limit",
         ))?;
-    paragraph.text.reserve(new_len.saturating_sub(paragraph.text.len()));
+    paragraph
+        .text
+        .reserve(new_len.saturating_sub(paragraph.text.len()));
     paragraph.text.push(LINE_BREAK_MARKER);
     Ok(())
 }
@@ -950,7 +946,9 @@ fn append_paragraph_text(
         .ok_or(DashSubtitleError::Unsupported(
             "A TTML paragraph exceeds the 12 MiB text limit",
         ))?;
-    paragraph.text.reserve(new_len.saturating_sub(paragraph.text.len()));
+    paragraph
+        .text
+        .reserve(new_len.saturating_sub(paragraph.text.len()));
     paragraph.text.push_str(value);
     Ok(())
 }
@@ -964,9 +962,12 @@ fn finish_paragraph(
     let begin_ms = paragraph.begin_ms.unwrap_or(0);
     let mut end_ms = paragraph.end_ms.unwrap_or(u64::MAX);
     if let Some(duration_ms) = paragraph.duration_ms {
-        let duration_end = begin_ms.checked_add(duration_ms).ok_or(
-            DashSubtitleError::Unsupported("A TTML paragraph duration overflows"),
-        )?;
+        let duration_end =
+            begin_ms
+                .checked_add(duration_ms)
+                .ok_or(DashSubtitleError::Unsupported(
+                    "A TTML paragraph duration overflows",
+                ))?;
         end_ms = end_ms.min(duration_end);
     }
     if end_ms <= begin_ms {
@@ -1028,9 +1029,7 @@ fn merge_adjacent_cues(cues: Vec<Cue>) -> Vec<Cue> {
             .last()
             .is_some_and(|previous| same_content && cue.start_ms == previous.end_ms);
         let duplicate = merged.last().is_some_and(|previous| {
-            same_content
-                && cue.start_ms == previous.start_ms
-                && cue.end_ms == previous.end_ms
+            same_content && cue.start_ms == previous.start_ms && cue.end_ms == previous.end_ms
         });
         if adjacent {
             if let Some(previous) = merged.last_mut() {
@@ -1236,7 +1235,10 @@ mod tests {
 
     #[test]
     fn accepts_simple_clock_and_offset_times_at_millisecond_precision() {
-        assert_eq!(parse_ttml_time("01:02:03.004").expect("clock time"), 3_723_004);
+        assert_eq!(
+            parse_ttml_time("01:02:03.004").expect("clock time"),
+            3_723_004
+        );
         assert_eq!(parse_ttml_time("1.5h").expect("hour offset"), 5_400_000);
         assert_eq!(parse_ttml_time("2m").expect("minute offset"), 120_000);
         assert_eq!(parse_ttml_time("1.25s").expect("second offset"), 1_250);

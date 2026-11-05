@@ -286,7 +286,10 @@ pub(super) fn count_boxes(boxes: &[mp4box::Box], kind: &str) -> usize {
         .sum()
 }
 
-pub(super) fn find_box<'boxes>(boxes: &'boxes [mp4box::Box], kind: &str) -> Option<&'boxes mp4box::Box> {
+pub(super) fn find_box<'boxes>(
+    boxes: &'boxes [mp4box::Box],
+    kind: &str,
+) -> Option<&'boxes mp4box::Box> {
     for box_ in boxes {
         if box_.typ == kind {
             return Some(box_);
@@ -511,7 +514,10 @@ pub(super) fn clear_destination(destination: &Path) -> Result<(), DashSubtitleEr
     }
 }
 
-pub(super) fn write_private_output(destination: &Path, bytes: &[u8]) -> Result<(), DashSubtitleError> {
+pub(super) fn write_private_output(
+    destination: &Path,
+    bytes: &[u8],
+) -> Result<(), DashSubtitleError> {
     if bytes.len() > MAX_OUTPUT_BYTES {
         return Err(DashSubtitleError::Unsupported(
             "The normalized DASH subtitle output exceeds the 16 MiB limit",

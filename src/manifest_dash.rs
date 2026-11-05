@@ -3114,7 +3114,10 @@ mod tests {
             parse_dash_manifest(BASE_URL, &body).expect("STPP representation should be recognized");
         assert_eq!(manifest.subtitle_representations.len(), 1);
         let representation = &manifest.subtitle_representations[0];
-        assert_eq!(representation.representation_id.as_deref(), Some("sub-ttml"));
+        assert_eq!(
+            representation.representation_id.as_deref(),
+            Some("sub-ttml")
+        );
         assert_eq!(representation.codecs.as_deref(), Some("stpp.ttml.im1t"));
 
         let plan = plan_dash_representation(&manifest, &representation.key)

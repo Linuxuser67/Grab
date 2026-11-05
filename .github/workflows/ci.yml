@@ -134,14 +134,8 @@ jobs:
           # No job pushes or fetches; don't persist the token in git config.
           persist-credentials: false
       - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
-      # Resolve once on the runner and display the exact Cargo.lock drift before
-      # failing. This keeps the offline vendor guard actionable when Cargo's
-      # lock graph changes due to a new feature or target dependency.
-      - name: Check Cargo.lock is up to date
-        run: |
-          cargo metadata --format-version 1 >/dev/null
-          git diff -- Cargo.lock
-          git diff --exit-code -- Cargo.lock
+      # --locked fails when the lock would need re-resolution; read-only otherwise.
+      - run: cargo metadata --locked --format-version 1 >/dev/null
       # Run the release metadata gate on every PR, not only after a tag is published.
       - name: Check release metadata consistency
         run: ./build-aux/check-release-consistency.py

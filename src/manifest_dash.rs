@@ -852,7 +852,7 @@ pub(crate) fn plan_dash_representation(
         return Err(DashError::UnsupportedAddressing);
     }
 
-    let mut resources = Vec::new();
+    let mut resources: Vec<DashResource> = Vec::new();
     let mut segment_count = 0_usize;
     for (period_index, source) in sources.iter().enumerate() {
         let mut period_representation = representation.clone();

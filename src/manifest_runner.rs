@@ -2450,6 +2450,7 @@ async fn decrypt_hls_sample_aes_segments(
         let encrypted = tokio::fs::read(&segment_path)
             .await
             .map_err(|error| ManifestRunError::Failed(format!("Could not read the staged HLS SAMPLE-AES segment: {error}")))?;
+        let encrypted_size = encrypted.len();
 
         let decrypted = tokio::task::spawn_blocking(move || {
             let decrypter = vsd_mp4::decrypt::HlsSampleAesDecrypter::new(&key, &iv);
@@ -2463,6 +2464,11 @@ async fn decrypt_hls_sample_aes_segments(
             )
         })?;
 
+        if decrypted.len() != encrypted_size {
+            return Err(ManifestRunError::Unsupported(
+                "VSD returned an incomplete HLS SAMPLE-AES segment".to_string(),
+            ));
+        }
         let mut validator = TransportStreamValidator::new();
         validator.observe(&decrypted);
         let decrypted_size = u64::try_from(decrypted.len()).map_err(|_| {

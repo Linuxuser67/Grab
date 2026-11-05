@@ -3501,9 +3501,8 @@ mod tests {
             .rsplit_once(r#"initialization="init.mp4""#)
             .map(|(prefix, suffix)| format!(r#"{prefix}initialization="init2.mp4"{suffix}"#))
             .expect("second period initialization exists");
-        let changed_init_manifest =
-            parse_dash_manifest(BASE_URL, &changed_initialization_url)
-                .expect("period init addressing parses before continuity is planned");
+        let changed_init_manifest = parse_dash_manifest(BASE_URL, &changed_initialization_url)
+            .expect("period init addressing parses before continuity is planned");
         assert_eq!(
             plan_dash_representation(
                 &changed_init_manifest,
@@ -3624,10 +3623,7 @@ mod tests {
             Some(DashError::UnsupportedPresentation)
         );
 
-        let nonzero_start = missing_continuity.replace(
-            r#"start="PT0S""#,
-            r#"start="PT1S""#,
-        );
+        let nonzero_start = missing_continuity.replace(r#"start="PT0S""#, r#"start="PT1S""#);
         assert_eq!(
             parse_dash_manifest(BASE_URL, &nonzero_start).err(),
             Some(DashError::UnsupportedPresentation)

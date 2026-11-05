@@ -592,6 +592,73 @@ fn validate_fragment(bytes: &[u8], init: InitEncryption) -> Result<(), String> {
     Ok(())
 }
 
+fn validate_auxiliary_information(
+    bytes: &[u8],
+    moof: BoxSpan,
+    senc: BoxSpan,
+    saiz: BoxSpan,
+    saio: BoxSpan,
+    expected_sizes: &[u8],
+) -> Result<(), String> {
+    let sizes = span_payload(bytes, saiz)?;
+    if sizes.len() < 9 || sizes[0] != 0 || sizes[1..4] != [0, 0, 0] {
+        return Err("DASH saiz is truncated or uses unsupported flags/version".to_string());
+    }
+    let default_size = sizes[4];
+    let sample_count = usize::try_from(read_u32(sizes, 5)?)
+        .map_err(|_| "DASH saiz sample count is out of range".to_string())?;
+    if sample_count != expected_sizes.len() {
+        return Err("DASH saiz sample count does not match senc".to_string());
+    }
+    if default_size == 0 {
+        let entries = sizes
+            .get(9..)
+            .ok_or_else(|| "DASH saiz per-sample entries are truncated".to_string())?;
+        if entries != expected_sizes {
+            return Err("DASH saiz per-sample sizes do not match senc entries".to_string());
+        }
+    } else if sizes.len() != 9 || expected_sizes.iter().any(|size| *size != default_size) {
+        return Err("DASH saiz default size does not match senc entries".to_string());
+    }
+
+    let offsets = span_payload(bytes, saio)?;
+    if offsets.len() < 8 || offsets[0] > 1 || offsets[1..4] != [0, 0, 0] {
+        return Err("DASH saio is truncated or uses unsupported flags/version".to_string());
+    }
+    let entry_count = usize::try_from(read_u32(offsets, 4)?)
+        .map_err(|_| "DASH saio entry count is out of range".to_string())?;
+    if entry_count != 1 {
+        return Err("DASH saio must contain one in-band encryption-data offset".to_string());
+    }
+    let actual_offset = if offsets[0] == 0 {
+        if offsets.len() != 12 {
+            return Err("DASH saio version 0 has an invalid length".to_string());
+        }
+        u64::from(read_u32(offsets, 8)?)
+    } else {
+        if offsets.len() != 16 {
+            return Err("DASH saio version 1 has an invalid length".to_string());
+        }
+        read_u64(offsets, 8)?
+    };
+    let absolute_offset = senc
+        .payload_start()?
+        .checked_add(8)
+        .ok_or_else(|| "DASH senc auxiliary-data offset overflows".to_string())?;
+    let relative_offset = absolute_offset
+        .checked_sub(moof.start)
+        .ok_or_else(|| "DASH senc auxiliary-data offset precedes its moof".to_string())?;
+    let expected_offset = u64::try_from(relative_offset)
+        .map_err(|_| "DASH senc auxiliary-data offset is out of range".to_string())?;
+    if actual_offset != expected_offset {
+        return Err(
+            "DASH saio does not point to the in-band senc sample auxiliary data".to_string(),
+        );
+    }
+
+    Ok(())
+}
+
 /// Decrypt one independently planned fragmented-MP4 representation into a
 /// private XDG-staging file. Encrypted source resources are never modified.
 pub(super) fn decrypt_track(

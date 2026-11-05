@@ -1,0 +1,26 @@
+name: Temporary DRM dependency lock generation
+
+on:
+  push:
+    branches:
+      - feat/dash-license-acquisition
+
+permissions:
+  contents: read
+
+jobs:
+  lock:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87
+      - run: cargo generate-lockfile
+      - run: python3 build-aux/gen-cargo-sources.py
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
+        with:
+          name: drm-dependency-lock
+          path: |
+            Cargo.lock
+            build-aux/cargo-sources.json

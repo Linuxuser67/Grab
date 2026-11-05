@@ -1990,9 +1990,6 @@ pub(crate) fn resolve_segment_base_index(
         }
     }
     let sidx = sidx.ok_or(DashError::UnsupportedAddressing)?;
-    if index.index_range_exact && (sidx.offset != 0 || sidx.size != index.index_range.length) {
-        return Err(DashError::UnsupportedAddressing);
-    }
     let sidx_end = sidx
         .offset
         .checked_add(sidx.size)
@@ -2017,7 +2014,7 @@ pub(crate) fn resolve_segment_base_index(
         .checked_add(sidx_end)
         .and_then(|offset| offset.checked_add(data.first_offset))
         .ok_or(DashError::InvalidSegment)?;
-    if media_offset < index_range_end {
+    if index.index_range_exact && media_offset < index_range_end {
         return Err(DashError::UnsupportedAddressing);
     }
 
@@ -2412,15 +2409,33 @@ mod tests {
     }
 
     #[test]
-    fn rejects_extra_box_when_index_range_is_declared_exact() {
+    fn accepts_prefix_boxes_before_sidx_when_index_range_is_exact() {
         let mut bytes = vec![0, 0, 0, 8, b'f', b'r', b'e', b'e'];
         bytes.extend_from_slice(&build_sidx_box(0, &[(64, 1_000, 0x9000_0000)]));
         let index = indexed_base_plan(
             ManifestByteRange { offset: 0, length: 100 },
-            ManifestByteRange {
-                offset: 100,
-                length: u64::try_from(bytes.len()).expect("test SIDX length"),
-            },
+            test_range(&bytes),
+            true,
+        );
+        let resources = resolve_segment_base_index(&index, &bytes, 1_000)
+            .expect("indexRangeExact describes a prefix, not one box extent");
+        assert_eq!(resources.len(), 1);
+        assert_eq!(
+            resources[0].range,
+            Some(ManifestByteRange {
+                offset: 100 + u64::try_from(bytes.len()).expect("test SIDX length"),
+                length: 64,
+            })
+        );
+    }
+
+    #[test]
+    fn rejects_exact_index_prefix_when_first_media_range_starts_inside_it() {
+        let mut bytes = build_sidx_box(0, &[(64, 1_000, 0x9000_0000)]);
+        bytes.extend_from_slice(&[0, 0, 0, 8, b'f', b'r', b'e', b'e']);
+        let index = indexed_base_plan(
+            ManifestByteRange { offset: 0, length: 100 },
+            test_range(&bytes),
             true,
         );
         assert_eq!(

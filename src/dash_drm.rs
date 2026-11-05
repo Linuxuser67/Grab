@@ -1,4 +1,4 @@
-//! Bounded DASH Common Encryption support for explicitly supplied content keys.
+//! Bounded DASH Common Encryption support using a configured Widevine CDM.
 //!
 //! Grab keeps downloaded encrypted resources as its resumable source of truth.
 //! Decryption produces a separate private track for FFmpeg; the destination part
@@ -17,7 +17,6 @@ const MP4_PROTECTION_SCHEME: &str = "urn:mpeg:dash:mp4protection:2011";
 const WIDEVINE_SCHEME: &str = "urn:uuid:edef8ba9-79d6-4ace-a3c8-27dcd51d21ed";
 const PLAYREADY_SCHEME: &str = "urn:uuid:9a04f079-9840-4286-ab92-e65be0885f95";
 const CLEARKEY_SCHEME: &str = "urn:uuid:e2719d58-a985-b3c9-781a-ab030af78d30";
-const MAX_KEY_FILE_BYTES: usize = 64 * 1024;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum EncryptionScheme {
@@ -42,9 +41,8 @@ impl DashKeyMap {
             .copied()
             .ok_or_else(|| {
                 format!(
-                    "No content key is configured for DASH KID {}. Add a KID:KEY entry to {}.",
-                    hex_string(&encryption.default_kid),
-                    key_file_path().display()
+                    "No acquired content key is available for DASH KID {}.",
+                    hex_string(&encryption.default_kid)
                 )
             })
     }
@@ -170,10 +168,6 @@ pub(crate) fn widevine_pssh_from_scopes(
         .into_boxed_slice()
 }
 
-fn key_file_path() -> PathBuf {
-    glib::user_config_dir().join("grab/drm-keys.txt")
-}
-
 fn license_file_path() -> PathBuf {
     glib::user_config_dir().join("grab/drm-license.json")
 }
@@ -239,44 +233,6 @@ fn read_private_file(
         ));
     }
     Ok(Some(bytes))
-}
-
-fn load_configured_keys() -> Result<BTreeMap<[u8; 16], [u8; 16]>, String> {
-    let path = key_file_path();
-    let Some(bytes) = read_private_file(&path, MAX_KEY_FILE_BYTES, "DRM key", true)? else {
-        return Ok(BTreeMap::new());
-    };
-    let text = std::str::from_utf8(&bytes)
-        .map_err(|_| format!("{} must contain UTF-8 KID:KEY entries", path.display()))?;
-    let mut keys = BTreeMap::new();
-
-    for (line_index, line) in text.lines().enumerate() {
-        let line = line.trim();
-        if line.is_empty() || line.starts_with('#') {
-            continue;
-        }
-        let (kid_text, key_text) = line.split_once(':').ok_or_else(|| {
-            format!("{}:{} must use KID:KEY format", path.display(), line_index + 1)
-        })?;
-        let kid = parse_hex_16(kid_text).ok_or_else(|| {
-            format!("{}:{} contains an invalid 128-bit KID", path.display(), line_index + 1)
-        })?;
-        let key = parse_hex_16(key_text).ok_or_else(|| {
-            format!(
-                "{}:{} contains an invalid 128-bit content key",
-                path.display(),
-                line_index + 1
-            )
-        })?;
-        if keys.insert(kid, key).is_some() {
-            return Err(format!(
-                "{}:{} repeats a KID; each KID must have exactly one key",
-                path.display(),
-                line_index + 1
-            ));
-        }
-    }
-    Ok(keys)
 }
 
 fn load_license_config() -> Result<Option<WidevineLicenseConfig>, String> {
@@ -375,12 +331,11 @@ fn parse_license_content_type(value: Option<&str>) -> Result<reqwest::header::He
     Ok(header)
 }
 
-/// Resolve selected encrypted video/audio keys from a private key file and, when needed,
-/// the explicitly configured Widevine CDM. Network requests are made only to the
-/// configured HTTPS license endpoint and never follow redirects.
+/// Resolve selected encrypted video/audio keys using the explicitly configured
+/// Widevine CDM. Network requests are made only to the configured HTTPS license
+/// endpoint and never follow redirects.
 pub(crate) async fn resolve_selected_keys(
     proxy: Option<&crate::net_types::ResolvedProxy>,
-    parent_url: &str,
     selected: &[(DashEncryption, &[String])],
     guarded_child_hosts: &mut std::collections::HashSet<String>,
 ) -> Result<Option<DashKeyMap>, String> {
@@ -392,12 +347,8 @@ pub(crate) async fn resolve_selected_keys(
         return Ok(None);
     }
 
-    let mut keys = load_configured_keys()?;
-    let missing = || required.iter().filter(|kid| !keys.contains_key(*kid)).copied().collect::<BTreeSet<_>>();
-    let mut missing_kids = missing();
-    if missing_kids.is_empty() {
-        return Ok(Some(DashKeyMap { keys }));
-    }
+    let mut keys = BTreeMap::new();
+    let mut missing_kids = required.clone();
 
     let Some(config) = load_license_config()? else {
         return Err(missing_key_error(&missing_kids));
@@ -494,7 +445,11 @@ pub(crate) async fn resolve_selected_keys(
         .await?;
         let acquired = parse_widevine_license_response(request, response, kids).await?;
         keys.extend(acquired);
-        missing_kids = missing();
+        missing_kids = required
+            .iter()
+            .filter(|kid| !keys.contains_key(*kid))
+            .copied()
+            .collect();
         if missing_kids.is_empty() {
             return Ok(Some(DashKeyMap { keys }));
         }
@@ -514,9 +469,8 @@ fn missing_key_error(missing: &BTreeSet<[u8; 16]>) -> String {
         .map(hex_string)
         .unwrap_or_else(|| "unknown".to_string());
     format!(
-        "No content key is configured or could be acquired for DASH KID {kid}. Configure {} for Widevine license acquisition or add a KID:KEY entry to {}.",
-        license_file_path().display(),
-        key_file_path().display()
+        "No Widevine content key could be acquired for DASH KID {kid}. Configure {} with a supported device and license endpoint.",
+        license_file_path().display()
     )
 }
 

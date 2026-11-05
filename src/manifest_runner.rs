@@ -693,7 +693,6 @@ async fn prepare_manifest_attempt(
             }
             crate::dash_drm::resolve_selected_keys(
                 job.proxy.as_ref(),
-                &job.source.url,
                 &selected_encryption,
                 &mut guarded_child_hosts,
             )

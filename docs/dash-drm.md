@@ -2,31 +2,8 @@
 
 Native DASH decryption supports static, single-Period fragmented MP4 presentations
 using CENC or CBCS and one default KID per selected video or audio representation.
-Grab can use either an explicitly supplied KID-to-key file or an explicitly
-configured Widevine license device and endpoint.
-
-## Explicit content keys
-
-Create:
-
-```text
-${XDG_CONFIG_HOME:-~/.config}/grab/drm-keys.txt
-```
-
-Use one KID-to-key mapping per line. KIDs may be a UUID with hyphens or 32
-hexadecimal characters; content keys must be 32 hexadecimal characters:
-
-```text
-# KID:KEY
-00112233-4455-6677-8899-aabbccddeeff:0123456789abcdef0123456789abcdef
-```
-
-Restrict the file to the current user:
-
-```sh
-mkdir -p "${XDG_CONFIG_HOME:-$HOME/.config}/grab"
-chmod 600 "${XDG_CONFIG_HOME:-$HOME/.config}/grab/drm-keys.txt"
-```
+Grab obtains the required content keys through an explicitly configured Widevine
+device and license endpoint. There is no manual content-key file fallback.
 
 ## Widevine license acquisition
 
@@ -69,8 +46,8 @@ chmod 600 /absolute/path/to/device.wvd
 
 Grab rejects symlinks, files owned by another user, and files with group or
 other permissions. KIDs and content keys are not written to queue state or
-application logs. Explicit KID:KEY entries take precedence; license acquisition
-is used only for selected KIDs that are not already configured.
+application logs. Every selected encrypted track must have a matching Widevine
+PSSH and a license response that supplies its default KID.
 
 ## Current native subset
 

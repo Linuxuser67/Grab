@@ -20,7 +20,6 @@ use crate::manifest::{
     HlsLiveAccumulator, HlsPlan, HlsResource, HlsResourceKind, ManifestByteRange,
     dash::{
         DashPresentation, DashRepresentationPlan, DashResource, DashResourceKind,
-        DashSegmentBaseIndex,
     },
 };
 use crate::manifest_intake::ManifestLookup;
@@ -2685,10 +2684,10 @@ const MAX_DASH_INDEX_RANGE_BYTES: u64 = 1024 * 1024;
 /// as downloaded media. Media byte ranges still use the normal journaled writer.
 async fn fetch_dash_index_bytes(
     client: &reqwest::Client,
-    index: &DashSegmentBaseIndex,
+    url: &Url,
+    range: ManifestByteRange,
     abort: &mut tokio::sync::oneshot::Receiver<crate::video::StopIntent>,
 ) -> Result<Option<(Vec<u8>, u64)>, ManifestRunError> {
-    let range = index.index_range;
     let end = range
         .offset
         .checked_add(range.length)
@@ -2699,7 +2698,7 @@ async fn fetch_dash_index_bytes(
                 "The DASH SegmentBase index range exceeds the supported limit".to_string(),
             )
         })?;
-    let request = client.get(index.url.clone()).header(
+    let request = client.get(url.clone()).header(
         reqwest::header::RANGE,
         format!("bytes={}-{end}", range.offset),
     );
@@ -2845,7 +2844,8 @@ async fn fetch_and_write_dash_track(
         abort,
     } = context;
     let resources = if let Some(index) = plan.segment_base_index.as_ref() {
-        let Some((bytes, total_length)) = fetch_dash_index_bytes(client, index, abort).await?
+        let Some((bytes, total_length)) =
+            fetch_dash_index_bytes(client, &index.url, index.index_range, abort).await?
         else {
             return Ok(false);
         };
@@ -4779,6 +4779,82 @@ segment-2.m4s
             ManifestRunError::Failed("local".to_string()).into_engine_message(),
             EngineMsg::Failed(_)
         ));
+    }
+
+    #[tokio::test]
+    async fn dash_index_fetch_uses_and_validates_the_requested_range() {
+        use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+
+        let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0))
+            .await
+            .expect("bind HTTP test listener");
+        let address = listener.local_addr().expect("listener address");
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.expect("accept index request");
+            let mut request = [0_u8; 1024];
+            let length = socket.read(&mut request).await.expect("read index request");
+            let request = String::from_utf8_lossy(&request[..length]).to_ascii_lowercase();
+            assert!(request.contains("range: bytes=40-43"));
+            socket
+                .write_all(
+                    b"HTTP/1.1 206 Partial Content\r\nContent-Length: 4\r\nContent-Range: bytes 40-43/1000\r\nConnection: close\r\n\r\nsidx",
+                )
+                .await
+                .expect("write index response");
+        });
+
+        let client = reqwest::Client::builder()
+            .no_proxy()
+            .build()
+            .expect("build direct HTTP test client");
+        let url = Url::parse(&format!("http://{address}/media.mp4")).expect("media URL");
+        let range = ManifestByteRange {
+            offset: 40,
+            length: 4,
+        };
+        let (_stop_tx, mut abort) = tokio::sync::oneshot::channel();
+        let result = fetch_dash_index_bytes(&client, &url, range, &mut abort)
+            .await
+            .expect("fetch index range");
+
+        server.await.expect("HTTP test server task");
+        assert_eq!(result, Some((b"sidx".to_vec(), 1_000)));
+    }
+
+    #[tokio::test]
+    async fn dash_index_fetch_rejects_full_response_without_retrying() {
+        use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+
+        let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0))
+            .await
+            .expect("bind HTTP test listener");
+        let address = listener.local_addr().expect("listener address");
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.expect("accept index request");
+            let mut request = [0_u8; 1024];
+            let _ = socket.read(&mut request).await.expect("read index request");
+            socket
+                .write_all(
+                    b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+                )
+                .await
+                .expect("write un-ranged response");
+        });
+
+        let client = reqwest::Client::builder()
+            .no_proxy()
+            .build()
+            .expect("build direct HTTP test client");
+        let url = Url::parse(&format!("http://{address}/media.mp4")).expect("media URL");
+        let range = ManifestByteRange {
+            offset: 40,
+            length: 4,
+        };
+        let (_stop_tx, mut abort) = tokio::sync::oneshot::channel();
+        let result = fetch_dash_index_bytes(&client, &url, range, &mut abort).await;
+
+        server.await.expect("HTTP test server task");
+        assert!(matches!(result, Err(ManifestRunError::Unsupported(_))));
     }
 
     #[tokio::test]

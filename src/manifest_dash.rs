@@ -428,10 +428,10 @@ pub(crate) fn parse_dash_manifest_at(
             validate_period_continuity(previous_period, period, previous_id)?;
         }
 
-        if period_index == 0 {
-            if let DashPresentation::Dynamic(dynamic) = &mut presentation {
-                dynamic.period_start = period_start;
-            }
+        if period_index == 0
+            && let DashPresentation::Dynamic(dynamic) = &mut presentation
+        {
+            dynamic.period_start = period_start;
         }
         let addressing_duration = if is_dynamic { Duration::MAX } else { duration };
         let period_base = resolve_base_url(mpd_base.clone(), &period.BaseURL)?;

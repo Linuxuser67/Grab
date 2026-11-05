@@ -2244,7 +2244,7 @@ one.ts
                 .iter()
                 .find(|resource| resource.kind == HlsResourceKind::Key)
                 .map(|resource| resource.url.as_str()),
-            Some("https://cdn.example.test/path/keys/media.key")
+            Some("https://cdn.example.test/keys/media.key")
         );
         assert_eq!(parsed.version, Some(5));
     }
@@ -2420,7 +2420,7 @@ one.ts
                 .iter()
                 .find(|resource| resource.kind == HlsResourceKind::Key)
                 .map(|resource| resource.url.as_str()),
-            Some("https://cdn.example.test/keys/media.key")
+            Some("https://cdn.example.test/path/keys/media.key")
         );
         assert!(!plan.is_destination_assemblable_candidate());
     }

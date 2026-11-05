@@ -2647,6 +2647,36 @@ mod tests {
     }
 
     #[test]
+    fn negative_timeline_repeat_uses_presentation_time_offset_for_period_end() {
+        let body = r#"<?xml version="1.0"?>
+<MPD xmlns="urn:mpeg:dash:schema:mpd:2011" type="static" mediaPresentationDuration="PT4S">
+  <Period duration="PT4S">
+    <AdaptationSet contentType="video" mimeType="video/mp4">
+      <SegmentTemplate timescale="1000" presentationTimeOffset="900000"
+                       media="seg-$Time$.m4s">
+        <SegmentTimeline>
+          <S t="900000" d="2000" r="-1"/>
+        </SegmentTimeline>
+      </SegmentTemplate>
+      <Representation id="v1"/>
+    </AdaptationSet>
+  </Period>
+</MPD>"#;
+        let plan = parse_dash_manifest(BASE_URL, body)
+            .expect("non-zero PTO timeline should parse");
+        let resources = plan_dash_representation(&plan, &plan.video_representations[0].key)
+            .expect("negative repeat should reach the PTO-adjusted Period end");
+
+        let urls = resources
+            .resources
+            .iter()
+            .filter(|resource| resource.kind == DashResourceKind::Segment)
+            .map(|resource| resource.url.path().to_owned())
+            .collect::<Vec<_>>();
+        assert_eq!(urls, ["/path/seg-900000.m4s", "/path/seg-902000.m4s"]);
+    }
+
+    #[test]
     fn skips_timeline_segments_before_the_period_and_preserves_numbers() {
         let body = r#"<?xml version="1.0"?>
 <MPD xmlns="urn:mpeg:dash:schema:mpd:2011" type="static" mediaPresentationDuration="PT2S">

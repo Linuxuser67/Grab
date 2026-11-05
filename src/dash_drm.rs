@@ -57,7 +57,8 @@ impl DashKeyMap {
 ///
 /// Native license acquisition currently supports ClearKey only. Widevine and
 /// PlayReady descriptors are rejected until their CDM exchanges have a safe,
-/// reusable integration. Key rotation and multiple default KIDs are unsupported.
+/// reusable integration. Fragment-local seig KID rotation is resolved from
+/// media fragments; conflicting default KIDs across descriptor scopes remain unsupported.
 pub(crate) fn encryption_from_scopes(
     scopes: &[&[dash_mpd_core::ContentProtection]],
 ) -> Result<Option<DashEncryption>, String> {
@@ -205,6 +206,14 @@ pub(crate) async fn acquire_required_keys(
     if requests.iter().any(|(_, kids)| kids.is_empty()) {
         return Err("DASH ClearKey acquisition requires at least one sample KID".to_string());
     }
+    if requests
+        .iter()
+        .any(|(_, kids)| kids.len() > MAX_LICENSE_KEYS)
+    {
+        return Err(format!(
+            "DASH ClearKey requests cannot exceed {MAX_LICENSE_KEYS} distinct KIDs per license URL"
+        ));
+    }
 
     let mut groups: Vec<(Url, BTreeSet<[u8; 16]>)> = Vec::new();
     for (license_url, required_kids) in requests {
@@ -213,6 +222,15 @@ pub(crate) async fn acquire_required_keys(
         } else {
             groups.push((license_url.clone(), required_kids.clone()));
         }
+    }
+
+    if groups
+        .iter()
+        .any(|(_, kids)| kids.len() > MAX_LICENSE_KEYS)
+    {
+        return Err(format!(
+            "DASH ClearKey requests cannot exceed {MAX_LICENSE_KEYS} distinct KIDs per license URL"
+        ));
     }
 
     let mut keys: BTreeMap<[u8; 16], Zeroizing<[u8; 16]>> = BTreeMap::new();

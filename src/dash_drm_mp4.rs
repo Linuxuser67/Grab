@@ -1243,6 +1243,12 @@ pub(crate) fn required_kids(
             .map_err(|error| format!("Could not read encrypted DASH media segment: {error}"))?;
         for sample in fragment_samples(&fragment, init_encryption)? {
             required.insert(sample.kid);
+            if required.len() > super::MAX_LICENSE_KEYS {
+                return Err(format!(
+                    "Encrypted DASH requires more than {} distinct ClearKey KIDs",
+                    super::MAX_LICENSE_KEYS
+                ));
+            }
         }
     }
     if required.is_empty() {

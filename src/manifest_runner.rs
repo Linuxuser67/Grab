@@ -520,7 +520,6 @@ struct ManifestPreparation {
     audio_dir: PathBuf,
     client: reqwest::Client,
     tracks: Tracks,
-    drm_keys: Option<crate::dash_drm::DashKeyMap>,
     guarded_child_hosts: std::collections::HashSet<String>,
     has_audio: bool,
     live_hls: bool,
@@ -666,7 +665,7 @@ async fn prepare_manifest_attempt(
         mut guarded_child_hosts,
         has_audio,
     } = resolve_manifest_tracks(job, offline_tracks, finish_requested).await?;
-    let drm_keys = match &tracks {
+    match &tracks {
         Tracks::Dash {
             video,
             audio,
@@ -705,13 +704,11 @@ async fn prepare_manifest_attempt(
                     })?;
                 guard_manifest_child_url(&job.source.url, license_url, &mut guarded_child_hosts)?;
             }
-            // Fragment-local seig groups can override the MPD default KID. Fetch
-            // all selected media first, then request the complete KID set once.
-            None
         }
-        Tracks::Hls { .. } | Tracks::DashLiveOffline { .. } => None,
+        Tracks::Hls { .. } | Tracks::DashLiveOffline { .. } => {}
     };
-    if has_audio {
+
+    if has_audio {    if has_audio {
         ensure_track_dir(&audio_dir).await?;
     }
 
@@ -757,7 +754,6 @@ async fn prepare_manifest_attempt(
         audio_dir,
         client,
         tracks,
-        drm_keys,
         guarded_child_hosts,
         has_audio,
         live_hls,
@@ -881,7 +877,6 @@ async fn resolve_manifest_tracks(
 struct ManifestStaticTransfer<'a> {
     client: &'a reqwest::Client,
     tracks: &'a Tracks,
-    drm_keys: Option<&'a crate::dash_drm::DashKeyMap>,
     destination_parts: bool,
     staging: &'a Path,
     destination: &'a Path,
@@ -903,7 +898,6 @@ async fn transfer_static_manifest_tracks(
     let ManifestStaticTransfer {
         client,
         tracks,
-        drm_keys: _,
         destination_parts,
         staging,
         destination,
@@ -1594,7 +1588,6 @@ pub(crate) async fn run_manifest_download(
         audio_dir,
         client,
         tracks,
-        drm_keys,
         mut guarded_child_hosts,
         mut has_audio,
         live_hls,
@@ -1705,7 +1698,6 @@ pub(crate) async fn run_manifest_download(
         match transfer_static_manifest_tracks(ManifestStaticTransfer {
             client: &client,
             tracks: &tracks,
-            drm_keys: drm_keys.as_ref(),
             destination_parts: static_destination_parts,
             staging: &staging,
             destination: &job.dest,

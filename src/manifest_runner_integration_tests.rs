@@ -2375,7 +2375,10 @@ async fn hls_sample_aes_mpegts_is_decrypted_by_ffmpeg_after_localization() {
     let localized_key = tokio::fs::read(video_dir.join(local_key_uri))
         .await
         .expect("read staged SAMPLE-AES key");
-    assert_eq!(localized_key, key, "staged key bytes must match the fetched key");
+    assert_eq!(
+        localized_key, key,
+        "staged key bytes must match the fetched key"
+    );
     let output = root.path().join("sample-aes-output.mkv");
     assert!(
         run_ffmpeg(

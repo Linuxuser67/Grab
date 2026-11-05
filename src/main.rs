@@ -21,7 +21,6 @@ mod inline_gallery;
 mod install_help;
 mod install_progress;
 mod live_capture_state;
-mod dash_subtitle;
 mod manifest;
 mod manifest_destination;
 mod manifest_intake;

@@ -1793,7 +1793,10 @@ mod tests {
             .expect("parse rotated sample group");
         assert_eq!(samples.len(), 1);
         assert_eq!(samples[0].kid, rotated_kid);
-        let plaintext = decrypt_one_sample(&fragment, &init, &samples[0], &[0x10; 16])
+        let key_hex = Zeroizing::new(hex_string(&[0x10; 16]));
+        let decrypter = vsd_mp4::decrypt::CencDecrypter::with_init(&key_hex, &init)
+            .expect("initialize rotated sample decrypter");
+        let plaintext = decrypt_one_sample(&fragment, &init, &samples[0], &decrypter)
             .expect("decrypt rotated sample using its selected KID key");
         assert_eq!(plaintext, [
             0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07,

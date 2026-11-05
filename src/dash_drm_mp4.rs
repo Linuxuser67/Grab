@@ -353,11 +353,15 @@ fn validate_fragment(bytes: &[u8], init: InitEncryption) -> Result<(), String> {
     let mdats: Vec<_> = top.iter().filter(|span| &span.kind == b"mdat").collect();
     if moofs.len() != 1
         || mdats.len() != 1
+        || top.iter().filter(|span| &span.kind == b"sidx").count() > 1
         || top.iter().any(|span| {
-            &span.kind != b"styp" && &span.kind != b"moof" && &span.kind != b"mdat"
+            &span.kind != b"styp"
+                && &span.kind != b"sidx"
+                && &span.kind != b"moof"
+                && &span.kind != b"mdat"
         })
     {
-        return Err("Each encrypted DASH segment must contain one moof and one mdat".to_string());
+        return Err("Each encrypted DASH segment must contain one moof and one mdat, with only optional styp/sidx boxes".to_string());
     }
     if top.iter().position(|span| &span.kind == b"moof")
         >= top.iter().position(|span| &span.kind == b"mdat")
@@ -381,9 +385,12 @@ fn validate_fragment(bytes: &[u8], init: InitEncryption) -> Result<(), String> {
 
     let traf_children = parse_box_spans(bytes, traf.payload_start()?, traf.end()?)?;
     if traf_children.iter().any(|span| {
-        !matches!(&span.kind, b"tfhd" | b"tfdt" | b"trun" | b"senc")
+        !matches!(
+            &span.kind,
+            b"tfhd" | b"tfdt" | b"trun" | b"saiz" | b"saio" | b"senc"
+        )
     }) {
-        return Err("Encrypted DASH fragment uses unsupported auxiliary, key-rotation or sample-group metadata".to_string());
+        return Err("Encrypted DASH fragment uses unsupported key-rotation or sample-group metadata".to_string());
     }
     if traf_children.iter().filter(|span| &span.kind == b"tfdt").count() > 1 {
         return Err("Encrypted DASH fragment contains multiple tfdt boxes".to_string());
@@ -391,11 +398,16 @@ fn validate_fragment(bytes: &[u8], init: InitEncryption) -> Result<(), String> {
     let tfhd = find_one(&traf_children, b"tfhd")?;
     let trun = find_one(&traf_children, b"trun")?;
     let senc = find_one(&traf_children, b"senc")?;
+    let saiz: Vec<_> = traf_children.iter().filter(|span| &span.kind == b"saiz").collect();
+    let saio: Vec<_> = traf_children.iter().filter(|span| &span.kind == b"saio").collect();
     if traf_children.iter().filter(|span| &span.kind == b"tfhd").count() != 1
         || traf_children.iter().filter(|span| &span.kind == b"trun").count() != 1
         || traf_children.iter().filter(|span| &span.kind == b"senc").count() != 1
+        || saiz.len() > 1
+        || saio.len() > 1
+        || (saiz.is_empty() != saio.is_empty())
     {
-        return Err("Encrypted DASH fragment requires one tfhd, trun and senc".to_string());
+        return Err("Encrypted DASH fragment requires one tfhd, trun and senc, with paired optional saiz/saio boxes".to_string());
     }
 
     let tfhd_payload = span_payload(bytes, *tfhd)?;

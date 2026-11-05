@@ -898,25 +898,9 @@ pub(crate) fn plan_dash_representation(
             .checked_add(period_segment_count)
             .filter(|count| *count <= MAX_SEGMENTS)
             .ok_or(DashError::LimitExceeded)?;
-        let mut first_media_resource = true;
         for resource in period_resources {
             if period_index > 0 && resource.kind == DashResourceKind::Initialization {
                 continue;
-            }
-            // DASH permits a media segment to straddle a continuous Period boundary.
-            // Skip only an identical first media resource at that boundary; do not
-            // collapse repeated URLs within a Period.
-            if period_index > 0 && first_media_resource {
-                first_media_resource = false;
-                if resources.last().is_some_and(|previous: &DashResource| {
-                    previous.url == resource.url
-                        && previous.range == resource.range
-                        && previous.kind == resource.kind
-                }) {
-                    continue;
-                }
-            } else {
-                first_media_resource = false;
             }
             resources.push(resource);
         }

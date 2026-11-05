@@ -171,6 +171,8 @@ struct DashTemplate {
     timescale: u64,
     duration_ticks: Option<u64>,
     timeline: Option<Box<[DashTimelineEntry]>>,
+    /// Sample-timeline timestamp corresponding to the Period start, in timescale units.
+    presentation_time_offset: u64,
     period_duration: Duration,
 }
 
@@ -220,8 +222,8 @@ pub(crate) fn parse_dash_manifest(
 /// assets are still subject to the 1 GiB per-resource limit. Multiple
 /// periods, DRM, XLink, adaptation-set Subset/Preselection combinations,
 /// dynamic SegmentList, LL-DASH, SegmentBase with a separate initialization
-/// resource, non-zero presentation-time offsets, and WebM remain on yt-dlp
-/// fallback.
+/// resource or non-zero presentation-time offset, non-zero offsets on dynamic
+/// SegmentTemplate, and WebM remain on yt-dlp fallback.
 ///
 /// # Errors
 /// Returns an error when the MPD is malformed, exceeds the input limit, uses
@@ -934,7 +936,11 @@ fn effective_addressing(
     }
     let addressing = match (has_template, has_list) {
         (true, false) => {
-            effective_template(&templates, period_duration).map(DashAddressing::Template)?
+            let template = effective_template(&templates, period_duration)?;
+            if is_dynamic && template.presentation_time_offset != 0 {
+                return Err(DashError::UnsupportedAddressing);
+            }
+            DashAddressing::Template(template)
         }
         (false, true) => effective_list(&lists).map(DashAddressing::List)?,
         _ => return Err(DashError::UnsupportedAddressing),
@@ -962,6 +968,7 @@ fn effective_template(
     let mut end_number = None;
     let mut timescale = None;
     let mut duration_ticks = None;
+    let mut presentation_time_offset = None;
     let mut timeline = None;
 
     for template in levels.iter().flatten() {
@@ -973,9 +980,6 @@ fn effective_template(
             || template.failover_content.is_some()
             || template.eptDelta.is_some_and(|delta| delta != 0)
             || template.pbDelta.is_some_and(|delta| delta != 0)
-            || template
-                .presentationTimeOffset
-                .is_some_and(|offset| offset != 0)
             || template
                 .availabilityTimeOffset
                 .is_some_and(|offset| offset != 0.0)
@@ -990,6 +994,8 @@ fn effective_template(
         start_number = template.startNumber.or(start_number);
         end_number = template.endNumber.or(end_number);
         timescale = template.timescale.or(timescale);
+        // An explicitly supplied zero overrides an inherited non-zero offset.
+        presentation_time_offset = template.presentationTimeOffset.or(presentation_time_offset);
 
         if let Some(duration) = template.duration {
             if !duration.is_finite()
@@ -1082,6 +1088,7 @@ fn effective_template(
         timescale,
         duration_ticks,
         timeline,
+        presentation_time_offset: presentation_time_offset.unwrap_or(0),
         period_duration,
     })
 }
@@ -1506,6 +1513,7 @@ fn expand_segment_times(template: &DashTemplate) -> Result<Vec<(u64, u64)>, Dash
         let mut next_start = 0_u64;
         let mut previous_start = None;
         let mut previous_run_uses_negative_repeat = false;
+        let mut expanded_count = 0_usize;
 
         for (index, entry) in timeline.iter().enumerate() {
             let start = entry.start.unwrap_or(next_start);
@@ -1538,6 +1546,7 @@ fn expand_segment_times(template: &DashTemplate) -> Result<Vec<(u64, u64)>, Dash
                         None => segments_until_period_end(
                             template.period_duration,
                             template.timescale,
+                            template.presentation_time_offset,
                             start,
                             entry.duration,
                         )?,
@@ -1550,16 +1559,36 @@ fn expand_segment_times(template: &DashTemplate) -> Result<Vec<(u64, u64)>, Dash
                 if template.end_number.is_some_and(|end| number > end) {
                     return Ok(output);
                 }
+                expanded_count = expanded_count
+                    .checked_add(1)
+                    .filter(|count| *count <= MAX_SEGMENTS)
+                    .ok_or(DashError::LimitExceeded)?;
+
+                // S@t is on the sample timeline and remains the value used for
+                // $Time$. PTO only maps that timestamp onto the Period timeline.
                 let time = repeat
                     .checked_mul(entry.duration)
                     .and_then(|offset| start.checked_add(offset))
                     .ok_or(DashError::InvalidSegment)?;
-                if !time_precedes_period_end(time, template.period_duration, template.timescale)? {
+                if !time_precedes_period_end(
+                    time,
+                    template.period_duration,
+                    template.timescale,
+                    template.presentation_time_offset,
+                )? {
                     return Err(DashError::InvalidSegment);
                 }
-                output.push((number, time));
-                if output.len() > MAX_SEGMENTS {
-                    return Err(DashError::LimitExceeded);
+
+                let segment_end = time
+                    .checked_add(entry.duration)
+                    .ok_or(DashError::InvalidSegment)?;
+                if segment_end > template.presentation_time_offset {
+                    if time < template.presentation_time_offset {
+                        // A segment crossing the Period start cannot be trimmed
+                        // by the current resource planner; leave it to yt-dlp.
+                        return Err(DashError::UnsupportedAddressing);
+                    }
+                    output.push((number, time));
                 }
                 number = number.checked_add(1).ok_or(DashError::InvalidSegment)?;
             }
@@ -1603,7 +1632,16 @@ fn expand_segment_times(template: &DashTemplate) -> Result<Vec<(u64, u64)>, Dash
         let offset = u64::try_from(index).map_err(|_| DashError::LimitExceeded)?;
         let time = offset
             .checked_mul(duration_ticks)
+            .and_then(|offset| template.presentation_time_offset.checked_add(offset))
             .ok_or(DashError::InvalidSegment)?;
+        if !time_precedes_period_end(
+            time,
+            template.period_duration,
+            template.timescale,
+            template.presentation_time_offset,
+        )? {
+            return Err(DashError::InvalidSegment);
+        }
         output.push((number, time));
         number = number.checked_add(1).ok_or(DashError::InvalidSegment)?;
     }
@@ -1631,19 +1669,35 @@ fn ceil_div_u128(numerator: u128, denominator: u128) -> Result<u64, DashError> {
     u64::try_from(quotient).map_err(|_| DashError::LimitExceeded)
 }
 
+fn period_end_on_sample_timeline(
+    period_duration: Duration,
+    timescale: u64,
+    presentation_time_offset: u64,
+) -> Result<u128, DashError> {
+    let period_duration_scaled = period_duration
+        .as_nanos()
+        .checked_mul(u128::from(timescale))
+        .ok_or(DashError::InvalidSegment)?;
+    let period_start_scaled = u128::from(presentation_time_offset)
+        .checked_mul(1_000_000_000)
+        .ok_or(DashError::InvalidSegment)?;
+    period_start_scaled
+        .checked_add(period_duration_scaled)
+        .ok_or(DashError::InvalidSegment)
+}
+
 fn segments_until_period_end(
     period_duration: Duration,
     timescale: u64,
+    presentation_time_offset: u64,
     segment_start: u64,
     segment_duration: u64,
 ) -> Result<u64, DashError> {
     if segment_duration == 0 {
         return Err(DashError::InvalidSegment);
     }
-    let period_end_scaled = period_duration
-        .as_nanos()
-        .checked_mul(u128::from(timescale))
-        .ok_or(DashError::InvalidSegment)?;
+    let period_end_scaled =
+        period_end_on_sample_timeline(period_duration, timescale, presentation_time_offset)?;
     let start_scaled = u128::from(segment_start)
         .checked_mul(1_000_000_000)
         .ok_or(DashError::InvalidSegment)?;
@@ -1661,11 +1715,10 @@ fn time_precedes_period_end(
     segment_start: u64,
     period_duration: Duration,
     timescale: u64,
+    presentation_time_offset: u64,
 ) -> Result<bool, DashError> {
-    let period_end_scaled = period_duration
-        .as_nanos()
-        .checked_mul(u128::from(timescale))
-        .ok_or(DashError::InvalidSegment)?;
+    let period_end_scaled =
+        period_end_on_sample_timeline(period_duration, timescale, presentation_time_offset)?;
     let segment_start_scaled = u128::from(segment_start)
         .checked_mul(1_000_000_000)
         .ok_or(DashError::InvalidSegment)?;
@@ -2519,6 +2572,214 @@ mod tests {
     }
 
     #[test]
+    fn expands_static_timeline_using_presentation_time_offset() {
+        let body = r#"<?xml version="1.0"?>
+<MPD xmlns="urn:mpeg:dash:schema:mpd:2011" type="static" mediaPresentationDuration="PT4S">
+  <Period duration="PT4S">
+    <AdaptationSet contentType="video" mimeType="video/mp4">
+      <SegmentTemplate timescale="1000" startNumber="7"
+                       presentationTimeOffset="900000"
+                       media="seg-$Number$-$Time$.m4s">
+        <SegmentTimeline>
+          <S t="900000" d="2000" r="1"/>
+        </SegmentTimeline>
+      </SegmentTemplate>
+      <Representation id="v1"/>
+    </AdaptationSet>
+  </Period>
+</MPD>"#;
+        let plan = parse_dash_manifest(BASE_URL, body).expect("non-zero PTO timeline should parse");
+        let video = &plan.video_representations[0];
+        let resources = plan_dash_representation(&plan, &video.key)
+            .expect("PTO-aligned timeline should expand");
+
+        let urls = resources
+            .resources
+            .iter()
+            .filter(|resource| resource.kind == DashResourceKind::Segment)
+            .map(|resource| resource.url.path().to_owned())
+            .collect::<Vec<_>>();
+        assert_eq!(urls, ["/path/seg-7-900000.m4s", "/path/seg-8-902000.m4s"]);
+    }
+
+    #[test]
+    fn expands_static_duration_template_from_presentation_time_offset() {
+        let body = r#"<?xml version="1.0"?>
+<MPD xmlns="urn:mpeg:dash:schema:mpd:2011" type="static" mediaPresentationDuration="PT4S">
+  <Period duration="PT4S">
+    <AdaptationSet contentType="video" mimeType="video/mp4">
+      <SegmentTemplate timescale="1000" duration="2000"
+                       presentationTimeOffset="900000"
+                       media="seg-$Time$.m4s"/>
+      <Representation id="v1"/>
+    </AdaptationSet>
+  </Period>
+</MPD>"#;
+        let plan = parse_dash_manifest(BASE_URL, body)
+            .expect("duration template PTO may exceed the Period duration in raw units");
+        let resources = plan_dash_representation(&plan, &plan.video_representations[0].key)
+            .expect("duration template should expand from the sample-timeline offset");
+
+        let urls = resources
+            .resources
+            .iter()
+            .filter(|resource| resource.kind == DashResourceKind::Segment)
+            .map(|resource| resource.url.path().to_owned())
+            .collect::<Vec<_>>();
+        assert_eq!(urls, ["/path/seg-900000.m4s", "/path/seg-902000.m4s"]);
+    }
+
+    #[test]
+    fn negative_timeline_repeat_uses_presentation_time_offset_for_period_end() {
+        let body = r#"<?xml version="1.0"?>
+<MPD xmlns="urn:mpeg:dash:schema:mpd:2011" type="static" mediaPresentationDuration="PT4S">
+  <Period duration="PT4S">
+    <AdaptationSet contentType="video" mimeType="video/mp4">
+      <SegmentTemplate timescale="1000" presentationTimeOffset="900000"
+                       media="seg-$Time$.m4s">
+        <SegmentTimeline>
+          <S t="900000" d="2000" r="-1"/>
+        </SegmentTimeline>
+      </SegmentTemplate>
+      <Representation id="v1"/>
+    </AdaptationSet>
+  </Period>
+</MPD>"#;
+        let plan = parse_dash_manifest(BASE_URL, body).expect("non-zero PTO timeline should parse");
+        let resources = plan_dash_representation(&plan, &plan.video_representations[0].key)
+            .expect("negative repeat should reach the PTO-adjusted Period end");
+
+        let urls = resources
+            .resources
+            .iter()
+            .filter(|resource| resource.kind == DashResourceKind::Segment)
+            .map(|resource| resource.url.path().to_owned())
+            .collect::<Vec<_>>();
+        assert_eq!(urls, ["/path/seg-900000.m4s", "/path/seg-902000.m4s"]);
+    }
+
+    #[test]
+    fn skips_timeline_segments_before_the_period_and_preserves_numbers() {
+        let body = r#"<?xml version="1.0"?>
+<MPD xmlns="urn:mpeg:dash:schema:mpd:2011" type="static" mediaPresentationDuration="PT2S">
+  <Period duration="PT2S">
+    <AdaptationSet contentType="video" mimeType="video/mp4">
+      <SegmentTemplate timescale="1" startNumber="10"
+                       presentationTimeOffset="4"
+                       media="seg-$Number$-$Time$.m4s">
+        <SegmentTimeline>
+          <S t="0" d="2" r="2"/>
+        </SegmentTimeline>
+      </SegmentTemplate>
+      <Representation id="v1"/>
+    </AdaptationSet>
+  </Period>
+</MPD>"#;
+        let plan = parse_dash_manifest(BASE_URL, body).expect("static timeline should parse");
+        let resources = plan_dash_representation(&plan, &plan.video_representations[0].key)
+            .expect("the segment at the Period start should remain available");
+
+        let urls = resources
+            .resources
+            .iter()
+            .filter(|resource| resource.kind == DashResourceKind::Segment)
+            .map(|resource| resource.url.path().to_owned())
+            .collect::<Vec<_>>();
+        assert_eq!(urls, ["/path/seg-12-4.m4s"]);
+    }
+
+    #[test]
+    fn falls_back_when_a_timeline_segment_crosses_the_period_start() {
+        let body = r#"<?xml version="1.0"?>
+<MPD xmlns="urn:mpeg:dash:schema:mpd:2011" type="static" mediaPresentationDuration="PT2S">
+  <Period duration="PT2S">
+    <AdaptationSet contentType="video" mimeType="video/mp4">
+      <SegmentTemplate timescale="1" presentationTimeOffset="4"
+                       media="seg-$Time$.m4s">
+        <SegmentTimeline>
+          <S t="3" d="2"/>
+        </SegmentTimeline>
+      </SegmentTemplate>
+      <Representation id="v1"/>
+    </AdaptationSet>
+  </Period>
+</MPD>"#;
+        let plan = parse_dash_manifest(BASE_URL, body).expect("MPD structure should parse");
+        assert_eq!(
+            plan_dash_representation(&plan, &plan.video_representations[0].key).err(),
+            Some(DashError::UnsupportedAddressing)
+        );
+    }
+
+    #[test]
+    fn resolves_presentation_time_offset_with_representation_precedence() {
+        let inherited = r#"<?xml version="1.0"?>
+<MPD xmlns="urn:mpeg:dash:schema:mpd:2011" type="static" mediaPresentationDuration="PT2S">
+  <Period duration="PT2S">
+    <SegmentTemplate timescale="1" duration="2" presentationTimeOffset="100"
+                     media="seg-$Time$.m4s"/>
+    <AdaptationSet contentType="video" mimeType="video/mp4">
+      <SegmentTemplate presentationTimeOffset="200"/>
+      <Representation id="v1">
+        <SegmentTemplate presentationTimeOffset="300"/>
+      </Representation>
+    </AdaptationSet>
+  </Period>
+</MPD>"#;
+        let plan =
+            parse_dash_manifest(BASE_URL, inherited).expect("inherited templates should parse");
+        let resources = plan_dash_representation(&plan, &plan.video_representations[0].key)
+            .expect("the most specific PTO should be used");
+        assert_eq!(resources.resources[0].url.path(), "/path/seg-300.m4s");
+
+        let explicit_zero = r#"<?xml version="1.0"?>
+<MPD xmlns="urn:mpeg:dash:schema:mpd:2011" type="static" mediaPresentationDuration="PT2S">
+  <Period duration="PT2S">
+    <SegmentTemplate timescale="1" duration="2" presentationTimeOffset="100"
+                     media="seg-$Time$.m4s"/>
+    <AdaptationSet contentType="video" mimeType="video/mp4">
+      <Representation id="v1">
+        <SegmentTemplate presentationTimeOffset="0"/>
+      </Representation>
+    </AdaptationSet>
+  </Period>
+</MPD>"#;
+        let plan = parse_dash_manifest(BASE_URL, explicit_zero)
+            .expect("explicit zero should override PTO");
+        let resources = plan_dash_representation(&plan, &plan.video_representations[0].key)
+            .expect("explicit zero PTO should be honored");
+        assert_eq!(resources.resources[0].url.path(), "/path/seg-0.m4s");
+    }
+
+    #[test]
+    fn dynamic_template_with_nonzero_presentation_time_offset_uses_fallback() {
+        let body = dynamic_mpd(
+            r#"<SegmentTemplate timescale="1" duration="4"
+                               presentationTimeOffset="4" media="seg-$Number$.m4s"/>"#,
+            "",
+        );
+        assert_eq!(
+            parse_dash_manifest_at(BASE_URL, &body, dynamic_test_clock(20)).err(),
+            Some(DashError::UnsupportedAddressing)
+        );
+    }
+
+    #[test]
+    fn rejects_negative_template_presentation_time_offset() {
+        let body = r#"<?xml version="1.0"?>
+<MPD xmlns="urn:mpeg:dash:schema:mpd:2011" type="static" mediaPresentationDuration="PT2S">
+  <Period duration="PT2S">
+    <AdaptationSet contentType="video" mimeType="video/mp4">
+      <SegmentTemplate timescale="1" duration="2"
+                       presentationTimeOffset="-1" media="seg-$Time$.m4s"/>
+      <Representation id="v1"/>
+    </AdaptationSet>
+  </Period>
+</MPD>"#;
+        assert!(parse_dash_manifest(BASE_URL, body).is_err());
+    }
+
+    #[test]
     fn negative_timeline_repeat_uses_ceiling_to_next_explicit_start() {
         let body = r#"<?xml version="1.0"?>
 <MPD xmlns="urn:mpeg:dash:schema:mpd:2011" type="static" mediaPresentationDuration="PT10S">
@@ -2691,14 +2952,13 @@ mod tests {
     }
 
     #[test]
-    fn rejects_dynamic_multi_period_drm_xlink_webm_and_nonzero_offset() {
+    fn rejects_dynamic_multi_period_drm_xlink_and_webm() {
         let rejected = [
             r#"<MPD xmlns="urn:mpeg:dash:schema:mpd:2011" type="dynamic"><Period/></MPD>"#,
             r#"<MPD xmlns="urn:mpeg:dash:schema:mpd:2011" type="static" mediaPresentationDuration="PT2S"><Period duration="PT1S"/><Period duration="PT1S"/></MPD>"#,
             r#"<MPD xmlns="urn:mpeg:dash:schema:mpd:2011" type="static" mediaPresentationDuration="PT2S"><ContentProtection schemeIdUri="urn:uuid:00000000-0000-0000-0000-000000000000"/><Period duration="PT2S"/></MPD>"#,
             r#"<MPD xmlns="urn:mpeg:dash:schema:mpd:2011" xmlns:xlink="http://www.w3.org/1999/xlink" type="static" mediaPresentationDuration="PT2S"><Period duration="PT2S" xlink:href="external.xml"/></MPD>"#,
             r#"<MPD xmlns="urn:mpeg:dash:schema:mpd:2011" type="static" mediaPresentationDuration="PT2S"><Period duration="PT2S"><AdaptationSet contentType="video" mimeType="video/webm"><SegmentList><SegmentURL media="v.webm"/></SegmentList><Representation id="v1"/></AdaptationSet></Period></MPD>"#,
-            r#"<MPD xmlns="urn:mpeg:dash:schema:mpd:2011" type="static" mediaPresentationDuration="PT2S"><Period duration="PT2S"><AdaptationSet contentType="video" mimeType="video/mp4"><SegmentTemplate media="s-$Number$.m4s" duration="2" presentationTimeOffset="1"/><Representation id="v1"/></AdaptationSet></Period></MPD>"#,
         ];
 
         for body in rejected {

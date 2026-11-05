@@ -690,7 +690,7 @@ async fn prepare_manifest_attempt(
                     )
                 })?;
                 guard_manifest_child_url(&job.source.url, license_url, &mut guarded_child_hosts)?;
-                license_requests.push((encryption, license_url.clone()));
+                license_requests.push((license_url.clone(), std::collections::BTreeSet::from([encryption.default_kid])));
             }
             if let Some(audio) = audio.as_ref()
                 && let Some(encryption) = audio.representation.encryption
@@ -3047,10 +3047,33 @@ async fn fetch_and_write_dash_track(
                     .to_string(),
             )
         })?;
-        let key = keys.key_for(encryption).map_err(ManifestRunError::Failed)?;
         let resources = drm_resources.ok_or_else(|| {
             ManifestRunError::Failed("Encrypted DASH resource plan is missing".to_string())
         })?;
+        let mut track_keys = keys.clone();
+        let required_kids = crate::dash_drm::required_kids(&resources, directory, encryption)
+            .map_err(ManifestRunError::Unsupported)?;
+        let missing_kids: std::collections::BTreeSet<_> = required_kids
+            .into_iter()
+            .filter(|kid| !track_keys.contains_kid(kid))
+            .collect();
+        if !missing_kids.is_empty() {
+            let license_url = plan.representation.license_url.as_ref().ok_or_else(|| {
+                ManifestRunError::Unsupported(
+                    "The selected DASH representation has no ClearKey license URL".to_string(),
+                )
+            })?;
+            let additional = crate::dash_drm::acquire_required_keys(
+                client,
+                &[(license_url.clone(), missing_kids)],
+            )
+            .await
+            .map_err(ManifestRunError::Failed)?
+            .ok_or_else(|| ManifestRunError::Failed(
+                "DASH ClearKey acquisition returned no additional keys".to_string()
+            ))?;
+            track_keys.merge(additional).map_err(ManifestRunError::Failed)?;
+        }
         let directory = directory.to_path_buf();
         let output = directory.join(format!("{filename}.decrypted"));
         let cancelled = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
@@ -3061,7 +3084,7 @@ async fn fetch_and_write_dash_track(
                 &directory,
                 &output,
                 encryption,
-                &key,
+                &track_keys,
                 &worker_cancelled,
             )
         });

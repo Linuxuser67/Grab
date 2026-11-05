@@ -34,24 +34,36 @@ pub(crate) struct DashEncryption {
     pub(crate) default_kid: [u8; 16],
 }
 
+#[derive(Clone)]
 pub(crate) struct DashKeyMap {
     keys: BTreeMap<[u8; 16], Zeroizing<[u8; 16]>>,
 }
 
 impl DashKeyMap {
-    pub(crate) fn key_for(
-        &self,
-        encryption: DashEncryption,
-    ) -> Result<Zeroizing<[u8; 16]>, String> {
+    pub(crate) fn contains_kid(&self, kid: &[u8; 16]) -> bool {
+        self.keys.contains_key(kid)
+    }
+
+    pub(crate) fn key_for_kid(&self, kid: &[u8; 16]) -> Result<Zeroizing<[u8; 16]>, String> {
         self.keys
-            .get(&encryption.default_kid)
+            .get(kid)
             .map(|key| Zeroizing::new(**key))
             .ok_or_else(|| {
-                format!(
-                    "The DASH license response did not include selected KID {}",
-                    hex_string(&encryption.default_kid)
-                )
+                format!("The DASH license response did not include selected KID {}", hex_string(kid))
             })
+    }
+
+    pub(crate) fn merge(&mut self, additional: Self) -> Result<(), String> {
+        for (kid, key) in additional.keys {
+            if let Some(previous) = self.keys.get(&kid) {
+                if **previous != *key {
+                    return Err("DASH license servers returned conflicting keys for one KID".to_string());
+                }
+            } else {
+                self.keys.insert(kid, key);
+            }
+        }
+        Ok(())
     }
 }
 
@@ -200,21 +212,18 @@ struct ClearKeyJwk {
 /// Keys are retained only in zeroizing memory and are never written to disk or logs.
 pub(crate) async fn acquire_required_keys(
     client: &reqwest::Client,
-    requests: &[(DashEncryption, Url)],
+    requests: &[(Url, BTreeSet<[u8; 16]>)],
 ) -> Result<Option<DashKeyMap>, String> {
     if requests.is_empty() {
         return Ok(None);
     }
 
     let mut groups: Vec<(Url, BTreeSet<[u8; 16]>)> = Vec::new();
-    for (encryption, license_url) in requests {
+    for (license_url, required_kids) in requests {
         if let Some((_, kids)) = groups.iter_mut().find(|(url, _)| url == license_url) {
-            kids.insert(encryption.default_kid);
+            kids.extend(required_kids.iter().copied());
         } else {
-            groups.push((
-                license_url.clone(),
-                BTreeSet::from([encryption.default_kid]),
-            ));
+            groups.push((license_url.clone(), required_kids.clone()));
         }
     }
 
@@ -299,12 +308,14 @@ pub(crate) async fn acquire_required_keys(
         }
     }
 
-    for (encryption, _) in requests {
-        if !keys.contains_key(&encryption.default_kid) {
-            return Err(format!(
-                "The DASH ClearKey license response did not include selected KID {}",
-                hex_string(&encryption.default_kid)
-            ));
+    for (_, required_kids) in requests {
+        for kid in required_kids {
+            if !keys.contains_key(kid) {
+                return Err(format!(
+                    "The DASH ClearKey license response did not include selected KID {}",
+                    hex_string(kid)
+                ));
+            }
         }
     }
     Ok(Some(DashKeyMap { keys }))
@@ -415,7 +426,7 @@ pub(super) fn hex_string(bytes: &[u8; 16]) -> String {
 #[path = "dash_drm_mp4.rs"]
 mod mp4;
 
-pub(crate) use mp4::decrypt_track;
+pub(crate) use mp4::{decrypt_track, required_kids};
 
 #[cfg(test)]
 mod tests {

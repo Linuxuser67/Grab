@@ -18,7 +18,10 @@ use crate::content_range::{ParsedContentRange, parse_content_range};
 use crate::engine_msg::EngineMsg;
 use crate::manifest::{
     HlsLiveAccumulator, HlsPlan, HlsResource, HlsResourceKind, ManifestByteRange,
-    dash::{DashPresentation, DashRepresentationPlan, DashResource, DashResourceKind},
+    dash::{
+        DashPresentation, DashRepresentationPlan, DashResource, DashResourceKind,
+        DashSegmentBaseIndex,
+    },
 };
 use crate::manifest_intake::ManifestLookup;
 #[cfg(test)]

@@ -242,7 +242,7 @@ pub(crate) fn parse_dash_manifest(
 /// flat SIDX and an Initialization range. Single-file assets are still subject
 /// to the 1 GiB per-resource limit. Multiple periods, DRM, XLink, adaptation-set
 /// Subset/Preselection combinations, dynamic SegmentList, LL-DASH, SegmentBase
-/// with a separate initialization resource or non-zero presentation-time offset,
+/// with an Initialization@sourceURL or non-zero presentation-time offset,
 /// hierarchical SIDX, non-zero offsets on dynamic SegmentTemplate, and WebM
 /// remain on yt-dlp fallback.
 ///
@@ -2197,6 +2197,13 @@ mod tests {
         bytes
     }
 
+    fn test_range(bytes: &[u8]) -> ManifestByteRange {
+        ManifestByteRange {
+            offset: 100,
+            length: u64::try_from(bytes.len()).expect("test SIDX length"),
+        }
+    }
+
     fn indexed_base_plan(
         initialization_range: ManifestByteRange,
         index_range: ManifestByteRange,
@@ -2234,8 +2241,20 @@ mod tests {
             .expect("indexed SegmentBase should produce a deferred SIDX plan");
 
         let index = plan.segment_base_index.as_ref().expect("deferred SIDX request");
-        assert_eq!(index.index_range, ManifestByteRange { offset: 100, length: 44 });
-        assert_eq!(index.initialization_range, ManifestByteRange { offset: 0, length: 100 });
+        assert_eq!(
+            index.index_range,
+            ManifestByteRange {
+                offset: 100,
+                length: 44,
+            }
+        );
+        assert_eq!(
+            index.initialization_range,
+            ManifestByteRange {
+                offset: 0,
+                length: 100,
+            }
+        );
         assert!(index.index_range_exact);
         assert_eq!(index.timescale, Some(1_000));
         assert_eq!(plan.resources.len(), 1);
@@ -2263,19 +2282,56 @@ mod tests {
     }
 
     #[test]
+    fn applies_sidx_first_offset_after_the_index_box() {
+        let bytes = build_sidx_box(8, &[(64, 1_000, 0x9000_0000)]);
+        let index = indexed_base_plan(
+            ManifestByteRange {
+                offset: 0,
+                length: 100,
+            },
+            test_range(&bytes),
+            true,
+        );
+        let resources = resolve_segment_base_index(&index, &bytes, 1_000)
+            .expect("first_offset should be applied to the end of SIDX");
+        assert_eq!(
+            resources[0].range,
+            Some(ManifestByteRange {
+                offset: 100 + u64::try_from(bytes.len()).expect("test SIDX length") + 8,
+                length: 64,
+            })
+        );
+    }
+
+    #[test]
     fn resolves_flat_sidx_references_to_ordered_media_ranges() {
         let bytes = build_sidx_box(0, &[(100, 2_000, 0x9000_0000), (200, 2_000, 0x9000_0000)]);
         let index = indexed_base_plan(
             ManifestByteRange { offset: 0, length: 100 },
-            ManifestByteRange { offset: 100, length: u64::try_from(bytes.len()).expect("test SIDX length") },
+            test_range(&bytes),
             true,
         );
 
         let resources = resolve_segment_base_index(&index, &bytes, 1_000)
             .expect("flat SIDX should resolve");
         assert_eq!(resources.len(), 2);
-        assert_eq!(resources[0].range, Some(ManifestByteRange { offset: 100 + u64::try_from(bytes.len()).expect("test SIDX length"), length: 100 }));
-        assert_eq!(resources[1].range, Some(ManifestByteRange { offset: 100 + u64::try_from(bytes.len()).expect("test SIDX length") + 100, length: 200 }));
+        let first_media_offset = 100_u64
+            .checked_add(u64::try_from(bytes.len()).expect("test SIDX length"))
+            .expect("test media offset");
+        assert_eq!(
+            resources[0].range,
+            Some(ManifestByteRange {
+                offset: first_media_offset,
+                length: 100,
+            })
+        );
+        assert_eq!(
+            resources[1].range,
+            Some(ManifestByteRange {
+                offset: first_media_offset + 100,
+                length: 200,
+            })
+        );
         assert_eq!(resources[0].segment_number, Some(0));
         assert_eq!(resources[1].segment_number, Some(1));
         assert!(resources.iter().all(|resource| resource.kind == DashResourceKind::Segment));
@@ -2287,7 +2343,7 @@ mod tests {
         bytes.extend_from_slice(&build_sidx_box(0, &[(64, 1_000, 0x9000_0000)]));
         let index = indexed_base_plan(
             ManifestByteRange { offset: 0, length: 100 },
-            ManifestByteRange { offset: 100, length: u64::try_from(bytes.len()).expect("test SIDX length") },
+            test_range(&bytes),
             false,
         );
 
@@ -2307,7 +2363,7 @@ mod tests {
         let hierarchical = build_sidx_box(0, &[(0x8000_0040, 1_000, 0x9000_0000)]);
         let index = indexed_base_plan(
             ManifestByteRange { offset: 0, length: 100 },
-            ManifestByteRange { offset: 100, length: u64::try_from(hierarchical.len()).expect("test SIDX length") },
+            test_range(&hierarchical),
             true,
         );
         assert_eq!(
@@ -2318,7 +2374,7 @@ mod tests {
         let oversized = build_sidx_box(0, &[(0x7fff_ffff, 1_000, 0x9000_0000)]);
         let oversized_index = indexed_base_plan(
             ManifestByteRange { offset: 0, length: 100 },
-            ManifestByteRange { offset: 100, length: u64::try_from(oversized.len()).expect("test SIDX length") },
+            test_range(&oversized),
             true,
         );
         assert_eq!(
@@ -2332,7 +2388,7 @@ mod tests {
         let bytes = build_sidx_box(0, &[(64, 1_000, 0x9000_0000)]);
         let mut index = indexed_base_plan(
             ManifestByteRange { offset: 0, length: 100 },
-            ManifestByteRange { offset: 100, length: u64::try_from(bytes.len()).expect("test SIDX length") },
+            test_range(&bytes),
             true,
         );
         index.timescale = Some(90_000);

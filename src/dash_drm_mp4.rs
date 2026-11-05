@@ -1316,8 +1316,17 @@ mod tests {
             0x20, 0x21, 0x22, 0x23, 0x24, 0x25, 0x26, 0x27, 0x28, 0x29, 0x2a, 0x2b, 0x2c, 0x2d,
             0x2e, 0x2f,
         ];
-        let decrypted =
-            decrypt_synthetic_track(EncryptionScheme::Cbcs, b"cbcs", 1, iv, &ciphertext, (1, 9));
+        let decrypted = decrypt_synthetic_track(
+            EncryptionScheme::Cbcs,
+            b"cbcs",
+            1,
+            iv,
+            &ciphertext,
+            SyntheticTrackOptions {
+                pattern: (1, 9),
+                use_byte_ranges: false,
+            },
+        );
         let boxes = parse_box_spans(&decrypted, 0, decrypted.len())
             .expect("decrypted CBCS file has complete MP4 boxes");
         let mdat = boxes
@@ -1355,7 +1364,16 @@ mod tests {
                 use_byte_ranges: true,
             },
         );
-        assert_eq!(decrypted.get(decrypted.len() - plaintext.len()..), Some(plaintext.as_slice()));
+        let boxes = parse_box_spans(&decrypted, 0, decrypted.len())
+            .expect("decrypted SegmentBase track has complete MP4 boxes");
+        let mdat = boxes
+            .iter()
+            .find(|span| &span.kind == b"mdat")
+            .copied()
+            .expect("decrypted SegmentBase track contains mdat");
+        let start = mdat.payload_start().expect("mdat payload start");
+        let end = mdat.end().expect("mdat end");
+        assert_eq!(decrypted.get(start..end), Some(plaintext.as_slice()));
     }
 
     #[test]

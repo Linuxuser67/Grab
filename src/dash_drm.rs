@@ -57,6 +57,7 @@ pub(crate) fn encryption_from_scopes(
     scopes: &[&[dash_mpd_core::ContentProtection]],
 ) -> Result<Option<DashEncryption>, String> {
     let mut selected = None;
+    let mut has_system_descriptor = false;
 
     for descriptor in scopes.iter().flat_map(|scope| scope.iter()) {
         if descriptor.schemeIdUri == MP4_PROTECTION_SCHEME {
@@ -92,9 +93,17 @@ pub(crate) fn encryption_from_scopes(
             {
                 return Err("DASH declares an unsupported protection system".to_string());
             }
+            has_system_descriptor = true;
         } else {
             return Err("DASH declares an unsupported ContentProtection scheme".to_string());
         }
+    }
+
+    if has_system_descriptor && selected.is_none() {
+        return Err(
+            "DASH advertises a DRM system but has no supported mp4protection cenc/cbcs default_KID"
+                .to_string(),
+        );
     }
 
     Ok(selected)
@@ -253,3 +262,95 @@ pub(super) fn hex_string(bytes: &[u8; 16]) -> String {
 mod mp4;
 
 pub(crate) use mp4::decrypt_track;
+
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn protection(scheme: &str, kid: &str) -> dash_mpd_core::ContentProtection {
+        dash_mpd_core::ContentProtection {
+            schemeIdUri: MP4_PROTECTION_SCHEME.to_string(),
+            value: Some(scheme.to_string()),
+            default_KID: Some(kid.to_string()),
+            ..Default::default()
+        }
+    }
+
+    fn widevine() -> dash_mpd_core::ContentProtection {
+        dash_mpd_core::ContentProtection {
+            schemeIdUri: WIDEVINE_SCHEME.to_string(),
+            value: Some("widevine".to_string()),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn resolves_cenc_and_cbcs_kids() {
+        let cenc = protection("cenc", "00112233-4455-6677-8899-aabbccddeeff");
+        let cbcs = protection("cbcs", "ffeeddcc-bbaa-9988-7766-554433221100");
+
+        let cenc_result = encryption_from_scopes(&[std::slice::from_ref(&cenc)])
+            .expect("CENC descriptor should be valid")
+            .expect("CENC descriptor should be recognized");
+        assert_eq!(cenc_result.scheme, EncryptionScheme::Cenc);
+        assert_eq!(
+            cenc_result.default_kid,
+            [
+                0x00, 0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77,
+                0x88, 0x99, 0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff,
+            ]
+        );
+
+        let cbcs_result = encryption_from_scopes(&[std::slice::from_ref(&cbcs)])
+            .expect("CBCS descriptor should be valid")
+            .expect("CBCS descriptor should be recognized");
+        assert_eq!(cbcs_result.scheme, EncryptionScheme::Cbcs);
+        assert_eq!(
+            cbcs_result.default_kid,
+            [
+                0xff, 0xee, 0xdd, 0xcc, 0xbb, 0xaa, 0x99, 0x88,
+                0x77, 0x66, 0x55, 0x44, 0x33, 0x22, 0x11, 0x00,
+            ]
+        );
+    }
+
+    #[test]
+    fn rejects_drm_system_descriptor_without_mp4protection_default_kid() {
+        let widevine = widevine();
+        assert!(
+            encryption_from_scopes(&[std::slice::from_ref(&widevine)]).is_err(),
+            "a DRM UUID descriptor alone must not be mistaken for clear media"
+        );
+    }
+
+    #[test]
+    fn rejects_conflicting_inherited_kids_and_schemes() {
+        let inherited = protection("cenc", "00112233445566778899aabbccddeeff");
+        let conflicting_kid = protection("cenc", "ffeeddccbbaa99887766554433221100");
+        let conflicting_scheme = protection("cbcs", "00112233445566778899aabbccddeeff");
+        assert!(encryption_from_scopes(&[
+            std::slice::from_ref(&inherited),
+            std::slice::from_ref(&conflicting_kid),
+        ])
+        .is_err());
+        assert!(encryption_from_scopes(&[
+            std::slice::from_ref(&inherited),
+            std::slice::from_ref(&conflicting_scheme),
+        ])
+        .is_err());
+    }
+
+    #[test]
+    fn rejects_unsupported_schemes_and_malformed_kids() {
+        let unsupported = protection("cens", "00112233445566778899aabbccddeeff");
+        let malformed = protection("cenc", "00112233445566778899aabbccddeef");
+        assert!(encryption_from_scopes(&[std::slice::from_ref(&unsupported)]).is_err());
+        assert!(encryption_from_scopes(&[std::slice::from_ref(&malformed)]).is_err());
+    }
+
+    #[test]
+    fn clear_content_without_protection_remains_unencrypted() {
+        assert_eq!(encryption_from_scopes(&[&[]]).expect("no protection"), None);
+    }
+}

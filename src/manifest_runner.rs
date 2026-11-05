@@ -682,37 +682,32 @@ async fn prepare_manifest_attempt(
                         .to_string(),
                 ));
             }
-            let mut license_requests = Vec::new();
-            if let Some(encryption) = video.representation.encryption {
+            if video.representation.encryption.is_some() {
                 let license_url = video.representation.license_url.as_ref().ok_or_else(|| {
                     ManifestRunError::Unsupported(
                         "The selected DASH representation has no ClearKey license URL".to_string(),
                     )
                 })?;
                 guard_manifest_child_url(&job.source.url, license_url, &mut guarded_child_hosts)?;
-                license_requests.push((
-                    license_url.clone(),
-                    std::collections::BTreeSet::from([encryption.default_kid]),
-                ));
             }
-            if let Some(audio) = audio.as_ref()
-                && let Some(encryption) = audio.representation.encryption
+            if audio
+                .as_ref()
+                .is_some_and(|track| track.representation.encryption.is_some())
             {
-                let license_url = audio.representation.license_url.as_ref().ok_or_else(|| {
-                    ManifestRunError::Unsupported(
-                        "The selected DASH audio representation has no ClearKey license URL"
-                            .to_string(),
-                    )
-                })?;
+                let license_url = audio
+                    .as_ref()
+                    .and_then(|track| track.representation.license_url.as_ref())
+                    .ok_or_else(|| {
+                        ManifestRunError::Unsupported(
+                            "The selected DASH audio representation has no ClearKey license URL"
+                                .to_string(),
+                        )
+                    })?;
                 guard_manifest_child_url(&job.source.url, license_url, &mut guarded_child_hosts)?;
-                license_requests.push((
-                    license_url.clone(),
-                    std::collections::BTreeSet::from([encryption.default_kid]),
-                ));
             }
-            crate::dash_drm::acquire_required_keys(&client, &license_requests)
-                .await
-                .map_err(ManifestRunError::Failed)?
+            // Fragment-local seig groups can override the MPD default KID. Fetch
+            // all selected media first, then request the complete KID set once.
+            None
         }
         Tracks::Hls { .. } | Tracks::DashLiveOffline { .. } => None,
     };
@@ -908,7 +903,7 @@ async fn transfer_static_manifest_tracks(
     let ManifestStaticTransfer {
         client,
         tracks,
-        drm_keys,
+        drm_keys: _,
         destination_parts,
         staging,
         destination,
@@ -1028,7 +1023,6 @@ async fn transfer_static_manifest_tracks(
                 client,
                 staging,
                 plan: video,
-                keys: drm_keys,
                 directory: video_dir,
                 filename: "video-track.mp4",
                 destination,
@@ -1048,8 +1042,7 @@ async fn transfer_static_manifest_tracks(
                     client,
                     staging,
                     plan: audio,
-                    keys: drm_keys,
-                    directory: audio_dir,
+                        directory: audio_dir,
                     filename: "audio-track.mp4",
                     destination,
                     item_id,
@@ -2964,7 +2957,6 @@ struct ManifestDashTrackTransfer<'a> {
     client: &'a reqwest::Client,
     staging: &'a Path,
     plan: &'a DashRepresentationPlan,
-    keys: Option<&'a crate::dash_drm::DashKeyMap>,
     directory: &'a Path,
     filename: &'a str,
     destination: &'a Path,
@@ -2983,7 +2975,6 @@ async fn fetch_and_write_dash_track(
         client,
         staging,
         plan,
-        keys,
         directory,
         filename,
         destination,
@@ -3047,39 +3038,25 @@ async fn fetch_and_write_dash_track(
         return Ok(false);
     }
     if let Some(encryption) = encryption {
-        let keys = keys.ok_or_else(|| {
-            ManifestRunError::Failed(
-                "Encrypted DASH track reached transfer without a loaded content-key map"
-                    .to_string(),
-            )
-        })?;
         let resources = drm_resources.ok_or_else(|| {
             ManifestRunError::Failed("Encrypted DASH resource plan is missing".to_string())
         })?;
-        let mut track_keys = (*keys).clone();
         let required_kids = crate::dash_drm::required_kids(&resources, directory, encryption)
             .map_err(ManifestRunError::Unsupported)?;
-        let missing_kids: std::collections::BTreeSet<_> = required_kids
-            .into_iter()
-            .filter(|kid| !track_keys.contains_kid(kid))
-            .collect();
-        if !missing_kids.is_empty() {
-            let license_url = plan.representation.license_url.as_ref().ok_or_else(|| {
-                ManifestRunError::Unsupported(
-                    "The selected DASH representation has no ClearKey license URL".to_string(),
-                )
-            })?;
-            let additional = crate::dash_drm::acquire_required_keys(
-                client,
-                &[(license_url.clone(), missing_kids)],
+        let license_url = plan.representation.license_url.as_ref().ok_or_else(|| {
+            ManifestRunError::Unsupported(
+                "The selected DASH representation has no ClearKey license URL".to_string(),
             )
-            .await
-            .map_err(ManifestRunError::Failed)?
-            .ok_or_else(|| ManifestRunError::Failed(
-                "DASH ClearKey acquisition returned no additional keys".to_string()
-            ))?;
-            track_keys.merge(additional).map_err(ManifestRunError::Failed)?;
-        }
+        })?;
+        let track_keys = crate::dash_drm::acquire_required_keys(
+            client,
+            &[(license_url.clone(), required_kids)],
+        )
+        .await
+        .map_err(ManifestRunError::Failed)?
+        .ok_or_else(|| {
+            ManifestRunError::Failed("DASH ClearKey acquisition returned no content keys".to_string())
+        })?;
         let directory = directory.to_path_buf();
         let output = directory.join(format!("{filename}.decrypted"));
         let cancelled = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));

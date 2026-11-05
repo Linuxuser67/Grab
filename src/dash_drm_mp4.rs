@@ -141,6 +141,8 @@ struct InitEncryption {
     track_id: u32,
     iv_size: u8,
     constant_iv: Option<[u8; 16]>,
+    crypt_blocks: u8,
+    skip_blocks: u8,
 }
 
 fn collect_mp4_boxes<'a>(
@@ -193,21 +195,41 @@ fn parse_init_encryption(
         return Err("Encrypted DASH initialization resource must contain ftyp and moov".to_string());
     }
 
+    let mut movie_headers = Vec::new();
+    let mut file_types = Vec::new();
     let mut track_boxes = Vec::new();
     let mut tenc_boxes = Vec::new();
     let mut schm_boxes = Vec::new();
     let mut tkhd_boxes = Vec::new();
+    collect_mp4_boxes(&boxes, "moov", &mut movie_headers);
+    collect_mp4_boxes(&boxes, "ftyp", &mut file_types);
     collect_mp4_boxes(&boxes, "trak", &mut track_boxes);
     collect_mp4_boxes(&boxes, "tenc", &mut tenc_boxes);
     collect_mp4_boxes(&boxes, "schm", &mut schm_boxes);
     collect_mp4_boxes(&boxes, "tkhd", &mut tkhd_boxes);
-    if track_boxes.len() != 1 || tenc_boxes.len() != 1 || schm_boxes.len() != 1 || tkhd_boxes.len() != 1 {
-        return Err("Encrypted DASH initialization must describe exactly one protected track".to_string());
+    if movie_headers.len() != 1
+        || file_types.len() != 1
+        || track_boxes.len() != 1
+        || tenc_boxes.len() != 1
+        || schm_boxes.len() != 1
+        || tkhd_boxes.len() != 1
+    {
+        return Err(
+            "Encrypted DASH initialization must contain one ftyp, one moov and exactly one protected track"
+                .to_string(),
+        );
     }
 
     let schm = mp4_payload(init, schm_boxes[0])?;
-    if schm.len() < 8 {
+    if schm.len() < 12 {
         return Err("DASH scheme box is truncated".to_string());
+    }
+    let schm_flags = (u32::from(schm[1]) << 16) | (u32::from(schm[2]) << 8) | u32::from(schm[3]);
+    if schm_flags & !0x000001 != 0 {
+        return Err("DASH scheme box uses unsupported flags".to_string());
+    }
+    if schm_flags & 0x000001 == 0 && schm.len() != 12 {
+        return Err("DASH scheme box contains unexpected trailing data".to_string());
     }
     let actual_scheme = &schm[4..8];
     let expected_scheme = match expected.scheme {
@@ -218,18 +240,37 @@ fn parse_init_encryption(
         return Err("DASH MPD encryption scheme does not match the MP4 initialization".to_string());
     }
 
+    if expected.scheme == EncryptionScheme::Cenc && (crypt_blocks != 0 || skip_blocks != 0) {
+        return Err("CENC initialization contains CBCS-style pattern parameters".to_string());
+    }
+    if expected.scheme == EncryptionScheme::Cbcs && crypt_blocks == 0 && skip_blocks != 0 {
+        return Err("CBCS initialization has a skip pattern without encrypted blocks".to_string());
+    }
+
     let tenc = mp4_payload(init, tenc_boxes[0])?;
     if tenc.len() < 23 {
         return Err("DASH track-encryption box is truncated".to_string());
     }
     let version = tenc[0];
+    if tenc[1..4] != [0, 0, 0] {
+        return Err("DASH track-encryption box uses unsupported flags".to_string());
+    }
     let mut offset = 4_usize;
     offset += 1;
-    match version {
-        0 => offset += 1,
-        1 => offset += 1,
+    let (crypt_blocks, skip_blocks) = match version {
+        0 => {
+            offset += 1;
+            (0, 0)
+        }
+        1 => {
+            let pattern = *tenc
+                .get(offset)
+                .ok_or_else(|| "DASH track-encryption pattern is missing".to_string())?;
+            offset += 1;
+            (pattern >> 4, pattern & 0x0f)
+        }
         _ => return Err("Unsupported DASH tenc version".to_string()),
-    }
+    };
     let is_protected = *tenc
         .get(offset)
         .ok_or_else(|| "DASH tenc protection flag is missing".to_string())?;
@@ -258,6 +299,9 @@ fn parse_init_encryption(
         offset += 1;
         if size != 8 && size != 16 {
             return Err("DASH tenc constant IV must contain 8 or 16 bytes".to_string());
+        }
+        if expected.scheme == EncryptionScheme::Cenc {
+            return Err("CENC initialization must use per-sample IVs".to_string());
         }
         let end = offset
             .checked_add(size)
@@ -299,6 +343,8 @@ fn parse_init_encryption(
         track_id,
         iv_size,
         constant_iv,
+        crypt_blocks,
+        skip_blocks,
     })
 }
 
@@ -343,25 +389,47 @@ fn validate_fragment(bytes: &[u8], init: InitEncryption) -> Result<(), String> {
     }
 
     let tfhd_payload = span_payload(bytes, *tfhd)?;
-    if tfhd_payload.len() < 8 {
-        return Err("DASH tfhd is truncated".to_string());
+    if tfhd_payload.len() < 8 || tfhd_payload[0] != 0 {
+        return Err("DASH tfhd is truncated or uses an unsupported version".to_string());
     }
     let tfhd_flags = (u32::from(tfhd_payload[1]) << 16)
         | (u32::from(tfhd_payload[2]) << 8)
         | u32::from(tfhd_payload[3]);
-    if tfhd_flags & 0x000001 != 0 || read_u32(tfhd_payload, 4)? != init.track_id {
-        return Err("DASH tfhd uses an unsupported base offset or a different track ID".to_string());
+    const TFHD_SUPPORTED_FLAGS: u32 = 0x0000_0002 | 0x0000_0008 | 0x0000_0010
+        | 0x0000_0020 | 0x0002_0000;
+    if tfhd_flags & !TFHD_SUPPORTED_FLAGS != 0
+        || tfhd_flags & 0x0002_0000 == 0
+        || read_u32(tfhd_payload, 4)? != init.track_id
+    {
+        return Err("DASH tfhd uses unsupported flags or a different track ID".to_string());
+    }
+    let mut tfhd_offset = 8_usize;
+    for flag in [0x0000_0002, 0x0000_0008, 0x0000_0010, 0x0000_0020] {
+        if tfhd_flags & flag != 0 {
+            tfhd_offset = tfhd_offset
+                .checked_add(4)
+                .ok_or_else(|| "DASH tfhd field offset overflows".to_string())?;
+        }
+    }
+    if tfhd_offset != tfhd_payload.len() {
+        return Err("DASH tfhd contains trailing or truncated optional fields".to_string());
     }
 
     let trun_payload = span_payload(bytes, *trun)?;
-    if trun_payload.len() < 8 {
-        return Err("DASH trun is truncated".to_string());
+    if trun_payload.len() < 8 || trun_payload[0] > 1 {
+        return Err("DASH trun is truncated or uses an unsupported version".to_string());
     }
     let trun_flags = (u32::from(trun_payload[1]) << 16)
         | (u32::from(trun_payload[2]) << 8)
         | u32::from(trun_payload[3]);
-    if trun_flags & 0x000001 == 0 || trun_flags & 0x000200 == 0 {
-        return Err("DASH trun must declare a data offset and explicit sample sizes".to_string());
+    const TRUN_SUPPORTED_FLAGS: u32 = 0x0000_0001 | 0x0000_0004 | 0x0000_0100
+        | 0x0000_0200 | 0x0000_0400 | 0x0000_0800;
+    if trun_flags & !TRUN_SUPPORTED_FLAGS != 0
+        || trun_flags & 0x0000_0001 == 0
+        || trun_flags & 0x0000_0200 == 0
+        || (trun_flags & 0x0000_0004 != 0 && trun_flags & 0x0000_0400 != 0)
+    {
+        return Err("DASH trun must declare one data offset and explicit sample sizes with supported flags".to_string());
     }
     let sample_count = usize::try_from(read_u32(trun_payload, 4)?)
         .map_err(|_| "DASH trun sample count is out of range".to_string())?;
@@ -427,8 +495,8 @@ fn validate_fragment(bytes: &[u8], init: InitEncryption) -> Result<(), String> {
     }
 
     let senc_payload = span_payload(bytes, *senc)?;
-    if senc_payload.len() < 8 {
-        return Err("DASH senc is truncated".to_string());
+    if senc_payload.len() < 8 || senc_payload[0] != 0 {
+        return Err("DASH senc is truncated or uses an unsupported version".to_string());
     }
     let senc_flags = (u32::from(senc_payload[1]) << 16)
         | (u32::from(senc_payload[2]) << 8)
@@ -493,6 +561,7 @@ pub(super) fn decrypt_track(
 ) -> Result<(), String> {
     if resources.len() < 2
         || resources[0].kind != DashResourceKind::Initialization
+        || resources[0].range.is_some()
         || resources[1..]
             .iter()
             .any(|resource| resource.kind != DashResourceKind::Segment || resource.range.is_some())
@@ -536,9 +605,13 @@ pub(super) fn decrypt_track(
         let fragment = read_regular_file_bounded(&path, MAX_FRAGMENT_BYTES)
             .map_err(|error| format!("Could not read encrypted DASH media segment: {error}"))?;
         validate_fragment(&fragment, init_encryption)?;
+        let encrypted_length = fragment.len();
         let decrypted = decrypter
             .decrypt_fragment(fragment, Some(&init))
             .map_err(|error| format!("VSD could not decrypt a DASH media fragment: {error}"))?;
+        if decrypted.len() != encrypted_length {
+            return Err("VSD changed the length of a validated DASH fragment".to_string());
+        }
         let length = u64::try_from(decrypted.len())
             .map_err(|_| "DASH decrypted fragment size is out of range".to_string())?;
         total = total

@@ -121,7 +121,7 @@ pub(crate) struct DashResource {
     pub(crate) range: Option<ManifestByteRange>,
     pub(crate) filename: String,
     pub(crate) kind: DashResourceKind,
-    /// SegmentTemplate Number or SegmentList index; initialization resources use None.
+    /// SegmentTemplate Number, SegmentList index, or 0 for a single-file SegmentBase; initialization resources use None.
     pub(crate) segment_number: Option<u64>,
 }
 
@@ -144,6 +144,8 @@ struct DashRepresentationSource {
 enum DashAddressing {
     Template(DashTemplate),
     List(DashList),
+    /// A single media file addressed by `BaseURL` (SegmentBase).
+    Base,
 }
 
 #[derive(Clone, Copy)]
@@ -201,17 +203,7 @@ struct DashListSegment {
 }
 
 #[cfg(test)]
-/// Parse a static or bounded single-period dynamic DASH MPD into selectable representations.
-///
-/// Dynamic support is limited to HTTPS SegmentTemplate presentations with a
-/// finite MPD update interval and complete segments. Multiple periods, DRM,
-/// XLink, adaptation-set Subset/Preselection combinations, dynamic SegmentList,
-/// LL-DASH, SegmentBase, indexed addressing, non-zero presentation-time offsets,
-/// and WebM remain on yt-dlp fallback.
-///
-/// # Errors
-/// Returns an error when the MPD is malformed, exceeds the input limit, uses
-/// unsupported features, or contains no supported video representation.
+/// Test-facing wrapper around `parse_dash_manifest_at` using the current time.
 pub(crate) fn parse_dash_manifest(
     manifest_url: &str,
     body: &str,
@@ -219,7 +211,23 @@ pub(crate) fn parse_dash_manifest(
     parse_dash_manifest_at(manifest_url, body, SystemTime::now())
 }
 
-/// Parse a DASH MPD using the HTTP server's Date header as the availability clock.
+/// Parse a static or bounded single-period dynamic DASH MPD into selectable representations.
+///
+/// Dynamic support is limited to HTTPS SegmentTemplate presentations with a
+/// finite MPD update interval and complete segments. Static SegmentBase is
+/// supported as a single-file download: the representation BaseURL is fetched
+/// in full, so index and initialization ranges are not needed. Single-file
+/// assets are still subject to the 1 GiB per-resource limit. Multiple
+/// periods, DRM, XLink, adaptation-set Subset/Preselection combinations,
+/// dynamic SegmentList, LL-DASH, SegmentBase with a separate initialization
+/// resource, non-zero presentation-time offsets, and WebM remain on yt-dlp
+/// fallback.
+///
+/// # Errors
+/// Returns an error when the MPD is malformed, exceeds the input limit, uses
+/// unsupported features, or contains no supported video representation.
+///
+/// The `server_now` argument is the availability clock derived from the HTTP Date header.
 pub(crate) fn parse_dash_manifest_at(
     manifest_url: &str,
     body: &str,
@@ -343,7 +351,7 @@ pub(crate) fn parse_dash_manifest_at(
     };
     let addressing_duration = if is_dynamic { Duration::MAX } else { duration };
 
-    let mpd_base = resolve_base_url(manifest_url, &mpd.base_url)?;
+    let mpd_base = resolve_base_url(manifest_url.clone(), &mpd.base_url)?;
     let period_base = resolve_base_url(mpd_base, &period.BaseURL)?;
 
     let mut video_representations = Vec::new();
@@ -419,6 +427,11 @@ pub(crate) fn parse_dash_manifest_at(
                 addressing_duration,
                 is_dynamic,
             )?;
+            if matches!(addressing, DashAddressing::Base)
+                && !is_single_file_media_url(&representation_base, &manifest_url)
+            {
+                return Err(DashError::UnsupportedAddressing);
+            }
             let representation_id = representation.id.clone();
             let bandwidth = representation.bandwidth;
             let width = representation.width.or(adaptation.width);
@@ -526,6 +539,10 @@ pub(crate) fn plan_dash_representation(
         (DashPresentation::Dynamic(_), DashAddressing::List(_)) => {
             return Err(DashError::UnsupportedAddressing);
         }
+        (DashPresentation::Dynamic(_), DashAddressing::Base) => {
+            return Err(DashError::UnsupportedAddressing);
+        }
+        (DashPresentation::Static, DashAddressing::Base) => expand_base(&representation)?,
         (DashPresentation::Static, DashAddressing::Template(template)) if live_selection => {
             expand_static_live_template(&representation, &template.media, template)?
         }
@@ -657,6 +674,9 @@ fn stable_representation_key(identity: RepresentationIdentity<'_>) -> String {
                 hash_optional_range(&mut hasher, segment.range);
             }
         }
+        DashAddressing::Base => {
+            hasher.update(b"base");
+        }
     }
 
     let digest = hasher.finalize();
@@ -697,21 +717,27 @@ fn stable_live_representation_key(identity: RepresentationIdentity<'_>) -> Strin
     hash_optional_number(&mut hasher, bandwidth);
     hash_optional_number(&mut hasher, width);
     hash_optional_number(&mut hasher, height);
-    if let DashAddressing::Template(template) = addressing {
-        hasher.update(b"template");
-        hasher.update(template.media.as_bytes());
-        hash_optional_number(&mut hasher, Some(template.timescale));
-        match &template.initialization {
-            Some(DashInitialization::Template(value)) => {
-                hasher.update(b"init-template");
-                hasher.update(value.as_bytes());
+    match addressing {
+        DashAddressing::Template(template) => {
+            hasher.update(b"template");
+            hasher.update(template.media.as_bytes());
+            hash_optional_number(&mut hasher, Some(template.timescale));
+            match &template.initialization {
+                Some(DashInitialization::Template(value)) => {
+                    hasher.update(b"init-template");
+                    hasher.update(value.as_bytes());
+                }
+                Some(DashInitialization::Resource { url, range }) => {
+                    hasher.update(b"init-resource");
+                    hash_optional_text(&mut hasher, url.as_deref());
+                    hash_optional_range(&mut hasher, *range);
+                }
+                None => hasher.update(b"no-init"),
             }
-            Some(DashInitialization::Resource { url, range }) => {
-                hasher.update(b"init-resource");
-                hash_optional_text(&mut hasher, url.as_deref());
-                hash_optional_range(&mut hasher, *range);
-            }
-            None => hasher.update(b"no-init"),
+        }
+        DashAddressing::List(_) => {}
+        DashAddressing::Base => {
+            hasher.update(b"base");
         }
     }
     let digest = hasher.finalize();
@@ -750,6 +776,15 @@ fn hash_optional_range(hasher: &mut Sha256, range: Option<ManifestByteRange>) {
         }
         None => hasher.update([0]),
     }
+}
+
+/// A `SegmentBase` BaseURL must name a media file, not the MPD itself or a
+/// directory; otherwise the resolved URL cannot be the whole media resource.
+fn is_single_file_media_url(url: &Url, manifest_url: &Url) -> bool {
+    url.path_segments()
+        .and_then(|mut segments| segments.next_back())
+        .is_some_and(|segment| !segment.is_empty())
+        && url.path() != manifest_url.path()
 }
 
 /// Resolve exactly one BaseURL at each inheritance level. Choosing among CDNs
@@ -861,16 +896,39 @@ fn effective_addressing(
         adaptation.SegmentList.as_ref(),
         representation.SegmentList.as_ref(),
     ];
-
-    if period.SegmentBase.is_some()
-        || adaptation.SegmentBase.is_some()
-        || representation.SegmentBase.is_some()
-    {
-        return Err(DashError::UnsupportedAddressing);
-    }
+    let bases = [
+        period.SegmentBase.as_ref(),
+        adaptation.SegmentBase.as_ref(),
+        representation.SegmentBase.as_ref(),
+    ];
 
     let has_template = templates.iter().any(Option::is_some);
     let has_list = lists.iter().any(Option::is_some);
+    if bases.iter().any(Option::is_some) {
+        if is_dynamic || has_template || has_list {
+            return Err(DashError::UnsupportedAddressing);
+        }
+        for base in bases.iter().flatten() {
+            if base
+                .presentationTimeOffset
+                .is_some_and(|offset| offset != 0)
+                || base
+                    .availabilityTimeOffset
+                    .is_some_and(|offset| offset != 0.0)
+                || base.availabilityTimeComplete == Some(false)
+                || base.eptDelta.is_some_and(|delta| delta != 0)
+                || base.pbDelta.is_some_and(|delta| delta != 0)
+                || base
+                    .Initialization
+                    .as_ref()
+                    .is_some_and(|initialization| initialization.sourceURL.is_some())
+            {
+                return Err(DashError::UnsupportedAddressing);
+            }
+        }
+        return Ok(DashAddressing::Base);
+    }
+
     if is_dynamic && (!has_template || has_list) {
         return Err(DashError::UnsupportedAddressing);
     }
@@ -1702,10 +1760,30 @@ fn resolve_resource(base_url: &Url, raw: &str) -> Result<Url, DashError> {
         .join(raw)
         .map_err(|_| DashError::UnsupportedAddressing)?;
     let resolved = validate_https_url(resolved)?;
-    if resolved.path().to_ascii_lowercase().ends_with(".webm") {
+    validate_media_url(&resolved)?;
+    Ok(resolved)
+}
+
+fn validate_media_url(url: &Url) -> Result<(), DashError> {
+    if url.path().to_ascii_lowercase().ends_with(".webm") {
         return Err(DashError::UnsupportedPresentation);
     }
-    Ok(resolved)
+    Ok(())
+}
+
+/// A single-file `SegmentBase` representation: the `BaseURL` is the media file.
+fn expand_base(representation: &DashRepresentation) -> Result<Vec<DashResource>, DashError> {
+    // shortcut: one resource = whole file; assets above MAX_RESOURCE_BYTES fall back to yt-dlp until range-by-index lands.
+    let url = representation.source.base_url.clone();
+    validate_media_url(&url)?;
+    let filename = super::resource_filename("dash-segment", Some(0), &url, None);
+    Ok(vec![DashResource {
+        url,
+        range: None,
+        filename,
+        kind: DashResourceKind::Segment,
+        segment_number: Some(0),
+    }])
 }
 
 fn expand_list(
@@ -2613,13 +2691,12 @@ mod tests {
     }
 
     #[test]
-    fn rejects_dynamic_multi_period_drm_xlink_segment_base_webm_and_nonzero_offset() {
+    fn rejects_dynamic_multi_period_drm_xlink_webm_and_nonzero_offset() {
         let rejected = [
             r#"<MPD xmlns="urn:mpeg:dash:schema:mpd:2011" type="dynamic"><Period/></MPD>"#,
             r#"<MPD xmlns="urn:mpeg:dash:schema:mpd:2011" type="static" mediaPresentationDuration="PT2S"><Period duration="PT1S"/><Period duration="PT1S"/></MPD>"#,
             r#"<MPD xmlns="urn:mpeg:dash:schema:mpd:2011" type="static" mediaPresentationDuration="PT2S"><ContentProtection schemeIdUri="urn:uuid:00000000-0000-0000-0000-000000000000"/><Period duration="PT2S"/></MPD>"#,
             r#"<MPD xmlns="urn:mpeg:dash:schema:mpd:2011" xmlns:xlink="http://www.w3.org/1999/xlink" type="static" mediaPresentationDuration="PT2S"><Period duration="PT2S" xlink:href="external.xml"/></MPD>"#,
-            r#"<MPD xmlns="urn:mpeg:dash:schema:mpd:2011" type="static" mediaPresentationDuration="PT2S"><Period duration="PT2S"><AdaptationSet contentType="video" mimeType="video/mp4"><SegmentBase indexRange="0-10"/><Representation id="v1"/></AdaptationSet></Period></MPD>"#,
             r#"<MPD xmlns="urn:mpeg:dash:schema:mpd:2011" type="static" mediaPresentationDuration="PT2S"><Period duration="PT2S"><AdaptationSet contentType="video" mimeType="video/webm"><SegmentList><SegmentURL media="v.webm"/></SegmentList><Representation id="v1"/></AdaptationSet></Period></MPD>"#,
             r#"<MPD xmlns="urn:mpeg:dash:schema:mpd:2011" type="static" mediaPresentationDuration="PT2S"><Period duration="PT2S"><AdaptationSet contentType="video" mimeType="video/mp4"><SegmentTemplate media="s-$Number$.m4s" duration="2" presentationTimeOffset="1"/><Representation id="v1"/></AdaptationSet></Period></MPD>"#,
         ];
@@ -2630,6 +2707,141 @@ mod tests {
                 "unsupported MPD should not enter native path: {body}"
             );
         }
+    }
+
+    #[test]
+    fn expands_single_file_segment_base_as_one_media_resource() {
+        let body = r#"<?xml version="1.0"?>
+<MPD xmlns="urn:mpeg:dash:schema:mpd:2011" type="static" mediaPresentationDuration="PT4S">
+  <Period duration="PT4S">
+    <AdaptationSet contentType="video" mimeType="video/mp4">
+      <Representation id="v1" bandwidth="500000">
+        <BaseURL>video.mp4</BaseURL>
+        <SegmentBase indexRange="0-999">
+          <Initialization range="0-999"/>
+        </SegmentBase>
+      </Representation>
+    </AdaptationSet>
+  </Period>
+</MPD>"#;
+        let plan = parse_dash_manifest(BASE_URL, body).expect("SegmentBase MPD should parse");
+        let video = plan.video_representations.first().expect("video track");
+        let resources =
+            plan_dash_representation(&plan, &video.key).expect("SegmentBase should expand");
+
+        assert_eq!(resources.resources.len(), 1);
+        assert_eq!(resources.resources[0].kind, DashResourceKind::Segment);
+        assert_eq!(
+            resources.resources[0].url.as_str(),
+            "https://cdn.example.test/path/video.mp4"
+        );
+        assert_eq!(resources.resources[0].range, None);
+        assert_eq!(resources.resources[0].segment_number, Some(0));
+        assert!(resources.resources[0].filename.starts_with("dash-segment"));
+    }
+
+    #[test]
+    fn segment_base_inherits_adaptation_set_base_url() {
+        let body = r#"<MPD xmlns="urn:mpeg:dash:schema:mpd:2011" type="static" mediaPresentationDuration="PT4S"><Period duration="PT4S"><AdaptationSet contentType="video" mimeType="video/mp4"><BaseURL>clip.mp4</BaseURL><Representation id="v1" bandwidth="500000"><SegmentBase indexRange="0-999"/></Representation></AdaptationSet></Period></MPD>"#;
+        let plan = parse_dash_manifest(BASE_URL, body).expect("inherited SegmentBase should parse");
+        let resources = plan_dash_representation(&plan, &plan.video_representations[0].key)
+            .expect("inherited SegmentBase should expand");
+        assert_eq!(
+            resources.resources[0].url.as_str(),
+            "https://cdn.example.test/path/clip.mp4"
+        );
+    }
+
+    #[test]
+    fn segment_base_rejects_webm_base_url() {
+        let body = r#"<MPD xmlns="urn:mpeg:dash:schema:mpd:2011" type="static" mediaPresentationDuration="PT2S"><Period duration="PT2S"><AdaptationSet contentType="video" mimeType="video/mp4"><Representation id="v1" bandwidth="500000"><BaseURL>video.webm</BaseURL><SegmentBase indexRange="0-999"/></Representation></AdaptationSet></Period></MPD>"#;
+        let plan = parse_dash_manifest(BASE_URL, body)
+            .expect("SegmentBase with WebM base URL should parse");
+        assert_eq!(
+            plan_dash_representation(&plan, &plan.video_representations[0].key).err(),
+            Some(DashError::UnsupportedPresentation)
+        );
+    }
+
+    #[test]
+    fn segment_base_requires_an_explicit_base_url() {
+        let body = r#"<MPD xmlns="urn:mpeg:dash:schema:mpd:2011" type="static" mediaPresentationDuration="PT2S"><Period duration="PT2S"><AdaptationSet contentType="video" mimeType="video/mp4"><SegmentBase indexRange="0-999"/><Representation id="v1"/></AdaptationSet></Period></MPD>"#;
+
+        assert_eq!(
+            parse_dash_manifest(BASE_URL, body).err(),
+            Some(DashError::UnsupportedAddressing)
+        );
+    }
+
+    #[test]
+    fn segment_base_rejects_dynamic_and_separate_initialization() {
+        let dynamic = dynamic_mpd(
+            r#"<BaseURL>video.mp4</BaseURL><SegmentBase indexRange="0-999"/>"#,
+            "",
+        );
+        assert_eq!(
+            parse_dash_manifest_at(BASE_URL, &dynamic, dynamic_test_clock(120)).err(),
+            Some(DashError::UnsupportedAddressing)
+        );
+
+        let separate_initialization = r#"<MPD xmlns="urn:mpeg:dash:schema:mpd:2011" type="static" mediaPresentationDuration="PT2S"><Period duration="PT2S"><AdaptationSet contentType="video" mimeType="video/mp4"><Representation id="v1"><BaseURL>video.mp4</BaseURL><SegmentBase indexRange="0-999"><Initialization sourceURL="init.mp4" range="0-99"/></SegmentBase></Representation></AdaptationSet></Period></MPD>"#;
+        assert_eq!(
+            parse_dash_manifest(BASE_URL, separate_initialization).err(),
+            Some(DashError::UnsupportedAddressing)
+        );
+    }
+
+    #[test]
+    fn segment_base_rejects_every_offset_variant() {
+        let cases = [
+            r#"presentationTimeOffset="1""#,
+            r#"availabilityTimeOffset="1""#,
+            r#"availabilityTimeComplete="false""#,
+            r#"eptDelta="1""#,
+            r#"pdDelta="1""#,
+        ];
+        for attributes in cases {
+            let body = format!(
+                r#"<MPD xmlns="urn:mpeg:dash:schema:mpd:2011" type="static" mediaPresentationDuration="PT2S"><Period duration="PT2S"><AdaptationSet contentType="video" mimeType="video/mp4"><Representation id="v1"><BaseURL>video.mp4</BaseURL><SegmentBase {attributes}/></Representation></AdaptationSet></Period></MPD>"#,
+                attributes = attributes
+            );
+            assert_eq!(
+                parse_dash_manifest(BASE_URL, &body).err(),
+                Some(DashError::UnsupportedAddressing),
+                "{attributes}"
+            );
+        }
+    }
+
+    #[test]
+    fn segment_base_rejects_mixed_addressing() {
+        // SegmentTemplate on the parent plus SegmentBase on the representation.
+        let mixed_template = r#"<MPD xmlns="urn:mpeg:dash:schema:mpd:2011" type="static" mediaPresentationDuration="PT2S"><Period duration="PT2S"><AdaptationSet contentType="video" mimeType="video/mp4"><SegmentTemplate media="s-$Number$.m4s" duration="2"/><Representation id="v1"><BaseURL>video.mp4</BaseURL><SegmentBase indexRange="0-999"/></Representation></AdaptationSet></Period></MPD>"#;
+        assert_eq!(
+            parse_dash_manifest(BASE_URL, mixed_template).err(),
+            Some(DashError::UnsupportedAddressing)
+        );
+
+        // SegmentList on a parent plus SegmentBase on the representation.
+        let mixed_list = r#"<MPD xmlns="urn:mpeg:dash:schema:mpd:2011" type="static" mediaPresentationDuration="PT2S"><Period duration="PT2S"><AdaptationSet contentType="video" mimeType="video/mp4"><SegmentList><SegmentURL media="a.mp4"/></SegmentList><Representation id="v1"><BaseURL>video.mp4</BaseURL><SegmentBase indexRange="0-999"/></Representation></AdaptationSet></Period></MPD>"#;
+        assert_eq!(
+            parse_dash_manifest(BASE_URL, mixed_list).err(),
+            Some(DashError::UnsupportedAddressing)
+        );
+
+        // A BaseURL that points at a directory resolves without a file name.
+        let directory = r#"<MPD xmlns="urn:mpeg:dash:schema:mpd:2011" type="static" mediaPresentationDuration="PT2S"><Period duration="PT2S"><AdaptationSet contentType="video" mimeType="video/mp4"><Representation id="v1"><BaseURL>folder/</BaseURL><SegmentBase indexRange="0-999"/></Representation></AdaptationSet></Period></MPD>"#;
+        assert_eq!(
+            parse_dash_manifest(BASE_URL, directory).err(),
+            Some(DashError::UnsupportedAddressing)
+        );
+
+        // A BaseURL that is the MPD URL itself names the manifest, not media.
+        let manifest = r#"<MPD xmlns="urn:mpeg:dash:schema:mpd:2011" type="static" mediaPresentationDuration="PT2S"><Period duration="PT2S"><AdaptationSet contentType="video" mimeType="video/mp4"><Representation id="v1"><BaseURL>manifest.mpd</BaseURL><SegmentBase indexRange="0-999"/></Representation></AdaptationSet></Period></MPD>"#;
+        assert_eq!(
+            parse_dash_manifest(BASE_URL, manifest).err(),
+            Some(DashError::UnsupportedAddressing)
+        );
     }
 
     #[test]

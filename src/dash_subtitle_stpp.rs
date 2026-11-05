@@ -320,18 +320,39 @@ fn validate_stpp_sample_entry(
         .ok_or(DashSubtitleError::Unsupported(
             "The STPP sample-entry metadata offset overflows",
         ))?;
-    let remaining = entry_end
+    let children = entry.children.as_deref().unwrap_or_default();
+    if children.iter().any(|child| child.typ != "btrt") {
+        return Err(DashSubtitleError::Unsupported(
+            "The STPP sample entry contains an unsupported extension box",
+        ));
+    }
+    if children.iter().any(|child| {
+        child.offset < strings_start
+            || child
+                .offset
+                .checked_add(child.size)
+                .is_none_or(|end| end > entry_end)
+    }) {
+        return Err(DashSubtitleError::Unsupported(
+            "An STPP sample-entry extension box points outside the sample entry",
+        ));
+    }
+    let strings_end = children
+        .iter()
+        .map(|child| child.offset)
+        .min()
+        .unwrap_or(entry_end);
+    let remaining = strings_end
         .checked_sub(strings_start)
         .ok_or(DashSubtitleError::Unsupported(
-            "The STPP sample entry is truncated",
+            "The STPP sample-entry metadata range is invalid",
         ))?;
-    let read_len =
-        usize::try_from(remaining.min(MAX_SAMPLE_ENTRY_TEXT_BYTES as u64)).map_err(|_| {
-            DashSubtitleError::Unsupported("The STPP sample-entry metadata size is out of range")
-        })?;
-    if read_len == 0 {
+    let read_len = usize::try_from(remaining).map_err(|_| {
+        DashSubtitleError::Unsupported("The STPP sample-entry metadata size is out of range")
+    })?;
+    if read_len == 0 || read_len > MAX_SAMPLE_ENTRY_TEXT_BYTES {
         return Err(DashSubtitleError::Unsupported(
-            "The STPP sample entry is missing its namespace metadata",
+            "The STPP sample-entry metadata is empty or exceeds the 16 KiB limit",
         ));
     }
     let mut bytes = vec![0_u8; read_len];
@@ -344,29 +365,15 @@ fn validate_stpp_sample_entry(
             ))
         })?;
 
-    let mut fields = Vec::with_capacity(3);
-    let mut start = 0;
-    for (index, byte) in bytes.iter().enumerate() {
-        if *byte == 0 {
-            fields.push(&bytes[start..index]);
-            start = index + 1;
-            if fields.len() == 3 {
-                break;
-            }
-        }
-    }
-    if fields.len() != 3 {
-        return Err(DashSubtitleError::Unsupported(
-            "The STPP sample entry does not contain three bounded null-terminated fields",
-        ));
-    }
-    let namespace = std::str::from_utf8(fields[0]).map_err(|_| {
+    let [namespace_bytes, schema_location_bytes, auxiliary_mime_types_bytes] =
+        split_sample_entry_fields(&bytes)?;
+    let namespace = std::str::from_utf8(namespace_bytes).map_err(|_| {
         DashSubtitleError::Unsupported("The STPP namespace field is not valid UTF-8")
     })?;
-    let schema_location = std::str::from_utf8(fields[1]).map_err(|_| {
+    let schema_location = std::str::from_utf8(schema_location_bytes).map_err(|_| {
         DashSubtitleError::Unsupported("The STPP schema-location field is not valid UTF-8")
     })?;
-    let auxiliary_mime_types = std::str::from_utf8(fields[2]).map_err(|_| {
+    let auxiliary_mime_types = std::str::from_utf8(auxiliary_mime_types_bytes).map_err(|_| {
         DashSubtitleError::Unsupported("The STPP auxiliary MIME field is not valid UTF-8")
     })?;
     let ttml_namespace = match namespace {
@@ -384,16 +391,41 @@ fn validate_stpp_sample_entry(
         ));
     }
     let _schema_location = schema_location;
-    if entry
-        .children
-        .as_deref()
-        .is_some_and(|children| children.iter().any(|child| child.typ != "btrt"))
-    {
+    let _schema_location = schema_location;
+    Ok(ttml_namespace)
+}
+
+fn split_sample_entry_fields(bytes: &[u8]) -> Result<[&[u8]; 3], DashSubtitleError> {
+    let mut fields = [None, None, None];
+    let mut field_count = 0_usize;
+    let mut field_start = 0_usize;
+
+    for (index, byte) in bytes.iter().enumerate() {
+        if *byte != 0 {
+            continue;
+        }
+        if field_count == fields.len() {
+            return Err(DashSubtitleError::Unsupported(
+                "The STPP sample entry contains more than three null-terminated fields",
+            ));
+        }
+        fields[field_count] = Some(&bytes[field_start..index]);
+        field_count += 1;
+        field_start = index + 1;
+    }
+
+    if field_count != fields.len() || field_start != bytes.len() {
         return Err(DashSubtitleError::Unsupported(
-            "The STPP sample entry contains an unsupported extension box",
+            "The STPP sample entry must end with exactly three null-terminated fields",
         ));
     }
-    Ok(ttml_namespace)
+
+    let [Some(namespace), Some(schema_location), Some(auxiliary_mime_types)] = fields else {
+        return Err(DashSubtitleError::Unsupported(
+            "The STPP sample entry is missing a required metadata field",
+        ));
+    };
+    Ok([namespace, schema_location, auxiliary_mime_types])
 }
 
 #[cfg(test)]
@@ -518,11 +550,7 @@ fn parse_ttml_document_with_namespace(
                 }
             }
             Event::Text(text) => {
-                let content = text.xml_content(XmlVersion::Implicit1_0).map_err(|_| {
-                    DashSubtitleError::Unsupported(
-                        "A DASH TTML text node cannot be decoded as XML 1.0",
-                    )
-                })?;
+                let content = text.xml_content(XmlVersion::Implicit1_0);
                 match stack.last().copied() {
                     Some(Element::Paragraph | Element::Span) => {
                         append_paragraph_text(&mut paragraph, &content)?;
@@ -598,7 +626,9 @@ fn classify_element(
             "The DASH TTML document uses an unsupported XML namespace",
         ));
     }
-    let name = start.name().local_name().as_ref();
+    let qualified_name = start.name();
+    let local_name = qualified_name.local_name();
+    let name = local_name.as_ref();
 
     if matches!(parent, Some(Element::Head)) {
         return Err(DashSubtitleError::Unsupported(
@@ -1104,6 +1134,27 @@ mod tests {
             r#"<tt xmlns="{TTML_NAMESPACE}" xmlns:ttp="{TTML_PARAMETER_NAMESPACE}" ttp:timeBase="media"><body><div>{body}</div></body></tt>"#
         )
         .into_bytes()
+    }
+
+    #[test]
+    fn sample_entry_metadata_requires_exactly_three_bounded_null_terminated_fields() {
+        assert_eq!(
+            split_sample_entry_fields(b"http://www.w3.org/ns/ttml\0\0\0")
+                .expect("three STPP sample-entry fields"),
+            [b"http://www.w3.org/ns/ttml".as_slice(), b"".as_slice(), b"".as_slice()]
+        );
+        assert!(
+            split_sample_entry_fields(b"namespace\0schema\0aux\0tail").is_err(),
+            "trailing bytes after the third field must be rejected"
+        );
+        assert!(
+            split_sample_entry_fields(b"namespace\0schema\0aux\0extra\0").is_err(),
+            "extra fields must be rejected"
+        );
+        assert!(
+            split_sample_entry_fields(b"namespace\0schema\0aux").is_err(),
+            "unterminated fields must be rejected"
+        );
     }
 
     #[test]

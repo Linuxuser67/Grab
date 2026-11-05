@@ -1,4 +1,4 @@
-//! Static, single-period DASH parsing and segment resource planning.
+//! Static DASH parsing and period-aware segment resource planning.
 
 use std::time::{Duration, SystemTime};
 
@@ -27,7 +27,7 @@ pub(crate) enum DashError {
     InvalidManifestUrl,
     #[error("DASH manifest is malformed or too large")]
     Parse,
-    #[error("DASH presentation is not static single-period VOD")]
+    #[error("DASH presentation uses an unsupported period layout")]
     UnsupportedPresentation,
     #[error("DASH addressing or resource URL is unsupported")]
     UnsupportedAddressing,
@@ -65,10 +65,13 @@ pub(crate) struct DashRepresentation {
     pub(crate) kind: DashTrackKind,
     pub(crate) is_default_audio: bool,
     pub(crate) is_default_subtitle: bool,
+    adaptation_id: Option<String>,
     source: DashRepresentationSource,
+    /// Additional period-local addressing sources in MPD presentation order.
+    additional_sources: Vec<DashRepresentationSource>,
 }
 
-/// Timing model shared by all representations in a single-period DASH presentation.
+/// Timing model shared by all representations in a DASH presentation.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum DashPresentation {
     Static,
@@ -234,13 +237,15 @@ pub(crate) fn parse_dash_manifest(
     parse_dash_manifest_at(manifest_url, body, SystemTime::now())
 }
 
-/// Parse a static or bounded single-period dynamic DASH MPD into selectable representations.
+/// Parse static period-continuous or bounded single-period dynamic DASH into selectable representations.
 ///
 /// Dynamic support is limited to HTTPS SegmentTemplate presentations with a
 /// finite MPD update interval and complete segments. Static SegmentBase supports
 /// either a single-file download or indexed byte-range resources described by a
 /// flat SIDX and an Initialization range. Single-file assets are still subject
-/// to the 1 GiB per-resource limit. Multiple periods, DRM, XLink, adaptation-set
+/// to the 1 GiB per-resource limit. Multiple static periods require explicit DASH-IF
+/// period-continuity signaling, stable adaptation/representation IDs, and contiguous timing.
+/// DRM, XLink, adaptation-set
 /// Subset/Preselection combinations, dynamic SegmentList, LL-DASH, SegmentBase
 /// with an Initialization@sourceURL or non-zero presentation-time offset,
 /// hierarchical SIDX, non-zero offsets on dynamic SegmentTemplate, and WebM
@@ -268,7 +273,7 @@ pub(crate) fn parse_dash_manifest_at(
     // explicitly rejected below because it signals protected media.
     let mpd = dash_mpd_core::parse(body).map_err(|_| DashError::Parse)?;
 
-    let presentation = match mpd.mpdtype.as_deref() {
+    let mut presentation = match mpd.mpdtype.as_deref() {
         None | Some("static") => {
             if mpd.minimumUpdatePeriod.is_some()
                 || mpd.availabilityStartTime.is_some()
@@ -314,226 +319,498 @@ pub(crate) fn parse_dash_manifest_at(
     };
 
     let is_dynamic = matches!(presentation, DashPresentation::Dynamic(_));
-    if !mpd.PatchLocation.is_empty() || mpd.periods.len() != 1 || !mpd.ContentProtection.is_empty()
+    if !mpd.PatchLocation.is_empty()
+        || mpd.periods.is_empty()
+        || mpd.periods.len() > dash_roles::MAX_PERIODS
+        || !mpd.ContentProtection.is_empty()
+        || (is_dynamic && mpd.periods.len() != 1)
     {
         return Err(DashError::UnsupportedPresentation);
     }
 
-    let [period] = mpd.periods.as_slice() else {
-        return Err(DashError::UnsupportedPresentation);
-    };
-    // Subset constrains which AdaptationSets may be selected together, while
-    // Preselection declares a coordinated set of media components. Grab's
-    // independent video/audio track selection cannot honor either constraint.
-    if !period.subsets.is_empty() || !period.pre_selections.is_empty() {
-        return Err(DashError::UnsupportedPresentation);
-    }
+    // The typed parser and bounded metadata pass must describe the same source-order
+    // structure for every Period; otherwise a foreign element could shift role indexes.
     let representation_metadata =
         dash_roles::representation_metadata(body.as_bytes(), MAX_REPRESENTATIONS)
             .ok_or(DashError::Parse)?;
-    // The typed parser and the metadata pass must describe the same source-order
-    // structure; otherwise a foreign or unsupported element could shift role indexes.
-    if representation_metadata.len() != period.adaptations.len()
-        || period
-            .adaptations
+    if representation_metadata.len() != mpd.periods.len()
+        || mpd
+            .periods
             .iter()
             .zip(&representation_metadata)
-            .any(|(adaptation, metadata)| {
-                adaptation.representations.len() != metadata.len()
-                    || adaptation
-                        .representations
+            .any(|(period, metadata)| {
+                metadata.len() != period.adaptations.len()
+                    || period
+                        .adaptations
                         .iter()
                         .zip(metadata)
-                        .any(|(representation, metadata)| representation.id != metadata.id)
+                        .any(|(adaptation, metadata)| {
+                            adaptation.representations.len() != metadata.len()
+                                || adaptation.representations.iter().zip(metadata).any(
+                                    |(representation, metadata)| representation.id != metadata.id,
+                                )
+                        })
             })
     {
         return Err(DashError::Parse);
     }
-    if period.href.is_some() || !period.ContentProtection.is_empty() {
-        return Err(DashError::UnsupportedPresentation);
-    }
-
-    let period_start = period.start.unwrap_or(Duration::ZERO);
-    let duration = period
-        .duration
-        .or_else(|| {
-            mpd.mediaPresentationDuration
-                .and_then(|whole_duration| whole_duration.checked_sub(period_start))
-        })
-        .filter(|duration| !duration.is_zero())
-        .unwrap_or(Duration::ZERO);
-    if !is_dynamic && duration.is_zero() {
-        return Err(DashError::UnsupportedPresentation);
-    }
-    let presentation = match presentation {
-        DashPresentation::Dynamic(mut dynamic) => {
-            dynamic.period_start = period_start;
-            DashPresentation::Dynamic(dynamic)
-        }
-        DashPresentation::Static => DashPresentation::Static,
-    };
-    let addressing_duration = if is_dynamic { Duration::MAX } else { duration };
 
     let mpd_base = resolve_base_url(manifest_url.clone(), &mpd.base_url)?;
-    let period_base = resolve_base_url(mpd_base, &period.BaseURL)?;
-
     let mut video_representations = Vec::new();
     let mut audio_representations = Vec::new();
     let mut subtitle_representations = Vec::new();
+    let mut total_duration = Duration::ZERO;
+    let mut previous_period_end = Duration::ZERO;
+    let mut previous_period_duration = Duration::ZERO;
 
-    for (adaptation_index, adaptation) in period.adaptations.iter().enumerate() {
-        let adaptation_metadata = &representation_metadata[adaptation_index];
-        if adaptation.href.is_some() || !adaptation.ContentProtection.is_empty() {
+    for (period_index, (period, period_metadata)) in
+        mpd.periods.iter().zip(&representation_metadata).enumerate()
+    {
+        if period.href.is_some()
+            || !period.ContentProtection.is_empty()
+            || !period.subsets.is_empty()
+            || !period.pre_selections.is_empty()
+            || (mpd.periods.len() > 1 && !period.empty_adaptations.is_empty())
+        {
             return Err(DashError::UnsupportedPresentation);
         }
-        if has_trick_mode_properties(
-            &adaptation.essential_property,
-            &adaptation.supplemental_property,
-        ) {
-            continue;
+
+        if mpd.periods.len() > 1
+            && (period.id.as_deref().is_none_or(str::is_empty)
+                || mpd.periods[..period_index]
+                    .iter()
+                    .any(|previous| previous.id == period.id))
+        {
+            return Err(DashError::UnsupportedPresentation);
+        }
+        let period_start = period.start.unwrap_or(previous_period_end);
+        if mpd.periods.len() > 1
+            && ((period_index == 0 && period_start != Duration::ZERO)
+                || period_start != previous_period_end)
+        {
+            return Err(DashError::UnsupportedPresentation);
+        }
+        let next_period_start = mpd
+            .periods
+            .get(period_index + 1)
+            .and_then(|next| next.start);
+        let duration = period
+            .duration
+            .or_else(|| {
+                next_period_start.and_then(|next_start| next_start.checked_sub(period_start))
+            })
+            .or_else(|| {
+                mpd.mediaPresentationDuration
+                    .and_then(|whole| whole.checked_sub(period_start))
+            })
+            .filter(|duration| !duration.is_zero())
+            .unwrap_or_default();
+        if !is_dynamic && duration.is_zero() {
+            return Err(DashError::UnsupportedPresentation);
+        }
+        let period_end = period_start
+            .checked_add(duration)
+            .ok_or(DashError::UnsupportedPresentation)?;
+        if period_index + 1 == mpd.periods.len()
+            && mpd
+                .mediaPresentationDuration
+                .is_some_and(|whole| whole != period_end)
+        {
+            return Err(DashError::UnsupportedPresentation);
+        }
+        total_duration = total_duration
+            .checked_add(duration)
+            .ok_or(DashError::LimitExceeded)?;
+
+        if period_index > 0 {
+            let previous_period = &mpd.periods[period_index - 1];
+            let previous_id = previous_period
+                .id
+                .as_deref()
+                .ok_or(DashError::UnsupportedPresentation)?;
+            validate_period_continuity(previous_period, period, previous_id)?;
         }
 
-        let adaptation_base = resolve_base_url(period_base.clone(), &adaptation.BaseURL)?;
-        for (representation_index, representation) in adaptation.representations.iter().enumerate()
+        if period_index == 0
+            && let DashPresentation::Dynamic(dynamic) = &mut presentation
         {
-            let representation_is_main = adaptation_metadata
-                .get(representation_index)
-                .ok_or(DashError::Parse)?
-                .is_main;
-            if representation.href.is_some() || !representation.ContentProtection.is_empty() {
+            dynamic.period_start = period_start;
+        }
+        let addressing_duration = if is_dynamic { Duration::MAX } else { duration };
+        let period_base = resolve_base_url(mpd_base.clone(), &period.BaseURL)?;
+
+        let mut period_video = Vec::new();
+        let mut period_audio = Vec::new();
+        let mut period_subtitles = Vec::new();
+
+        for (adaptation_index, adaptation) in period.adaptations.iter().enumerate() {
+            let adaptation_metadata = &period_metadata[adaptation_index];
+            if adaptation.href.is_some() || !adaptation.ContentProtection.is_empty() {
                 return Err(DashError::UnsupportedPresentation);
             }
             if has_trick_mode_properties(
-                &representation.essential_property,
-                &representation.supplemental_property,
+                &adaptation.essential_property,
+                &adaptation.supplemental_property,
             ) {
                 continue;
             }
 
-            let mime_type = representation
-                .mimeType
-                .clone()
-                .or_else(|| adaptation.mimeType.clone());
-            if mime_type
-                .as_deref()
-                .is_some_and(|mime| mime.to_ascii_lowercase().contains("webm"))
+            let adaptation_base = resolve_base_url(period_base.clone(), &adaptation.BaseURL)?;
+            for (representation_index, representation) in
+                adaptation.representations.iter().enumerate()
             {
-                continue;
-            }
+                let representation_is_main = adaptation_metadata
+                    .get(representation_index)
+                    .ok_or(DashError::Parse)?
+                    .is_main;
+                if representation.href.is_some() || !representation.ContentProtection.is_empty() {
+                    return Err(DashError::UnsupportedPresentation);
+                }
+                if has_trick_mode_properties(
+                    &representation.essential_property,
+                    &representation.supplemental_property,
+                ) {
+                    continue;
+                }
 
-            let kind = track_kind(
-                representation.contentType.as_deref(),
-                mime_type.as_deref(),
-                adaptation.contentType.as_deref(),
-                adaptation.mimeType.as_deref(),
-                representation
-                    .codecs
+                let mime_type = representation
+                    .mimeType
+                    .clone()
+                    .or_else(|| adaptation.mimeType.clone());
+                if mime_type
                     .as_deref()
-                    .or(adaptation.codecs.as_deref()),
-            );
-            let Some(kind) = kind else {
-                // Text, metadata, and unknown adaptation sets are not media inputs.
-                continue;
-            };
-            let is_main = representation_is_main
-                || adaptation.Role.iter().any(|role| {
-                    role.schemeIdUri == DASH_ROLE_SCHEME && role.value.as_deref() == Some("main")
-                });
-            let is_default_audio = kind == DashTrackKind::Audio && is_main;
+                    .is_some_and(|mime| mime.to_ascii_lowercase().contains("webm"))
+                {
+                    continue;
+                }
 
-            let representation_base =
-                resolve_base_url(adaptation_base.clone(), &representation.BaseURL)?;
-            let addressing = effective_addressing(
-                period,
-                adaptation,
-                representation,
-                addressing_duration,
-                is_dynamic,
-            )?;
-            if matches!(
-                addressing,
-                DashAddressing::Base | DashAddressing::IndexedBase(_)
-            ) && !is_single_file_media_url(&representation_base, &manifest_url)
-            {
-                return Err(DashError::UnsupportedAddressing);
-            }
-            let representation_id = representation.id.clone();
-            let bandwidth = representation.bandwidth;
-            let width = representation.width.or(adaptation.width);
-            let height = representation.height.or(adaptation.height);
-            let codecs = representation
-                .codecs
-                .clone()
-                .or_else(|| adaptation.codecs.clone());
-            let language = representation
-                .lang
-                .clone()
-                .or_else(|| adaptation.lang.clone());
-            let identity = RepresentationIdentity {
-                id: representation_id.as_deref(),
-                kind,
-                bandwidth,
-                width,
-                height,
-                mime_type: mime_type.as_deref(),
-                codecs: codecs.as_deref(),
-                language: language.as_deref(),
-                base_url: &representation_base,
-                addressing: &addressing,
-            };
-            let live_key = stable_live_representation_key(identity);
-            let key = if is_dynamic {
-                live_key.clone()
-            } else {
-                stable_representation_key(identity)
-            };
+                let kind = track_kind(
+                    representation.contentType.as_deref(),
+                    mime_type.as_deref(),
+                    adaptation.contentType.as_deref(),
+                    adaptation.mimeType.as_deref(),
+                    representation
+                        .codecs
+                        .as_deref()
+                        .or(adaptation.codecs.as_deref()),
+                );
+                let Some(kind) = kind else {
+                    continue;
+                };
+                let is_main = representation_is_main
+                    || adaptation.Role.iter().any(|role| {
+                        role.schemeIdUri == DASH_ROLE_SCHEME
+                            && role.value.as_deref() == Some("main")
+                    });
+                let is_default_audio = kind == DashTrackKind::Audio && is_main;
 
-            let choice = DashRepresentation {
-                key,
-                live_key,
-                representation_id,
-                bandwidth,
-                width,
-                height,
-                mime_type,
-                codecs,
-                language,
-                kind,
-                is_default_audio,
-                is_default_subtitle: kind == DashTrackKind::Subtitle && is_main,
-                source: DashRepresentationSource {
-                    base_url: representation_base,
-                    addressing,
-                },
-            };
+                let representation_base =
+                    resolve_base_url(adaptation_base.clone(), &representation.BaseURL)?;
+                let addressing = effective_addressing(
+                    period,
+                    adaptation,
+                    representation,
+                    addressing_duration,
+                    is_dynamic,
+                )?;
+                if matches!(
+                    &addressing,
+                    DashAddressing::Base | DashAddressing::IndexedBase(_)
+                ) && !is_single_file_media_url(&representation_base, &manifest_url)
+                {
+                    return Err(DashError::UnsupportedAddressing);
+                }
+                let representation_id = representation.id.clone();
+                let bandwidth = representation.bandwidth;
+                let width = representation.width.or(adaptation.width);
+                let height = representation.height.or(adaptation.height);
+                let codecs = representation
+                    .codecs
+                    .clone()
+                    .or_else(|| adaptation.codecs.clone());
+                let language = representation
+                    .lang
+                    .clone()
+                    .or_else(|| adaptation.lang.clone());
+                let identity = RepresentationIdentity {
+                    id: representation_id.as_deref(),
+                    kind,
+                    bandwidth,
+                    width,
+                    height,
+                    mime_type: mime_type.as_deref(),
+                    codecs: codecs.as_deref(),
+                    language: language.as_deref(),
+                    base_url: &representation_base,
+                    addressing: &addressing,
+                };
+                let live_key = stable_live_representation_key(identity);
+                let key = if is_dynamic {
+                    live_key.clone()
+                } else {
+                    stable_representation_key(identity)
+                };
 
-            match kind {
-                DashTrackKind::Video => video_representations.push(choice),
-                DashTrackKind::Audio => audio_representations.push(choice),
-                DashTrackKind::Subtitle => subtitle_representations.push(choice),
-            }
+                let choice = DashRepresentation {
+                    key,
+                    live_key,
+                    representation_id,
+                    bandwidth,
+                    width,
+                    height,
+                    mime_type,
+                    codecs,
+                    language,
+                    kind,
+                    is_default_audio,
+                    is_default_subtitle: kind == DashTrackKind::Subtitle && is_main,
+                    adaptation_id: adaptation.id.clone(),
+                    source: DashRepresentationSource {
+                        base_url: representation_base,
+                        addressing,
+                    },
+                    additional_sources: Vec::new(),
+                };
 
-            if video_representations.len()
-                + audio_representations.len()
-                + subtitle_representations.len()
-                > MAX_REPRESENTATIONS
-            {
-                return Err(DashError::LimitExceeded);
+                match kind {
+                    DashTrackKind::Video => period_video.push(choice),
+                    DashTrackKind::Audio => period_audio.push(choice),
+                    DashTrackKind::Subtitle => period_subtitles.push(choice),
+                }
+
+                if period_video.len() + period_audio.len() + period_subtitles.len()
+                    > MAX_REPRESENTATIONS
+                {
+                    return Err(DashError::LimitExceeded);
+                }
             }
         }
+
+        if period_index == 0 {
+            video_representations = period_video;
+            audio_representations = period_audio;
+            subtitle_representations = period_subtitles;
+        } else {
+            append_period_sources(
+                &mut video_representations,
+                period_video,
+                previous_period_duration,
+            )?;
+            append_period_sources(
+                &mut audio_representations,
+                period_audio,
+                previous_period_duration,
+            )?;
+            append_period_sources(
+                &mut subtitle_representations,
+                period_subtitles,
+                previous_period_duration,
+            )?;
+        }
+
+        previous_period_end = period_end;
+        previous_period_duration = duration;
     }
 
     if video_representations.is_empty() {
         return Err(DashError::NoVideoRepresentations);
     }
+    if mpd.periods.len() > 1
+        && !representation_keys_are_unambiguous(
+            video_representations
+                .iter()
+                .chain(&audio_representations)
+                .chain(&subtitle_representations),
+        )
+    {
+        return Err(DashError::UnsupportedPresentation);
+    }
 
     Ok(DashManifestPlan {
-        duration,
+        duration: total_duration,
         presentation,
         video_representations: video_representations.into_boxed_slice(),
         audio_representations: audio_representations.into_boxed_slice(),
         subtitle_representations: subtitle_representations.into_boxed_slice(),
     })
+}
+
+const DASH_PERIOD_CONTINUITY_SCHEME: &str = "urn:mpeg:dash:period-continuity:2015";
+const DASH_PERIOD_CONNECTIVITY_SCHEME: &str = "urn:mpeg:dash:period-connectivity:2015";
+
+/// Require DASH-IF period continuity, associated assets, and stable track identities.
+fn validate_period_continuity(
+    previous: &dash_mpd_core::Period,
+    current: &dash_mpd_core::Period,
+    previous_period_id: &str,
+) -> Result<(), DashError> {
+    if previous.adaptations.len() != current.adaptations.len()
+        || previous.asset_identifier.is_none()
+        || previous.asset_identifier != current.asset_identifier
+    {
+        return Err(DashError::UnsupportedPresentation);
+    }
+
+    let mut previous_adaptations =
+        std::collections::HashMap::with_capacity(previous.adaptations.len());
+    for adaptation in &previous.adaptations {
+        let id = adaptation
+            .id
+            .as_deref()
+            .filter(|id| !id.is_empty())
+            .ok_or(DashError::UnsupportedPresentation)?;
+        if previous_adaptations.insert(id, adaptation).is_some() {
+            return Err(DashError::UnsupportedPresentation);
+        }
+    }
+
+    let mut current_adaptation_ids =
+        std::collections::HashSet::with_capacity(current.adaptations.len());
+    for adaptation in &current.adaptations {
+        let adaptation_id = adaptation
+            .id
+            .as_deref()
+            .filter(|id| !id.is_empty())
+            .ok_or(DashError::UnsupportedPresentation)?;
+        if !current_adaptation_ids.insert(adaptation_id) {
+            return Err(DashError::UnsupportedPresentation);
+        }
+
+        let previous_adaptation = previous_adaptations
+            .get(adaptation_id)
+            .copied()
+            .ok_or(DashError::UnsupportedPresentation)?;
+        let continuity_signaled = adaptation.supplemental_property.iter().any(|property| {
+            property.schemeIdUri == DASH_PERIOD_CONTINUITY_SCHEME
+                && property.value.as_deref() == Some(previous_period_id)
+        });
+        let connectivity_also_signaled = adaptation
+            .supplemental_property
+            .iter()
+            .any(|property| property.schemeIdUri == DASH_PERIOD_CONNECTIVITY_SCHEME);
+        if !continuity_signaled
+            || connectivity_also_signaled
+            || previous_adaptation.representations.len() != adaptation.representations.len()
+        {
+            return Err(DashError::UnsupportedPresentation);
+        }
+
+        let mut previous_representation_ids =
+            std::collections::HashSet::with_capacity(previous_adaptation.representations.len());
+        for representation in &previous_adaptation.representations {
+            let id = representation
+                .id
+                .as_deref()
+                .filter(|id| !id.is_empty())
+                .ok_or(DashError::UnsupportedPresentation)?;
+            if !previous_representation_ids.insert(id) {
+                return Err(DashError::UnsupportedPresentation);
+            }
+        }
+
+        let mut current_representation_ids =
+            std::collections::HashSet::with_capacity(adaptation.representations.len());
+        for representation in &adaptation.representations {
+            let id = representation
+                .id
+                .as_deref()
+                .filter(|id| !id.is_empty())
+                .ok_or(DashError::UnsupportedPresentation)?;
+            if !current_representation_ids.insert(id) || !previous_representation_ids.contains(id) {
+                return Err(DashError::UnsupportedPresentation);
+            }
+        }
+    }
+
+    Ok(())
+}
+
+fn period_duration_to_ticks(duration: Duration, timescale: u64) -> Result<u64, DashError> {
+    let scaled_nanos = duration
+        .as_nanos()
+        .checked_mul(u128::from(timescale))
+        .ok_or(DashError::UnsupportedPresentation)?;
+    let nanos_per_second = 1_000_000_000_u128;
+    if scaled_nanos % nanos_per_second != 0 {
+        return Err(DashError::UnsupportedPresentation);
+    }
+    u64::try_from(scaled_nanos / nanos_per_second).map_err(|_| DashError::UnsupportedPresentation)
+}
+
+fn representation_keys_are_unambiguous<'a>(
+    mut representations: impl Iterator<Item = &'a DashRepresentation>,
+) -> bool {
+    let mut keys = std::collections::HashSet::new();
+    representations.all(|representation| {
+        keys.insert(representation.key.as_str())
+            && (representation.live_key == representation.key
+                || keys.insert(representation.live_key.as_str()))
+    })
+}
+
+/// Append a period's source only when it preserves the selected representation's decoding identity.
+fn append_period_sources(
+    existing: &mut [DashRepresentation],
+    incoming: Vec<DashRepresentation>,
+    previous_period_duration: Duration,
+) -> Result<(), DashError> {
+    if existing.len() != incoming.len() {
+        return Err(DashError::UnsupportedPresentation);
+    }
+
+    let mut incoming_ids = std::collections::HashSet::with_capacity(incoming.len());
+    if incoming.iter().any(|next| {
+        !incoming_ids.insert((
+            next.adaptation_id.as_deref(),
+            next.representation_id.as_deref(),
+        ))
+    }) {
+        return Err(DashError::UnsupportedPresentation);
+    }
+
+    for next in incoming {
+        let current = existing
+            .iter_mut()
+            .find(|candidate| {
+                candidate.adaptation_id == next.adaptation_id
+                    && candidate.representation_id == next.representation_id
+            })
+            .ok_or(DashError::UnsupportedPresentation)?;
+
+        if current.kind != next.kind
+            || current.mime_type != next.mime_type
+            || current.codecs != next.codecs
+            || current.width != next.width
+            || current.height != next.height
+            || current.language != next.language
+        {
+            return Err(DashError::UnsupportedPresentation);
+        }
+
+        let previous_source = current.additional_sources.last().unwrap_or(&current.source);
+        let (DashAddressing::Template(previous_template), DashAddressing::Template(next_template)) =
+            (&previous_source.addressing, &next.source.addressing)
+        else {
+            return Err(DashError::UnsupportedAddressing);
+        };
+        if previous_template.timescale != next_template.timescale
+            || previous_template.initialization.is_some() != next_template.initialization.is_some()
+        {
+            return Err(DashError::UnsupportedPresentation);
+        }
+        let period_ticks =
+            period_duration_to_ticks(previous_period_duration, previous_template.timescale)?;
+        let expected_presentation_time_offset = previous_template
+            .presentation_time_offset
+            .checked_add(period_ticks)
+            .ok_or(DashError::UnsupportedPresentation)?;
+        if next_template.presentation_time_offset != expected_presentation_time_offset {
+            return Err(DashError::UnsupportedPresentation);
+        }
+        current.additional_sources.push(next.source);
+    }
+
+    Ok(())
 }
 
 /// Expand a chosen representation into ordered initialization and media resources.
@@ -545,7 +822,7 @@ pub(crate) fn plan_dash_representation(
     manifest: &DashManifestPlan,
     representation_key: &str,
 ) -> Result<DashRepresentationPlan, DashError> {
-    let representation = manifest
+    let mut representation = manifest
         .video_representations
         .iter()
         .chain(manifest.audio_representations.iter())
@@ -557,42 +834,130 @@ pub(crate) fn plan_dash_representation(
         .ok_or(DashError::UnsupportedAddressing)?;
 
     let live_selection = representation_key == representation.live_key;
-    let resources = match (&manifest.presentation, &representation.source.addressing) {
-        (DashPresentation::Dynamic(dynamic), DashAddressing::Template(template)) => {
-            expand_dynamic_template(&representation, &template.media, template, dynamic)?
-        }
-        (DashPresentation::Dynamic(_), DashAddressing::List(_)) => {
-            return Err(DashError::UnsupportedAddressing);
-        }
-        (DashPresentation::Dynamic(_), DashAddressing::Base | DashAddressing::IndexedBase(_)) => {
-            return Err(DashError::UnsupportedAddressing);
-        }
-        (DashPresentation::Static, DashAddressing::Base) => expand_base(&representation)?,
-        (DashPresentation::Static, DashAddressing::IndexedBase(index)) => {
-            expand_indexed_base(&representation, index)?
-        }
-        (DashPresentation::Static, DashAddressing::Template(template)) if live_selection => {
-            expand_static_live_template(&representation, &template.media, template)?
-        }
-        (DashPresentation::Static, DashAddressing::Template(template)) => {
-            expand_template(&representation, &template.media, template)?
-        }
-        (DashPresentation::Static, DashAddressing::List(_)) if live_selection => {
-            return Err(DashError::UnsupportedAddressing);
-        }
-        (DashPresentation::Static, DashAddressing::List(list)) => {
-            expand_list(&representation, list)?
-        }
-    };
+    let mut sources = Vec::with_capacity(1 + representation.additional_sources.len());
+    sources.push(representation.source.clone());
+    sources.append(&mut representation.additional_sources);
 
-    let segment_base_index = match &representation.source.addressing {
-        DashAddressing::IndexedBase(index) => Some(DashSegmentBaseIndex {
+    // Concatenating independently addressed SegmentBase files or SIDX indexes
+    // would require container-aware remapping. Multi-period native assembly is
+    // therefore limited to fragment-addressed resources with a shared init.
+    if sources.len() > 1
+        && sources.iter().any(|source| {
+            matches!(
+                &source.addressing,
+                DashAddressing::Base | DashAddressing::IndexedBase(_)
+            )
+        })
+    {
+        return Err(DashError::UnsupportedAddressing);
+    }
+
+    let mut resources: Vec<DashResource> = Vec::new();
+    let mut segment_count = 0_usize;
+    for (period_index, source) in sources.iter().enumerate() {
+        let mut period_representation = representation.clone();
+        period_representation.source = source.clone();
+        let mut period_resources = match (&manifest.presentation, &source.addressing) {
+            (DashPresentation::Dynamic(dynamic), DashAddressing::Template(template)) => {
+                expand_dynamic_template(&period_representation, &template.media, template, dynamic)?
+            }
+            (DashPresentation::Dynamic(_), DashAddressing::List(_)) => {
+                return Err(DashError::UnsupportedAddressing);
+            }
+            (
+                DashPresentation::Dynamic(_),
+                DashAddressing::Base | DashAddressing::IndexedBase(_),
+            ) => {
+                return Err(DashError::UnsupportedAddressing);
+            }
+            (DashPresentation::Static, DashAddressing::Base) => {
+                expand_base(&period_representation)?
+            }
+            (DashPresentation::Static, DashAddressing::IndexedBase(index)) => {
+                expand_indexed_base(&period_representation, index)?
+            }
+            (DashPresentation::Static, DashAddressing::Template(template)) if live_selection => {
+                expand_static_live_template(
+                    &period_representation,
+                    &template.media,
+                    template,
+                    sources.len() > 1,
+                )?
+            }
+            (DashPresentation::Static, DashAddressing::Template(template)) => expand_template(
+                &period_representation,
+                &template.media,
+                template,
+                sources.len() > 1,
+            )?,
+            (DashPresentation::Static, DashAddressing::List(_)) if live_selection => {
+                return Err(DashError::UnsupportedAddressing);
+            }
+            (DashPresentation::Static, DashAddressing::List(list)) => {
+                expand_list(&period_representation, list)?
+            }
+        };
+
+        if period_index > 0 {
+            let period_prefix = format!("dash-period-{period_index}");
+            for (resource_index, resource) in period_resources.iter_mut().enumerate() {
+                if resource.kind == DashResourceKind::Segment {
+                    resource.filename = super::resource_filename(
+                        &period_prefix,
+                        Some(resource_index),
+                        &resource.url,
+                        resource.range,
+                    );
+                }
+            }
+        }
+
+        if period_index > 0 {
+            let previous_initialization = resources
+                .iter()
+                .find(|resource| resource.kind == DashResourceKind::Initialization);
+            let period_initialization = period_resources
+                .iter()
+                .find(|resource| resource.kind == DashResourceKind::Initialization);
+            let initialization_matches = match (previous_initialization, period_initialization) {
+                (Some(previous), Some(current)) => {
+                    previous.url == current.url && previous.range == current.range
+                }
+                (None, None) => true,
+                _ => false,
+            };
+            if !initialization_matches {
+                return Err(DashError::UnsupportedPresentation);
+            }
+        }
+
+        let period_segment_count = period_resources
+            .iter()
+            .filter(|resource| resource.kind == DashResourceKind::Segment)
+            .count();
+        if sources.len() > 1 && period_segment_count == 0 {
+            return Err(DashError::InvalidSegment);
+        }
+        segment_count = segment_count
+            .checked_add(period_segment_count)
+            .filter(|count| *count <= MAX_SEGMENTS)
+            .ok_or(DashError::LimitExceeded)?;
+        for resource in period_resources {
+            if period_index > 0 && resource.kind == DashResourceKind::Initialization {
+                continue;
+            }
+            resources.push(resource);
+        }
+    }
+    let segment_base_index = match (&representation.source.addressing, sources.len()) {
+        (DashAddressing::IndexedBase(index), 1) => Some(DashSegmentBaseIndex {
             url: representation.source.base_url.clone(),
             index_range: index.index_range,
             initialization_range: index.initialization_range,
             index_range_exact: index.index_range_exact,
             timescale: index.timescale,
         }),
+        (DashAddressing::IndexedBase(_), _) => return Err(DashError::UnsupportedAddressing),
         _ => None,
     };
 
@@ -1371,8 +1736,14 @@ fn expand_static_live_template(
     representation: &DashRepresentation,
     media_template: &str,
     template: &DashTemplate,
+    require_period_alignment: bool,
 ) -> Result<Vec<DashResource>, DashError> {
-    let mut resources = expand_template(representation, media_template, template)?;
+    let mut resources = expand_template(
+        representation,
+        media_template,
+        template,
+        require_period_alignment,
+    )?;
     for resource in &mut resources {
         resource.filename = match resource.kind {
             DashResourceKind::Initialization => {
@@ -1529,8 +1900,28 @@ fn expand_template(
     representation: &DashRepresentation,
     media_template: &str,
     template: &DashTemplate,
+    require_period_alignment: bool,
 ) -> Result<Vec<DashResource>, DashError> {
     let segments = expand_segment_times(template)?;
+    if require_period_alignment {
+        let period_ticks = period_duration_to_ticks(template.period_duration, template.timescale)?;
+        let expected_end = template
+            .presentation_time_offset
+            .checked_add(period_ticks)
+            .ok_or(DashError::UnsupportedPresentation)?;
+        let mut expected_start = template.presentation_time_offset;
+        for (_, start, duration) in &segments {
+            if *start != expected_start {
+                return Err(DashError::UnsupportedPresentation);
+            }
+            expected_start = start
+                .checked_add(*duration)
+                .ok_or(DashError::UnsupportedPresentation)?;
+        }
+        if expected_start != expected_end {
+            return Err(DashError::UnsupportedPresentation);
+        }
+    }
     if segments.is_empty() || segments.len() > MAX_SEGMENTS {
         return Err(if segments.len() > MAX_SEGMENTS {
             DashError::LimitExceeded
@@ -1579,7 +1970,7 @@ fn expand_template(
         });
     }
 
-    for (index, (number, time)) in segments.into_iter().enumerate() {
+    for (index, (number, time, _duration)) in segments.into_iter().enumerate() {
         let uri = substitute_template(media_template, representation, number, time, true)?;
         let url = resolve_resource(&representation.source.base_url, &uri)?;
         let filename = super::resource_filename("dash-segment", Some(index), &url, None);
@@ -1595,7 +1986,7 @@ fn expand_template(
     Ok(resources)
 }
 
-fn expand_segment_times(template: &DashTemplate) -> Result<Vec<(u64, u64)>, DashError> {
+fn expand_segment_times(template: &DashTemplate) -> Result<Vec<(u64, u64, u64)>, DashError> {
     let mut output = Vec::new();
     let mut number = template.start_number;
 
@@ -1678,7 +2069,7 @@ fn expand_segment_times(template: &DashTemplate) -> Result<Vec<(u64, u64)>, Dash
                         // by the current resource planner; leave it to yt-dlp.
                         return Err(DashError::UnsupportedAddressing);
                     }
-                    output.push((number, time));
+                    output.push((number, time, entry.duration));
                 }
                 number = number.checked_add(1).ok_or(DashError::InvalidSegment)?;
             }
@@ -1732,7 +2123,7 @@ fn expand_segment_times(template: &DashTemplate) -> Result<Vec<(u64, u64)>, Dash
         )? {
             return Err(DashError::InvalidSegment);
         }
-        output.push((number, time));
+        output.push((number, time, duration_ticks));
         number = number.checked_add(1).ok_or(DashError::InvalidSegment)?;
     }
 
@@ -2996,6 +3387,246 @@ mod tests {
             plan_dash_representation(&manifest, &representation.live_key).err(),
             Some(DashError::InvalidSegment),
             "an explicit start inside a positive-repeat run must be rejected"
+        );
+    }
+
+    #[test]
+    fn accepts_dynamic_single_period_with_nonzero_period_start() {
+        let body = r#"<?xml version="1.0"?>
+<MPD xmlns="urn:mpeg:dash:schema:mpd:2011" type="dynamic"
+     availabilityStartTime="1970-01-01T00:00:00Z" minimumUpdatePeriod="PT4S">
+  <Period start="PT3600S">
+    <AdaptationSet contentType="video" mimeType="video/mp4">
+      <SegmentTemplate duration="4" media="video-$Number$.m4s"/>
+      <Representation id="v1"/>
+    </AdaptationSet>
+  </Period>
+</MPD>"#;
+        let manifest = parse_dash_manifest_at(BASE_URL, body, dynamic_test_clock(3604))
+            .expect("single-period dynamic MPD may have a nonzero period start");
+        let DashPresentation::Dynamic(dynamic) = manifest.presentation else {
+            panic!("fixture is dynamic");
+        };
+        assert_eq!(dynamic.period_start, Duration::from_secs(3600));
+    }
+
+    #[test]
+    fn plans_period_continuous_static_dash_as_one_resource_sequence() {
+        let body = r#"<?xml version="1.0"?>
+<MPD xmlns="urn:mpeg:dash:schema:mpd:2011" type="static" mediaPresentationDuration="PT4S">
+  <Period id="p1" start="PT0S" duration="PT2S">
+    <AssetIdentifier schemeIdUri="urn:example:asset" value="asset-1"/>
+    <AdaptationSet id="video" contentType="video" mimeType="video/mp4" codecs="avc1.640028">
+      <SegmentTemplate timescale="1" startNumber="1" duration="1"
+                       initialization="init.mp4" media="video-$Number$.m4s"/>
+      <Representation id="v1" bandwidth="1000000" width="1280" height="720"/>
+    </AdaptationSet>
+  </Period>
+  <Period id="p2" start="PT2S" duration="PT2S">
+    <AssetIdentifier schemeIdUri="urn:example:asset" value="asset-1"/>
+    <AdaptationSet id="video" contentType="video" mimeType="video/mp4" codecs="avc1.640028">
+      <SupplementalProperty schemeIdUri="urn:mpeg:dash:period-continuity:2015" value="p1"/>
+      <SegmentTemplate timescale="1" startNumber="3" duration="1" presentationTimeOffset="2"
+                       initialization="init.mp4" media="video-$Number$.m4s"/>
+      <Representation id="v1" bandwidth="1000000" width="1280" height="720"/>
+    </AdaptationSet>
+  </Period>
+</MPD>"#;
+
+        let manifest = parse_dash_manifest(BASE_URL, body)
+            .expect("explicitly continuous static periods should parse");
+        assert_eq!(manifest.duration, Duration::from_secs(4));
+        assert_eq!(manifest.video_representations.len(), 1);
+
+        let plan = plan_dash_representation(&manifest, &manifest.video_representations[0].key)
+            .expect("period resources should be combined in presentation order");
+        assert_eq!(plan.duration, Duration::from_secs(4));
+        assert_eq!(
+            plan.resources
+                .iter()
+                .filter(|resource| resource.kind == DashResourceKind::Initialization)
+                .count(),
+            1,
+            "continuous periods share the first initialization section"
+        );
+        let segment_numbers = plan
+            .resources
+            .iter()
+            .filter(|resource| resource.kind == DashResourceKind::Segment)
+            .map(|resource| resource.segment_number)
+            .collect::<Vec<_>>();
+        assert_eq!(segment_numbers, [Some(1), Some(2), Some(3), Some(4)]);
+
+        let repeated_url_body = body.replace("video-$Number$.m4s", "video.m4s");
+        let repeated_url_manifest = parse_dash_manifest(BASE_URL, &repeated_url_body)
+            .expect("repeated media URLs are valid with continuous period timing");
+        let repeated_url_plan = plan_dash_representation(
+            &repeated_url_manifest,
+            &repeated_url_manifest.video_representations[0].key,
+        )
+        .expect("period staging names should remain unique");
+        let mut filenames = std::collections::HashSet::new();
+        assert!(
+            repeated_url_plan
+                .resources
+                .iter()
+                .all(|resource| filenames.insert(resource.filename.as_str()))
+        );
+
+        let different_asset = body.replacen(r#"value="asset-1""#, r#"value="asset-2""#, 1);
+        assert_eq!(
+            parse_dash_manifest(BASE_URL, &different_asset).err(),
+            Some(DashError::UnsupportedPresentation)
+        );
+
+        let discontinuous_timeline = body.replace(
+            r#"presentationTimeOffset="2""#,
+            r#"presentationTimeOffset="1""#,
+        );
+        assert_eq!(
+            parse_dash_manifest(BASE_URL, &discontinuous_timeline).err(),
+            Some(DashError::UnsupportedPresentation)
+        );
+
+        let changed_initialization = body
+            .rsplit_once(r#"initialization="init.mp4" "#)
+            .map(|(prefix, suffix)| format!("{prefix}{suffix}"))
+            .expect("second period initialization exists");
+        assert_eq!(
+            parse_dash_manifest(BASE_URL, &changed_initialization).err(),
+            Some(DashError::UnsupportedPresentation)
+        );
+
+        let changed_initialization_url = body
+            .rsplit_once(r#"initialization="init.mp4""#)
+            .map(|(prefix, suffix)| format!(r#"{prefix}initialization="init2.mp4"{suffix}"#))
+            .expect("second period initialization exists");
+        let changed_init_manifest = parse_dash_manifest(BASE_URL, &changed_initialization_url)
+            .expect("period init addressing parses before continuity is planned");
+        assert_eq!(
+            plan_dash_representation(
+                &changed_init_manifest,
+                &changed_init_manifest.video_representations[0].key,
+            )
+            .err(),
+            Some(DashError::UnsupportedPresentation)
+        );
+
+        let crossing_segment = body.replace(r#"duration="1""#, r#"duration="3""#);
+        let crossing_manifest = parse_dash_manifest(BASE_URL, &crossing_segment)
+            .expect("period metadata is valid before segment-boundary planning");
+        assert_eq!(
+            plan_dash_representation(
+                &crossing_manifest,
+                &crossing_manifest.video_representations[0].key,
+            )
+            .err(),
+            Some(DashError::UnsupportedPresentation)
+        );
+    }
+
+    #[test]
+    fn plans_three_continuous_periods_using_each_adjacent_timeline() {
+        let body = r#"<?xml version="1.0"?>
+<MPD xmlns="urn:mpeg:dash:schema:mpd:2011" type="static" mediaPresentationDuration="PT6S">
+  <Period id="p1" start="PT0S" duration="PT2S">
+    <AssetIdentifier schemeIdUri="urn:example:asset" value="asset-1"/>
+    <AdaptationSet id="video" contentType="video" mimeType="video/mp4" codecs="avc1.640028">
+      <SegmentTemplate timescale="1" startNumber="1" duration="1"
+                       initialization="init.mp4" media="video-$Number$.m4s"/>
+      <Representation id="v1" width="1280" height="720"/>
+    </AdaptationSet>
+  </Period>
+  <Period id="p2" start="PT2S" duration="PT2S">
+    <AssetIdentifier schemeIdUri="urn:example:asset" value="asset-1"/>
+    <AdaptationSet id="video" contentType="video" mimeType="video/mp4" codecs="avc1.640028">
+      <SupplementalProperty schemeIdUri="urn:mpeg:dash:period-continuity:2015" value="p1"/>
+      <SegmentTemplate timescale="1" startNumber="3" duration="1" presentationTimeOffset="2"
+                       initialization="init.mp4" media="video-$Number$.m4s"/>
+      <Representation id="v1" width="1280" height="720"/>
+    </AdaptationSet>
+  </Period>
+  <Period id="p3" start="PT4S" duration="PT2S">
+    <AssetIdentifier schemeIdUri="urn:example:asset" value="asset-1"/>
+    <AdaptationSet id="video" contentType="video" mimeType="video/mp4" codecs="avc1.640028">
+      <SupplementalProperty schemeIdUri="urn:mpeg:dash:period-continuity:2015" value="p2"/>
+      <SegmentTemplate timescale="1" startNumber="5" duration="1" presentationTimeOffset="4"
+                       initialization="init.mp4" media="video-$Number$.m4s"/>
+      <Representation id="v1" width="1280" height="720"/>
+    </AdaptationSet>
+  </Period>
+</MPD>"#;
+
+        let manifest = parse_dash_manifest(BASE_URL, body)
+            .expect("three adjacent period-continuous periods should parse");
+        let plan = plan_dash_representation(&manifest, &manifest.video_representations[0].key)
+            .expect("all three period resource sequences should be appended");
+        let segment_numbers = plan
+            .resources
+            .iter()
+            .filter(|resource| resource.kind == DashResourceKind::Segment)
+            .map(|resource| resource.segment_number)
+            .collect::<Vec<_>>();
+        assert_eq!(
+            segment_numbers,
+            [Some(1), Some(2), Some(3), Some(4), Some(5), Some(6)]
+        );
+        assert_eq!(
+            plan.resources
+                .iter()
+                .filter(|resource| resource.kind == DashResourceKind::Initialization)
+                .count(),
+            1
+        );
+    }
+
+    #[test]
+    fn rejects_multi_period_dash_without_continuity_or_with_timing_gaps() {
+        let missing_continuity = r#"<?xml version="1.0"?>
+<MPD xmlns="urn:mpeg:dash:schema:mpd:2011" type="static" mediaPresentationDuration="PT4S">
+  <Period id="p1" start="PT0S" duration="PT2S">
+    <AssetIdentifier schemeIdUri="urn:example:asset" value="asset-1"/>
+    <AdaptationSet id="video" contentType="video" mimeType="video/mp4">
+      <SegmentTemplate duration="1" media="video-$Number$.m4s"/>
+      <Representation id="v1"/>
+    </AdaptationSet>
+  </Period>
+  <Period id="p2" start="PT2S" duration="PT2S">
+    <AssetIdentifier schemeIdUri="urn:example:asset" value="asset-1"/>
+    <AdaptationSet id="video" contentType="video" mimeType="video/mp4">
+      <SegmentTemplate duration="1" startNumber="3" media="video-$Number$.m4s"/>
+      <Representation id="v1"/>
+    </AdaptationSet>
+  </Period>
+</MPD>"#;
+        assert_eq!(
+            parse_dash_manifest(BASE_URL, missing_continuity).err(),
+            Some(DashError::UnsupportedPresentation)
+        );
+
+        let gap = missing_continuity
+            .replace(
+                r#"<Period id="p2" start="PT2S" duration="PT2S">"#,
+                r#"<Period id="p2" start="PT3S" duration="PT1S">"#,
+            )
+            .replace(
+                r#"<AssetIdentifier schemeIdUri="urn:example:asset" value="asset-1"/>
+    <AdaptationSet id="video" contentType="video" mimeType="video/mp4">
+      <SegmentTemplate duration="1" startNumber="3""#,
+                r#"<AssetIdentifier schemeIdUri="urn:example:asset" value="asset-1"/>
+    <AdaptationSet id="video" contentType="video" mimeType="video/mp4">
+      <SupplementalProperty schemeIdUri="urn:mpeg:dash:period-continuity:2015" value="p1"/>
+      <SegmentTemplate duration="1" startNumber="3""#,
+            );
+        assert_eq!(
+            parse_dash_manifest(BASE_URL, &gap).err(),
+            Some(DashError::UnsupportedPresentation)
+        );
+
+        let nonzero_start = missing_continuity.replace(r#"start="PT0S""#, r#"start="PT1S""#);
+        assert_eq!(
+            parse_dash_manifest(BASE_URL, &nonzero_start).err(),
+            Some(DashError::UnsupportedPresentation)
         );
     }
 

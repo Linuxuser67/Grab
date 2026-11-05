@@ -288,7 +288,7 @@ pub(crate) async fn acquire_required_keys(
         let received = parse_clear_key_license(&mut body, &required)?;
         for (kid, key) in received {
             if let Some(previous) = keys.get(&kid) {
-                if &**previous != &*key {
+                if **previous != *key {
                     return Err(
                         "DASH license servers returned conflicting keys for one KID".to_string()
                     );

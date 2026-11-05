@@ -334,15 +334,23 @@ pub(crate) fn parse_dash_manifest_at(
         dash_roles::representation_metadata(body.as_bytes(), MAX_REPRESENTATIONS)
             .ok_or(DashError::Parse)?;
     if representation_metadata.len() != mpd.periods.len()
-        || mpd.periods.iter().zip(&representation_metadata).any(|(period, metadata)| {
-            metadata.len() != period.adaptations.len()
-                || period.adaptations.iter().zip(metadata).any(|(adaptation, metadata)| {
-                    adaptation.representations.len() != metadata.len()
-                        || adaptation.representations.iter().zip(metadata).any(
-                            |(representation, metadata)| representation.id != metadata.id,
-                        )
-                })
-        })
+        || mpd
+            .periods
+            .iter()
+            .zip(&representation_metadata)
+            .any(|(period, metadata)| {
+                metadata.len() != period.adaptations.len()
+                    || period
+                        .adaptations
+                        .iter()
+                        .zip(metadata)
+                        .any(|(adaptation, metadata)| {
+                            adaptation.representations.len() != metadata.len()
+                                || adaptation.representations.iter().zip(metadata).any(
+                                    |(representation, metadata)| representation.id != metadata.id,
+                                )
+                        })
+            })
     {
         return Err(DashError::Parse);
     }
@@ -358,7 +366,8 @@ pub(crate) fn parse_dash_manifest_at(
     for (period_index, (period, period_metadata)) in
         mpd.periods.iter().zip(&representation_metadata).enumerate()
     {
-        if period.href.is_some() || !period.ContentProtection.is_empty()
+        if period.href.is_some()
+            || !period.ContentProtection.is_empty()
             || !period.subsets.is_empty()
             || !period.pre_selections.is_empty()
             || (mpd.periods.len() > 1 && !period.empty_adaptations.is_empty())
@@ -378,26 +387,44 @@ pub(crate) fn parse_dash_manifest_at(
         if mpd.periods.len() > 1 && period_start != previous_period_end {
             return Err(DashError::UnsupportedPresentation);
         }
-        let next_period_start = mpd.periods.get(period_index + 1).and_then(|next| next.start);
-        let duration = period.duration
-            .or_else(|| next_period_start.and_then(|next_start| next_start.checked_sub(period_start)))
-            .or_else(|| mpd.mediaPresentationDuration.and_then(|whole| whole.checked_sub(period_start)))
+        let next_period_start = mpd
+            .periods
+            .get(period_index + 1)
+            .and_then(|next| next.start);
+        let duration = period
+            .duration
+            .or_else(|| {
+                next_period_start.and_then(|next_start| next_start.checked_sub(period_start))
+            })
+            .or_else(|| {
+                mpd.mediaPresentationDuration
+                    .and_then(|whole| whole.checked_sub(period_start))
+            })
             .filter(|duration| !duration.is_zero())
             .unwrap_or_default();
         if !is_dynamic && duration.is_zero() {
             return Err(DashError::UnsupportedPresentation);
         }
-        let period_end = period_start.checked_add(duration).ok_or(DashError::UnsupportedPresentation)?;
+        let period_end = period_start
+            .checked_add(duration)
+            .ok_or(DashError::UnsupportedPresentation)?;
         if period_index + 1 == mpd.periods.len()
-            && mpd.mediaPresentationDuration.is_some_and(|whole| whole != period_end)
+            && mpd
+                .mediaPresentationDuration
+                .is_some_and(|whole| whole != period_end)
         {
             return Err(DashError::UnsupportedPresentation);
         }
-        total_duration = total_duration.checked_add(duration).ok_or(DashError::LimitExceeded)?;
+        total_duration = total_duration
+            .checked_add(duration)
+            .ok_or(DashError::LimitExceeded)?;
 
         if period_index > 0 {
             let previous_period = &mpd.periods[period_index - 1];
-            let previous_id = previous_period.id.as_deref().ok_or(DashError::UnsupportedPresentation)?;
+            let previous_id = previous_period
+                .id
+                .as_deref()
+                .ok_or(DashError::UnsupportedPresentation)?;
             validate_period_continuity(previous_period, period, previous_id)?;
         }
 
@@ -426,7 +453,8 @@ pub(crate) fn parse_dash_manifest_at(
             }
 
             let adaptation_base = resolve_base_url(period_base.clone(), &adaptation.BaseURL)?;
-            for (representation_index, representation) in adaptation.representations.iter().enumerate()
+            for (representation_index, representation) in
+                adaptation.representations.iter().enumerate()
             {
                 let representation_is_main = adaptation_metadata
                     .get(representation_index)
@@ -442,8 +470,14 @@ pub(crate) fn parse_dash_manifest_at(
                     continue;
                 }
 
-                let mime_type = representation.mimeType.clone().or_else(|| adaptation.mimeType.clone());
-                if mime_type.as_deref().is_some_and(|mime| mime.to_ascii_lowercase().contains("webm")) {
+                let mime_type = representation
+                    .mimeType
+                    .clone()
+                    .or_else(|| adaptation.mimeType.clone());
+                if mime_type
+                    .as_deref()
+                    .is_some_and(|mime| mime.to_ascii_lowercase().contains("webm"))
+                {
                     continue;
                 }
 
@@ -452,14 +486,18 @@ pub(crate) fn parse_dash_manifest_at(
                     mime_type.as_deref(),
                     adaptation.contentType.as_deref(),
                     adaptation.mimeType.as_deref(),
-                    representation.codecs.as_deref().or(adaptation.codecs.as_deref()),
+                    representation
+                        .codecs
+                        .as_deref()
+                        .or(adaptation.codecs.as_deref()),
                 );
                 let Some(kind) = kind else {
                     continue;
                 };
                 let is_main = representation_is_main
                     || adaptation.Role.iter().any(|role| {
-                        role.schemeIdUri == DASH_ROLE_SCHEME && role.value.as_deref() == Some("main")
+                        role.schemeIdUri == DASH_ROLE_SCHEME
+                            && role.value.as_deref() == Some("main")
                     });
                 let is_default_audio = kind == DashTrackKind::Audio && is_main;
 
@@ -483,8 +521,14 @@ pub(crate) fn parse_dash_manifest_at(
                 let bandwidth = representation.bandwidth;
                 let width = representation.width.or(adaptation.width);
                 let height = representation.height.or(adaptation.height);
-                let codecs = representation.codecs.clone().or_else(|| adaptation.codecs.clone());
-                let language = representation.lang.clone().or_else(|| adaptation.lang.clone());
+                let codecs = representation
+                    .codecs
+                    .clone()
+                    .or_else(|| adaptation.codecs.clone());
+                let language = representation
+                    .lang
+                    .clone()
+                    .or_else(|| adaptation.lang.clone());
                 let identity = RepresentationIdentity {
                     id: representation_id.as_deref(),
                     kind,
@@ -531,7 +575,9 @@ pub(crate) fn parse_dash_manifest_at(
                     DashTrackKind::Subtitle => period_subtitles.push(choice),
                 }
 
-                if period_video.len() + period_audio.len() + period_subtitles.len() > MAX_REPRESENTATIONS {
+                if period_video.len() + period_audio.len() + period_subtitles.len()
+                    > MAX_REPRESENTATIONS
+                {
                     return Err(DashError::LimitExceeded);
                 }
             }
@@ -542,9 +588,21 @@ pub(crate) fn parse_dash_manifest_at(
             audio_representations = period_audio;
             subtitle_representations = period_subtitles;
         } else {
-            append_period_sources(&mut video_representations, period_video, previous_period_duration)?;
-            append_period_sources(&mut audio_representations, period_audio, previous_period_duration)?;
-            append_period_sources(&mut subtitle_representations, period_subtitles, previous_period_duration)?;
+            append_period_sources(
+                &mut video_representations,
+                period_video,
+                previous_period_duration,
+            )?;
+            append_period_sources(
+                &mut audio_representations,
+                period_audio,
+                previous_period_duration,
+            )?;
+            append_period_sources(
+                &mut subtitle_representations,
+                period_subtitles,
+                previous_period_duration,
+            )?;
         }
 
         previous_period_end = period_end;
@@ -573,7 +631,6 @@ pub(crate) fn parse_dash_manifest_at(
         subtitle_representations: subtitle_representations.into_boxed_slice(),
     })
 }
-
 
 const DASH_PERIOD_CONTINUITY_SCHEME: &str = "urn:mpeg:dash:period-continuity:2015";
 const DASH_PERIOD_CONNECTIVITY_SCHEME: &str = "urn:mpeg:dash:period-connectivity:2015";
@@ -624,9 +681,10 @@ fn validate_period_continuity(
             property.schemeIdUri == DASH_PERIOD_CONTINUITY_SCHEME
                 && property.value.as_deref() == Some(previous_period_id)
         });
-        let connectivity_also_signaled = adaptation.supplemental_property.iter().any(|property| {
-            property.schemeIdUri == DASH_PERIOD_CONNECTIVITY_SCHEME
-        });
+        let connectivity_also_signaled = adaptation
+            .supplemental_property
+            .iter()
+            .any(|property| property.schemeIdUri == DASH_PERIOD_CONNECTIVITY_SCHEME);
         if !continuity_signaled
             || connectivity_also_signaled
             || previous_adaptation.representations.len() != adaptation.representations.len()
@@ -655,9 +713,7 @@ fn validate_period_continuity(
                 .as_deref()
                 .filter(|id| !id.is_empty())
                 .ok_or(DashError::UnsupportedPresentation)?;
-            if !current_representation_ids.insert(id)
-                || !previous_representation_ids.contains(id)
-            {
+            if !current_representation_ids.insert(id) || !previous_representation_ids.contains(id) {
                 return Err(DashError::UnsupportedPresentation);
             }
         }
@@ -675,8 +731,7 @@ fn period_duration_to_ticks(duration: Duration, timescale: u64) -> Result<u64, D
     if scaled_nanos % nanos_per_second != 0 {
         return Err(DashError::UnsupportedPresentation);
     }
-    u64::try_from(scaled_nanos / nanos_per_second)
-        .map_err(|_| DashError::UnsupportedPresentation)
+    u64::try_from(scaled_nanos / nanos_per_second).map_err(|_| DashError::UnsupportedPresentation)
 }
 
 fn representation_keys_are_unambiguous<'a>(
@@ -711,10 +766,13 @@ fn append_period_sources(
     }
 
     for next in incoming {
-        let current = existing.iter_mut().find(|candidate| {
-            candidate.adaptation_id == next.adaptation_id
-                && candidate.representation_id == next.representation_id
-        }).ok_or(DashError::UnsupportedPresentation)?;
+        let current = existing
+            .iter_mut()
+            .find(|candidate| {
+                candidate.adaptation_id == next.adaptation_id
+                    && candidate.representation_id == next.representation_id
+            })
+            .ok_or(DashError::UnsupportedPresentation)?;
 
         if current.kind != next.kind
             || current.mime_type != next.mime_type
@@ -737,10 +795,8 @@ fn append_period_sources(
         {
             return Err(DashError::UnsupportedPresentation);
         }
-        let period_ticks = period_duration_to_ticks(
-            previous_period_duration,
-            previous_template.timescale,
-        )?;
+        let period_ticks =
+            period_duration_to_ticks(previous_period_duration, previous_template.timescale)?;
         let expected_presentation_time_offset = previous_template
             .presentation_time_offset
             .checked_add(period_ticks)
@@ -805,7 +861,10 @@ pub(crate) fn plan_dash_representation(
             (DashPresentation::Dynamic(_), DashAddressing::List(_)) => {
                 return Err(DashError::UnsupportedAddressing);
             }
-            (DashPresentation::Dynamic(_), DashAddressing::Base | DashAddressing::IndexedBase(_)) => {
+            (
+                DashPresentation::Dynamic(_),
+                DashAddressing::Base | DashAddressing::IndexedBase(_),
+            ) => {
                 return Err(DashError::UnsupportedAddressing);
             }
             (DashPresentation::Static, DashAddressing::Base) => {
@@ -3325,30 +3384,26 @@ mod tests {
         assert_eq!(manifest.duration, Duration::from_secs(4));
         assert_eq!(manifest.video_representations.len(), 1);
 
-        let plan = plan_dash_representation(
-            &manifest,
-            &manifest.video_representations[0].key,
-        )
-        .expect("period resources should be combined in presentation order");
+        let plan = plan_dash_representation(&manifest, &manifest.video_representations[0].key)
+            .expect("period resources should be combined in presentation order");
         assert_eq!(plan.duration, Duration::from_secs(4));
         assert_eq!(
-            plan.resources.iter()
+            plan.resources
+                .iter()
                 .filter(|resource| resource.kind == DashResourceKind::Initialization)
                 .count(),
             1,
             "continuous periods share the first initialization section"
         );
-        let segment_numbers = plan.resources.iter()
+        let segment_numbers = plan
+            .resources
+            .iter()
             .filter(|resource| resource.kind == DashResourceKind::Segment)
             .map(|resource| resource.segment_number)
             .collect::<Vec<_>>();
         assert_eq!(segment_numbers, [Some(1), Some(2), Some(3), Some(4)]);
 
-        let different_asset = body.replacen(
-            r#"value="asset-1""#,
-            r#"value="asset-2""#,
-            1,
-        );
+        let different_asset = body.replacen(r#"value="asset-1""#, r#"value="asset-2""#, 1);
         assert_eq!(
             parse_dash_manifest(BASE_URL, &different_asset).err(),
             Some(DashError::UnsupportedPresentation)
@@ -3409,7 +3464,9 @@ mod tests {
             .expect("three adjacent period-continuous periods should parse");
         let plan = plan_dash_representation(&manifest, &manifest.video_representations[0].key)
             .expect("all three period resource sequences should be appended");
-        let segment_numbers = plan.resources.iter()
+        let segment_numbers = plan
+            .resources
+            .iter()
             .filter(|resource| resource.kind == DashResourceKind::Segment)
             .map(|resource| resource.segment_number)
             .collect::<Vec<_>>();
@@ -3418,7 +3475,8 @@ mod tests {
             [Some(1), Some(2), Some(3), Some(4), Some(5), Some(6)]
         );
         assert_eq!(
-            plan.resources.iter()
+            plan.resources
+                .iter()
                 .filter(|resource| resource.kind == DashResourceKind::Initialization)
                 .count(),
             1

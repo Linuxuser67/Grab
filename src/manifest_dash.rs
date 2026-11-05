@@ -3449,8 +3449,14 @@ mod tests {
         );
 
         let crossing_segment = body.replace(r#"duration="1""#, r#"duration="3""#);
+        let crossing_manifest = parse_dash_manifest(BASE_URL, &crossing_segment)
+            .expect("period metadata is valid before segment-boundary planning");
         assert_eq!(
-            parse_dash_manifest(BASE_URL, &crossing_segment).err(),
+            plan_dash_representation(
+                &crossing_manifest,
+                &crossing_manifest.video_representations[0].key,
+            )
+            .err(),
             Some(DashError::UnsupportedPresentation)
         );
     }

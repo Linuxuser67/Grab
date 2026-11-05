@@ -1003,9 +1003,7 @@ fn effective_addressing(
                 .map(parse_byte_range)
                 .transpose()?
                 .ok_or(DashError::UnsupportedAddressing)?;
-            if timescale == Some(0)
-                || ranges_overlap(index_range, initialization_range)?
-            {
+            if timescale == Some(0) || ranges_overlap(index_range, initialization_range)? {
                 return Err(DashError::UnsupportedAddressing);
             }
             return Ok(DashAddressing::IndexedBase(DashBaseIndex {
@@ -1992,9 +1990,7 @@ pub(crate) fn resolve_segment_base_index(
         }
     }
     let sidx = sidx.ok_or(DashError::UnsupportedAddressing)?;
-    if index.index_range_exact
-        && (sidx.offset != 0 || sidx.size != index.index_range.length)
-    {
+    if index.index_range_exact && (sidx.offset != 0 || sidx.size != index.index_range.length) {
         return Err(DashError::UnsupportedAddressing);
     }
     let sidx_end = sidx
@@ -2006,7 +2002,9 @@ pub(crate) fn resolve_segment_base_index(
         return Err(DashError::Parse);
     };
     if data.timescale == 0
-        || index.timescale.is_some_and(|timescale| timescale != u64::from(data.timescale))
+        || index
+            .timescale
+            .is_some_and(|timescale| timescale != u64::from(data.timescale))
         || data.references.is_empty()
         || data.references.len() > MAX_SEGMENTS
     {
@@ -2025,7 +2023,8 @@ pub(crate) fn resolve_segment_base_index(
 
     let mut resources = Vec::with_capacity(data.references.len());
     for (number, reference) in data.references.iter().enumerate() {
-        if reference.reference_type != 0 || reference.referenced_size == 0
+        if reference.reference_type != 0
+            || reference.referenced_size == 0
             || reference.subsegment_duration == 0
         {
             return Err(DashError::UnsupportedAddressing);
@@ -2042,20 +2041,14 @@ pub(crate) fn resolve_segment_base_index(
         if ranges_overlap(range, index.initialization_range)? {
             return Err(DashError::InvalidSegment);
         }
-        let filename = super::resource_filename(
-            "dash-segment",
-            Some(number),
-            &index.url,
-            Some(range),
-        );
+        let filename =
+            super::resource_filename("dash-segment", Some(number), &index.url, Some(range));
         resources.push(DashResource {
             url: index.url.clone(),
             range: Some(range),
             filename,
             kind: DashResourceKind::Segment,
-            segment_number: Some(
-                u64::try_from(number).map_err(|_| DashError::LimitExceeded)?,
-            ),
+            segment_number: Some(u64::try_from(number).map_err(|_| DashError::LimitExceeded)?),
         });
         media_offset = end;
     }
@@ -2063,10 +2056,7 @@ pub(crate) fn resolve_segment_base_index(
 }
 
 /// Return whether two checked half-open ranges overlap.
-fn ranges_overlap(
-    left: ManifestByteRange,
-    right: ManifestByteRange,
-) -> Result<bool, DashError> {
+fn ranges_overlap(left: ManifestByteRange, right: ManifestByteRange) -> Result<bool, DashError> {
     let left_end = left
         .offset
         .checked_add(left.length)
@@ -2175,8 +2165,7 @@ mod tests {
     }
 
     fn build_sidx_box(first_offset: u32, references: &[(u32, u32, u32)]) -> Vec<u8> {
-        let size = 32_u32
-            + u32::try_from(references.len()).expect("test reference count") * 12;
+        let size = 32_u32 + u32::try_from(references.len()).expect("test reference count") * 12;
         let mut bytes = Vec::with_capacity(usize::try_from(size).expect("test index size"));
         bytes.extend_from_slice(&size.to_be_bytes());
         bytes.extend_from_slice(b"sidx");
@@ -2187,7 +2176,9 @@ mod tests {
         bytes.extend_from_slice(&first_offset.to_be_bytes());
         bytes.extend_from_slice(&0_u16.to_be_bytes());
         bytes.extend_from_slice(
-            &u16::try_from(references.len()).expect("test reference count").to_be_bytes(),
+            &u16::try_from(references.len())
+                .expect("test reference count")
+                .to_be_bytes(),
         );
         for (reference, duration, sap) in references {
             bytes.extend_from_slice(&reference.to_be_bytes());
@@ -2210,8 +2201,7 @@ mod tests {
         index_range_exact: bool,
     ) -> DashSegmentBaseIndex {
         DashSegmentBaseIndex {
-            url: Url::parse("https://cdn.example.test/path/media.mp4")
-                .expect("test media URL"),
+            url: Url::parse("https://cdn.example.test/path/media.mp4").expect("test media URL"),
             index_range,
             initialization_range,
             index_range_exact,
@@ -2234,13 +2224,16 @@ mod tests {
     </AdaptationSet>
   </Period>
 </MPD>"#;
-        let manifest = parse_dash_manifest(BASE_URL, body)
-            .expect("indexed SegmentBase should parse");
+        let manifest =
+            parse_dash_manifest(BASE_URL, body).expect("indexed SegmentBase should parse");
         let representation = &manifest.video_representations[0];
         let plan = plan_dash_representation(&manifest, &representation.key)
             .expect("indexed SegmentBase should produce a deferred SIDX plan");
 
-        let index = plan.segment_base_index.as_ref().expect("deferred SIDX request");
+        let index = plan
+            .segment_base_index
+            .as_ref()
+            .expect("deferred SIDX request");
         assert_eq!(
             index.index_range,
             ManifestByteRange {
@@ -2307,13 +2300,16 @@ mod tests {
     fn resolves_flat_sidx_references_to_ordered_media_ranges() {
         let bytes = build_sidx_box(0, &[(100, 2_000, 0x9000_0000), (200, 2_000, 0x9000_0000)]);
         let index = indexed_base_plan(
-            ManifestByteRange { offset: 0, length: 100 },
+            ManifestByteRange {
+                offset: 0,
+                length: 100,
+            },
             test_range(&bytes),
             true,
         );
 
-        let resources = resolve_segment_base_index(&index, &bytes, 1_000)
-            .expect("flat SIDX should resolve");
+        let resources =
+            resolve_segment_base_index(&index, &bytes, 1_000).expect("flat SIDX should resolve");
         assert_eq!(resources.len(), 2);
         let first_media_offset = 100_u64
             .checked_add(u64::try_from(bytes.len()).expect("test SIDX length"))
@@ -2334,7 +2330,11 @@ mod tests {
         );
         assert_eq!(resources[0].segment_number, Some(0));
         assert_eq!(resources[1].segment_number, Some(1));
-        assert!(resources.iter().all(|resource| resource.kind == DashResourceKind::Segment));
+        assert!(
+            resources
+                .iter()
+                .all(|resource| resource.kind == DashResourceKind::Segment)
+        );
     }
 
     #[test]
@@ -2342,7 +2342,10 @@ mod tests {
         let mut bytes = vec![0, 0, 0, 8, b'f', b'r', b'e', b'e'];
         bytes.extend_from_slice(&build_sidx_box(0, &[(64, 1_000, 0x9000_0000)]));
         let index = indexed_base_plan(
-            ManifestByteRange { offset: 0, length: 100 },
+            ManifestByteRange {
+                offset: 0,
+                length: 100,
+            },
             test_range(&bytes),
             false,
         );
@@ -2373,7 +2376,10 @@ mod tests {
 
         let oversized = build_sidx_box(0, &[(0x7fff_ffff, 1_000, 0x9000_0000)]);
         let oversized_index = indexed_base_plan(
-            ManifestByteRange { offset: 0, length: 100 },
+            ManifestByteRange {
+                offset: 0,
+                length: 100,
+            },
             test_range(&oversized),
             true,
         );

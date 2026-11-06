@@ -4670,18 +4670,16 @@ async fn run_ffmpeg(
 mod tests {
     use super::*;
 
-    fn hls_playready_uri(license_url: &str, kid_suffix: &str) -> String {
+    fn hls_playready_uri(license_url: &str) -> String {
         use base64::Engine as _;
         use base64::engine::general_purpose::STANDARD;
 
         let xml = format!(
             concat!(
                 "<WRMHEADER xmlns=\"http://schemas.microsoft.com/DRM/2007/03/PlayReadyHeader\" ",
-                "version=\"4.3.0.0\"><DATA><LA_URL>{}</LA_URL>",
-                "<PROTECTINFO><KIDS><KID ALGID=\"AESCTR\" VALUE=\"{}\"/>",
-                "</KIDS></PROTECTINFO></DATA></WRMHEADER>"
+                "version=\"4.3.0.0\"><DATA><LA_URL>{}</LA_URL></DATA></WRMHEADER>"
             ),
-            license_url, kid_suffix
+            license_url
         );
         let utf16: Vec<u8> = xml.encode_utf16().flat_map(u16::to_le_bytes).collect();
         let mut pro = Vec::with_capacity(10 + utf16.len());
@@ -4732,10 +4730,7 @@ mod tests {
     fn hls_playready_request_accepts_one_static_cmaf_key_and_rejects_mixed_keys() {
         // The KID is fixture metadata only; the planner derives the effective
         // sample KID from the CMAF tenc box after resources are staged.
-        let first_uri = hls_playready_uri(
-            "https://license.example.test/acquire",
-            "MyIRAFVEd2aImaq7zN3u/w==",
-        );
+        let first_uri = hls_playready_uri("https://license.example.test/acquire");
         let plan = hls_playready_plan(&first_uri, false);
         assert!(plan.is_single_init_fmp4_presentation());
         assert_eq!(plan.protections.len(), 1);
@@ -4752,10 +4747,7 @@ mod tests {
             "a later METHOD=NONE segment must not be decrypted with the preceding PlayReady key"
         );
 
-        let second_uri = hls_playready_uri(
-            "https://license.example.test/acquire",
-            "MyIRAFVEd2aImaq7zN3u/x==",
-        );
+        let second_uri = hls_playready_uri("https://license.example.test/acquire-rotated");
         let rotation = format!(
             concat!(
                 "#EXTM3U\n#EXT-X-VERSION:7\n#EXT-X-TARGETDURATION:2\n",

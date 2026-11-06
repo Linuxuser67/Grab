@@ -39,11 +39,16 @@ public-host validation. Requests are bounded by a 30-second timeout and a
 persist them, log them, or fall back to a local key file. The former
 `drm-keys.txt` configuration is no longer read.
 
-Widevine and PlayReady license exchanges are not supported by this increment.
-They require system-specific CDM challenges and device provisioning; such
-presentations remain on the existing fallback path. License servers that
-require custom authorization headers or challenge formats beyond the ClearKey
-JSON exchange are also not supported yet.
+Native DASH currently remains ClearKey-only. Grab now has an isolated
+PlayReady challenge/license-response worker, but it is not yet connected to
+DASH manifest planning, device-path configuration, or MP4 decryption; PlayReady
+presentations therefore remain on the existing fallback path. The worker
+requires a user-provisioned `.prd` device and supports one PlayReady PSSH with
+one WRMHEADER per acquisition. Custom authorization headers and non-standard
+license challenge formats are not supported yet.
+
+Widevine remains on fallback: the currently available Rust CDM crates depend
+on the unpatched `rsa 0.9.x` advisory, which Grab does not suppress.
 
 The current native media subset requires one encrypted track in each selected
 initialization resource, one track fragment per media resource, explicit

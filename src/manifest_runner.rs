@@ -4727,11 +4727,16 @@ mod tests {
             .and_then(|segment| segment.key.as_ref())
             .expect("parsed segment retains its active PlayReady key");
         assert_eq!(key.keyformat.as_deref(), Some("com.microsoft.playready"));
+        assert_eq!(key.method, m3u8_rs::KeyMethod::SampleAES);
+        assert!(key.iv.is_none());
+        assert!(segment_map_present(&parsed));
         crate::drm::hls_protection_from_key(key)
             .expect("parsed PlayReady key descriptor is valid")
             .expect("parsed PlayReady key descriptor is retained");
+        crate::drm::validate_hls_keyformat_multiplexing(playlist.as_bytes())
+            .expect("PlayReady KEYFORMAT multiplexing is valid");
         crate::manifest::plan_hls_media_playlist(
-            "https://cdn.example.test/master.m3u8",
+            "https://cdn.example.test/path/master.m3u8",
             playlist.as_bytes(),
         )
         .expect("test static PlayReady CMAF playlist")

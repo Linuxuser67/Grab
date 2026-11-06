@@ -591,7 +591,6 @@ version = "0.5.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e34d8227fe1ba289043aeb13792056ff80fd6de1a9f49137a5f499de8e8c78ea"
 dependencies = [
- "block-buffer",
  "crypto-common 0.2.1",
  "inout 0.2.2",
 ]
@@ -5232,9 +5231,6 @@ name = "zeroize"
 version = "1.9.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e13084392c5e4bc371903e2935a5eaeed24905a7511356b883835e18a78f6879"
-dependencies = [
- "serde",
-]
 
 [[package]]
 name = "zerotrie"

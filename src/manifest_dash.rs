@@ -148,6 +148,35 @@ pub(crate) struct DashRepresentationPlan {
 }
 
 impl DashRepresentationPlan {
+    /// Format the indexed representation's media-to-presentation timestamp offset
+    /// for FFmpeg's per-input itsoffset option.
+    #[must_use]
+    pub(crate) fn ffmpeg_timestamp_offset(&self) -> Option<String> {
+        let index = self.segment_base_index.as_ref()?;
+        let period_start = i128::try_from(index.period_start.as_nanos()).ok()?;
+        let media_offset = i128::from(index.presentation_time_offset)
+            .checked_mul(1_000_000_000)?
+            .checked_div(i128::from(index.timescale))?;
+        let offset = period_start.checked_sub(media_offset)?;
+        Some(format_signed_nanoseconds(offset))
+    }
+}
+
+/// Format a signed nanosecond count as an FFmpeg-compatible decimal time.
+fn format_signed_nanoseconds(value: i128) -> String {
+    let sign = if value < 0 { "-" } else { "" };
+    let absolute = value.unsigned_abs();
+    let seconds = absolute / 1_000_000_000;
+    let nanoseconds = absolute % 1_000_000_000;
+    if nanoseconds == 0 {
+        format!("{sign}{seconds}")
+    } else {
+        let fraction = format!("{nanoseconds:09}");
+        format!("{sign}{seconds}.{}", fraction.trim_end_matches('0'))
+    }
+}
+
+impl DashRepresentationPlan {
     /// Whether MP4 subtitle sample timestamps use the MPD's zero-origin
     /// presentation timeline for a single static DASH Period.
     ///
@@ -170,16 +199,24 @@ impl DashRepresentationPlan {
 /// Information needed to resolve a static SegmentBase index into media ranges.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct DashSegmentBaseIndex {
+    /// The resource whose byte ranges contain the media segments.
     pub(crate) url: Url,
+    /// Resource containing the root SIDX; may differ from the media resource.
+    pub(crate) index_url: Url,
     pub(crate) index_range: ManifestByteRange,
+    pub(crate) index_is_external: bool,
+    pub(crate) byte_range_template: Option<String>,
     initialization_range: ManifestByteRange,
     index_range_exact: bool,
-    timescale: Option<u64>,
+    timescale: u64,
+    presentation_time_offset: u64,
+    period_start: Duration,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct DashRepresentationSource {
     base_url: Url,
+    byte_range_template: Option<String>,
     addressing: DashAddressing,
     period_start: Duration,
 }
@@ -196,10 +233,13 @@ enum DashAddressing {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct DashBaseIndex {
+    index_url: Url,
+    index_is_external: bool,
     index_range: ManifestByteRange,
     initialization_range: ManifestByteRange,
     index_range_exact: bool,
-    timescale: Option<u64>,
+    timescale: u64,
+    presentation_time_offset: u64,
 }
 
 #[derive(Clone, Copy)]
@@ -213,6 +253,7 @@ struct RepresentationIdentity<'a> {
     codecs: Option<&'a str>,
     language: Option<&'a str>,
     base_url: &'a Url,
+    byte_range_template: Option<&'a str>,
     addressing: &'a DashAddressing,
 }
 
@@ -385,7 +426,13 @@ pub(crate) fn parse_dash_manifest_at(
         return Err(DashError::Parse);
     }
 
-    let mpd_base = resolve_base_url(manifest_url.clone(), &mpd.base_url)?;
+    let mpd_base = resolve_base_url(
+        DashResolvedBaseUrl {
+            url: manifest_url.clone(),
+            byte_range_template: None,
+        },
+        &mpd.base_url,
+    )?;
     let mut video_representations = Vec::new();
     let mut audio_representations = Vec::new();
     let mut subtitle_representations = Vec::new();
@@ -540,13 +587,15 @@ pub(crate) fn parse_dash_manifest_at(
                     period,
                     adaptation,
                     representation,
+                    &representation_base.url,
+                    representation_base.byte_range_template.as_deref(),
                     addressing_duration,
                     is_dynamic,
                 )?;
                 if matches!(
                     &addressing,
                     DashAddressing::Base | DashAddressing::IndexedBase(_)
-                ) && !is_single_file_media_url(&representation_base, &manifest_url)
+                ) && !is_single_file_media_url(&representation_base.url, &manifest_url)
                 {
                     return Err(DashError::UnsupportedAddressing);
                 }
@@ -571,7 +620,8 @@ pub(crate) fn parse_dash_manifest_at(
                     mime_type: mime_type.as_deref(),
                     codecs: codecs.as_deref(),
                     language: language.as_deref(),
-                    base_url: &representation_base,
+                    base_url: &representation_base.url,
+                    byte_range_template: representation_base.byte_range_template.as_deref(),
                     addressing: &addressing,
                 };
                 let live_key = stable_live_representation_key(identity);
@@ -596,7 +646,8 @@ pub(crate) fn parse_dash_manifest_at(
                     is_default_subtitle: kind == DashTrackKind::Subtitle && is_main,
                     adaptation_id: adaptation.id.clone(),
                     source: DashRepresentationSource {
-                        base_url: representation_base,
+                        base_url: representation_base.url,
+                        byte_range_template: representation_base.byte_range_template,
                         addressing,
                         period_start,
                     },
@@ -983,10 +1034,15 @@ pub(crate) fn plan_dash_representation(
     let segment_base_index = match (&representation.source.addressing, sources.len()) {
         (DashAddressing::IndexedBase(index), 1) => Some(DashSegmentBaseIndex {
             url: representation.source.base_url.clone(),
+            index_url: index.index_url.clone(),
             index_range: index.index_range,
+            index_is_external: index.index_is_external,
+            byte_range_template: representation.source.byte_range_template.clone(),
             initialization_range: index.initialization_range,
             index_range_exact: index.index_range_exact,
             timescale: index.timescale,
+            presentation_time_offset: index.presentation_time_offset,
+            period_start: representation.source.period_start,
         }),
         (DashAddressing::IndexedBase(_), _) => return Err(DashError::UnsupportedAddressing),
         _ => None,

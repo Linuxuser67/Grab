@@ -1884,6 +1884,15 @@ async fn finalize_manifest_download(
             .await
             .map_err(ManifestRunError::Failed)?;
     }
+    let (video_timestamp_offset, audio_timestamp_offset) = match &tracks {
+        Tracks::Dash { video, audio, .. } => (
+            video.ffmpeg_timestamp_offset(),
+            audio
+                .as_deref()
+                .and_then(DashRepresentationPlan::ffmpeg_timestamp_offset),
+        ),
+        _ => (None, None),
+    };
     let staged_bytes = downloaded.load(Ordering::Relaxed);
     // FFmpeg writes beside the staged segments, so check both the XDG state
     // filesystem (staged inputs plus mux output) and destination filesystem
@@ -1893,6 +1902,8 @@ async fn finalize_manifest_download(
         &ffmpeg,
         &video_input,
         audio_input.as_deref(),
+        video_timestamp_offset.as_deref(),
+        audio_timestamp_offset.as_deref(),
         SubtitleOutput {
             input: subtitle_input.as_deref(),
             embed: job.embed_subs,
@@ -4199,6 +4210,8 @@ async fn run_ffmpeg(
     ffmpeg: &Path,
     video_input: &Path,
     audio_input: Option<&Path>,
+    video_timestamp_offset: Option<&str>,
+    audio_timestamp_offset: Option<&str>,
     subtitles: SubtitleOutput<'_>,
     output: &Path,
     abort: &mut tokio::sync::oneshot::Receiver<crate::video::StopIntent>,
@@ -4211,12 +4224,17 @@ async fn run_ffmpeg(
     command
         .arg("-hide_banner")
         .arg("-nostdin")
-        .arg("-n")
-        .arg("-i")
-        .arg(video_input);
+        .arg("-n");
+    if let Some(offset) = video_timestamp_offset {
+        command.arg("-itsoffset").arg(offset);
+    }
+    command.arg("-i").arg(video_input);
     if let Some(audio_input) = audio_input {
         if is_hls_playlist_input(audio_input) {
             add_hls_staging_options(&mut command);
+        }
+        if let Some(offset) = audio_timestamp_offset {
+            command.arg("-itsoffset").arg(offset);
         }
         command.arg("-i").arg(audio_input);
         command.arg("-map").arg("0:v:0?").arg("-map").arg("1:a:0?");
@@ -5609,6 +5627,7 @@ segment-2.m4s
         let resource = Resource {
             url: Url::parse(&format!("http://{address}/segment.m4s")).expect("resource URL"),
             range: None,
+            byte_range_url: None,
             filename: "segment-000001-0123456789abcdef0123456789abcdef.bin".to_string(),
             key: false,
         };
@@ -5667,6 +5686,7 @@ segment-2.m4s
         let resource = Resource {
             url: Url::parse(&format!("http://{address}/complete.m4s")).expect("resource URL"),
             range: None,
+            byte_range_url: None,
             filename: "complete-000001-0123456789abcdef0123456789abcdef.bin".to_string(),
             key: false,
         };
@@ -5824,6 +5844,7 @@ segment-2.m4s
                 offset: 0,
                 length: 4,
             }),
+            byte_range_url: None,
             filename: "range-000001-0123456789abcdef0123456789abcdef.bin".to_string(),
             key: false,
         };

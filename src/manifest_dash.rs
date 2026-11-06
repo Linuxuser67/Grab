@@ -4451,6 +4451,36 @@ mod tests {
     }
 
     #[test]
+    fn retains_widevine_pssh_and_system_on_selected_representation() {
+        let body = TEMPLATE_MPD.replace(
+            "</Period>",
+            r#"
+    <AdaptationSet contentType="video" mimeType="video/mp4">
+      <ContentProtection schemeIdUri="urn:mpeg:dash:mp4protection:2011"
+                         value="cenc"
+                         default_KID="00112233-4455-6677-8899-aabbccddeeff"/>
+      <ContentProtection schemeIdUri="urn:uuid:edef8ba9-79d6-4ace-a3c8-27dcd51d21ed">
+        <cenc:pssh>AAAAIHBzc2gAAAAA7e+LqXnWSs6jyCfc1R0h7QAAAAA=</cenc:pssh>
+      </ContentProtection>
+      <Representation id="widevine" bandwidth="1000">
+        <SegmentTemplate timescale="1" duration="5" initialization="widevine-init.mp4" media="widevine-$Number$.m4s"/>
+      </Representation>
+    </AdaptationSet>
+</Period>"#,
+        );
+        let manifest = parse_dash_manifest(BASE_URL, &body)
+            .expect("Widevine-protected MPD metadata should parse");
+        let selected = manifest.video_representations.iter()
+            .find(|item| item.representation_id.as_deref() == Some("widevine"))
+            .expect("Widevine representation");
+        assert_eq!(
+            selected.encryption.map(|encryption| encryption.system),
+            Some(crate::dash_drm::ProtectionSystem::Widevine)
+        );
+        assert!(selected.widevine_pssh.is_some());
+    }
+
+    #[test]
     fn rejects_unsupported_or_conflicting_dash_protection_descriptors() {
         let unknown = TEMPLATE_MPD.replace(
             "</Period>",

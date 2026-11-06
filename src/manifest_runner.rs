@@ -2529,8 +2529,7 @@ async fn decrypt_hls_playready_track(
     let scheme = request.scheme;
     let cancelled = Arc::new(AtomicBool::new(false));
     let scan_cancelled = Arc::clone(&cancelled);
-    let (resources, directory, encryption, required_kids) =
-        tokio::task::spawn_blocking(move || {
+    let mut scan = Box::pin(tokio::task::spawn_blocking(move || {
             let init_resource = resources
                 .first()
                 .ok_or_else(|| "HLS CMAF initialization resource is missing".to_string())?;
@@ -2549,14 +2548,14 @@ async fn decrypt_hls_playready_track(
                 &scan_cancelled,
             )?;
             Ok::<_, String>((resources, directory, encryption, required))
-        });
+        }));
     let (resources, directory, encryption, required_kids) = tokio::select! {
         biased;
         _ = &mut *abort => {
             cancelled.store(true, Ordering::Release);
             return Ok(false);
         }
-        result = scan => result
+        result = &mut scan => result
             .map_err(|_| {
                 ManifestRunError::Failed("HLS PlayReady sample inspection task failed".to_string())
             })?

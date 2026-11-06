@@ -39,13 +39,27 @@ public-host validation. Requests are bounded by a 30-second timeout and a
 persist them, log them, or fall back to a local key file. The former
 `drm-keys.txt` configuration is no longer read.
 
-Native DASH currently remains ClearKey-only. Grab now has an isolated
-PlayReady challenge/license-response worker, but it is not yet connected to
-DASH manifest planning, device-path configuration, or MP4 decryption; PlayReady
-presentations therefore remain on the existing fallback path. The worker
-requires a user-provisioned `.prd` device and supports one PlayReady PSSH with
-one WRMHEADER per acquisition. Custom authorization headers and non-standard
-license challenge formats are not supported yet.
+Native DASH also supports PlayReady for static, single-Period fragmented MP4
+CENC/CBCS tracks when the MPD supplies one supported PlayReady initialization
+object and an explicit HTTPS DASHIF Laurl. Initialization data may be
+signalled as cenc:pssh or mspr:pro; cenc:pssh takes precedence within a
+descriptor. Each selected track must resolve to exactly one WRMHEADER.
+Configure a user-provisioned .prd device file under Advanced → Media
+preferences. Grab stores only the file path in GSettings and reads device
+material inside the short-lived PlayReady worker.
+
+The parent process retains network transport, host validation, proxy policy,
+and bounded HTTPS license requests, including the PlayReady SOAP
+`AcquireLicense` action header. The worker performs device verification,
+challenge creation, and response parsing. The PlayReady CDM normalizes
+GUID-layout KIDs to ISO Common Encryption byte order before returning them;
+Grab preserves that byte order when matching fragment sample KIDs. Retrieved
+content-key allocations are moved into zeroizing storage immediately. This
+process boundary is not an OS sandbox.
+
+PlayReady licenses requiring custom authorization headers, DASHIF authorization
+URL workflows, multiple WRMHEADER records, or non-standard challenge formats
+remain on extractor fallback. Encrypted subtitles also remain unsupported.
 
 Widevine remains on fallback: the currently available Rust CDM crates depend
 on the unpatched `rsa 0.9.x` advisory, which Grab does not suppress.

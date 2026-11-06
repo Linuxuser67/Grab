@@ -33,6 +33,8 @@ const MAX_CHALLENGE_BYTES: usize = 128 * 1024;
 const MAX_LICENSE_RESPONSE_BYTES: usize = 64 * 1024;
 const MAX_LICENSE_KEYS: usize = 64;
 const LICENSE_REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
+const PLAYREADY_SOAP_ACTION: &str =
+    "\"http://schemas.microsoft.com/DRM/2007/03/protocols/AcquireLicense\"";
 const WORKER_TIMEOUT: Duration = Duration::from_secs(60);
 const WORKER_EXIT_TIMEOUT: Duration = Duration::from_secs(5);
 
@@ -62,6 +64,11 @@ struct WorkerKey {
     key: Zeroizing<[u8; 16]>,
 }
 
+struct PendingWorkerKey {
+    kid: [u8; 16],
+    bytes: Zeroizing<Box<[u8]>>,
+}
+
 #[derive(Debug, Clone, Copy, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 enum WorkerFailure {
@@ -87,11 +94,11 @@ impl WorkerFailure {
 }
 
 /// One PlayReady content key, held in zeroizing memory.
-pub struct PlayReadyKey {
-    /// The 16-byte key identifier.
-    pub kid: [u8; 16],
+pub(crate) struct PlayReadyKey {
+    /// The 16-byte key identifier in ISO Common Encryption byte order.
+    pub(crate) kid: [u8; 16],
     /// The 16-byte AES content key. It is zeroized when dropped.
-    pub key: Zeroizing<[u8; 16]>,
+    pub(crate) key: Zeroizing<[u8; 16]>,
 }
 
 impl std::fmt::Debug for PlayReadyKey {
@@ -137,7 +144,7 @@ pub(crate) fn run_worker() -> i32 {
 ///
 /// Returns an error when the device, PSSH, license endpoint, worker exchange,
 /// or bounded license response is invalid.
-pub async fn acquire_keys(
+pub(crate) async fn acquire_keys(
     client: &reqwest::Client,
     device_path: &Path,
     pssh: &[u8],
@@ -229,6 +236,7 @@ async fn acquire_keys_with_child(
             .post(license_url.clone())
             .timeout(LICENSE_REQUEST_TIMEOUT)
             .header(reqwest::header::CONTENT_TYPE, "text/xml; charset=utf-8")
+            .header("SOAPAction", PLAYREADY_SOAP_ACTION)
             .body(challenge.to_string())
             .send(),
     )
@@ -393,14 +401,22 @@ fn process_worker<R: BufRead, W: Write>(
     let keys = cdm
         .get_keys_from_challenge_response(body.as_str())
         .map_err(|_| WorkerFailure::LicenseResponseInvalid)?;
+    // The crate returns ordinary Box allocations. Move every key into zeroizing
+    // storage before count/length checks so all early-return paths wipe the keys.
+    let keys: Vec<PendingWorkerKey> = keys
+        .into_iter()
+        .map(|(kid, key)| PendingWorkerKey {
+            kid: kid.into(),
+            bytes: Zeroizing::new(key.into()),
+        })
+        .collect();
     if keys.is_empty() || keys.len() > MAX_LICENSE_KEYS {
         return Err(WorkerFailure::KeyMaterialInvalid);
     }
 
     let mut output = Vec::with_capacity(keys.len());
-    for (kid, key) in keys {
-        let kid: [u8; 16] = kid.into();
-        let key = copy_content_key(key.as_ref())?;
+    for PendingWorkerKey { kid, bytes } in keys {
+        let key = copy_content_key(&bytes)?;
         output.push(WorkerKey { kid, key });
     }
     write_sync_frame(writer, &WorkerResponse::Keys { keys: output })

@@ -1,4 +1,4 @@
-//! Bounded DASH Common Encryption support using HTTPS ClearKey licenses.
+//! Bounded DASH Common Encryption support using HTTPS ClearKey and PlayReady licenses.
 //!
 //! Grab keeps downloaded encrypted resources as its resumable source of truth.
 //! License keys are held in zeroizing memory, and decryption produces a separate
@@ -25,7 +25,7 @@ pub(crate) struct DashEncryption {
 
 const MP4_PROTECTION_SCHEME: &str = "urn:mpeg:dash:mp4protection:2011";
 const WIDEVINE_SCHEME: &str = "urn:uuid:edef8ba9-79d6-4ace-a3c8-27dcd51d21ed";
-const PLAYREADY_SCHEME: &str = "urn:uuid:9a04f079-9840-4286-ab92-e65be0885f95";
+pub(crate) const PLAYREADY_SCHEME: &str = "urn:uuid:9a04f079-9840-4286-ab92-e65be0885f95";
 const CLEARKEY_SCHEME: &str = "urn:uuid:e2719d58-a985-b3c9-781a-ab030af78d30";
 const MAX_LICENSE_RESPONSE_BYTES: usize = 64 * 1024;
 const MAX_LICENSE_KEYS: usize = 64;
@@ -34,8 +34,9 @@ const LICENSE_REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 /// Resolve inherited DASH ContentProtection descriptors into one supported
 /// Common Encryption scheme and one default KID.
 ///
-/// ClearKey and Widevine are distinguished during planning; the runner currently
-/// executes ClearKey only and falls back for Widevine. PlayReady remains unsupported.
+/// ClearKey, PlayReady, and Widevine are distinguished during planning.
+/// The runner executes ClearKey and configured PlayReady acquisitions; Widevine
+/// remains on extractor fallback because no audited Rust CDM backend is available.
 /// Fragment-local seig KID rotation is resolved from media fragments; conflicting
 /// default KIDs across descriptor scopes remain unsupported.
 pub(crate) fn encryption_from_scopes(
@@ -82,11 +83,12 @@ pub(crate) fn encryption_from_scopes(
             selected = Some(encryption);
         } else if descriptor.schemeIdUri == CLEARKEY_SCHEME
             || descriptor.schemeIdUri == WIDEVINE_SCHEME
+            || descriptor.schemeIdUri == PLAYREADY_SCHEME
         {
-            let next = if descriptor.schemeIdUri == WIDEVINE_SCHEME {
-                ProtectionSystem::Widevine
-            } else {
-                ProtectionSystem::ClearKey
+            let next = match descriptor.schemeIdUri.as_str() {
+                WIDEVINE_SCHEME => ProtectionSystem::Widevine,
+                PLAYREADY_SCHEME => ProtectionSystem::PlayReady,
+                _ => ProtectionSystem::ClearKey,
             };
             if system
                 .replace(next)
@@ -94,8 +96,6 @@ pub(crate) fn encryption_from_scopes(
             {
                 return Err("DASH declares conflicting DRM systems".to_string());
             }
-        } else if descriptor.schemeIdUri == PLAYREADY_SCHEME {
-            return Err("Native DASH PlayReady support is not available yet".to_string());
         } else if descriptor.schemeIdUri.starts_with("urn:uuid:") {
             return Err("DASH declares an unsupported protection system".to_string());
         } else {
@@ -150,52 +150,81 @@ pub(crate) fn widevine_pssh_from_scopes(
     Ok(pssh_boxes)
 }
 
-/// Resolve the ClearKey license URL across inherited protection scopes.
+/// Resolve ClearKey or PlayReady license URLs across inherited DASH protection scopes.
 ///
-/// Relative license URLs are resolved against the MPD. URL user-info,
-/// fragments, and non-HTTPS schemes are rejected.
+/// Relative URLs are resolved against the MPD. URL user-info, fragments, and
+/// non-HTTPS schemes are rejected. PlayReady uses an explicit DASHIF Laurl;
+/// embedded WRMHEADER LA_URL values are not treated as a fallback.
 pub(crate) fn license_url_from_scopes(
     scopes: &[&[dash_mpd_core::ContentProtection]],
     manifest_url: &Url,
 ) -> Result<Option<Url>, String> {
-    let mut is_clear_key = false;
+    let mut has_clear_key = false;
+    let mut has_playready = false;
     let mut selected: Option<Url> = None;
 
-    for descriptor in scopes.iter().flat_map(|scope| scope.iter()) {
-        if descriptor.schemeIdUri != CLEARKEY_SCHEME {
-            continue;
-        }
-        is_clear_key = true;
-        let raw = descriptor
-            .laurl
-            .as_ref()
-            .or(descriptor.clearkey_laurl.as_ref())
+    for scope in scopes {
+        let mut scope_selected: Option<Url> = None;
+        for descriptor in *scope {
+            let is_clear_key = descriptor.schemeIdUri == CLEARKEY_SCHEME;
+            let is_playready = descriptor.schemeIdUri == PLAYREADY_SCHEME;
+            if !is_clear_key && !is_playready {
+                continue;
+            }
+            has_clear_key |= is_clear_key;
+            has_playready |= is_playready;
+
+            let raw = if is_playready {
+                descriptor.laurl.as_ref()
+            } else {
+                descriptor
+                    .laurl
+                    .as_ref()
+                    .or(descriptor.clearkey_laurl.as_ref())
+            }
             .and_then(|laurl| laurl.content.as_deref())
             .map(str::trim)
             .filter(|value| !value.is_empty());
-        let Some(raw) = raw else {
-            continue;
-        };
-        let url = manifest_url
-            .join(raw)
-            .map_err(|_| "DASH ClearKey license URL is invalid".to_string())?;
-        if url.scheme() != "https"
-            || url.host_str().is_none()
-            || !url.username().is_empty()
-            || url.password().is_some()
-            || url.fragment().is_some()
-        {
-            return Err(
-                "DASH ClearKey license URL must be HTTPS and contain no user-info or fragment"
-                    .to_string(),
-            );
+            let Some(raw) = raw else {
+                continue;
+            };
+            let url = manifest_url.join(raw).map_err(|_| {
+                if is_playready {
+                    "DASH PlayReady license URL is invalid".to_string()
+                } else {
+                    "DASH ClearKey license URL is invalid".to_string()
+                }
+            })?;
+            if url.scheme() != "https"
+                || url.host_str().is_none()
+                || !url.username().is_empty()
+                || url.password().is_some()
+                || url.fragment().is_some()
+            {
+                return Err(
+                    "DASH license URL must be HTTPS and contain no user-info or fragment"
+                        .to_string(),
+                );
+            }
+            if scope_selected
+                .as_ref()
+                .is_some_and(|previous| previous != &url)
+            {
+                return Err("DASH protection scope contains conflicting license URLs".to_string());
+            }
+            scope_selected = Some(url);
         }
-        // More specific inherited scopes may override the parent license URL.
-        selected = Some(url);
+        // A more-specific scope may replace the endpoint inherited from its parent.
+        if scope_selected.is_some() {
+            selected = scope_selected;
+        }
     }
 
-    if is_clear_key && selected.is_none() {
+    if has_clear_key && selected.is_none() {
         return Err("DASH ClearKey protection has no license URL".to_string());
+    }
+    if has_playready && selected.is_none() {
+        return Err("DASH PlayReady protection has no DASHIF Laurl".to_string());
     }
     Ok(selected)
 }
@@ -726,14 +755,88 @@ mod tests {
     }
 
     #[test]
-    fn rejects_widevine_and_playready_without_cdms() {
-        for scheme in [WIDEVINE_SCHEME, PLAYREADY_SCHEME] {
-            let descriptor = dash_mpd_core::ContentProtection {
-                schemeIdUri: scheme.to_string(),
+    fn playready_license_url_uses_dashif_laurl_and_requires_https() {
+        let descriptor = dash_mpd_core::ContentProtection {
+            schemeIdUri: PLAYREADY_SCHEME.to_string(),
+            laurl: Some(dash_mpd_core::Laurl {
+                content: Some("../license".to_string()),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        let manifest =
+            Url::parse("https://media.example.test/path/manifest.mpd").expect("manifest URL");
+        let url = license_url_from_scopes(&[std::slice::from_ref(&descriptor)], &manifest)
+            .expect("relative PlayReady license URL should parse")
+            .expect("license URL should be present");
+        assert_eq!(url.as_str(), "https://media.example.test/license");
+
+        for value in ["http://license.example.test/key", "javascript:alert(1)"] {
+            let insecure = dash_mpd_core::ContentProtection {
+                schemeIdUri: PLAYREADY_SCHEME.to_string(),
+                laurl: Some(dash_mpd_core::Laurl {
+                    content: Some(value.to_string()),
+                    ..Default::default()
+                }),
                 ..Default::default()
             };
-            assert!(encryption_from_scopes(&[std::slice::from_ref(&descriptor)]).is_err());
+            assert!(
+                license_url_from_scopes(&[std::slice::from_ref(&insecure)], &manifest).is_err()
+            );
         }
+    }
+
+    #[test]
+    fn rejects_conflicting_playready_license_urls_in_one_scope() {
+        let descriptor = |url: &str| dash_mpd_core::ContentProtection {
+            schemeIdUri: PLAYREADY_SCHEME.to_string(),
+            laurl: Some(dash_mpd_core::Laurl {
+                content: Some(url.to_string()),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        let first = descriptor("https://license-a.example.test/acquire");
+        let second = descriptor("https://license-b.example.test/acquire");
+        let manifest = Url::parse("https://media.example.test/manifest.mpd").expect("manifest URL");
+        assert!(
+            license_url_from_scopes(&[&[first, second]], &manifest).is_err(),
+            "conflicting endpoints at one scope must not be resolved by document order"
+        );
+    }
+
+    #[test]
+    fn more_specific_playready_license_url_overrides_parent() {
+        let parent = dash_mpd_core::ContentProtection {
+            schemeIdUri: PLAYREADY_SCHEME.to_string(),
+            laurl: Some(dash_mpd_core::Laurl {
+                content: Some("https://license-a.example.test/acquire".to_string()),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        let child = dash_mpd_core::ContentProtection {
+            schemeIdUri: PLAYREADY_SCHEME.to_string(),
+            laurl: Some(dash_mpd_core::Laurl {
+                content: Some("https://license-b.example.test/acquire".to_string()),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        let manifest = Url::parse("https://media.example.test/manifest.mpd").expect("manifest URL");
+        let selected = license_url_from_scopes(
+            &[std::slice::from_ref(&parent), std::slice::from_ref(&child)],
+            &manifest,
+        )
+        .expect("more-specific license URL")
+        .expect("license URL should be selected");
+        assert_eq!(selected.as_str(), "https://license-b.example.test/acquire");
+    }
+
+    #[test]
+    fn rejects_widevine_without_a_supported_cdm() {
+        let descriptor = widevine();
+        assert!(encryption_from_scopes(&[std::slice::from_ref(&descriptor)]).is_err());
     }
 
     #[test]

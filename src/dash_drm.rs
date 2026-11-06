@@ -639,7 +639,7 @@ mod tests {
         let wrm_header = concat!(
             "<WRMHEADER xmlns=\"http://schemas.microsoft.com/DRM/2007/03/PlayReadyHeader\" ",
             "version=\"4.3.0.0\"><DATA><PROTECTINFO><KIDS>",
-            "<KID ALGID=\"AESCTR\" VALUE=\"ABEiM0RVZneImaq7zN3u/w==\"/>",
+            "<KID ALGID=\"AESCTR\" VALUE=\"MyIRAFVEd2aImaq7zN3u/w==\"/>",
             "</KIDS></PROTECTINFO><LA_URL>https://license.example.test/Acquire</LA_URL>",
             "</DATA></WRMHEADER>"
         );

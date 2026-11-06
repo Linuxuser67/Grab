@@ -587,6 +587,14 @@ mod tests {
             widevine_pssh_from_scopes(&[std::slice::from_ref(&malformed)]).is_err()
         );
 
+        let mut wrong_system = widevine();
+        wrong_system.cenc_pssh.push(dash_mpd_core::CencPssh {
+            content: Some("AAAAIHBzc2gAAAAAEREREREREREREREREREREQAAAAA=".to_string()),
+        });
+        assert!(
+            widevine_pssh_from_scopes(&[std::slice::from_ref(&wrong_system)]).is_err()
+        );
+
         let mut multiple = widevine();
         multiple.cenc_pssh.extend([
             dash_mpd_core::CencPssh {
@@ -595,10 +603,13 @@ mod tests {
             dash_mpd_core::CencPssh {
                 content: Some("AAAAIXBzc2gAAAAA7e+LqXnWSs6jyCfc1R0h7QAAAAEB".to_string()),
             },
+            dash_mpd_core::CencPssh {
+                content: Some("AAAANHBzc2gBAAAA7e+LqXnWSs6jyCfc1R0h7QAAAAEAESIzRFVmd4iZqrvM3e7/AAAAAA==".to_string()),
+            },
         ]);
         let retained = widevine_pssh_from_scopes(&[std::slice::from_ref(&multiple)])
             .expect("multiple valid PSSH boxes should be retained");
-        assert_eq!(retained.len(), 2);
+        assert_eq!(retained.len(), 3);
     }
 
     #[test]

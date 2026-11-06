@@ -137,7 +137,7 @@ pub(crate) fn run_worker() -> i32 {
 ///
 /// Returns an error when the device, PSSH, license endpoint, worker exchange,
 /// or bounded license response is invalid.
-pub(crate) async fn acquire_keys(
+pub async fn acquire_keys(
     client: &reqwest::Client,
     device_path: &Path,
     pssh: &[u8],

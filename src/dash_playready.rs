@@ -184,10 +184,10 @@ pub(crate) fn hls_license_request(pro: &[u8]) -> Result<(Vec<u8>, Url), String> 
     let raw_url = playready_la_url(&header)?;
     let url = Url::parse(&raw_url)
         .map_err(|_| "HLS PlayReady LA_URL must be an absolute HTTPS URL".to_string())?;
-    let authority_has_userinfo = url
-        .as_str()
-        .strip_prefix("https://")
-        .and_then(|remainder| remainder.split(['/', '?', '#']).next())
+    let authority_has_userinfo = raw_url
+        .split_once("://")
+        .filter(|(scheme, _)| scheme.eq_ignore_ascii_case("https"))
+        .and_then(|(_, remainder)| remainder.split(['/', '?', '#']).next())
         .is_some_and(|authority| authority.contains('@'));
     if url.scheme() != "https"
         || url.host_str().is_none()

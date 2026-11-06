@@ -58,8 +58,8 @@ Fetch each bounded index range, decode SIDX with the existing `mp4box`
 dependency, and translate direct and nested references into ordered Grab
 byte-range resources. Separate initialization URLs, dynamic SegmentBase, malformed or out-of-file
 references, and hierarchies exceeding the explicit depth/node/size limits remain
-on yt-dlp fallback. Non-zero SegmentBase presentation-time offsets are covered
-by the bounded profile in phase 5 below.
+on yt-dlp fallback. Non-zero SegmentBase presentation-time offsets also remain
+on fallback, as explained in phase 5 below.
 
 Acceptance is covered by tests for exact/non-exact index ranges, initialization
 and media extents, nested child indexes, reference identity/timing validation,

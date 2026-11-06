@@ -2483,14 +2483,36 @@ segment-1.m4s
 
     #[test]
     fn retains_playready_hls_key_metadata_and_rejects_unsupported_key_formats() {
-        let body = br#"#EXTM3U
-#EXT-X-TARGETDURATION:2
-#EXT-X-KEY:METHOD=SAMPLE-AES,URI="data:text/plain;charset=UTF-16;base64,AA==",KEYFORMAT="com.microsoft.playready"
-#EXTINF:2,
-segment.ts
-#EXT-X-ENDLIST
-"#;
-        let plan = plan_hls_media_playlist(BASE_URL, body)
+        use base64::Engine as _;
+        use base64::engine::general_purpose::STANDARD;
+
+        let xml = "<WRMHEADER><DATA></DATA></WRMHEADER>";
+        let utf16: Vec<u8> = xml
+            .encode_utf16()
+            .flat_map(|unit| unit.to_le_bytes())
+            .collect();
+        let mut pro = Vec::new();
+        pro.extend_from_slice(
+            &u32::try_from(10 + utf16.len())
+                .expect("test PRO length fits u32")
+                .to_le_bytes(),
+        );
+        pro.extend_from_slice(&1_u16.to_le_bytes());
+        pro.extend_from_slice(&1_u16.to_le_bytes());
+        pro.extend_from_slice(
+            &u16::try_from(utf16.len())
+                .expect("test WRMHEADER length fits u16")
+                .to_le_bytes(),
+        );
+        pro.extend_from_slice(&utf16);
+        let pro_uri = format!(
+            "data:text/plain;charset=UTF-16;base64,{}",
+            STANDARD.encode(&pro)
+        );
+        let body = format!(
+            "#EXTM3U\\n#EXT-X-TARGETDURATION:2\\n#EXT-X-KEY:METHOD=SAMPLE-AES,URI=\"{pro_uri}\",KEYFORMAT=\"com.microsoft.playready\"\\n#EXTINF:2,\\nsegment.ts\\n#EXT-X-ENDLIST\\n"
+        );
+        let plan = plan_hls_media_playlist(BASE_URL, body.as_bytes())
             .expect("PlayReady signaling should be retained for the CDM phase");
         assert_eq!(plan.protections.len(), 1);
         assert_eq!(
@@ -2498,14 +2520,7 @@ segment.ts
             crate::drm::ProtectionSystem::PlayReady
         );
 
-        let unsupported = body
-            .split(|byte| *byte == b'\\n')
-            .map(|line| {
-                String::from_utf8_lossy(line)
-                    .replace("com.microsoft.playready", "com.example.unsupported")
-            })
-            .collect::<Vec<_>>()
-            .join("\\n");
+        let unsupported = body.replace("com.microsoft.playready", "com.example.unsupported");
         assert_eq!(
             plan_hls_media_playlist(BASE_URL, unsupported.as_bytes()).err(),
             Some(ManifestError::UnsupportedEncryption)

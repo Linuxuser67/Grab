@@ -582,8 +582,9 @@ mod tests {
         let request = WorkerRequest::LicenseResponse {
             body: Zeroizing::new("<LicenseResponse />".to_string()),
         };
-        let mut frame = Zeroizing::new(Vec::new());
-        write_sync_frame(&mut frame, &request).expect("worker frame should serialize");
+        let mut encoded = Vec::new();
+        write_sync_frame(&mut encoded, &request).expect("worker frame should serialize");
+        let frame = Zeroizing::new(encoded);
         let mut reader = BufReader::new(frame.as_slice());
         let decoded: WorkerRequest =
             read_sync_message(&mut reader).expect("worker frame should deserialize");

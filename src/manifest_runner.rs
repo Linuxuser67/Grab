@@ -4743,7 +4743,11 @@ mod tests {
                     .all(|segment| !segment.unknown_tags.iter().any(|tag| tag.tag == "X-KEY")),
             "recognized PlayReady key tags must not remain in unknown_tags: playlist={:?}, segments={:?}",
             parsed.unknown_tags,
-            parsed.segments.iter().map(|segment| &segment.unknown_tags).collect::<Vec<_>>()
+            parsed
+                .segments
+                .iter()
+                .map(|segment| &segment.unknown_tags)
+                .collect::<Vec<_>>()
         );
         crate::drm::hls_protection_from_key(key)
             .expect("parsed PlayReady key descriptor is valid")

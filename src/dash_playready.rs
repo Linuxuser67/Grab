@@ -72,7 +72,10 @@ fn playready_object_from_pssh(pssh: &[u8]) -> Result<&[u8], String> {
 }
 
 fn validate_playready_pro(pro: &[u8]) -> Result<(), String> {
-    let invalid = || "DASH PlayReady PRO must contain exactly one WRMHEADER record".to_string();
+    let invalid = || "PlayReady Object must contain exactly one valid WRMHEADER record".to_string();
+    if pro.len() < 10 || pro.len() > crate::drm::MAX_HLS_DRM_INIT_DATA_BYTES {
+        return Err(invalid());
+    }
     let declared_size = u32::from_le_bytes(
         pro.get(..4)
             .ok_or_else(invalid)?
@@ -88,31 +91,223 @@ fn validate_playready_pro(pro: &[u8]) -> Result<(), String> {
             .try_into()
             .map_err(|_| invalid())?,
     );
-    let record_type = u16::from_le_bytes(
-        pro.get(6..8)
-            .ok_or_else(invalid)?
-            .try_into()
-            .map_err(|_| invalid())?,
-    );
-    let record_len = u16::from_le_bytes(
-        pro.get(8..10)
-            .ok_or_else(invalid)?
-            .try_into()
-            .map_err(|_| invalid())?,
-    );
-    if record_count != 1
-        || record_type != 1
-        || usize::from(record_len) != pro.len().saturating_sub(10)
-    {
+    if record_count == 0 {
+        return Err(invalid());
+    }
+
+    let mut offset = 6_usize;
+    let mut header_count = 0_usize;
+    for _ in 0..record_count {
+        let header_end = offset.checked_add(4).ok_or_else(invalid)?;
+        let record_header = pro.get(offset..header_end).ok_or_else(invalid)?;
+        let record_type = u16::from_le_bytes(
+            record_header
+                .get(..2)
+                .ok_or_else(invalid)?
+                .try_into()
+                .map_err(|_| invalid())?,
+        );
+        let record_len = usize::from(u16::from_le_bytes(
+            record_header
+                .get(2..4)
+                .ok_or_else(invalid)?
+                .try_into()
+                .map_err(|_| invalid())?,
+        ));
+        let record_end = header_end.checked_add(record_len).ok_or_else(invalid)?;
+        let record = pro.get(header_end..record_end).ok_or_else(invalid)?;
+        match record_type {
+            1 => {
+                if record.is_empty() || record.len() % 2 != 0 {
+                    return Err(invalid());
+                }
+                let units: Vec<u16> = record
+                    .as_chunks::<2>()
+                    .0
+                    .iter()
+                    .map(|pair| u16::from_le_bytes(*pair))
+                    .collect();
+                String::from_utf16(&units).map_err(|_| invalid())?;
+                header_count += 1;
+            }
+            // PlayReady PRO record types 2 and 3 are reserved metadata records.
+            2 | 3 => {}
+            _ => return Err(invalid()),
+        }
+        offset = record_end;
+    }
+    if offset != pro.len() || header_count != 1 {
         return Err(invalid());
     }
 
     let parsed =
-        Pssh::from_bytes(pro).map_err(|_| "DASH PlayReady PRO is malformed".to_string())?;
+        Pssh::from_bytes(pro).map_err(|_| "PlayReady Object is malformed".to_string())?;
     if parsed.wrm_headers().len() != 1 {
         return Err(invalid());
     }
     Ok(())
+}
+
+fn playready_object_to_pssh(pro: &[u8]) -> Result<Vec<u8>, String> {
+    validate_playready_pro(pro)?;
+    let pssh_len = PLAYREADY_PSSH_FIXED_BYTES
+        .checked_add(pro.len())
+        .filter(|length| *length <= crate::drm::MAX_PSSH_BYTES)
+        .ok_or_else(|| "PlayReady Object exceeds the PSSH size limit".to_string())?;
+    let data_len = u32::try_from(pro.len())
+        .map_err(|_| "PlayReady Object exceeds the PSSH size limit".to_string())?;
+    let box_len = u32::try_from(pssh_len)
+        .map_err(|_| "PlayReady PSSH exceeds its size limit".to_string())?;
+
+    let mut pssh = Vec::with_capacity(pssh_len);
+    pssh.extend_from_slice(&box_len.to_be_bytes());
+    pssh.extend_from_slice(b"pssh");
+    pssh.extend_from_slice(&[0, 0, 0, 0]);
+    pssh.extend_from_slice(&PLAYREADY_SYSTEM_ID);
+    pssh.extend_from_slice(&data_len.to_be_bytes());
+    pssh.extend_from_slice(pro);
+    validate_playready_pssh(&pssh)?;
+    Ok(pssh)
+}
+
+/// Convert an HLS PlayReady Object into the PSSH and explicit HTTPS endpoint
+/// required by the isolated PlayReady worker.
+///
+/// Only one WRMHEADER and its explicit DATA/LA_URL are supported. LUI_URL and
+/// endpoint inference are deliberately not used.
+pub(crate) fn hls_license_request(pro: &[u8]) -> Result<(Vec<u8>, Url), String> {
+    validate_playready_pro(pro)?;
+    let parsed =
+        Pssh::from_bytes(pro).map_err(|_| "HLS PlayReady Object is malformed".to_string())?;
+    let headers = parsed.wrm_headers();
+    if headers.len() != 1 {
+        return Err("HLS PlayReady requires exactly one WRMHEADER".to_string());
+    }
+    let header = String::from(
+        headers
+            .into_iter()
+            .next()
+            .ok_or_else(|| "HLS PlayReady WRMHEADER is missing".to_string())?,
+    );
+    let raw_url = playready_la_url(&header)?;
+    let url = Url::parse(&raw_url)
+        .map_err(|_| "HLS PlayReady LA_URL must be an absolute HTTPS URL".to_string())?;
+    if url.scheme() != "https"
+        || url.host_str().is_none()
+        || !url.username().is_empty()
+        || url.password().is_some()
+        || url.fragment().is_some()
+    {
+        return Err("HLS PlayReady LA_URL must be HTTPS without user-info or a fragment".to_string());
+    }
+    Ok((playready_object_to_pssh(pro)?, url))
+}
+
+fn playready_la_url(header: &str) -> Result<String, String> {
+    use quick_xml::events::Event;
+    use quick_xml::reader::Reader;
+
+    let invalid = || "HLS PlayReady WRMHEADER must contain one non-empty DATA/LA_URL".to_string();
+    let mut reader = Reader::from_str(header);
+    reader.config_mut().trim_text(true);
+    let mut depth = 0_usize;
+    let mut data_depth = None;
+    let mut data_count = 0_usize;
+    let mut la_url_depth = None;
+    let mut la_url: Option<String> = None;
+
+    loop {
+        match reader.read_event() {
+            Ok(Event::Start(element)) => {
+                depth = depth.checked_add(1).ok_or_else(invalid)?;
+                match element.local_name().as_ref() {
+                    b"DATA" => {
+                        data_count += 1;
+                        if data_count != 1 || data_depth.is_some() {
+                            return Err(invalid());
+                        }
+                        data_depth = Some(depth);
+                    }
+                    b"LA_URL" if data_depth == depth.checked_sub(1) => {
+                        if la_url.is_some() {
+                            return Err(invalid());
+                        }
+                        la_url = Some(String::new());
+                        la_url_depth = Some(depth);
+                    }
+                    _ if la_url_depth.is_some() => return Err(invalid()),
+                    _ => {}
+                }
+            }
+            Ok(Event::Empty(element)) => {
+                let name = element.local_name();
+                if name.as_ref() == b"DATA" {
+                    data_count += 1;
+                    if data_count != 1 || data_depth.is_some() {
+                        return Err(invalid());
+                    }
+                } else if name.as_ref() == b"LA_URL" && data_depth == Some(depth) {
+                    if la_url.is_some() {
+                        return Err(invalid());
+                    }
+                    la_url = Some(String::new());
+                } else if la_url_depth.is_some() {
+                    return Err(invalid());
+                }
+            }
+            Ok(Event::Text(text)) if la_url_depth == Some(depth) => {
+                let decoded = quick_xml::escape::unescape(text.as_ref())
+                    .map_err(|_| invalid())?;
+                let value = la_url.as_mut().ok_or_else(invalid)?;
+                value.push_str(&decoded);
+                if value.len() > 2048 {
+                    return Err(invalid());
+                }
+            }
+            Ok(Event::CData(text)) if la_url_depth == Some(depth) => {
+                let value = la_url.as_mut().ok_or_else(invalid)?;
+                value.push_str(text.as_ref());
+                if value.len() > 2048 {
+                    return Err(invalid());
+                }
+            }
+            Ok(Event::GeneralRef(reference)) if la_url_depth == Some(depth) => {
+                let resolved = match reference.resolve_char_ref().map_err(|_| invalid())? {
+                    Some(character) => character.to_string(),
+                    None => quick_xml::escape::resolve_xml_entity(reference.as_ref())
+                        .ok_or_else(invalid)?
+                        .to_string(),
+                };
+                let value = la_url.as_mut().ok_or_else(invalid)?;
+                value.push_str(&resolved);
+                if value.len() > 2048 {
+                    return Err(invalid());
+                }
+            }
+            Ok(Event::End(_)) => {
+                if la_url_depth == Some(depth) {
+                    la_url_depth = None;
+                }
+                if data_depth == Some(depth) {
+                    data_depth = None;
+                }
+                depth = depth.checked_sub(1).ok_or_else(invalid)?;
+            }
+            Ok(Event::Eof) => break,
+            Ok(_) => {}
+            Err(_) => return Err(invalid()),
+        }
+    }
+
+    if data_count != 1 || data_depth.is_some() || la_url_depth.is_some() {
+        return Err(invalid());
+    }
+    let value = la_url.ok_or_else(invalid)?;
+    let value = value.trim();
+    if value.is_empty() || value.len() > 2048 {
+        return Err(invalid());
+    }
+    Ok(value.to_string())
 }
 
 fn validate_playready_pssh(pssh: &[u8]) -> Result<(), String> {
@@ -156,24 +351,7 @@ fn playready_pssh_from_descriptor(
     let pro = decode_bounded_protection_data(encoded_pro, "PlayReady PRO")?;
     validate_playready_pro(&pro)?;
 
-    let pssh_len = PLAYREADY_PSSH_FIXED_BYTES
-        .checked_add(pro.len())
-        .filter(|length| *length <= crate::drm::MAX_PSSH_BYTES)
-        .ok_or_else(|| "DASH PlayReady PRO exceeds the PSSH size limit".to_string())?;
-    let pssh_data_len = u32::try_from(pro.len())
-        .map_err(|_| "DASH PlayReady PRO exceeds the PSSH size limit".to_string())?;
-    let pssh_box_len = u32::try_from(pssh_len)
-        .map_err(|_| "DASH PlayReady PSSH exceeds its size limit".to_string())?;
-
-    let mut pssh = Vec::with_capacity(pssh_len);
-    pssh.extend_from_slice(&pssh_box_len.to_be_bytes());
-    pssh.extend_from_slice(b"pssh");
-    pssh.extend_from_slice(&[0, 0, 0, 0]);
-    pssh.extend_from_slice(&PLAYREADY_SYSTEM_ID);
-    pssh.extend_from_slice(&pssh_data_len.to_be_bytes());
-    pssh.extend_from_slice(&pro);
-    validate_playready_pssh(&pssh)?;
-    Ok(Some(pssh))
+    Ok(Some(playready_object_to_pssh(&pro)?))
 }
 
 /// Decode PlayReady initialization data from inherited DASH protection scopes.
@@ -305,6 +483,52 @@ mod tests {
         pssh.extend_from_slice(&u32::try_from(pro.len()).expect("PRO length").to_be_bytes());
         pssh.extend_from_slice(pro);
         pssh
+    }
+
+    #[test]
+    fn parses_hls_playready_pro_and_requires_one_absolute_https_la_url() {
+        let pro = playready_pro();
+        let (pssh, url) = hls_license_request(&pro).expect("HLS PlayReady request data");
+        crate::drm::validate_pssh(&pssh, ProtectionSystem::PlayReady)
+            .expect("HLS PRO should be wrapped as a PlayReady PSSH");
+        assert_eq!(url.as_str(), "https://license.example.test/Acquire");
+
+        let xml = concat!(
+            "<WRMHEADER><DATA>",
+            "<LA_URL>https://one.example.test/license</LA_URL>",
+            "<LA_URL>https://two.example.test/license</LA_URL>",
+            "</DATA></WRMHEADER>"
+        );
+        let multiple = test_pro_from_xml(xml);
+        assert!(hls_license_request(&multiple).is_err());
+
+        for value in [
+            "<WRMHEADER><DATA></DATA></WRMHEADER>",
+            "<WRMHEADER><DATA><LA_URL>http://license.example.test</LA_URL></DATA></WRMHEADER>",
+            "<WRMHEADER><DATA><LA_URL>https://user:pass@license.example.test</LA_URL></DATA></WRMHEADER>",
+            "<WRMHEADER><DATA><LUI_URL>https://license.example.test/ui</LUI_URL></DATA></WRMHEADER>",
+        ] {
+            assert!(hls_license_request(&test_pro_from_xml(value)).is_err());
+        }
+    }
+
+    fn test_pro_from_xml(xml: &str) -> Vec<u8> {
+        let utf16: Vec<u8> = xml.encode_utf16().flat_map(u16::to_le_bytes).collect();
+        let mut pro = Vec::with_capacity(10 + utf16.len());
+        pro.extend_from_slice(
+            &u32::try_from(10 + utf16.len())
+                .expect("test PRO size")
+                .to_le_bytes(),
+        );
+        pro.extend_from_slice(&1_u16.to_le_bytes());
+        pro.extend_from_slice(&1_u16.to_le_bytes());
+        pro.extend_from_slice(
+            &u16::try_from(utf16.len())
+                .expect("test WRMHEADER size")
+                .to_le_bytes(),
+        );
+        pro.extend_from_slice(&utf16);
+        pro
     }
 
     #[test]

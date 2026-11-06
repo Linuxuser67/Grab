@@ -566,10 +566,9 @@ pub(crate) fn parse_dash_manifest_at(
                     &adaptation.ContentProtection[..],
                     &representation.ContentProtection[..],
                 ];
-                let widevine_pssh =
-                    crate::dash_drm::widevine_pssh_from_scopes(&protection_scopes)
-                        .map_err(DashError::UnsupportedProtection)?
-                        .into_boxed_slice();
+                let widevine_pssh = crate::dash_drm::widevine_pssh_from_scopes(&protection_scopes)
+                    .map_err(DashError::UnsupportedProtection)?
+                    .into_boxed_slice();
                 let encryption = crate::dash_drm::encryption_from_scopes(&protection_scopes)
                     .map_err(DashError::UnsupportedProtection)?;
                 let license_url =

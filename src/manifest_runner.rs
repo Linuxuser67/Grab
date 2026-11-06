@@ -4237,6 +4237,19 @@ mod tests {
     use super::*;
 
     #[test]
+    fn vsd_adts_validation_rejects_zero_length_frames() {
+        let malformed = [0xff, 0xf1, 0, 0, 0, 0, 0];
+        assert!(validate_vsd_adts_pes(&malformed).is_err());
+    }
+
+    #[test]
+    fn vsd_adts_validation_accepts_complete_frames() {
+        let frame = [0xff, 0xf1, 0, 0, 0, 0xe0, 0];
+        assert!(validate_vsd_adts_pes(&frame).is_ok());
+        assert!(validate_vsd_adts_pes(&[frame, frame].concat()).is_ok());
+    }
+
+    #[test]
     fn sample_aes_iv_uses_media_sequence_when_iv_is_omitted() {
         assert_eq!(
             hls_sample_aes_iv(None, 42).expect("derive media-sequence IV"),

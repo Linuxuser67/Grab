@@ -56,18 +56,13 @@ pub(crate) enum HlsInitializationData {
 impl fmt::Debug for HlsInitializationData {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::Pssh(bytes) => formatter
-                .debug_tuple("Pssh")
-                .field(&format_args!("[{} bytes]", bytes.len()))
-                .finish(),
-            Self::PlayReadyObject(bytes) => formatter
-                .debug_tuple("PlayReadyObject")
-                .field(&format_args!("[{} bytes]", bytes.len()))
-                .finish(),
-            Self::FairPlayKeyUri(uri) => formatter
-                .debug_tuple("FairPlayKeyUri")
-                .field(&format_args!("[redacted, {} bytes]", uri.len()))
-                .finish(),
+            Self::Pssh(bytes) => write!(formatter, "Pssh([{} bytes])", bytes.len()),
+            Self::PlayReadyObject(bytes) => {
+                write!(formatter, "PlayReadyObject([{} bytes])", bytes.len())
+            }
+            Self::FairPlayKeyUri(uri) => {
+                write!(formatter, "FairPlayKeyUri([redacted, {} bytes])", uri.len())
+            }
         }
     }
 }

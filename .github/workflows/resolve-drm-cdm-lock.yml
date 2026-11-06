@@ -17,6 +17,8 @@ jobs:
         with:
           ref: ${{ github.head_ref }}
       - uses: dtolnay/rust-toolchain@stable
+      - name: Refresh the PlayReady AES dependency to a non-yanked release
+        run: cargo update -p aes@0.9.0
       - name: Resolve the new CDM dependency graph
         run: cargo metadata --format-version 1 >/dev/null
       - name: Regenerate the Flatpak vendor source manifest

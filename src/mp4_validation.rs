@@ -499,8 +499,8 @@ mod tests {
 
     #[test]
     fn high_level_box_tree_parser_stops_at_read_budget() {
-        let box_count = usize::try_from(MAX_PARSER_READ_BYTES / 8 + 1)
-            .expect("test box count fits in usize");
+        let box_count =
+            usize::try_from(MAX_PARSER_READ_BYTES / 8 + 1).expect("test box count fits in usize");
         let mut bytes = Vec::with_capacity(box_count * 8);
         for _ in 0..box_count {
             bytes.extend_from_slice(&8_u32.to_be_bytes());
@@ -517,5 +517,4 @@ mod tests {
             "a box tree larger than the parser read budget must be rejected"
         );
     }
-
 }

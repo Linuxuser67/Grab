@@ -22,9 +22,8 @@ use crate::mp4_validation::{BoundedReader, MAX_PARSER_READ_BYTES, ReadBudget};
 use crate::dash_subtitle::{
     DashSubtitleError, MAX_CUE_COUNT, MAX_CUE_TEXT_BYTES, MAX_OUTPUT_BYTES, MAX_SAMPLE_BYTES,
     MAX_SAMPLE_COUNT, MAX_SAMPLE_TABLE_READ_BYTES, MAX_SAMPLE_TOTAL_BYTES, MAX_TRACK_BYTES,
-    clear_destination, contains_box,
-    count_boxes, count_fragment_samples, find_box, open_source, sample_is_within_media_data,
-    units_to_millis, write_private_output,
+    clear_destination, contains_box, count_boxes, count_fragment_samples, find_box, open_source,
+    sample_is_within_media_data, units_to_millis, write_private_output,
 };
 
 const TTML_NAMESPACE: &str = "http://www.w3.org/ns/ttml";

@@ -316,6 +316,7 @@ pub(crate) enum ManifestOutcome {
 struct Resource {
     url: Url,
     range: Option<ManifestByteRange>,
+    byte_range_url: Option<Url>,
     filename: String,
     key: bool,
 }
@@ -2174,24 +2175,47 @@ fn hls_resources_from(resources: &[HlsResource]) -> Vec<Resource> {
         .map(|resource| Resource {
             url: resource.url.clone(),
             range: resource.range,
+            byte_range_url: None,
             filename: resource.filename.clone(),
             key: resource.kind == HlsResourceKind::Key,
         })
         .collect()
 }
 
-fn dash_resources(plan: &DashRepresentationPlan) -> Vec<Resource> {
-    dash_resources_from(&plan.resources)
+fn dash_resources(plan: &DashRepresentationPlan) -> Result<Vec<Resource>, ManifestRunError> {
+    dash_resources_from(
+        &plan.resources,
+        plan.segment_base_index
+            .as_ref()
+            .and_then(|index| index.byte_range_template.as_deref()),
+    )
 }
 
-fn dash_resources_from(resources: &[DashResource]) -> Vec<Resource> {
+fn dash_resources_from(
+    resources: &[DashResource],
+    byte_range_template: Option<&str>,
+) -> Result<Vec<Resource>, ManifestRunError> {
     resources
         .iter()
-        .map(|resource| Resource {
-            url: resource.url.clone(),
-            range: resource.range,
-            filename: resource.filename.clone(),
-            key: false,
+        .map(|resource| {
+            let byte_range_url = match (resource.range, byte_range_template) {
+                (Some(range), Some(template)) => Some(
+                    crate::manifest::dash::build_byte_range_url(&resource.url, range, template)
+                        .map_err(|error| {
+                            ManifestRunError::Unsupported(format!(
+                                "The DASH BaseURL byte-range template is unsupported: {error}"
+                            ))
+                        })?,
+                ),
+                _ => None,
+            };
+            Ok(Resource {
+                url: resource.url.clone(),
+                range: resource.range,
+                byte_range_url,
+                filename: resource.filename.clone(),
+                key: false,
+            })
         })
         .collect()
 }
@@ -2865,8 +2889,9 @@ async fn fetch_resource_once(
 
     let part = directory.join(format!("{}.part", resource.filename));
     remove_regular_file_if_present(&part).await?;
-    let mut request = client.get(resource.url.clone());
-    if let Some(range) = resource.range {
+    let request_url = resource.byte_range_url.as_ref().unwrap_or(&resource.url);
+    let mut request = client.get(request_url.clone());
+    if let Some(range) = resource.range.filter(|_| resource.byte_range_url.is_none()) {
         let end = range
             .offset
             .checked_add(range.length)
@@ -2890,24 +2915,39 @@ async fn fetch_resource_once(
         })?;
     let status = response.status();
     if let Some(range) = resource.range {
-        if is_retryable_resource_status(status) {
-            return Err(ManifestRunError::Retryable(format!(
-                "The stream server returned HTTP {} for a byte-range segment",
-                status.as_u16()
-            )));
-        }
-        if status != reqwest::StatusCode::PARTIAL_CONTENT
-            || !content_range_matches(
-                response
-                    .headers()
-                    .get(reqwest::header::CONTENT_RANGE)
-                    .and_then(|value| value.to_str().ok()),
-                range,
-            )
-        {
-            return Err(ManifestRunError::Unsupported(
-                "The stream server did not honor the requested byte range".to_string(),
-            ));
+        if resource.byte_range_url.is_some() {
+            if status != reqwest::StatusCode::OK {
+                if is_retryable_resource_status(status) {
+                    return Err(ManifestRunError::Retryable(format!(
+                        "The stream server returned HTTP {} for a DASH byte-range URL",
+                        status.as_u16()
+                    )));
+                }
+                return Err(ManifestRunError::Unsupported(
+                    "The stream server did not return the DASH byte-range URL as a complete resource"
+                        .to_string(),
+                ));
+            }
+        } else {
+            if is_retryable_resource_status(status) {
+                return Err(ManifestRunError::Retryable(format!(
+                    "The stream server returned HTTP {} for a byte-range segment",
+                    status.as_u16()
+                )));
+            }
+            if status != reqwest::StatusCode::PARTIAL_CONTENT
+                || !content_range_matches(
+                    response
+                        .headers()
+                        .get(reqwest::header::CONTENT_RANGE)
+                        .and_then(|value| value.to_str().ok()),
+                    range,
+                )
+            {
+                return Err(ManifestRunError::Unsupported(
+                    "The stream server did not honor the requested byte range".to_string(),
+                ));
+            }
         }
     } else if status == reqwest::StatusCode::PARTIAL_CONTENT {
         return Err(ManifestRunError::Unsupported(
@@ -2923,10 +2963,13 @@ async fn fetch_resource_once(
         ));
     }
     if let Some(range) = resource.range
-        && byte_range_content_length_exceeds(range, content_length)
+        && (byte_range_content_length_exceeds(range, content_length)
+            || (resource.byte_range_url.is_some()
+                && content_length.is_some_and(|length| length != range.length)))
     {
         return Err(ManifestRunError::Unsupported(
-            "The stream server returned more bytes than the requested range".to_string(),
+            "The stream server returned a size that did not match the requested DASH byte range"
+                .to_string(),
         ));
     }
     if resource.key && content_length.is_some_and(|length| length != 16) {
@@ -3003,9 +3046,15 @@ async fn fetch_resource_once(
     if let Some(range) = resource.range
         && size < range.length
     {
-        return Err(ManifestRunError::Retryable(
-            "The stream server ended a byte-range segment before all bytes arrived".to_string(),
-        ));
+        return Err(if resource.byte_range_url.is_some() {
+            ManifestRunError::Unsupported(
+                "The stream server returned an incomplete DASH byte-range URL resource".to_string(),
+            )
+        } else {
+            ManifestRunError::Retryable(
+                "The stream server ended a byte-range segment before all bytes arrived".to_string(),
+            )
+        });
     }
     if size == 0 || (resource.key && size != 16) {
         return Err(ManifestRunError::Unsupported(if resource.key {
@@ -3114,6 +3163,7 @@ async fn fetch_dash_index_bytes(
     client: &reqwest::Client,
     url: &Url,
     range: ManifestByteRange,
+    byte_range_template: Option<&str>,
     abort: &mut tokio::sync::oneshot::Receiver<crate::video::StopIntent>,
 ) -> Result<Option<(Vec<u8>, u64)>, ManifestRunError> {
     let end = range
@@ -3126,10 +3176,22 @@ async fn fetch_dash_index_bytes(
                 "The DASH SegmentBase index range exceeds the supported limit".to_string(),
             )
         })?;
-    let request = client.get(url.clone()).header(
-        reqwest::header::RANGE,
-        format!("bytes={}-{end}", range.offset),
-    );
+    let byte_range_url = byte_range_template
+        .map(|template| {
+            crate::manifest::dash::build_byte_range_url(url, range, template).map_err(|error| {
+                ManifestRunError::Unsupported(format!(
+                    "The DASH BaseURL byte-range template is unsupported: {error}"
+                ))
+            })
+        })
+        .transpose()?;
+    let mut request = client.get(byte_range_url.clone().unwrap_or_else(|| url.clone()));
+    if byte_range_url.is_none() {
+        request = request.header(
+            reqwest::header::RANGE,
+            format!("bytes={}-{end}", range.offset),
+        );
+    }
     let response = tokio::select! {
         biased;
         stop = &mut *abort => {
@@ -3148,37 +3210,52 @@ async fn fetch_dash_index_bytes(
         }
     };
     let status = response.status();
-    if status != reqwest::StatusCode::PARTIAL_CONTENT {
-        if is_retryable_resource_status(status) {
-            return Err(ManifestRunError::Retryable(format!(
-                "The stream server returned HTTP {} for the DASH segment index",
-                status.as_u16()
-            )));
-        }
-        return Err(ManifestRunError::Unsupported(
-            "The stream server did not honor the DASH segment-index byte range".to_string(),
-        ));
-    }
-
     let content_range = response
         .headers()
         .get(reqwest::header::CONTENT_RANGE)
         .and_then(|value| value.to_str().ok());
-    if !content_range_matches(content_range, range) {
-        return Err(ManifestRunError::Unsupported(
-            "The stream server returned an invalid Content-Range for the DASH segment index"
-                .to_string(),
-        ));
-    }
-    let total_length = match content_range.and_then(parse_content_range) {
-        Some(ParsedContentRange::Satisfied {
-            complete_length: Some(total),
-            ..
-        }) => total,
-        _ => {
+    let total_length = if byte_range_url.is_some() {
+        if status != reqwest::StatusCode::OK {
+            if is_retryable_resource_status(status) {
+                return Err(ManifestRunError::Retryable(format!(
+                    "The stream server returned HTTP {} for the DASH byte-range URL",
+                    status.as_u16()
+                )));
+            }
             return Err(ManifestRunError::Unsupported(
-                "The DASH segment index response omitted the complete resource length".to_string(),
+                "The stream server did not return the DASH byte-range URL as a complete resource"
+                    .to_string(),
             ));
+        }
+        u64::MAX
+    } else {
+        if status != reqwest::StatusCode::PARTIAL_CONTENT {
+            if is_retryable_resource_status(status) {
+                return Err(ManifestRunError::Retryable(format!(
+                    "The stream server returned HTTP {} for the DASH segment index",
+                    status.as_u16()
+                )));
+            }
+            return Err(ManifestRunError::Unsupported(
+                "The stream server did not honor the DASH segment-index byte range".to_string(),
+            ));
+        }
+        if !content_range_matches(content_range, range) {
+            return Err(ManifestRunError::Unsupported(
+                "The stream server returned an invalid Content-Range for the DASH segment index"
+                    .to_string(),
+            ));
+        }
+        match content_range.and_then(parse_content_range) {
+            Some(ParsedContentRange::Satisfied {
+                complete_length: Some(total),
+                ..
+            }) => total,
+            _ => {
+                return Err(ManifestRunError::Unsupported(
+                    "The DASH segment index response omitted the complete resource length".to_string(),
+                ));
+            }
         }
     };
     if response
@@ -3245,12 +3322,29 @@ async fn resolve_dash_segment_base_resources(
     index: &DashSegmentBaseIndex,
     abort: &mut tokio::sync::oneshot::Receiver<crate::video::StopIntent>,
 ) -> Result<Option<Vec<DashResource>>, ManifestRunError> {
-    let Some((root_bytes, total_length)) =
-        fetch_dash_index_bytes(client, &index.url, index.index_range, abort).await?
+    let Some((root_bytes, index_total_length)) = fetch_dash_index_bytes(
+        client,
+        &index.index_url,
+        index.index_range,
+        index.byte_range_template.as_deref(),
+        abort,
+    )
+    .await?
     else {
         return Ok(None);
     };
-    let root = parse_segment_base_index(index, &root_bytes, total_length).map_err(|error| {
+    let mut media_total_length = if index.index_is_external || index_total_length == u64::MAX {
+        None
+    } else {
+        Some(index_total_length)
+    };
+    let root = parse_segment_base_index(
+        index,
+        &root_bytes,
+        index_total_length,
+        media_total_length.unwrap_or(u64::MAX),
+    )
+    .map_err(|error| {
         ManifestRunError::Unsupported(format!(
             "The DASH SegmentBase index is unsupported: {error}"
         ))
@@ -3269,7 +3363,9 @@ async fn resolve_dash_segment_base_resources(
         ));
     }
     let mut seen_indexes = HashSet::new();
-    seen_indexes.insert((index.index_range.offset, index.index_range.length));
+    if !index.index_is_external {
+        seen_indexes.insert((index.index_range.offset, index.index_range.length));
+    }
     let mut child_index_ranges = Vec::new();
     let mut media_ranges = Vec::new();
     let mut resources = Vec::new();
@@ -3326,25 +3422,37 @@ async fn resolve_dash_segment_base_resources(
                     })?;
                 index_count += 1;
 
-                let Some((child_bytes, child_total_length)) =
-                    fetch_dash_index_bytes(client, &index.url, child.range, abort).await?
+                let Some((child_bytes, child_total_length)) = fetch_dash_index_bytes(
+                    client,
+                    &index.url,
+                    child.range,
+                    index.byte_range_template.as_deref(),
+                    abort,
+                )
+                .await?
                 else {
                     return Ok(None);
                 };
-                if child_total_length != total_length {
-                    return Err(ManifestRunError::Unsupported(
-                        "The DASH media file changed while its SIDX hierarchy was being read"
-                            .to_string(),
-                    ));
+                if child_total_length != u64::MAX {
+                    if media_total_length.is_some_and(|length| length != child_total_length) {
+                        return Err(ManifestRunError::Unsupported(
+                            "The DASH media file changed while its SIDX hierarchy was being read"
+                                .to_string(),
+                        ));
+                    }
+                    media_total_length = Some(child_total_length);
                 }
-                let child_node =
-                    parse_child_segment_index(index, &child, &child_bytes, total_length).map_err(
-                        |error| {
-                            ManifestRunError::Unsupported(format!(
-                                "The DASH child SIDX is unsupported: {error}"
-                            ))
-                        },
-                    )?;
+                let child_node = parse_child_segment_index(
+                    index,
+                    &child,
+                    &child_bytes,
+                    child_total_length,
+                )
+                .map_err(|error| {
+                    ManifestRunError::Unsupported(format!(
+                        "The DASH child SIDX is unsupported: {error}"
+                    ))
+                })?;
                 total_entry_count = total_entry_count
                     .checked_add(child_node.entries.len())
                     .filter(|count| *count <= MAX_DASH_SIDX_SEGMENTS)
@@ -3365,8 +3473,13 @@ async fn resolve_dash_segment_base_resources(
         }
     }
 
-    validate_segment_base_sidx_ranges(index, &child_index_ranges, &media_ranges, total_length)
-        .map_err(|error| {
+    validate_segment_base_sidx_ranges(
+        index,
+        &child_index_ranges,
+        &media_ranges,
+        media_total_length.unwrap_or(u64::MAX),
+    )
+    .map_err(|error| {
             ManifestRunError::Unsupported(format!(
                 "The DASH SIDX hierarchy contains overlapping or invalid ranges: {error}"
             ))
@@ -3413,11 +3526,14 @@ async fn fetch_and_write_dash_track(
         else {
             return Ok(false);
         };
-        let mut resources = dash_resources(plan);
-        resources.extend(dash_resources_from(&media_resources));
+        let mut resources = dash_resources(plan)?;
+        resources.extend(dash_resources_from(
+            &media_resources,
+            index.byte_range_template.as_deref(),
+        )?);
         resources
     } else {
-        dash_resources(plan)
+        dash_resources(plan)?
     };
     fetch_and_write_ordered_track(ManifestOrderedTrackTransfer {
         client,
@@ -5405,7 +5521,7 @@ segment-2.m4s
             length: 4,
         };
         let (_stop_tx, mut abort) = tokio::sync::oneshot::channel();
-        let result = fetch_dash_index_bytes(&client, &url, range, &mut abort)
+        let result = fetch_dash_index_bytes(&client, &url, range, None, &mut abort)
             .await
             .expect("fetch index range");
 
@@ -5441,7 +5557,7 @@ segment-2.m4s
             length: 4,
         };
         let (_stop_tx, mut abort) = tokio::sync::oneshot::channel();
-        let result = fetch_dash_index_bytes(&client, &url, range, &mut abort).await;
+        let result = fetch_dash_index_bytes(&client, &url, range, None, &mut abort).await;
 
         server.await.expect("HTTP test server task");
         assert!(matches!(result, Err(ManifestRunError::Unsupported(_))));

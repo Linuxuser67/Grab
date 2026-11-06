@@ -743,8 +743,8 @@ async fn prepare_manifest_attempt(
                 .or_else(|| subtitle.as_ref().and_then(|track| track.protections.first()));
             if let Some(protection) = protection {
                 return Err(ManifestRunError::Unsupported(format!(
-                    "Native HLS {} decryption is not available yet",
-                    protection.system.label()
+                    "Native HLS decryption is not available yet ({})",
+                    protection.description()
                 )));
             }
         }

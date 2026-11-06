@@ -682,11 +682,14 @@ async fn prepare_manifest_attempt(
                 ));
             }
             if video.representation.encryption.is_some_and(|encryption| {
-                encryption.system != crate::dash_drm::ProtectionSystem::ClearKey
+                encryption.system == crate::dash_drm::ProtectionSystem::Widevine
             }) {
-                return Err(ManifestRunError::Unsupported(
-                    "Native DASH Widevine decryption is not available yet".to_string(),
-                ));
+                let reason = if video.representation.widevine_pssh.is_empty() {
+                    "The selected DASH Widevine representation has no MPD PSSH data"
+                } else {
+                    "Native DASH Widevine decryption is not available yet"
+                };
+                return Err(ManifestRunError::Unsupported(reason.to_string()));
             }
             if video.representation.encryption.is_some() {
                 let license_url = video.representation.license_url.as_ref().ok_or_else(|| {
@@ -698,12 +701,18 @@ async fn prepare_manifest_attempt(
             }
             if audio.as_ref().is_some_and(|track| {
                 track.representation.encryption.is_some_and(|encryption| {
-                    encryption.system != crate::dash_drm::ProtectionSystem::ClearKey
+                    encryption.system == crate::dash_drm::ProtectionSystem::Widevine
                 })
             }) {
-                return Err(ManifestRunError::Unsupported(
-                    "Native DASH Widevine decryption is not available yet".to_string(),
-                ));
+                let reason = if audio
+                    .as_ref()
+                    .is_some_and(|track| track.representation.widevine_pssh.is_empty())
+                {
+                    "The selected DASH Widevine audio representation has no MPD PSSH data"
+                } else {
+                    "Native DASH Widevine decryption is not available yet"
+                };
+                return Err(ManifestRunError::Unsupported(reason.to_string()));
             }
             if audio
                 .as_ref()

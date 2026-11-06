@@ -317,7 +317,8 @@ fn playready_la_url(header: &str) -> Result<String, String> {
         }
     }
 
-    if !root_seen || depth != 0 || data_count != 1 || data_depth.is_some() || la_url_depth.is_some() {
+    if !root_seen || depth != 0 || data_count != 1 || data_depth.is_some() || la_url_depth.is_some()
+    {
         return Err(invalid());
     }
     let value = la_url.ok_or_else(invalid)?;

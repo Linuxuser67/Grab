@@ -5,6 +5,7 @@
 //! pipeline can consume it without duplicating provider handling.
 
 use std::collections::HashMap;
+use std::fmt;
 
 use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD;
@@ -42,7 +43,7 @@ impl ProtectionSystem {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub(crate) enum HlsInitializationData {
     /// A complete ISO BMFF Protection System Specific Header box.
     Pssh(Box<[u8]>),
@@ -50,6 +51,25 @@ pub(crate) enum HlsInitializationData {
     PlayReadyObject(Box<[u8]>),
     /// FairPlay Streaming key identifier. It is not a PSSH box.
     FairPlayKeyUri(String),
+}
+
+impl fmt::Debug for HlsInitializationData {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Pssh(bytes) => formatter
+                .debug_tuple("Pssh")
+                .field(&format_args!("[{} bytes]", bytes.len()))
+                .finish(),
+            Self::PlayReadyObject(bytes) => formatter
+                .debug_tuple("PlayReadyObject")
+                .field(&format_args!("[{} bytes]", bytes.len()))
+                .finish(),
+            Self::FairPlayKeyUri(uri) => formatter
+                .debug_tuple("FairPlayKeyUri")
+                .field(&format_args!("[redacted, {} bytes]", uri.len()))
+                .finish(),
+        }
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -72,7 +92,7 @@ impl HlsProtection {
             }
             HlsInitializationData::FairPlayKeyUri(uri) => {
                 let _ = uri.len();
-                "FairPlay key URI".to_string()
+                format!("FairPlay key URI ({} bytes)", uri.len())
             }
         };
         format!("{} {scheme} {initialization}", self.system.label())

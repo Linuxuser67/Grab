@@ -5,6 +5,7 @@ mod bounded_file;
 mod content_range;
 mod cookies;
 mod dash_drm;
+mod drm;
 mod dash_subtitle;
 mod dash_subtitle_stpp;
 mod download;

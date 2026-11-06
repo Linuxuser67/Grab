@@ -6,7 +6,7 @@ use mp4box::{BoxRef, NodeKind};
 
 /// Bound parser reads so a resource containing many tiny boxes cannot allocate
 /// an unbounded box tree while being validated.
-const MAX_PARSER_READ_BYTES: u64 = 256 * 1024;
+pub(crate) const MAX_PARSER_READ_BYTES: u64 = 256 * 1024;
 
 /// Parse one ISO BMFF resource and require complete, contiguous box coverage.
 ///
@@ -143,14 +143,14 @@ fn payload_covers_box(data_offset: u64, data_len: u64, header_end: u64, box_end:
 
 /// Restrict parser reads and seeks to one resource, even when the underlying
 /// file contains adjacent resources or unrelated data.
-struct BoundedReader<'reader, R> {
+pub(crate) struct BoundedReader<'reader, R> {
     inner: &'reader mut R,
     start: u64,
     end: u64,
 }
 
 impl<'reader, R> BoundedReader<'reader, R> {
-    fn new(inner: &'reader mut R, start: u64, end: u64) -> Self {
+    pub(crate) fn new(inner: &'reader mut R, start: u64, end: u64) -> Self {
         Self { inner, start, end }
     }
 }
@@ -204,13 +204,13 @@ impl<R: Read + Seek> Seek for BoundedReader<'_, R> {
 
 /// Bound the total amount of box-header and metadata data consumed by the
 /// parser. Media payloads are skipped by seeking and do not count against it.
-struct ReadBudget<R> {
+pub(crate) struct ReadBudget<R> {
     inner: R,
     remaining: u64,
 }
 
 impl<R> ReadBudget<R> {
-    fn new(inner: R, remaining: u64) -> Self {
+    pub(crate) fn new(inner: R, remaining: u64) -> Self {
         Self { inner, remaining }
     }
 }
@@ -246,7 +246,7 @@ impl<R: Seek> Seek for ReadBudget<R> {
 mod tests {
     use std::io::{self, Cursor, Read, Seek, SeekFrom};
 
-    use super::is_fmp4_resource;
+    use super::{BoundedReader, MAX_PARSER_READ_BYTES, ReadBudget, is_fmp4_resource};
 
     fn box_bytes(kind: &[u8; 4], payload: &[u8]) -> Vec<u8> {
         let size = u32::try_from(8 + payload.len()).expect("test box fits in a u32");
@@ -496,4 +496,26 @@ mod tests {
             bytes.len() as u64
         ));
     }
+
+    #[test]
+    fn high_level_box_tree_parser_stops_at_read_budget() {
+        let box_count = usize::try_from(MAX_PARSER_READ_BYTES / 8 + 1)
+            .expect("test box count fits in usize");
+        let mut bytes = Vec::with_capacity(box_count * 8);
+        for _ in 0..box_count {
+            bytes.extend_from_slice(&8_u32.to_be_bytes());
+            bytes.extend_from_slice(b"free");
+        }
+
+        let track_bytes = u64::try_from(bytes.len()).expect("test track length fits in u64");
+        let mut file = Cursor::new(bytes);
+        let bounded_reader = BoundedReader::new(&mut file, 0, track_bytes);
+        let mut parser_reader = ReadBudget::new(bounded_reader, MAX_PARSER_READ_BYTES);
+
+        assert!(
+            mp4box::get_boxes(&mut parser_reader, track_bytes, false).is_err(),
+            "a box tree larger than the parser read budget must be rejected"
+        );
+    }
+
 }

@@ -66,7 +66,7 @@ pub(crate) struct DashRepresentation {
     pub(crate) language: Option<String>,
     pub(crate) kind: DashTrackKind,
     pub(crate) encryption: Option<crate::dash_drm::DashEncryption>,
-    pub(crate) widevine_pssh: Option<Vec<u8>>,
+    pub(crate) widevine_pssh: Box<[Vec<u8>]>,
     pub(crate) license_url: Option<Url>,
     pub(crate) is_default_audio: bool,
     pub(crate) is_default_subtitle: bool,
@@ -567,7 +567,8 @@ pub(crate) fn parse_dash_manifest_at(
                     &representation.ContentProtection[..],
                 ];
                 let widevine_pssh = crate::dash_drm::widevine_pssh_from_scopes(&protection_scopes)
-                    .map_err(DashError::UnsupportedProtection)?;
+                    .map_err(DashError::UnsupportedProtection)?
+                    .into_boxed_slice();
                 let encryption = crate::dash_drm::encryption_from_scopes(&protection_scopes)
                     .map_err(DashError::UnsupportedProtection)?;
                 let license_url =
@@ -4477,7 +4478,7 @@ mod tests {
             selected.encryption.map(|encryption| encryption.system),
             Some(crate::dash_drm::ProtectionSystem::Widevine)
         );
-        assert!(selected.widevine_pssh.is_some());
+        assert_eq!(selected.widevine_pssh.len(), 1);
     }
 
     #[test]

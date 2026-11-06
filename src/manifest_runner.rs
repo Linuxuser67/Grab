@@ -1007,6 +1007,7 @@ async fn transfer_static_manifest_tracks(
                     return Ok(false);
                 }
                 write_playlist(&subtitle_dir, subtitle).await?;
+                decrypt_hls_sample_aes_segments(&subtitle_dir, subtitle).await?;
             }
         }
         Tracks::Dash {

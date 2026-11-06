@@ -238,6 +238,37 @@ fn mp4_full_box_payload(bytes: &[u8], box_: &mp4box::Box) -> Result<Vec<u8>, Str
 }
 
 fn parse_init_encryption(init: &[u8], expected: DashEncryption) -> Result<InitEncryption, String> {
+    parse_init_encryption_inner(init, expected.scheme, Some(expected.default_kid))
+}
+
+/// Read the protected track metadata from an HLS CMAF initialization section.
+///
+/// HLS signals the protection system and scheme through KEYFORMAT, but the
+/// default KID is carried by the sample-entry tenc box rather than the playlist.
+pub(crate) fn hls_encryption_from_init(
+    init: &[u8],
+    scheme: EncryptionScheme,
+    system: crate::drm::ProtectionSystem,
+) -> Result<DashEncryption, String> {
+    if !matches!(
+        system,
+        crate::drm::ProtectionSystem::PlayReady
+    ) {
+        return Err("Native HLS CMAF currently supports PlayReady only".to_string());
+    }
+    let parsed = parse_init_encryption_inner(init, scheme, None)?;
+    Ok(DashEncryption {
+        scheme,
+        default_kid: parsed.default_kid,
+        system,
+    })
+}
+
+fn parse_init_encryption_inner(
+    init: &[u8],
+    scheme: EncryptionScheme,
+    expected_default_kid: Option<[u8; 16]>,
+) -> Result<InitEncryption, String> {
     let boxes = mp4box::get_boxes(
         &mut Cursor::new(init),
         u64::try_from(init.len())
@@ -330,7 +361,7 @@ fn parse_init_encryption(init: &[u8], expected: DashEncryption) -> Result<InitEn
         return Err("DASH scheme box contains unexpected trailing data".to_string());
     }
     let actual_scheme = &schm[4..8];
-    let expected_scheme = match expected.scheme {
+    let expected_scheme = match scheme {
         EncryptionScheme::Cenc => b"cenc".as_slice(),
         EncryptionScheme::Cbcs => b"cbcs".as_slice(),
     };
@@ -370,10 +401,10 @@ fn parse_init_encryption(init: &[u8], expected: DashEncryption) -> Result<InitEn
         }
         _ => return Err("Unsupported DASH tenc version".to_string()),
     };
-    if expected.scheme == EncryptionScheme::Cenc && (crypt_blocks != 0 || skip_blocks != 0) {
+    if scheme == EncryptionScheme::Cenc && (crypt_blocks != 0 || skip_blocks != 0) {
         return Err("CENC initialization contains CBCS-style pattern parameters".to_string());
     }
-    if expected.scheme == EncryptionScheme::Cbcs && crypt_blocks == 0 && skip_blocks != 0 {
+    if scheme == EncryptionScheme::Cbcs && crypt_blocks == 0 && skip_blocks != 0 {
         return Err("CBCS initialization has a skip pattern without encrypted blocks".to_string());
     }
     let is_protected = *tenc
@@ -393,8 +424,8 @@ fn parse_init_encryption(init: &[u8], expected: DashEncryption) -> Result<InitEn
     let mut kid = [0_u8; 16];
     kid.copy_from_slice(kid_bytes);
     offset = kid_end;
-    if is_protected != 1 || kid != expected.default_kid {
-        return Err("DASH tenc is not protected by the selected MPD default_KID".to_string());
+    if is_protected != 1 || expected_default_kid.is_some_and(|expected| kid != expected) {
+        return Err("MP4 tenc protection or KID does not match the selected encryption metadata".to_string());
     }
 
     let mut constant_iv_size = None;
@@ -411,7 +442,7 @@ fn parse_init_encryption(init: &[u8], expected: DashEncryption) -> Result<InitEn
             u8::try_from(size)
                 .map_err(|_| "DASH tenc constant IV size is out of range".to_string())?,
         );
-        if expected.scheme == EncryptionScheme::Cenc {
+        if scheme == EncryptionScheme::Cenc {
             return Err("CENC initialization must use per-sample IVs".to_string());
         }
         let end = offset

@@ -10,6 +10,7 @@ use std::time::Duration;
 use base64::Engine as _;
 use base64::engine::general_purpose::{STANDARD, URL_SAFE_NO_PAD};
 use futures_util::StreamExt as _;
+use playready::Pssh;
 use serde::{Deserialize, Serialize};
 use url::Url;
 use zeroize::{Zeroize as _, Zeroizing};
@@ -34,8 +35,9 @@ const LICENSE_REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 /// Resolve inherited DASH ContentProtection descriptors into one supported
 /// Common Encryption scheme and one default KID.
 ///
-/// ClearKey and Widevine are distinguished during planning; the runner currently
-/// executes ClearKey only and falls back for Widevine. PlayReady remains unsupported.
+/// ClearKey, PlayReady, and Widevine are distinguished during planning.
+/// The runner executes ClearKey and configured PlayReady acquisitions; Widevine
+/// remains on extractor fallback because no audited Rust CDM backend is available.
 /// Fragment-local seig KID rotation is resolved from media fragments; conflicting
 /// default KIDs across descriptor scopes remain unsupported.
 pub(crate) fn encryption_from_scopes(
@@ -82,11 +84,12 @@ pub(crate) fn encryption_from_scopes(
             selected = Some(encryption);
         } else if descriptor.schemeIdUri == CLEARKEY_SCHEME
             || descriptor.schemeIdUri == WIDEVINE_SCHEME
+            || descriptor.schemeIdUri == PLAYREADY_SCHEME
         {
-            let next = if descriptor.schemeIdUri == WIDEVINE_SCHEME {
-                ProtectionSystem::Widevine
-            } else {
-                ProtectionSystem::ClearKey
+            let next = match descriptor.schemeIdUri.as_str() {
+                WIDEVINE_SCHEME => ProtectionSystem::Widevine,
+                PLAYREADY_SCHEME => ProtectionSystem::PlayReady,
+                _ => ProtectionSystem::ClearKey,
             };
             if system
                 .replace(next)
@@ -94,8 +97,6 @@ pub(crate) fn encryption_from_scopes(
             {
                 return Err("DASH declares conflicting DRM systems".to_string());
             }
-        } else if descriptor.schemeIdUri == PLAYREADY_SCHEME {
-            return Err("Native DASH PlayReady support is not available yet".to_string());
         } else if descriptor.schemeIdUri.starts_with("urn:uuid:") {
             return Err("DASH declares an unsupported protection system".to_string());
         } else {
@@ -150,35 +151,188 @@ pub(crate) fn widevine_pssh_from_scopes(
     Ok(pssh_boxes)
 }
 
-/// Resolve the ClearKey license URL across inherited protection scopes.
+const PLAYREADY_PSSH_FIXED_BYTES: usize = 32;
+const PLAYREADY_SYSTEM_ID: [u8; 16] = [
+    0x9a, 0x04, 0xf0, 0x79, 0x98, 0x40, 0x42, 0x86, 0xab, 0x92, 0xe6, 0x5b, 0xe0, 0x88, 0x5f,
+    0x95,
+];
+
+fn decode_bounded_protection_data(encoded: &str, label: &str) -> Result<Vec<u8>, String> {
+    let compact: Vec<u8> = encoded
+        .bytes()
+        .filter(|byte| !byte.is_ascii_whitespace())
+        .collect();
+    if compact.len() > crate::drm::MAX_PSSH_BYTES.saturating_mul(2) {
+        return Err(format!("DASH {label} exceeds its encoded size limit"));
+    }
+    let decoded = STANDARD
+        .decode(compact)
+        .map_err(|_| format!("DASH {label} is not valid base64"))?;
+    if decoded.is_empty() || decoded.len() > crate::drm::MAX_PSSH_BYTES {
+        return Err(format!("DASH {label} exceeds its decoded size limit"));
+    }
+    Ok(decoded)
+}
+
+fn validate_playready_pssh(pssh: &[u8]) -> Result<(), String> {
+    crate::drm::validate_pssh(pssh, ProtectionSystem::PlayReady)?;
+    let parsed =
+        Pssh::from_bytes(pssh).map_err(|_| "DASH PlayReady PSSH is malformed".to_string())?;
+    if parsed.wrm_headers().len() != 1 {
+        return Err(
+            "Native DASH PlayReady supports exactly one WRMHEADER per PSSH".to_string(),
+        );
+    }
+    Ok(())
+}
+
+fn playready_pssh_from_descriptor(
+    descriptor: &dash_mpd_core::ContentProtection,
+) -> Result<Option<Vec<u8>>, String> {
+    let encoded_pssh: Vec<&str> = descriptor
+        .cenc_pssh
+        .iter()
+        .filter_map(|pssh| pssh.content.as_deref())
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .collect();
+
+    if !encoded_pssh.is_empty() {
+        let mut selected: Option<Vec<u8>> = None;
+        for encoded in encoded_pssh {
+            let pssh = decode_bounded_protection_data(encoded, "PlayReady PSSH")?;
+            validate_playready_pssh(&pssh)?;
+            if selected.as_ref().is_some_and(|previous| previous != &pssh) {
+                return Err(
+                    "DASH PlayReady descriptor contains conflicting PSSH boxes".to_string(),
+                );
+            }
+            selected = Some(pssh);
+        }
+        // cenc:pssh takes precedence over mspr:pro within one descriptor.
+        return Ok(selected);
+    }
+
+    let Some(encoded_pro) = descriptor
+        .msprpro
+        .as_ref()
+        .and_then(|pro| pro.content.as_deref())
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    else {
+        return Ok(None);
+    };
+    let pro = decode_bounded_protection_data(encoded_pro, "PlayReady PRO")?;
+    let parsed =
+        Pssh::from_bytes(&pro).map_err(|_| "DASH PlayReady PRO is malformed".to_string())?;
+    if parsed.wrm_headers().len() != 1 {
+        return Err(
+            "Native DASH PlayReady supports exactly one WRMHEADER per PRO".to_string(),
+        );
+    }
+
+    let pssh_len = PLAYREADY_PSSH_FIXED_BYTES
+        .checked_add(pro.len())
+        .filter(|length| *length <= crate::drm::MAX_PSSH_BYTES)
+        .ok_or_else(|| "DASH PlayReady PRO exceeds the PSSH size limit".to_string())?;
+    let pssh_data_len = u32::try_from(pro.len())
+        .map_err(|_| "DASH PlayReady PRO exceeds the PSSH size limit".to_string())?;
+    let pssh_box_len = u32::try_from(pssh_len)
+        .map_err(|_| "DASH PlayReady PSSH exceeds its size limit".to_string())?;
+
+    let mut pssh = Vec::with_capacity(pssh_len);
+    pssh.extend_from_slice(&pssh_box_len.to_be_bytes());
+    pssh.extend_from_slice(b"pssh");
+    pssh.extend_from_slice(&[0, 0, 0, 0]);
+    pssh.extend_from_slice(&PLAYREADY_SYSTEM_ID);
+    pssh.extend_from_slice(&pssh_data_len.to_be_bytes());
+    pssh.extend_from_slice(&pro);
+    validate_playready_pssh(&pssh)?;
+    Ok(Some(pssh))
+}
+
+/// Decode PlayReady initialization data from inherited DASH protection scopes.
 ///
-/// Relative license URLs are resolved against the MPD. URL user-info,
-/// fragments, and non-HTTPS schemes are rejected.
+/// The most-specific scope containing PlayReady initialization data overrides
+/// its ancestors.
+pub(crate) fn playready_pssh_from_scopes(
+    scopes: &[&[dash_mpd_core::ContentProtection]],
+) -> Result<Option<Vec<u8>>, String> {
+    let mut selected = None;
+    for scope in scopes {
+        let mut scope_pssh: Option<Vec<u8>> = None;
+        for descriptor in *scope {
+            if descriptor.schemeIdUri != PLAYREADY_SCHEME {
+                continue;
+            }
+            let Some(pssh) = playready_pssh_from_descriptor(descriptor)? else {
+                continue;
+            };
+            if scope_pssh.as_ref().is_some_and(|previous| previous != &pssh) {
+                return Err(
+                    "DASH PlayReady descriptors conflict within one protection scope".to_string(),
+                );
+            }
+            scope_pssh = Some(pssh);
+        }
+        if scope_pssh.is_some() {
+            selected = scope_pssh;
+        }
+    }
+    Ok(selected)
+}
+
+/// Convert a PlayReady GUID-layout KID into ISO Common Encryption UUID byte order.
+pub(crate) fn playready_kid_to_cenc(mut kid: [u8; 16]) -> [u8; 16] {
+    kid[..4].reverse();
+    kid[4..6].reverse();
+    kid[6..8].reverse();
+    kid
+}
+
+/// Resolve ClearKey or PlayReady license URLs across inherited DASH protection scopes.
+///
+/// Relative URLs are resolved against the MPD. URL user-info, fragments, and
+/// non-HTTPS schemes are rejected. PlayReady uses an explicit DASHIF Laurl;
+/// embedded WRMHEADER LA_URL values are not treated as a fallback.
 pub(crate) fn license_url_from_scopes(
     scopes: &[&[dash_mpd_core::ContentProtection]],
     manifest_url: &Url,
 ) -> Result<Option<Url>, String> {
-    let mut is_clear_key = false;
+    let mut has_clear_key = false;
+    let mut has_playready = false;
     let mut selected: Option<Url> = None;
 
     for descriptor in scopes.iter().flat_map(|scope| scope.iter()) {
-        if descriptor.schemeIdUri != CLEARKEY_SCHEME {
+        let is_clear_key = descriptor.schemeIdUri == CLEARKEY_SCHEME;
+        let is_playready = descriptor.schemeIdUri == PLAYREADY_SCHEME;
+        if !is_clear_key && !is_playready {
             continue;
         }
-        is_clear_key = true;
-        let raw = descriptor
-            .laurl
-            .as_ref()
-            .or(descriptor.clearkey_laurl.as_ref())
-            .and_then(|laurl| laurl.content.as_deref())
-            .map(str::trim)
-            .filter(|value| !value.is_empty());
+        has_clear_key |= is_clear_key;
+        has_playready |= is_playready;
+
+        let raw = if is_playready {
+            descriptor.laurl.as_ref()
+        } else {
+            descriptor
+                .laurl
+                .as_ref()
+                .or(descriptor.clearkey_laurl.as_ref())
+        }
+        .and_then(|laurl| laurl.content.as_deref())
+        .map(str::trim)
+        .filter(|value| !value.is_empty());
         let Some(raw) = raw else {
             continue;
         };
-        let url = manifest_url
-            .join(raw)
-            .map_err(|_| "DASH ClearKey license URL is invalid".to_string())?;
+        let url = manifest_url.join(raw).map_err(|_| {
+            if is_playready {
+                "DASH PlayReady license URL is invalid".to_string()
+            } else {
+                "DASH ClearKey license URL is invalid".to_string()
+            }
+        })?;
         if url.scheme() != "https"
             || url.host_str().is_none()
             || !url.username().is_empty()
@@ -186,16 +340,17 @@ pub(crate) fn license_url_from_scopes(
             || url.fragment().is_some()
         {
             return Err(
-                "DASH ClearKey license URL must be HTTPS and contain no user-info or fragment"
-                    .to_string(),
+                "DASH license URL must be HTTPS and contain no user-info or fragment".to_string(),
             );
         }
-        // More specific inherited scopes may override the parent license URL.
         selected = Some(url);
     }
 
-    if is_clear_key && selected.is_none() {
+    if has_clear_key && selected.is_none() {
         return Err("DASH ClearKey protection has no license URL".to_string());
+    }
+    if has_playready && selected.is_none() {
+        return Err("DASH PlayReady protection has no DASHIF Laurl".to_string());
     }
     Ok(selected)
 }

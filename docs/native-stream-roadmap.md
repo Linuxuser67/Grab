@@ -138,10 +138,21 @@ fragment sample KIDs. Retrieved content-key allocations are moved into
 zeroizing storage immediately. The existing shared `DrmKeyMap` and CENC/CBCS
 decryptor handle key lookup and sample decryption without a second decryptor.
 
-HLS CMAF is the next PlayReady integration target. HLS PlayReady, dynamic or
-multi-Period DASH, encrypted subtitles, multiple WRMHEADER records, embedded
-license URLs without DASHIF `Laurl`, authorization-header workflows, and
-non-standard challenge formats continue to use extractor fallback.
+The initial HLS CMAF PlayReady integration is implemented for static tracks.
+It reuses the validated fragmented-MP4 CENC/CBCS sample parser/decryptor and
+the same isolated PlayReady worker. The HLS planner requires one leading
+`EXT-X-MAP`, no byte ranges or discontinuities, one unchanged PlayReady Object
+per selected video/audio track, exactly one WRMHEADER, and one explicit absolute
+HTTPS `DATA/LA_URL`. The PlayReady device path is shared with DASH settings.
+The parent retains guarded reqwest networking; decrypted tracks remain in
+private XDG staging and enter the existing FFmpeg finalizer.
+
+HLS PlayReady live streams, key changes to a distinct PlayReady Object, mixed
+clear/encrypted segments, changing initialization maps, encrypted subtitles,
+Widevine, FairPlay, custom license authorization, and non-standard challenge
+formats continue to use extractor fallback. DASH multi-Period presentations,
+encrypted subtitles, embedded license URLs without DASHIF `Laurl`, and
+non-standard challenge formats also remain on extractor fallback.
 
 Keep the dependency graph on the patched `crypto-bigint >= 0.7.6` line. The
 previous `playready 0.3.x` dependency resolved `crypto-bigint 0.5.5`, which

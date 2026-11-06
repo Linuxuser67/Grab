@@ -198,10 +198,10 @@ pub(crate) fn hls_protection_from_key(key: &Key) -> Result<Option<HlsProtection>
         .ok_or_else(|| "HLS DRM key URI is missing".to_string())?;
     let (system, initialization_data) = match key_format {
         "urn:uuid:edef8ba9-79d6-4ace-a3c8-27dcd51d21ed" => {
-            let bytes = decode_hls_data_uri(uri, &[
-                "text/plain;base64",
-                "text/plain;charset=utf-8;base64",
-            ])?;
+            let bytes = decode_hls_data_uri(
+                uri,
+                &["text/plain;base64", "text/plain;charset=utf-8;base64"],
+            )?;
             validate_pssh(&bytes, ProtectionSystem::Widevine)?;
             (
                 ProtectionSystem::Widevine,
@@ -281,7 +281,8 @@ fn decode_hls_data_uri(uri: &str, accepted_metadata: &[&str]) -> Result<Vec<u8>,
 }
 
 fn validate_playready_object(bytes: &[u8]) -> Result<(), String> {
-    let invalid = || "HLS PlayReady initialization data is not a valid PlayReady Object".to_string();
+    let invalid =
+        || "HLS PlayReady initialization data is not a valid PlayReady Object".to_string();
     if bytes.len() < 10 || bytes.len() > MAX_HLS_DRM_INIT_DATA_BYTES {
         return Err(invalid());
     }
@@ -356,8 +357,8 @@ fn validate_playready_object(bytes: &[u8]) -> Result<(), String> {
 pub(crate) fn validate_hls_keyformat_multiplexing(body: &[u8]) -> Result<(), String> {
     use std::collections::HashSet;
 
-    let text = std::str::from_utf8(body)
-        .map_err(|_| "HLS playlist is not valid UTF-8".to_string())?;
+    let text =
+        std::str::from_utf8(body).map_err(|_| "HLS playlist is not valid UTF-8".to_string())?;
     let mut active_formats = HashSet::new();
     for line in text.lines().map(str::trim) {
         if let Some(attributes) = line.strip_prefix("#EXT-X-KEY:") {
@@ -457,16 +458,15 @@ mod tests {
     #[test]
     fn parses_widevine_hls_data_uri_without_treating_it_as_a_network_key() {
         let uri = format!("data:text/plain;base64,{WIDEVINE_PSSH}");
-        let parsed = hls_protection_from_key(&key(
-            KeyMethod::SampleAES,
-            &uri,
-            WIDEVINE_KEYFORMAT,
-        ))
-        .expect("Widevine HLS key descriptor should parse")
-        .expect("Widevine descriptor should be retained");
+        let parsed = hls_protection_from_key(&key(KeyMethod::SampleAES, &uri, WIDEVINE_KEYFORMAT))
+            .expect("Widevine HLS key descriptor should parse")
+            .expect("Widevine descriptor should be retained");
         assert_eq!(parsed.system, ProtectionSystem::Widevine);
         assert_eq!(parsed.scheme, EncryptionScheme::Cbcs);
-        assert!(matches!(parsed.initialization_data, HlsInitializationData::Pssh(_)));
+        assert!(matches!(
+            parsed.initialization_data,
+            HlsInitializationData::Pssh(_)
+        ));
     }
 
     #[test]
@@ -523,7 +523,11 @@ mod tests {
 
     #[test]
     fn leaves_identity_keys_to_the_existing_hls_paths() {
-        let identity = key(KeyMethod::AES128, "https://cdn.example.test/key.bin", "identity");
+        let identity = key(
+            KeyMethod::AES128,
+            "https://cdn.example.test/key.bin",
+            "identity",
+        );
         assert_eq!(hls_protection_from_key(&identity), Ok(None));
     }
 

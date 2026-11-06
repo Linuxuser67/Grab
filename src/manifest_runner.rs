@@ -730,7 +730,25 @@ async fn prepare_manifest_attempt(
                 guard_manifest_child_url(&job.source.url, license_url, &mut guarded_child_hosts)?;
             }
         }
-        Tracks::Hls { .. } | Tracks::DashLiveOffline { .. } => {}
+        Tracks::Hls {
+            video,
+            audio,
+            subtitle,
+            ..
+        } => {
+            let protection = video
+                .protections
+                .first()
+                .or_else(|| audio.as_ref().and_then(|track| track.protections.first()))
+                .or_else(|| subtitle.as_ref().and_then(|track| track.protections.first()));
+            if let Some(protection) = protection {
+                return Err(ManifestRunError::Unsupported(format!(
+                    "Native HLS {} decryption is not available yet",
+                    protection.system.label()
+                )));
+            }
+        }
+        Tracks::DashLiveOffline { .. } => {}
     };
 
     if has_audio {
@@ -2119,6 +2137,22 @@ async fn finalize_manifest_download(
     Ok(ManifestOutcome::Finished(size))
 }
 
+fn inherit_hls_session_protections(
+    plan: &mut crate::manifest::HlsPlan,
+    inherited: &[crate::drm::HlsProtection],
+) {
+    if inherited.is_empty() {
+        return;
+    }
+    let mut protections = inherited.to_vec();
+    for protection in plan.protections.iter() {
+        if !protections.contains(protection) {
+            protections.push(protection.clone());
+        }
+    }
+    plan.protections = protections.into_boxed_slice();
+}
+
 async fn resolve_tracks(
     client: &reqwest::Client,
     lookup: ManifestLookup,
@@ -2145,19 +2179,22 @@ async fn resolve_tracks(
                 audio_url,
                 subtitle_url,
                 subtitle_language,
+                session_protections,
             } = *plan;
             guard_manifest_child_url(&source.url, &video_url, guarded_child_hosts)?;
             if let Some(audio_url) = audio_url.as_ref() {
                 guard_manifest_child_url(&source.url, audio_url, guarded_child_hosts)?;
             }
-            let video =
+            let mut video =
                 crate::manifest_intake::lookup_hls_media(client, video_url.as_str()).await?;
+            inherit_hls_session_protections(&mut video, &session_protections);
             guard_hls_resources(&source.url, &video, guarded_child_hosts)?;
             let subtitle = match subtitle_url {
                 Some(url) => {
                     guard_manifest_child_url(&source.url, &url, guarded_child_hosts)?;
-                    let plan =
+                    let mut plan =
                         crate::manifest_intake::lookup_hls_media(client, url.as_str()).await?;
+                    inherit_hls_session_protections(&mut plan, &session_protections);
                     if plan.is_live {
                         return Err(ManifestRunError::Unsupported(
                             "Native live HLS subtitle renditions are not supported yet".to_string(),
@@ -2170,8 +2207,9 @@ async fn resolve_tracks(
             };
             let audio = match audio_url {
                 Some(url) => {
-                    let plan =
+                    let mut plan =
                         crate::manifest_intake::lookup_hls_media(client, url.as_str()).await?;
+                    inherit_hls_session_protections(&mut plan, &session_protections);
                     guard_hls_resources(&source.url, &plan, guarded_child_hosts)?;
                     Some(plan)
                 }

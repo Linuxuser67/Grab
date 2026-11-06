@@ -1,5 +1,6 @@
 //! Native HLS/DASH segment transfer, resume and container finalization.
 
+use std::collections::HashSet;
 use std::fmt;
 use std::path::{Path, PathBuf};
 use std::sync::{
@@ -18,7 +19,11 @@ use crate::content_range::{ParsedContentRange, parse_content_range};
 use crate::engine_msg::EngineMsg;
 use crate::manifest::{
     HlsLiveAccumulator, HlsPlan, HlsResource, HlsResourceKind, ManifestByteRange,
-    dash::{DashPresentation, DashRepresentationPlan, DashResource, DashResourceKind},
+    dash::{
+        DashPresentation, DashRepresentationPlan, DashResource, DashResourceKind,
+        DashSegmentBaseIndex, DashSidxEntry, MAX_DASH_SIDX_SEGMENTS, dash_sidx_media_resource,
+        parse_child_segment_index, parse_segment_base_index, validate_segment_base_sidx_ranges,
+    },
 };
 use crate::manifest_intake::ManifestLookup;
 #[cfg(test)]
@@ -3099,6 +3104,9 @@ const DASH_LIVE_STATE_NAME: &str = "live-dash-state.json";
 const DASH_LIVE_STATE_VERSION: u32 = 1;
 
 const MAX_DASH_INDEX_RANGE_BYTES: u64 = 1024 * 1024;
+const MAX_DASH_SIDX_DEPTH: usize = 8;
+const MAX_DASH_SIDX_NODES: usize = 128;
+const MAX_DASH_SIDX_TOTAL_BYTES: u64 = 16 * 1024 * 1024;
 
 /// Fetch the bounded SIDX control range without staging or counting index bytes
 /// as downloaded media. Media byte ranges still use the normal journaled writer.
@@ -3231,6 +3239,142 @@ async fn fetch_dash_index_bytes(
     Ok(Some((bytes, total_length)))
 }
 
+/// Resolve a bounded hierarchy of SIDX boxes before handing only media leaves to the writer.
+async fn resolve_dash_segment_base_resources(
+    client: &reqwest::Client,
+    index: &DashSegmentBaseIndex,
+    abort: &mut tokio::sync::oneshot::Receiver<crate::video::StopIntent>,
+) -> Result<Option<Vec<DashResource>>, ManifestRunError> {
+    let Some((root_bytes, total_length)) =
+        fetch_dash_index_bytes(client, &index.url, index.index_range, abort).await?
+    else {
+        return Ok(None);
+    };
+    let root = parse_segment_base_index(index, &root_bytes, total_length).map_err(|error| {
+        ManifestRunError::Unsupported(format!(
+            "The DASH SegmentBase index is unsupported: {error}"
+        ))
+    })?;
+
+    let mut pending: Vec<(DashSidxEntry, usize)> = root
+        .entries
+        .into_iter()
+        .rev()
+        .map(|entry| (entry, 0))
+        .collect();
+    let mut total_entry_count = pending.len();
+    if total_entry_count > MAX_DASH_SIDX_SEGMENTS {
+        return Err(ManifestRunError::Unsupported(
+            "The DASH SIDX hierarchy contains too many references".to_string(),
+        ));
+    }
+    let mut seen_indexes = HashSet::new();
+    seen_indexes.insert((index.index_range.offset, index.index_range.length));
+    let mut child_index_ranges = Vec::new();
+    let mut media_ranges = Vec::new();
+    let mut resources = Vec::new();
+    let mut total_index_bytes = index.index_range.length;
+    let mut index_count = 1_usize;
+
+    while let Some((entry, depth)) = pending.pop() {
+        match entry {
+            DashSidxEntry::Media(range) => {
+                if media_ranges.len() >= MAX_DASH_SIDX_SEGMENTS {
+                    return Err(ManifestRunError::Unsupported(
+                        "The DASH SIDX hierarchy contains too many media references".to_string(),
+                    ));
+                }
+                let resource = dash_sidx_media_resource(&index.url, range, resources.len())
+                    .map_err(|error| {
+                        ManifestRunError::Unsupported(format!(
+                            "The DASH SIDX media reference is unsupported: {error}"
+                        ))
+                    })?;
+                media_ranges.push(range);
+                resources.push(resource);
+            }
+            DashSidxEntry::Index(child) => {
+                let child_depth = depth.checked_add(1).ok_or_else(|| {
+                    ManifestRunError::Unsupported(
+                        "The DASH SIDX hierarchy is too deeply nested".to_string(),
+                    )
+                })?;
+                if child_depth > MAX_DASH_SIDX_DEPTH {
+                    return Err(ManifestRunError::Unsupported(
+                        "The DASH SIDX hierarchy exceeds the supported nesting depth".to_string(),
+                    ));
+                }
+                if index_count >= MAX_DASH_SIDX_NODES {
+                    return Err(ManifestRunError::Unsupported(
+                        "The DASH SIDX hierarchy contains too many index boxes".to_string(),
+                    ));
+                }
+                let child_key = (child.range.offset, child.range.length);
+                if !seen_indexes.insert(child_key) {
+                    return Err(ManifestRunError::Unsupported(
+                        "The DASH SIDX hierarchy contains a repeated child index".to_string(),
+                    ));
+                }
+                total_index_bytes = total_index_bytes
+                    .checked_add(child.range.length)
+                    .filter(|bytes| *bytes <= MAX_DASH_SIDX_TOTAL_BYTES)
+                    .ok_or_else(|| {
+                        ManifestRunError::Unsupported(
+                            "The DASH SIDX hierarchy exceeds the aggregate index-size limit"
+                                .to_string(),
+                        )
+                    })?;
+                index_count += 1;
+
+                let Some((child_bytes, child_total_length)) =
+                    fetch_dash_index_bytes(client, &index.url, child.range, abort).await?
+                else {
+                    return Ok(None);
+                };
+                if child_total_length != total_length {
+                    return Err(ManifestRunError::Unsupported(
+                        "The DASH media file changed while its SIDX hierarchy was being read"
+                            .to_string(),
+                    ));
+                }
+                let child_node =
+                    parse_child_segment_index(index, &child, &child_bytes, total_length).map_err(
+                        |error| {
+                            ManifestRunError::Unsupported(format!(
+                                "The DASH child SIDX is unsupported: {error}"
+                            ))
+                        },
+                    )?;
+                total_entry_count = total_entry_count
+                    .checked_add(child_node.entries.len())
+                    .filter(|count| *count <= MAX_DASH_SIDX_SEGMENTS)
+                    .ok_or_else(|| {
+                        ManifestRunError::Unsupported(
+                            "The DASH SIDX hierarchy contains too many references".to_string(),
+                        )
+                    })?;
+                child_index_ranges.push(child.range);
+                pending.extend(
+                    child_node
+                        .entries
+                        .into_iter()
+                        .rev()
+                        .map(|entry| (entry, child_depth)),
+                );
+            }
+        }
+    }
+
+    validate_segment_base_sidx_ranges(index, &child_index_ranges, &media_ranges, total_length)
+        .map_err(|error| {
+            ManifestRunError::Unsupported(format!(
+                "The DASH SIDX hierarchy contains overlapping or invalid ranges: {error}"
+            ))
+        })?;
+
+    Ok(Some(resources))
+}
+
 struct ManifestDashTrackTransfer<'a> {
     client: &'a reqwest::Client,
     staging: &'a Path,
@@ -3264,18 +3408,11 @@ async fn fetch_and_write_dash_track(
         abort,
     } = context;
     let resources = if let Some(index) = plan.segment_base_index.as_ref() {
-        let Some((bytes, total_length)) =
-            fetch_dash_index_bytes(client, &index.url, index.index_range, abort).await?
+        let Some(media_resources) =
+            resolve_dash_segment_base_resources(client, index, abort).await?
         else {
             return Ok(false);
         };
-        let media_resources =
-            crate::manifest::dash::resolve_segment_base_index(index, &bytes, total_length)
-                .map_err(|error| {
-                    ManifestRunError::Unsupported(format!(
-                        "The DASH SegmentBase index is unsupported: {error}"
-                    ))
-                })?;
         let mut resources = dash_resources(plan);
         resources.extend(dash_resources_from(&media_resources));
         resources

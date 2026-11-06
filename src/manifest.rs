@@ -2184,12 +2184,11 @@ video.m3u8
             b"#EXTM3U\n#EXT-X-TARGETDURATION:4\n#EXTINF:2,\none.ts\n#EXT-X-ENDLIST\n",
         )
         .expect("first media playlist");
-        let second =
-            plan_hls_media_playlist(
-                BASE_URL,
-                b"#EXTM3U\n#EXT-X-TARGETDURATION:4\n#EXTINF:2,\ntwo.ts\n#EXT-X-ENDLIST\n",
-            )
-                .expect("second media playlist");
+        let second = plan_hls_media_playlist(
+            BASE_URL,
+            b"#EXTM3U\n#EXT-X-TARGETDURATION:4\n#EXTINF:2,\ntwo.ts\n#EXT-X-ENDLIST\n",
+        )
+        .expect("second media playlist");
         assert_ne!(
             first.resources[0].filename, second.resources[0].filename,
             "a changed resource URL must not reuse bytes cached under the old segment ordinal"

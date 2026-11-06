@@ -66,7 +66,7 @@ librqbit = { version = "9", default-features = false, features = ["rust-tls"] }
 gettext-rs = "0.8"
 # Video-page extraction (YouTube etc). Use the crate's tiered Moka + Redb
 # metadata cache; Grab scopes entries to the full extraction identity.
-yt-dlp = { version = "2.9.1", default-features = false, features = ["rustls", "cache-memory", "cache-redb"] }
+yt-dlp = { version = "2.10.0", default-features = false, features = ["rustls", "cache-memory", "cache-redb"] }
 libc = "0.2"
 # Mozilla Public Suffix List for validating browser cookie domains.
 psl = "=2.1.241"

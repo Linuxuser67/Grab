@@ -6333,14 +6333,14 @@
     {
         "type": "archive",
         "archive-type": "tar-gzip",
-        "url": "https://static.crates.io/crates/yt-dlp/yt-dlp-2.9.1.crate",
-        "sha256": "00e836305d4f48f33102f15463cd38b9c5805be829d238851f1a8a1216d95b0a",
-        "dest": "cargo/yt-dlp-2.9.1"
+        "url": "https://static.crates.io/crates/yt-dlp/yt-dlp-2.10.0.crate",
+        "sha256": "fc62a3a9e416ccfbca0556de001de202a7bcb1c46f30c76a65a70204d91fe284",
+        "dest": "cargo/yt-dlp-2.10.0"
     },
     {
         "type": "inline",
-        "contents": "{\"package\": \"00e836305d4f48f33102f15463cd38b9c5805be829d238851f1a8a1216d95b0a\", \"files\": {}}",
-        "dest": "cargo/yt-dlp-2.9.1",
+        "contents": "{\"package\": \"fc62a3a9e416ccfbca0556de001de202a7bcb1c46f30c76a65a70204d91fe284\", \"files\": {}}",
+        "dest": "cargo/yt-dlp-2.10.0",
         "dest-filename": ".cargo-checksum.json"
     },
     {

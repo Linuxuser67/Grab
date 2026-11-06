@@ -5080,9 +5080,9 @@ dependencies = [
 
 [[package]]
 name = "yt-dlp"
-version = "2.9.1"
+version = "2.10.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "00e836305d4f48f33102f15463cd38b9c5805be829d238851f1a8a1216d95b0a"
+checksum = "fc62a3a9e416ccfbca0556de001de202a7bcb1c46f30c76a65a70204d91fe284"
 dependencies = [
  "async-trait",
  "cfg-if",

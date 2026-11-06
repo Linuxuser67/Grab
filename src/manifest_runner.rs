@@ -4728,8 +4728,6 @@ mod tests {
 
     #[test]
     fn hls_playready_request_accepts_one_static_cmaf_key_and_rejects_mixed_keys() {
-        // The KID is fixture metadata only; the planner derives the effective
-        // sample KID from the CMAF tenc box after resources are staged.
         let first_uri = hls_playready_uri("https://license.example.test/acquire");
         let plan = hls_playready_plan(&first_uri, false);
         assert!(plan.is_single_init_fmp4_presentation());

@@ -128,31 +128,14 @@ jobs:
   # v4.0.0-beta.4 shipped without its bundle. Seconds, no system deps.
   vendor-sync:
     runs-on: ubuntu-latest
-    permissions:
-      contents: write
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          ref: ${{ github.event.pull_request.head.sha }}
-          persist-credentials: true
+          # No job pushes or fetches; don't persist the token in git config.
+          persist-credentials: false
       - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
-      # Temporary PR-only lockfile refresh to capture Cargo's exact resolution.
-      - name: Generate Cargo lock and vendor metadata
-        run: |
-          cargo metadata --format-version 1 >/dev/null
-          ./build-aux/gen-cargo-sources.py
-      - name: Commit generated Cargo metadata
-        env:
-          GITHUB_HEAD_REF: ${{ github.event.pull_request.head.ref }}
-        run: |
-          git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add Cargo.lock build-aux/cargo-sources.json
-          if git diff --cached --quiet; then
-            exit 0
-          fi
-          git commit -m "build(deps): regenerate cargo lock and vendor sources"
-          git push origin "HEAD:refs/heads/${GITHUB_HEAD_REF}"
+      # --locked fails when the lock would need re-resolution; read-only otherwise.
+      - run: cargo metadata --locked --format-version 1 >/dev/null
       # Run the release metadata gate on every PR, not only after a tag is published.
       - name: Check release metadata consistency
         run: ./build-aux/check-release-consistency.py

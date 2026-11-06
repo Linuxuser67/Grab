@@ -4,15 +4,48 @@
 //! adapters retain validated initialization data here so a shared CDM/decryption
 //! pipeline can consume it without duplicating provider handling.
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::fmt;
 
 use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD;
 use m3u8_rs::{Key, KeyMethod};
+use zeroize::Zeroizing;
 
 pub(crate) const MAX_PSSH_BYTES: usize = 64 * 1024;
 pub(crate) const MAX_HLS_DRM_INIT_DATA_BYTES: usize = 64 * 1024;
+
+/// Content keys shared by the DASH and HLS Common Encryption paths.
+///
+/// Key material is never cloneable or formatted for diagnostics.
+pub(crate) struct DrmKeyMap {
+    keys: BTreeMap<[u8; 16], Zeroizing<[u8; 16]>>,
+}
+
+impl DrmKeyMap {
+    pub(crate) fn from_keys(
+        entries: impl IntoIterator<Item = ([u8; 16], Zeroizing<[u8; 16]>)>,
+    ) -> Result<Self, String> {
+        let mut keys = BTreeMap::new();
+        for (kid, key) in entries {
+            if let Some(previous) = keys.get(&kid) {
+                if **previous != *key {
+                    return Err("DRM license responses returned conflicting keys for one KID".to_string());
+                }
+            } else {
+                keys.insert(kid, key);
+            }
+        }
+        Ok(Self { keys })
+    }
+
+    pub(crate) fn key_for_kid(&self, kid: &[u8; 16]) -> Result<Zeroizing<[u8; 16]>, String> {
+        self.keys
+            .get(kid)
+            .map(|key| Zeroizing::new(**key))
+            .ok_or_else(|| "The DRM license response did not include the selected KID".to_string())
+    }
+}
 
 const WIDEVINE_SYSTEM_ID: [u8; 16] = [
     0xed, 0xef, 0x8b, 0xa9, 0x79, 0xd6, 0x4a, 0xce, 0xa3, 0xc8, 0x27, 0xdc, 0xd5, 0x1d, 0x21, 0xed,

@@ -330,6 +330,11 @@ fn sanitize_format_entry(entry: &mut serde_json::Map<String, serde_json::Value>)
     entry.entry("format").or_insert(serde_json::json!(""));
     entry.entry("format_id").or_insert(serde_json::json!(""));
     entry.entry("http_headers").or_insert(serde_json::json!({}));
+    if let Some(serde_json::Value::Object(headers)) = entry.get_mut("http_headers") {
+        // v2.10 flattens extra headers into a string map; a non-string value
+        // would fail the whole video parse. 2.9 ignored unknown keys, so drop it.
+        headers.retain(|_, value| value.is_string());
+    }
     // Infer the actual transport from the URL. In particular, never label
     // an http:// URL as HTTPS: StreamSel::from_format deliberately rejects
     // non-HTTPS sources, so this classification must not weaken that policy.
@@ -780,6 +785,21 @@ mod sanitized_protocol_tests {
         });
         sanitize_video_json(&mut value);
         assert!(value["formats"][0].get("protocol").is_none());
+    }
+
+    #[test]
+    fn non_string_http_header_values_are_dropped() {
+        let mut value = serde_json::json!({
+            "formats": [{
+                "url": "https://cdn.example/video.mp4",
+                "http_headers": {"Referer": "https://example.com/", "X-Retry": 3}
+            }]
+        });
+        sanitize_video_json(&mut value);
+        assert_eq!(
+            value["formats"][0]["http_headers"],
+            serde_json::json!({"Referer": "https://example.com/"})
+        );
     }
 
     #[test]

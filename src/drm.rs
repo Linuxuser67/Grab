@@ -385,6 +385,12 @@ pub(crate) fn validate_hls_keyformat_multiplexing(body: &[u8]) -> Result<(), Str
                 .map(String::as_str)
                 .unwrap_or("identity");
             if method == "NONE" {
+                if fields.len() != 1 {
+                    return Err(
+                        "HLS METHOD=NONE key tag must not contain additional attributes"
+                            .to_string(),
+                    );
+                }
                 // HLS 2nd Edition defines METHOD=NONE as a presentation-wide
                 // key reset, regardless of the preceding KEYFORMAT.
                 active_formats.clear();
@@ -591,6 +597,14 @@ segment.ts
             validate_hls_keyformat_multiplexing(body),
             Ok(()),
             "METHOD=NONE clears the active PlayReady keyformat before identity encryption starts"
+        );
+
+        let invalid_reset = std::str::from_utf8(body)
+            .expect("test playlist is UTF-8")
+            .replace("METHOD=NONE", "METHOD=NONE,URI=\\"ignored\\"");
+        assert!(
+            validate_hls_keyformat_multiplexing(invalid_reset.as_bytes()).is_err(),
+            "METHOD=NONE must not carry attributes"
         );
     }
 

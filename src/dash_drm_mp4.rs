@@ -243,8 +243,8 @@ fn parse_init_encryption(init: &[u8], expected: DashEncryption) -> Result<InitEn
 
 /// Read the protected track metadata from an HLS CMAF initialization section.
 ///
-/// HLS signals the protection system and scheme through KEYFORMAT, but the
-/// default KID is carried by the sample-entry tenc box rather than the playlist.
+/// HLS KEYFORMAT identifies the protection system and METHOD selects the scheme.
+/// The default KID is carried by the sample-entry tenc box, not the playlist.
 pub(crate) fn hls_encryption_from_init(
     init: &[u8],
     scheme: EncryptionScheme,
@@ -1253,7 +1253,10 @@ pub(crate) fn required_kids(
     required_kids_inner(resources, directory, encryption, None)
 }
 
-/// Scan the selected encrypted fragments while honoring a caller's stop signal.
+/// Scan encrypted fragments for sample KIDs while honoring a caller's stop signal.
+///
+/// # Errors
+/// Returns an error if a resource is malformed, a sample is invalid, or scanning is cancelled.
 pub(crate) fn required_kids_with_cancel(
     resources: &[DashResource],
     directory: &Path,
@@ -1297,7 +1300,7 @@ fn required_kids_inner(
             required.insert(sample.kid);
             if required.len() > super::MAX_LICENSE_KEYS {
                 return Err(format!(
-                    "Encrypted DASH requires more than {} distinct ClearKey KIDs",
+                    "Encrypted fragmented MP4 requires more than {} distinct content-key IDs",
                     super::MAX_LICENSE_KEYS
                 ));
             }

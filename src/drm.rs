@@ -30,7 +30,9 @@ impl DrmKeyMap {
         for (kid, key) in entries {
             if let Some(previous) = keys.get(&kid) {
                 if **previous != *key {
-                    return Err("DRM license responses returned conflicting keys for one KID".to_string());
+                    return Err(
+                        "DRM license responses returned conflicting keys for one KID".to_string(),
+                    );
                 }
             } else {
                 keys.insert(kid, key);
@@ -597,7 +599,6 @@ segment.ts
         assert_eq!(validate_hls_keyformat_multiplexing(rotation), Ok(()));
     }
 }
-
 
 #[cfg(test)]
 mod key_map_tests {

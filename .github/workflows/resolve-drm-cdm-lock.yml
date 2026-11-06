@@ -1,0 +1,29 @@
+name: Resolve DRM CDM lockfile
+
+on:
+  pull_request:
+    paths:
+      - Cargo.toml
+      - .github/workflows/resolve-drm-cdm-lock.yml
+
+permissions:
+  contents: read
+
+jobs:
+  resolve:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Resolve the new CDM dependency graph
+        run: cargo metadata --format-version 1 >/dev/null
+      - name: Regenerate the Flatpak vendor source manifest
+        run: python3 build-aux/gen-cargo-sources.py
+      - uses: actions/upload-artifact@v4
+        with:
+          name: resolved-drm-cdm-lock
+          path: |
+            Cargo.lock
+            build-aux/cargo-sources.json
+          if-no-files-found: error
+          retention-days: 1

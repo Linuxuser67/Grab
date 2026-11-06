@@ -72,6 +72,10 @@ fn playready_object_from_pssh(pssh: &[u8]) -> Result<&[u8], String> {
 }
 
 fn validate_playready_pro(pro: &[u8]) -> Result<(), String> {
+    playready_wrm_header(pro).map(|_| ())
+}
+
+fn playready_wrm_header(pro: &[u8]) -> Result<String, String> {
     let invalid = || "PlayReady Object must contain exactly one valid WRMHEADER record".to_string();
     if pro.len() < 10 || pro.len() > crate::drm::MAX_HLS_DRM_INIT_DATA_BYTES {
         return Err(invalid());
@@ -97,6 +101,7 @@ fn validate_playready_pro(pro: &[u8]) -> Result<(), String> {
 
     let mut offset = 6_usize;
     let mut header_count = 0_usize;
+    let mut wrm_header = None;
     for _ in 0..record_count {
         let header_end = offset.checked_add(4).ok_or_else(invalid)?;
         let record_header = pro.get(offset..header_end).ok_or_else(invalid)?;
@@ -127,7 +132,7 @@ fn validate_playready_pro(pro: &[u8]) -> Result<(), String> {
                     .iter()
                     .map(|pair| u16::from_le_bytes(*pair))
                     .collect();
-                String::from_utf16(&units).map_err(|_| invalid())?;
+                wrm_header = Some(String::from_utf16(&units).map_err(|_| invalid())?);
                 header_count += 1;
             }
             // PlayReady PRO record types 2 and 3 are reserved metadata records.
@@ -145,7 +150,7 @@ fn validate_playready_pro(pro: &[u8]) -> Result<(), String> {
     if parsed.wrm_headers().len() != 1 {
         return Err(invalid());
     }
-    Ok(())
+    wrm_header.ok_or_else(invalid)
 }
 
 fn playready_object_to_pssh(pro: &[u8]) -> Result<Vec<u8>, String> {
@@ -176,19 +181,7 @@ fn playready_object_to_pssh(pro: &[u8]) -> Result<Vec<u8>, String> {
 /// Only one WRMHEADER and its explicit DATA/LA_URL are supported. LUI_URL and
 /// endpoint inference are deliberately not used.
 pub(crate) fn hls_license_request(pro: &[u8]) -> Result<(Vec<u8>, Url), String> {
-    validate_playready_pro(pro)?;
-    let parsed =
-        Pssh::from_bytes(pro).map_err(|_| "HLS PlayReady Object is malformed".to_string())?;
-    let headers = parsed.wrm_headers();
-    if headers.len() != 1 {
-        return Err("HLS PlayReady requires exactly one WRMHEADER".to_string());
-    }
-    let header = String::from(
-        headers
-            .into_iter()
-            .next()
-            .ok_or_else(|| "HLS PlayReady WRMHEADER is missing".to_string())?,
-    );
+    let header = playready_wrm_header(pro)?;
     let raw_url = playready_la_url(&header)?;
     let url = Url::parse(&raw_url)
         .map_err(|_| "HLS PlayReady LA_URL must be an absolute HTTPS URL".to_string())?;

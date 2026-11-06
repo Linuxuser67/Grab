@@ -2568,7 +2568,8 @@ mod tests {
     ) -> DashSegmentBaseIndex {
         DashSegmentBaseIndex {
             url: Url::parse("https://cdn.example.test/path/media.mp4").expect("test media URL"),
-            index_url: Url::parse("https://cdn.example.test/path/media.mp4").expect("test index URL"),
+            index_url: Url::parse("https://cdn.example.test/path/media.mp4")
+                .expect("test index URL"),
             index_range,
             index_is_external: false,
             initialization_range,
@@ -2639,8 +2640,8 @@ mod tests {
     </AdaptationSet>
   </Period>
 </MPD>"#;
-        let manifest = parse_dash_manifest(BASE_URL, body)
-            .expect("external RepresentationIndex should parse");
+        let manifest =
+            parse_dash_manifest(BASE_URL, body).expect("external RepresentationIndex should parse");
         let representation = &manifest.video_representations[0];
         let plan = plan_dash_representation(&manifest, &representation.key)
             .expect("external RepresentationIndex should plan");
@@ -2649,8 +2650,14 @@ mod tests {
             .segment_base_index
             .as_ref()
             .expect("external SIDX request");
-        assert_eq!(index.index_url.as_str(), "https://cdn.example.test/path/index.sidx");
-        assert_eq!(index.url.as_str(), "https://cdn.example.test/path/media.mp4");
+        assert_eq!(
+            index.index_url.as_str(),
+            "https://cdn.example.test/path/index.sidx"
+        );
+        assert_eq!(
+            index.url.as_str(),
+            "https://cdn.example.test/path/media.mp4"
+        );
         assert!(index.index_is_external);
         assert_eq!(
             index.index_range,
@@ -2677,8 +2684,8 @@ mod tests {
     </AdaptationSet>
   </Period>
 </MPD>"#;
-        let manifest = parse_dash_manifest(BASE_URL, body)
-            .expect("RepresentationIndex range should parse");
+        let manifest =
+            parse_dash_manifest(BASE_URL, body).expect("RepresentationIndex range should parse");
         let representation = &manifest.video_representations[0];
         let plan = plan_dash_representation(&manifest, &representation.key)
             .expect("RepresentationIndex range should plan");

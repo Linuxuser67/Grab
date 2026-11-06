@@ -1285,6 +1285,84 @@ fn hash_optional_range(hasher: &mut Sha256, range: Option<ManifestByteRange>) {
     }
 }
 
+/// Construct an Annex E byte-range URL for one resource range.
+pub(crate) fn build_byte_range_url(
+    source: &Url,
+    range: ManifestByteRange,
+    template: &str,
+) -> Result<Url, DashError> {
+    if template.is_empty() || template.len() > 4_096 || range.length == 0 {
+        return Err(DashError::UnsupportedAddressing);
+    }
+    let last = range.offset
+        .checked_add(range.length)
+        .and_then(|end| end.checked_sub(1))
+        .ok_or(DashError::InvalidSegment)?;
+    let mut base = source.clone();
+    base.set_query(None);
+    base.set_fragment(None);
+    let query = source.query().unwrap_or_default();
+
+    let mut output = String::with_capacity(template.len().saturating_add(query.len()));
+    let bytes = template.as_bytes();
+    let mut cursor = 0;
+    let mut has_first = false;
+    let mut has_last = false;
+    let mut has_query = false;
+    while cursor < bytes.len() {
+        if bytes[cursor] != b'$' {
+            let ch = template[cursor..].chars().next()
+                .ok_or(DashError::UnsupportedAddressing)?;
+            output.push(ch);
+            cursor += ch.len_utf8();
+            continue;
+        }
+        if bytes.get(cursor + 1) == Some(&b'$') {
+            output.push('$');
+            cursor += 2;
+            continue;
+        }
+        let token_start = cursor + 1;
+        let token_end = bytes[token_start..].iter()
+            .position(|byte| *byte == b'$')
+            .map(|offset| token_start + offset)
+            .ok_or(DashError::UnsupportedAddressing)?;
+        match &template[token_start..token_end] {
+            "base" => output.push_str(base.as_str()),
+            "query" => {
+                output.push_str(query);
+                has_query = true;
+            }
+            "first" => {
+                output.push_str(&range.offset.to_string());
+                has_first = true;
+            }
+            "last" => {
+                output.push_str(&last.to_string());
+                has_last = true;
+            }
+            _ => return Err(DashError::UnsupportedAddressing),
+        }
+        cursor = token_end + 1;
+    }
+    if !has_first || !has_last {
+        return Err(DashError::UnsupportedAddressing);
+    }
+    if !has_query && !query.is_empty() {
+        output.push('?');
+        output.push_str(query);
+    }
+    let url = Url::parse(&output).map_err(|_| DashError::UnsupportedAddressing)?;
+    if url.origin() != source.origin()
+        || url.fragment().is_some()
+        || !url.username().is_empty()
+        || url.password().is_some()
+    {
+        return Err(DashError::UnsupportedAddressing);
+    }
+    validate_https_url(url)
+}
+
 /// A `SegmentBase` BaseURL must name a media file, not the MPD itself or a
 /// directory; otherwise the resolved URL cannot be the whole media resource.
 fn is_single_file_media_url(url: &Url, manifest_url: &Url) -> bool {
@@ -1294,36 +1372,28 @@ fn is_single_file_media_url(url: &Url, manifest_url: &Url) -> bool {
         && url.path() != manifest_url.path()
 }
 
-/// Resolve exactly one BaseURL at each inheritance level. Choosing among CDNs
-/// is deliberately left to a later selection layer instead of silently guessing.
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct DashResolvedBaseUrl {
+    url: Url,
+    byte_range_template: Option<String>,
+}
+
+/// Resolve one BaseURL at each inheritance level. Multiple CDN alternatives
+/// remain unsupported so selection never depends on parser ordering.
 fn resolve_base_url(
-    base_url: Url,
+    inherited: DashResolvedBaseUrl,
     candidates: &[dash_mpd_core::BaseURL],
-) -> Result<Url, DashError> {
+) -> Result<DashResolvedBaseUrl, DashError> {
     let mut values = candidates
         .iter()
         .map(|candidate| candidate.base.trim())
         .filter(|value| !value.is_empty());
-    let Some(value) = values.next() else {
-        if candidates.iter().any(|candidate| {
-            candidate.byte_range.is_some()
-                || candidate
-                    .availability_time_offset
-                    .is_some_and(|offset| offset != 0.0)
-                || candidate.availability_time_complete == Some(false)
-                || candidate.timeShiftBufferDepth.is_some()
-        }) {
-            return Err(DashError::UnsupportedAddressing);
-        }
-        return Ok(base_url);
-    };
-
+    let value = values.next();
     if values.next().is_some()
         || candidates.iter().any(|candidate| {
-            candidate.byte_range.is_some()
-                || candidate
-                    .availability_time_offset
-                    .is_some_and(|offset| offset != 0.0)
+            candidate
+                .availability_time_offset
+                .is_some_and(|offset| offset != 0.0)
                 || candidate.availability_time_complete == Some(false)
                 || candidate.timeShiftBufferDepth.is_some()
         })
@@ -1331,10 +1401,36 @@ fn resolve_base_url(
         return Err(DashError::UnsupportedAddressing);
     }
 
-    let resolved = base_url
-        .join(value)
-        .map_err(|_| DashError::UnsupportedAddressing)?;
-    validate_https_url(resolved)
+    let mut byte_ranges = candidates
+        .iter()
+        .filter_map(|candidate| candidate.byte_range.as_deref())
+        .map(str::trim);
+    let candidate_byte_range = byte_ranges.next();
+    if byte_ranges.any(|value| Some(value) != candidate_byte_range) {
+        return Err(DashError::UnsupportedAddressing);
+    }
+    let byte_range_template = match candidate_byte_range {
+        Some(template) => Some(template.to_owned()),
+        None => inherited.byte_range_template,
+    };
+
+    let url = match value {
+        Some(value) => validate_https_url(
+            inherited
+                .url
+                .join(value)
+                .map_err(|_| DashError::UnsupportedAddressing)?,
+        )?,
+        None => inherited.url,
+    };
+    if let Some(template) = byte_range_template.as_deref() {
+        build_byte_range_url(
+            &url,
+            ManifestByteRange { offset: 0, length: 1 },
+            template,
+        )?;
+    }
+    Ok(DashResolvedBaseUrl { url, byte_range_template })
 }
 
 fn has_trick_mode_properties(
@@ -1390,6 +1486,8 @@ fn effective_addressing(
     period: &dash_mpd_core::Period,
     adaptation: &dash_mpd_core::AdaptationSet,
     representation: &dash_mpd_core::Representation,
+    base_url: &Url,
+    byte_range_template: Option<&str>,
     period_duration: Duration,
     is_dynamic: bool,
 ) -> Result<DashAddressing, DashError> {
@@ -1419,18 +1517,16 @@ fn effective_addressing(
         let mut initialization_range = None;
         let mut index_range_exact = None;
         let mut timescale = None;
+        let mut presentation_time_offset = None;
+        let mut representation_index = None;
         for base in bases.iter().flatten() {
-            if base
-                .presentationTimeOffset
-                .is_some_and(|offset| offset != 0)
-                || base.timescale == Some(0)
+            if base.timescale == Some(0)
                 || base
                     .availabilityTimeOffset
                     .is_some_and(|offset| offset != 0.0)
                 || base.availabilityTimeComplete == Some(false)
                 || base.eptDelta.is_some_and(|delta| delta != 0)
                 || base.pbDelta.is_some_and(|delta| delta != 0)
-                || base.representation_index.is_some()
                 || base
                     .Initialization
                     .as_ref()
@@ -1442,11 +1538,41 @@ fn effective_addressing(
             index_range = base.indexRange.as_deref().or(index_range);
             index_range_exact = base.indexRangeExact.or(index_range_exact);
             timescale = base.timescale.or(timescale);
+            presentation_time_offset =
+                base.presentationTimeOffset.or(presentation_time_offset);
+            representation_index = base.representation_index.as_ref().or(representation_index);
             if let Some(initialization) = base.Initialization.as_ref() {
                 // An Initialization child replaces the inherited child; a
                 // missing range must not silently reuse the parent's range.
                 initialization_range = Some(initialization.range.as_deref());
             }
+        }
+
+        // The nearest RepresentationIndex child supplies the index location
+        // and can override the inherited SegmentBase@indexRange.
+        let index_url = if let Some(representation_index) = representation_index {
+            if let Some(source_url) = representation_index
+                .sourceURL
+                .as_deref()
+                .filter(|source_url| !source_url.trim().is_empty())
+            {
+                let resolved = validate_https_url(
+                    base_url
+                        .join(source_url.trim())
+                        .map_err(|_| DashError::UnsupportedAddressing)?,
+                )?;
+                if resolved.origin() != base_url.origin() {
+                    return Err(DashError::UnsupportedAddressing);
+                }
+                resolved
+            } else {
+                base_url.clone()
+            }
+        } else {
+            base_url.clone()
+        };
+        if let Some(representation_index) = representation_index {
+            index_range = representation_index.range.as_deref().or(index_range);
         }
 
         if index_range.is_none() && index_range_exact.is_some() {
@@ -1460,15 +1586,26 @@ fn effective_addressing(
                 .map(parse_byte_range)
                 .transpose()?
                 .ok_or(DashError::UnsupportedAddressing)?;
-            if timescale == Some(0) || ranges_overlap(index_range, initialization_range)? {
+            if ranges_overlap(index_range, initialization_range)? {
                 return Err(DashError::UnsupportedAddressing);
             }
+            let timescale = timescale.unwrap_or(1);
+            let presentation_time_offset = presentation_time_offset.unwrap_or(0);
             return Ok(DashAddressing::IndexedBase(DashBaseIndex {
+                index_url: index_url.clone(),
+                index_is_external: index_url != *base_url,
                 index_range,
                 initialization_range,
                 index_range_exact: index_range_exact.unwrap_or(false),
                 timescale,
+                presentation_time_offset,
             }));
+        }
+        if byte_range_template.is_some()
+            || presentation_time_offset.is_some_and(|offset| offset != 0)
+            || representation_index.is_some()
+        {
+            return Err(DashError::UnsupportedAddressing);
         }
         return Ok(DashAddressing::Base);
     }

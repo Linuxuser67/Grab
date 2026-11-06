@@ -1733,7 +1733,7 @@ mod tests {
                 DashEncryption {
                     scheme,
                     default_kid,
-                    system: super::ProtectionSystem::ClearKey,
+                    system: crate::dash_drm::ProtectionSystem::ClearKey,
                 },
             )
             .expect("parse synthetic init");
@@ -1790,7 +1790,7 @@ mod tests {
             DashEncryption {
                 scheme: EncryptionScheme::Cenc,
                 default_kid,
-                system: super::ProtectionSystem::ClearKey,
+                system: crate::dash_drm::ProtectionSystem::ClearKey,
             },
         )
         .expect("parse synthetic init");
@@ -1975,7 +1975,7 @@ mod tests {
             DashEncryption {
                 scheme: EncryptionScheme::Cenc,
                 default_kid: kid,
-                system: super::ProtectionSystem::ClearKey,
+                system: crate::dash_drm::ProtectionSystem::ClearKey,
             },
         )
         .expect("synthetic FullBox encryption metadata should parse");
@@ -2047,7 +2047,7 @@ mod tests {
             DashEncryption {
                 scheme,
                 default_kid: kid,
-                system: super::ProtectionSystem::ClearKey,
+                system: crate::dash_drm::ProtectionSystem::ClearKey,
             },
             &keys,
             &AtomicBool::new(false),
@@ -2235,7 +2235,7 @@ mod tests {
             DashEncryption {
                 scheme: EncryptionScheme::Cenc,
                 default_kid: kid,
-                system: super::ProtectionSystem::ClearKey,
+                system: crate::dash_drm::ProtectionSystem::ClearKey,
             },
         );
         assert!(
@@ -2258,7 +2258,7 @@ mod tests {
             DashEncryption {
                 scheme: EncryptionScheme::Cenc,
                 default_kid: [0x33; 16],
-                system: super::ProtectionSystem::ClearKey,
+                system: crate::dash_drm::ProtectionSystem::ClearKey,
             },
             &keys,
             &AtomicBool::new(true),

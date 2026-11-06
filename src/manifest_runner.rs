@@ -2650,6 +2650,13 @@ fn validate_vsd_sample_aes_segment(bytes: &[u8]) -> Result<(), String> {
             Some(TsPayload::Raw(payload)) => {
                 if let Some(data) = aac_pes.get_mut(&pid) {
                     data.extend_from_slice(&payload);
+                } else if stream_types.get(&pid).is_some_and(|stream_type| {
+                    matches!(
+                        *stream_type,
+                        StreamType::AdtsAac | StreamType::AdtsAacWithAes128Cbc
+                    )
+                }) {
+                    return Err("AAC PES continuation has no preceding PES header".to_string());
                 }
             }
             _ => {}

@@ -4,7 +4,7 @@ use std::fmt;
 use std::path::{Path, PathBuf};
 use std::sync::{
     Arc,
-    atomic::{AtomicBool, AtomicU64, Ordering},
+    atomic::{AtomicU64, Ordering},
 };
 use std::time::{Duration, Instant};
 
@@ -182,7 +182,6 @@ pub(crate) struct ManifestJob {
     pub(crate) cookies_browser: String,
     pub(crate) connections: usize,
     pub(crate) embed_subs: bool,
-    pub(crate) playready_device_path: Option<PathBuf>,
 }
 
 /// Classifies native manifest failures so transient transfers do not discard staged resources.
@@ -318,13 +317,13 @@ struct Resource {
 
 enum Tracks {
     Hls {
-        video: Box<HlsPlan>,
-        audio: Option<Box<HlsPlan>>,
+        video: HlsPlan,
+        audio: Option<HlsPlan>,
         subtitle: Option<Box<HlsPlan>>,
         subtitle_language: Option<String>,
     },
     Dash {
-        video: Box<DashRepresentationPlan>,
+        video: DashRepresentationPlan,
         audio: Option<Box<DashRepresentationPlan>>,
         subtitle: Option<Box<DashRepresentationPlan>>,
         subtitle_language: Option<String>,
@@ -340,7 +339,7 @@ impl Tracks {
             Self::Hls { video, audio, .. } => {
                 video.is_destination_assemblable_candidate()
                     && audio
-                        .as_deref()
+                        .as_ref()
                         .is_none_or(HlsPlan::is_destination_assemblable_candidate)
             }
             Self::Dash { .. } => true,
@@ -663,110 +662,9 @@ async fn prepare_manifest_attempt(
     let ResolvedManifestTracks {
         client,
         tracks,
-        mut guarded_child_hosts,
+        guarded_child_hosts,
         has_audio,
     } = resolve_manifest_tracks(job, offline_tracks, finish_requested).await?;
-    match &tracks {
-        Tracks::Dash {
-            video,
-            audio,
-            subtitle,
-            ..
-        } => {
-            validate_playready_configuration(video, job.playready_device_path.as_deref())?;
-            if let Some(audio) = audio {
-                validate_playready_configuration(audio, job.playready_device_path.as_deref())?;
-            }
-            if subtitle
-                .as_ref()
-                .is_some_and(|track| track.representation.encryption.is_some())
-            {
-                return Err(ManifestRunError::Unsupported(
-                    "Native DASH DRM decryption is currently limited to selected video and audio tracks"
-                        .to_string(),
-                ));
-            }
-            if video.representation.encryption.is_some_and(|encryption| {
-                encryption.system == crate::dash_drm::ProtectionSystem::Widevine
-            }) {
-                let reason = if video.representation.widevine_pssh.is_empty() {
-                    "The selected DASH Widevine representation has no MPD PSSH data"
-                } else {
-                    "Native DASH Widevine decryption is not available yet"
-                };
-                return Err(ManifestRunError::Unsupported(reason.to_string()));
-            }
-            if video.representation.encryption.is_some() {
-                let license_url = video.representation.license_url.as_ref().ok_or_else(|| {
-                    ManifestRunError::Unsupported(
-                        "The selected DASH representation has no license URL".to_string(),
-                    )
-                })?;
-                guard_manifest_child_url(&job.source.url, license_url, &mut guarded_child_hosts)?;
-            }
-            if audio.as_ref().is_some_and(|track| {
-                track.representation.encryption.is_some_and(|encryption| {
-                    encryption.system == crate::dash_drm::ProtectionSystem::Widevine
-                })
-            }) {
-                let reason = if audio
-                    .as_ref()
-                    .is_some_and(|track| track.representation.widevine_pssh.is_empty())
-                {
-                    "The selected DASH Widevine audio representation has no MPD PSSH data"
-                } else {
-                    "Native DASH Widevine decryption is not available yet"
-                };
-                return Err(ManifestRunError::Unsupported(reason.to_string()));
-            }
-            if audio
-                .as_ref()
-                .is_some_and(|track| track.representation.encryption.is_some())
-            {
-                let license_url = audio
-                    .as_ref()
-                    .and_then(|track| track.representation.license_url.as_ref())
-                    .ok_or_else(|| {
-                        ManifestRunError::Unsupported(
-                            "The selected DASH audio representation has no license URL".to_string(),
-                        )
-                    })?;
-                guard_manifest_child_url(&job.source.url, license_url, &mut guarded_child_hosts)?;
-            }
-        }
-        Tracks::Hls {
-            video,
-            audio,
-            subtitle,
-            ..
-        } => {
-            validate_hls_playready_configuration(
-                video,
-                job.playready_device_path.as_deref(),
-                &job.source.url,
-                &mut guarded_child_hosts,
-            )?;
-            if let Some(audio) = audio {
-                validate_hls_playready_configuration(
-                    audio,
-                    job.playready_device_path.as_deref(),
-                    &job.source.url,
-                    &mut guarded_child_hosts,
-                )?;
-            }
-            if subtitle
-                .as_ref()
-                .is_some_and(|track| !track.protections.is_empty())
-            {
-                return Err(ManifestRunError::Unsupported(
-                    "Native HLS DRM is limited to the selected video and audio CMAF tracks"
-                        .to_string(),
-                ));
-            }
-        }
-        Tracks::DashLiveOffline { .. } => {}
-    };
-
     if has_audio {
         ensure_track_dir(&audio_dir).await?;
     }
@@ -936,7 +834,6 @@ async fn resolve_manifest_tracks(
 struct ManifestStaticTransfer<'a> {
     client: &'a reqwest::Client,
     tracks: &'a Tracks,
-    playready_device_path: Option<&'a Path>,
     destination_parts: bool,
     staging: &'a Path,
     destination: &'a Path,
@@ -958,7 +855,6 @@ async fn transfer_static_manifest_tracks(
     let ManifestStaticTransfer {
         client,
         tracks,
-        playready_device_path,
         destination_parts,
         staging,
         destination,
@@ -1045,52 +941,10 @@ async fn transfer_static_manifest_tracks(
                     return Ok(false);
                 }
                 write_playlist(video_dir, video).await?;
-                if tracks_has_hls_playready_plan(video) {
-                    let device_path = playready_device_path.ok_or_else(|| {
-                        ManifestRunError::Unsupported(
-                            "A PlayReady device file is required for native HLS CMAF decryption"
-                                .to_string(),
-                        )
-                    })?;
-                    if !decrypt_hls_playready_track(
-                        client,
-                        device_path,
-                        video,
-                        video_dir,
-                        "video-track.mp4.decrypted",
-                        abort,
-                    )
-                    .await?
-                    {
-                        return Ok(false);
-                    }
-                } else {
-                    decrypt_hls_sample_aes_segments(video_dir, video).await?;
-                }
+                decrypt_hls_sample_aes_segments(video_dir, video).await?;
                 if let Some(audio) = audio {
                     write_playlist(audio_dir, audio).await?;
-                    if tracks_has_hls_playready_plan(audio) {
-                        let device_path = playready_device_path.ok_or_else(|| {
-                            ManifestRunError::Unsupported(
-                                "A PlayReady device file is required for native HLS CMAF decryption"
-                                    .to_string(),
-                            )
-                        })?;
-                        if !decrypt_hls_playready_track(
-                            client,
-                            device_path,
-                            audio,
-                            audio_dir,
-                            "audio-track.mp4.decrypted",
-                            abort,
-                        )
-                        .await?
-                        {
-                            return Ok(false);
-                        }
-                    } else {
-                        decrypt_hls_sample_aes_segments(audio_dir, audio).await?;
-                    }
+                    decrypt_hls_sample_aes_segments(audio_dir, audio).await?;
                 }
             }
             if let Some(subtitle) = subtitle {
@@ -1121,7 +975,6 @@ async fn transfer_static_manifest_tracks(
         } => {
             if !fetch_and_write_dash_track(ManifestDashTrackTransfer {
                 client,
-                playready_device_path,
                 staging,
                 plan: video,
                 directory: video_dir,
@@ -1141,7 +994,6 @@ async fn transfer_static_manifest_tracks(
             if let Some(audio) = audio
                 && !fetch_and_write_dash_track(ManifestDashTrackTransfer {
                     client,
-                    playready_device_path,
                     staging,
                     plan: audio,
                     directory: audio_dir,
@@ -1186,7 +1038,6 @@ async fn transfer_static_manifest_tracks(
                     };
                 if !fetch_and_write_dash_track(ManifestDashTrackTransfer {
                     client,
-                    playready_device_path,
                     staging,
                     plan: subtitle,
                     directory: &subtitle_dir,
@@ -1705,10 +1556,7 @@ pub(crate) async fn run_manifest_download(
         downloaded,
     } = prepare_manifest_attempt(&job, &tx).await?;
     let mut _finish_stop_sender = None;
-    let static_destination_parts = !live_hls
-        && !live_dash
-        && !tracks_has_hls_playready(&tracks)
-        && tracks.uses_destination_parts();
+    let static_destination_parts = !live_hls && !live_dash && tracks.uses_destination_parts();
     let mut live_destination_parts = live_dash;
     if live_hls {
         let Tracks::Hls { video, audio, .. } = &tracks else {
@@ -1725,7 +1573,7 @@ pub(crate) async fn run_manifest_download(
             staging: &staging,
             finish_only: finish_requested,
             video,
-            audio: audio.as_deref(),
+            audio: audio.as_ref(),
             video_dir: &video_dir,
             audio_dir: &audio_dir,
             concurrency,
@@ -1765,7 +1613,7 @@ pub(crate) async fn run_manifest_download(
         }
     } else if live_dash {
         let (video_plan, audio_plan) = match &tracks {
-            Tracks::Dash { video, audio, .. } => (Some(video.as_ref()), audio.as_deref()),
+            Tracks::Dash { video, audio, .. } => (Some(video), audio.as_deref()),
             Tracks::DashLiveOffline { .. } => (None, None),
             Tracks::Hls { .. } => {
                 return Err(ManifestRunError::Failed(
@@ -1809,7 +1657,6 @@ pub(crate) async fn run_manifest_download(
         match transfer_static_manifest_tracks(ManifestStaticTransfer {
             client: &client,
             tracks: &tracks,
-            playready_device_path: job.playready_device_path.as_deref(),
             destination_parts: static_destination_parts,
             staging: &staging,
             destination: &job.dest,
@@ -1880,20 +1727,6 @@ struct ManifestFinalization<'a> {
     downloaded: &'a AtomicU64,
 }
 
-async fn require_decrypted_track(path: &Path, label: &str) -> Result<(), ManifestRunError> {
-    let metadata = tokio::fs::symlink_metadata(path).await.map_err(|error| {
-        ManifestRunError::Failed(format!(
-            "Could not inspect the decrypted native {label} track: {error}"
-        ))
-    })?;
-    if metadata.file_type().is_symlink() || !metadata.is_file() || metadata.len() == 0 {
-        return Err(ManifestRunError::Failed(format!(
-            "The decrypted native {label} track is not a regular, non-empty staging file"
-        )));
-    }
-    Ok(())
-}
-
 /// Mux the staged tracks, validate the output, and publish it without clobbering.
 ///
 /// The staging data is retained on every failure before publication so the queue
@@ -1923,18 +1756,7 @@ async fn finalize_manifest_download(
     tx.send(EngineMsg::Phase("Merging audio and video…".to_string()))
         .ok();
 
-    let video_encrypted = matches!(
-        &tracks,
-        Tracks::Dash { video, .. } if video.representation.encryption.is_some()
-    ) || matches!(
-        &tracks,
-        Tracks::Hls { video, .. } if tracks_has_hls_playready_plan(video)
-    );
-    let video_input = if video_encrypted {
-        let path = video_dir.join("video-track.mp4.decrypted");
-        require_decrypted_track(&path, "video").await?;
-        path
-    } else if destination_parts {
+    let video_input = if destination_parts {
         crate::manifest_destination::part_path_async(
             staging.to_path_buf(),
             job.dest.clone(),
@@ -1951,19 +1773,8 @@ async fn finalize_manifest_download(
             }
         }
     };
-    let audio_encrypted = matches!(
-        &tracks,
-        Tracks::Dash { audio: Some(audio), .. } if audio.representation.encryption.is_some()
-    ) || matches!(
-        &tracks,
-        Tracks::Hls { audio: Some(audio), .. } if tracks_has_hls_playready_plan(audio)
-    );
     let audio_input = if has_audio {
-        Some(if audio_encrypted {
-            let path = audio_dir.join("audio-track.mp4.decrypted");
-            require_decrypted_track(&path, "audio").await?;
-            path
-        } else if destination_parts {
+        Some(if destination_parts {
             crate::manifest_destination::part_path_async(
                 staging.to_path_buf(),
                 job.dest.clone(),
@@ -2210,22 +2021,6 @@ async fn finalize_manifest_download(
     Ok(ManifestOutcome::Finished(size))
 }
 
-fn inherit_hls_session_protections(
-    plan: &mut crate::manifest::HlsPlan,
-    inherited: &[crate::drm::HlsProtection],
-) {
-    if inherited.is_empty() {
-        return;
-    }
-    let mut protections = inherited.to_vec();
-    for protection in plan.protections.iter() {
-        if !protections.contains(protection) {
-            protections.push(protection.clone());
-        }
-    }
-    plan.protections = protections.into_boxed_slice();
-}
-
 async fn resolve_tracks(
     client: &reqwest::Client,
     lookup: ManifestLookup,
@@ -2240,7 +2035,7 @@ async fn resolve_tracks(
         ManifestDownloadPlan::HlsMedia(video) => {
             guard_hls_resources(&source.url, &video, guarded_child_hosts)?;
             Ok(Tracks::Hls {
-                video,
+                video: *video,
                 audio: None,
                 subtitle: None,
                 subtitle_language: None,
@@ -2252,22 +2047,19 @@ async fn resolve_tracks(
                 audio_url,
                 subtitle_url,
                 subtitle_language,
-                session_protections,
             } = *plan;
             guard_manifest_child_url(&source.url, &video_url, guarded_child_hosts)?;
             if let Some(audio_url) = audio_url.as_ref() {
                 guard_manifest_child_url(&source.url, audio_url, guarded_child_hosts)?;
             }
-            let mut video =
+            let video =
                 crate::manifest_intake::lookup_hls_media(client, video_url.as_str()).await?;
-            inherit_hls_session_protections(&mut video, &session_protections);
             guard_hls_resources(&source.url, &video, guarded_child_hosts)?;
             let subtitle = match subtitle_url {
                 Some(url) => {
                     guard_manifest_child_url(&source.url, &url, guarded_child_hosts)?;
-                    let mut plan =
+                    let plan =
                         crate::manifest_intake::lookup_hls_media(client, url.as_str()).await?;
-                    inherit_hls_session_protections(&mut plan, &session_protections);
                     if plan.is_live {
                         return Err(ManifestRunError::Unsupported(
                             "Native live HLS subtitle renditions are not supported yet".to_string(),
@@ -2280,9 +2072,8 @@ async fn resolve_tracks(
             };
             let audio = match audio_url {
                 Some(url) => {
-                    let mut plan =
+                    let plan =
                         crate::manifest_intake::lookup_hls_media(client, url.as_str()).await?;
-                    inherit_hls_session_protections(&mut plan, &session_protections);
                     guard_hls_resources(&source.url, &plan, guarded_child_hosts)?;
                     Some(plan)
                 }
@@ -2296,8 +2087,8 @@ async fn resolve_tracks(
                 ));
             }
             Ok(Tracks::Hls {
-                video: Box::new(video),
-                audio: audio.map(Box::new),
+                video,
+                audio,
                 subtitle,
                 subtitle_language,
             })
@@ -2324,7 +2115,7 @@ async fn resolve_tracks(
                 .as_ref()
                 .and_then(|track| track.representation.language.clone());
             Ok(Tracks::Dash {
-                video,
+                video: *video,
                 audio,
                 subtitle,
                 subtitle_language,
@@ -2342,264 +2133,6 @@ fn guard_hls_resources(
         guard_manifest_child_url(parent_url, &resource.url, seen_hosts)?;
     }
     Ok(())
-}
-
-struct HlsPlayReadyRequest {
-    scheme: crate::dash_drm::EncryptionScheme,
-    pssh: Vec<u8>,
-    license_url: Url,
-}
-
-fn tracks_has_hls_playready(tracks: &Tracks) -> bool {
-    matches!(
-        tracks,
-        Tracks::Hls { video, audio, .. }
-            if tracks_has_hls_playready_plan(video)
-                || audio.as_deref().is_some_and(tracks_has_hls_playready_plan)
-    )
-}
-
-fn tracks_has_hls_playready_plan(plan: &HlsPlan) -> bool {
-    plan.protections
-        .iter()
-        .any(|protection| protection.system == crate::drm::ProtectionSystem::PlayReady)
-}
-
-fn hls_playready_request(plan: &HlsPlan) -> Result<Option<HlsPlayReadyRequest>, String> {
-    if plan.protections.is_empty() {
-        return Ok(None);
-    }
-    if plan.is_live || !plan.end_list || !plan.is_single_init_fmp4_presentation() {
-        return Err(
-            "Native HLS PlayReady requires a static, single-init CMAF presentation".to_string(),
-        );
-    }
-    if plan.resources.iter().any(|resource| {
-        resource.range.is_some()
-            || !matches!(
-                resource.kind,
-                HlsResourceKind::InitMap | HlsResourceKind::Segment
-            )
-    }) {
-        return Err(
-            "Native HLS PlayReady does not support ranged or non-CMAF resources".to_string(),
-        );
-    }
-    if plan.protections.len() != 1 {
-        return Err(
-            "Native HLS PlayReady currently requires one unique PlayReady Object per track"
-                .to_string(),
-        );
-    }
-    let protection = &plan.protections[0];
-    if protection.system != crate::drm::ProtectionSystem::PlayReady {
-        return Err("The selected HLS DRM system has no enabled native CDM".to_string());
-    }
-    let playlist_bytes = plan
-        .local_playlist_bytes()
-        .map_err(|_| "The local HLS PlayReady playlist could not be validated".to_string())?;
-    let playlist = m3u8_rs::parse_media_playlist_res(&playlist_bytes)
-        .map_err(|_| "The local HLS PlayReady playlist is malformed".to_string())?;
-    if playlist.segments.is_empty() {
-        return Err("The HLS PlayReady playlist has no media segments".to_string());
-    }
-    for segment in &playlist.segments {
-        let key = segment.key.as_ref().ok_or_else(|| {
-            "The HLS PlayReady playlist changes to an unencrypted segment".to_string()
-        })?;
-        let active = crate::drm::hls_protection_from_key(key)?.ok_or_else(|| {
-            "The HLS PlayReady playlist uses an unsupported identity key".to_string()
-        })?;
-        if active != *protection {
-            return Err(
-                "Native HLS PlayReady requires one unchanged PlayReady Object and scheme across the track"
-                    .to_string(),
-            );
-        }
-    }
-    let crate::drm::HlsInitializationData::PlayReadyObject(pro) = &protection.initialization_data
-    else {
-        return Err("The HLS PlayReady initialization data is not a PlayReady Object".to_string());
-    };
-    let (pssh, license_url) = crate::dash_playready::hls_license_request(pro)?;
-    Ok(Some(HlsPlayReadyRequest {
-        scheme: protection.scheme,
-        pssh,
-        license_url,
-    }))
-}
-
-fn validate_playready_device_file(device_path: Option<&Path>) -> Result<(), ManifestRunError> {
-    let Some(device_path) = device_path else {
-        return Err(ManifestRunError::Unsupported(
-            "Select a valid PlayReady .prd device file in Advanced → Media preferences".to_string(),
-        ));
-    };
-    if !device_path.is_file()
-        || !device_path
-            .extension()
-            .and_then(|extension| extension.to_str())
-            .is_some_and(|extension| extension.eq_ignore_ascii_case("prd"))
-    {
-        return Err(ManifestRunError::Unsupported(
-            "The configured PlayReady device must be an existing .prd file".to_string(),
-        ));
-    }
-    Ok(())
-}
-
-fn validate_hls_playready_configuration(
-    plan: &HlsPlan,
-    device_path: Option<&Path>,
-    source_url: &str,
-    guarded_child_hosts: &mut std::collections::HashSet<String>,
-) -> Result<(), ManifestRunError> {
-    let Some(request) = hls_playready_request(plan).map_err(ManifestRunError::Unsupported)? else {
-        return Ok(());
-    };
-    validate_playready_device_file(device_path)?;
-    guard_manifest_child_url(source_url, &request.license_url, guarded_child_hosts)?;
-    Ok(())
-}
-
-fn validate_playready_configuration(
-    plan: &DashRepresentationPlan,
-    device_path: Option<&Path>,
-) -> Result<(), ManifestRunError> {
-    let Some(encryption) = plan.representation.encryption else {
-        return Ok(());
-    };
-    if encryption.system != crate::dash_drm::ProtectionSystem::PlayReady {
-        return Ok(());
-    }
-
-    validate_playready_device_file(device_path)?;
-    if plan.representation.playready_pssh.is_none() {
-        return Err(ManifestRunError::Unsupported(
-            "The selected DASH PlayReady representation has no supported PSSH or mspr:pro data"
-                .to_string(),
-        ));
-    }
-    if plan.representation.license_url.is_none() {
-        return Err(ManifestRunError::Unsupported(
-            "The selected DASH PlayReady representation has no DASHIF license URL".to_string(),
-        ));
-    }
-    Ok(())
-}
-
-/// Decrypt one static HLS CMAF track through the shared validated CENC/CBCS path.
-async fn decrypt_hls_playready_track(
-    client: &reqwest::Client,
-    device_path: &Path,
-    plan: &HlsPlan,
-    directory: &Path,
-    output_name: &str,
-    abort: &mut tokio::sync::oneshot::Receiver<crate::video::StopIntent>,
-) -> Result<bool, ManifestRunError> {
-    let request = hls_playready_request(plan)
-        .map_err(ManifestRunError::Unsupported)?
-        .ok_or_else(|| {
-            ManifestRunError::Unsupported(
-                "The selected HLS track has no supported PlayReady initialization data".to_string(),
-            )
-        })?;
-    let resources: Vec<DashResource> = plan
-        .resources
-        .iter()
-        .map(|resource| {
-            let kind = match resource.kind {
-                HlsResourceKind::InitMap => DashResourceKind::Initialization,
-                HlsResourceKind::Segment => DashResourceKind::Segment,
-                HlsResourceKind::Key => {
-                    return Err(ManifestRunError::Unsupported(
-                        "Native HLS PlayReady does not accept remote key resources".to_string(),
-                    ));
-                }
-            };
-            Ok(DashResource {
-                url: resource.url.clone(),
-                range: resource.range,
-                filename: resource.filename.clone(),
-                kind,
-                segment_number: None,
-            })
-        })
-        .collect::<Result<_, ManifestRunError>>()?;
-    let directory = directory.to_path_buf();
-    let scheme = request.scheme;
-    let cancelled = Arc::new(AtomicBool::new(false));
-    let scan_cancelled = Arc::clone(&cancelled);
-    let mut scan = Box::pin(tokio::task::spawn_blocking(move || {
-        let init_resource = resources
-            .first()
-            .ok_or_else(|| "HLS CMAF initialization resource is missing".to_string())?;
-        let init_path = directory.join(&init_resource.filename);
-        let init = crate::bounded_file::read_regular_file_bounded(&init_path, 16 * 1024 * 1024)
-            .map_err(|error| format!("Could not read HLS CMAF initialization: {error}"))?;
-        let encryption = crate::dash_drm::hls_encryption_from_init(
-            &init,
-            scheme,
-            crate::drm::ProtectionSystem::PlayReady,
-        )?;
-        let required = crate::dash_drm::required_kids_with_cancel(
-            &resources,
-            &directory,
-            encryption,
-            &scan_cancelled,
-        )?;
-        Ok::<_, String>((resources, directory, encryption, required))
-    }));
-    let (resources, directory, encryption, required_kids) = tokio::select! {
-        biased;
-        _ = &mut *abort => {
-            cancelled.store(true, Ordering::Release);
-            return Ok(false);
-        }
-        result = &mut scan => result
-            .map_err(|_| {
-                ManifestRunError::Failed("HLS PlayReady sample inspection task failed".to_string())
-            })?
-            .map_err(ManifestRunError::Unsupported)?,
-    };
-
-    let mut key_request = Box::pin(crate::dash_playready::acquire_keys(
-        client,
-        device_path,
-        &request.pssh,
-        &request.license_url,
-        &required_kids,
-    ));
-    let keys = tokio::select! {
-        biased;
-        _ = &mut *abort => return Ok(false),
-        result = &mut key_request => result.map_err(ManifestRunError::Failed)?,
-    };
-
-    let output = directory.join(output_name);
-    let task_cancelled = Arc::clone(&cancelled);
-    let mut decrypt = Box::pin(tokio::task::spawn_blocking(move || {
-        crate::dash_drm::decrypt_track(
-            &resources,
-            &directory,
-            &output,
-            encryption,
-            &keys,
-            &task_cancelled,
-        )
-    }));
-    tokio::select! {
-        biased;
-        _ = &mut *abort => {
-            cancelled.store(true, Ordering::Release);
-            Ok(false)
-        }
-        result = &mut decrypt => {
-            result
-                .map_err(|_| ManifestRunError::Failed("HLS PlayReady decryption task failed".to_string()))?
-                .map_err(ManifestRunError::Failed)
-        }
-    }
 }
 
 /// Extend the browser-handoff DNS policy to every host discovered in a native
@@ -2783,8 +2316,8 @@ async fn write_playlist(directory: &Path, plan: &HlsPlan) -> Result<(), String> 
         .map_err(|error| format!("Could not publish the local HLS playlist: {error}"))
 }
 
-/// Decrypt identity SAMPLE-AES MPEG-TS segments with the same VSD implementation
-/// used by VSD itself, then remove the corresponding key tags from the local playlist.
+/// Decrypt identity SAMPLE-AES MPEG-TS segments with iori-ssa, the engine used by VSD,
+/// then remove the corresponding key tags from the local playlist.
 async fn decrypt_hls_sample_aes_segments(
     directory: &Path,
     plan: &HlsPlan,
@@ -2868,9 +2401,16 @@ async fn decrypt_hls_sample_aes_segments(
 
         let decrypted = tokio::task::spawn_blocking(move || {
             std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                validate_vsd_sample_aes_segment(&encrypted)?;
-                let decrypter = vsd_mp4::decrypt::HlsSampleAesDecrypter::new(&key, &iv);
-                Ok::<Vec<u8>, String>(decrypter.decrypt(encrypted))
+                validate_iori_sample_aes_segment(&encrypted)?;
+                let mut decrypted = Vec::with_capacity(encrypted.len());
+                iori_ssa::decrypt(
+                    std::io::Cursor::new(encrypted.as_slice()),
+                    &mut decrypted,
+                    key,
+                    iv,
+                )
+                .map_err(|error| error.to_string())?;
+                Ok::<Vec<u8>, String>(decrypted)
             }))
         })
         .await
@@ -2883,19 +2423,19 @@ async fn decrypt_hls_sample_aes_segments(
             Ok(Ok(bytes)) => bytes,
             Ok(Err(error)) => {
                 return Err(ManifestRunError::Unsupported(format!(
-                    "VSD cannot safely process HLS SAMPLE-AES segment {segment_uri}: {error}"
+                    "iori-ssa cannot safely process HLS SAMPLE-AES segment {segment_uri}: {error}"
                 )));
             }
             Err(_) => {
                 return Err(ManifestRunError::Unsupported(format!(
-                    "VSD panicked while processing HLS SAMPLE-AES segment {segment_uri}"
+                    "iori-ssa panicked while processing HLS SAMPLE-AES segment {segment_uri}"
                 )));
             }
         };
 
         if decrypted.len() != encrypted_size {
             return Err(ManifestRunError::Unsupported(
-                "VSD returned an incomplete HLS SAMPLE-AES segment".to_string(),
+                "iori-ssa returned an incomplete HLS SAMPLE-AES segment".to_string(),
             ));
         }
         let mut validator = TransportStreamValidator::new();
@@ -2905,7 +2445,7 @@ async fn decrypt_hls_sample_aes_segments(
         })?;
         if !validator.is_valid_complete(decrypted_size) {
             return Err(ManifestRunError::Unsupported(
-                "VSD produced an invalid MPEG-TS SAMPLE-AES segment".to_string(),
+                "iori-ssa produced an invalid MPEG-TS SAMPLE-AES segment".to_string(),
             ));
         }
 
@@ -2997,9 +2537,9 @@ async fn decrypt_hls_sample_aes_segments(
 }
 
 /// Validate the MPEG-TS packet/PES structure before handing untrusted bytes to
-/// VSD's SAMPLE-AES parser. In particular, iori-ssa's ADTS frame loop does not
+/// iori-ssa's SAMPLE-AES parser. In particular, iori-ssa's ADTS frame loop does not
 /// advance when a malformed frame advertises a zero length.
-fn validate_vsd_sample_aes_segment(bytes: &[u8]) -> Result<(), String> {
+fn validate_iori_sample_aes_segment(bytes: &[u8]) -> Result<(), String> {
     use mpeg2ts::{
         es::StreamType,
         ts::{ReadTsPacket, TsPacketReader, TsPayload},
@@ -3027,7 +2567,7 @@ fn validate_vsd_sample_aes_segment(bytes: &[u8]) -> Result<(), String> {
             }
             Some(TsPayload::Pes(pes)) => {
                 if let Some(previous) = aac_pes.remove(&pid) {
-                    validate_vsd_adts_pes(&previous)?;
+                    validate_iori_adts_pes(&previous)?;
                 }
                 if stream_types.get(&pid).is_some_and(|stream_type| {
                     matches!(
@@ -3054,12 +2594,12 @@ fn validate_vsd_sample_aes_segment(bytes: &[u8]) -> Result<(), String> {
         }
 
         if flush && let Some(data) = aac_pes.remove(&pid) {
-            validate_vsd_adts_pes(&data)?;
+            validate_iori_adts_pes(&data)?;
         }
     }
 
     for data in aac_pes.into_values() {
-        validate_vsd_adts_pes(&data)?;
+        validate_iori_adts_pes(&data)?;
     }
 
     Ok(())
@@ -3067,7 +2607,7 @@ fn validate_vsd_sample_aes_segment(bytes: &[u8]) -> Result<(), String> {
 
 /// Reject ADTS frame lengths that could make iori-ssa's audio loop fail to
 /// advance or index beyond the current PES packet.
-fn validate_vsd_adts_pes(mut data: &[u8]) -> Result<(), String> {
+fn validate_iori_adts_pes(mut data: &[u8]) -> Result<(), String> {
     while !data.is_empty() {
         if data.len() < 7 || data[0] != 0xff || data[1] & 0xf6 != 0xf0 {
             return Err("malformed ADTS frame header".to_string());
@@ -3693,7 +3233,6 @@ async fn fetch_dash_index_bytes(
 
 struct ManifestDashTrackTransfer<'a> {
     client: &'a reqwest::Client,
-    playready_device_path: Option<&'a Path>,
     staging: &'a Path,
     plan: &'a DashRepresentationPlan,
     directory: &'a Path,
@@ -3712,7 +3251,6 @@ async fn fetch_and_write_dash_track(
 ) -> Result<bool, ManifestRunError> {
     let ManifestDashTrackTransfer {
         client,
-        playready_device_path,
         staging,
         plan,
         directory,
@@ -3725,8 +3263,7 @@ async fn fetch_and_write_dash_track(
         downloaded,
         abort,
     } = context;
-    let encryption = plan.representation.encryption;
-    let (resources, drm_resources) = if let Some(index) = plan.segment_base_index.as_ref() {
+    let resources = if let Some(index) = plan.segment_base_index.as_ref() {
         let Some((bytes, total_length)) =
             fetch_dash_index_bytes(client, &index.url, index.index_range, abort).await?
         else {
@@ -3739,21 +3276,13 @@ async fn fetch_and_write_dash_track(
                         "The DASH SegmentBase index is unsupported: {error}"
                     ))
                 })?;
-        let drm_resources = encryption.map(|_| {
-            let mut resources = plan.resources.to_vec();
-            resources.extend(media_resources.iter().cloned());
-            resources
-        });
         let mut resources = dash_resources(plan);
         resources.extend(dash_resources_from(&media_resources));
-        (resources, drm_resources)
+        resources
     } else {
-        (
-            dash_resources(plan),
-            encryption.map(|_| plan.resources.to_vec()),
-        )
+        dash_resources(plan)
     };
-    let completed = fetch_and_write_ordered_track(ManifestOrderedTrackTransfer {
+    fetch_and_write_ordered_track(ManifestOrderedTrackTransfer {
         client,
         staging,
         resources,
@@ -3766,127 +3295,9 @@ async fn fetch_and_write_dash_track(
         tx,
         downloaded,
         abort,
-        format: if encryption.is_some() {
-            OrderedTrackFormat::Fmp4
-        } else {
-            OrderedTrackFormat::Any
-        },
-        retain_sources: encryption.is_some(),
+        format: OrderedTrackFormat::Any,
     })
-    .await?;
-    if !completed {
-        return Ok(false);
-    }
-    if let Some(encryption) = encryption {
-        let resources = drm_resources.ok_or_else(|| {
-            ManifestRunError::Failed("Encrypted DASH resource plan is missing".to_string())
-        })?;
-        let scan_resources = resources.clone();
-        let scan_directory = directory.to_path_buf();
-        let mut kid_scan = tokio::task::spawn_blocking(move || {
-            crate::dash_drm::required_kids(&scan_resources, &scan_directory, encryption)
-        });
-        let required_kids = tokio::select! {
-            biased;
-            _ = &mut *abort => return Ok(false),
-            result = &mut kid_scan => result
-                .map_err(|error| {
-                    ManifestRunError::Failed(format!("DASH KID scan task failed: {error}"))
-                })?
-                .map_err(ManifestRunError::Unsupported)?,
-        };
-        let license_url = plan.representation.license_url.as_ref().ok_or_else(|| {
-            ManifestRunError::Unsupported(
-                "The selected DASH representation has no license URL".to_string(),
-            )
-        })?;
-        let track_keys = match encryption.system {
-            crate::dash_drm::ProtectionSystem::ClearKey => {
-                let license_requests = [(license_url.clone(), required_kids)];
-                let mut key_request = Box::pin(crate::dash_drm::acquire_required_keys(
-                    client,
-                    &license_requests,
-                ));
-                let acquired_keys = tokio::select! {
-                    biased;
-                    _ = &mut *abort => return Ok(false),
-                    result = &mut key_request => result.map_err(ManifestRunError::Failed)?,
-                };
-                acquired_keys.ok_or_else(|| {
-                    ManifestRunError::Failed(
-                        "DASH ClearKey acquisition returned no content keys".to_string(),
-                    )
-                })?
-            }
-            crate::dash_drm::ProtectionSystem::PlayReady => {
-                let device_path = playready_device_path.ok_or_else(|| {
-                    ManifestRunError::Unsupported(
-                        "A PlayReady device file is required for native DASH decryption"
-                            .to_string(),
-                    )
-                })?;
-                let pssh = plan.representation.playready_pssh.as_deref().ok_or_else(|| {
-                    ManifestRunError::Unsupported(
-                        "The selected DASH PlayReady representation has no supported initialization data"
-                            .to_string(),
-                    )
-                })?;
-                let mut key_request = Box::pin(crate::dash_playready::acquire_keys(
-                    client,
-                    device_path,
-                    pssh,
-                    license_url,
-                    &required_kids,
-                ));
-                tokio::select! {
-                    biased;
-                    _ = &mut *abort => return Ok(false),
-                    result = &mut key_request => result.map_err(ManifestRunError::Failed)?,
-                }
-            }
-            crate::dash_drm::ProtectionSystem::Widevine
-            | crate::dash_drm::ProtectionSystem::FairPlay => {
-                return Err(ManifestRunError::Unsupported(
-                    "The selected DASH DRM system has no enabled native CDM".to_string(),
-                ));
-            }
-        };
-        let directory = directory.to_path_buf();
-        let output = directory.join(format!("{filename}.decrypted"));
-        let cancelled = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
-        let worker_cancelled = std::sync::Arc::clone(&cancelled);
-        let mut decryption = tokio::task::spawn_blocking(move || {
-            crate::dash_drm::decrypt_track(
-                &resources,
-                &directory,
-                &output,
-                encryption,
-                &track_keys,
-                &worker_cancelled,
-            )
-        });
-        tokio::select! {
-            biased;
-            _ = &mut *abort => {
-                cancelled.store(true, Ordering::Release);
-                let _decryption_result = decryption.await.map_err(|error| {
-                    ManifestRunError::Failed(format!("DASH decryption task failed: {error}"))
-                })?;
-                return Ok(false);
-            }
-            result = &mut decryption => {
-                let completed = result
-                    .map_err(|error| {
-                        ManifestRunError::Failed(format!("DASH decryption task failed: {error}"))
-                    })?
-                    .map_err(ManifestRunError::Unsupported)?;
-                if !completed {
-                    return Ok(false);
-                }
-            }
-        }
-    }
-    Ok(true)
+    .await
 }
 
 struct ManifestHlsTrackTransfer<'a> {
@@ -4224,7 +3635,6 @@ struct ManifestOrderedTrackTransfer<'a> {
     downloaded: &'a Arc<AtomicU64>,
     abort: &'a mut tokio::sync::oneshot::Receiver<crate::video::StopIntent>,
     format: OrderedTrackFormat,
-    retain_sources: bool,
 }
 
 async fn fetch_and_write_ordered_track(
@@ -4244,24 +3654,12 @@ async fn fetch_and_write_ordered_track(
         downloaded,
         abort,
         format,
-        retain_sources,
     } = context;
     let resource_names = resources
         .iter()
         .map(|resource| resource.filename.clone())
         .collect::<Vec<_>>();
-    let (writer, committed_bytes) = if retain_sources {
-        crate::manifest_writer::OrderedTrackWriter::open_destination_part_retaining_sources(
-            resource_names.clone(),
-            directory,
-            staging,
-            filename,
-            destination,
-            item_id,
-            track,
-        )
-        .await?
-    } else {
+    let (writer, committed_bytes) =
         crate::manifest_writer::OrderedTrackWriter::open_destination_part(
             resource_names.clone(),
             directory,
@@ -4271,8 +3669,7 @@ async fn fetch_and_write_ordered_track(
             item_id,
             track,
         )
-        .await?
-    };
+        .await?;
     if committed_bytes > 0 {
         let total = reserve_download_bytes(downloaded, committed_bytes)?;
         tx.send(progress_message(total)).ok();
@@ -4670,155 +4067,17 @@ async fn run_ffmpeg(
 mod tests {
     use super::*;
 
-    fn hls_playready_uri(license_url: &str) -> String {
-        use base64::Engine as _;
-        use base64::engine::general_purpose::STANDARD;
-
-        let xml = format!(
-            concat!(
-                "<WRMHEADER xmlns=\"http://schemas.microsoft.com/DRM/2007/03/PlayReadyHeader\" ",
-                "version=\"4.3.0.0\"><DATA><LA_URL>{}</LA_URL></DATA></WRMHEADER>"
-            ),
-            license_url
-        );
-        let utf16: Vec<u8> = xml.encode_utf16().flat_map(u16::to_le_bytes).collect();
-        let mut pro = Vec::with_capacity(10 + utf16.len());
-        pro.extend_from_slice(
-            &u32::try_from(10 + utf16.len())
-                .expect("test PlayReady PRO size")
-                .to_le_bytes(),
-        );
-        pro.extend_from_slice(&1_u16.to_le_bytes());
-        pro.extend_from_slice(&1_u16.to_le_bytes());
-        pro.extend_from_slice(
-            &u16::try_from(utf16.len())
-                .expect("test WRMHEADER size")
-                .to_le_bytes(),
-        );
-        pro.extend_from_slice(&utf16);
-        format!(
-            "data:text/plain;charset=UTF-16;base64,{}",
-            STANDARD.encode(pro)
-        )
-    }
-
-    fn hls_playready_plan(playready_uri: &str, include_clear_segment: bool) -> HlsPlan {
-        let mut playlist = format!(
-            concat!(
-                "#EXTM3U\n",
-                "#EXT-X-VERSION:7\n",
-                "#EXT-X-TARGETDURATION:2\n",
-                "#EXT-X-MAP:URI=\"init.mp4\"\n",
-                "#EXT-X-KEY:METHOD=SAMPLE-AES,URI=\"{}\",",
-                "KEYFORMAT=\"com.microsoft.playready\"\n",
-                "#EXTINF:2,\nsegment-1.m4s\n"
-            ),
-            playready_uri
-        );
-        if include_clear_segment {
-            playlist.push_str("#EXT-X-KEY:METHOD=NONE\n#EXTINF:2,\nsegment-2.m4s\n");
-        }
-        playlist.push_str("#EXT-X-ENDLIST\n");
-        let parsed = m3u8_rs::parse_media_playlist_res(playlist.as_bytes())
-            .expect("parse test PlayReady CMAF playlist");
-        let key = parsed
-            .segments
-            .first()
-            .and_then(|segment| segment.key.as_ref())
-            .expect("parsed segment retains its active PlayReady key");
-        assert_eq!(key.keyformat.as_deref(), Some("com.microsoft.playready"));
-        assert_eq!(key.method, m3u8_rs::KeyMethod::SampleAES);
-        assert!(key.iv.is_none());
-        assert!(
-            parsed
-                .segments
-                .first()
-                .is_some_and(|segment| segment.map.is_some())
-        );
-        assert!(
-            !parsed.unknown_tags.iter().any(|tag| tag.tag == "X-KEY"),
-            "a media key tag must not appear among playlist-level unknown tags"
-        );
-        assert!(
-            parsed
-                .segments
-                .first()
-                .is_some_and(|segment| segment.unknown_tags.iter().all(|tag| tag.tag != "X-KEY")),
-            "the recognized PlayReady key must remain typed"
-        );
-        assert!(
-            parsed
-                .segments
-                .iter()
-                .flat_map(|segment| &segment.unknown_tags)
-                .all(|tag| tag.tag != "X-KEY" || tag.rest.as_deref() == Some("METHOD=NONE")),
-            "only the valid METHOD=NONE reset may remain as an unknown key tag"
-        );
-        crate::drm::hls_protection_from_key(key)
-            .expect("parsed PlayReady key descriptor is valid")
-            .expect("parsed PlayReady key descriptor is retained");
-        crate::drm::validate_hls_keyformat_multiplexing(playlist.as_bytes())
-            .expect("PlayReady KEYFORMAT multiplexing is valid");
-        crate::manifest::plan_hls_media_playlist(
-            "https://cdn.example.test/path/master.m3u8",
-            playlist.as_bytes(),
-        )
-        .expect("test static PlayReady CMAF playlist")
-    }
-
-    #[test]
-    fn hls_playready_request_accepts_one_static_cmaf_key_and_rejects_mixed_keys() {
-        let first_uri = hls_playready_uri("https://license.example.test/acquire");
-        let plan = hls_playready_plan(&first_uri, false);
-        assert!(plan.is_single_init_fmp4_presentation());
-        assert_eq!(plan.protections.len(), 1);
-        assert_eq!(plan.resources.len(), 2);
-        let request = hls_playready_request(&plan).expect("valid HLS PlayReady request");
-        assert_eq!(
-            request.expect("request").license_url.as_str(),
-            "https://license.example.test/acquire"
-        );
-
-        let mixed = hls_playready_plan(&first_uri, true);
-        assert!(
-            hls_playready_request(&mixed).is_err(),
-            "a later METHOD=NONE segment must not be decrypted with the preceding PlayReady key"
-        );
-
-        let second_uri = hls_playready_uri("https://license.example.test/acquire-rotated");
-        let rotation = format!(
-            concat!(
-                "#EXTM3U\n#EXT-X-VERSION:7\n#EXT-X-TARGETDURATION:2\n",
-                "#EXT-X-MAP:URI=\"init.mp4\"\n",
-                "#EXT-X-KEY:METHOD=SAMPLE-AES,URI=\"{}\",KEYFORMAT=\"com.microsoft.playready\"\n",
-                "#EXTINF:2,\nsegment-1.m4s\n",
-                "#EXT-X-KEY:METHOD=SAMPLE-AES,URI=\"{}\",KEYFORMAT=\"com.microsoft.playready\"\n",
-                "#EXTINF:2,\nsegment-2.m4s\n#EXT-X-ENDLIST\n"
-            ),
-            first_uri, second_uri
-        );
-        let rotation_plan = crate::manifest::plan_hls_media_playlist(
-            "https://cdn.example.test/master.m3u8",
-            rotation.as_bytes(),
-        )
-        .expect("two-object rotation metadata is valid for fallback planning");
-        assert!(
-            hls_playready_request(&rotation_plan).is_err(),
-            "distinct PlayReady Objects must remain on extractor fallback"
-        );
-    }
-
     #[test]
     fn vsd_adts_validation_rejects_zero_length_frames() {
         let malformed = [0xff, 0xf1, 0, 0, 0, 0, 0];
-        assert!(validate_vsd_adts_pes(&malformed).is_err());
+        assert!(validate_iori_adts_pes(&malformed).is_err());
     }
 
     #[test]
     fn vsd_adts_validation_accepts_complete_frames() {
         let frame = [0xff, 0xf1, 0, 0, 0, 0xe0, 0];
-        assert!(validate_vsd_adts_pes(&frame).is_ok());
-        assert!(validate_vsd_adts_pes(&[frame, frame].concat()).is_ok());
+        assert!(validate_iori_adts_pes(&frame).is_ok());
+        assert!(validate_iori_adts_pes(&[frame, frame].concat()).is_ok());
     }
 
     #[test]
@@ -5474,7 +4733,6 @@ segment-2.m4s
         assert!(
             fetch_and_write_dash_track(ManifestDashTrackTransfer {
                 client: &client,
-                playready_device_path: None,
                 staging: staging.path(),
                 plan: &plan,
                 directory: &video_dir,
@@ -5789,7 +5047,6 @@ segment-2.m4s
             cookies_browser: "none".to_string(),
             connections: 1,
             embed_subs: false,
-            playready_device_path: None,
         };
         let gate = crate::attempt_gate::AttemptGate::new();
         let (_stop_tx, stop_rx) = tokio::sync::oneshot::channel();

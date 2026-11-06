@@ -107,76 +107,17 @@ timeBase and time-expression validation, namespace/element restrictions,
 whitespace/entities, malformed or oversized XML, sample and output bounds,
 and unchanged WVTT and FFmpeg finalization paths.
 
-### 4. Shared DRM across HLS and DASH
+### 4. Explicit-key encrypted media support
 
-Keep protocol parsing separate from the shared protection-system, CDM, key
-handling, and sample-decryption layers. HLS already has identity AES-128 and
-MPEG-TS identity SAMPLE-AES handling; DASH has bounded ClearKey CENC/CBCS
-decryption. The shared metadata layer recognizes DASH Widevine PSSH and HLS
-Widevine/PlayReady/FairPlay signalling, but non-identity providers remain on
-extractor fallback until an audited CDM path is available.
+Evaluate HLS SAMPLE-AES and fragmented-MP4 CENC decryption as separate features.
+The first scope is user-supplied keys only. Do not add license-server discovery,
+Widevine/PlayReady acquisition, browser secret extraction, or automatic key
+fetching in this phase. Audit per-track encryption metadata and sample auxiliary
+information before enabling any format; reject unsupported schemes and patterns.
 
-The first PlayReady worker increment is implemented using the
-maintained `playready 0.4.x` API. Grab launches its own executable in a
-short-lived child-process mode; the parent retains HTTPS transport and its
-existing reqwest network policy, while the child loads and verifies a
-provisioned `.prd` device, creates a challenge, and processes the bounded
-license response. IPC is length-bounded JSON Lines; device paths, PSSH data,
-challenges, responses, and keys are not placed in argv or logs. Key material
-crosses the pipe in zeroizing buffers and is returned as zeroizing 128-bit
-values. This is a process-lifetime boundary, not an OS sandbox.
-
-The worker is now connected to static, single-Period DASH CENC/CBCS video and
-audio tracks. The Advanced → Media preferences page accepts a user-selected
-`.prd` device file; only its path is stored in GSettings. DASH planning
-accepts bounded PlayReady `cenc:pssh` or `mspr:pro` initialization data and
-an explicit HTTPS DASHIF `Laurl`. The parent uses Grab's guarded reqwest
-client for the license exchange, including the standard PlayReady SOAP
-`AcquireLicense` action header. The PlayReady crate normalizes returned KIDs
-to ISO Common Encryption UUID byte order, which Grab preserves when matching
-fragment sample KIDs. Retrieved content-key allocations are moved into
-zeroizing storage immediately. The existing shared `DrmKeyMap` and CENC/CBCS
-decryptor handle key lookup and sample decryption without a second decryptor.
-
-The initial HLS CMAF PlayReady integration is implemented for static tracks.
-It reuses the validated fragmented-MP4 CENC/CBCS sample parser/decryptor and
-the same isolated PlayReady worker. The HLS planner requires one leading
-`EXT-X-MAP`, no byte ranges or discontinuities, one unchanged PlayReady Object
-per selected video/audio track, exactly one WRMHEADER, and one explicit absolute
-HTTPS `DATA/LA_URL`. The PlayReady device path is shared with DASH settings.
-The parent retains guarded reqwest networking; decrypted tracks remain in
-private XDG staging and enter the existing FFmpeg finalizer.
-
-HLS PlayReady live streams, key changes to a distinct PlayReady Object, mixed
-clear/encrypted segments, changing initialization maps, encrypted subtitles,
-Widevine, FairPlay, custom license authorization, and non-standard challenge
-formats continue to use extractor fallback. DASH multi-Period presentations,
-encrypted subtitles, embedded license URLs without DASHIF `Laurl`, and
-non-standard challenge formats also remain on extractor fallback.
-
-Keep the dependency graph on the patched `crypto-bigint >= 0.7.6` line. The
-previous `playready 0.3.x` dependency resolved `crypto-bigint 0.5.5`, which
-is affected by RUSTSEC-2026-0387.
-
-Do not add the current Rust Widevine CDM crates while they require
-`rsa 0.9.x`: both `widevine 0.1.0` and `rswidevine 0.1.1` resolve
-RUSTSEC-2023-0071, for which RustSec lists no patched release. Do not suppress
-the advisory. Re-evaluate Widevine when a safe implementation is available;
-an official system-CDM host is a separate option because it depends on a
-locally installed proprietary CDM and must be evaluated for Flatpak isolation,
-availability, and licensing before adoption.
-
-Keep FairPlay Streaming separate because its SAMPLE-AES and skd URI flow uses
-Apple-specific application key handling rather than the Widevine or PlayReady
-CDM protocol. Do not extract browser secrets or log license challenges,
-license responses, content keys, or device material.
-
-Acceptance: validated protocol-specific initialization data mapped to a
-track-scoped KID/key model; exact CENC/CBCS sample auxiliary-data validation;
-bounded worker IPC, license responses, and resource parsing; zeroizing parent
-key storage; no key leakage into logs or argv; and known-answer fixtures for
-each enabled scheme. Unsupported schemes continue through the extractor
-fallback.
+Acceptance: validated track-scoped keys/IVs, correct clear/encrypted sample
+boundaries, bounded parsing, no key leakage into logs or argv, and known-answer
+fixtures for each enabled scheme.
 
 ### 5. Broader DASH index addressing
 

@@ -20,13 +20,14 @@ gio = "0.22"
 url = "2"
 # HLS playlist parsing and local media-playlist serialization.
 m3u8-rs = "6.0.1"
+# Validate MPEG-TS/PES structure before iori-ssa SAMPLE-AES processing.
 mpeg2ts = "=0.3.1"
 # Parse and validate MPEG-2 transport packets in native HLS segments.
 mpeg-ts = { version = "=0.6.2", default-features = false, features = ["std"] }
 # Parse ISO BMFF box trees for structural validation of native fMP4 resources.
 mp4box = { version = "=0.14.0", default-features = false }
-# Reuse VSD's SAMPLE-AES and sample-level CENC/CBCS decryption implementations.
-vsd-mp4 = { version = "=0.2.1", default-features = false, features = ["decrypt-cenc", "decrypt-hls"] }
+# VSD uses iori-ssa for identity-key SAMPLE-AES MPEG-TS decryption.
+iori-ssa = "=0.2.1"
 # Parse HLS diagnostics without exposing playlist contents. m3u8-rs exposes nom 7 parser errors.
 nom = "7"
 # DASH MPD parsing and serialization for native VOD downloads; pin the untrusted-input parser release.
@@ -72,11 +73,6 @@ psl = "=2.1.241"
 # Safe wrappers for Linux no-replace renameat2 operations.
 rustix = { version = "1.1.6", features = ["fs"] }
 thiserror = "2"
-# PlayReady CDM license processing. Use the release with the patched
-# crypto-bigint dependency chain; Widevine waits for a safe CDM backend.
-playready = "=0.4.0"
-# Zeroize short-lived content keys and decoded license material.
-zeroize = { version = "1.9.1", features = ["serde"] }
 # Secure destination-local temporary file for atomic no-clobber publication.
 tempfile = "3.27.0"
 

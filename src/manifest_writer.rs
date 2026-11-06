@@ -117,7 +117,6 @@ enum WriterMode {
     #[cfg(test)]
     StagedRetainingCheckpoint,
     DestinationPart(DestinationPart),
-    DestinationPartRetainingSources(DestinationPart),
     AppendableDestinationPart(DestinationPart),
     AppendableDestinationPartRetainingSources(DestinationPart),
 }
@@ -131,9 +130,6 @@ impl WriterMode {
             Self::StagedRetainingCheckpoint => (CheckpointPolicy::RetainAfterPublish, None, false),
             Self::DestinationPart(part) => {
                 (CheckpointPolicy::RetainAfterPublish, Some(part), false)
-            }
-            Self::DestinationPartRetainingSources(part) => {
-                (CheckpointPolicy::RetainSources, Some(part), false)
             }
             Self::AppendableDestinationPart(part) => {
                 (CheckpointPolicy::RetainAfterPublish, Some(part), true)
@@ -262,38 +258,6 @@ impl OrderedTrackWriter {
             directory,
             filename,
             WriterMode::DestinationPart(DestinationPart {
-                staging: staging.to_path_buf(),
-                destination: destination.to_path_buf(),
-                item_id,
-                track,
-            }),
-        ))
-        .await
-    }
-
-    /// Open a destination part while retaining the encrypted source resources.
-    ///
-    /// Static DASH DRM recovery keeps the ciphertext source segments and their
-    /// digest journal; the destination part is also ciphertext and is never
-    /// rewritten with decrypted bytes.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if the plan, checkpoint, ownership record, or files are invalid.
-    pub(crate) async fn open_destination_part_retaining_sources(
-        resources: Vec<String>,
-        directory: &Path,
-        staging: &Path,
-        filename: &str,
-        destination: &Path,
-        item_id: u64,
-        track: crate::manifest_destination::TrackKind,
-    ) -> Result<(Option<Self>, u64), String> {
-        Box::pin(Self::open_with_mode(
-            resources,
-            directory,
-            filename,
-            WriterMode::DestinationPartRetainingSources(DestinationPart {
                 staging: staging.to_path_buf(),
                 destination: destination.to_path_buf(),
                 item_id,

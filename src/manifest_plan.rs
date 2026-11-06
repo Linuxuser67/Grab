@@ -22,7 +22,6 @@ pub(crate) struct HlsMasterDownloadPlan {
     pub(crate) audio_url: Option<Url>,
     pub(crate) subtitle_url: Option<Url>,
     pub(crate) subtitle_language: Option<String>,
-    pub(crate) session_protections: Box<[crate::drm::HlsProtection]>,
 }
 
 #[derive(Debug)]
@@ -476,7 +475,6 @@ pub(crate) fn download_plan(
                                 .flatten()
                             })
                     }),
-                    session_protections: master.session_protections.clone(),
                 },
             )))
         }

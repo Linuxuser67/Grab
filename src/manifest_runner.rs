@@ -4729,7 +4729,12 @@ mod tests {
         assert_eq!(key.keyformat.as_deref(), Some("com.microsoft.playready"));
         assert_eq!(key.method, m3u8_rs::KeyMethod::SampleAES);
         assert!(key.iv.is_none());
-        assert!(segment_map_present(&parsed));
+        assert!(
+            parsed
+                .segments
+                .first()
+                .is_some_and(|segment| segment.map.is_some())
+        );
         crate::drm::hls_protection_from_key(key)
             .expect("parsed PlayReady key descriptor is valid")
             .expect("parsed PlayReady key descriptor is retained");

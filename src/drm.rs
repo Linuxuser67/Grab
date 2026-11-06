@@ -343,7 +343,7 @@ fn validate_playready_object(bytes: &[u8]) -> Result<(), String> {
     }
 
     let mut offset = 6_usize;
-    let mut has_wrm_header = false;
+    let mut wrm_header_count = 0_usize;
     for _ in 0..record_count {
         let header_end = offset.checked_add(4).ok_or_else(invalid)?;
         let header = bytes.get(offset..header_end).ok_or_else(invalid)?;
@@ -375,14 +375,14 @@ fn validate_playready_object(bytes: &[u8]) -> Result<(), String> {
                     .map(|pair| u16::from_le_bytes(*pair))
                     .collect();
                 String::from_utf16(&units).map_err(|_| invalid())?;
-                has_wrm_header = true;
+                wrm_header_count += 1;
             }
             2 | 3 => {}
             _ => return Err(invalid()),
         }
         offset = record_end;
     }
-    if offset != bytes.len() || !has_wrm_header {
+    if offset != bytes.len() || wrm_header_count != 1 {
         return Err(invalid());
     }
     Ok(())

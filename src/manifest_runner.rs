@@ -4662,6 +4662,108 @@ async fn run_ffmpeg(
 mod tests {
     use super::*;
 
+    fn hls_playready_uri(license_url: &str, kid_suffix: &str) -> String {
+        use base64::Engine as _;
+        use base64::engine::general_purpose::STANDARD;
+
+        let xml = format!(
+            concat!(
+                "<WRMHEADER xmlns=\"http://schemas.microsoft.com/DRM/2007/03/PlayReadyHeader\" ",
+                "version=\"4.3.0.0\"><DATA><LA_URL>{license_url}</LA_URL>",
+                "<PROTECTINFO><KIDS><KID ALGID=\"AESCTR\" VALUE=\"{kid_suffix}\"/>",
+                "</KIDS></PROTECTINFO></DATA></WRMHEADER>"
+            )
+        );
+        let utf16: Vec<u8> = xml.encode_utf16().flat_map(u16::to_le_bytes).collect();
+        let mut pro = Vec::with_capacity(10 + utf16.len());
+        pro.extend_from_slice(
+            &u32::try_from(10 + utf16.len())
+                .expect("test PlayReady PRO size")
+                .to_le_bytes(),
+        );
+        pro.extend_from_slice(&1_u16.to_le_bytes());
+        pro.extend_from_slice(&1_u16.to_le_bytes());
+        pro.extend_from_slice(
+            &u16::try_from(utf16.len())
+                .expect("test WRMHEADER size")
+                .to_le_bytes(),
+        );
+        pro.extend_from_slice(&utf16);
+        format!(
+            "data:text/plain;charset=UTF-16;base64,{}",
+            STANDARD.encode(pro)
+        )
+    }
+
+    fn hls_playready_plan(playready_uri: &str, include_clear_segment: bool) -> HlsPlan {
+        let mut playlist = format!(
+            concat!(
+                "#EXTM3U\\n",
+                "#EXT-X-VERSION:7\\n",
+                "#EXT-X-TARGETDURATION:2\\n",
+                "#EXT-X-MAP:URI=\\\"init.mp4\\\"\\n",
+                "#EXT-X-KEY:METHOD=SAMPLE-AES,URI=\\\"{playready_uri}\\\",",
+                "KEYFORMAT=\\\"com.microsoft.playready\\\"\\n",
+                "#EXTINF:2,\\nsegment-1.m4s\\n"
+            )
+        );
+        if include_clear_segment {
+            playlist.push_str("#EXT-X-KEY:METHOD=NONE\\n#EXTINF:2,\\nsegment-2.m4s\\n");
+        }
+        playlist.push_str("#EXT-X-ENDLIST\\n");
+        crate::manifest::plan_hls_media_playlist("https://cdn.example.test/master.m3u8", playlist.as_bytes())
+            .expect("test static PlayReady CMAF playlist")
+    }
+
+    #[test]
+    fn hls_playready_request_accepts_one_static_cmaf_key_and_rejects_mixed_keys() {
+        // The KID is fixture metadata only; the planner derives the effective
+        // sample KID from the CMAF tenc box after resources are staged.
+        let first_uri = hls_playready_uri(
+            "https://license.example.test/acquire",
+            "MyIRAFVEd2aImaq7zN3u/w==",
+        );
+        let plan = hls_playready_plan(&first_uri, false);
+        assert!(plan.is_single_init_fmp4_presentation());
+        assert_eq!(plan.protections.len(), 1);
+        assert_eq!(plan.resources.len(), 2);
+        let request = hls_playready_request(&plan).expect("valid HLS PlayReady request");
+        assert_eq!(
+            request.expect("request").license_url.as_str(),
+            "https://license.example.test/acquire"
+        );
+
+        let mixed = hls_playready_plan(&first_uri, true);
+        assert!(
+            hls_playready_request(&mixed).is_err(),
+            "a later METHOD=NONE segment must not be decrypted with the preceding PlayReady key"
+        );
+
+        let second_uri = hls_playready_uri(
+            "https://license.example.test/acquire",
+            "MyIRAFVEd2aImaq7zN3u/x==",
+        );
+        let rotation = format!(
+            concat!(
+                "#EXTM3U\\n#EXT-X-VERSION:7\\n#EXT-X-TARGETDURATION:2\\n",
+                "#EXT-X-MAP:URI=\\\"init.mp4\\\"\\n",
+                "#EXT-X-KEY:METHOD=SAMPLE-AES,URI=\\\"{first_uri}\\\",KEYFORMAT=\\\"com.microsoft.playready\\\"\\n",
+                "#EXTINF:2,\\nsegment-1.m4s\\n",
+                "#EXT-X-KEY:METHOD=SAMPLE-AES,URI=\\\"{second_uri}\\\",KEYFORMAT=\\\"com.microsoft.playready\\\"\\n",
+                "#EXTINF:2,\\nsegment-2.m4s\\n#EXT-X-ENDLIST\\n"
+            )
+        );
+        let rotation_plan = crate::manifest::plan_hls_media_playlist(
+            "https://cdn.example.test/master.m3u8",
+            rotation.as_bytes(),
+        )
+        .expect("two-object rotation metadata is valid for fallback planning");
+        assert!(
+            hls_playready_request(&rotation_plan).is_err(),
+            "distinct PlayReady Objects must remain on extractor fallback"
+        );
+    }
+
     #[test]
     fn vsd_adts_validation_rejects_zero_length_frames() {
         let malformed = [0xff, 0xf1, 0, 0, 0, 0, 0];

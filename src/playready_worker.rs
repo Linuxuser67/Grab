@@ -18,7 +18,9 @@ use futures_util::StreamExt as _;
 use playready::{Cdm, Device, Pssh};
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
-use tokio::io::{AsyncBufRead, AsyncBufReadExt as _, AsyncWrite, AsyncWriteExt as _, BufReader as AsyncBufReader};
+use tokio::io::{
+    AsyncBufRead, AsyncBufReadExt as _, AsyncWrite, AsyncWriteExt as _, BufReader as AsyncBufReader,
+};
 use tokio::process::Command;
 use url::Url;
 use zeroize::Zeroizing;
@@ -49,15 +51,9 @@ enum WorkerRequest {
 #[derive(Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 enum WorkerResponse {
-    Challenge {
-        body: Zeroizing<String>,
-    },
-    Keys {
-        keys: Vec<WorkerKey>,
-    },
-    Failure {
-        reason: WorkerFailure,
-    },
+    Challenge { body: Zeroizing<String> },
+    Keys { keys: Vec<WorkerKey> },
+    Failure { reason: WorkerFailure },
 }
 
 #[derive(Serialize, Deserialize)]
@@ -111,10 +107,7 @@ impl std::fmt::Debug for PlayReadyKey {
 /// Run the internal worker entry point when the parent starts this executable
 /// with its private worker argument.
 pub(crate) fn is_worker_requested() -> bool {
-    std::env::args_os()
-        .nth(1)
-        .as_deref()
-        == Some(OsStr::new(INTERNAL_WORKER_ARG))
+    std::env::args_os().nth(1).as_deref() == Some(OsStr::new(INTERNAL_WORKER_ARG))
 }
 
 /// Execute the child-side PlayReady protocol. The return value is a process
@@ -163,7 +156,9 @@ pub async fn acquire_keys(
         || license_url.password().is_some()
         || license_url.fragment().is_some()
     {
-        return Err("The PlayReady license URL must be HTTPS without user-info or a fragment".to_string());
+        return Err(
+            "The PlayReady license URL must be HTTPS without user-info or a fragment".to_string(),
+        );
     }
 
     let executable = std::env::current_exe()
@@ -256,9 +251,7 @@ pub async fn acquire_keys(
             .len()
             .checked_add(chunk.len())
             .filter(|length| *length <= MAX_LICENSE_RESPONSE_BYTES)
-            .ok_or_else(|| {
-                "The PlayReady license response exceeds its size limit".to_string()
-            })?;
+            .ok_or_else(|| "The PlayReady license response exceeds its size limit".to_string())?;
         response_bytes.extend_from_slice(&chunk);
         debug_assert_eq!(response_bytes.len(), next_len);
     }
@@ -355,12 +348,7 @@ fn process_worker<R: BufRead, W: Write>(
     if challenge.is_empty() || challenge.len() > MAX_CHALLENGE_BYTES {
         return Err(WorkerFailure::ChallengeFailed);
     }
-    write_sync_frame(
-        writer,
-        &WorkerResponse::Challenge {
-            body: challenge,
-        },
-    )?;
+    write_sync_frame(writer, &WorkerResponse::Challenge { body: challenge })?;
 
     let request: WorkerRequest = read_sync_message(reader)?;
     let WorkerRequest::LicenseResponse { body } = request else {
@@ -381,9 +369,7 @@ fn process_worker<R: BufRead, W: Write>(
         let kid_text = Zeroizing::new(kid.to_string());
         let key_text = Zeroizing::new(key.to_string());
         let kid = parse_hex_16(&kid_text).ok_or(WorkerFailure::KeyMaterialInvalid)?;
-        let key = Zeroizing::new(
-            parse_hex_16(&key_text).ok_or(WorkerFailure::KeyMaterialInvalid)?,
-        );
+        let key = Zeroizing::new(parse_hex_16(&key_text).ok_or(WorkerFailure::KeyMaterialInvalid)?);
         output.push(WorkerKey { kid, key });
     }
     write_sync_frame(writer, &WorkerResponse::Keys { keys: output })
@@ -434,9 +420,7 @@ fn hex_nibble(byte: u8) -> Option<u8> {
     }
 }
 
-fn read_sync_frame<R: BufRead>(
-    reader: &mut R,
-) -> Result<Zeroizing<Vec<u8>>, WorkerFailure> {
+fn read_sync_frame<R: BufRead>(reader: &mut R) -> Result<Zeroizing<Vec<u8>>, WorkerFailure> {
     let mut frame = Zeroizing::new(Vec::new());
     loop {
         let available = reader.fill_buf().map_err(|_| WorkerFailure::Protocol)?;
@@ -460,9 +444,7 @@ fn read_sync_frame<R: BufRead>(
     }
 }
 
-fn read_sync_message<R: BufRead, T: DeserializeOwned>(
-    reader: &mut R,
-) -> Result<T, WorkerFailure> {
+fn read_sync_message<R: BufRead, T: DeserializeOwned>(reader: &mut R) -> Result<T, WorkerFailure> {
     let frame = read_sync_frame(reader)?;
     serde_json::from_slice(&frame).map_err(|_| WorkerFailure::Protocol)
 }
@@ -471,9 +453,7 @@ fn write_sync_frame<W: Write, T: Serialize>(
     writer: &mut W,
     message: &T,
 ) -> Result<(), WorkerFailure> {
-    let frame = Zeroizing::new(
-        serde_json::to_vec(message).map_err(|_| WorkerFailure::Protocol)?,
-    );
+    let frame = Zeroizing::new(serde_json::to_vec(message).map_err(|_| WorkerFailure::Protocol)?);
     if frame.len() > MAX_WORKER_FRAME_BYTES {
         return Err(WorkerFailure::Protocol);
     }
@@ -555,15 +535,15 @@ mod tests {
         assert_eq!(
             parse_hex_16("00112233445566778899aabbccddeeff"),
             Some([
-                0x00, 0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88, 0x99, 0xaa, 0xbb, 0xcc,
-                0xdd, 0xee, 0xff,
+                0x00, 0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88, 0x99, 0xaa, 0xbb, 0xcc, 0xdd,
+                0xee, 0xff,
             ])
         );
         assert_eq!(
             parse_hex_16("00112233-4455-6677-8899-aabbccddeeff"),
             Some([
-                0x00, 0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88, 0x99, 0xaa, 0xbb, 0xcc,
-                0xdd, 0xee, 0xff,
+                0x00, 0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88, 0x99, 0xaa, 0xbb, 0xcc, 0xdd,
+                0xee, 0xff,
             ])
         );
     }

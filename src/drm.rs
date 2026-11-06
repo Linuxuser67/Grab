@@ -91,7 +91,6 @@ impl HlsProtection {
                 format!("PlayReady Object ({} bytes)", bytes.len())
             }
             HlsInitializationData::FairPlayKeyUri(uri) => {
-                let _ = uri.len();
                 format!("FairPlay key URI ({} bytes)", uri.len())
             }
         };

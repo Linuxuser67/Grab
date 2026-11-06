@@ -384,22 +384,39 @@ fn process_worker<R: BufRead, W: Write>(
 }
 
 fn parse_hex_16(value: &str) -> Option<[u8; 16]> {
-    let mut output = [0_u8; 16];
-    let mut high_nibble = None;
-    let mut index = 0_usize;
-    for byte in value.bytes().filter(|byte| *byte != b'-') {
-        let nibble = hex_nibble(byte)?;
-        if let Some(high) = high_nibble.take() {
-            if index >= output.len() {
-                return None;
-            }
-            output[index] = (high << 4) | nibble;
-            index += 1;
-        } else {
-            high_nibble = Some(nibble);
-        }
+    let bytes = value.as_bytes();
+    let compact = bytes.len() == 32 && bytes.iter().all(|byte| *byte != b'-');
+    let uuid = bytes.len() == 36
+        && [8, 13, 18, 23]
+            .iter()
+            .all(|index| bytes.get(*index) == Some(&b'-'))
+        && bytes
+            .iter()
+            .enumerate()
+            .all(|(index, byte)| (*byte == b'-') == [8, 13, 18, 23].contains(&index));
+    if !compact && !uuid {
+        return None;
     }
-    (index == output.len() && high_nibble.is_none()).then_some(output)
+
+    let mut digits = [0_u8; 32];
+    let mut digit_count = 0_usize;
+    for byte in bytes.iter().copied().filter(|byte| *byte != b'-') {
+        let nibble = hex_nibble(byte)?;
+        if digit_count >= digits.len() {
+            return None;
+        }
+        digits[digit_count] = nibble;
+        digit_count += 1;
+    }
+    if digit_count != digits.len() {
+        return None;
+    }
+
+    let mut output = [0_u8; 16];
+    for (index, pair) in digits.chunks_exact(2).enumerate() {
+        output[index] = (pair[0] << 4) | pair[1];
+    }
+    Some(output)
 }
 
 fn hex_nibble(byte: u8) -> Option<u8> {

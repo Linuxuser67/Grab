@@ -59,6 +59,26 @@ pub(crate) struct HlsProtection {
     pub(crate) initialization_data: HlsInitializationData,
 }
 
+impl HlsProtection {
+    pub(crate) fn description(&self) -> String {
+        let scheme = match self.scheme {
+            EncryptionScheme::Cenc => "CENC",
+            EncryptionScheme::Cbcs => "CBCS",
+        };
+        let initialization = match &self.initialization_data {
+            HlsInitializationData::Pssh(bytes) => format!("PSSH ({} bytes)", bytes.len()),
+            HlsInitializationData::PlayReadyObject(bytes) => {
+                format!("PlayReady Object ({} bytes)", bytes.len())
+            }
+            HlsInitializationData::FairPlayKeyUri(uri) => {
+                let _ = uri.len();
+                "FairPlay key URI".to_string()
+            }
+        };
+        format!("{} {scheme} {initialization}", self.system.label())
+    }
+}
+
 /// Validate the complete box framing and system identifier of a PSSH box.
 ///
 /// Only ordinary 32-bit box sizes and versions 0/1 are accepted. Extended-size

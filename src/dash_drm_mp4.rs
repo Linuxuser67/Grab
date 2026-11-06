@@ -1250,6 +1250,25 @@ pub(crate) fn required_kids(
     directory: &Path,
     encryption: DashEncryption,
 ) -> Result<BTreeSet<[u8; 16]>, String> {
+    required_kids_inner(resources, directory, encryption, None)
+}
+
+/// Scan the selected encrypted fragments while honoring a caller's stop signal.
+pub(crate) fn required_kids_with_cancel(
+    resources: &[DashResource],
+    directory: &Path,
+    encryption: DashEncryption,
+    cancelled: &AtomicBool,
+) -> Result<BTreeSet<[u8; 16]>, String> {
+    required_kids_inner(resources, directory, encryption, Some(cancelled))
+}
+
+fn required_kids_inner(
+    resources: &[DashResource],
+    directory: &Path,
+    encryption: DashEncryption,
+    cancelled: Option<&AtomicBool>,
+) -> Result<BTreeSet<[u8; 16]>, String> {
     if resources.len() < 2
         || resources[0].kind != DashResourceKind::Initialization
         || resources[1..]
@@ -1268,6 +1287,9 @@ pub(crate) fn required_kids(
     let init_encryption = parse_init_encryption(&init, encryption)?;
     let mut required = BTreeSet::new();
     for resource in &resources[1..] {
+        if cancelled.is_some_and(|signal| signal.load(Ordering::Acquire)) {
+            return Err("DRM KID scan was cancelled".to_string());
+        }
         let path = directory.join(&resource.filename);
         let fragment = read_regular_file_bounded(&path, MAX_FRAGMENT_BYTES)
             .map_err(|error| format!("Could not read encrypted DASH media segment: {error}"))?;

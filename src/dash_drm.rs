@@ -598,7 +598,10 @@ mod tests {
                 content: Some("AAAAIXBzc2gAAAAA7e+LqXnWSs6jyCfc1R0h7QAAAAEB".to_string()),
             },
             dash_mpd_core::CencPssh {
-                content: Some("AAAANHBzc2gBAAAA7e+LqXnWSs6jyCfc1R0h7QAAAAEAESIzRFVmd4iZqrvM3e7/AAAAAA==".to_string()),
+                content: Some(
+                    "AAAANHBzc2gBAAAA7e+LqXnWSs6jyCfc1R0h7QAAAAEAESIzRFVmd4iZqrvM3e7/AAAAAA=="
+                        .to_string(),
+                ),
             },
         ]);
         let retained = widevine_pssh_from_scopes(&[std::slice::from_ref(&multiple)])

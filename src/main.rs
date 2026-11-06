@@ -37,6 +37,7 @@ mod media_types;
 mod mp4_validation;
 mod mpeg_ts_validation;
 mod net_types;
+pub mod playready_worker;
 mod preferences;
 mod runtime;
 mod settings;
@@ -135,6 +136,10 @@ fn ensure_schema_dir() {
 }
 
 fn main() -> glib::ExitCode {
+    if playready_worker::is_worker_requested() {
+        std::process::exit(playready_worker::run_worker());
+    }
+
     // Schema dir first: the schema may not be in the default source
     // (tarball/uninstalled run).
     ensure_schema_dir();

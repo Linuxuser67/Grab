@@ -1737,12 +1737,11 @@ mod tests {
                 },
             )
             .expect("parse synthetic init");
-            let keys = super::super::DashKeyMap {
-                keys: BTreeMap::from([
-                    (first_kid, Zeroizing::new([0x10; 16])),
-                    (second_kid, Zeroizing::new([0x11; 16])),
-                ]),
-            };
+            let keys = super::super::DashKeyMap::from_keys([
+                (first_kid, Zeroizing::new([0x10; 16])),
+                (second_kid, Zeroizing::new([0x11; 16])),
+            ])
+            .expect("create test DRM key map");
             let decrypted = decrypt_fragment_with_keys(&fragment, &init, parsed_init, &keys)
                 .expect("decrypt both KID groups in one fragment");
             let boxes =
@@ -2037,9 +2036,8 @@ mod tests {
             },
         ];
         let output = directory.path().join("decrypted.mp4");
-        let keys = super::super::DashKeyMap {
-            keys: BTreeMap::from([(kid, Zeroizing::new([0x10; 16]))]),
-        };
+        let keys = super::super::DashKeyMap::from_keys([(kid, Zeroizing::new([0x10; 16]))])
+            .expect("create test DRM key map");
         decrypt_track(
             &resources,
             directory.path(),
@@ -2248,9 +2246,8 @@ mod tests {
     fn cancelled_decryption_does_not_publish_a_track() {
         let directory = tempfile::tempdir().expect("create cancelled DRM staging directory");
         let output = directory.path().join("decrypted.mp4");
-        let keys = super::super::DashKeyMap {
-            keys: BTreeMap::from([([0x33; 16], Zeroizing::new([0x10; 16]))]),
-        };
+        let keys = super::super::DashKeyMap::from_keys([([0x33; 16], Zeroizing::new([0x10; 16]))])
+            .expect("create test DRM key map");
         let result = decrypt_track(
             &[],
             directory.path(),

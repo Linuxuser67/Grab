@@ -14,7 +14,7 @@ use serde::{Deserialize, Serialize};
 use url::Url;
 use zeroize::{Zeroize as _, Zeroizing};
 
-pub(crate) use crate::drm::{EncryptionScheme, ProtectionSystem};
+pub(crate) use crate::drm::{DrmKeyMap as DashKeyMap, EncryptionScheme, ProtectionSystem};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct DashEncryption {
@@ -30,24 +30,6 @@ const CLEARKEY_SCHEME: &str = "urn:uuid:e2719d58-a985-b3c9-781a-ab030af78d30";
 const MAX_LICENSE_RESPONSE_BYTES: usize = 64 * 1024;
 const MAX_LICENSE_KEYS: usize = 64;
 const LICENSE_REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
-
-pub(crate) struct DashKeyMap {
-    keys: BTreeMap<[u8; 16], Zeroizing<[u8; 16]>>,
-}
-
-impl DashKeyMap {
-    pub(crate) fn key_for_kid(&self, kid: &[u8; 16]) -> Result<Zeroizing<[u8; 16]>, String> {
-        self.keys
-            .get(kid)
-            .map(|key| Zeroizing::new(**key))
-            .ok_or_else(|| {
-                format!(
-                    "The DASH license response did not include selected KID {}",
-                    hex_string(kid)
-                )
-            })
-    }
-}
 
 /// Resolve inherited DASH ContentProtection descriptors into one supported
 /// Common Encryption scheme and one default KID.
@@ -367,7 +349,7 @@ pub(crate) async fn acquire_required_keys(
             }
         }
     }
-    Ok(Some(DashKeyMap { keys }))
+    Ok(Some(DashKeyMap::from_keys(keys)?))
 }
 
 fn parse_clear_key_license(

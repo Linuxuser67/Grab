@@ -2623,19 +2623,11 @@ segment-1.m4s
             "METHOD=NONE must not inherit the preceding encryption key"
         );
 
-        let unsupported = body
-            .split(|byte| *byte == b'\n')
-            .map(|line| {
-                if line.starts_with(b"#EXT-X-KEY:METHOD=NONE") {
-                    b"#EXT-X-KEY:METHOD=UNSUPPORTED".as_slice()
-                } else {
-                    line
-                }
-            })
-            .collect::<Vec<_>>()
-            .join(&b'\n');
+        let unsupported = std::str::from_utf8(body)
+            .expect("test playlist is UTF-8")
+            .replace("METHOD=NONE", "METHOD=UNSUPPORTED");
         assert_eq!(
-            plan_hls_media_playlist(BASE_URL, &unsupported).err(),
+            plan_hls_media_playlist(BASE_URL, unsupported.as_bytes()).err(),
             Some(ManifestError::UnsupportedEncryption),
             "an undecoded key method must remain unsupported"
         );

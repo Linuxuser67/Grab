@@ -1883,12 +1883,12 @@ struct ManifestFinalization<'a> {
 async fn require_decrypted_track(path: &Path, label: &str) -> Result<(), ManifestRunError> {
     let metadata = tokio::fs::symlink_metadata(path).await.map_err(|error| {
         ManifestRunError::Failed(format!(
-            "Could not inspect the decrypted DASH {label} track: {error}"
+            "Could not inspect the decrypted native {label} track: {error}"
         ))
     })?;
     if metadata.file_type().is_symlink() || !metadata.is_file() || metadata.len() == 0 {
         return Err(ManifestRunError::Failed(format!(
-            "The decrypted DASH {label} track is not a regular, non-empty staging file"
+            "The decrypted native {label} track is not a regular, non-empty staging file"
         )));
     }
     Ok(())
@@ -2504,10 +2504,12 @@ async fn decrypt_hls_playready_track(
         })
         .collect();
     let directory = directory.to_path_buf();
+    let inspect_directory = directory.clone();
+    let inspect_resources = resources.clone();
     let scheme = request.scheme;
     let (encryption, required_kids) = tokio::task::spawn_blocking(move || {
-        let init_path = directory.join(
-            resources
+        let init_path = inspect_directory.join(
+            inspect_resources
                 .first()
                 .ok_or_else(|| "HLS CMAF initialization resource is missing".to_string())?
                 .filename
@@ -2520,7 +2522,8 @@ async fn decrypt_hls_playready_track(
             scheme,
             crate::drm::ProtectionSystem::PlayReady,
         )?;
-        let required = crate::dash_drm_mp4::required_kids(&resources, &directory, encryption)?;
+        let required =
+            crate::dash_drm_mp4::required_kids(&inspect_resources, &inspect_directory, encryption)?;
         Ok::<_, String>((encryption, required))
     })
     .await

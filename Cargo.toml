@@ -20,6 +20,7 @@ gio = "0.22"
 url = "2"
 # HLS playlist parsing and local media-playlist serialization.
 m3u8-rs = "6.0.1"
+mpeg2ts = "=0.3.1"
 # Parse and validate MPEG-2 transport packets in native HLS segments.
 mpeg-ts = { version = "=0.6.2", default-features = false, features = ["std"] }
 # Parse ISO BMFF box trees for structural validation of native fMP4 resources.

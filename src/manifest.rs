@@ -2608,6 +2608,40 @@ segment-1.m4s
     }
 
     #[test]
+    fn hls_method_none_clears_the_active_key_but_unknown_key_methods_fail_closed() {
+        let body = b"#EXTM3U\n#EXT-X-TARGETDURATION:2\n#EXT-X-KEY:METHOD=SAMPLE-AES,URI=\"https://cdn.example.test/key.bin\"\n#EXTINF:2,\none.ts\n#EXT-X-KEY:METHOD=NONE\n#EXTINF:2,\ntwo.ts\n#EXT-X-ENDLIST\n";
+        let plan = plan_hls_media_playlist(BASE_URL, body)
+            .expect("METHOD=NONE is a valid key reset");
+        let local = plan
+            .local_playlist_bytes()
+            .expect("reset playlist should serialize");
+        let parsed = m3u8_rs::parse_media_playlist_res(&local)
+            .expect("reset playlist should parse");
+        assert!(parsed.segments[0].key.is_some());
+        assert!(
+            parsed.segments[1].key.is_none(),
+            "METHOD=NONE must not inherit the preceding encryption key"
+        );
+
+        let unsupported = body
+            .split(|byte| *byte == b'\n')
+            .map(|line| {
+                if line.starts_with(b"#EXT-X-KEY:METHOD=NONE") {
+                    b"#EXT-X-KEY:METHOD=UNSUPPORTED".as_slice()
+                } else {
+                    line
+                }
+            })
+            .collect::<Vec<_>>()
+            .join(&b'\n');
+        assert_eq!(
+            plan_hls_media_playlist(BASE_URL, &unsupported).err(),
+            Some(ManifestError::UnsupportedEncryption),
+            "an undecoded key method must remain unsupported"
+        );
+    }
+
+    #[test]
     fn sample_aes_key_rotation_keeps_each_identity_key_localized() {
         let body = b"#EXTM3U\n#EXT-X-MEDIA-SEQUENCE:7\n#EXT-X-KEY:METHOD=SAMPLE-AES,URI=\"key-1.bin\"\n#EXTINF:2,\none.ts\n#EXT-X-KEY:METHOD=SAMPLE-AES,URI=\"key-2.bin\"\n#EXTINF:2,\ntwo.ts\n#EXT-X-ENDLIST\n";
         let plan = plan_hls_media_playlist(BASE_URL, body)

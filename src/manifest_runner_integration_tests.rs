@@ -2347,7 +2347,7 @@ async fn hls_sample_aes_mpegts_is_decrypted_by_vsd_before_ffmpeg_finalization() 
         "SAMPLE-AES resource fetch unexpectedly aborted"
     );
     wait_for_fixture_server(server).await;
-    assert_eq!(downloaded.load(Ordering::Relaxed), 65_440);
+    assert_eq!(downloaded.load(Ordering::Relaxed), 130_880);
 
     write_playlist(&video_dir, &plan)
         .await

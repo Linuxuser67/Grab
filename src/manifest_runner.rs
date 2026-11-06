@@ -4676,10 +4676,10 @@ mod tests {
 
         let xml = format!(concat!(
             "<WRMHEADER xmlns=\"http://schemas.microsoft.com/DRM/2007/03/PlayReadyHeader\" ",
-            "version=\"4.3.0.0\"><DATA><LA_URL>{license_url}</LA_URL>",
-            "<PROTECTINFO><KIDS><KID ALGID=\"AESCTR\" VALUE=\"{kid_suffix}\"/>",
+            "version=\"4.3.0.0\"><DATA><LA_URL>{}</LA_URL>",
+            "<PROTECTINFO><KIDS><KID ALGID=\"AESCTR\" VALUE=\"{}\"/>",
             "</KIDS></PROTECTINFO></DATA></WRMHEADER>"
-        ));
+        ), license_url, kid_suffix);
         let utf16: Vec<u8> = xml.encode_utf16().flat_map(u16::to_le_bytes).collect();
         let mut pro = Vec::with_capacity(10 + utf16.len());
         pro.extend_from_slice(
@@ -4707,10 +4707,10 @@ mod tests {
             "#EXT-X-VERSION:7\n",
             "#EXT-X-TARGETDURATION:2\n",
             "#EXT-X-MAP:URI=\"init.mp4\"\n",
-            "#EXT-X-KEY:METHOD=SAMPLE-AES,URI=\"{playready_uri}\",",
+            "#EXT-X-KEY:METHOD=SAMPLE-AES,URI=\"{}\",",
             "KEYFORMAT=\"com.microsoft.playready\"\n",
             "#EXTINF:2,\nsegment-1.m4s\n"
-        ));
+        ), playready_uri);
         if include_clear_segment {
             playlist.push_str("#EXT-X-KEY:METHOD=NONE\n#EXTINF:2,\nsegment-2.m4s\n");
         }
@@ -4753,11 +4753,11 @@ mod tests {
         let rotation = format!(concat!(
             "#EXTM3U\n#EXT-X-VERSION:7\n#EXT-X-TARGETDURATION:2\n",
             "#EXT-X-MAP:URI=\"init.mp4\"\n",
-            "#EXT-X-KEY:METHOD=SAMPLE-AES,URI=\"{first_uri}\",KEYFORMAT=\"com.microsoft.playready\"\n",
+            "#EXT-X-KEY:METHOD=SAMPLE-AES,URI=\"{}\",KEYFORMAT=\"com.microsoft.playready\"\n",
             "#EXTINF:2,\nsegment-1.m4s\n",
-            "#EXT-X-KEY:METHOD=SAMPLE-AES,URI=\"{second_uri}\",KEYFORMAT=\"com.microsoft.playready\"\n",
+            "#EXT-X-KEY:METHOD=SAMPLE-AES,URI=\"{}\",KEYFORMAT=\"com.microsoft.playready\"\n",
             "#EXTINF:2,\nsegment-2.m4s\n#EXT-X-ENDLIST\n"
-        ));
+        ), first_uri, second_uri);
         let rotation_plan = crate::manifest::plan_hls_media_playlist(
             "https://cdn.example.test/master.m3u8",
             rotation.as_bytes(),

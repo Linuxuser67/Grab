@@ -66,6 +66,7 @@ pub(crate) struct DashRepresentation {
     pub(crate) language: Option<String>,
     pub(crate) kind: DashTrackKind,
     pub(crate) encryption: Option<crate::dash_drm::DashEncryption>,
+    pub(crate) widevine_pssh: Box<[Vec<u8>]>,
     pub(crate) license_url: Option<Url>,
     pub(crate) is_default_audio: bool,
     pub(crate) is_default_subtitle: bool,
@@ -565,6 +566,9 @@ pub(crate) fn parse_dash_manifest_at(
                     &adaptation.ContentProtection[..],
                     &representation.ContentProtection[..],
                 ];
+                let widevine_pssh = crate::dash_drm::widevine_pssh_from_scopes(&protection_scopes)
+                    .map_err(DashError::UnsupportedProtection)?
+                    .into_boxed_slice();
                 let encryption = crate::dash_drm::encryption_from_scopes(&protection_scopes)
                     .map_err(DashError::UnsupportedProtection)?;
                 let license_url =
@@ -610,6 +614,7 @@ pub(crate) fn parse_dash_manifest_at(
                     language,
                     kind,
                     encryption,
+                    widevine_pssh,
                     license_url,
                     is_default_audio,
                     is_default_subtitle: kind == DashTrackKind::Subtitle && is_main,
@@ -1054,6 +1059,9 @@ fn hash_encryption(hasher: &mut Sha256, encryption: Option<crate::dash_drm::Dash
                 crate::dash_drm::EncryptionScheme::Cbcs => b"cbcs".as_slice(),
             });
             hasher.update(encryption.default_kid);
+            if encryption.system == crate::dash_drm::ProtectionSystem::Widevine {
+                hasher.update(b"widevine");
+            }
         }
         None => hasher.update(b"clear"),
     }
@@ -2578,6 +2586,42 @@ mod tests {
     use super::*;
 
     const BASE_URL: &str = "https://cdn.example.test/path/manifest.mpd";
+
+    #[test]
+    fn representation_encryption_hash_preserves_clearkey_and_distinguishes_widevine() {
+        fn digest(encryption: crate::dash_drm::DashEncryption) -> Vec<u8> {
+            let mut hasher = Sha256::new();
+            hash_encryption(&mut hasher, Some(encryption));
+            hasher.finalize().to_vec()
+        }
+
+        let clear_key = crate::dash_drm::DashEncryption {
+            scheme: crate::dash_drm::EncryptionScheme::Cenc,
+            default_kid: [0x11; 16],
+            system: crate::dash_drm::ProtectionSystem::ClearKey,
+        };
+        let widevine = crate::dash_drm::DashEncryption {
+            system: crate::dash_drm::ProtectionSystem::Widevine,
+            ..clear_key
+        };
+
+        let mut previous_clear_key_hash = Sha256::new();
+        previous_clear_key_hash.update(b"encrypted");
+        previous_clear_key_hash.update(b"cenc");
+        previous_clear_key_hash.update([0x11; 16]);
+
+        assert_eq!(
+            digest(clear_key),
+            previous_clear_key_hash.finalize().to_vec(),
+            "adding provider identity must not invalidate existing ClearKey representation IDs"
+        );
+        assert_ne!(
+            digest(clear_key),
+            digest(widevine),
+            "the same KID under different DRM systems must have distinct representation IDs"
+        );
+    }
+
     #[derive(Clone)]
     struct SharedLogWriter(std::sync::Arc<std::sync::Mutex<Vec<u8>>>);
 
@@ -4444,6 +4488,38 @@ mod tests {
             .expect("protected representation");
         assert!(protected.encryption.is_some());
         assert!(protected.license_url.is_none());
+    }
+
+    #[test]
+    fn retains_widevine_pssh_and_system_on_selected_representation() {
+        let body = TEMPLATE_MPD.replace(
+            "</Period>",
+            r#"
+    <AdaptationSet contentType="video" mimeType="video/mp4">
+      <ContentProtection schemeIdUri="urn:mpeg:dash:mp4protection:2011"
+                         value="cenc"
+                         default_KID="00112233-4455-6677-8899-aabbccddeeff"/>
+      <ContentProtection schemeIdUri="urn:uuid:edef8ba9-79d6-4ace-a3c8-27dcd51d21ed" xmlns:cenc="urn:mpeg:cenc:2013">
+        <cenc:pssh>AAAAIHBzc2gAAAAA7e+LqXnWSs6jyCfc1R0h7QAAAAA=</cenc:pssh>
+      </ContentProtection>
+      <Representation id="widevine" bandwidth="1000">
+        <SegmentTemplate timescale="1" duration="5" initialization="widevine-init.mp4" media="widevine-$Number$.m4s"/>
+      </Representation>
+    </AdaptationSet>
+</Period>"#,
+        );
+        let manifest = parse_dash_manifest(BASE_URL, &body)
+            .expect("Widevine-protected MPD metadata should parse");
+        let selected = manifest
+            .video_representations
+            .iter()
+            .find(|item| item.representation_id.as_deref() == Some("widevine"))
+            .expect("Widevine representation");
+        assert_eq!(
+            selected.encryption.map(|encryption| encryption.system),
+            Some(crate::dash_drm::ProtectionSystem::Widevine)
+        );
+        assert_eq!(selected.widevine_pssh.len(), 1);
     }
 
     #[test]

@@ -8,7 +8,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::time::Duration;
 
 use base64::Engine as _;
-use base64::engine::general_purpose::URL_SAFE_NO_PAD;
+use base64::engine::general_purpose::{STANDARD, URL_SAFE_NO_PAD};
 use futures_util::StreamExt as _;
 use serde::{Deserialize, Serialize};
 use url::Url;
@@ -16,6 +16,9 @@ use zeroize::{Zeroize as _, Zeroizing};
 
 const MP4_PROTECTION_SCHEME: &str = "urn:mpeg:dash:mp4protection:2011";
 const WIDEVINE_SCHEME: &str = "urn:uuid:edef8ba9-79d6-4ace-a3c8-27dcd51d21ed";
+const WIDEVINE_SYSTEM_ID: [u8; 16] = [
+    0xed, 0xef, 0x8b, 0xa9, 0x79, 0xd6, 0x4a, 0xce, 0xa3, 0xc8, 0x27, 0xdc, 0xd5, 0x1d, 0x21, 0xed,
+];
 const PLAYREADY_SCHEME: &str = "urn:uuid:9a04f079-9840-4286-ab92-e65be0885f95";
 const CLEARKEY_SCHEME: &str = "urn:uuid:e2719d58-a985-b3c9-781a-ab030af78d30";
 const MAX_LICENSE_RESPONSE_BYTES: usize = 64 * 1024;
@@ -32,6 +35,13 @@ pub(crate) enum EncryptionScheme {
 pub(crate) struct DashEncryption {
     pub(crate) scheme: EncryptionScheme,
     pub(crate) default_kid: [u8; 16],
+    pub(crate) system: ProtectionSystem,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum ProtectionSystem {
+    ClearKey,
+    Widevine,
 }
 
 pub(crate) struct DashKeyMap {
@@ -55,15 +65,15 @@ impl DashKeyMap {
 /// Resolve inherited DASH ContentProtection descriptors into one supported
 /// Common Encryption scheme and one default KID.
 ///
-/// Native license acquisition currently supports ClearKey only. Widevine and
-/// PlayReady descriptors are rejected until their CDM exchanges have a safe,
-/// reusable integration. Fragment-local seig KID rotation is resolved from
-/// media fragments; conflicting default KIDs across descriptor scopes remain unsupported.
+/// ClearKey and Widevine are distinguished during planning; the runner currently
+/// executes ClearKey only and falls back for Widevine. PlayReady remains unsupported.
+/// Fragment-local seig KID rotation is resolved from media fragments; conflicting
+/// default KIDs across descriptor scopes remain unsupported.
 pub(crate) fn encryption_from_scopes(
     scopes: &[&[dash_mpd_core::ContentProtection]],
 ) -> Result<Option<DashEncryption>, String> {
     let mut selected = None;
-    let mut has_system_descriptor = false;
+    let mut system = None;
 
     for descriptor in scopes.iter().flat_map(|scope| scope.iter()) {
         if descriptor.schemeIdUri == MP4_PROTECTION_SCHEME {
@@ -89,22 +99,34 @@ pub(crate) fn encryption_from_scopes(
             let encryption = DashEncryption {
                 scheme,
                 default_kid: kid,
+                system: system.unwrap_or(ProtectionSystem::ClearKey),
             };
-            if selected.is_some_and(|previous| previous != encryption) {
+            if selected.is_some_and(|previous: DashEncryption| {
+                previous.scheme != encryption.scheme
+                    || previous.default_kid != encryption.default_kid
+            }) {
                 return Err(
                     "DASH uses conflicting encryption schemes or default KIDs across scopes"
                         .to_string(),
                 );
             }
             selected = Some(encryption);
-        } else if descriptor.schemeIdUri == CLEARKEY_SCHEME {
-            has_system_descriptor = true;
-        } else if descriptor.schemeIdUri == WIDEVINE_SCHEME
-            || descriptor.schemeIdUri == PLAYREADY_SCHEME
+        } else if descriptor.schemeIdUri == CLEARKEY_SCHEME
+            || descriptor.schemeIdUri == WIDEVINE_SCHEME
         {
-            return Err(
-                "Native DASH license acquisition currently supports ClearKey only".to_string(),
-            );
+            let next = if descriptor.schemeIdUri == WIDEVINE_SCHEME {
+                ProtectionSystem::Widevine
+            } else {
+                ProtectionSystem::ClearKey
+            };
+            if system
+                .replace(next)
+                .is_some_and(|previous| previous != next)
+            {
+                return Err("DASH declares conflicting DRM systems".to_string());
+            }
+        } else if descriptor.schemeIdUri == PLAYREADY_SCHEME {
+            return Err("Native DASH PlayReady support is not available yet".to_string());
         } else if descriptor.schemeIdUri.starts_with("urn:uuid:") {
             return Err("DASH declares an unsupported protection system".to_string());
         } else {
@@ -112,14 +134,92 @@ pub(crate) fn encryption_from_scopes(
         }
     }
 
-    if has_system_descriptor && selected.is_none() {
+    if system.is_some() && selected.is_none() {
         return Err(
             "DASH advertises a DRM system but has no supported mp4protection cenc/cbcs default_KID"
                 .to_string(),
         );
     }
 
-    Ok(selected)
+    Ok(selected.map(|mut encryption: DashEncryption| {
+        encryption.system = system.unwrap_or(ProtectionSystem::ClearKey);
+        encryption
+    }))
+}
+
+/// Decode and validate Widevine PSSH boxes from inherited DASH protection scopes.
+pub(crate) fn widevine_pssh_from_scopes(
+    scopes: &[&[dash_mpd_core::ContentProtection]],
+) -> Result<Vec<Vec<u8>>, String> {
+    let mut pssh_boxes = Vec::new();
+    for descriptor in scopes.iter().flat_map(|scope| scope.iter()) {
+        if descriptor.schemeIdUri != WIDEVINE_SCHEME {
+            continue;
+        }
+        for pssh in &descriptor.cenc_pssh {
+            let Some(encoded) = pssh
+                .content
+                .as_deref()
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+            else {
+                continue;
+            };
+            let compact: Vec<u8> = encoded
+                .bytes()
+                .filter(|byte| !byte.is_ascii_whitespace())
+                .collect();
+            let decoded = STANDARD
+                .decode(compact)
+                .map_err(|_| "DASH Widevine PSSH is not valid base64".to_string())?;
+            validate_widevine_pssh(&decoded)?;
+            if !pssh_boxes.contains(&decoded) {
+                pssh_boxes.push(decoded);
+            }
+        }
+    }
+    Ok(pssh_boxes)
+}
+
+fn validate_widevine_pssh(bytes: &[u8]) -> Result<(), String> {
+    let invalid = || "DASH Widevine PSSH box is malformed or has the wrong system ID".to_string();
+    if bytes.len() < 32
+        || bytes.get(4..8) != Some(&b"pssh"[..])
+        || bytes.get(8).is_none_or(|version| *version > 1)
+        || bytes.get(9..12) != Some(&[0, 0, 0][..])
+        || bytes.get(12..28) != Some(WIDEVINE_SYSTEM_ID.as_slice())
+    {
+        return Err(invalid());
+    }
+    let declared_size = u32::from_be_bytes(bytes[0..4].try_into().map_err(|_| invalid())?);
+    if usize::try_from(declared_size).ok() != Some(bytes.len()) {
+        return Err(invalid());
+    }
+    let mut offset = 28_usize;
+    if bytes[8] == 1 {
+        let count_end = offset.checked_add(4).ok_or_else(invalid)?;
+        let count_bytes: [u8; 4] = bytes
+            .get(offset..count_end)
+            .ok_or_else(invalid)?
+            .try_into()
+            .map_err(|_| invalid())?;
+        let count = usize::try_from(u32::from_be_bytes(count_bytes)).map_err(|_| invalid())?;
+        offset = count_end
+            .checked_add(count.checked_mul(16).ok_or_else(invalid)?)
+            .ok_or_else(invalid)?;
+    }
+    let size_end = offset.checked_add(4).ok_or_else(invalid)?;
+    let data_size_bytes: [u8; 4] = bytes
+        .get(offset..size_end)
+        .ok_or_else(invalid)?
+        .try_into()
+        .map_err(|_| invalid())?;
+    let data_size = usize::try_from(u32::from_be_bytes(data_size_bytes)).map_err(|_| invalid())?;
+    let end = size_end.checked_add(data_size).ok_or_else(invalid)?;
+    if end != bytes.len() {
+        return Err(invalid());
+    }
+    Ok(())
 }
 
 /// Resolve the ClearKey license URL across inherited protection scopes.
@@ -453,6 +553,63 @@ mod tests {
     }
 
     #[test]
+    fn parses_widevine_pssh_and_associates_its_protection_system() {
+        let pssh = "AAAAIHBzc2gAAAAA7e+LqXnWSs6jyCfc1R0h7QAAAAA=";
+        let mut descriptor = widevine();
+        descriptor.cenc_pssh.push(dash_mpd_core::CencPssh {
+            content: Some(format!("\n  {pssh}\n")),
+        });
+        let common_encryption = protection("cenc", "00112233445566778899aabbccddeeff");
+        let scopes = [
+            std::slice::from_ref(&common_encryption),
+            std::slice::from_ref(&descriptor),
+        ];
+
+        let encryption = encryption_from_scopes(&scopes)
+            .expect("Widevine CENC metadata should be accepted")
+            .expect("Widevine CENC metadata should be present");
+        assert_eq!(encryption.system, ProtectionSystem::Widevine);
+        assert_eq!(
+            widevine_pssh_from_scopes(&scopes).expect("Widevine PSSH should decode"),
+            vec![STANDARD.decode(pssh).expect("test PSSH base64")]
+        );
+    }
+
+    #[test]
+    fn rejects_malformed_and_retains_distinct_widevine_pssh() {
+        let mut malformed = widevine();
+        malformed.cenc_pssh.push(dash_mpd_core::CencPssh {
+            content: Some("bm90LWEtcHNzaA==".to_string()),
+        });
+        assert!(widevine_pssh_from_scopes(&[std::slice::from_ref(&malformed)]).is_err());
+
+        let mut wrong_system = widevine();
+        wrong_system.cenc_pssh.push(dash_mpd_core::CencPssh {
+            content: Some("AAAAIHBzc2gAAAAAEREREREREREREREREREREQAAAAA=".to_string()),
+        });
+        assert!(widevine_pssh_from_scopes(&[std::slice::from_ref(&wrong_system)]).is_err());
+
+        let mut multiple = widevine();
+        multiple.cenc_pssh.extend([
+            dash_mpd_core::CencPssh {
+                content: Some("AAAAIHBzc2gAAAAA7e+LqXnWSs6jyCfc1R0h7QAAAAA=".to_string()),
+            },
+            dash_mpd_core::CencPssh {
+                content: Some("AAAAIXBzc2gAAAAA7e+LqXnWSs6jyCfc1R0h7QAAAAEB".to_string()),
+            },
+            dash_mpd_core::CencPssh {
+                content: Some(
+                    "AAAANHBzc2gBAAAA7e+LqXnWSs6jyCfc1R0h7QAAAAEAESIzRFVmd4iZqrvM3e7/AAAAAA=="
+                        .to_string(),
+                ),
+            },
+        ]);
+        let retained = widevine_pssh_from_scopes(&[std::slice::from_ref(&multiple)])
+            .expect("multiple valid PSSH boxes should be retained");
+        assert_eq!(retained.len(), 3);
+    }
+
+    #[test]
     fn resolves_cenc_and_cbcs_kids() {
         let cenc = protection("cenc", "00112233-4455-6677-8899-aabbccddeeff");
         let cbcs = protection("cbcs", "ffeeddcc-bbaa-9988-7766-554433221100");
@@ -461,6 +618,7 @@ mod tests {
             .expect("CENC descriptor should be valid")
             .expect("CENC descriptor should be recognized");
         assert_eq!(cenc_result.scheme, EncryptionScheme::Cenc);
+        assert_eq!(cenc_result.system, ProtectionSystem::ClearKey);
         assert_eq!(
             cenc_result.default_kid,
             [

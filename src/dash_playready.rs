@@ -135,8 +135,9 @@ fn playready_wrm_header(pro: &[u8]) -> Result<String, String> {
                 wrm_header = Some(String::from_utf16(&units).map_err(|_| invalid())?);
                 header_count += 1;
             }
-            // PlayReady PRO record types 2 and 3 are reserved metadata records.
-            2 | 3 => {}
+            // Record type 0x0002 is reserved. Embedded license stores (0x0003)
+            // are not consumed by this online license-acquisition path.
+            2 => {}
             _ => return Err(invalid()),
         }
         offset = record_end;
@@ -209,6 +210,7 @@ fn playready_la_url(header: &str) -> Result<String, String> {
     let mut reader = Reader::from_str(header);
     reader.config_mut().trim_text(true);
     let mut depth = 0_usize;
+    let mut root_seen = false;
     let mut data_depth = None;
     let mut data_count = 0_usize;
     let mut la_url_depth = None;
@@ -218,10 +220,20 @@ fn playready_la_url(header: &str) -> Result<String, String> {
         match reader.read_event() {
             Ok(Event::Start(element)) => {
                 depth = depth.checked_add(1).ok_or_else(invalid)?;
-                match element.local_name().as_ref() {
+                let name = element.local_name();
+                if depth == 1 {
+                    if root_seen || name.as_ref() != "WRMHEADER" {
+                        return Err(invalid());
+                    }
+                    root_seen = true;
+                } else if name.as_ref() == "WRMHEADER" {
+                    return Err(invalid());
+                }
+
+                match name.as_ref() {
                     "DATA" => {
                         data_count += 1;
-                        if data_count != 1 || data_depth.is_some() {
+                        if depth != 2 || data_count != 1 || data_depth.is_some() {
                             return Err(invalid());
                         }
                         data_depth = Some(depth);
@@ -233,24 +245,30 @@ fn playready_la_url(header: &str) -> Result<String, String> {
                         la_url = Some(String::new());
                         la_url_depth = Some(depth);
                     }
+                    "LA_URL" => return Err(invalid()),
                     _ if la_url_depth.is_some() => return Err(invalid()),
                     _ => {}
                 }
             }
             Ok(Event::Empty(element)) => {
                 let name = element.local_name();
-                if name.as_ref() == "DATA" {
-                    data_count += 1;
-                    if data_count != 1 || data_depth.is_some() {
-                        return Err(invalid());
+                match name.as_ref() {
+                    "WRMHEADER" => return Err(invalid()),
+                    "DATA" => {
+                        data_count += 1;
+                        if !root_seen || depth != 1 || data_count != 1 || data_depth.is_some() {
+                            return Err(invalid());
+                        }
                     }
-                } else if name.as_ref() == "LA_URL" && data_depth == Some(depth) {
-                    if la_url.is_some() {
-                        return Err(invalid());
+                    "LA_URL" if data_depth == Some(depth) => {
+                        if la_url.is_some() {
+                            return Err(invalid());
+                        }
+                        la_url = Some(String::new());
                     }
-                    la_url = Some(String::new());
-                } else if la_url_depth.is_some() {
-                    return Err(invalid());
+                    "LA_URL" => return Err(invalid()),
+                    _ if la_url_depth.is_some() => return Err(invalid()),
+                    _ => {}
                 }
             }
             Ok(Event::Text(text)) if la_url_depth == Some(depth) => {
@@ -282,6 +300,9 @@ fn playready_la_url(header: &str) -> Result<String, String> {
                 }
             }
             Ok(Event::End(_)) => {
+                if depth == 0 {
+                    return Err(invalid());
+                }
                 if la_url_depth == Some(depth) {
                     la_url_depth = None;
                 }
@@ -296,7 +317,12 @@ fn playready_la_url(header: &str) -> Result<String, String> {
         }
     }
 
-    if data_count != 1 || data_depth.is_some() || la_url_depth.is_some() {
+    if !root_seen
+        || depth != 0
+        || data_count != 1
+        || data_depth.is_some()
+        || la_url_depth.is_some()
+    {
         return Err(invalid());
     }
     let value = la_url.ok_or_else(invalid)?;
@@ -529,6 +555,33 @@ mod tests {
         );
         pro.extend_from_slice(&utf16);
         pro
+    }
+
+    #[test]
+    fn requires_la_url_in_the_direct_wrmheader_data_path() {
+        for header in [
+            "<WRMHEADER><META><DATA><LA_URL>https://license.example.test</LA_URL></DATA></META></WRMHEADER>",
+            "<WRMHEADER><DATA><META><LA_URL>https://license.example.test</LA_URL></META></DATA></WRMHEADER>",
+            "<WRAPPER><WRMHEADER><DATA><LA_URL>https://license.example.test</LA_URL></DATA></WRMHEADER></WRAPPER>",
+        ] {
+            assert!(playready_la_url(header).is_err(), "accepted {header}");
+        }
+    }
+
+    #[test]
+    fn rejects_embedded_license_store_records_not_handled_by_online_acquisition() {
+        let pro = playready_pro();
+        let mut with_els = Vec::with_capacity(pro.len() + 6);
+        let new_length = pro.len() + 6;
+        with_els.extend_from_slice(
+            &u32::try_from(new_length).expect("test PRO length").to_le_bytes(),
+        );
+        with_els.extend_from_slice(&2_u16.to_le_bytes());
+        with_els.extend_from_slice(&3_u16.to_le_bytes());
+        with_els.extend_from_slice(&2_u16.to_le_bytes());
+        with_els.extend_from_slice(b"EL");
+        with_els.extend_from_slice(&pro[6..]);
+        assert!(validate_playready_pro(&with_els).is_err());
     }
 
     #[test]

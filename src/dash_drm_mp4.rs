@@ -1998,6 +1998,52 @@ mod tests {
     }
 
     #[test]
+    fn reads_hls_cmaf_scheme_and_kid_from_the_protected_sample_entry() {
+        for (scheme, fourcc, version, pattern) in [
+            (EncryptionScheme::Cenc, b"cenc", 0, (0, 0)),
+            (EncryptionScheme::Cbcs, b"cbcs", 1, (1, 9)),
+        ] {
+            let (init, kid) = synthetic_init(fourcc, version, pattern, false);
+            let encryption = hls_encryption_from_init(
+                &init,
+                scheme,
+                crate::drm::ProtectionSystem::PlayReady,
+            )
+            .expect("HLS init should expose the tenc KID");
+            assert_eq!(encryption.default_kid, kid);
+            assert_eq!(encryption.scheme, scheme);
+            assert_eq!(
+                encryption.system,
+                crate::drm::ProtectionSystem::PlayReady
+            );
+            assert!(
+                parse_init_encryption(&init, encryption).is_ok(),
+                "the HLS-derived KID should satisfy the existing strict DASH parser"
+            );
+        }
+
+        let (init, _) = synthetic_init(b"cenc", 0, (0, 0), false);
+        assert!(
+            hls_encryption_from_init(
+                &init,
+                EncryptionScheme::Cbcs,
+                crate::drm::ProtectionSystem::PlayReady,
+            )
+            .is_err(),
+            "the HLS KEYFORMAT scheme must agree with the MP4 schm box"
+        );
+        assert!(
+            hls_encryption_from_init(
+                &init,
+                EncryptionScheme::Cenc,
+                crate::drm::ProtectionSystem::Widevine,
+            )
+            .is_err(),
+            "this HLS integration must not accept an unimplemented CDM"
+        );
+    }
+
+    #[test]
     fn restores_full_box_headers_before_validating_encryption_metadata() {
         let (init, kid) = synthetic_init(b"cenc", 0, (0, 0), false);
         let parsed = parse_init_encryption(

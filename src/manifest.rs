@@ -1613,6 +1613,23 @@ video/1080.m3u8
     }
 
     #[test]
+    fn retains_widevine_hls_master_session_key_metadata() {
+        let body = br#"#EXTM3U
+#EXT-X-SESSION-KEY:METHOD=SAMPLE-AES,URI="data:text/plain;base64,AAAAIHBzc2gAAAAA7e+LqXnWSs6jyCfc1R0h7QAAAAA=",KEYFORMAT="urn:uuid:edef8ba9-79d6-4ace-a3c8-27dcd51d21ed"
+#EXT-X-STREAM-INF:BANDWIDTH=1200000
+video/720.m3u8
+"#;
+        let plan = parse_hls_master_playlist(BASE_URL, body)
+            .expect("Widevine session key metadata should be retained");
+
+        assert_eq!(plan.session_protections.len(), 1);
+        assert_eq!(
+            plan.session_protections[0].system,
+            crate::drm::ProtectionSystem::Widevine
+        );
+    }
+
+    #[test]
     fn rejects_variants_with_unmatched_audio_groups() {
         let body = br#"#EXTM3U
 #EXT-X-STREAM-INF:BANDWIDTH=1200000,AUDIO="missing"
@@ -2433,6 +2450,66 @@ one.ts
             Some("https://cdn.example.test/path/keys/media.key")
         );
         assert!(!plan.is_destination_assemblable_candidate());
+    }
+
+    #[test]
+    fn retains_widevine_hls_cmaf_key_metadata_without_fetching_data_uri() {
+        let body = br#"#EXTM3U
+#EXT-X-VERSION:7
+#EXT-X-TARGETDURATION:2
+#EXT-X-MAP:URI="init.mp4"
+#EXT-X-KEY:METHOD=SAMPLE-AES,URI="data:text/plain;base64,AAAAIHBzc2gAAAAA7e+LqXnWSs6jyCfc1R0h7QAAAAA=",KEYFORMAT="urn:uuid:edef8ba9-79d6-4ace-a3c8-27dcd51d21ed",KEYFORMATVERSIONS="1"
+#EXTINF:2,
+segment-1.m4s
+#EXT-X-ENDLIST
+"#;
+        let plan = plan_hls_media_playlist(BASE_URL, body)
+            .expect("Widevine-protected CMAF playlist should retain its metadata");
+
+        assert_eq!(plan.protections.len(), 1);
+        assert_eq!(
+            plan.protections[0].system,
+            crate::drm::ProtectionSystem::Widevine
+        );
+        assert_eq!(plan.protections[0].scheme, crate::drm::EncryptionScheme::Cbcs);
+        assert_eq!(plan.resources.len(), 2);
+        assert!(
+            plan.resources
+                .iter()
+                .all(|resource| resource.kind != HlsResourceKind::Key),
+            "inline DRM initialization data must not be fetched as a remote key resource"
+        );
+    }
+
+    #[test]
+    fn retains_playready_hls_key_metadata_and_rejects_unsupported_key_formats() {
+        let body = br#"#EXTM3U
+#EXT-X-TARGETDURATION:2
+#EXT-X-KEY:METHOD=SAMPLE-AES,URI="data:text/plain;charset=UTF-16;base64,AA==",KEYFORMAT="com.microsoft.playready"
+#EXTINF:2,
+segment.ts
+#EXT-X-ENDLIST
+"#;
+        let plan = plan_hls_media_playlist(BASE_URL, body)
+            .expect("PlayReady signaling should be retained for the CDM phase");
+        assert_eq!(plan.protections.len(), 1);
+        assert_eq!(
+            plan.protections[0].system,
+            crate::drm::ProtectionSystem::PlayReady
+        );
+
+        let unsupported = body
+            .split(|byte| *byte == b'\\n')
+            .map(|line| {
+                String::from_utf8_lossy(line)
+                    .replace("com.microsoft.playready", "com.example.unsupported")
+            })
+            .collect::<Vec<_>>()
+            .join("\\n");
+        assert_eq!(
+            plan_hls_media_playlist(BASE_URL, unsupported.as_bytes()).err(),
+            Some(ManifestError::UnsupportedEncryption)
+        );
     }
 
     #[test]

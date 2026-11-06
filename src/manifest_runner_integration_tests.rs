@@ -2312,7 +2312,7 @@ async fn hls_sample_aes_mpegts_is_decrypted_by_vsd_before_ffmpeg_finalization() 
     .expect("plan identity SAMPLE-AES MPEG-TS fixture");
     assert!(
         !plan.is_destination_assemblable_candidate(),
-        "encrypted HLS must use the local playlist path so FFmpeg sees the key tag"
+        "encrypted HLS must use the local playlist path for per-segment VSD decryption"
     );
 
     let files = HashMap::from([

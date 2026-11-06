@@ -2475,7 +2475,10 @@ segment-1.m4s
             plan.protections[0].system,
             crate::drm::ProtectionSystem::Widevine
         );
-        assert_eq!(plan.protections[0].scheme, crate::drm::EncryptionScheme::Cbcs);
+        assert_eq!(
+            plan.protections[0].scheme,
+            crate::drm::EncryptionScheme::Cbcs
+        );
         assert_eq!(plan.resources.len(), 2);
         assert!(
             plan.resources

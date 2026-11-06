@@ -4736,18 +4736,23 @@ mod tests {
                 .is_some_and(|segment| segment.map.is_some())
         );
         assert!(
-            !parsed.unknown_tags.iter().any(|tag| tag.tag == "X-KEY")
-                && parsed
-                    .segments
-                    .iter()
-                    .all(|segment| !segment.unknown_tags.iter().any(|tag| tag.tag == "X-KEY")),
-            "recognized PlayReady key tags must not remain in unknown_tags: playlist={:?}, segments={:?}",
-            parsed.unknown_tags,
+            !parsed.unknown_tags.iter().any(|tag| tag.tag == "X-KEY"),
+            "a media key tag must not appear among playlist-level unknown tags"
+        );
+        assert!(
+            parsed
+                .segments
+                .first()
+                .is_some_and(|segment| segment.unknown_tags.iter().all(|tag| tag.tag != "X-KEY")),
+            "the recognized PlayReady key must remain typed"
+        );
+        assert!(
             parsed
                 .segments
                 .iter()
-                .map(|segment| &segment.unknown_tags)
-                .collect::<Vec<_>>()
+                .flat_map(|segment| &segment.unknown_tags)
+                .all(|tag| tag.tag != "X-KEY" || tag.rest.as_deref() == Some("METHOD=NONE")),
+            "only the valid METHOD=NONE reset may remain as an unknown key tag"
         );
         crate::drm::hls_protection_from_key(key)
             .expect("parsed PlayReady key descriptor is valid")

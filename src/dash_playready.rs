@@ -221,14 +221,14 @@ fn playready_la_url(header: &str) -> Result<String, String> {
             Ok(Event::Start(element)) => {
                 depth = depth.checked_add(1).ok_or_else(invalid)?;
                 match element.local_name().as_ref() {
-                    b"DATA" => {
+                    "DATA" => {
                         data_count += 1;
                         if data_count != 1 || data_depth.is_some() {
                             return Err(invalid());
                         }
                         data_depth = Some(depth);
                     }
-                    b"LA_URL" if data_depth == depth.checked_sub(1) => {
+                    "LA_URL" if data_depth == depth.checked_sub(1) => {
                         if la_url.is_some() {
                             return Err(invalid());
                         }
@@ -241,12 +241,12 @@ fn playready_la_url(header: &str) -> Result<String, String> {
             }
             Ok(Event::Empty(element)) => {
                 let name = element.local_name();
-                if name.as_ref() == b"DATA" {
+                if name.as_ref() == "DATA" {
                     data_count += 1;
                     if data_count != 1 || data_depth.is_some() {
                         return Err(invalid());
                     }
-                } else if name.as_ref() == b"LA_URL" && data_depth == Some(depth) {
+                } else if name.as_ref() == "LA_URL" && data_depth == Some(depth) {
                     if la_url.is_some() {
                         return Err(invalid());
                     }

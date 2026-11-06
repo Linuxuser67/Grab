@@ -2473,20 +2473,31 @@ async fn decrypt_hls_sample_aes_segments(
         let encrypted_size = encrypted.len();
 
         let decrypted = tokio::task::spawn_blocking(move || {
-            let decrypter = vsd_mp4::decrypt::HlsSampleAesDecrypter::new(&key, &iv);
             std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                decrypter.decrypt(encrypted)
+                validate_vsd_sample_aes_segment(&encrypted)?;
+                let decrypter = vsd_mp4::decrypt::HlsSampleAesDecrypter::new(&key, &iv);
+                Ok::<Vec<u8>, String>(decrypter.decrypt(encrypted))
             }))
         })
         .await
         .map_err(|error| {
-            ManifestRunError::Failed(format!("The HLS SAMPLE-AES worker failed: {error}"))
-        })?
-        .map_err(|_| {
-            ManifestRunError::Unsupported(
-                "VSD could not decrypt the HLS SAMPLE-AES segment".to_string(),
-            )
+            ManifestRunError::Failed(format!(
+                "The HLS SAMPLE-AES worker failed for {segment_uri}: {error}"
+            ))
         })?;
+        let decrypted = match decrypted {
+            Ok(Ok(bytes)) => bytes,
+            Ok(Err(error)) => {
+                return Err(ManifestRunError::Unsupported(format!(
+                    "VSD cannot safely process HLS SAMPLE-AES segment {segment_uri}: {error}"
+                )));
+            }
+            Err(_) => {
+                return Err(ManifestRunError::Unsupported(format!(
+                    "VSD panicked while processing HLS SAMPLE-AES segment {segment_uri}"
+                )));
+            }
+        };
 
         if decrypted.len() != encrypted_size {
             return Err(ManifestRunError::Unsupported(
@@ -2586,6 +2597,94 @@ async fn decrypt_hls_sample_aes_segments(
         sync_staging_directory(directory)
             .await
             .map_err(ManifestRunError::Failed)?;
+    }
+
+    Ok(())
+}
+
+/// Validate the MPEG-TS packet/PES structure before handing untrusted bytes to
+/// VSD's SAMPLE-AES parser. In particular, iori-ssa's ADTS frame loop does not
+/// advance when a malformed frame advertises a zero length.
+fn validate_vsd_sample_aes_segment(bytes: &[u8]) -> Result<(), String> {
+    use mpeg2ts::{
+        es::StreamType,
+        ts::{ReadTsPacket, TsPacketReader, TsPayload},
+    };
+
+    let mut reader = TsPacketReader::new(std::io::Cursor::new(bytes));
+    let mut stream_types = std::collections::HashMap::<u16, StreamType>::new();
+    let mut aac_pes = std::collections::HashMap::<u16, Vec<u8>>::new();
+
+    loop {
+        let Some(packet) = reader
+            .read_ts_packet()
+            .map_err(|error| format!("invalid MPEG-TS packet: {error:?}"))?
+        else {
+            break;
+        };
+        let pid = packet.header.pid.as_u16();
+        let flush = matches!(
+            &packet.payload,
+            Some(TsPayload::Pat(_) | TsPayload::Pmt(_) | TsPayload::Section(_))
+        );
+
+        match packet.payload {
+            Some(TsPayload::Pmt(pmt)) => {
+                for stream in pmt.es_info {
+                    stream_types.insert(stream.elementary_pid.as_u16(), stream.stream_type);
+                }
+            }
+            Some(TsPayload::Pes(pes)) => {
+                if let Some(previous) = aac_pes.remove(&pid) {
+                    validate_vsd_adts_pes(&previous)?;
+                }
+                if stream_types.get(&pid).is_some_and(|stream_type| {
+                    matches!(
+                        stream_type,
+                        StreamType::AdtsAac | StreamType::AdtsAacWithAes128Cbc
+                    )
+                }) {
+                    aac_pes.insert(pid, pes.data.to_vec());
+                }
+            }
+            Some(TsPayload::Raw(payload)) => {
+                if let Some(data) = aac_pes.get_mut(&pid) {
+                    data.extend_from_slice(&payload);
+                }
+            }
+            _ => {}
+        }
+
+        if flush {
+            if let Some(data) = aac_pes.remove(&pid) {
+                validate_vsd_adts_pes(&data)?;
+            }
+        }
+    }
+
+    for data in aac_pes.into_values() {
+        validate_vsd_adts_pes(&data)?;
+    }
+
+    Ok(())
+}
+
+/// Reject ADTS frame lengths that could make iori-ssa's audio loop fail to
+/// advance or index beyond the current PES packet.
+fn validate_vsd_adts_pes(mut data: &[u8]) -> Result<(), String> {
+    while !data.is_empty() {
+        if data.len() < 7 || data[0] != 0xff || data[1] & 0xf6 != 0xf0 {
+            return Err("malformed ADTS frame header".to_string());
+        }
+
+        let frame_length = (usize::from(data[3] & 0x03) << 11)
+            | (usize::from(data[4]) << 3)
+            | usize::from(data[5] >> 5);
+        let header_length = if data[1] & 0x01 == 0 { 9 } else { 7 };
+        if frame_length < header_length || frame_length > data.len() {
+            return Err("ADTS frame length is invalid or incomplete".to_string());
+        }
+        data = &data[frame_length..];
     }
 
     Ok(())

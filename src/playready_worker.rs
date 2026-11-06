@@ -62,7 +62,7 @@ struct WorkerKey {
     key: Zeroizing<[u8; 16]>,
 }
 
-#[derive(Clone, Copy, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 enum WorkerFailure {
     Protocol,
@@ -173,10 +173,9 @@ pub(crate) async fn acquire_keys(
         .spawn()
         .map_err(|_| "Could not start the PlayReady CDM worker".to_string())?;
 
-    let result =
-        acquire_keys_with_child(client, device_path, pssh, license_url, &mut child).await;
+    let result = acquire_keys_with_child(client, device_path, pssh, license_url, &mut child).await;
     if result.is_err() {
-        if child.try_wait().await.ok().flatten().is_none() {
+        if child.try_wait().ok().flatten().is_none() {
             let _ = child.start_kill();
         }
         let _ = tokio::time::timeout(WORKER_EXIT_TIMEOUT, child.wait()).await;
@@ -270,9 +269,7 @@ async fn acquire_keys_with_child(
             .len()
             .checked_add(chunk.len())
             .filter(|length| *length <= MAX_LICENSE_RESPONSE_BYTES)
-            .ok_or_else(|| {
-                "The PlayReady license response exceeds its size limit".to_string()
-            })?;
+            .ok_or_else(|| "The PlayReady license response exceeds its size limit".to_string())?;
         response_bytes.extend_from_slice(&chunk);
         debug_assert_eq!(response_bytes.len(), next_len);
     }
@@ -347,8 +344,7 @@ fn process_worker<R: BufRead, W: Write>(
     if !metadata.is_file() || metadata.len() > MAX_DEVICE_FILE_BYTES {
         return Err(WorkerFailure::InvalidDevice);
     }
-    let capacity =
-        usize::try_from(metadata.len()).map_err(|_| WorkerFailure::InvalidDevice)?;
+    let capacity = usize::try_from(metadata.len()).map_err(|_| WorkerFailure::InvalidDevice)?;
     let mut device_bytes = Zeroizing::new(Vec::with_capacity(capacity));
     let mut bounded_device_file = device_file.take(MAX_DEVICE_FILE_BYTES + 1);
     bounded_device_file

@@ -1214,15 +1214,18 @@ fn build_hls_plan(base_url: Url, mut playlist: MediaPlaylist) -> Result<HlsPlan,
             return Err(ManifestError::UnsupportedPlaylist);
         }
 
-        if let Some(key) = segment.key.as_ref() {
+        if let Some(key) = segment.key.take() {
             if key.method == KeyMethod::None {
                 // Keep METHOD=NONE on the first segment after the explicit
                 // reset, then omit the parser's repeated inherited copies.
-                segment.key = (!method_none_active).then(|| key.clone());
+                if !method_none_active {
+                    segment.key = Some(key);
+                }
                 active_key = None;
                 method_none_active = true;
             } else {
                 active_key = Some(key.clone());
+                segment.key = Some(key);
                 method_none_active = false;
             }
         } else {

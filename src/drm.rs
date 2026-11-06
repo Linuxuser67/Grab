@@ -26,7 +26,7 @@ impl DrmKeyMap {
     pub(crate) fn from_keys(
         entries: impl IntoIterator<Item = ([u8; 16], Zeroizing<[u8; 16]>)>,
     ) -> Result<Self, String> {
-        let mut keys = BTreeMap::new();
+        let mut keys: BTreeMap<[u8; 16], Zeroizing<[u8; 16]>> = BTreeMap::new();
         for (kid, key) in entries {
             if let Some(previous) = keys.get(&kid) {
                 if **previous != *key {

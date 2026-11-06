@@ -135,7 +135,9 @@ pub(crate) fn run_worker() -> i32 {
 
 /// Acquire PlayReady keys while keeping device parsing and CDM state in a
 /// short-lived child process. The supplied HTTP client remains owned by Grab,
-/// so its DNS, proxy, TLS, and host-validation policy is not bypassed.
+/// so its DNS, proxy, TLS, and redirect policy is not bypassed. The caller
+/// must also validate the license host with Grab's public-host policy before
+/// calling this function.
 ///
 /// # Errors
 ///
@@ -573,6 +575,22 @@ mod tests {
         ] {
             assert_eq!(parse_hex_16(invalid), None, "{invalid}");
         }
+    }
+
+    #[test]
+    fn license_response_frame_roundtrips_in_zeroizing_buffers() {
+        let request = WorkerRequest::LicenseResponse {
+            body: Zeroizing::new("<LicenseResponse />".to_string()),
+        };
+        let mut frame = Zeroizing::new(Vec::new());
+        write_sync_frame(&mut frame, &request).expect("worker frame should serialize");
+        let mut reader = BufReader::new(frame.as_slice());
+        let decoded: WorkerRequest =
+            read_sync_message(&mut reader).expect("worker frame should deserialize");
+        let WorkerRequest::LicenseResponse { body } = decoded else {
+            panic!("worker request type should be retained");
+        };
+        assert_eq!(body.as_str(), "<LicenseResponse />");
     }
 
     #[test]

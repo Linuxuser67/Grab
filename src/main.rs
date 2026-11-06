@@ -38,7 +38,7 @@ mod media_types;
 mod mp4_validation;
 mod mpeg_ts_validation;
 mod net_types;
-pub mod playready_worker;
+mod playready_worker;
 mod preferences;
 mod runtime;
 mod settings;

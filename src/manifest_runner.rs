@@ -2509,11 +2509,8 @@ async fn decrypt_hls_playready_track(
     let resources: Vec<DashResource> = plan
         .resources
         .iter()
-        .map(|resource| DashResource {
-            url: resource.url.clone(),
-            range: resource.range,
-            filename: resource.filename.clone(),
-            kind: match resource.kind {
+        .map(|resource| {
+            let kind = match resource.kind {
                 HlsResourceKind::InitMap => DashResourceKind::Initialization,
                 HlsResourceKind::Segment => DashResourceKind::Segment,
                 HlsResourceKind::Key => {
@@ -2521,10 +2518,16 @@ async fn decrypt_hls_playready_track(
                         "Native HLS PlayReady does not accept remote key resources".to_string(),
                     ));
                 }
-            },
-            segment_number: None,
+            };
+            Ok(DashResource {
+                url: resource.url.clone(),
+                range: resource.range,
+                filename: resource.filename.clone(),
+                kind,
+                segment_number: None,
+            })
         })
-        .collect();
+        .collect::<Result<_, ManifestRunError>>()?;
     let directory = directory.to_path_buf();
     let scheme = request.scheme;
     let cancelled = Arc::new(AtomicBool::new(false));

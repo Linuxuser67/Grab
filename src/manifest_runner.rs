@@ -3235,7 +3235,8 @@ async fn fetch_dash_range_bytes(
             .is_none_or(|length| length > range.length)
         {
             return Err(ManifestRunError::Unsupported(
-                "The stream server returned more bytes than the requested DASH byte range".to_string(),
+                "The stream server returned more bytes than the requested DASH byte range"
+                    .to_string(),
             ));
         }
         bytes.extend_from_slice(&chunk);
@@ -3384,13 +3385,12 @@ async fn resolve_dash_segment_base_resources(
                     ));
                 }
                 let child_node =
-                    parse_child_segment_index(index, &child, &child_bytes, media_resource_length).map_err(
-                        |error| {
+                    parse_child_segment_index(index, &child, &child_bytes, media_resource_length)
+                        .map_err(|error| {
                             ManifestRunError::Unsupported(format!(
                                 "The DASH child SIDX is unsupported: {error}"
                             ))
-                        },
-                    )?;
+                        })?;
                 total_entry_count = total_entry_count
                     .checked_add(child_node.entries.len())
                     .filter(|count| *count <= MAX_DASH_SIDX_SEGMENTS)
@@ -3411,12 +3411,17 @@ async fn resolve_dash_segment_base_resources(
         }
     }
 
-    validate_segment_base_sidx_ranges(index, &child_index_ranges, &media_ranges, media_resource_length)
-        .map_err(|error| {
-            ManifestRunError::Unsupported(format!(
-                "The DASH SIDX hierarchy contains overlapping or invalid ranges: {error}"
-            ))
-        })?;
+    validate_segment_base_sidx_ranges(
+        index,
+        &child_index_ranges,
+        &media_ranges,
+        media_resource_length,
+    )
+    .map_err(|error| {
+        ManifestRunError::Unsupported(format!(
+            "The DASH SIDX hierarchy contains overlapping or invalid ranges: {error}"
+        ))
+    })?;
 
     Ok(Some(resources))
 }

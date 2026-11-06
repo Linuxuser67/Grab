@@ -1212,10 +1212,9 @@ fn build_hls_plan(base_url: Url, mut playlist: MediaPlaylist) -> Result<HlsPlan,
             if key.method != KeyMethod::AES128 && !sample_aes {
                 return Err(ManifestError::UnsupportedEncryption);
             }
-            // FFmpeg's HLS demuxer implements SAMPLE-AES for MPEG-TS
-            // elementary streams. SAMPLE-AES in fragmented MP4 is the
-            // Common Encryption cbcs scheme and is deliberately not routed
-            // through this transport-stream path.
+            // VSD's HLS decrypter handles SAMPLE-AES MPEG-TS elementary
+            // streams. SAMPLE-AES in fragmented MP4 is the Common Encryption
+            // cbcs scheme and is deliberately not routed through this path.
             if sample_aes && segment.map.is_some() {
                 return Err(ManifestError::UnsupportedEncryption);
             }

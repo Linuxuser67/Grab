@@ -21,9 +21,9 @@ dependencies = [
 
 [[package]]
 name = "aes"
-version = "0.9.0"
+version = "0.9.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "66bd29a732b644c0431c6140f370d097879203d79b80c94a6747ba0872adaef8"
+checksum = "fc0fc36d7440d015b45468ba08a21e80e056ebbd014c611c6298bb7503e04bd1"
 dependencies = [
  "cipher 0.5.1",
  "cpubits",
@@ -3402,7 +3402,7 @@ version = "0.4.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f0637582ece29474fceb1bcc2738c92f122534108440bdb46fa1c18f33d487a0"
 dependencies = [
- "aes 0.9.0",
+ "aes 0.9.4",
  "base64 0.22.1",
  "binrw",
  "bitflags 2.13.2",
@@ -4601,7 +4601,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "32497e9a4c7b38532efcdebeef879707aa9f794296a4f0244f6f69e9bc8574bd"
 dependencies = [
  "fastrand",
- "getrandom 0.4.3",
+ "getrandom 0.3.4",
  "once_cell",
  "rustix",
  "windows-sys 0.61.2",
@@ -5102,7 +5102,7 @@ version = "0.2.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c1300e0d5eb9680eed93ab79a6c1d862e0c7ba79a5702817557d0ae32066f385"
 dependencies = [
- "aes 0.9.0",
+ "aes 0.9.4",
  "cbc 0.2.0",
  "cipher 0.5.1",
  "ctr",

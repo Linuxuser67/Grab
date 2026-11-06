@@ -2495,7 +2495,7 @@ video.m3u8
 
     #[test]
     fn rejects_gapped_segments() {
-        let gap_body = b"#EXTM3U\n#EXTINF:2,\n#EXT-X-GAP\none.ts\n#EXT-X-ENDLIST\n";
+        let gap_body = b"#EXTM3U\n#EXT-X-TARGETDURATION:2\n#EXTINF:2,\n#EXT-X-GAP\none.ts\n#EXT-X-ENDLIST\n";
         assert_eq!(
             plan_hls_media_playlist(BASE_URL, gap_body).err(),
             Some(ManifestError::UnsupportedPlaylist)
@@ -2521,6 +2521,7 @@ one.ts
     #[test]
     fn rejects_uri_affecting_hls_extensions_until_they_are_supported() {
         let body = br#"#EXTM3U
+#EXT-X-TARGETDURATION:2
 #EXT-X-CONTENT-STEERING:SERVER-URI="steering.json",PATHWAY-ID="default"
 #EXT-X-STREAM-INF:BANDWIDTH=1000000
 video.m3u8
@@ -2530,7 +2531,7 @@ video.m3u8
             Some(ManifestError::UnsupportedPlaylist)
         );
 
-        let media = b"#EXTM3U\n#EXT-X-DEFINE:NAME=\"path\",VALUE=\"video\"\n#EXTINF:2,\n{$path}/one.ts\n#EXT-X-ENDLIST\n";
+        let media = b"#EXTM3U\n#EXT-X-TARGETDURATION:2\n#EXT-X-DEFINE:NAME=\"path\",VALUE=\"video\"\n#EXTINF:2,\n{$path}/one.ts\n#EXT-X-ENDLIST\n";
         assert_eq!(
             plan_hls_media_playlist(BASE_URL, media).err(),
             Some(ManifestError::UnsupportedPlaylist)
@@ -2539,7 +2540,7 @@ video.m3u8
 
     #[test]
     fn rejects_live_playlists_without_end_list() {
-        let body = b"#EXTM3U\n#EXTINF:2,\none.ts\n";
+        let body = b"#EXTM3U\n#EXT-X-TARGETDURATION:2\n#EXTINF:2,\none.ts\n";
         assert_eq!(
             plan_hls_media_playlist(BASE_URL, body).err(),
             Some(ManifestError::UnsupportedPlaylist)

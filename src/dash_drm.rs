@@ -530,6 +530,54 @@ mod tests {
     }
 
     #[test]
+    fn parses_widevine_pssh_and_associates_its_protection_system() {
+        let pssh = "AAAAIHBzc2gAAAAA7e+LqXnWSs6jyCfc1R0h7QAAAAA=";
+        let mut descriptor = widevine();
+        descriptor.cenc_pssh.push(dash_mpd_core::CencPssh {
+            content: Some(pssh.to_string()),
+        });
+        let common_encryption = protection("cenc", "00112233445566778899aabbccddeeff");
+        let scopes = [
+            std::slice::from_ref(&common_encryption),
+            std::slice::from_ref(&descriptor),
+        ];
+
+        let encryption = encryption_from_scopes(&scopes)
+            .expect("Widevine CENC metadata should be accepted")
+            .expect("Widevine CENC metadata should be present");
+        assert_eq!(encryption.system, ProtectionSystem::Widevine);
+        assert_eq!(
+            widevine_pssh_from_scopes(&scopes).expect("Widevine PSSH should decode"),
+            Some(STANDARD.decode(pssh).expect("test PSSH base64"))
+        );
+    }
+
+    #[test]
+    fn rejects_malformed_and_conflicting_widevine_pssh() {
+        let mut malformed = widevine();
+        malformed.cenc_pssh.push(dash_mpd_core::CencPssh {
+            content: Some("bm90LWEtcHNzaA==".to_string()),
+        });
+        assert!(widevine_pssh_from_scopes(&[std::slice::from_ref(&malformed)]).is_err());
+
+        let mut first = widevine();
+        first.cenc_pssh.push(dash_mpd_core::CencPssh {
+            content: Some("AAAAIHBzc2gAAAAA7e+LqXnWSs6jyCfc1R0h7QAAAAA=".to_string()),
+        });
+        let mut second = widevine();
+        second.cenc_pssh.push(dash_mpd_core::CencPssh {
+            content: Some("AAAAIHBzc2gAAAAA7e+LqXnWSs6jyCfc1R0h7QAAAAA=".to_string()),
+        });
+        second.cenc_pssh[0].content = Some(
+            "AAAAIHBzc2gAAAAA7e+LqXnWSs6jyCfc1R0h7QAAAAA=".replace("AAAAA=", "AAAAAQ==")
+        );
+        assert!(widevine_pssh_from_scopes(&[
+            std::slice::from_ref(&first),
+            std::slice::from_ref(&second),
+        ]).is_err());
+    }
+
+    #[test]
     fn resolves_cenc_and_cbcs_kids() {
         let cenc = protection("cenc", "00112233-4455-6677-8899-aabbccddeeff");
         let cbcs = protection("cbcs", "ffeeddcc-bbaa-9988-7766-554433221100");

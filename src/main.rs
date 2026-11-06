@@ -4,8 +4,6 @@ mod backend_debug;
 mod bounded_file;
 mod content_range;
 mod cookies;
-mod dash_drm;
-mod dash_playready;
 mod dash_subtitle;
 mod dash_subtitle_stpp;
 mod download;
@@ -16,7 +14,6 @@ mod download_pieces;
 mod download_rate;
 mod download_row;
 mod download_store;
-mod drm;
 mod engine_msg;
 mod extension_server;
 mod file_names;
@@ -38,7 +35,6 @@ mod media_types;
 mod mp4_validation;
 mod mpeg_ts_validation;
 mod net_types;
-mod playready_worker;
 mod preferences;
 mod runtime;
 mod settings;
@@ -137,10 +133,6 @@ fn ensure_schema_dir() {
 }
 
 fn main() -> glib::ExitCode {
-    if playready_worker::is_worker_requested() {
-        std::process::exit(playready_worker::run_worker());
-    }
-
     // Schema dir first: the schema may not be in the default source
     // (tarball/uninstalled run).
     ensure_schema_dir();

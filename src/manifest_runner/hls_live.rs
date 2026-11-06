@@ -50,8 +50,8 @@ pub(super) async fn restore_local_live_hls_tracks(
     };
     let audio = read_local_live_hls_plan(source_url, audio_dir).await?;
     Ok(Some(Tracks::Hls {
-        video: Box::new(video),
-        audio: audio.map(Box::new),
+        video,
+        audio,
         subtitle: None,
         subtitle_language: None,
     }))

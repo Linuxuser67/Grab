@@ -2296,6 +2296,8 @@ async fn hls_sample_aes_mpegts_is_decrypted_by_vsd_before_ffmpeg_finalization() 
 
     let root = TempRoot::new("sample-aes");
     let encrypted_segment = include_bytes!("../tests/fixtures/hls-sample-aes/ac3.ts").to_vec();
+    let expected_downloaded =
+        u64::try_from(encrypted_segment.len()).expect("fixture size fits in u64") * 2;
     let key = include_bytes!("../tests/fixtures/hls-sample-aes/key.bin").to_vec();
     let iv = include_bytes!("../tests/fixtures/hls-sample-aes/iv.bin");
     let iv_hex = iv
@@ -2347,7 +2349,7 @@ async fn hls_sample_aes_mpegts_is_decrypted_by_vsd_before_ffmpeg_finalization() 
         "SAMPLE-AES resource fetch unexpectedly aborted"
     );
     wait_for_fixture_server(server).await;
-    assert_eq!(downloaded.load(Ordering::Relaxed), 130_880);
+    assert_eq!(downloaded.load(Ordering::Relaxed), expected_downloaded);
 
     write_playlist(&video_dir, &plan)
         .await

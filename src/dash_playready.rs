@@ -19,6 +19,9 @@ const PLAYREADY_SYSTEM_ID: [u8; 16] = [
 ];
 
 fn decode_bounded_protection_data(encoded: &str, label: &str) -> Result<Vec<u8>, String> {
+    if encoded.len() > crate::drm::MAX_PSSH_BYTES.saturating_mul(4) {
+        return Err(format!("DASH {label} exceeds its encoded size limit"));
+    }
     let compact: Vec<u8> = encoded
         .bytes()
         .filter(|byte| !byte.is_ascii_whitespace())

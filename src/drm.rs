@@ -172,6 +172,7 @@ pub(crate) fn hls_protection_from_key(key: &Key) -> Result<Option<HlsProtection>
         }
         "com.microsoft.playready" => {
             let bytes = decode_hls_data_uri(uri, &["text/plain;charset=utf-16;base64"])?;
+            validate_playready_object(&bytes)?;
             (
                 ProtectionSystem::PlayReady,
                 HlsInitializationData::PlayReadyObject(bytes.into_boxed_slice()),
@@ -217,6 +218,76 @@ fn decode_hls_data_uri(uri: &str, accepted_metadata: &[&str]) -> Result<Vec<u8>,
         return Err("HLS DRM initialization data exceeds its size limit".to_string());
     }
     Ok(bytes)
+}
+
+fn validate_playready_object(bytes: &[u8]) -> Result<(), String> {
+    let invalid = || "HLS PlayReady initialization data is not a valid PlayReady Object".to_string();
+    if bytes.len() < 10 || bytes.len() > MAX_HLS_DRM_INIT_DATA_BYTES {
+        return Err(invalid());
+    }
+    let declared_size = u32::from_le_bytes(
+        bytes
+            .get(0..4)
+            .ok_or_else(invalid)?
+            .try_into()
+            .map_err(|_| invalid())?,
+    );
+    if usize::try_from(declared_size).ok() != Some(bytes.len()) {
+        return Err(invalid());
+    }
+    let record_count = u16::from_le_bytes(
+        bytes
+            .get(4..6)
+            .ok_or_else(invalid)?
+            .try_into()
+            .map_err(|_| invalid())?,
+    );
+    if record_count == 0 {
+        return Err(invalid());
+    }
+
+    let mut offset = 6_usize;
+    let mut has_wrm_header = false;
+    for _ in 0..record_count {
+        let header_end = offset.checked_add(4).ok_or_else(invalid)?;
+        let header = bytes.get(offset..header_end).ok_or_else(invalid)?;
+        let record_type = u16::from_le_bytes(
+            header
+                .get(0..2)
+                .ok_or_else(invalid)?
+                .try_into()
+                .map_err(|_| invalid())?,
+        );
+        let record_length = usize::from(u16::from_le_bytes(
+            header
+                .get(2..4)
+                .ok_or_else(invalid)?
+                .try_into()
+                .map_err(|_| invalid())?,
+        ));
+        let record_end = header_end.checked_add(record_length).ok_or_else(invalid)?;
+        let record = bytes.get(header_end..record_end).ok_or_else(invalid)?;
+        match record_type {
+            1 => {
+                if record.is_empty() || record.len() % 2 != 0 {
+                    return Err(invalid());
+                }
+                let units: Vec<u16> = record
+                    .chunks_exact(2)
+                    .map(|pair| u16::from_le_bytes([pair[0], pair[1]]))
+                    .collect();
+                String::from_utf16(&units).map_err(|_| invalid())?;
+                has_wrm_header = true;
+            }
+            2 | 3 => {}
+            _ => return Err(invalid()),
+        }
+        offset = record_end;
+    }
+    if offset != bytes.len() || !has_wrm_header {
+        return Err(invalid());
+    }
+    Ok(())
 }
 
 /// Reject multiple simultaneously active KEYFORMATs because m3u8-rs exposes

@@ -8,6 +8,16 @@ use url::Url;
 
 use super::dash_roles::{self, DASH_ROLE_SCHEME};
 use super::{MAX_MANIFEST_BYTES, ManifestByteRange};
+
+#[path = "manifest_dash_sidx.rs"]
+mod sidx;
+pub(crate) use sidx::{
+    DashSidxChildIndex, DashSidxEntry, DashSidxNode, MAX_DASH_SIDX_SEGMENTS,
+    dash_sidx_media_resource, parse_child_segment_index, parse_segment_base_index,
+    validate_segment_base_sidx_ranges,
+};
+#[cfg(test)]
+pub(crate) use sidx::resolve_segment_base_index;
 const MAX_REPRESENTATIONS: usize = 1_024;
 const MAX_SEGMENTS: usize = 100_000;
 const MIN_DYNAMIC_UPDATE_PERIOD: Duration = Duration::from_millis(500);
@@ -2357,115 +2367,6 @@ fn expand_indexed_base(
         kind: DashResourceKind::Initialization,
         segment_number: None,
     }])
-}
-
-/// Resolve a flat SIDX into checked byte-range resources for a SegmentBase file.
-pub(crate) fn resolve_segment_base_index(
-    index: &DashSegmentBaseIndex,
-    bytes: &[u8],
-    total_length: u64,
-) -> Result<Vec<DashResource>, DashError> {
-    use mp4box::StructuredData;
-
-    let index_range_end = index
-        .index_range
-        .offset
-        .checked_add(index.index_range.length)
-        .ok_or(DashError::InvalidSegment)?;
-    if index.index_range.length == 0
-        || index.index_range.length > MAX_SEGMENT_INDEX_BYTES
-        || u64::try_from(bytes.len()).ok() != Some(index.index_range.length)
-        || index_range_end > total_length
-        || index.initialization_range.length == 0
-        || index.initialization_range.length > crate::manifest_writer::MAX_RESOURCE_BYTES
-    {
-        return Err(DashError::InvalidSegment);
-    }
-
-    let initialization_end = index
-        .initialization_range
-        .offset
-        .checked_add(index.initialization_range.length)
-        .ok_or(DashError::InvalidSegment)?;
-    if initialization_end > total_length
-        || ranges_overlap(index.index_range, index.initialization_range)?
-    {
-        return Err(DashError::InvalidSegment);
-    }
-
-    let mut reader = std::io::Cursor::new(bytes);
-    let boxes = mp4box::get_boxes(&mut reader, index.index_range.length, true)
-        .map_err(|_| DashError::Parse)?;
-    let mut sidx = None;
-    for box_ref in &boxes {
-        if box_ref.typ == "sidx" && sidx.replace(box_ref).is_some() {
-            return Err(DashError::UnsupportedAddressing);
-        }
-    }
-    let sidx = sidx.ok_or(DashError::UnsupportedAddressing)?;
-    let sidx_end = sidx
-        .offset
-        .checked_add(sidx.size)
-        .filter(|end| *end <= index.index_range.length)
-        .ok_or(DashError::InvalidSegment)?;
-    let Some(StructuredData::SegmentIndex(data)) = sidx.structured_data.as_ref() else {
-        return Err(DashError::Parse);
-    };
-    if data.timescale == 0
-        || index
-            .timescale
-            .is_some_and(|timescale| timescale != u64::from(data.timescale))
-        || data.references.is_empty()
-        || data.references.len() > MAX_SEGMENTS
-    {
-        return Err(DashError::UnsupportedAddressing);
-    }
-
-    let mut media_offset = index
-        .index_range
-        .offset
-        .checked_add(sidx_end)
-        .and_then(|offset| offset.checked_add(data.first_offset))
-        .ok_or(DashError::InvalidSegment)?;
-    if index.index_range_exact && media_offset < index_range_end {
-        return Err(DashError::UnsupportedAddressing);
-    }
-
-    let mut resources = Vec::with_capacity(data.references.len());
-    for (number, reference) in data.references.iter().enumerate() {
-        if reference.reference_type != 0
-            || reference.referenced_size == 0
-            || reference.subsegment_duration == 0
-        {
-            return Err(DashError::UnsupportedAddressing);
-        }
-        let length = u64::from(reference.referenced_size);
-        let end = media_offset
-            .checked_add(length)
-            .filter(|end| *end <= total_length)
-            .ok_or(DashError::InvalidSegment)?;
-        if length > crate::manifest_writer::MAX_RESOURCE_BYTES {
-            return Err(DashError::LimitExceeded);
-        }
-        let range = ManifestByteRange {
-            offset: media_offset,
-            length,
-        };
-        if ranges_overlap(range, index.initialization_range)? {
-            return Err(DashError::InvalidSegment);
-        }
-        let filename =
-            super::resource_filename("dash-segment", Some(number), &index.url, Some(range));
-        resources.push(DashResource {
-            url: index.url.clone(),
-            range: Some(range),
-            filename,
-            kind: DashResourceKind::Segment,
-            segment_number: Some(u64::try_from(number).map_err(|_| DashError::LimitExceeded)?),
-        });
-        media_offset = end;
-    }
-    Ok(resources)
 }
 
 /// Return whether two checked half-open ranges overlap.

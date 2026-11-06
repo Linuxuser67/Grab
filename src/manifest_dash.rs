@@ -170,11 +170,15 @@ impl DashRepresentationPlan {
 /// Information needed to resolve a static SegmentBase index into media ranges.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct DashSegmentBaseIndex {
+    /// Media resource containing the referenced byte ranges.
     pub(crate) url: Url,
+    /// Resource containing the SIDX box; this may differ from the media URL.
+    pub(crate) index_url: Url,
     pub(crate) index_range: ManifestByteRange,
-    initialization_range: ManifestByteRange,
-    index_range_exact: bool,
-    timescale: Option<u64>,
+    pub(crate) index_is_external: bool,
+    pub(crate) initialization_range: ManifestByteRange,
+    pub(crate) index_range_exact: bool,
+    pub(crate) timescale: Option<u64>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -197,6 +201,7 @@ enum DashAddressing {
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct DashBaseIndex {
     index_range: ManifestByteRange,
+    index_url: Option<String>,
     initialization_range: ManifestByteRange,
     index_range_exact: bool,
     timescale: Option<u64>,
@@ -981,13 +986,27 @@ pub(crate) fn plan_dash_representation(
         }
     }
     let segment_base_index = match (&representation.source.addressing, sources.len()) {
-        (DashAddressing::IndexedBase(index), 1) => Some(DashSegmentBaseIndex {
-            url: representation.source.base_url.clone(),
-            index_range: index.index_range,
-            initialization_range: index.initialization_range,
-            index_range_exact: index.index_range_exact,
-            timescale: index.timescale,
-        }),
+        (DashAddressing::IndexedBase(index), 1) => {
+            if !representation.source.period_start.is_zero() {
+                return Err(DashError::UnsupportedAddressing);
+            }
+            let index_url = index
+                .index_url
+                .as_deref()
+                .map(|raw| resolve_resource(&representation.source.base_url, raw))
+                .transpose()?
+                .unwrap_or_else(|| representation.source.base_url.clone());
+            let index_is_external = index_url != representation.source.base_url;
+            Some(DashSegmentBaseIndex {
+                url: representation.source.base_url.clone(),
+                index_url,
+                index_range: index.index_range,
+                index_is_external,
+                initialization_range: index.initialization_range,
+                index_range_exact: index.index_range_exact,
+                timescale: index.timescale,
+            })
+        }
         (DashAddressing::IndexedBase(_), _) => return Err(DashError::UnsupportedAddressing),
         _ => None,
     };
@@ -1118,6 +1137,7 @@ fn stable_representation_key(identity: RepresentationIdentity<'_>) -> String {
             hasher.update(b"indexed-base");
             hash_optional_range(&mut hasher, Some(index.index_range));
             hash_optional_range(&mut hasher, Some(index.initialization_range));
+            hash_optional_text(&mut hasher, index.index_url.as_deref());
             hasher.update([u8::from(index.index_range_exact)]);
             hash_optional_number(&mut hasher, index.timescale);
         }
@@ -1187,6 +1207,7 @@ fn stable_live_representation_key(identity: RepresentationIdentity<'_>) -> Strin
             hasher.update(b"indexed-base");
             hash_optional_range(&mut hasher, Some(index.index_range));
             hash_optional_range(&mut hasher, Some(index.initialization_range));
+            hash_optional_text(&mut hasher, index.index_url.as_deref());
             hasher.update([u8::from(index.index_range_exact)]);
             hash_optional_number(&mut hasher, index.timescale);
         }
@@ -1337,6 +1358,12 @@ fn effective_addressing(
     period_duration: Duration,
     is_dynamic: bool,
 ) -> Result<DashAddressing, DashError> {
+    if representation.representation_index.is_some() {
+        // The supported profile requires RepresentationIndex to be nested in
+        // SegmentBase, where index and initialization addressing can be resolved.
+        return Err(DashError::UnsupportedAddressing);
+    }
+
     let templates = [
         period.SegmentTemplate.as_ref(),
         adaptation.SegmentTemplate.as_ref(),
@@ -1363,18 +1390,20 @@ fn effective_addressing(
         let mut initialization_range = None;
         let mut index_range_exact = None;
         let mut timescale = None;
+        let mut index_source_url = None;
+        let mut has_representation_index = false;
         for base in bases.iter().flatten() {
-            if base
-                .presentationTimeOffset
-                .is_some_and(|offset| offset != 0)
-                || base.timescale == Some(0)
+            if base.timescale == Some(0)
+                || base
+                    .presentationTimeOffset
+                    .is_some_and(|offset| offset != 0)
                 || base
                     .availabilityTimeOffset
                     .is_some_and(|offset| offset != 0.0)
                 || base.availabilityTimeComplete == Some(false)
                 || base.eptDelta.is_some_and(|delta| delta != 0)
                 || base.pbDelta.is_some_and(|delta| delta != 0)
-                || base.representation_index.is_some()
+                || base.failover_content.is_some()
                 || base
                     .Initialization
                     .as_ref()
@@ -1386,6 +1415,20 @@ fn effective_addressing(
             index_range = base.indexRange.as_deref().or(index_range);
             index_range_exact = base.indexRangeExact.or(index_range_exact);
             timescale = base.timescale.or(timescale);
+            if let Some(representation_index) = base.representation_index.as_ref() {
+                // Child elements replace inherited children rather than
+                // inheriting individual attributes from the parent element.
+                has_representation_index = true;
+                index_source_url = representation_index
+                    .sourceURL
+                    .as_deref()
+                    .map(str::trim)
+                    .filter(|source| !source.is_empty())
+                    .map(str::to_string);
+                if let Some(range) = representation_index.range.as_deref() {
+                    index_range = Some(range);
+                }
+            }
             if let Some(initialization) = base.Initialization.as_ref() {
                 // An Initialization child replaces the inherited child; a
                 // missing range must not silently reuse the parent's range.
@@ -1393,6 +1436,11 @@ fn effective_addressing(
             }
         }
 
+        if has_representation_index && index_range.is_none() {
+            // An index without an explicit bounded range would require an
+            // unbounded whole-resource fetch.
+            return Err(DashError::UnsupportedAddressing);
+        }
         if index_range.is_none() && index_range_exact.is_some() {
             return Err(DashError::UnsupportedAddressing);
         }
@@ -1404,15 +1452,22 @@ fn effective_addressing(
                 .map(parse_byte_range)
                 .transpose()?
                 .ok_or(DashError::UnsupportedAddressing)?;
-            if timescale == Some(0) || ranges_overlap(index_range, initialization_range)? {
+            if timescale == Some(0)
+                || (index_source_url.is_none()
+                    && ranges_overlap(index_range, initialization_range)?)
+            {
                 return Err(DashError::UnsupportedAddressing);
             }
             return Ok(DashAddressing::IndexedBase(DashBaseIndex {
                 index_range,
+                index_url: index_source_url,
                 initialization_range,
                 index_range_exact: index_range_exact.unwrap_or(false),
                 timescale,
             }));
+        }
+        if has_representation_index {
+            return Err(DashError::UnsupportedAddressing);
         }
         return Ok(DashAddressing::Base);
     }
@@ -2513,7 +2568,9 @@ mod tests {
     ) -> DashSegmentBaseIndex {
         DashSegmentBaseIndex {
             url: Url::parse("https://cdn.example.test/path/media.mp4").expect("test media URL"),
+            index_url: Url::parse("https://cdn.example.test/path/media.mp4").expect("test index URL"),
             index_range,
+            index_is_external: false,
             initialization_range,
             index_range_exact,
             timescale: Some(1_000),
@@ -2564,6 +2621,144 @@ mod tests {
         assert_eq!(plan.resources.len(), 1);
         assert_eq!(plan.resources[0].kind, DashResourceKind::Initialization);
         assert_eq!(plan.resources[0].range, Some(index.initialization_range));
+    }
+
+    #[test]
+    fn plans_external_representation_index_with_its_own_bounded_range() {
+        let body = r#"<?xml version="1.0"?>
+<MPD xmlns="urn:mpeg:dash:schema:mpd:2011" type="static" mediaPresentationDuration="PT2S">
+  <BaseURL>media.mp4</BaseURL>
+  <Period duration="PT2S">
+    <AdaptationSet contentType="video" mimeType="video/mp4">
+      <Representation id="v1">
+        <SegmentBase timescale="1000">
+          <Initialization range="0-99"/>
+          <RepresentationIndex sourceURL="index.sidx" range="0-43"/>
+        </SegmentBase>
+      </Representation>
+    </AdaptationSet>
+  </Period>
+</MPD>"#;
+        let manifest = parse_dash_manifest(BASE_URL, body)
+            .expect("external RepresentationIndex should parse");
+        let representation = &manifest.video_representations[0];
+        let plan = plan_dash_representation(&manifest, &representation.key)
+            .expect("external RepresentationIndex should plan");
+
+        let index = plan
+            .segment_base_index
+            .as_ref()
+            .expect("external SIDX request");
+        assert_eq!(index.index_url.as_str(), "https://cdn.example.test/path/index.sidx");
+        assert_eq!(index.url.as_str(), "https://cdn.example.test/path/media.mp4");
+        assert!(index.index_is_external);
+        assert_eq!(
+            index.index_range,
+            ManifestByteRange {
+                offset: 0,
+                length: 44,
+            }
+        );
+    }
+
+    #[test]
+    fn representation_index_range_overrides_segment_base_index_range() {
+        let body = r#"<?xml version="1.0"?>
+<MPD xmlns="urn:mpeg:dash:schema:mpd:2011" type="static" mediaPresentationDuration="PT2S">
+  <BaseURL>media.mp4</BaseURL>
+  <Period duration="PT2S">
+    <AdaptationSet contentType="video" mimeType="video/mp4">
+      <Representation id="v1">
+        <SegmentBase timescale="1000" indexRange="100-143">
+          <Initialization range="0-99"/>
+          <RepresentationIndex sourceURL="media.mp4" range="200-243"/>
+        </SegmentBase>
+      </Representation>
+    </AdaptationSet>
+  </Period>
+</MPD>"#;
+        let manifest = parse_dash_manifest(BASE_URL, body)
+            .expect("RepresentationIndex range should parse");
+        let representation = &manifest.video_representations[0];
+        let plan = plan_dash_representation(&manifest, &representation.key)
+            .expect("RepresentationIndex range should plan");
+        let index = plan.segment_base_index.as_ref().expect("indexed plan");
+
+        assert!(!index.index_is_external);
+        assert_eq!(
+            index.index_range,
+            ManifestByteRange {
+                offset: 200,
+                length: 44,
+            }
+        );
+    }
+
+    #[test]
+    fn representation_index_without_bounded_range_falls_back() {
+        let body = r#"<?xml version="1.0"?>
+<MPD xmlns="urn:mpeg:dash:schema:mpd:2011" type="static" mediaPresentationDuration="PT2S">
+  <BaseURL>media.mp4</BaseURL>
+  <Period duration="PT2S">
+    <AdaptationSet contentType="video" mimeType="video/mp4">
+      <Representation id="v1">
+        <SegmentBase timescale="1000">
+          <Initialization range="0-99"/>
+          <RepresentationIndex sourceURL="index.sidx"/>
+        </SegmentBase>
+      </Representation>
+    </AdaptationSet>
+  </Period>
+</MPD>"#;
+        assert_eq!(
+            parse_dash_manifest(BASE_URL, body).err(),
+            Some(DashError::UnsupportedAddressing)
+        );
+    }
+
+    #[test]
+    fn rejects_nonzero_segment_base_presentation_time_offset() {
+        let body = r#"<?xml version="1.0"?>
+<MPD xmlns="urn:mpeg:dash:schema:mpd:2011" type="static" mediaPresentationDuration="PT2S">
+  <BaseURL>media.mp4</BaseURL>
+  <Period duration="PT2S">
+    <AdaptationSet contentType="video" mimeType="video/mp4">
+      <Representation id="v1">
+        <SegmentBase timescale="1000" presentationTimeOffset="8100" indexRange="100-143">
+          <Initialization range="0-99"/>
+        </SegmentBase>
+      </Representation>
+    </AdaptationSet>
+  </Period>
+</MPD>"#;
+        let manifest = parse_dash_manifest(BASE_URL, body)
+            .expect("MPD structure should parse before addressing is selected");
+        let representation = &manifest.video_representations[0];
+        assert_eq!(
+            plan_dash_representation(&manifest, &representation.key).err(),
+            Some(DashError::UnsupportedAddressing)
+        );
+    }
+
+    #[test]
+    fn rejects_base_url_byte_range_alternative_request_templates() {
+        let body = r#"<?xml version="1.0"?>
+<MPD xmlns="urn:mpeg:dash:schema:mpd:2011" type="static" mediaPresentationDuration="PT2S">
+  <BaseURL byteRange="0-100">media.mp4</BaseURL>
+  <Period duration="PT2S">
+    <AdaptationSet contentType="video" mimeType="video/mp4">
+      <Representation id="v1">
+        <SegmentBase timescale="1000" indexRange="100-143">
+          <Initialization range="0-99"/>
+        </SegmentBase>
+      </Representation>
+    </AdaptationSet>
+  </Period>
+</MPD>"#;
+        assert_eq!(
+            parse_dash_manifest(BASE_URL, body).err(),
+            Some(DashError::UnsupportedAddressing)
+        );
     }
 
     #[test]

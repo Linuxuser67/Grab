@@ -19,25 +19,55 @@ owned by Grab.
 - Every new addressing mode must use Grab's existing byte-range response
   validation, per-origin host guard, staging writer, and resume identity.
 
+## Native HLS supported profile
+
+The native HLS path covers multivariant master playlists with selectable video
+variants and external audio/subtitle renditions; static VOD and EVENT media
+playlists; ordinary non-low-latency live capture; MPEG-TS and fragmented-MP4
+media with initialization maps; explicit and valid implicit byte ranges;
+discontinuities; identity AES-128 keys (including key rotation and
+`METHOD=NONE` resets); and identity SAMPLE-AES for MPEG-TS.
+
+This is a deliberately bounded profile, not a claim of support for every HLS
+extension. Unknown parser tags and unsupported resource-affecting extensions
+fall back to yt-dlp. This includes alternate VIDEO rendition groups, LL-HLS
+parts, preload hints, delta updates, rendition reports, and blocking-reload
+query parameters. Gapped segments, I-frame-only media playlists, variable
+substitution, content steering, non-identity key formats, SAMPLE-AES over
+fragmented MP4/CBCS, and other unsupported encryption schemes also remain on
+fallback. AES-128 and supported SAMPLE-AES keys continue to use the existing
+bounded key-resource path; no license or CDM acquisition is added.
+
+## Explicitly unplanned
+
+- Low-Latency HLS (LL-HLS): part/preload scheduling, delta playlist updates,
+  rendition reports, and blocking reload.
+- Low-Latency DASH (LL-DASH): partial-segment availability and low-latency
+  chunk transfer behavior.
+
+Do not silently strip or ignore low-latency metadata and then treat the
+playlist as a complete segment-based presentation.
+
 ## Phases
 
-### 1. Static DASH SegmentBase and flat SIDX — in progress
+### 1. Static DASH SegmentBase and hierarchical SIDX — implemented
 
 Support a static single-period MP4 representation with an in-file
-`SegmentBase@indexRange`, `Initialization@range`, and one flat SIDX. Fetch the
-bounded index range, decode SIDX with the existing `mp4box` dependency, and
-translate each direct reference into an ordinary Grab byte-range resource.
-Hierarchical SIDX, separate initialization URLs, dynamic SegmentBase, non-zero
-SegmentBase presentation-time offsets, and malformed or out-of-file references
-remain on yt-dlp fallback.
+`SegmentBase@indexRange`, `Initialization@range`, and bounded SIDX hierarchy.
+Fetch each bounded index range, decode SIDX with the existing `mp4box`
+dependency, and translate direct and nested references into ordered Grab
+byte-range resources. Separate initialization URLs, dynamic SegmentBase, malformed or out-of-file
+references, and hierarchies exceeding the explicit depth/node/size limits remain
+on yt-dlp fallback. Non-zero SegmentBase presentation-time offsets are covered
+by the bounded profile in phase 5 below.
 
-Acceptance: checked offset arithmetic; validated SIDX timescale; strict
-`206`/Content-Range validation; bounded index response; direct references only;
-tests for exact/non-exact index ranges, initialization and media extents,
-hierarchical references, overflow, and truncated responses; all media bytes flow
-through the existing ordered writer and recovery journal.
+Acceptance is covered by tests for exact/non-exact index ranges, initialization
+and media extents, nested child indexes, reference identity/timing validation,
+overlap, overflow, and truncated responses. Index responses require strict
+`206`/Content-Range validation and bounded bodies; media bytes flow through the
+existing ordered writer and recovery journal.
 
-### 2. Static multi-period DASH
+### 2. Static multi-period DASH — implemented
 
 Model each Period as an explicit sub-plan with independent inherited
 BaseURL/addressing/timing. Create stable identities that include period identity
@@ -50,7 +80,7 @@ Acceptance: ordered multi-period video/audio plans, period-local initialization,
 time/byte-range validation, representation selection stable across MPD reorder,
 and fixtures covering discontinuities and differing codec/init metadata.
 
-### 3a. Fragmented-MP4 WVTT extraction — initial implementation
+### 3a. Fragmented-MP4 WVTT extraction — implemented bounded profile
 
 The selected static DASH WVTT representation is assembled through the existing
 destination-part writer, then decoded separately from DASH planning and FFmpeg
@@ -73,7 +103,7 @@ Acceptance: parser tests for cue box parsing, timestamp normalization, empty
 cues, malformed boxes, bounds, timestamp eligibility, and sidecar/embedded
 FFmpeg handling.
 
-### 3b. Fragmented-MP4 STPP extraction — bounded initial implementation
+### 3b. Fragmented-MP4 STPP extraction — implemented bounded profile
 
 The selected static DASH STPP representation uses the existing destination-part
 writer and is parsed with the project's existing mp4box and quick-xml
@@ -107,22 +137,40 @@ timeBase and time-expression validation, namespace/element restrictions,
 whitespace/entities, malformed or oversized XML, sample and output bounds,
 and unchanged WVTT and FFmpeg finalization paths.
 
-### 4. Explicit-key encrypted media support
+### 4. Explicit-key and DRM expansion — shelved
 
-Evaluate HLS SAMPLE-AES and fragmented-MP4 CENC decryption as separate features.
-The first scope is user-supplied keys only. Do not add license-server discovery,
-Widevine/PlayReady acquisition, browser secret extraction, or automatic key
-fetching in this phase. Audit per-track encryption metadata and sample auxiliary
-information before enabling any format; reject unsupported schemes and patterns.
+This phase is shelved and is not part of the native-stream completion PR. No
+native DASH CENC/CBCS decryption expansion, user-supplied CENC keys, license
+acquisition, Widevine/PlayReady device-file support, or CDM integration is
+included. The existing HLS identity SAMPLE-AES MPEG-TS path remains on `main`;
+shelving this phase does not remove that already-supported HLS behavior.
 
-Acceptance: validated track-scoped keys/IVs, correct clear/encrypted sample
-boundaries, bounded parsing, no key leakage into logs or argv, and known-answer
-fixtures for each enabled scheme.
+### 5. Broader DASH index addressing — evaluated, bounded subset implemented
 
-### 5. Broader DASH index addressing
+The native path now supports:
+- `RepresentationIndex@sourceURL` with an explicit bounded `range`, either
+  referencing the media resource itself or a separate HTTPS index resource.
+  An external SIDX uses `first_offset` relative to the media resource; its
+  media extents are validated against the media resource's independently
+  checked total length. External indexes are limited to a flat SIDX.
+- Bounded hierarchical SIDX when the index and media ranges are in the same
+  media resource.
 
-After flat SIDX has production evidence, evaluate nested/hierarchical SIDX,
-representation-level indexes, BaseURL byte ranges, and SegmentBase timing
-attributes such as presentation-time offsets. Each extension needs explicit
-standards-based semantics and separate tests; unsupported forms remain fallback.
+The following remain explicit yt-dlp fallbacks:
+- Non-zero `SegmentBase@presentationTimeOffset`. It maps each representation's
+  sample timeline to the Period timeline. Grab's finalizer currently stream
+  copies video and audio as separate inputs without applying per-representation
+  input timestamp offsets; accepting non-zero values could therefore misalign
+  the tracks. Zero-offset SegmentBase remains supported.
+- External RepresentationIndex hierarchies and external index resources without
+  an explicit bounded range.
+- Separate initialization URLs, dynamic SegmentBase, and non-zero
+  `eptDelta`/`pbDelta`.
+
+`BaseURL@byteRange` remains unsupported. ISO/IEC 23009-1 Annex E defines it
+as an alternate byte-range URL template for regular GET requests when HTTP
+partial GET is unavailable or not honored. Grab deliberately does not retry a
+failed native resource request or add an alternate request path, so this
+fallback-only optimization is not implemented. Ordinary DASH byte ranges
+continue to use Grab's strict HTTP Range and Content-Range validation.
 

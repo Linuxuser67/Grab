@@ -14,9 +14,8 @@ mod sidx;
 #[cfg(test)]
 pub(crate) use sidx::resolve_segment_base_index;
 pub(crate) use sidx::{
-    DashSidxEntry, MAX_DASH_SIDX_SEGMENTS,
-    dash_sidx_media_resource, parse_child_segment_index, parse_segment_base_index,
-    validate_segment_base_sidx_ranges,
+    DashSidxEntry, MAX_DASH_SIDX_SEGMENTS, dash_sidx_media_resource, parse_child_segment_index,
+    parse_segment_base_index, validate_segment_base_sidx_ranges,
 };
 const MAX_REPRESENTATIONS: usize = 1_024;
 const MAX_SEGMENTS: usize = 100_000;
@@ -2381,7 +2380,6 @@ fn ranges_overlap(left: ManifestByteRange, right: ManifestByteRange) -> Result<b
         .ok_or(DashError::InvalidSegment)?;
     Ok(left.offset < right_end && right.offset < left_end)
 }
-
 
 fn expand_list(
     representation: &DashRepresentation,

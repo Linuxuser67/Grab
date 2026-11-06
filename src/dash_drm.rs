@@ -163,47 +163,60 @@ pub(crate) fn license_url_from_scopes(
     let mut has_playready = false;
     let mut selected: Option<Url> = None;
 
-    for descriptor in scopes.iter().flat_map(|scope| scope.iter()) {
-        let is_clear_key = descriptor.schemeIdUri == CLEARKEY_SCHEME;
-        let is_playready = descriptor.schemeIdUri == PLAYREADY_SCHEME;
-        if !is_clear_key && !is_playready {
-            continue;
-        }
-        has_clear_key |= is_clear_key;
-        has_playready |= is_playready;
-
-        let raw = if is_playready {
-            descriptor.laurl.as_ref()
-        } else {
-            descriptor
-                .laurl
-                .as_ref()
-                .or(descriptor.clearkey_laurl.as_ref())
-        }
-        .and_then(|laurl| laurl.content.as_deref())
-        .map(str::trim)
-        .filter(|value| !value.is_empty());
-        let Some(raw) = raw else {
-            continue;
-        };
-        let url = manifest_url.join(raw).map_err(|_| {
-            if is_playready {
-                "DASH PlayReady license URL is invalid".to_string()
-            } else {
-                "DASH ClearKey license URL is invalid".to_string()
+    for scope in scopes {
+        let mut scope_selected: Option<Url> = None;
+        for descriptor in *scope {
+            let is_clear_key = descriptor.schemeIdUri == CLEARKEY_SCHEME;
+            let is_playready = descriptor.schemeIdUri == PLAYREADY_SCHEME;
+            if !is_clear_key && !is_playready {
+                continue;
             }
-        })?;
-        if url.scheme() != "https"
-            || url.host_str().is_none()
-            || !url.username().is_empty()
-            || url.password().is_some()
-            || url.fragment().is_some()
-        {
-            return Err(
-                "DASH license URL must be HTTPS and contain no user-info or fragment".to_string(),
-            );
+            has_clear_key |= is_clear_key;
+            has_playready |= is_playready;
+
+            let raw = if is_playready {
+                descriptor.laurl.as_ref()
+            } else {
+                descriptor
+                    .laurl
+                    .as_ref()
+                    .or(descriptor.clearkey_laurl.as_ref())
+            }
+            .and_then(|laurl| laurl.content.as_deref())
+            .map(str::trim)
+            .filter(|value| !value.is_empty());
+            let Some(raw) = raw else {
+                continue;
+            };
+            let url = manifest_url.join(raw).map_err(|_| {
+                if is_playready {
+                    "DASH PlayReady license URL is invalid".to_string()
+                } else {
+                    "DASH ClearKey license URL is invalid".to_string()
+                }
+            })?;
+            if url.scheme() != "https"
+                || url.host_str().is_none()
+                || !url.username().is_empty()
+                || url.password().is_some()
+                || url.fragment().is_some()
+            {
+                return Err(
+                    "DASH license URL must be HTTPS and contain no user-info or fragment"
+                        .to_string(),
+                );
+            }
+            if scope_selected.as_ref().is_some_and(|previous| previous != &url) {
+                return Err(
+                    "DASH protection scope contains conflicting license URLs".to_string(),
+                );
+            }
+            scope_selected = Some(url);
         }
-        selected = Some(url);
+        // A more-specific scope may replace the endpoint inherited from its parent.
+        if scope_selected.is_some() {
+            selected = scope_selected;
+        }
     }
 
     if has_clear_key && selected.is_none() {
@@ -770,6 +783,58 @@ mod tests {
                 license_url_from_scopes(&[std::slice::from_ref(&insecure)], &manifest).is_err()
             );
         }
+    }
+
+    #[test]
+    fn rejects_conflicting_playready_license_urls_in_one_scope() {
+        let descriptor = |url: &str| dash_mpd_core::ContentProtection {
+            schemeIdUri: PLAYREADY_SCHEME.to_string(),
+            laurl: Some(dash_mpd_core::Laurl {
+                content: Some(url.to_string()),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        let first = descriptor("https://license-a.example.test/acquire");
+        let second = descriptor("https://license-b.example.test/acquire");
+        let manifest = Url::parse("https://media.example.test/manifest.mpd")
+            .expect("manifest URL");
+        assert!(
+            license_url_from_scopes(&[&[first, second]], &manifest).is_err(),
+            "conflicting endpoints at one scope must not be resolved by document order"
+        );
+    }
+
+    #[test]
+    fn more_specific_playready_license_url_overrides_parent() {
+        let parent = dash_mpd_core::ContentProtection {
+            schemeIdUri: PLAYREADY_SCHEME.to_string(),
+            laurl: Some(dash_mpd_core::Laurl {
+                content: Some("https://license-a.example.test/acquire".to_string()),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        let child = dash_mpd_core::ContentProtection {
+            schemeIdUri: PLAYREADY_SCHEME.to_string(),
+            laurl: Some(dash_mpd_core::Laurl {
+                content: Some("https://license-b.example.test/acquire".to_string()),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        let manifest = Url::parse("https://media.example.test/manifest.mpd")
+            .expect("manifest URL");
+        let selected = license_url_from_scopes(&[
+            std::slice::from_ref(&parent),
+            std::slice::from_ref(&child),
+        ], &manifest)
+        .expect("more-specific license URL")
+        .expect("license URL should be selected");
+        assert_eq!(
+            selected.as_str(),
+            "https://license-b.example.test/acquire"
+        );
     }
 
     #[test]

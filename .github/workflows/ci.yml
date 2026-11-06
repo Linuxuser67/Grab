@@ -144,7 +144,7 @@ jobs:
           name: generated-cargo-metadata
           path: |
             Cargo.lock
-            cargo-sources.json
+            build-aux/cargo-sources.json
           if-no-files-found: error
       # Run the release metadata gate on every PR, not only after a tag is published.
       - name: Check release metadata consistency

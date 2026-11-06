@@ -231,7 +231,7 @@ async fn acquire_keys_with_child(
             .post(license_url.clone())
             .timeout(LICENSE_REQUEST_TIMEOUT)
             .header(reqwest::header::CONTENT_TYPE, "text/xml; charset=utf-8")
-            .header("SOAPAction", PLAYREADY_SOAP_ACTION)
+            .header("SOAPAction", format!("\"{PLAYREADY_SOAP_ACTION}\""))
             .body(challenge.to_string())
             .send(),
     )

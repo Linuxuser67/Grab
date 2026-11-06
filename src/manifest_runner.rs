@@ -3556,42 +3556,18 @@ async fn fetch_and_write_dash_track(
                             .to_string(),
                     )
                 })?;
-                let mut key_request = Box::pin(crate::playready_worker::acquire_keys(
+                let mut key_request = Box::pin(crate::dash_playready::acquire_keys(
                     client,
                     device_path,
                     pssh,
                     license_url,
+                    &required_kids,
                 ));
-                let keys = tokio::select! {
+                tokio::select! {
                     biased;
                     _ = &mut *abort => return Ok(false),
                     result = &mut key_request => result.map_err(ManifestRunError::Failed)?,
-                };
-
-                let mut accepted: std::collections::BTreeMap<
-                    [u8; 16],
-                    zeroize::Zeroizing<[u8; 16]>,
-                > = std::collections::BTreeMap::new();
-                for key in keys {
-                    // playready::cdm::KeyId::from_uuid normalizes the GUID fields
-                    // into ISO/CENC byte order before returning the key from the CDM.
-                    let kid = key.kid;
-                    if required_kids.contains(&kid)
-                        && accepted.insert(kid, key.key).is_some()
-                    {
-                        return Err(ManifestRunError::Failed(
-                            "PlayReady returned duplicate keys for a selected KID".to_string(),
-                        ));
-                    }
                 }
-                if accepted.len() != required_kids.len() {
-                    return Err(ManifestRunError::Failed(
-                        "The PlayReady license did not return every selected content key"
-                            .to_string(),
-                    ));
-                }
-                crate::drm::DrmKeyMap::from_keys(accepted)
-                    .map_err(ManifestRunError::Failed)?
             }
             crate::dash_drm::ProtectionSystem::Widevine
             | crate::dash_drm::ProtectionSystem::FairPlay => {

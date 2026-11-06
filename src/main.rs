@@ -16,6 +16,7 @@ mod download_rate;
 mod download_row;
 mod download_store;
 mod drm;
+pub mod playready_worker;
 mod engine_msg;
 mod extension_server;
 mod file_names;
@@ -135,6 +136,10 @@ fn ensure_schema_dir() {
 }
 
 fn main() -> glib::ExitCode {
+    if playready_worker::is_worker_requested() {
+        std::process::exit(playready_worker::run_worker());
+    }
+
     // Schema dir first: the schema may not be in the default source
     // (tarball/uninstalled run).
     ensure_schema_dir();

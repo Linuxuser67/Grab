@@ -2289,7 +2289,7 @@ async fn live_hls_snapshot_appends_fetched_mpegts_fragments_to_visible_destinati
 }
 
 #[tokio::test]
-async fn hls_sample_aes_mpegts_is_decrypted_by_vsd_before_ffmpeg_finalization() {
+async fn hls_sample_aes_mpegts_is_decrypted_by_iori_ssa_before_ffmpeg_finalization() {
     if !tools_available() {
         return;
     }
@@ -2357,7 +2357,7 @@ async fn hls_sample_aes_mpegts_is_decrypted_by_vsd_before_ffmpeg_finalization() 
         .expect("write localized SAMPLE-AES playlist");
     decrypt_hls_sample_aes_segments(&video_dir, &plan)
         .await
-        .expect("decrypt SAMPLE-AES segment with VSD");
+        .expect("decrypt SAMPLE-AES segment with iori-ssa");
     let local_playlist_bytes = tokio::fs::read(video_dir.join("local.m3u8"))
         .await
         .expect("read decrypted local HLS playlist");

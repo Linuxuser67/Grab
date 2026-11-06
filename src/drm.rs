@@ -385,7 +385,9 @@ pub(crate) fn validate_hls_keyformat_multiplexing(body: &[u8]) -> Result<(), Str
                 .map(String::as_str)
                 .unwrap_or("identity");
             if method == "NONE" {
-                active_formats.remove(format);
+                // HLS 2nd Edition defines METHOD=NONE as a presentation-wide
+                // key reset, regardless of the preceding KEYFORMAT.
+                active_formats.clear();
                 continue;
             }
             active_formats.insert(format.to_string());
@@ -577,7 +579,7 @@ mod tests {
     }
 
     #[test]
-    fn method_none_only_clears_its_own_keyformat() {
+    fn method_none_clears_all_active_keyformats() {
         let body = br#"#EXTM3U
 #EXT-X-KEY:METHOD=SAMPLE-AES,URI="data:text/plain;base64,AAAAIHBzc2gAAAAA7e+LqXnWSs6jyCfc1R0h7QAAAAA=",KEYFORMAT="urn:uuid:edef8ba9-79d6-4ace-a3c8-27dcd51d21ed"
 #EXT-X-KEY:METHOD=NONE
@@ -585,7 +587,11 @@ mod tests {
 #EXTINF:2,
 segment.ts
 "#;
-        assert!(validate_hls_keyformat_multiplexing(body).is_err());
+        assert_eq!(
+            validate_hls_keyformat_multiplexing(body),
+            Ok(()),
+            "METHOD=NONE clears the active PlayReady keyformat before identity encryption starts"
+        );
     }
 
     #[test]

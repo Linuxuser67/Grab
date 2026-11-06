@@ -2395,6 +2395,28 @@ fn hls_playready_request(plan: &HlsPlan) -> Result<Option<HlsPlayReadyRequest>, 
     if protection.system != crate::drm::ProtectionSystem::PlayReady {
         return Err("The selected HLS DRM system has no enabled native CDM".to_string());
     }
+    let playlist_bytes = plan
+        .local_playlist_bytes()
+        .map_err(|_| "The local HLS PlayReady playlist could not be validated".to_string())?;
+    let playlist = m3u8_rs::parse_media_playlist_res(&playlist_bytes)
+        .map_err(|_| "The local HLS PlayReady playlist is malformed".to_string())?;
+    if playlist.segments.is_empty() {
+        return Err("The HLS PlayReady playlist has no media segments".to_string());
+    }
+    for segment in &playlist.segments {
+        let key = segment
+            .key
+            .as_ref()
+            .ok_or_else(|| "The HLS PlayReady playlist changes to an unencrypted segment".to_string())?;
+        let active = crate::drm::hls_protection_from_key(key)?
+            .ok_or_else(|| "The HLS PlayReady playlist uses an unsupported identity key".to_string())?;
+        if active != *protection {
+            return Err(
+                "Native HLS PlayReady requires one unchanged PlayReady Object and scheme across the track"
+                    .to_string(),
+            );
+        }
+    }
     let crate::drm::HlsInitializationData::PlayReadyObject(pro) =
         &protection.initialization_data
     else {

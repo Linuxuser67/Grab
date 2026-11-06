@@ -1088,15 +1088,22 @@ pub(crate) fn plan_hls_media_playlist(
             "playlist exceeds its supported size limit".to_string(),
         ));
     }
-    crate::drm::validate_hls_keyformat_multiplexing(body)
+    let key_reset_state_by_segment = crate::drm::hls_key_reset_state_by_segment(body)
         .map_err(|_| ManifestError::UnsupportedEncryption)?;
     let base_url = parse_manifest_url(manifest_url)?;
     let playlist =
         m3u8_rs::parse_media_playlist_res(body).map_err(|error| hls_parse_error(body, error))?;
-    build_hls_plan(base_url, playlist)
+    build_hls_plan(base_url, playlist, key_reset_state_by_segment)
 }
 
-fn build_hls_plan(base_url: Url, mut playlist: MediaPlaylist) -> Result<HlsPlan, ManifestError> {
+fn build_hls_plan(
+    base_url: Url,
+    mut playlist: MediaPlaylist,
+    key_reset_state_by_segment: Vec<bool>,
+) -> Result<HlsPlan, ManifestError> {
+    if key_reset_state_by_segment.len() != playlist.segments.len() {
+        return Err(ManifestError::UnsupportedPlaylist);
+    }
     let is_live = !playlist.end_list;
     let end_list = playlist.end_list;
     let source_target_duration = playlist.target_duration;
@@ -1139,7 +1146,12 @@ fn build_hls_plan(base_url: Url, mut playlist: MediaPlaylist) -> Result<HlsPlan,
     let mut total_duration = Duration::ZERO;
     let mut maximum_segment_duration = 0.0_f64;
 
-    for (index, segment) in playlist.segments.iter_mut().enumerate() {
+    for (index, (segment, key_was_cleared)) in playlist
+        .segments
+        .iter_mut()
+        .zip(key_reset_state_by_segment)
+        .enumerate()
+    {
         let sequence_index = u64::try_from(index).map_err(|_| ManifestError::DurationOverflow)?;
         let media_sequence = playlist
             .media_sequence
@@ -1157,7 +1169,7 @@ fn build_hls_plan(base_url: Url, mut playlist: MediaPlaylist) -> Result<HlsPlan,
         } else {
             index
         };
-        if segment.unknown_tags.iter().any(|tag| tag.tag == "X-KEY") {
+        if has_unsupported_hls_key_tag(&segment.unknown_tags) {
             // A key tag the parser could not decode must never pass through
             // into FFmpeg, where it could bypass our encryption policy.
             return Err(ManifestError::UnsupportedEncryption);
@@ -1165,13 +1177,23 @@ fn build_hls_plan(base_url: Url, mut playlist: MediaPlaylist) -> Result<HlsPlan,
         if segment
             .unknown_tags
             .iter()
-            .any(|tag| is_unsupported_hls_tag(&tag.tag))
+            .any(|tag| is_unsupported_hls_tag(&tag.tag) && !is_hls_key_reset_tag(tag))
         {
             return Err(ManifestError::UnsupportedPlaylist);
         }
 
-        if let Some(key) = segment.key.as_ref() {
-            active_key = Some(key.clone());
+        if key_was_cleared {
+            active_key = None;
+        } else {
+            if let Some(key) = segment.key.as_ref() {
+                active_key = Some(key.clone());
+            }
+            // m3u8-rs writes the typed key before unknown tags. Remove a reset
+            // when a later key supersedes it before this segment URI; this also
+            // discards a trailing reset that follows the final media segment.
+            segment
+                .unknown_tags
+                .retain(|tag| !is_hls_key_reset_tag(tag));
         }
         if let Some(map) = segment.map.as_ref() {
             active_map = Some(map.clone());
@@ -1376,6 +1398,18 @@ fn is_unsupported_hls_tag(tag: &str) -> bool {
         tag,
         "X-GAP" | "X-SKIP" | "X-KEY" | "X-DEFINE" | "X-CONTENT-STEERING"
     )
+}
+
+/// m3u8-rs preserves the valid HLS METHOD=NONE key reset as an unknown tag
+/// because its typed key parser does not represent that method. Accept only
+/// this exact reset form; other undecoded key tags remain unsupported.
+fn is_hls_key_reset_tag(tag: &m3u8_rs::ExtTag) -> bool {
+    tag.tag == "X-KEY" && tag.rest.as_deref() == Some("METHOD=NONE")
+}
+
+fn has_unsupported_hls_key_tag(tags: &[m3u8_rs::ExtTag]) -> bool {
+    tags.iter()
+        .any(|tag| tag.tag == "X-KEY" && !is_hls_key_reset_tag(tag))
 }
 
 /// Low-latency HLS schedule tags: server pacing hints for prefetching clients.
@@ -2336,26 +2370,68 @@ two.m4s
     }
 
     #[test]
-    fn rejects_method_none_key_tags_with_or_without_iv() {
-        let without_iv = br#"#EXTM3U
+    fn accepts_method_none_without_attributes_and_rejects_extra_attributes() {
+        let without_attributes = br#"#EXTM3U
 #EXT-X-KEY:METHOD=NONE
 #EXTINF:2,
 one.ts
 #EXT-X-ENDLIST
 "#;
+        assert!(
+            plan_hls_media_playlist(BASE_URL, without_attributes).is_ok(),
+            "METHOD=NONE without additional attributes is a valid key reset"
+        );
+
         let with_iv = br#"#EXTM3U
 #EXT-X-KEY:METHOD=NONE,IV=0x00000000000000000000000000000001
 #EXTINF:2,
 one.ts
 #EXT-X-ENDLIST
 "#;
+        assert_eq!(
+            plan_hls_media_playlist(BASE_URL, with_iv).err(),
+            Some(ManifestError::UnsupportedEncryption)
+        );
+    }
 
-        for body in [without_iv.as_slice(), with_iv.as_slice()] {
-            assert_eq!(
-                plan_hls_media_playlist(BASE_URL, body).err(),
-                Some(ManifestError::UnsupportedEncryption)
-            );
-        }
+    #[test]
+    fn method_none_before_a_new_key_preserves_source_order_in_local_playlist() {
+        let body = br#"#EXTM3U
+#EXT-X-TARGETDURATION:2
+#EXT-X-KEY:METHOD=SAMPLE-AES,URI="key-one.bin"
+#EXTINF:2,
+one.ts
+#EXT-X-KEY:METHOD=NONE
+#EXTINF:2,
+two.ts
+#EXT-X-KEY:METHOD=SAMPLE-AES,URI="key-two.bin"
+#EXTINF:2,
+three.ts
+#EXT-X-ENDLIST
+"#;
+        let plan = plan_hls_media_playlist(BASE_URL, body)
+            .expect("key reset followed by a new key should remain supported");
+        let local = String::from_utf8(
+            plan.local_playlist_bytes()
+                .expect("serialize local HLS playlist"),
+        )
+        .expect("local playlist is UTF-8");
+        let key_lines = local
+            .lines()
+            .filter(|line| line.starts_with("#EXT-X-KEY:"))
+            .collect::<Vec<_>>();
+
+        assert_eq!(key_lines.len(), 3);
+        assert!(key_lines[0].contains("key-"));
+        assert_eq!(key_lines[1], "#EXT-X-KEY:METHOD=NONE");
+        assert!(key_lines[2].contains("key-"));
+        assert_ne!(key_lines[0], key_lines[2]);
+
+        let parsed = m3u8_rs::parse_media_playlist_res(local.as_bytes())
+            .expect("serialized key-order playlist should parse");
+        assert!(parsed.segments[0].key.is_some());
+        assert!(parsed.segments[1].key.is_none());
+        assert!(parsed.segments[2].key.is_some());
     }
 
     /// Gap markers move to segment unknown tags, where the same reject list still
@@ -2531,6 +2607,89 @@ segment-1.m4s
         assert_eq!(
             plan_hls_media_playlist(BASE_URL, unsupported.as_bytes()).err(),
             Some(ManifestError::UnsupportedEncryption)
+        );
+    }
+
+    #[test]
+    fn plans_static_playready_cmaf_with_one_init_map_and_inline_pro() {
+        use base64::Engine as _;
+        use base64::engine::general_purpose::STANDARD;
+
+        let xml = concat!(
+            "<WRMHEADER xmlns=\"http://schemas.microsoft.com/DRM/2007/03/PlayReadyHeader\" ",
+            "version=\"4.3.0.0\"><DATA><LA_URL>https://license.example.test/acquire</LA_URL>",
+            "</DATA></WRMHEADER>"
+        );
+        let utf16: Vec<u8> = xml.encode_utf16().flat_map(u16::to_le_bytes).collect();
+        let mut pro = Vec::with_capacity(10 + utf16.len());
+        pro.extend_from_slice(
+            &u32::try_from(10 + utf16.len())
+                .expect("test PlayReady PRO size")
+                .to_le_bytes(),
+        );
+        pro.extend_from_slice(&1_u16.to_le_bytes());
+        pro.extend_from_slice(&1_u16.to_le_bytes());
+        pro.extend_from_slice(
+            &u16::try_from(utf16.len())
+                .expect("test WRMHEADER size")
+                .to_le_bytes(),
+        );
+        pro.extend_from_slice(&utf16);
+        let uri = format!(
+            "data:text/plain;charset=UTF-16;base64,{}",
+            STANDARD.encode(pro)
+        );
+        let playlist = format!(
+            concat!(
+                "#EXTM3U\n#EXT-X-VERSION:7\n#EXT-X-TARGETDURATION:2\n",
+                "#EXT-X-MAP:URI=\"init.mp4\"\n",
+                "#EXT-X-KEY:METHOD=SAMPLE-AES,URI=\"{}\",KEYFORMAT=\"com.microsoft.playready\"\n",
+                "#EXTINF:2,\nsegment-1.m4s\n#EXT-X-ENDLIST\n"
+            ),
+            uri
+        );
+        let plan = plan_hls_media_playlist(BASE_URL, playlist.as_bytes())
+            .expect("static PlayReady CMAF plan");
+        assert!(plan.is_single_init_fmp4_presentation());
+        assert_eq!(plan.protections.len(), 1);
+        assert_eq!(
+            plan.protections[0].scheme,
+            crate::drm::EncryptionScheme::Cbcs
+        );
+        assert_eq!(plan.resources.len(), 2);
+        assert_eq!(plan.resources[0].kind, HlsResourceKind::InitMap);
+        assert_eq!(plan.resources[1].kind, HlsResourceKind::Segment);
+        assert!(
+            plan.resources
+                .iter()
+                .all(|resource| resource.kind != HlsResourceKind::Key),
+            "inline PlayReady Objects must not be fetched as network key resources"
+        );
+    }
+
+    #[test]
+    fn hls_method_none_clears_the_active_key_but_unknown_key_methods_fail_closed() {
+        let body = b"#EXTM3U\n#EXT-X-TARGETDURATION:2\n#EXT-X-KEY:METHOD=SAMPLE-AES,URI=\"https://cdn.example.test/key.bin\"\n#EXTINF:2,\none.ts\n#EXT-X-KEY:METHOD=NONE\n#EXTINF:2,\ntwo.ts\n#EXT-X-ENDLIST\n";
+        let plan =
+            plan_hls_media_playlist(BASE_URL, body).expect("METHOD=NONE is a valid key reset");
+        let local = plan
+            .local_playlist_bytes()
+            .expect("reset playlist should serialize");
+        let parsed =
+            m3u8_rs::parse_media_playlist_res(&local).expect("reset playlist should parse");
+        assert!(parsed.segments[0].key.is_some());
+        assert!(
+            parsed.segments[1].key.is_none(),
+            "METHOD=NONE must not inherit the preceding encryption key"
+        );
+
+        let unsupported = std::str::from_utf8(body)
+            .expect("test playlist is UTF-8")
+            .replace("METHOD=NONE", "METHOD=UNSUPPORTED");
+        assert_eq!(
+            plan_hls_media_playlist(BASE_URL, unsupported.as_bytes()).err(),
+            Some(ManifestError::UnsupportedEncryption),
+            "an undecoded key method must remain unsupported"
         );
     }
 

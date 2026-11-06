@@ -486,7 +486,9 @@ pub(super) fn hex_string(bytes: &[u8; 16]) -> String {
 #[path = "dash_drm_mp4.rs"]
 mod mp4;
 
-pub(crate) use mp4::{decrypt_track, required_kids};
+pub(crate) use mp4::{
+    decrypt_track, hls_encryption_from_init, required_kids, required_kids_with_cancel,
+};
 
 #[cfg(test)]
 mod tests {

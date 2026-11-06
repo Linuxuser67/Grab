@@ -67,17 +67,6 @@ pub(crate) enum ProtectionSystem {
     FairPlay,
 }
 
-impl ProtectionSystem {
-    pub(crate) const fn label(self) -> &'static str {
-        match self {
-            Self::ClearKey => "ClearKey",
-            Self::Widevine => "Widevine",
-            Self::PlayReady => "PlayReady",
-            Self::FairPlay => "FairPlay",
-        }
-    }
-}
-
 #[derive(Clone, PartialEq, Eq)]
 pub(crate) enum HlsInitializationData {
     /// A complete ISO BMFF Protection System Specific Header box.
@@ -107,25 +96,6 @@ pub(crate) struct HlsProtection {
     pub(crate) system: ProtectionSystem,
     pub(crate) scheme: EncryptionScheme,
     pub(crate) initialization_data: HlsInitializationData,
-}
-
-impl HlsProtection {
-    pub(crate) fn description(&self) -> String {
-        let scheme = match self.scheme {
-            EncryptionScheme::Cenc => "CENC",
-            EncryptionScheme::Cbcs => "CBCS",
-        };
-        let initialization = match &self.initialization_data {
-            HlsInitializationData::Pssh(bytes) => format!("PSSH ({} bytes)", bytes.len()),
-            HlsInitializationData::PlayReadyObject(bytes) => {
-                format!("PlayReady Object ({} bytes)", bytes.len())
-            }
-            HlsInitializationData::FairPlayKeyUri(uri) => {
-                format!("FairPlay key URI ({} bytes)", uri.len())
-            }
-        };
-        format!("{} {scheme} {initialization}", self.system.label())
-    }
 }
 
 /// Validate the complete box framing and system identifier of a PSSH box.
@@ -343,7 +313,7 @@ fn validate_playready_object(bytes: &[u8]) -> Result<(), String> {
     }
 
     let mut offset = 6_usize;
-    let mut has_wrm_header = false;
+    let mut wrm_header_count = 0_usize;
     for _ in 0..record_count {
         let header_end = offset.checked_add(4).ok_or_else(invalid)?;
         let header = bytes.get(offset..header_end).ok_or_else(invalid)?;
@@ -375,14 +345,16 @@ fn validate_playready_object(bytes: &[u8]) -> Result<(), String> {
                     .map(|pair| u16::from_le_bytes(*pair))
                     .collect();
                 String::from_utf16(&units).map_err(|_| invalid())?;
-                has_wrm_header = true;
+                wrm_header_count += 1;
             }
-            2 | 3 => {}
+            // Record type 0x0002 is reserved; 0x0003 is an embedded license
+            // store that this online acquisition path does not consume.
+            2 => {}
             _ => return Err(invalid()),
         }
         offset = record_end;
     }
-    if offset != bytes.len() || !has_wrm_header {
+    if offset != bytes.len() || wrm_header_count != 1 {
         return Err(invalid());
     }
     Ok(())
@@ -391,12 +363,24 @@ fn validate_playready_object(bytes: &[u8]) -> Result<(), String> {
 /// Reject multiple simultaneously active KEYFORMATs because m3u8-rs exposes
 /// only one Key on each media segment. Silently retaining only the last tag
 /// would lose a valid protection descriptor and could select the wrong path.
+#[cfg(test)]
 pub(crate) fn validate_hls_keyformat_multiplexing(body: &[u8]) -> Result<(), String> {
+    hls_key_reset_state_by_segment(body).map(|_| ())
+}
+
+/// Return whether METHOD=NONE is the most recent key declaration for each segment.
+///
+/// m3u8-rs stores typed keys and unknown METHOD=NONE tags separately. Keeping
+/// the source-order state prevents a reset from overriding a later typed key
+/// declaration that belongs to the same media segment.
+pub(crate) fn hls_key_reset_state_by_segment(body: &[u8]) -> Result<Vec<bool>, String> {
     use std::collections::HashSet;
 
     let text =
         std::str::from_utf8(body).map_err(|_| "HLS playlist is not valid UTF-8".to_string())?;
     let mut active_formats = HashSet::new();
+    let mut method_none_is_active = false;
+    let mut reset_state = Vec::new();
     for line in text.lines().map(str::trim) {
         if let Some(attributes) = line.strip_prefix("#EXT-X-KEY:") {
             let mut fields = HashMap::new();
@@ -413,18 +397,31 @@ pub(crate) fn validate_hls_keyformat_multiplexing(body: &[u8]) -> Result<(), Str
                 .map(String::as_str)
                 .unwrap_or("identity");
             if method == "NONE" {
-                active_formats.remove(format);
+                if fields.len() != 1 {
+                    return Err(
+                        "HLS METHOD=NONE key tag must not contain additional attributes"
+                            .to_string(),
+                    );
+                }
+                // HLS 2nd Edition defines METHOD=NONE as a presentation-wide
+                // key reset, regardless of the preceding KEYFORMAT.
+                active_formats.clear();
+                method_none_is_active = true;
                 continue;
             }
             active_formats.insert(format.to_string());
-        } else if !line.is_empty() && !line.starts_with('#') && active_formats.len() > 1 {
-            return Err(
-                "HLS media segment uses multiple KEYFORMATs which the current parser cannot preserve"
-                    .to_string(),
-            );
+            method_none_is_active = false;
+        } else if !line.is_empty() && !line.starts_with('#') {
+            if active_formats.len() > 1 {
+                return Err(
+                    "HLS media segment uses multiple KEYFORMATs which the current parser cannot preserve"
+                        .to_string(),
+                );
+            }
+            reset_state.push(method_none_is_active);
         }
     }
-    Ok(())
+    Ok(reset_state)
 }
 
 fn parse_hls_attribute_list(input: &str) -> Result<Vec<(String, String)>, String> {
@@ -544,6 +541,32 @@ mod tests {
             HlsInitializationData::PlayReadyObject(_)
         ));
 
+        let mut with_els = Vec::with_capacity(pro.len() + 6);
+        let new_length = pro.len() + 6;
+        with_els.extend_from_slice(
+            &u32::try_from(new_length)
+                .expect("test PRO length")
+                .to_le_bytes(),
+        );
+        with_els.extend_from_slice(&2_u16.to_le_bytes());
+        with_els.extend_from_slice(&3_u16.to_le_bytes());
+        with_els.extend_from_slice(&2_u16.to_le_bytes());
+        with_els.extend_from_slice(b"EL");
+        with_els.extend_from_slice(&pro[6..]);
+        let with_els_uri = format!(
+            "data:text/plain;charset=UTF-16;base64,{}",
+            STANDARD.encode(&with_els)
+        );
+        assert!(
+            hls_protection_from_key(&key(
+                KeyMethod::SampleAES,
+                &with_els_uri,
+                "com.microsoft.playready",
+            ))
+            .is_err(),
+            "an unconsumed embedded license store must remain unsupported"
+        );
+
         let fairplay = hls_protection_from_key(&key(
             KeyMethod::SampleAES,
             "skd://asset.example.test/content-id",
@@ -579,7 +602,7 @@ mod tests {
     }
 
     #[test]
-    fn method_none_only_clears_its_own_keyformat() {
+    fn method_none_clears_all_active_keyformats() {
         let body = br#"#EXTM3U
 #EXT-X-KEY:METHOD=SAMPLE-AES,URI="data:text/plain;base64,AAAAIHBzc2gAAAAA7e+LqXnWSs6jyCfc1R0h7QAAAAA=",KEYFORMAT="urn:uuid:edef8ba9-79d6-4ace-a3c8-27dcd51d21ed"
 #EXT-X-KEY:METHOD=NONE
@@ -587,7 +610,19 @@ mod tests {
 #EXTINF:2,
 segment.ts
 "#;
-        assert!(validate_hls_keyformat_multiplexing(body).is_err());
+        assert_eq!(
+            validate_hls_keyformat_multiplexing(body),
+            Ok(()),
+            "METHOD=NONE clears the active DRM keyformat before identity encryption starts"
+        );
+
+        let invalid_reset = std::str::from_utf8(body)
+            .expect("test playlist is UTF-8")
+            .replace("METHOD=NONE", "METHOD=NONE,URI=\"ignored\"");
+        assert!(
+            validate_hls_keyformat_multiplexing(invalid_reset.as_bytes()).is_err(),
+            "METHOD=NONE must not carry attributes"
+        );
     }
 
     #[test]

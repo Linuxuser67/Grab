@@ -238,6 +238,34 @@ fn mp4_full_box_payload(bytes: &[u8], box_: &mp4box::Box) -> Result<Vec<u8>, Str
 }
 
 fn parse_init_encryption(init: &[u8], expected: DashEncryption) -> Result<InitEncryption, String> {
+    parse_init_encryption_inner(init, expected.scheme, Some(expected.default_kid))
+}
+
+/// Read the protected track metadata from an HLS CMAF initialization section.
+///
+/// HLS KEYFORMAT identifies the protection system and METHOD selects the scheme.
+/// The default KID is carried by the sample-entry tenc box, not the playlist.
+pub(crate) fn hls_encryption_from_init(
+    init: &[u8],
+    scheme: EncryptionScheme,
+    system: crate::drm::ProtectionSystem,
+) -> Result<DashEncryption, String> {
+    if !matches!(system, crate::drm::ProtectionSystem::PlayReady) {
+        return Err("Native HLS CMAF currently supports PlayReady only".to_string());
+    }
+    let parsed = parse_init_encryption_inner(init, scheme, None)?;
+    Ok(DashEncryption {
+        scheme,
+        default_kid: parsed.default_kid,
+        system,
+    })
+}
+
+fn parse_init_encryption_inner(
+    init: &[u8],
+    scheme: EncryptionScheme,
+    expected_default_kid: Option<[u8; 16]>,
+) -> Result<InitEncryption, String> {
     let boxes = mp4box::get_boxes(
         &mut Cursor::new(init),
         u64::try_from(init.len())
@@ -330,7 +358,7 @@ fn parse_init_encryption(init: &[u8], expected: DashEncryption) -> Result<InitEn
         return Err("DASH scheme box contains unexpected trailing data".to_string());
     }
     let actual_scheme = &schm[4..8];
-    let expected_scheme = match expected.scheme {
+    let expected_scheme = match scheme {
         EncryptionScheme::Cenc => b"cenc".as_slice(),
         EncryptionScheme::Cbcs => b"cbcs".as_slice(),
     };
@@ -370,10 +398,10 @@ fn parse_init_encryption(init: &[u8], expected: DashEncryption) -> Result<InitEn
         }
         _ => return Err("Unsupported DASH tenc version".to_string()),
     };
-    if expected.scheme == EncryptionScheme::Cenc && (crypt_blocks != 0 || skip_blocks != 0) {
+    if scheme == EncryptionScheme::Cenc && (crypt_blocks != 0 || skip_blocks != 0) {
         return Err("CENC initialization contains CBCS-style pattern parameters".to_string());
     }
-    if expected.scheme == EncryptionScheme::Cbcs && crypt_blocks == 0 && skip_blocks != 0 {
+    if scheme == EncryptionScheme::Cbcs && crypt_blocks == 0 && skip_blocks != 0 {
         return Err("CBCS initialization has a skip pattern without encrypted blocks".to_string());
     }
     let is_protected = *tenc
@@ -393,8 +421,11 @@ fn parse_init_encryption(init: &[u8], expected: DashEncryption) -> Result<InitEn
     let mut kid = [0_u8; 16];
     kid.copy_from_slice(kid_bytes);
     offset = kid_end;
-    if is_protected != 1 || kid != expected.default_kid {
-        return Err("DASH tenc is not protected by the selected MPD default_KID".to_string());
+    if is_protected != 1 || expected_default_kid.is_some_and(|expected| kid != expected) {
+        return Err(
+            "MP4 tenc protection or KID does not match the selected encryption metadata"
+                .to_string(),
+        );
     }
 
     let mut constant_iv_size = None;
@@ -411,7 +442,7 @@ fn parse_init_encryption(init: &[u8], expected: DashEncryption) -> Result<InitEn
             u8::try_from(size)
                 .map_err(|_| "DASH tenc constant IV size is out of range".to_string())?,
         );
-        if expected.scheme == EncryptionScheme::Cenc {
+        if scheme == EncryptionScheme::Cenc {
             return Err("CENC initialization must use per-sample IVs".to_string());
         }
         let end = offset
@@ -1219,6 +1250,28 @@ pub(crate) fn required_kids(
     directory: &Path,
     encryption: DashEncryption,
 ) -> Result<BTreeSet<[u8; 16]>, String> {
+    required_kids_inner(resources, directory, encryption, None)
+}
+
+/// Scan encrypted fragments for sample KIDs while honoring a caller's stop signal.
+///
+/// # Errors
+/// Returns an error if a resource is malformed, a sample is invalid, or scanning is cancelled.
+pub(crate) fn required_kids_with_cancel(
+    resources: &[DashResource],
+    directory: &Path,
+    encryption: DashEncryption,
+    cancelled: &AtomicBool,
+) -> Result<BTreeSet<[u8; 16]>, String> {
+    required_kids_inner(resources, directory, encryption, Some(cancelled))
+}
+
+fn required_kids_inner(
+    resources: &[DashResource],
+    directory: &Path,
+    encryption: DashEncryption,
+    cancelled: Option<&AtomicBool>,
+) -> Result<BTreeSet<[u8; 16]>, String> {
     if resources.len() < 2
         || resources[0].kind != DashResourceKind::Initialization
         || resources[1..]
@@ -1237,6 +1290,9 @@ pub(crate) fn required_kids(
     let init_encryption = parse_init_encryption(&init, encryption)?;
     let mut required = BTreeSet::new();
     for resource in &resources[1..] {
+        if cancelled.is_some_and(|signal| signal.load(Ordering::Acquire)) {
+            return Err("DRM KID scan was cancelled".to_string());
+        }
         let path = directory.join(&resource.filename);
         let fragment = read_regular_file_bounded(&path, MAX_FRAGMENT_BYTES)
             .map_err(|error| format!("Could not read encrypted DASH media segment: {error}"))?;
@@ -1244,7 +1300,7 @@ pub(crate) fn required_kids(
             required.insert(sample.kid);
             if required.len() > super::MAX_LICENSE_KEYS {
                 return Err(format!(
-                    "Encrypted DASH requires more than {} distinct ClearKey KIDs",
+                    "Encrypted fragmented MP4 requires more than {} distinct content-key IDs",
                     super::MAX_LICENSE_KEYS
                 ));
             }
@@ -1964,6 +2020,46 @@ mod tests {
     struct SyntheticTrackOptions {
         pattern: (u8, u8),
         use_byte_ranges: bool,
+    }
+
+    #[test]
+    fn reads_hls_cmaf_scheme_and_kid_from_the_protected_sample_entry() {
+        for (scheme, fourcc, version, pattern) in [
+            (EncryptionScheme::Cenc, b"cenc", 0, (0, 0)),
+            (EncryptionScheme::Cbcs, b"cbcs", 1, (1, 9)),
+        ] {
+            let (init, kid) = synthetic_init(fourcc, version, pattern, false);
+            let encryption =
+                hls_encryption_from_init(&init, scheme, crate::drm::ProtectionSystem::PlayReady)
+                    .expect("HLS init should expose the tenc KID");
+            assert_eq!(encryption.default_kid, kid);
+            assert_eq!(encryption.scheme, scheme);
+            assert_eq!(encryption.system, crate::drm::ProtectionSystem::PlayReady);
+            assert!(
+                parse_init_encryption(&init, encryption).is_ok(),
+                "the HLS-derived KID should satisfy the existing strict DASH parser"
+            );
+        }
+
+        let (init, _) = synthetic_init(b"cenc", 0, (0, 0), false);
+        assert!(
+            hls_encryption_from_init(
+                &init,
+                EncryptionScheme::Cbcs,
+                crate::drm::ProtectionSystem::PlayReady,
+            )
+            .is_err(),
+            "the HLS KEYFORMAT scheme must agree with the MP4 schm box"
+        );
+        assert!(
+            hls_encryption_from_init(
+                &init,
+                EncryptionScheme::Cenc,
+                crate::drm::ProtectionSystem::Widevine,
+            )
+            .is_err(),
+            "this HLS integration must not accept an unimplemented CDM"
+        );
     }
 
     #[test]

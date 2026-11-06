@@ -206,10 +206,11 @@ pub(crate) fn license_url_from_scopes(
                         .to_string(),
                 );
             }
-            if scope_selected.as_ref().is_some_and(|previous| previous != &url) {
-                return Err(
-                    "DASH protection scope contains conflicting license URLs".to_string(),
-                );
+            if scope_selected
+                .as_ref()
+                .is_some_and(|previous| previous != &url)
+            {
+                return Err("DASH protection scope contains conflicting license URLs".to_string());
             }
             scope_selected = Some(url);
         }
@@ -797,8 +798,7 @@ mod tests {
         };
         let first = descriptor("https://license-a.example.test/acquire");
         let second = descriptor("https://license-b.example.test/acquire");
-        let manifest = Url::parse("https://media.example.test/manifest.mpd")
-            .expect("manifest URL");
+        let manifest = Url::parse("https://media.example.test/manifest.mpd").expect("manifest URL");
         assert!(
             license_url_from_scopes(&[&[first, second]], &manifest).is_err(),
             "conflicting endpoints at one scope must not be resolved by document order"
@@ -823,18 +823,14 @@ mod tests {
             }),
             ..Default::default()
         };
-        let manifest = Url::parse("https://media.example.test/manifest.mpd")
-            .expect("manifest URL");
-        let selected = license_url_from_scopes(&[
-            std::slice::from_ref(&parent),
-            std::slice::from_ref(&child),
-        ], &manifest)
+        let manifest = Url::parse("https://media.example.test/manifest.mpd").expect("manifest URL");
+        let selected = license_url_from_scopes(
+            &[std::slice::from_ref(&parent), std::slice::from_ref(&child)],
+            &manifest,
+        )
         .expect("more-specific license URL")
         .expect("license URL should be selected");
-        assert_eq!(
-            selected.as_str(),
-            "https://license-b.example.test/acquire"
-        );
+        assert_eq!(selected.as_str(), "https://license-b.example.test/acquire");
     }
 
     #[test]

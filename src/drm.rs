@@ -519,7 +519,9 @@ mod tests {
         let mut with_els = Vec::with_capacity(pro.len() + 6);
         let new_length = pro.len() + 6;
         with_els.extend_from_slice(
-            &u32::try_from(new_length).expect("test PRO length").to_le_bytes(),
+            &u32::try_from(new_length)
+                .expect("test PRO length")
+                .to_le_bytes(),
         );
         with_els.extend_from_slice(&2_u16.to_le_bytes());
         with_els.extend_from_slice(&3_u16.to_le_bytes());

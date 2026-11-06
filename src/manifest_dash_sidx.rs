@@ -75,7 +75,9 @@ pub(crate) fn parse_segment_base_index(
         index_is_external: index.index_is_external,
         expectation: None,
         index_range_exact: index.index_range_exact,
-        require_exact_box: index.index_range_exact,
+        // indexRangeExact describes the representation's byte prefix, which
+        // may contain boxes before the SIDX. It does not require SIDX alone.
+        require_exact_box: false,
     })
 }
 

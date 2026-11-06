@@ -915,9 +915,10 @@ pub(crate) fn parse_hls_master_playlist(
         ));
     }
     let base_url = parse_manifest_url(manifest_url)?;
-    if base_url.query_pairs().any(|(name, _)| {
-        matches!(name.as_ref(), "_HLS_msn" | "_HLS_part" | "_HLS_skip")
-    }) {
+    if base_url
+        .query_pairs()
+        .any(|(name, _)| matches!(name.as_ref(), "_HLS_msn" | "_HLS_part" | "_HLS_skip"))
+    {
         return Err(ManifestError::UnsupportedPlaylist);
     }
     let playlist =
@@ -935,7 +936,10 @@ pub(crate) fn parse_hls_master_playlist(
     // Alternate VIDEO groups are separate selectable renditions. The native
     // HLS picker models variant playlists, audio, and subtitles, not video
     // angles, so do not silently select the variant URI and omit its group.
-    if master.variants.iter().any(|variant| variant.video.is_some())
+    if master
+        .variants
+        .iter()
+        .any(|variant| variant.video.is_some())
         || master
             .alternatives
             .iter()
@@ -1088,9 +1092,10 @@ pub(crate) fn plan_hls_media_playlist(
         ));
     }
     let base_url = parse_manifest_url(manifest_url)?;
-    if base_url.query_pairs().any(|(name, _)| {
-        matches!(name.as_ref(), "_HLS_msn" | "_HLS_part" | "_HLS_skip")
-    }) {
+    if base_url
+        .query_pairs()
+        .any(|(name, _)| matches!(name.as_ref(), "_HLS_msn" | "_HLS_part" | "_HLS_skip"))
+    {
         return Err(ManifestError::UnsupportedPlaylist);
     }
     let playlist =
@@ -2335,7 +2340,9 @@ clear-2.ts
             1
         );
         let local = m3u8_rs::parse_media_playlist_res(
-            &plan.local_playlist_bytes().expect("serialize local playlist"),
+            &plan
+                .local_playlist_bytes()
+                .expect("serialize local playlist"),
         )
         .expect("parse local playlist");
         assert_eq!(local.segments.len(), 3);

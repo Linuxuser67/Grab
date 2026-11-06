@@ -2303,7 +2303,7 @@ async fn hls_sample_aes_mpegts_is_decrypted_by_vsd_before_ffmpeg_finalization() 
         .map(|byte| format!("{byte:02X}"))
         .collect::<String>();
     let playlist = format!(
-        "#EXTM3U\n#EXT-X-VERSION:5\n#EXT-X-TARGETDURATION:2\n#EXT-X-MEDIA-SEQUENCE:0\n#EXT-X-KEY:METHOD=SAMPLE-AES,URI=\"key.bin\",IV=0x{iv_hex}\n#EXTINF:2,\nsegment-0.ts\n#EXT-X-ENDLIST\n"
+        "#EXTM3U\n#EXT-X-VERSION:5\n#EXT-X-TARGETDURATION:2\n#EXT-X-MEDIA-SEQUENCE:0\n#EXT-X-KEY:METHOD=SAMPLE-AES,URI=\"key.bin\",IV=0x{iv_hex}\n#EXTINF:2,\nsegment-0.ts\n#EXTINF:2,\nsegment-0.ts\n#EXT-X-ENDLIST\n"
     );
     let mut plan = crate::manifest::plan_hls_media_playlist(
         "https://origin.example.test/index.m3u8",
@@ -2365,19 +2365,26 @@ async fn hls_sample_aes_mpegts_is_decrypted_by_vsd_before_ffmpeg_finalization() 
     );
     let local_playlist = m3u8_rs::parse_media_playlist_res(&local_playlist_bytes)
         .expect("parse decrypted local HLS playlist");
+    assert_eq!(local_playlist.segments.len(), 2);
     assert!(
-        local_playlist.segments[0].key.is_none(),
-        "the decrypted segment must no longer carry an encryption key tag"
+        local_playlist.segments.iter().all(|segment| segment.key.is_none()),
+        "decrypted segments must no longer carry encryption key tags"
     );
-    let clear_segment = tokio::fs::read(video_dir.join(&local_playlist.segments[0].uri))
-        .await
-        .expect("read decrypted SAMPLE-AES segment");
-    let mut validator = crate::mpeg_ts_validation::TransportStreamValidator::new();
-    validator.observe(&clear_segment);
-    assert!(
-        validator.is_valid_complete(clear_segment.len() as u64),
-        "VSD output must remain a complete MPEG-TS resource"
+    assert_ne!(
+        local_playlist.segments[0].uri, local_playlist.segments[1].uri,
+        "repeated references to one encrypted URI must get independent decrypted files"
     );
+    for segment in &local_playlist.segments {
+        let clear_segment = tokio::fs::read(video_dir.join(&segment.uri))
+            .await
+            .expect("read decrypted SAMPLE-AES segment");
+        let mut validator = crate::mpeg_ts_validation::TransportStreamValidator::new();
+        validator.observe(&clear_segment);
+        assert!(
+            validator.is_valid_complete(clear_segment.len() as u64),
+            "VSD output must remain a complete MPEG-TS resource"
+        );
+    }
     let output = root.path().join("sample-aes-output.mkv");
     assert!(
         run_ffmpeg(

@@ -2619,11 +2619,24 @@ fn hls_sample_aes_iv(
     }
     let mut parsed = [0_u8; 16];
     for (index, byte) in parsed.iter_mut().enumerate() {
-        *byte = u8::from_str_radix(&hex[index * 2..index * 2 + 2], 16).map_err(|_| {
+        let high = hls_hex_nibble(hex.as_bytes()[index * 2]).ok_or_else(|| {
             ManifestRunError::Unsupported("The HLS SAMPLE-AES IV is invalid".to_string())
         })?;
+        let low = hls_hex_nibble(hex.as_bytes()[index * 2 + 1]).ok_or_else(|| {
+            ManifestRunError::Unsupported("The HLS SAMPLE-AES IV is invalid".to_string())
+        })?;
+        *byte = (high << 4) | low;
     }
     Ok(parsed)
+}
+
+fn hls_hex_nibble(byte: u8) -> Option<u8> {
+    match byte {
+        b'0'..=b'9' => Some(byte - b'0'),
+        b'a'..=b'f' => Some(byte - b'a' + 10),
+        b'A'..=b'F' => Some(byte - b'A' + 10),
+        _ => None,
+    }
 }
 
 async fn fetch_resources(

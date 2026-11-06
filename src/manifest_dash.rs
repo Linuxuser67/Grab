@@ -2716,10 +2716,15 @@ mod tests {
     ) -> DashSegmentBaseIndex {
         DashSegmentBaseIndex {
             url: Url::parse("https://cdn.example.test/path/media.mp4").expect("test media URL"),
+            index_url: Url::parse("https://cdn.example.test/path/media.mp4").expect("test index URL"),
             index_range,
+            index_is_external: false,
+            byte_range_template: None,
             initialization_range,
             index_range_exact,
-            timescale: Some(1_000),
+            timescale: 1_000,
+            presentation_time_offset: 0,
+            period_start: Duration::ZERO,
         }
     }
 
@@ -2763,7 +2768,7 @@ mod tests {
             }
         );
         assert!(index.index_range_exact);
-        assert_eq!(index.timescale, Some(1_000));
+        assert_eq!(index.timescale, 1_000);
         assert_eq!(plan.resources.len(), 1);
         assert_eq!(plan.resources[0].kind, DashResourceKind::Initialization);
         assert_eq!(plan.resources[0].range, Some(index.initialization_range));
@@ -2957,13 +2962,13 @@ mod tests {
             test_range(&bytes),
             true,
         );
-        index.timescale = Some(90_000);
+        index.timescale = 90_000;
         assert_eq!(
             resolve_segment_base_index(&index, &bytes, 1_000).err(),
             Some(DashError::UnsupportedAddressing)
         );
 
-        index.timescale = Some(1_000);
+        index.timescale = 1_000;
         index.index_range_exact = true;
         assert_eq!(
             resolve_segment_base_index(&index, &bytes[..bytes.len() - 1], 1_000).err(),
@@ -4453,9 +4458,8 @@ mod tests {
     }
 
     #[test]
-    fn segment_base_rejects_every_offset_variant() {
+    fn segment_base_rejects_unsupported_availability_and_delta_attributes() {
         let cases = [
-            r#"presentationTimeOffset="1""#,
             r#"availabilityTimeOffset="1""#,
             r#"availabilityTimeComplete="false""#,
             r#"eptDelta="1""#,
@@ -4472,6 +4476,149 @@ mod tests {
                 "{attributes}"
             );
         }
+    }
+
+    #[test]
+    fn plans_external_representation_index_and_segment_base_presentation_offset() {
+        let body = r#"<?xml version="1.0"?>
+<MPD xmlns="urn:mpeg:dash:schema:mpd:2011" type="static" mediaPresentationDuration="PT7S">
+  <BaseURL>media.mp4</BaseURL>
+  <Period start="PT2S" duration="PT5S">
+    <AdaptationSet contentType="video" mimeType="video/mp4">
+      <Representation id="v1">
+        <SegmentBase timescale="1000" presentationTimeOffset="3000" indexRange="100-143">
+          <Initialization range="0-99"/>
+          <RepresentationIndex sourceURL="index.sidx" range="20-63"/>
+        </SegmentBase>
+      </Representation>
+    </AdaptationSet>
+  </Period>
+</MPD>"#;
+        let manifest = parse_dash_manifest(BASE_URL, body)
+            .expect("external RepresentationIndex should parse");
+        let representation = &manifest.video_representations[0];
+        let plan = plan_dash_representation(&manifest, &representation.key)
+            .expect("external index plan");
+
+        let index = plan.segment_base_index.as_ref().expect("indexed plan");
+        assert_eq!(
+            index.index_url.as_str(),
+            "https://cdn.example.test/path/index.sidx"
+        );
+        assert_eq!(
+            index.index_range,
+            ManifestByteRange {
+                offset: 20,
+                length: 44,
+            }
+        );
+        assert!(index.index_is_external);
+        assert_eq!(index.timescale, 1_000);
+        assert_eq!(index.presentation_time_offset, 3_000);
+        assert_eq!(index.period_start, Duration::from_secs(2));
+        assert_eq!(plan.ffmpeg_timestamp_offset().as_deref(), Some("-1"));
+    }
+
+    #[test]
+    fn rejects_cross_origin_representation_index_source() {
+        let body = r#"<?xml version="1.0"?>
+<MPD xmlns="urn:mpeg:dash:schema:mpd:2011" type="static" mediaPresentationDuration="PT2S">
+  <BaseURL>media.mp4</BaseURL>
+  <Period duration="PT2S">
+    <AdaptationSet contentType="video" mimeType="video/mp4">
+      <Representation id="v1">
+        <SegmentBase indexRange="100-143">
+          <Initialization range="0-99"/>
+          <RepresentationIndex sourceURL="https://other.example.test/index.sidx" range="0-43"/>
+        </SegmentBase>
+      </Representation>
+    </AdaptationSet>
+  </Period>
+</MPD>"#;
+        assert_eq!(
+            parse_dash_manifest(BASE_URL, body).err(),
+            Some(DashError::UnsupportedAddressing)
+        );
+    }
+
+    #[test]
+    fn resolves_base_url_annex_e_byte_range_template() {
+        let source = Url::parse("https://cdn.example.test/path/media.mp4?token=abc")
+            .expect("source URL");
+        let range = ManifestByteRange {
+            offset: 10,
+            length: 20,
+        };
+        let resolved = build_byte_range_url(
+            &source,
+            range,
+            "$base$?$query$&range=$first$-$last$",
+        )
+        .expect("valid Annex E template");
+        assert_eq!(
+            resolved.as_str(),
+            "https://cdn.example.test/path/media.mp4?token=abc&range=10-29"
+        );
+
+        let escaped = build_byte_range_url(
+            &source,
+            range,
+            "$base$?marker=$$&range=$first$-$last$&$query$",
+        )
+        .expect("escaped dollar template");
+        assert_eq!(
+            escaped.as_str(),
+            "https://cdn.example.test/path/media.mp4?marker=$&range=10-29&token=abc"
+        );
+    }
+
+    #[test]
+    fn rejects_invalid_annex_e_byte_range_templates() {
+        let source = Url::parse("https://cdn.example.test/path/media.mp4")
+            .expect("source URL");
+        let range = ManifestByteRange {
+            offset: 10,
+            length: 20,
+        };
+        for template in [
+            "$base$/range=$first$",
+            "$base$/range=$first$-$last$-$unknown$",
+            "https://other.example.test/file?range=$first$-$last$",
+        ] {
+            assert_eq!(
+                build_byte_range_url(&source, range, template).err(),
+                Some(DashError::UnsupportedAddressing),
+                "{template}"
+            );
+        }
+    }
+
+    #[test]
+    fn inherits_base_url_byte_range_template_into_segment_base_plan() {
+        let body = r#"<?xml version="1.0"?>
+<MPD xmlns="urn:mpeg:dash:schema:mpd:2011" type="static" mediaPresentationDuration="PT2S">
+  <BaseURL byteRange="$base$?$query$&amp;range=$first$-$last$">media.mp4</BaseURL>
+  <Period duration="PT2S">
+    <AdaptationSet contentType="video" mimeType="video/mp4">
+      <Representation id="v1">
+        <SegmentBase indexRange="100-143">
+          <Initialization range="0-99"/>
+        </SegmentBase>
+      </Representation>
+    </AdaptationSet>
+  </Period>
+</MPD>"#;
+        let manifest = parse_dash_manifest(BASE_URL, body)
+            .expect("BaseURL byteRange should parse");
+        let representation = &manifest.video_representations[0];
+        let plan = plan_dash_representation(&manifest, &representation.key)
+            .expect("indexed plan");
+        assert_eq!(
+            plan.segment_base_index
+                .as_ref()
+                .and_then(|index| index.byte_range_template.as_deref()),
+            Some("$base$?$query$&range=$first$-$last$")
+        );
     }
 
     #[test]

@@ -2615,13 +2615,10 @@ fn validate_vsd_sample_aes_segment(bytes: &[u8]) -> Result<(), String> {
     let mut stream_types = std::collections::HashMap::<u16, StreamType>::new();
     let mut aac_pes = std::collections::HashMap::<u16, Vec<u8>>::new();
 
-    loop {
-        let Some(packet) = reader
-            .read_ts_packet()
-            .map_err(|error| format!("invalid MPEG-TS packet: {error:?}"))?
-        else {
-            break;
-        };
+    while let Some(packet) = reader
+        .read_ts_packet()
+        .map_err(|error| format!("invalid MPEG-TS packet: {error:?}"))?
+    {
         let pid = packet.header.pid.as_u16();
         let flush = matches!(
             &packet.payload,
@@ -2662,10 +2659,8 @@ fn validate_vsd_sample_aes_segment(bytes: &[u8]) -> Result<(), String> {
             _ => {}
         }
 
-        if flush {
-            if let Some(data) = aac_pes.remove(&pid) {
-                validate_vsd_adts_pes(&data)?;
-            }
+        if flush && let Some(data) = aac_pes.remove(&pid) {
+            validate_vsd_adts_pes(&data)?;
         }
     }
 

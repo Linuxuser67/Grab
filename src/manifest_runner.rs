@@ -4192,6 +4192,30 @@ async fn run_ffmpeg(
 mod tests {
     use super::*;
 
+    #[test]
+    fn sample_aes_iv_uses_media_sequence_when_iv_is_omitted() {
+        assert_eq!(
+            hls_sample_aes_iv(None, 42).expect("derive media-sequence IV"),
+            [
+                0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 42
+            ]
+        );
+    }
+
+    #[test]
+    fn sample_aes_iv_parses_explicit_128_bit_values() {
+        assert_eq!(
+            hls_sample_aes_iv(
+                Some("0x0000000000000000000000000000002A"),
+                0
+            )
+            .expect("parse explicit IV"),
+            [
+                0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 42
+            ]
+        );
+    }
+
     fn valid_transport_stream(packet_count: usize, continuity_seed: u8) -> Vec<u8> {
         let mut bytes = vec![0xff; packet_count * mpeg_ts::ts::TS_PACKET_SIZE];
         for (index, packet) in bytes

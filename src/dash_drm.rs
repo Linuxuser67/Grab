@@ -16,6 +16,13 @@ use zeroize::{Zeroize as _, Zeroizing};
 
 pub(crate) use crate::drm::{EncryptionScheme, ProtectionSystem};
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct DashEncryption {
+    pub(crate) scheme: EncryptionScheme,
+    pub(crate) default_kid: [u8; 16],
+    pub(crate) system: ProtectionSystem,
+}
+
 const MP4_PROTECTION_SCHEME: &str = "urn:mpeg:dash:mp4protection:2011";
 const WIDEVINE_SCHEME: &str = "urn:uuid:edef8ba9-79d6-4ace-a3c8-27dcd51d21ed";
 const PLAYREADY_SCHEME: &str = "urn:uuid:9a04f079-9840-4286-ab92-e65be0885f95";

@@ -8,7 +8,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::time::Duration;
 
 use base64::Engine as _;
-use base64::engine::general_purpose::URL_SAFE_NO_PAD;
+use base64::engine::general_purpose::{STANDARD, URL_SAFE_NO_PAD};
 use futures_util::StreamExt as _;
 use serde::{Deserialize, Serialize};
 use url::Url;
@@ -16,6 +16,7 @@ use zeroize::{Zeroize as _, Zeroizing};
 
 const MP4_PROTECTION_SCHEME: &str = "urn:mpeg:dash:mp4protection:2011";
 const WIDEVINE_SCHEME: &str = "urn:uuid:edef8ba9-79d6-4ace-a3c8-27dcd51d21ed";
+const WIDEVINE_SYSTEM_ID: [u8; 16] = [0xed, 0xef, 0x8b, 0xa9, 0x79, 0xd6, 0x4a, 0xce, 0xa3, 0xc8, 0x27, 0xdc, 0xd5, 0x1d, 0x21, 0xed];
 const PLAYREADY_SCHEME: &str = "urn:uuid:9a04f079-9840-4286-ab92-e65be0885f95";
 const CLEARKEY_SCHEME: &str = "urn:uuid:e2719d58-a985-b3c9-781a-ab030af78d30";
 const MAX_LICENSE_RESPONSE_BYTES: usize = 64 * 1024;
@@ -32,6 +33,13 @@ pub(crate) enum EncryptionScheme {
 pub(crate) struct DashEncryption {
     pub(crate) scheme: EncryptionScheme,
     pub(crate) default_kid: [u8; 16],
+    pub(crate) system: ProtectionSystem,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum ProtectionSystem {
+    ClearKey,
+    Widevine,
 }
 
 pub(crate) struct DashKeyMap {
@@ -63,7 +71,7 @@ pub(crate) fn encryption_from_scopes(
     scopes: &[&[dash_mpd_core::ContentProtection]],
 ) -> Result<Option<DashEncryption>, String> {
     let mut selected = None;
-    let mut has_system_descriptor = false;
+    let mut system = None;
 
     for descriptor in scopes.iter().flat_map(|scope| scope.iter()) {
         if descriptor.schemeIdUri == MP4_PROTECTION_SCHEME {
@@ -89,6 +97,7 @@ pub(crate) fn encryption_from_scopes(
             let encryption = DashEncryption {
                 scheme,
                 default_kid: kid,
+                system: system.unwrap_or(ProtectionSystem::ClearKey),
             };
             if selected.is_some_and(|previous| previous != encryption) {
                 return Err(
@@ -97,14 +106,19 @@ pub(crate) fn encryption_from_scopes(
                 );
             }
             selected = Some(encryption);
-        } else if descriptor.schemeIdUri == CLEARKEY_SCHEME {
-            has_system_descriptor = true;
-        } else if descriptor.schemeIdUri == WIDEVINE_SCHEME
-            || descriptor.schemeIdUri == PLAYREADY_SCHEME
+        } else if descriptor.schemeIdUri == CLEARKEY_SCHEME
+            || descriptor.schemeIdUri == WIDEVINE_SCHEME
         {
-            return Err(
-                "Native DASH license acquisition currently supports ClearKey only".to_string(),
-            );
+            let next = if descriptor.schemeIdUri == WIDEVINE_SCHEME {
+                ProtectionSystem::Widevine
+            } else {
+                ProtectionSystem::ClearKey
+            };
+            if system.replace(next).is_some_and(|previous| previous != next) {
+                return Err("DASH declares conflicting DRM systems".to_string());
+            }
+        } else if descriptor.schemeIdUri == PLAYREADY_SCHEME {
+            return Err("Native DASH PlayReady support is not available yet".to_string());
         } else if descriptor.schemeIdUri.starts_with("urn:uuid:") {
             return Err("DASH declares an unsupported protection system".to_string());
         } else {
@@ -112,14 +126,77 @@ pub(crate) fn encryption_from_scopes(
         }
     }
 
-    if has_system_descriptor && selected.is_none() {
+    if system.is_some() && selected.is_none() {
         return Err(
             "DASH advertises a DRM system but has no supported mp4protection cenc/cbcs default_KID"
                 .to_string(),
         );
     }
 
+    Ok(selected.map(|mut encryption: DashEncryption| {
+        encryption.system = system.unwrap_or(ProtectionSystem::ClearKey);
+        encryption
+    }))
+}
+
+/// Decode and validate the Widevine PSSH declared by inherited DASH protection scopes.
+pub(crate) fn widevine_pssh_from_scopes(
+    scopes: &[&[dash_mpd_core::ContentProtection]],
+) -> Result<Option<Vec<u8>>, String> {
+    let mut selected: Option<Vec<u8>> = None;
+    for descriptor in scopes.iter().flat_map(|scope| scope.iter()) {
+        if descriptor.schemeIdUri != WIDEVINE_SCHEME {
+            continue;
+        }
+        for pssh in &descriptor.cenc_pssh {
+            let Some(encoded) = pssh.content.as_deref().map(str::trim).filter(|value| !value.is_empty()) else {
+                continue;
+            };
+            let decoded = STANDARD
+                .decode(encoded.as_bytes())
+                .map_err(|_| "DASH Widevine PSSH is not valid base64".to_string())?;
+            validate_widevine_pssh(&decoded)?;
+            if selected.as_ref().is_some_and(|previous| previous != &decoded) {
+                return Err("DASH declares conflicting Widevine PSSH boxes".to_string());
+            }
+            selected = Some(decoded);
+        }
+    }
     Ok(selected)
+}
+
+fn validate_widevine_pssh(bytes: &[u8]) -> Result<(), String> {
+    let invalid = || "DASH Widevine PSSH box is malformed or has the wrong system ID".to_string();
+    if bytes.len() < 32
+        || bytes.get(4..8) != Some(b"pssh")
+        || bytes.get(8).is_none_or(|version| *version > 1)
+        || bytes.get(12..28) != Some(WIDEVINE_SYSTEM_ID.as_slice())
+    {
+        return Err(invalid());
+    }
+    let declared_size = u32::from_be_bytes(bytes[0..4].try_into().map_err(|_| invalid())?);
+    if usize::try_from(declared_size).ok() != Some(bytes.len()) {
+        return Err(invalid());
+    }
+    let version = bytes[8];
+    let mut offset = 28_usize;
+    if version == 1 {
+        let count_bytes: [u8; 4] = bytes.get(offset..offset + 4).ok_or_else(invalid)?
+            .try_into().map_err(|_| invalid())?;
+        let count = usize::try_from(u32::from_be_bytes(count_bytes)).map_err(|_| invalid())?;
+        offset = offset.checked_add(4)
+            .and_then(|value| count.checked_mul(16).and_then(|kids| value.checked_add(kids)))
+            .ok_or_else(invalid)?;
+    }
+    let data_size_bytes: [u8; 4] = bytes.get(offset..offset + 4).ok_or_else(invalid)?
+        .try_into().map_err(|_| invalid())?;
+    let data_size = usize::try_from(u32::from_be_bytes(data_size_bytes)).map_err(|_| invalid())?;
+    let end = offset.checked_add(4).and_then(|value| value.checked_add(data_size))
+        .ok_or_else(invalid)?;
+    if end != bytes.len() {
+        return Err(invalid());
+    }
+    Ok(())
 }
 
 /// Resolve the ClearKey license URL across inherited protection scopes.

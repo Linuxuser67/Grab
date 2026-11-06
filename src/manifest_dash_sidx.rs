@@ -429,6 +429,45 @@ mod tests {
     }
 
     #[test]
+    fn external_root_sidx_offsets_refer_to_the_media_resource() {
+        let root = build_sidx_box(7, 1_000, 0, 100, &[(64, 2_000, 0x9000_0000)]);
+        let mut index = test_index(&root);
+        index.index_url =
+            Url::parse("https://cdn.example.test/path/index.sidx").expect("external index URL");
+        index.index_range = ManifestByteRange {
+            offset: 0,
+            length: u64::try_from(root.len()).expect("external index length"),
+        };
+        index.index_is_external = true;
+
+        let node = parse_segment_base_index(
+            &index,
+            &root,
+            u64::try_from(root.len()).expect("external index file length"),
+            1_000,
+        )
+        .expect("external root SIDX");
+
+        assert_eq!(
+            node.entries,
+            [DashSidxEntry::Media(ManifestByteRange {
+                offset: 100,
+                length: 64,
+            })]
+        );
+        validate_segment_base_sidx_ranges(
+            &index,
+            &[],
+            &[ManifestByteRange {
+                offset: 100,
+                length: 64,
+            }],
+            1_000,
+        )
+        .expect("external root index range is not in the media file");
+    }
+
+    #[test]
     fn expands_child_sidx_into_ordered_media_ranges() {
         let child = build_sidx_box(7, 1_000, 0, 0, &[(80, 2_000, 0x9000_0000)]);
         let root = build_sidx_box(
@@ -447,7 +486,7 @@ mod tests {
             + u64::try_from(root.len()).expect("root length")
             + u64::try_from(child.len()).expect("child length")
             + 80;
-        let root_node = parse_segment_base_index(&index, &root, total_length).expect("root SIDX");
+        let root_node = parse_segment_base_index(&index, &root, total_length, total_length).expect("root SIDX");
         let DashSidxEntry::Index(child_reference) = &root_node.entries[0] else {
             panic!("root should point to a child index");
         };
@@ -505,7 +544,7 @@ mod tests {
             + u64::try_from(child.len()).expect("child length")
             + u64::try_from(grandchild.len()).expect("grandchild length")
             + 96;
-        let root_node = parse_segment_base_index(&index, &root, total_length).expect("root SIDX");
+        let root_node = parse_segment_base_index(&index, &root, total_length, total_length).expect("root SIDX");
         let DashSidxEntry::Index(child_reference) = &root_node.entries[0] else {
             panic!("root should point to a child index");
         };
@@ -555,7 +594,7 @@ mod tests {
             + u64::try_from(root.len()).expect("root length")
             + u64::try_from(child.len()).expect("child length")
             + 80;
-        let root_node = parse_segment_base_index(&index, &root, total_length).expect("root SIDX");
+        let root_node = parse_segment_base_index(&index, &root, total_length, total_length).expect("root SIDX");
         let DashSidxEntry::Index(child_reference) = &root_node.entries[0] else {
             panic!("root should point to a child index");
         };
@@ -591,7 +630,7 @@ mod tests {
             + u64::try_from(root.len()).expect("root length")
             + u64::try_from(child.len()).expect("child length")
             + 80;
-        let root_node = parse_segment_base_index(&index, &root, total_length).expect("root SIDX");
+        let root_node = parse_segment_base_index(&index, &root, total_length, total_length).expect("root SIDX");
         let DashSidxEntry::Index(child_reference) = &root_node.entries[0] else {
             panic!("root should point to a child index");
         };
@@ -620,7 +659,7 @@ mod tests {
             + u64::try_from(root.len()).expect("root length")
             + u64::try_from(child.len()).expect("child length")
             + 80;
-        let root_node = parse_segment_base_index(&index, &root, total_length).expect("root SIDX");
+        let root_node = parse_segment_base_index(&index, &root, total_length, total_length).expect("root SIDX");
         let DashSidxEntry::Index(child_reference) = &root_node.entries[0] else {
             panic!("root should point to a child index");
         };

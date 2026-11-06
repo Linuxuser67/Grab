@@ -142,29 +142,34 @@ pub(crate) fn encryption_from_scopes(
 }
 
 /// Decode and validate the Widevine PSSH declared by inherited DASH protection scopes.
+/// Decode and validate the Widevine PSSH boxes declared by inherited DASH protection scopes.
 pub(crate) fn widevine_pssh_from_scopes(
     scopes: &[&[dash_mpd_core::ContentProtection]],
-) -> Result<Option<Vec<u8>>, String> {
-    let mut selected: Option<Vec<u8>> = None;
+) -> Result<Vec<Vec<u8>>, String> {
+    let mut pssh_boxes = Vec::new();
     for descriptor in scopes.iter().flat_map(|scope| scope.iter()) {
         if descriptor.schemeIdUri != WIDEVINE_SCHEME {
             continue;
         }
         for pssh in &descriptor.cenc_pssh {
-            let Some(encoded) = pssh.content.as_deref().map(str::trim).filter(|value| !value.is_empty()) else {
+            let Some(encoded) = pssh
+                .content
+                .as_deref()
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+            else {
                 continue;
             };
             let decoded = STANDARD
                 .decode(encoded.as_bytes())
                 .map_err(|_| "DASH Widevine PSSH is not valid base64".to_string())?;
             validate_widevine_pssh(&decoded)?;
-            if selected.as_ref().is_some_and(|previous| previous != &decoded) {
-                return Err("DASH declares conflicting Widevine PSSH boxes".to_string());
+            if !pssh_boxes.contains(&decoded) {
+                pssh_boxes.push(decoded);
             }
-            selected = Some(decoded);
         }
     }
-    Ok(selected)
+    Ok(pssh_boxes)
 }
 
 fn validate_widevine_pssh(bytes: &[u8]) -> Result<(), String> {
@@ -172,6 +177,7 @@ fn validate_widevine_pssh(bytes: &[u8]) -> Result<(), String> {
     if bytes.len() < 32
         || bytes.get(4..8) != Some(&b"pssh"[..])
         || bytes.get(8).is_none_or(|version| *version > 1)
+        || bytes.get(9..12) != Some(&[0, 0, 0][..])
         || bytes.get(12..28) != Some(WIDEVINE_SYSTEM_ID.as_slice())
     {
         return Err(invalid());
@@ -180,21 +186,27 @@ fn validate_widevine_pssh(bytes: &[u8]) -> Result<(), String> {
     if usize::try_from(declared_size).ok() != Some(bytes.len()) {
         return Err(invalid());
     }
-    let version = bytes[8];
     let mut offset = 28_usize;
-    if version == 1 {
-        let count_bytes: [u8; 4] = bytes.get(offset..offset + 4).ok_or_else(invalid)?
-            .try_into().map_err(|_| invalid())?;
+    if bytes[8] == 1 {
+        let count_end = offset.checked_add(4).ok_or_else(invalid)?;
+        let count_bytes: [u8; 4] = bytes
+            .get(offset..count_end)
+            .ok_or_else(invalid)?
+            .try_into()
+            .map_err(|_| invalid())?;
         let count = usize::try_from(u32::from_be_bytes(count_bytes)).map_err(|_| invalid())?;
-        offset = offset.checked_add(4)
-            .and_then(|value| count.checked_mul(16).and_then(|kids| value.checked_add(kids)))
+        offset = count_end
+            .checked_add(count.checked_mul(16).ok_or_else(invalid)?)
             .ok_or_else(invalid)?;
     }
-    let data_size_bytes: [u8; 4] = bytes.get(offset..offset + 4).ok_or_else(invalid)?
-        .try_into().map_err(|_| invalid())?;
+    let size_end = offset.checked_add(4).ok_or_else(invalid)?;
+    let data_size_bytes: [u8; 4] = bytes
+        .get(offset..size_end)
+        .ok_or_else(invalid)?
+        .try_into()
+        .map_err(|_| invalid())?;
     let data_size = usize::try_from(u32::from_be_bytes(data_size_bytes)).map_err(|_| invalid())?;
-    let end = offset.checked_add(4).and_then(|value| value.checked_add(data_size))
-        .ok_or_else(invalid)?;
+    let end = size_end.checked_add(data_size).ok_or_else(invalid)?;
     if end != bytes.len() {
         return Err(invalid());
     }
@@ -550,7 +562,7 @@ mod tests {
         assert_eq!(encryption.system, ProtectionSystem::Widevine);
         assert_eq!(
             widevine_pssh_from_scopes(&scopes).expect("Widevine PSSH should decode"),
-            Some(STANDARD.decode(pssh).expect("test PSSH base64"))
+            vec![STANDARD.decode(pssh).expect("test PSSH base64")]
         );
     }
 
@@ -562,21 +574,21 @@ mod tests {
         });
         assert!(widevine_pssh_from_scopes(&[std::slice::from_ref(&malformed)]).is_err());
 
-        let mut first = widevine();
-        first.cenc_pssh.push(dash_mpd_core::CencPssh {
-            content: Some("AAAAIHBzc2gAAAAA7e+LqXnWSs6jyCfc1R0h7QAAAAA=".to_string()),
-        });
-        let mut second = widevine();
-        second.cenc_pssh.push(dash_mpd_core::CencPssh {
-            content: Some("AAAAIHBzc2gAAAAA7e+LqXnWSs6jyCfc1R0h7QAAAAA=".to_string()),
-        });
-        second.cenc_pssh[0].content = Some(
-            "AAAAIXBzc2gAAAAA7e+LqXnWSs6jyCfc1R0h7QAAAAEB".to_string()
+        let mut multiple = widevine();
+        multiple.cenc_pssh.extend([
+            dash_mpd_core::CencPssh {
+                content: Some("AAAAIHBzc2gAAAAA7e+LqXnWSs6jyCfc1R0h7QAAAAA=".to_string()),
+            },
+            dash_mpd_core::CencPssh {
+                content: Some("AAAAIXBzc2gAAAAA7e+LqXnWSs6jyCfc1R0h7QAAAAEB".to_string()),
+            },
+        ]);
+        assert_eq!(
+            widevine_pssh_from_scopes(&[std::slice::from_ref(&multiple)])
+                .expect("multiple valid PSSH boxes should be retained")
+                .len(),
+            2
         );
-        assert!(widevine_pssh_from_scopes(&[
-            std::slice::from_ref(&first),
-            std::slice::from_ref(&second),
-        ]).is_err());
     }
 
     #[test]

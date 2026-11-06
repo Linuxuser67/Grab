@@ -25,7 +25,6 @@ use zeroize::Zeroizing;
 
 const INTERNAL_WORKER_ARG: &str = "--grab-internal-playready-worker";
 const MAX_WORKER_FRAME_BYTES: usize = 256 * 1024;
-const MAX_PSSH_BYTES: usize = 64 * 1024;
 const MAX_DEVICE_FILE_BYTES: u64 = 4 * 1024 * 1024;
 const MAX_CHALLENGE_BYTES: usize = 128 * 1024;
 const MAX_LICENSE_RESPONSE_BYTES: usize = 64 * 1024;
@@ -149,7 +148,7 @@ pub async fn acquire_keys(
     license_url: &Url,
 ) -> Result<Vec<PlayReadyKey>, String> {
     crate::drm::validate_pssh(pssh, crate::drm::ProtectionSystem::PlayReady)?;
-    if pssh.len() > MAX_PSSH_BYTES {
+    if pssh.len() > crate::drm::MAX_PSSH_BYTES {
         return Err("The PlayReady PSSH exceeds its size limit".to_string());
     }
     if license_url.scheme() != "https"
@@ -272,11 +271,12 @@ pub async fn acquire_keys(
     )
     .await
     .map_err(|_| "The PlayReady CDM worker timed out while processing the license".to_string())??;
-    let WorkerResponse::Keys { keys } = keys_response else {
-        return match keys_response {
-            WorkerResponse::Failure { reason } => Err(reason.message().to_string()),
-            _ => Err("The PlayReady worker returned an invalid protocol response".to_string()),
-        };
+    let keys = match keys_response {
+        WorkerResponse::Keys { keys } => keys,
+        WorkerResponse::Failure { reason } => return Err(reason.message().to_string()),
+        WorkerResponse::Challenge { .. } => {
+            return Err("The PlayReady worker returned an invalid protocol response".to_string());
+        }
     };
 
     let status = tokio::time::timeout(WORKER_EXIT_TIMEOUT, child.wait())
@@ -329,7 +329,7 @@ fn process_worker<R: BufRead, W: Write>(
             .decode(pssh_base64.as_bytes())
             .map_err(|_| WorkerFailure::InvalidPssh)?,
     );
-    if pssh_bytes.is_empty() || pssh_bytes.len() > MAX_PSSH_BYTES {
+    if pssh_bytes.is_empty() || pssh_bytes.len() > crate::drm::MAX_PSSH_BYTES {
         return Err(WorkerFailure::InvalidPssh);
     }
     crate::drm::validate_pssh(&pssh_bytes, crate::drm::ProtectionSystem::PlayReady)
@@ -512,8 +512,11 @@ async fn write_async_frame<W: AsyncWrite + Unpin, T: Serialize>(
     writer
         .write_all(&frame)
         .await
-        .and_then(|()| async { writer.write_all(b"\n").await }.await)
         .map_err(|_| "Could not write the PlayReady worker message".to_string())?;
+    writer
+        .write_all(b"\n")
+        .await
+        .map_err(|_| "Could not terminate the PlayReady worker message".to_string())?;
     writer
         .flush()
         .await

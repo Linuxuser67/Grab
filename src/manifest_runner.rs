@@ -2399,7 +2399,7 @@ async fn decrypt_hls_sample_aes_segments(
         .map_err(|error| ManifestRunError::Failed(error.to_string()))?;
     let mut playlist = m3u8_rs::parse_media_playlist_res(&playlist_bytes).map_err(|error| {
         ManifestRunError::Failed(format!(
-            "Could not parse the localized HLS playlist: {error}"
+            "Could not parse the localized HLS playlist: {error:?}"
         ))
     })?;
     let mut changed = false;

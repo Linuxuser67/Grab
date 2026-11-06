@@ -363,6 +363,7 @@ fn validate_playready_object(bytes: &[u8]) -> Result<(), String> {
 /// Reject multiple simultaneously active KEYFORMATs because m3u8-rs exposes
 /// only one Key on each media segment. Silently retaining only the last tag
 /// would lose a valid protection descriptor and could select the wrong path.
+#[cfg(test)]
 pub(crate) fn validate_hls_keyformat_multiplexing(body: &[u8]) -> Result<(), String> {
     hls_key_reset_state_by_segment(body).map(|_| ())
 }

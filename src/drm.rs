@@ -135,7 +135,11 @@ pub(crate) fn validate_pssh(bytes: &[u8], system: ProtectionSystem) -> Result<()
 /// Identity AES-128 and identity MPEG-TS SAMPLE-AES continue through their
 /// existing download/decryption paths and therefore return Ok(None).
 pub(crate) fn hls_protection_from_key(key: &Key) -> Result<Option<HlsProtection>, String> {
-    if key.keyformatversions.as_deref().is_some_and(|value| value != "1") {
+    if key
+        .keyformatversions
+        .as_deref()
+        .is_some_and(|versions| !supports_hls_keyformat_version_one(versions))
+    {
         return Err("HLS DRM key uses an unsupported KEYFORMATVERSIONS value".to_string());
     }
 
@@ -195,6 +199,28 @@ pub(crate) fn hls_protection_from_key(key: &Key) -> Result<Option<HlsProtection>
         scheme,
         initialization_data,
     }))
+}
+
+fn supports_hls_keyformat_version_one(versions: &str) -> bool {
+    if versions.is_empty() || versions.len() > 64 {
+        return false;
+    }
+    let mut supports_one = false;
+    let mut count = 0_usize;
+    for version in versions.split('/') {
+        count += 1;
+        if version.is_empty() || !version.bytes().all(|byte| byte.is_ascii_digit()) {
+            return false;
+        }
+        let Ok(version) = version.parse::<u32>() else {
+            return false;
+        };
+        if version == 0 {
+            return false;
+        }
+        supports_one |= version == 1;
+    }
+    count <= 8 && supports_one
 }
 
 fn decode_hls_data_uri(uri: &str, accepted_metadata: &[&str]) -> Result<Vec<u8>, String> {
@@ -301,20 +327,23 @@ pub(crate) fn validate_hls_keyformat_multiplexing(body: &[u8]) -> Result<(), Str
     let mut active_formats = HashSet::new();
     for line in text.lines().map(str::trim) {
         if let Some(attributes) = line.strip_prefix("#EXT-X-KEY:") {
-            let fields: HashMap<String, String> = parse_hls_attribute_list(attributes)?
-                .into_iter()
-                .collect();
+            let mut fields = HashMap::new();
+            for (name, value) in parse_hls_attribute_list(attributes)? {
+                if fields.insert(name, value).is_some() {
+                    return Err("HLS key tag contains a duplicate attribute".to_string());
+                }
+            }
             let method = fields
                 .get("METHOD")
                 .ok_or_else(|| "HLS key tag has no METHOD".to_string())?;
-            if method == "NONE" {
-                active_formats.clear();
-                continue;
-            }
             let format = fields
                 .get("KEYFORMAT")
                 .map(String::as_str)
                 .unwrap_or("identity");
+            if method == "NONE" {
+                active_formats.remove(format);
+                continue;
+            }
             active_formats.insert(format.to_string());
         } else if !line.is_empty() && !line.starts_with('#') && active_formats.len() > 1 {
             return Err(
@@ -462,6 +491,22 @@ mod tests {
     fn leaves_identity_keys_to_the_existing_hls_paths() {
         let identity = key(KeyMethod::AES128, "https://cdn.example.test/key.bin", "identity");
         assert_eq!(hls_protection_from_key(&identity), Ok(None));
+    }
+
+    #[test]
+    fn accepts_keyformat_version_one_in_a_version_list() {
+        assert!(supports_hls_keyformat_version_one("1"));
+        assert!(supports_hls_keyformat_version_one("1/2"));
+        assert!(supports_hls_keyformat_version_one("2/1/3"));
+        assert!(!supports_hls_keyformat_version_one("2"));
+        assert!(!supports_hls_keyformat_version_one("1/x"));
+        assert!(!supports_hls_keyformat_version_one("0/1"));
+    }
+
+    #[test]
+    fn method_none_only_clears_its_own_keyformat() {
+        let body = b"#EXTM3U\\n#EXT-X-KEY:METHOD=SAMPLE-AES,URI=\\\"data:text/plain;base64,AAAAIHBzc2gAAAAA7e+LqXnWSs6jyCfc1R0h7QAAAAA=\\\",KEYFORMAT=\\\"urn:uuid:edef8ba9-79d6-4ace-a3c8-27dcd51d21ed\\\"\\n#EXT-X-KEY:METHOD=NONE\\n#EXT-X-KEY:METHOD=AES-128,URI=\\\"key.bin\\\"\\n#EXTINF:2,\\nsegment.ts\\n";
+        assert!(validate_hls_keyformat_multiplexing(body).is_err());
     }
 
     #[test]

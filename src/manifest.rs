@@ -2566,9 +2566,9 @@ segment-1.m4s
         let playlist = format!(concat!(
             "#EXTM3U\n#EXT-X-VERSION:7\n#EXT-X-TARGETDURATION:2\n",
             "#EXT-X-MAP:URI=\"init.mp4\"\n",
-            "#EXT-X-KEY:METHOD=SAMPLE-AES,URI=\"{uri}\",KEYFORMAT=\"com.microsoft.playready\"\n",
+            "#EXT-X-KEY:METHOD=SAMPLE-AES,URI=\"{}\",KEYFORMAT=\"com.microsoft.playready\"\n",
             "#EXTINF:2,\nsegment-1.m4s\n#EXT-X-ENDLIST\n"
-        ));
+        ), uri);
         let plan = plan_hls_media_playlist(BASE_URL, playlist.as_bytes())
             .expect("static PlayReady CMAF plan");
         assert!(plan.is_single_init_fmp4_presentation());

@@ -4698,19 +4698,19 @@ mod tests {
     fn hls_playready_plan(playready_uri: &str, include_clear_segment: bool) -> HlsPlan {
         let mut playlist = format!(
             concat!(
-                "#EXTM3U\\n",
-                "#EXT-X-VERSION:7\\n",
-                "#EXT-X-TARGETDURATION:2\\n",
-                "#EXT-X-MAP:URI=\\\"init.mp4\\\"\\n",
-                "#EXT-X-KEY:METHOD=SAMPLE-AES,URI=\\\"{playready_uri}\\\",",
-                "KEYFORMAT=\\\"com.microsoft.playready\\\"\\n",
-                "#EXTINF:2,\\nsegment-1.m4s\\n"
+                "#EXTM3U\n",
+                "#EXT-X-VERSION:7\n",
+                "#EXT-X-TARGETDURATION:2\n",
+                "#EXT-X-MAP:URI=\"init.mp4\"\n",
+                "#EXT-X-KEY:METHOD=SAMPLE-AES,URI=\"{playready_uri}\",",
+                "KEYFORMAT=\"com.microsoft.playready\"\n",
+                "#EXTINF:2,\nsegment-1.m4s\n"
             )
         );
         if include_clear_segment {
-            playlist.push_str("#EXT-X-KEY:METHOD=NONE\\n#EXTINF:2,\\nsegment-2.m4s\\n");
+            playlist.push_str("#EXT-X-KEY:METHOD=NONE\n#EXTINF:2,\nsegment-2.m4s\n");
         }
-        playlist.push_str("#EXT-X-ENDLIST\\n");
+        playlist.push_str("#EXT-X-ENDLIST\n");
         crate::manifest::plan_hls_media_playlist("https://cdn.example.test/master.m3u8", playlist.as_bytes())
             .expect("test static PlayReady CMAF playlist")
     }
@@ -4745,12 +4745,12 @@ mod tests {
         );
         let rotation = format!(
             concat!(
-                "#EXTM3U\\n#EXT-X-VERSION:7\\n#EXT-X-TARGETDURATION:2\\n",
-                "#EXT-X-MAP:URI=\\\"init.mp4\\\"\\n",
-                "#EXT-X-KEY:METHOD=SAMPLE-AES,URI=\\\"{first_uri}\\\",KEYFORMAT=\\\"com.microsoft.playready\\\"\\n",
-                "#EXTINF:2,\\nsegment-1.m4s\\n",
-                "#EXT-X-KEY:METHOD=SAMPLE-AES,URI=\\\"{second_uri}\\\",KEYFORMAT=\\\"com.microsoft.playready\\\"\\n",
-                "#EXTINF:2,\\nsegment-2.m4s\\n#EXT-X-ENDLIST\\n"
+                "#EXTM3U\n#EXT-X-VERSION:7\n#EXT-X-TARGETDURATION:2\n",
+                "#EXT-X-MAP:URI=\"init.mp4\"\n",
+                "#EXT-X-KEY:METHOD=SAMPLE-AES,URI=\"{first_uri}\",KEYFORMAT=\"com.microsoft.playready\"\n",
+                "#EXTINF:2,\nsegment-1.m4s\n",
+                "#EXT-X-KEY:METHOD=SAMPLE-AES,URI=\"{second_uri}\",KEYFORMAT=\"com.microsoft.playready\"\n",
+                "#EXTINF:2,\nsegment-2.m4s\n#EXT-X-ENDLIST\n"
             )
         );
         let rotation_plan = crate::manifest::plan_hls_media_playlist(

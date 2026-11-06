@@ -67,17 +67,6 @@ pub(crate) enum ProtectionSystem {
     FairPlay,
 }
 
-impl ProtectionSystem {
-    pub(crate) const fn label(self) -> &'static str {
-        match self {
-            Self::ClearKey => "ClearKey",
-            Self::Widevine => "Widevine",
-            Self::PlayReady => "PlayReady",
-            Self::FairPlay => "FairPlay",
-        }
-    }
-}
-
 #[derive(Clone, PartialEq, Eq)]
 pub(crate) enum HlsInitializationData {
     /// A complete ISO BMFF Protection System Specific Header box.
@@ -107,25 +96,6 @@ pub(crate) struct HlsProtection {
     pub(crate) system: ProtectionSystem,
     pub(crate) scheme: EncryptionScheme,
     pub(crate) initialization_data: HlsInitializationData,
-}
-
-impl HlsProtection {
-    pub(crate) fn description(&self) -> String {
-        let scheme = match self.scheme {
-            EncryptionScheme::Cenc => "CENC",
-            EncryptionScheme::Cbcs => "CBCS",
-        };
-        let initialization = match &self.initialization_data {
-            HlsInitializationData::Pssh(bytes) => format!("PSSH ({} bytes)", bytes.len()),
-            HlsInitializationData::PlayReadyObject(bytes) => {
-                format!("PlayReady Object ({} bytes)", bytes.len())
-            }
-            HlsInitializationData::FairPlayKeyUri(uri) => {
-                format!("FairPlay key URI ({} bytes)", uri.len())
-            }
-        };
-        format!("{} {scheme} {initialization}", self.system.label())
-    }
 }
 
 /// Validate the complete box framing and system identifier of a PSSH box.

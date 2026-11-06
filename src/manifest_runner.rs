@@ -21,9 +21,8 @@ use crate::manifest::{
     HlsLiveAccumulator, HlsPlan, HlsResource, HlsResourceKind, ManifestByteRange,
     dash::{
         DashPresentation, DashRepresentationPlan, DashResource, DashResourceKind,
-        DashSegmentBaseIndex, DashSidxEntry, MAX_DASH_SIDX_SEGMENTS,
-        dash_sidx_media_resource, parse_child_segment_index, parse_segment_base_index,
-        validate_segment_base_sidx_ranges,
+        DashSegmentBaseIndex, DashSidxEntry, MAX_DASH_SIDX_SEGMENTS, dash_sidx_media_resource,
+        parse_child_segment_index, parse_segment_base_index, validate_segment_base_sidx_ranges,
     },
 };
 use crate::manifest_intake::ManifestLookup;
@@ -3338,17 +3337,14 @@ async fn resolve_dash_segment_base_resources(
                             .to_string(),
                     ));
                 }
-                let child_node = parse_child_segment_index(
-                    index,
-                    &child,
-                    &child_bytes,
-                    total_length,
-                )
-                .map_err(|error| {
-                    ManifestRunError::Unsupported(format!(
-                        "The DASH child SIDX is unsupported: {error}"
-                    ))
-                })?;
+                let child_node =
+                    parse_child_segment_index(index, &child, &child_bytes, total_length).map_err(
+                        |error| {
+                            ManifestRunError::Unsupported(format!(
+                                "The DASH child SIDX is unsupported: {error}"
+                            ))
+                        },
+                    )?;
                 total_entry_count = total_entry_count
                     .checked_add(child_node.entries.len())
                     .filter(|count| *count <= MAX_DASH_SIDX_SEGMENTS)
@@ -3369,17 +3365,12 @@ async fn resolve_dash_segment_base_resources(
         }
     }
 
-    validate_segment_base_sidx_ranges(
-        index,
-        &child_index_ranges,
-        &media_ranges,
-        total_length,
-    )
-    .map_err(|error| {
-        ManifestRunError::Unsupported(format!(
-            "The DASH SIDX hierarchy contains overlapping or invalid ranges: {error}"
-        ))
-    })?;
+    validate_segment_base_sidx_ranges(index, &child_index_ranges, &media_ranges, total_length)
+        .map_err(|error| {
+            ManifestRunError::Unsupported(format!(
+                "The DASH SIDX hierarchy contains overlapping or invalid ranges: {error}"
+            ))
+        })?;
 
     Ok(Some(resources))
 }

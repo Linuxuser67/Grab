@@ -11,13 +11,13 @@ use super::{MAX_MANIFEST_BYTES, ManifestByteRange};
 
 #[path = "manifest_dash_sidx.rs"]
 mod sidx;
+#[cfg(test)]
+pub(crate) use sidx::resolve_segment_base_index;
 pub(crate) use sidx::{
     DashSidxChildIndex, DashSidxEntry, DashSidxNode, MAX_DASH_SIDX_SEGMENTS,
     dash_sidx_media_resource, parse_child_segment_index, parse_segment_base_index,
     validate_segment_base_sidx_ranges,
 };
-#[cfg(test)]
-pub(crate) use sidx::resolve_segment_base_index;
 const MAX_REPRESENTATIONS: usize = 1_024;
 const MAX_SEGMENTS: usize = 100_000;
 const MIN_DYNAMIC_UPDATE_PERIOD: Duration = Duration::from_millis(500);

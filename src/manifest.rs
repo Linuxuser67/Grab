@@ -902,7 +902,7 @@ fn hls_segment_identity(segment: &m3u8_rs::MediaSegment) -> String {
 /// are trick-play indexes, not independently downloadable video presentations.
 ///
 /// # Errors
-/// Returns an error for malformed playlists, unsupported session encryption,
+/// Returns an error for malformed playlists, unsupported session-key formats,
 /// or resource URLs that are not HTTPS.
 pub(crate) fn parse_hls_master_playlist(
     manifest_url: &str,
@@ -1062,9 +1062,13 @@ pub(crate) fn parse_hls_master_playlist(
 /// Byte ranges are converted to explicit offsets, init maps are fetched once per
 /// distinct URI/range pair, and every media sequence gets a stable local filename.
 /// AES-128 identity keys are included in the local fetch plan and the rewritten
-/// playlist points FFmpeg at the staged key file; other encryption methods are
-/// deliberately rejected. Non-low-latency live playlists are accepted for
-/// incremental capture; the runner polls them until ENDLIST or user stop.
+/// playlist points FFmpeg at the staged key file. Identity MPEG-TS SAMPLE-AES
+/// remains on its existing VSD decryption path. Recognized non-identity
+/// KEYFORMAT signaling is retained as bounded protocol metadata, then sent to
+/// the extractor fallback until the shared CDM/decryption worker is available.
+/// Unknown methods and simultaneous active KEYFORMATs are rejected. Non-low-
+/// latency live playlists are accepted for incremental capture; the runner polls
+/// them until ENDLIST or user stop.
 ///
 /// shortcut: live reloads reuse the manifest URL verbatim, including frozen
 /// `_HLS_msn`/`_HLS_part` LL-HLS blocking-reload params; if an edge honors

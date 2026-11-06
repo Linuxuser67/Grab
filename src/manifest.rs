@@ -2610,13 +2610,13 @@ segment-1.m4s
     #[test]
     fn hls_method_none_clears_the_active_key_but_unknown_key_methods_fail_closed() {
         let body = b"#EXTM3U\n#EXT-X-TARGETDURATION:2\n#EXT-X-KEY:METHOD=SAMPLE-AES,URI=\"https://cdn.example.test/key.bin\"\n#EXTINF:2,\none.ts\n#EXT-X-KEY:METHOD=NONE\n#EXTINF:2,\ntwo.ts\n#EXT-X-ENDLIST\n";
-        let plan = plan_hls_media_playlist(BASE_URL, body)
-            .expect("METHOD=NONE is a valid key reset");
+        let plan =
+            plan_hls_media_playlist(BASE_URL, body).expect("METHOD=NONE is a valid key reset");
         let local = plan
             .local_playlist_bytes()
             .expect("reset playlist should serialize");
-        let parsed = m3u8_rs::parse_media_playlist_res(&local)
-            .expect("reset playlist should parse");
+        let parsed =
+            m3u8_rs::parse_media_playlist_res(&local).expect("reset playlist should parse");
         assert!(parsed.segments[0].key.is_some());
         assert!(
             parsed.segments[1].key.is_none(),

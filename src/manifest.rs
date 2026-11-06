@@ -1116,11 +1116,9 @@ fn build_hls_plan(base_url: Url, mut playlist: MediaPlaylist) -> Result<HlsPlan,
         return Err(ManifestError::EmptyPlaylist);
     }
     strip_llhls_schedule_tags(&mut playlist);
-    if playlist
-        .unknown_tags
-        .iter()
-        .any(|tag| is_unsupported_hls_tag(&tag.tag))
-    {
+    if playlist.unknown_tags.iter().any(|tag| {
+        tag.tag == "X-KEY" || is_unsupported_hls_tag(&tag.tag)
+    }) {
         return Err(ManifestError::UnsupportedPlaylist);
     }
 
@@ -1157,7 +1155,7 @@ fn build_hls_plan(base_url: Url, mut playlist: MediaPlaylist) -> Result<HlsPlan,
         } else {
             index
         };
-        if segment.unknown_tags.iter().any(|tag| tag.tag == "X-KEY") {
+        if has_unsupported_hls_key_tag(&segment.unknown_tags) {
             // A key tag the parser could not decode must never pass through
             // into FFmpeg, where it could bypass our encryption policy.
             return Err(ManifestError::UnsupportedEncryption);
@@ -1170,7 +1168,11 @@ fn build_hls_plan(base_url: Url, mut playlist: MediaPlaylist) -> Result<HlsPlan,
             return Err(ManifestError::UnsupportedPlaylist);
         }
 
-        if let Some(key) = segment.key.as_ref() {
+        if segment.unknown_tags.iter().any(is_hls_key_reset_tag) {
+            // METHOD=NONE explicitly clears the preceding key. m3u8-rs
+            // exposes this standards-defined reset as an unknown tag.
+            active_key = None;
+        } else if let Some(key) = segment.key.as_ref() {
             active_key = Some(key.clone());
         }
         if let Some(map) = segment.map.as_ref() {
@@ -1374,8 +1376,20 @@ fn minimum_hls_playlist_version(playlist: &MediaPlaylist) -> usize {
 fn is_unsupported_hls_tag(tag: &str) -> bool {
     matches!(
         tag,
-        "X-GAP" | "X-SKIP" | "X-KEY" | "X-DEFINE" | "X-CONTENT-STEERING"
+        "X-GAP" | "X-SKIP" | "X-DEFINE" | "X-CONTENT-STEERING"
     )
+}
+
+/// m3u8-rs preserves the valid HLS METHOD=NONE key reset as an unknown tag
+/// because its typed key parser does not represent that method. Accept only
+/// this exact reset form; other undecoded key tags remain unsupported.
+fn is_hls_key_reset_tag(tag: &m3u8_rs::ExtTag) -> bool {
+    tag.tag == "X-KEY" && tag.rest.as_deref() == Some("METHOD=NONE")
+}
+
+fn has_unsupported_hls_key_tag(tags: &[m3u8_rs::ExtTag]) -> bool {
+    tags.iter()
+        .any(|tag| tag.tag == "X-KEY" && !is_hls_key_reset_tag(tag))
 }
 
 /// Low-latency HLS schedule tags: server pacing hints for prefetching clients.

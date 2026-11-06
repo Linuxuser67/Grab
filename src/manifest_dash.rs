@@ -1059,6 +1059,9 @@ fn hash_encryption(hasher: &mut Sha256, encryption: Option<crate::dash_drm::Dash
                 crate::dash_drm::EncryptionScheme::Cbcs => b"cbcs".as_slice(),
             });
             hasher.update(encryption.default_kid);
+            if encryption.system == crate::dash_drm::ProtectionSystem::Widevine {
+                hasher.update(b"widevine");
+            }
         }
         None => hasher.update(b"clear"),
     }
@@ -2583,6 +2586,41 @@ mod tests {
     use super::*;
 
     const BASE_URL: &str = "https://cdn.example.test/path/manifest.mpd";
+
+    #[test]
+    fn representation_encryption_hash_preserves_clearkey_and_distinguishes_widevine() {
+        fn digest(encryption: crate::dash_drm::DashEncryption) -> Vec<u8> {
+            let mut hasher = Sha256::new();
+            hash_encryption(&mut hasher, Some(encryption));
+            hasher.finalize().to_vec()
+        }
+
+        let clear_key = crate::dash_drm::DashEncryption {
+            scheme: crate::dash_drm::EncryptionScheme::Cenc,
+            default_kid: [0x11; 16],
+            system: crate::dash_drm::ProtectionSystem::ClearKey,
+        };
+        let widevine = crate::dash_drm::DashEncryption {
+            system: crate::dash_drm::ProtectionSystem::Widevine,
+            ..clear_key
+        };
+
+        let mut previous_clear_key_hash = Sha256::new();
+        previous_clear_key_hash.update(b"encrypted");
+        previous_clear_key_hash.update(b"cenc");
+        previous_clear_key_hash.update([0x11; 16]);
+
+        assert_eq!(
+            digest(clear_key),
+            previous_clear_key_hash.finalize().to_vec(),
+            "adding provider identity must not invalidate existing ClearKey representation IDs"
+        );
+        assert_ne!(
+            digest(clear_key),
+            digest(widevine),
+            "the same KID under different DRM systems must have distinct representation IDs"
+        );
+    }
     #[derive(Clone)]
     struct SharedLogWriter(std::sync::Arc<std::sync::Mutex<Vec<u8>>>);
 

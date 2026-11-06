@@ -984,8 +984,10 @@ async fn transfer_static_manifest_tracks(
                     return Ok(false);
                 }
                 write_playlist(video_dir, video).await?;
+                decrypt_hls_sample_aes_segments(video_dir, video).await?;
                 if let Some(audio) = audio {
                     write_playlist(audio_dir, audio).await?;
+                    decrypt_hls_sample_aes_segments(audio_dir, audio).await?;
                 }
             }
             if let Some(subtitle) = subtitle {
@@ -1005,6 +1007,7 @@ async fn transfer_static_manifest_tracks(
                     return Ok(false);
                 }
                 write_playlist(&subtitle_dir, subtitle).await?;
+                decrypt_hls_sample_aes_segments(&subtitle_dir, subtitle).await?;
             }
         }
         Tracks::Dash {
@@ -2386,6 +2389,356 @@ async fn write_playlist(directory: &Path, plan: &HlsPlan) -> Result<(), String> 
         .map_err(|error| format!("Could not publish the local HLS playlist: {error}"))
 }
 
+/// Decrypt identity SAMPLE-AES MPEG-TS segments with the same VSD implementation
+/// used by VSD itself, then remove the corresponding key tags from the local playlist.
+async fn decrypt_hls_sample_aes_segments(
+    directory: &Path,
+    plan: &HlsPlan,
+) -> Result<(), ManifestRunError> {
+    let playlist_bytes = plan
+        .local_playlist_bytes()
+        .map_err(|error| ManifestRunError::Failed(error.to_string()))?;
+    let mut playlist = m3u8_rs::parse_media_playlist_res(&playlist_bytes).map_err(|error| {
+        ManifestRunError::Failed(format!(
+            "Could not parse the localized HLS playlist: {error:?}"
+        ))
+    })?;
+    let mut changed = false;
+
+    for (index, segment) in playlist.segments.iter_mut().enumerate() {
+        let Some(key_tag) = segment
+            .key
+            .as_ref()
+            .filter(|key| key.method == m3u8_rs::KeyMethod::SampleAES)
+        else {
+            continue;
+        };
+
+        let key_uri = key_tag.uri.as_deref().ok_or_else(|| {
+            ManifestRunError::Unsupported("The HLS SAMPLE-AES key URI is missing".to_string())
+        })?;
+        let key_path = local_hls_resource_path(directory, key_uri)?;
+        let key_metadata = tokio::fs::symlink_metadata(&key_path)
+            .await
+            .map_err(|error| {
+                ManifestRunError::Failed(format!(
+                    "Could not inspect the staged HLS SAMPLE-AES key: {error}"
+                ))
+            })?;
+        if key_metadata.file_type().is_symlink() || !key_metadata.is_file() {
+            return Err(ManifestRunError::Failed(
+                "The staged HLS SAMPLE-AES key is not a regular file".to_string(),
+            ));
+        }
+        let key_bytes = tokio::fs::read(&key_path).await.map_err(|error| {
+            ManifestRunError::Failed(format!(
+                "Could not read the staged HLS SAMPLE-AES key: {error}"
+            ))
+        })?;
+        let key: [u8; 16] = key_bytes.as_slice().try_into().map_err(|_| {
+            ManifestRunError::Unsupported("The HLS identity key is not 16 bytes".to_string())
+        })?;
+
+        let sequence_offset = u64::try_from(index).map_err(|_| {
+            ManifestRunError::Failed("The HLS media sequence overflowed".to_string())
+        })?;
+        let media_sequence = playlist
+            .media_sequence
+            .checked_add(sequence_offset)
+            .ok_or_else(|| {
+                ManifestRunError::Failed("The HLS media sequence overflowed".to_string())
+            })?;
+        let iv = hls_sample_aes_iv(key_tag.iv.as_deref(), media_sequence)?;
+
+        let segment_uri = segment.uri.clone();
+        let segment_path = local_hls_resource_path(directory, &segment_uri)?;
+        let segment_metadata =
+            tokio::fs::symlink_metadata(&segment_path)
+                .await
+                .map_err(|error| {
+                    ManifestRunError::Failed(format!(
+                        "Could not inspect the staged HLS segment: {error}"
+                    ))
+                })?;
+        if segment_metadata.file_type().is_symlink() || !segment_metadata.is_file() {
+            return Err(ManifestRunError::Failed(
+                "The staged HLS SAMPLE-AES segment is not a regular file".to_string(),
+            ));
+        }
+        let encrypted = tokio::fs::read(&segment_path).await.map_err(|error| {
+            ManifestRunError::Failed(format!(
+                "Could not read the staged HLS SAMPLE-AES segment: {error}"
+            ))
+        })?;
+        let encrypted_size = encrypted.len();
+
+        let decrypted = tokio::task::spawn_blocking(move || {
+            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                validate_vsd_sample_aes_segment(&encrypted)?;
+                let decrypter = vsd_mp4::decrypt::HlsSampleAesDecrypter::new(&key, &iv);
+                Ok::<Vec<u8>, String>(decrypter.decrypt(encrypted))
+            }))
+        })
+        .await
+        .map_err(|error| {
+            ManifestRunError::Failed(format!(
+                "The HLS SAMPLE-AES worker failed for {segment_uri}: {error}"
+            ))
+        })?;
+        let decrypted = match decrypted {
+            Ok(Ok(bytes)) => bytes,
+            Ok(Err(error)) => {
+                return Err(ManifestRunError::Unsupported(format!(
+                    "VSD cannot safely process HLS SAMPLE-AES segment {segment_uri}: {error}"
+                )));
+            }
+            Err(_) => {
+                return Err(ManifestRunError::Unsupported(format!(
+                    "VSD panicked while processing HLS SAMPLE-AES segment {segment_uri}"
+                )));
+            }
+        };
+
+        if decrypted.len() != encrypted_size {
+            return Err(ManifestRunError::Unsupported(
+                "VSD returned an incomplete HLS SAMPLE-AES segment".to_string(),
+            ));
+        }
+        let mut validator = TransportStreamValidator::new();
+        validator.observe(&decrypted);
+        let decrypted_size = u64::try_from(decrypted.len()).map_err(|_| {
+            ManifestRunError::Failed("The decrypted HLS segment is too large".to_string())
+        })?;
+        if !validator.is_valid_complete(decrypted_size) {
+            return Err(ManifestRunError::Unsupported(
+                "VSD produced an invalid MPEG-TS SAMPLE-AES segment".to_string(),
+            ));
+        }
+
+        // Write each decrypted occurrence to a distinct staged file. Keep
+        // encrypted source resources untouched until the whole playlist succeeds.
+        let decrypted_uri = format!("sample-aes-decrypted-{index}.bin");
+        let decrypted_path = local_hls_resource_path(directory, &decrypted_uri)?;
+        remove_regular_file_if_present(&decrypted_path)
+            .await
+            .map_err(ManifestRunError::Failed)?;
+        let temporary = directory.join(format!("{decrypted_uri}.part"));
+        remove_regular_file_if_present(&temporary)
+            .await
+            .map_err(ManifestRunError::Failed)?;
+        let write_result = async {
+            let mut file = tokio::fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(&temporary)
+                .await
+                .map_err(|error| {
+                    format!("Could not create decrypted HLS segment staging: {error}")
+                })?;
+            file.write_all(&decrypted).await.map_err(|error| {
+                format!("Could not write decrypted HLS segment staging: {error}")
+            })?;
+            file.sync_all().await.map_err(|error| {
+                format!("Could not flush decrypted HLS segment staging: {error}")
+            })?;
+            drop(file);
+            tokio::fs::rename(&temporary, &decrypted_path)
+                .await
+                .map_err(|error| format!("Could not publish the decrypted HLS segment: {error}"))
+        }
+        .await;
+        if let Err(error) = write_result {
+            let _ = remove_regular_file_if_present(&temporary).await;
+            return Err(ManifestRunError::Failed(error));
+        }
+
+        segment.uri = decrypted_uri;
+        segment.key = None;
+        changed = true;
+    }
+
+    if changed {
+        let mut rewritten = Vec::new();
+        playlist.write_to(&mut rewritten).map_err(|error| {
+            ManifestRunError::Failed(format!(
+                "Could not serialize the decrypted HLS playlist: {error}"
+            ))
+        })?;
+        let target = directory.join("local.m3u8");
+        let temporary = directory.join("local.m3u8.sample-aes.part");
+        remove_regular_file_if_present(&temporary)
+            .await
+            .map_err(ManifestRunError::Failed)?;
+        let write_result = async {
+            let mut file = tokio::fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(&temporary)
+                .await
+                .map_err(|error| {
+                    format!("Could not create the decrypted HLS playlist staging: {error}")
+                })?;
+            file.write_all(&rewritten).await.map_err(|error| {
+                format!("Could not write the decrypted HLS playlist staging: {error}")
+            })?;
+            file.sync_all().await.map_err(|error| {
+                format!("Could not flush the decrypted HLS playlist staging: {error}")
+            })?;
+            drop(file);
+            tokio::fs::rename(&temporary, &target)
+                .await
+                .map_err(|error| format!("Could not publish the decrypted HLS playlist: {error}"))
+        }
+        .await;
+        if let Err(error) = write_result {
+            let _ = remove_regular_file_if_present(&temporary).await;
+            return Err(ManifestRunError::Failed(error));
+        }
+        sync_staging_directory(directory)
+            .await
+            .map_err(ManifestRunError::Failed)?;
+    }
+
+    Ok(())
+}
+
+/// Validate the MPEG-TS packet/PES structure before handing untrusted bytes to
+/// VSD's SAMPLE-AES parser. In particular, iori-ssa's ADTS frame loop does not
+/// advance when a malformed frame advertises a zero length.
+fn validate_vsd_sample_aes_segment(bytes: &[u8]) -> Result<(), String> {
+    use mpeg2ts::{
+        es::StreamType,
+        ts::{ReadTsPacket, TsPacketReader, TsPayload},
+    };
+
+    let mut reader = TsPacketReader::new(std::io::Cursor::new(bytes));
+    let mut stream_types = std::collections::HashMap::<u16, StreamType>::new();
+    let mut aac_pes = std::collections::HashMap::<u16, Vec<u8>>::new();
+
+    while let Some(packet) = reader
+        .read_ts_packet()
+        .map_err(|error| format!("invalid MPEG-TS packet: {error:?}"))?
+    {
+        let pid = packet.header.pid.as_u16();
+        let flush = matches!(
+            &packet.payload,
+            Some(TsPayload::Pat(_) | TsPayload::Pmt(_) | TsPayload::Section(_))
+        );
+
+        match packet.payload {
+            Some(TsPayload::Pmt(pmt)) => {
+                for stream in pmt.es_info {
+                    stream_types.insert(stream.elementary_pid.as_u16(), stream.stream_type);
+                }
+            }
+            Some(TsPayload::Pes(pes)) => {
+                if let Some(previous) = aac_pes.remove(&pid) {
+                    validate_vsd_adts_pes(&previous)?;
+                }
+                if stream_types.get(&pid).is_some_and(|stream_type| {
+                    matches!(
+                        *stream_type,
+                        StreamType::AdtsAac | StreamType::AdtsAacWithAes128Cbc
+                    )
+                }) {
+                    aac_pes.insert(pid, pes.data.to_vec());
+                }
+            }
+            Some(TsPayload::Raw(payload)) => {
+                if let Some(data) = aac_pes.get_mut(&pid) {
+                    data.extend_from_slice(&payload);
+                } else if stream_types.get(&pid).is_some_and(|stream_type| {
+                    matches!(
+                        *stream_type,
+                        StreamType::AdtsAac | StreamType::AdtsAacWithAes128Cbc
+                    )
+                }) {
+                    return Err("AAC PES continuation has no preceding PES header".to_string());
+                }
+            }
+            _ => {}
+        }
+
+        if flush && let Some(data) = aac_pes.remove(&pid) {
+            validate_vsd_adts_pes(&data)?;
+        }
+    }
+
+    for data in aac_pes.into_values() {
+        validate_vsd_adts_pes(&data)?;
+    }
+
+    Ok(())
+}
+
+/// Reject ADTS frame lengths that could make iori-ssa's audio loop fail to
+/// advance or index beyond the current PES packet.
+fn validate_vsd_adts_pes(mut data: &[u8]) -> Result<(), String> {
+    while !data.is_empty() {
+        if data.len() < 7 || data[0] != 0xff || data[1] & 0xf6 != 0xf0 {
+            return Err("malformed ADTS frame header".to_string());
+        }
+
+        let frame_length = (usize::from(data[3] & 0x03) << 11)
+            | (usize::from(data[4]) << 3)
+            | usize::from(data[5] >> 5);
+        let header_length = if data[1] & 0x01 == 0 { 9 } else { 7 };
+        if frame_length < header_length || frame_length > data.len() {
+            return Err("ADTS frame length is invalid or incomplete".to_string());
+        }
+        data = &data[frame_length..];
+    }
+
+    Ok(())
+}
+
+fn local_hls_resource_path(directory: &Path, uri: &str) -> Result<PathBuf, ManifestRunError> {
+    let mut components = Path::new(uri).components();
+    if !matches!(components.next(), Some(std::path::Component::Normal(_)))
+        || components.next().is_some()
+    {
+        return Err(ManifestRunError::Unsupported(
+            "The localized HLS playlist contains an unsafe resource path".to_string(),
+        ));
+    }
+    Ok(directory.join(uri))
+}
+
+fn hls_sample_aes_iv(iv: Option<&str>, media_sequence: u64) -> Result<[u8; 16], ManifestRunError> {
+    let Some(iv) = iv else {
+        return Ok(u128::from(media_sequence).to_be_bytes());
+    };
+    let hex = iv
+        .strip_prefix("0x")
+        .or_else(|| iv.strip_prefix("0X"))
+        .unwrap_or(iv);
+    if hex.len() != 32 {
+        return Err(ManifestRunError::Unsupported(
+            "The HLS SAMPLE-AES IV is not 128 bits".to_string(),
+        ));
+    }
+    let mut parsed = [0_u8; 16];
+    for (index, byte) in parsed.iter_mut().enumerate() {
+        let high = hls_hex_nibble(hex.as_bytes()[index * 2]).ok_or_else(|| {
+            ManifestRunError::Unsupported("The HLS SAMPLE-AES IV is invalid".to_string())
+        })?;
+        let low = hls_hex_nibble(hex.as_bytes()[index * 2 + 1]).ok_or_else(|| {
+            ManifestRunError::Unsupported("The HLS SAMPLE-AES IV is invalid".to_string())
+        })?;
+        *byte = (high << 4) | low;
+    }
+    Ok(parsed)
+}
+
+fn hls_hex_nibble(byte: u8) -> Option<u8> {
+    match byte {
+        b'0'..=b'9' => Some(byte - b'0'),
+        b'a'..=b'f' => Some(byte - b'a' + 10),
+        b'A'..=b'F' => Some(byte - b'A' + 10),
+        _ => None,
+    }
+}
+
 async fn fetch_resources(
     client: &reqwest::Client,
     resources: Vec<Resource>,
@@ -2639,7 +2992,7 @@ async fn fetch_resource_once(
     }
     if resource.key && content_length.is_some_and(|length| length != 16) {
         return Err(ManifestRunError::Unsupported(
-            "The HLS AES-128 key is not 16 bytes".to_string(),
+            "The HLS identity key is not 16 bytes".to_string(),
         ));
     }
 
@@ -2689,7 +3042,7 @@ async fn fetch_resource_once(
             })?;
         if resource.key && size > 16 {
             return Err(ManifestRunError::Unsupported(
-                "The HLS AES-128 key is not 16 bytes".to_string(),
+                "The HLS identity key is not 16 bytes".to_string(),
             ));
         }
         file.write_all(&chunk)
@@ -2717,7 +3070,7 @@ async fn fetch_resource_once(
     }
     if size == 0 || (resource.key && size != 16) {
         return Err(ManifestRunError::Unsupported(if resource.key {
-            "The HLS AES-128 key is not 16 bytes".to_string()
+            "The HLS identity key is not 16 bytes".to_string()
         } else {
             "The stream server returned an empty segment".to_string()
         }));
@@ -3884,6 +4237,41 @@ async fn run_ffmpeg(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn vsd_adts_validation_rejects_zero_length_frames() {
+        let malformed = [0xff, 0xf1, 0, 0, 0, 0, 0];
+        assert!(validate_vsd_adts_pes(&malformed).is_err());
+    }
+
+    #[test]
+    fn vsd_adts_validation_accepts_complete_frames() {
+        let frame = [0xff, 0xf1, 0, 0, 0, 0xe0, 0];
+        assert!(validate_vsd_adts_pes(&frame).is_ok());
+        assert!(validate_vsd_adts_pes(&[frame, frame].concat()).is_ok());
+    }
+
+    #[test]
+    fn sample_aes_iv_uses_media_sequence_when_iv_is_omitted() {
+        assert_eq!(
+            hls_sample_aes_iv(None, 42).expect("derive media-sequence IV"),
+            [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 42]
+        );
+    }
+
+    #[test]
+    fn sample_aes_iv_parses_explicit_128_bit_values() {
+        assert_eq!(
+            hls_sample_aes_iv(Some("0x0000000000000000000000000000002A"), 0)
+                .expect("parse explicit IV"),
+            [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 42]
+        );
+    }
+
+    #[test]
+    fn sample_aes_iv_rejects_non_hexadecimal_bytes() {
+        assert!(hls_sample_aes_iv(Some("éééééééééééééééé"), 0).is_err());
+    }
 
     fn valid_transport_stream(packet_count: usize, continuity_seed: u8) -> Vec<u8> {
         let mut bytes = vec![0xff; packet_count * mpeg_ts::ts::TS_PACKET_SIZE];

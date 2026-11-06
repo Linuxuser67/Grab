@@ -20,12 +20,13 @@ gio = "0.22"
 url = "2"
 # HLS playlist parsing and local media-playlist serialization.
 m3u8-rs = "6.0.1"
+mpeg2ts = "=0.3.1"
 # Parse and validate MPEG-2 transport packets in native HLS segments.
 mpeg-ts = { version = "=0.6.2", default-features = false, features = ["std"] }
 # Parse ISO BMFF box trees for structural validation of native fMP4 resources.
 mp4box = { version = "=0.14.0", default-features = false }
-# Reuse VSD's sample-level CENC/CBCS cryptographic transforms; Grab validates boxes first.
-vsd-mp4 = { version = "=0.2.1", default-features = false, features = ["decrypt-cenc"] }
+# Reuse VSD's SAMPLE-AES and sample-level CENC/CBCS decryption implementations.
+vsd-mp4 = { version = "=0.2.1", default-features = false, features = ["decrypt-cenc", "decrypt-hls"] }
 # Parse HLS diagnostics without exposing playlist contents. m3u8-rs exposes nom 7 parser errors.
 nom = "7"
 # DASH MPD parsing and serialization for native VOD downloads; pin the untrusted-input parser release.

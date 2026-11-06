@@ -14,8 +14,7 @@ use crate::drm::DrmKeyMap;
 
 const PLAYREADY_PSSH_FIXED_BYTES: usize = 32;
 const PLAYREADY_SYSTEM_ID: [u8; 16] = [
-    0x9a, 0x04, 0xf0, 0x79, 0x98, 0x40, 0x42, 0x86, 0xab, 0x92, 0xe6, 0x5b, 0xe0, 0x88, 0x5f,
-    0x95,
+    0x9a, 0x04, 0xf0, 0x79, 0x98, 0x40, 0x42, 0x86, 0xab, 0x92, 0xe6, 0x5b, 0xe0, 0x88, 0x5f, 0x95,
 ];
 
 fn decode_bounded_protection_data(encoded: &str, label: &str) -> Result<Vec<u8>, String> {
@@ -108,8 +107,8 @@ fn validate_playready_pro(pro: &[u8]) -> Result<(), String> {
         return Err(invalid());
     }
 
-    let parsed = Pssh::from_bytes(pro)
-        .map_err(|_| "DASH PlayReady PRO is malformed".to_string())?;
+    let parsed =
+        Pssh::from_bytes(pro).map_err(|_| "DASH PlayReady PRO is malformed".to_string())?;
     if parsed.wrm_headers().len() != 1 {
         return Err(invalid());
     }
@@ -137,9 +136,7 @@ fn playready_pssh_from_descriptor(
             let pssh = decode_bounded_protection_data(encoded, "PlayReady PSSH")?;
             validate_playready_pssh(&pssh)?;
             if selected.as_ref().is_some_and(|previous| previous != &pssh) {
-                return Err(
-                    "DASH PlayReady descriptor contains conflicting PSSH boxes".to_string(),
-                );
+                return Err("DASH PlayReady descriptor contains conflicting PSSH boxes".to_string());
             }
             selected = Some(pssh);
         }
@@ -196,7 +193,10 @@ pub(crate) fn pssh_from_scopes(
             let Some(pssh) = playready_pssh_from_descriptor(descriptor)? else {
                 continue;
             };
-            if scope_pssh.as_ref().is_some_and(|previous| previous != &pssh) {
+            if scope_pssh
+                .as_ref()
+                .is_some_and(|previous| previous != &pssh)
+            {
                 return Err(
                     "DASH PlayReady descriptors conflict within one protection scope".to_string(),
                 );
@@ -209,8 +209,6 @@ pub(crate) fn pssh_from_scopes(
     }
     Ok(selected)
 }
-
-
 
 /// Acquire only the PlayReady content keys referenced by the selected DASH track.
 ///
@@ -231,7 +229,8 @@ pub(crate) async fn acquire_keys(
         return Err("DASH PlayReady acquisition requires at least one sample KID".to_string());
     }
 
-    let keys = crate::playready_worker::acquire_keys(client, device_path, pssh, license_url).await?;
+    let keys =
+        crate::playready_worker::acquire_keys(client, device_path, pssh, license_url).await?;
     let mut accepted: BTreeMap<[u8; 16], Zeroizing<[u8; 16]>> = BTreeMap::new();
     for key in keys {
         let kid = key.kid;
@@ -240,9 +239,7 @@ pub(crate) async fn acquire_keys(
         }
     }
     if accepted.len() != required_kids.len() {
-        return Err(
-            "The PlayReady license did not return every selected content key".to_string(),
-        );
+        return Err("The PlayReady license did not return every selected content key".to_string());
     }
     DrmKeyMap::from_keys(accepted)
 }
@@ -411,11 +408,8 @@ mod tests {
             .expect("parent PlayReady data")
             .expect("parent PSSH");
         assert_eq!(
-            pssh_from_scopes(&[
-                std::slice::from_ref(&parent),
-                std::slice::from_ref(&child),
-            ])
-            .expect("inherited PlayReady data")
+            pssh_from_scopes(&[std::slice::from_ref(&parent), std::slice::from_ref(&child),])
+                .expect("inherited PlayReady data")
             .as_deref(),
             Some(parent_pssh.as_slice())
         );

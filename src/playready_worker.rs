@@ -158,6 +158,10 @@ pub(crate) async fn acquire_keys(
         );
     }
 
+    if device_path.as_os_str().as_encoded_bytes().len() > MAX_DEVICE_PATH_BYTES {
+        return Err("The PlayReady device path exceeds its size limit".to_string());
+    }
+
     let executable = std::env::current_exe()
         .map_err(|_| "Could not locate the Grab executable for the PlayReady worker".to_string())?;
     let mut child = Command::new(executable)
@@ -333,6 +337,9 @@ fn process_worker<R: BufRead, W: Write>(
         return Err(WorkerFailure::Protocol);
     };
 
+    if device_path.as_os_str().as_encoded_bytes().len() > MAX_DEVICE_PATH_BYTES {
+        return Err(WorkerFailure::InvalidDevice);
+    }
     let device_file = fs::File::open(&device_path).map_err(|_| WorkerFailure::InvalidDevice)?;
     let metadata = device_file
         .metadata()
@@ -395,59 +402,19 @@ fn process_worker<R: BufRead, W: Write>(
     }
 
     let mut output = Vec::with_capacity(keys.len());
-    for (kid, key) in &keys {
-        let kid_text = Zeroizing::new(kid.to_string());
-        let key_text = Zeroizing::new(key.to_string());
-        let kid = parse_hex_16(&kid_text).ok_or(WorkerFailure::KeyMaterialInvalid)?;
-        let key = Zeroizing::new(parse_hex_16(&key_text).ok_or(WorkerFailure::KeyMaterialInvalid)?);
+    for (kid, key) in keys {
+        let kid: [u8; 16] = kid.into();
+        let key = copy_content_key(key.as_ref())?;
         output.push(WorkerKey { kid, key });
     }
     write_sync_frame(writer, &WorkerResponse::Keys { keys: output })
 }
 
-fn parse_hex_16(value: &str) -> Option<[u8; 16]> {
-    let bytes = value.as_bytes();
-    let compact = bytes.len() == 32 && bytes.iter().all(|byte| *byte != b'-');
-    let uuid = bytes.len() == 36
-        && [8, 13, 18, 23]
-            .iter()
-            .all(|index| bytes.get(*index) == Some(&b'-'))
-        && bytes
-            .iter()
-            .enumerate()
-            .all(|(index, byte)| (*byte == b'-') == [8, 13, 18, 23].contains(&index));
-    if !compact && !uuid {
-        return None;
-    }
-
-    let mut digits = [0_u8; 32];
-    let mut digit_count = 0_usize;
-    for byte in bytes.iter().copied().filter(|byte| *byte != b'-') {
-        let nibble = hex_nibble(byte)?;
-        if digit_count >= digits.len() {
-            return None;
-        }
-        digits[digit_count] = nibble;
-        digit_count += 1;
-    }
-    if digit_count != digits.len() {
-        return None;
-    }
-
-    let mut output = [0_u8; 16];
-    for (index, pair) in digits.chunks_exact(2).enumerate() {
-        output[index] = (pair[0] << 4) | pair[1];
-    }
-    Some(output)
-}
-
-fn hex_nibble(byte: u8) -> Option<u8> {
-    match byte {
-        b'0'..=b'9' => Some(byte - b'0'),
-        b'a'..=b'f' => Some(byte - b'a' + 10),
-        b'A'..=b'F' => Some(byte - b'A' + 10),
-        _ => None,
-    }
+fn copy_content_key(bytes: &[u8]) -> Result<Zeroizing<[u8; 16]>, WorkerFailure> {
+    let key: [u8; 16] = bytes
+        .try_into()
+        .map_err(|_| WorkerFailure::KeyMaterialInvalid)?;
+    Ok(Zeroizing::new(key))
 }
 
 fn read_sync_frame<R: BufRead>(reader: &mut R) -> Result<Zeroizing<Vec<u8>>, WorkerFailure> {
@@ -561,51 +528,17 @@ mod tests {
     use super::*;
 
     #[test]
-    fn parses_playready_hex_key_identifiers_and_content_keys() {
-        assert_eq!(
-            parse_hex_16("00112233445566778899aabbccddeeff"),
-            Some([
-                0x00, 0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88, 0x99, 0xaa, 0xbb, 0xcc, 0xdd,
-                0xee, 0xff,
-            ])
-        );
-        assert_eq!(
-            parse_hex_16("00112233-4455-6677-8899-aabbccddeeff"),
-            Some([
-                0x00, 0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88, 0x99, 0xaa, 0xbb, 0xcc, 0xdd,
-                0xee, 0xff,
-            ])
-        );
-    }
+    fn copies_only_aes128_content_keys_into_zeroizing_storage() {
+        let key = [0x5a; 16];
+        let copied = copy_content_key(&key).expect("16-byte content key should be accepted");
+        assert_eq!(*copied, key);
 
-    #[test]
-    fn rejects_non_hex_or_non_aes128_playready_key_material() {
-        for invalid in [
-            "",
-            "00112233",
-            "00112233445566778899aabbccddeefg",
-            "0000112233445566778899aabbccddeeff00",
-            "00112233--4455-6677-8899-aabbccddeeff",
-        ] {
-            assert_eq!(parse_hex_16(invalid), None, "{invalid}");
+        for invalid in [&[][..], &[0x11; 15][..], &[0x22; 17][..]] {
+            assert!(matches!(
+                copy_content_key(invalid),
+                Err(WorkerFailure::KeyMaterialInvalid)
+            ));
         }
-    }
-
-    #[test]
-    fn license_response_frame_roundtrips_in_zeroizing_buffers() {
-        let request = WorkerRequest::LicenseResponse {
-            body: Zeroizing::new("<LicenseResponse />".to_string()),
-        };
-        let mut encoded = Vec::new();
-        write_sync_frame(&mut encoded, &request).expect("worker frame should serialize");
-        let frame = Zeroizing::new(encoded);
-        let mut reader = BufReader::new(frame.as_slice());
-        let decoded: WorkerRequest =
-            read_sync_message(&mut reader).expect("worker frame should deserialize");
-        let WorkerRequest::LicenseResponse { body } = decoded else {
-            panic!("worker request type should be retained");
-        };
-        assert_eq!(body.as_str(), "<LicenseResponse />");
     }
 
     #[test]
@@ -626,5 +559,22 @@ mod tests {
             read_sync_frame(&mut reader),
             Err(WorkerFailure::Protocol)
         ));
+    }
+
+    #[test]
+    fn license_response_frame_roundtrips_in_zeroizing_buffers() {
+        let request = WorkerRequest::LicenseResponse {
+            body: Zeroizing::new("<LicenseResponse />".to_string()),
+        };
+        let mut encoded = Vec::new();
+        write_sync_frame(&mut encoded, &request).expect("worker frame should serialize");
+        let frame = Zeroizing::new(encoded);
+        let mut reader = BufReader::new(frame.as_slice());
+        let decoded: WorkerRequest =
+            read_sync_message(&mut reader).expect("worker frame should deserialize");
+        let WorkerRequest::LicenseResponse { body } = decoded else {
+            panic!("worker request type should be retained");
+        };
+        assert_eq!(body.as_str(), "<LicenseResponse />");
     }
 }

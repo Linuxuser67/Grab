@@ -1095,6 +1095,7 @@ fn stable_representation_key(identity: RepresentationIdentity<'_>) -> String {
         codecs,
         language,
         base_url,
+        byte_range_template,
         addressing,
     } = identity;
     let mut hasher = Sha256::new();
@@ -1110,6 +1111,7 @@ fn stable_representation_key(identity: RepresentationIdentity<'_>) -> String {
     hash_optional_text(&mut hasher, mime_type);
     hash_optional_text(&mut hasher, codecs);
     hash_optional_text(&mut hasher, language);
+    hash_optional_text(&mut hasher, byte_range_template);
     hash_optional_number(&mut hasher, bandwidth);
     hash_optional_number(&mut hasher, width);
     hash_optional_number(&mut hasher, height);
@@ -1172,10 +1174,13 @@ fn stable_representation_key(identity: RepresentationIdentity<'_>) -> String {
         }
         DashAddressing::IndexedBase(index) => {
             hasher.update(b"indexed-base");
+            hash_optional_text(&mut hasher, Some(index.index_url.as_str()));
+            hasher.update([u8::from(index.index_is_external)]);
             hash_optional_range(&mut hasher, Some(index.index_range));
             hash_optional_range(&mut hasher, Some(index.initialization_range));
             hasher.update([u8::from(index.index_range_exact)]);
-            hash_optional_number(&mut hasher, index.timescale);
+            hash_optional_number(&mut hasher, Some(index.timescale));
+            hash_optional_number(&mut hasher, Some(index.presentation_time_offset));
         }
     }
 
@@ -1199,6 +1204,7 @@ fn stable_live_representation_key(identity: RepresentationIdentity<'_>) -> Strin
         codecs,
         language,
         base_url,
+        byte_range_template,
         addressing,
     } = identity;
     let mut hasher = Sha256::new();
@@ -1214,6 +1220,7 @@ fn stable_live_representation_key(identity: RepresentationIdentity<'_>) -> Strin
     hash_optional_text(&mut hasher, mime_type);
     hash_optional_text(&mut hasher, codecs);
     hash_optional_text(&mut hasher, language);
+    hash_optional_text(&mut hasher, byte_range_template);
     hash_optional_number(&mut hasher, bandwidth);
     hash_optional_number(&mut hasher, width);
     hash_optional_number(&mut hasher, height);
@@ -1241,10 +1248,13 @@ fn stable_live_representation_key(identity: RepresentationIdentity<'_>) -> Strin
         }
         DashAddressing::IndexedBase(index) => {
             hasher.update(b"indexed-base");
+            hash_optional_text(&mut hasher, Some(index.index_url.as_str()));
+            hasher.update([u8::from(index.index_is_external)]);
             hash_optional_range(&mut hasher, Some(index.index_range));
             hash_optional_range(&mut hasher, Some(index.initialization_range));
             hasher.update([u8::from(index.index_range_exact)]);
-            hash_optional_number(&mut hasher, index.timescale);
+            hash_optional_number(&mut hasher, Some(index.timescale));
+            hash_optional_number(&mut hasher, Some(index.presentation_time_offset));
         }
     }
     let digest = hasher.finalize();

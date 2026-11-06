@@ -2510,7 +2510,7 @@ segment-1.m4s
             STANDARD.encode(&pro)
         );
         let body = format!(
-            "#EXTM3U\\n#EXT-X-TARGETDURATION:2\\n#EXT-X-KEY:METHOD=SAMPLE-AES,URI=\"{pro_uri}\",KEYFORMAT=\"com.microsoft.playready\"\\n#EXTINF:2,\\nsegment.ts\\n#EXT-X-ENDLIST\\n"
+            "#EXTM3U\n#EXT-X-TARGETDURATION:2\n#EXT-X-KEY:METHOD=SAMPLE-AES,URI=\"{pro_uri}\",KEYFORMAT=\"com.microsoft.playready\"\n#EXTINF:2,\nsegment.ts\n#EXT-X-ENDLIST\n"
         );
         let plan = plan_hls_media_playlist(BASE_URL, body.as_bytes())
             .expect("PlayReady signaling should be retained for the CDM phase");

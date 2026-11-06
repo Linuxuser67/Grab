@@ -2640,7 +2640,7 @@ fn validate_vsd_sample_aes_segment(bytes: &[u8]) -> Result<(), String> {
                 }
                 if stream_types.get(&pid).is_some_and(|stream_type| {
                     matches!(
-                        stream_type,
+                        *stream_type,
                         StreamType::AdtsAac | StreamType::AdtsAacWithAes128Cbc
                     )
                 }) {

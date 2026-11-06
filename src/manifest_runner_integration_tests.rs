@@ -2367,7 +2367,10 @@ async fn hls_sample_aes_mpegts_is_decrypted_by_vsd_before_ffmpeg_finalization() 
         .expect("parse decrypted local HLS playlist");
     assert_eq!(local_playlist.segments.len(), 2);
     assert!(
-        local_playlist.segments.iter().all(|segment| segment.key.is_none()),
+        local_playlist
+            .segments
+            .iter()
+            .all(|segment| segment.key.is_none()),
         "decrypted segments must no longer carry encryption key tags"
     );
     assert_ne!(

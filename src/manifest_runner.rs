@@ -4735,6 +4735,16 @@ mod tests {
                 .first()
                 .is_some_and(|segment| segment.map.is_some())
         );
+        assert!(
+            !parsed.unknown_tags.iter().any(|tag| tag.tag == "X-KEY")
+                && parsed
+                    .segments
+                    .iter()
+                    .all(|segment| !segment.unknown_tags.iter().any(|tag| tag.tag == "X-KEY")),
+            "recognized PlayReady key tags must not remain in unknown_tags: playlist={:?}, segments={:?}",
+            parsed.unknown_tags,
+            parsed.segments.iter().map(|segment| &segment.unknown_tags).collect::<Vec<_>>()
+        );
         crate::drm::hls_protection_from_key(key)
             .expect("parsed PlayReady key descriptor is valid")
             .expect("parsed PlayReady key descriptor is retained");

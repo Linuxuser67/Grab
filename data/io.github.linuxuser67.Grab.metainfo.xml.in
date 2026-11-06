@@ -50,6 +50,14 @@
     </screenshot>
   </screenshots>
   <releases>
+    <release version="6.5.0~beta.12" date="2026-11-06">
+      <description>
+        <ul>
+          <li>Bump yt-dlp to 2.10.0 for metadata cache freshness and header parsing compatibility.</li>
+          <li>Carry forward the full native manifest, cache, queue navigation, and media-tool improvements from the current beta line.</li>
+        </ul>
+      </description>
+    </release>
     <release version="6.5.0~beta.11" date="2026-11-04">
       <description>
         <ul>

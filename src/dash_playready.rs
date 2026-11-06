@@ -192,10 +192,14 @@ pub(crate) fn hls_license_request(pro: &[u8]) -> Result<(Vec<u8>, Url), String> 
     let raw_url = playready_la_url(&header)?;
     let url = Url::parse(&raw_url)
         .map_err(|_| "HLS PlayReady LA_URL must be an absolute HTTPS URL".to_string())?;
+    let authority_has_userinfo = url
+        .as_str()
+        .strip_prefix("https://")
+        .and_then(|remainder| remainder.split(['/', '?', '#']).next())
+        .is_some_and(|authority| authority.contains('@'));
     if url.scheme() != "https"
         || url.host_str().is_none()
-        || !url.username().is_empty()
-        || url.password().is_some()
+        || authority_has_userinfo
         || url.fragment().is_some()
     {
         return Err("HLS PlayReady LA_URL must be HTTPS without user-info or a fragment".to_string());
@@ -505,6 +509,7 @@ mod tests {
             "<DATA></DATA>",
             "<DATA><LA_URL>http://license.example.test</LA_URL></DATA>",
             "<DATA><LA_URL>https://user:pass@license.example.test</LA_URL></DATA>",
+            "<DATA><LA_URL>https://@license.example.test</LA_URL></DATA>",
             "<DATA><LUI_URL>https://license.example.test/ui</LUI_URL></DATA>",
         ] {
             assert!(hls_license_request(&test_pro_from_xml(content)).is_err());

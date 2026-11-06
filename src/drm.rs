@@ -597,3 +597,38 @@ segment.ts
         assert_eq!(validate_hls_keyformat_multiplexing(rotation), Ok(()));
     }
 }
+
+
+#[cfg(test)]
+mod key_map_tests {
+    use super::*;
+
+    #[test]
+    fn shared_key_map_returns_a_zeroizing_copy() {
+        let kid = [0x11; 16];
+        let key = [0x22; 16];
+        let map = DrmKeyMap::from_keys([(kid, Zeroizing::new(key))])
+            .expect("one content key should be accepted");
+
+        let mut returned = map
+            .key_for_kid(&kid)
+            .expect("the selected content key should be present");
+        assert_eq!(*returned, key);
+        returned[0] = 0;
+        assert_eq!(
+            *map.key_for_kid(&kid)
+                .expect("the stored content key should remain unchanged"),
+            key
+        );
+    }
+
+    #[test]
+    fn shared_key_map_rejects_conflicting_duplicate_kids() {
+        let kid = [0x11; 16];
+        let result = DrmKeyMap::from_keys([
+            (kid, Zeroizing::new([0x22; 16])),
+            (kid, Zeroizing::new([0x33; 16])),
+        ]);
+        assert!(result.is_err());
+    }
+}

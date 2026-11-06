@@ -2621,6 +2621,7 @@ mod tests {
             "the same KID under different DRM systems must have distinct representation IDs"
         );
     }
+
     #[derive(Clone)]
     struct SharedLogWriter(std::sync::Arc<std::sync::Mutex<Vec<u8>>>);
 

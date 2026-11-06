@@ -4459,7 +4459,7 @@ mod tests {
       <ContentProtection schemeIdUri="urn:mpeg:dash:mp4protection:2011"
                          value="cenc"
                          default_KID="00112233-4455-6677-8899-aabbccddeeff"/>
-      <ContentProtection schemeIdUri="urn:uuid:edef8ba9-79d6-4ace-a3c8-27dcd51d21ed">
+      <ContentProtection schemeIdUri="urn:uuid:edef8ba9-79d6-4ace-a3c8-27dcd51d21ed" xmlns:cenc="urn:mpeg:cenc:2013">
         <cenc:pssh>AAAAIHBzc2gAAAAA7e+LqXnWSs6jyCfc1R0h7QAAAAA=</cenc:pssh>
       </ContentProtection>
       <Representation id="widevine" bandwidth="1000">

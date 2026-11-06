@@ -347,7 +347,9 @@ fn validate_playready_object(bytes: &[u8]) -> Result<(), String> {
                 String::from_utf16(&units).map_err(|_| invalid())?;
                 wrm_header_count += 1;
             }
-            2 | 3 => {}
+            // Record type 0x0002 is reserved; 0x0003 is an embedded license
+            // store that this online acquisition path does not consume.
+            2 => {}
             _ => return Err(invalid()),
         }
         offset = record_end;
@@ -513,6 +515,30 @@ mod tests {
             playready.initialization_data,
             HlsInitializationData::PlayReadyObject(_)
         ));
+
+        let mut with_els = Vec::with_capacity(pro.len() + 6);
+        let new_length = pro.len() + 6;
+        with_els.extend_from_slice(
+            &u32::try_from(new_length).expect("test PRO length").to_le_bytes(),
+        );
+        with_els.extend_from_slice(&2_u16.to_le_bytes());
+        with_els.extend_from_slice(&3_u16.to_le_bytes());
+        with_els.extend_from_slice(&2_u16.to_le_bytes());
+        with_els.extend_from_slice(b"EL");
+        with_els.extend_from_slice(&pro[6..]);
+        let with_els_uri = format!(
+            "data:text/plain;charset=UTF-16;base64,{}",
+            STANDARD.encode(&with_els)
+        );
+        assert!(
+            hls_protection_from_key(&key(
+                KeyMethod::SampleAES,
+                &with_els_uri,
+                "com.microsoft.playready",
+            ))
+            .is_err(),
+            "an unconsumed embedded license store must remain unsupported"
+        );
 
         let fairplay = hls_protection_from_key(&key(
             KeyMethod::SampleAES,

@@ -15,6 +15,7 @@ mod download_pieces;
 mod download_rate;
 mod download_row;
 mod download_store;
+mod drm;
 mod engine_msg;
 mod extension_server;
 mod file_names;

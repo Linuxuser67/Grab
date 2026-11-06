@@ -244,12 +244,14 @@ pub(crate) struct HlsMasterPlan {
     pub(crate) variants: Box<[HlsVariant]>,
     pub(crate) audio_renditions: Box<[HlsAudioRendition]>,
     pub(crate) subtitle_renditions: Box<[HlsSubtitleRendition]>,
+    pub(crate) session_protections: Box<[crate::drm::HlsProtection]>,
 }
 
 /// Validated HLS media playlist, ordered resources, and local FFmpeg input.
 #[derive(Clone, Debug)]
 pub(crate) struct HlsPlan {
     pub(crate) resources: Box<[HlsResource]>,
+    pub(crate) protections: Box<[crate::drm::HlsProtection]>,
     pub(crate) playlist_url: Url,
     pub(crate) is_live: bool,
     pub(crate) end_list: bool,
@@ -280,6 +282,7 @@ impl HlsPlan {
 
         Ok(Self {
             resources: Vec::new().into_boxed_slice(),
+            protections: Vec::new().into_boxed_slice(),
             playlist_url,
             is_live: false,
             end_list: true,
@@ -899,7 +902,7 @@ fn hls_segment_identity(segment: &m3u8_rs::MediaSegment) -> String {
 /// are trick-play indexes, not independently downloadable video presentations.
 ///
 /// # Errors
-/// Returns an error for malformed playlists, unsupported session encryption,
+/// Returns an error for malformed playlists, unsupported session-key formats,
 /// or resource URLs that are not HTTPS.
 pub(crate) fn parse_hls_master_playlist(
     manifest_url: &str,
@@ -918,11 +921,15 @@ pub(crate) fn parse_hls_master_playlist(
         return Err(ManifestError::ExpectedMasterPlaylist);
     };
 
-    // Session keys and unimplemented URI-affecting extensions need the
-    // established extractor path; silently ignoring them can select wrong media.
-    if !master.session_key.is_empty() {
-        return Err(ManifestError::UnsupportedEncryption);
-    }
+    let session_protections = master
+        .session_key
+        .iter()
+        .map(|session_key| {
+            crate::drm::hls_protection_from_key(&session_key.0)
+                .map_err(|_| ManifestError::UnsupportedEncryption)?
+                .ok_or(ManifestError::UnsupportedEncryption)
+        })
+        .collect::<Result<Vec<_>, ManifestError>>()?;
     if master
         .unknown_tags
         .iter()
@@ -1046,6 +1053,7 @@ pub(crate) fn parse_hls_master_playlist(
         variants: variants.into_boxed_slice(),
         audio_renditions: audio_renditions.into_boxed_slice(),
         subtitle_renditions: subtitle_renditions.into_boxed_slice(),
+        session_protections: session_protections.into_boxed_slice(),
     })
 }
 
@@ -1054,9 +1062,13 @@ pub(crate) fn parse_hls_master_playlist(
 /// Byte ranges are converted to explicit offsets, init maps are fetched once per
 /// distinct URI/range pair, and every media sequence gets a stable local filename.
 /// AES-128 identity keys are included in the local fetch plan and the rewritten
-/// playlist points FFmpeg at the staged key file; other encryption methods are
-/// deliberately rejected. Non-low-latency live playlists are accepted for
-/// incremental capture; the runner polls them until ENDLIST or user stop.
+/// playlist points FFmpeg at the staged key file. Identity MPEG-TS SAMPLE-AES
+/// remains on its existing VSD decryption path. Recognized non-identity
+/// KEYFORMAT signaling is retained as bounded protocol metadata, then sent to
+/// the extractor fallback until the shared CDM/decryption worker is available.
+/// Unknown methods and simultaneous active KEYFORMATs are rejected. Non-low-
+/// latency live playlists are accepted for incremental capture; the runner polls
+/// them until ENDLIST or user stop.
 ///
 /// shortcut: live reloads reuse the manifest URL verbatim, including frozen
 /// `_HLS_msn`/`_HLS_part` LL-HLS blocking-reload params; if an edge honors
@@ -1076,6 +1088,8 @@ pub(crate) fn plan_hls_media_playlist(
             "playlist exceeds its supported size limit".to_string(),
         ));
     }
+    crate::drm::validate_hls_keyformat_multiplexing(body)
+        .map_err(|_| ManifestError::UnsupportedEncryption)?;
     let base_url = parse_manifest_url(manifest_url)?;
     let playlist =
         m3u8_rs::parse_media_playlist_res(body).map_err(|error| hls_parse_error(body, error))?;
@@ -1111,6 +1125,7 @@ fn build_hls_plan(base_url: Url, mut playlist: MediaPlaylist) -> Result<HlsPlan,
     }
 
     let mut resources = Vec::with_capacity(playlist.segments.len());
+    let mut protections = Vec::new();
     let mut map_filenames: HashMap<(String, Option<ManifestByteRange>), String> = HashMap::new();
     let mut key_filenames: HashMap<String, String> = HashMap::new();
     // An implicit segment offset is defined only by the immediately preceding
@@ -1208,65 +1223,64 @@ fn build_hls_plan(base_url: Url, mut playlist: MediaPlaylist) -> Result<HlsPlan,
         }
 
         if let Some(key) = segment.key.as_mut() {
-            let sample_aes = key.method == KeyMethod::SampleAES;
-            if key.method != KeyMethod::AES128 && !sample_aes {
-                return Err(ManifestError::UnsupportedEncryption);
-            }
-            // VSD's HLS decrypter handles SAMPLE-AES MPEG-TS elementary
-            // streams. SAMPLE-AES in fragmented MP4 is the Common Encryption
-            // cbcs scheme and is deliberately not routed through this path.
-            if sample_aes && segment.map.is_some() {
-                return Err(ManifestError::UnsupportedEncryption);
-            }
-            // RFC 8216 requires an explicit IV for AES-128-encrypted
-            // initialization sections; the media-sequence-derived IV rule
-            // applies to media segments, not initialization sections.
-            if segment.map.is_some() && key.iv.is_none() {
-                return Err(ManifestError::UnsupportedEncryption);
-            }
-            if key
-                .keyformat
-                .as_deref()
-                .is_some_and(|format| format != "identity")
-                || key
-                    .keyformatversions
-                    .as_deref()
-                    .is_some_and(|versions| versions != "1")
-            {
-                return Err(ManifestError::UnsupportedEncryption);
-            }
-            let key_uri = key
-                .uri
-                .as_deref()
-                .ok_or(ManifestError::UnsupportedEncryption)?;
-            let key_url = resolve_resource_url(&base_url, key_uri)?;
-            let key_url_string = key_url.as_str().to_string();
-            let filename = match key_filenames.get(&key_url_string) {
-                Some(existing) => existing.clone(),
-                None => {
-                    let filename = resource_filename_exact_url("key", None, &key_url, None);
-                    resources.push(HlsResource {
-                        url: key_url,
-                        range: None,
-                        filename: filename.clone(),
-                        kind: HlsResourceKind::Key,
-                    });
-                    key_filenames.insert(key_url_string, filename.clone());
-                    filename
+            let protection = crate::drm::hls_protection_from_key(key)
+                .map_err(|_| ManifestError::UnsupportedEncryption)?;
+            if let Some(protection) = protection {
+                if !protections.contains(&protection) {
+                    protections.push(protection);
                 }
-            };
-            key.uri = Some(filename);
+            } else {
+                let sample_aes = key.method == KeyMethod::SampleAES;
+                if key.method != KeyMethod::AES128 && !sample_aes {
+                    return Err(ManifestError::UnsupportedEncryption);
+                }
+                // VSD's identity SAMPLE-AES path handles MPEG-TS elementary
+                // streams. CMAF SAMPLE-AES is Common Encryption and is routed
+                // through the shared CENC/CBCS path in a later phase.
+                if sample_aes && segment.map.is_some() {
+                    return Err(ManifestError::UnsupportedEncryption);
+                }
+                // RFC 8216 requires an explicit IV for AES-128-encrypted
+                // initialization sections; media-sequence IV derivation does
+                // not apply to initialization sections.
+                if segment.map.is_some() && key.iv.is_none() {
+                    return Err(ManifestError::UnsupportedEncryption);
+                }
+                let key_uri = key
+                    .uri
+                    .as_deref()
+                    .ok_or(ManifestError::UnsupportedEncryption)?;
+                let key_url = resolve_resource_url(&base_url, key_uri)?;
+                let key_url_string = key_url.as_str().to_string();
+                let filename = match key_filenames.get(&key_url_string) {
+                    Some(existing) => existing.clone(),
+                    None => {
+                        let filename = resource_filename_exact_url("key", None, &key_url, None);
+                        resources.push(HlsResource {
+                            url: key_url,
+                            range: None,
+                            filename: filename.clone(),
+                            kind: HlsResourceKind::Key,
+                        });
+                        key_filenames.insert(key_url_string, filename.clone());
+                        filename
+                    }
+                };
+                key.uri = Some(filename);
+            }
         }
 
         let segment_url = resolve_resource_url(&base_url, &segment.uri)?;
-        if segment
-            .key
-            .as_ref()
-            .is_some_and(|key| key.method == KeyMethod::SampleAES)
-            && [".m4s", ".mp4", ".cmfv", ".cmfa"]
-                .iter()
-                .any(|extension| segment_url.path().to_ascii_lowercase().ends_with(extension))
-        {
+        if segment.key.as_ref().is_some_and(|key| {
+            key.method == KeyMethod::SampleAES
+                && crate::drm::hls_protection_from_key(key)
+                    .ok()
+                    .flatten()
+                    .is_none()
+                && [".m4s", ".mp4", ".cmfv", ".cmfa"]
+                    .iter()
+                    .any(|extension| segment_url.path().to_ascii_lowercase().ends_with(extension))
+        }) {
             return Err(ManifestError::UnsupportedEncryption);
         }
         let range = match segment.byte_range.as_ref() {
@@ -1328,6 +1342,7 @@ fn build_hls_plan(base_url: Url, mut playlist: MediaPlaylist) -> Result<HlsPlan,
 
     Ok(HlsPlan {
         resources: resources.into_boxed_slice(),
+        protections: protections.into_boxed_slice(),
         playlist_url: base_url,
         is_live,
         end_list,
@@ -1598,6 +1613,23 @@ video/1080.m3u8
         assert_eq!(
             plan.audio_renditions[0].url.as_ref().map(Url::as_str),
             Some("https://cdn.example.test/path/audio/en.m3u8")
+        );
+    }
+
+    #[test]
+    fn retains_widevine_hls_master_session_key_metadata() {
+        let body = br#"#EXTM3U
+#EXT-X-SESSION-KEY:METHOD=SAMPLE-AES,URI="data:text/plain;base64,AAAAIHBzc2gAAAAA7e+LqXnWSs6jyCfc1R0h7QAAAAA=",KEYFORMAT="urn:uuid:edef8ba9-79d6-4ace-a3c8-27dcd51d21ed"
+#EXT-X-STREAM-INF:BANDWIDTH=1200000
+video/720.m3u8
+"#;
+        let plan = parse_hls_master_playlist(BASE_URL, body)
+            .expect("Widevine session key metadata should be retained");
+
+        assert_eq!(plan.session_protections.len(), 1);
+        assert_eq!(
+            plan.session_protections[0].system,
+            crate::drm::ProtectionSystem::Widevine
         );
     }
 
@@ -2425,6 +2457,84 @@ one.ts
     }
 
     #[test]
+    fn retains_widevine_hls_cmaf_key_metadata_without_fetching_data_uri() {
+        let body = br#"#EXTM3U
+#EXT-X-VERSION:7
+#EXT-X-TARGETDURATION:2
+#EXT-X-MAP:URI="init.mp4"
+#EXT-X-KEY:METHOD=SAMPLE-AES,URI="data:text/plain;base64,AAAAIHBzc2gAAAAA7e+LqXnWSs6jyCfc1R0h7QAAAAA=",KEYFORMAT="urn:uuid:edef8ba9-79d6-4ace-a3c8-27dcd51d21ed",KEYFORMATVERSIONS="1"
+#EXTINF:2,
+segment-1.m4s
+#EXT-X-ENDLIST
+"#;
+        let plan = plan_hls_media_playlist(BASE_URL, body)
+            .expect("Widevine-protected CMAF playlist should retain its metadata");
+
+        assert_eq!(plan.protections.len(), 1);
+        assert_eq!(
+            plan.protections[0].system,
+            crate::drm::ProtectionSystem::Widevine
+        );
+        assert_eq!(
+            plan.protections[0].scheme,
+            crate::drm::EncryptionScheme::Cbcs
+        );
+        assert_eq!(plan.resources.len(), 2);
+        assert!(
+            plan.resources
+                .iter()
+                .all(|resource| resource.kind != HlsResourceKind::Key),
+            "inline DRM initialization data must not be fetched as a remote key resource"
+        );
+    }
+
+    #[test]
+    fn retains_playready_hls_key_metadata_and_rejects_unsupported_key_formats() {
+        use base64::Engine as _;
+        use base64::engine::general_purpose::STANDARD;
+
+        let xml = "<WRMHEADER><DATA></DATA></WRMHEADER>";
+        let utf16: Vec<u8> = xml
+            .encode_utf16()
+            .flat_map(|unit| unit.to_le_bytes())
+            .collect();
+        let mut pro = Vec::new();
+        pro.extend_from_slice(
+            &u32::try_from(10 + utf16.len())
+                .expect("test PRO length fits u32")
+                .to_le_bytes(),
+        );
+        pro.extend_from_slice(&1_u16.to_le_bytes());
+        pro.extend_from_slice(&1_u16.to_le_bytes());
+        pro.extend_from_slice(
+            &u16::try_from(utf16.len())
+                .expect("test WRMHEADER length fits u16")
+                .to_le_bytes(),
+        );
+        pro.extend_from_slice(&utf16);
+        let pro_uri = format!(
+            "data:text/plain;charset=UTF-16;base64,{}",
+            STANDARD.encode(&pro)
+        );
+        let body = format!(
+            "#EXTM3U\n#EXT-X-TARGETDURATION:2\n#EXT-X-KEY:METHOD=SAMPLE-AES,URI=\"{pro_uri}\",KEYFORMAT=\"com.microsoft.playready\"\n#EXTINF:2,\nsegment.ts\n#EXT-X-ENDLIST\n"
+        );
+        let plan = plan_hls_media_playlist(BASE_URL, body.as_bytes())
+            .expect("PlayReady signaling should be retained for the CDM phase");
+        assert_eq!(plan.protections.len(), 1);
+        assert_eq!(
+            plan.protections[0].system,
+            crate::drm::ProtectionSystem::PlayReady
+        );
+
+        let unsupported = body.replace("com.microsoft.playready", "com.example.unsupported");
+        assert_eq!(
+            plan_hls_media_playlist(BASE_URL, unsupported.as_bytes()).err(),
+            Some(ManifestError::UnsupportedEncryption)
+        );
+    }
+
+    #[test]
     fn sample_aes_key_rotation_keeps_each_identity_key_localized() {
         let body = b"#EXTM3U\n#EXT-X-MEDIA-SEQUENCE:7\n#EXT-X-KEY:METHOD=SAMPLE-AES,URI=\"key-1.bin\"\n#EXTINF:2,\none.ts\n#EXT-X-KEY:METHOD=SAMPLE-AES,URI=\"key-2.bin\"\n#EXTINF:2,\ntwo.ts\n#EXT-X-ENDLIST\n";
         let plan = plan_hls_media_playlist(BASE_URL, body)
@@ -2466,7 +2576,7 @@ one.ts
     }
 
     #[test]
-    fn rejects_sample_aes_fragmented_mp4_and_non_identity_key_formats() {
+    fn rejects_identity_sample_aes_fragmented_mp4_but_retains_fairplay_metadata() {
         let fragmented = br#"#EXTM3U
 #EXT-X-KEY:METHOD=SAMPLE-AES,URI="key.bin",IV=0x00000000000000000000000000000001
 #EXT-X-MAP:URI="init.mp4"
@@ -2485,9 +2595,21 @@ one.m4s
 one.ts
 #EXT-X-ENDLIST
 "#;
+        let plan = plan_hls_media_playlist(BASE_URL, fairplay)
+            .expect("FairPlay signalling should be retained for extractor fallback");
+        assert_eq!(plan.protections.len(), 1);
+        let protection = &plan.protections[0];
+        assert_eq!(protection.system, crate::drm::ProtectionSystem::FairPlay);
+        assert_eq!(protection.scheme, crate::drm::EncryptionScheme::Cbcs);
         assert_eq!(
-            plan_hls_media_playlist(BASE_URL, fairplay).err(),
-            Some(ManifestError::UnsupportedEncryption)
+            protection.initialization_data,
+            crate::drm::HlsInitializationData::FairPlayKeyUri("skd://asset".to_string())
+        );
+        assert!(
+            plan.resources
+                .iter()
+                .all(|resource| resource.kind != HlsResourceKind::Key),
+            "skd:// identifiers are metadata, not downloadable key URLs"
         );
     }
 

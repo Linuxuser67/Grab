@@ -2535,6 +2535,62 @@ segment-1.m4s
     }
 
     #[test]
+    fn plans_static_playready_cmaf_with_one_init_map_and_inline_pro() {
+        use base64::Engine as _;
+        use base64::engine::general_purpose::STANDARD;
+
+        let xml = concat!(
+            "<WRMHEADER xmlns=\"http://schemas.microsoft.com/DRM/2007/03/PlayReadyHeader\" ",
+            "version=\"4.3.0.0\"><DATA><LA_URL>https://license.example.test/acquire</LA_URL>",
+            "</DATA></WRMHEADER>"
+        );
+        let utf16: Vec<u8> = xml.encode_utf16().flat_map(u16::to_le_bytes).collect();
+        let mut pro = Vec::with_capacity(10 + utf16.len());
+        pro.extend_from_slice(
+            &u32::try_from(10 + utf16.len())
+                .expect("test PlayReady PRO size")
+                .to_le_bytes(),
+        );
+        pro.extend_from_slice(&1_u16.to_le_bytes());
+        pro.extend_from_slice(&1_u16.to_le_bytes());
+        pro.extend_from_slice(
+            &u16::try_from(utf16.len())
+                .expect("test WRMHEADER size")
+                .to_le_bytes(),
+        );
+        pro.extend_from_slice(&utf16);
+        let uri = format!(
+            "data:text/plain;charset=UTF-16;base64,{}",
+            STANDARD.encode(pro)
+        );
+        let playlist = format!(
+            concat!(
+                "#EXTM3U\\n#EXT-X-VERSION:7\\n#EXT-X-TARGETDURATION:2\\n",
+                "#EXT-X-MAP:URI=\\\"init.mp4\\\"\\n",
+                "#EXT-X-KEY:METHOD=SAMPLE-AES,URI=\\\"{uri}\\\",KEYFORMAT=\\\"com.microsoft.playready\\\"\\n",
+                "#EXTINF:2,\\nsegment-1.m4s\\n#EXT-X-ENDLIST\\n"
+            )
+        );
+        let plan = plan_hls_media_playlist(BASE_URL, playlist.as_bytes())
+            .expect("static PlayReady CMAF plan");
+        assert!(plan.is_single_init_fmp4_presentation());
+        assert_eq!(plan.protections.len(), 1);
+        assert_eq!(
+            plan.protections[0].scheme,
+            crate::drm::EncryptionScheme::Cbcs
+        );
+        assert_eq!(plan.resources.len(), 2);
+        assert_eq!(plan.resources[0].kind, HlsResourceKind::InitMap);
+        assert_eq!(plan.resources[1].kind, HlsResourceKind::Segment);
+        assert!(
+            plan.resources
+                .iter()
+                .all(|resource| resource.kind != HlsResourceKind::Key),
+            "inline PlayReady Objects must not be fetched as network key resources"
+        );
+    }
+
+    #[test]
     fn sample_aes_key_rotation_keeps_each_identity_key_localized() {
         let body = b"#EXTM3U\n#EXT-X-MEDIA-SEQUENCE:7\n#EXT-X-KEY:METHOD=SAMPLE-AES,URI=\"key-1.bin\"\n#EXTINF:2,\none.ts\n#EXT-X-KEY:METHOD=SAMPLE-AES,URI=\"key-2.bin\"\n#EXTINF:2,\ntwo.ts\n#EXT-X-ENDLIST\n";
         let plan = plan_hls_media_playlist(BASE_URL, body)

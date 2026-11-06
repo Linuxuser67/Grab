@@ -244,12 +244,14 @@ pub(crate) struct HlsMasterPlan {
     pub(crate) variants: Box<[HlsVariant]>,
     pub(crate) audio_renditions: Box<[HlsAudioRendition]>,
     pub(crate) subtitle_renditions: Box<[HlsSubtitleRendition]>,
+    pub(crate) session_protections: Box<[crate::drm::HlsProtection]>,
 }
 
 /// Validated HLS media playlist, ordered resources, and local FFmpeg input.
 #[derive(Clone, Debug)]
 pub(crate) struct HlsPlan {
     pub(crate) resources: Box<[HlsResource]>,
+    pub(crate) protections: Box<[crate::drm::HlsProtection]>,
     pub(crate) playlist_url: Url,
     pub(crate) is_live: bool,
     pub(crate) end_list: bool,
@@ -280,6 +282,7 @@ impl HlsPlan {
 
         Ok(Self {
             resources: Vec::new().into_boxed_slice(),
+            protections: Vec::new().into_boxed_slice(),
             playlist_url,
             is_live: false,
             end_list: true,
@@ -918,11 +921,15 @@ pub(crate) fn parse_hls_master_playlist(
         return Err(ManifestError::ExpectedMasterPlaylist);
     };
 
-    // Session keys and unimplemented URI-affecting extensions need the
-    // established extractor path; silently ignoring them can select wrong media.
-    if !master.session_key.is_empty() {
-        return Err(ManifestError::UnsupportedEncryption);
-    }
+    let session_protections = master
+        .session_key
+        .iter()
+        .map(|session_key| {
+            crate::drm::hls_protection_from_key(&session_key.0)
+                .map_err(|_| ManifestError::UnsupportedEncryption)?
+                .ok_or(ManifestError::UnsupportedEncryption)
+        })
+        .collect::<Result<Vec<_>, ManifestError>>()?;
     if master
         .unknown_tags
         .iter()
@@ -1046,6 +1053,7 @@ pub(crate) fn parse_hls_master_playlist(
         variants: variants.into_boxed_slice(),
         audio_renditions: audio_renditions.into_boxed_slice(),
         subtitle_renditions: subtitle_renditions.into_boxed_slice(),
+        session_protections: session_protections.into_boxed_slice(),
     })
 }
 
@@ -1076,6 +1084,8 @@ pub(crate) fn plan_hls_media_playlist(
             "playlist exceeds its supported size limit".to_string(),
         ));
     }
+    crate::drm::validate_hls_keyformat_multiplexing(body)
+        .map_err(|_| ManifestError::UnsupportedEncryption)?;
     let base_url = parse_manifest_url(manifest_url)?;
     let playlist =
         m3u8_rs::parse_media_playlist_res(body).map_err(|error| hls_parse_error(body, error))?;
@@ -1111,6 +1121,7 @@ fn build_hls_plan(base_url: Url, mut playlist: MediaPlaylist) -> Result<HlsPlan,
     }
 
     let mut resources = Vec::with_capacity(playlist.segments.len());
+    let mut protections = Vec::new();
     let mut map_filenames: HashMap<(String, Option<ManifestByteRange>), String> = HashMap::new();
     let mut key_filenames: HashMap<String, String> = HashMap::new();
     // An implicit segment offset is defined only by the immediately preceding
@@ -1208,65 +1219,64 @@ fn build_hls_plan(base_url: Url, mut playlist: MediaPlaylist) -> Result<HlsPlan,
         }
 
         if let Some(key) = segment.key.as_mut() {
-            let sample_aes = key.method == KeyMethod::SampleAES;
-            if key.method != KeyMethod::AES128 && !sample_aes {
-                return Err(ManifestError::UnsupportedEncryption);
-            }
-            // VSD's HLS decrypter handles SAMPLE-AES MPEG-TS elementary
-            // streams. SAMPLE-AES in fragmented MP4 is the Common Encryption
-            // cbcs scheme and is deliberately not routed through this path.
-            if sample_aes && segment.map.is_some() {
-                return Err(ManifestError::UnsupportedEncryption);
-            }
-            // RFC 8216 requires an explicit IV for AES-128-encrypted
-            // initialization sections; the media-sequence-derived IV rule
-            // applies to media segments, not initialization sections.
-            if segment.map.is_some() && key.iv.is_none() {
-                return Err(ManifestError::UnsupportedEncryption);
-            }
-            if key
-                .keyformat
-                .as_deref()
-                .is_some_and(|format| format != "identity")
-                || key
-                    .keyformatversions
-                    .as_deref()
-                    .is_some_and(|versions| versions != "1")
-            {
-                return Err(ManifestError::UnsupportedEncryption);
-            }
-            let key_uri = key
-                .uri
-                .as_deref()
-                .ok_or(ManifestError::UnsupportedEncryption)?;
-            let key_url = resolve_resource_url(&base_url, key_uri)?;
-            let key_url_string = key_url.as_str().to_string();
-            let filename = match key_filenames.get(&key_url_string) {
-                Some(existing) => existing.clone(),
-                None => {
-                    let filename = resource_filename_exact_url("key", None, &key_url, None);
-                    resources.push(HlsResource {
-                        url: key_url,
-                        range: None,
-                        filename: filename.clone(),
-                        kind: HlsResourceKind::Key,
-                    });
-                    key_filenames.insert(key_url_string, filename.clone());
-                    filename
+            let protection = crate::drm::hls_protection_from_key(key)
+                .map_err(|_| ManifestError::UnsupportedEncryption)?;
+            if let Some(protection) = protection {
+                if !protections.contains(&protection) {
+                    protections.push(protection);
                 }
-            };
-            key.uri = Some(filename);
+            } else {
+                let sample_aes = key.method == KeyMethod::SampleAES;
+                if key.method != KeyMethod::AES128 && !sample_aes {
+                    return Err(ManifestError::UnsupportedEncryption);
+                }
+                // VSD's identity SAMPLE-AES path handles MPEG-TS elementary
+                // streams. CMAF SAMPLE-AES is Common Encryption and is routed
+                // through the shared CENC/CBCS path in a later phase.
+                if sample_aes && segment.map.is_some() {
+                    return Err(ManifestError::UnsupportedEncryption);
+                }
+                // RFC 8216 requires an explicit IV for AES-128-encrypted
+                // initialization sections; media-sequence IV derivation does
+                // not apply to initialization sections.
+                if segment.map.is_some() && key.iv.is_none() {
+                    return Err(ManifestError::UnsupportedEncryption);
+                }
+                let key_uri = key
+                    .uri
+                    .as_deref()
+                    .ok_or(ManifestError::UnsupportedEncryption)?;
+                let key_url = resolve_resource_url(&base_url, key_uri)?;
+                let key_url_string = key_url.as_str().to_string();
+                let filename = match key_filenames.get(&key_url_string) {
+                    Some(existing) => existing.clone(),
+                    None => {
+                        let filename = resource_filename_exact_url("key", None, &key_url, None);
+                        resources.push(HlsResource {
+                            url: key_url,
+                            range: None,
+                            filename: filename.clone(),
+                            kind: HlsResourceKind::Key,
+                        });
+                        key_filenames.insert(key_url_string, filename.clone());
+                        filename
+                    }
+                };
+                key.uri = Some(filename);
+            }
         }
 
         let segment_url = resolve_resource_url(&base_url, &segment.uri)?;
-        if segment
-            .key
-            .as_ref()
-            .is_some_and(|key| key.method == KeyMethod::SampleAES)
-            && [".m4s", ".mp4", ".cmfv", ".cmfa"]
-                .iter()
-                .any(|extension| segment_url.path().to_ascii_lowercase().ends_with(extension))
-        {
+        if segment.key.as_ref().is_some_and(|key| {
+            key.method == KeyMethod::SampleAES
+                && crate::drm::hls_protection_from_key(key)
+                    .ok()
+                    .flatten()
+                    .is_none()
+                && [".m4s", ".mp4", ".cmfv", ".cmfa"]
+                    .iter()
+                    .any(|extension| segment_url.path().to_ascii_lowercase().ends_with(extension))
+        }) {
             return Err(ManifestError::UnsupportedEncryption);
         }
         let range = match segment.byte_range.as_ref() {
@@ -1328,6 +1338,7 @@ fn build_hls_plan(base_url: Url, mut playlist: MediaPlaylist) -> Result<HlsPlan,
 
     Ok(HlsPlan {
         resources: resources.into_boxed_slice(),
+        protections: protections.into_boxed_slice(),
         playlist_url: base_url,
         is_live,
         end_list,

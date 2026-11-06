@@ -17,8 +17,7 @@ use zeroize::{Zeroize as _, Zeroizing};
 const MP4_PROTECTION_SCHEME: &str = "urn:mpeg:dash:mp4protection:2011";
 const WIDEVINE_SCHEME: &str = "urn:uuid:edef8ba9-79d6-4ace-a3c8-27dcd51d21ed";
 const WIDEVINE_SYSTEM_ID: [u8; 16] = [
-    0xed, 0xef, 0x8b, 0xa9, 0x79, 0xd6, 0x4a, 0xce, 0xa3, 0xc8, 0x27, 0xdc, 0xd5, 0x1d, 0x21,
-    0xed,
+    0xed, 0xef, 0x8b, 0xa9, 0x79, 0xd6, 0x4a, 0xce, 0xa3, 0xc8, 0x27, 0xdc, 0xd5, 0x1d, 0x21, 0xed,
 ];
 const PLAYREADY_SCHEME: &str = "urn:uuid:9a04f079-9840-4286-ab92-e65be0885f95";
 const CLEARKEY_SCHEME: &str = "urn:uuid:e2719d58-a985-b3c9-781a-ab030af78d30";
@@ -120,7 +119,10 @@ pub(crate) fn encryption_from_scopes(
             } else {
                 ProtectionSystem::ClearKey
             };
-            if system.replace(next).is_some_and(|previous| previous != next) {
+            if system
+                .replace(next)
+                .is_some_and(|previous| previous != next)
+            {
                 return Err("DASH declares conflicting DRM systems".to_string());
             }
         } else if descriptor.schemeIdUri == PLAYREADY_SCHEME {
@@ -180,9 +182,7 @@ pub(crate) fn widevine_pssh_from_scopes(
 }
 
 fn validate_widevine_pssh(bytes: &[u8]) -> Result<(), String> {
-    let invalid = || {
-        "DASH Widevine PSSH box is malformed or has the wrong system ID".to_string()
-    };
+    let invalid = || "DASH Widevine PSSH box is malformed or has the wrong system ID".to_string();
     if bytes.len() < 32
         || bytes.get(4..8) != Some(&b"pssh"[..])
         || bytes.get(8).is_none_or(|version| *version > 1)
@@ -203,8 +203,7 @@ fn validate_widevine_pssh(bytes: &[u8]) -> Result<(), String> {
             .ok_or_else(invalid)?
             .try_into()
             .map_err(|_| invalid())?;
-        let count = usize::try_from(u32::from_be_bytes(count_bytes))
-            .map_err(|_| invalid())?;
+        let count = usize::try_from(u32::from_be_bytes(count_bytes)).map_err(|_| invalid())?;
         offset = count_end
             .checked_add(count.checked_mul(16).ok_or_else(invalid)?)
             .ok_or_else(invalid)?;
@@ -215,8 +214,7 @@ fn validate_widevine_pssh(bytes: &[u8]) -> Result<(), String> {
         .ok_or_else(invalid)?
         .try_into()
         .map_err(|_| invalid())?;
-    let data_size = usize::try_from(u32::from_be_bytes(data_size_bytes))
-        .map_err(|_| invalid())?;
+    let data_size = usize::try_from(u32::from_be_bytes(data_size_bytes)).map_err(|_| invalid())?;
     let end = size_end.checked_add(data_size).ok_or_else(invalid)?;
     if end != bytes.len() {
         return Err(invalid());
@@ -583,17 +581,13 @@ mod tests {
         malformed.cenc_pssh.push(dash_mpd_core::CencPssh {
             content: Some("bm90LWEtcHNzaA==".to_string()),
         });
-        assert!(
-            widevine_pssh_from_scopes(&[std::slice::from_ref(&malformed)]).is_err()
-        );
+        assert!(widevine_pssh_from_scopes(&[std::slice::from_ref(&malformed)]).is_err());
 
         let mut wrong_system = widevine();
         wrong_system.cenc_pssh.push(dash_mpd_core::CencPssh {
             content: Some("AAAAIHBzc2gAAAAAEREREREREREREREREREREQAAAAA=".to_string()),
         });
-        assert!(
-            widevine_pssh_from_scopes(&[std::slice::from_ref(&wrong_system)]).is_err()
-        );
+        assert!(widevine_pssh_from_scopes(&[std::slice::from_ref(&wrong_system)]).is_err());
 
         let mut multiple = widevine();
         multiple.cenc_pssh.extend([

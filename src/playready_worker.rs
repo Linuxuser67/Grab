@@ -64,6 +64,11 @@ struct WorkerKey {
     key: Zeroizing<[u8; 16]>,
 }
 
+struct PendingWorkerKey {
+    kid: [u8; 16],
+    bytes: Zeroizing<Box<[u8]>>,
+}
+
 #[derive(Debug, Clone, Copy, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 enum WorkerFailure {
@@ -398,17 +403,20 @@ fn process_worker<R: BufRead, W: Write>(
         .map_err(|_| WorkerFailure::LicenseResponseInvalid)?;
     // The crate returns ordinary Box allocations. Move every key into zeroizing
     // storage before count/length checks so all early-return paths wipe the keys.
-    let keys: Vec<([u8; 16], Zeroizing<Box<[u8]>>)> = keys
+    let keys: Vec<PendingWorkerKey> = keys
         .into_iter()
-        .map(|(kid, key)| (kid.into(), Zeroizing::new(key.into())))
+        .map(|(kid, key)| PendingWorkerKey {
+            kid: kid.into(),
+            bytes: Zeroizing::new(key.into()),
+        })
         .collect();
     if keys.is_empty() || keys.len() > MAX_LICENSE_KEYS {
         return Err(WorkerFailure::KeyMaterialInvalid);
     }
 
     let mut output = Vec::with_capacity(keys.len());
-    for (kid, key_bytes) in keys {
-        let key = copy_content_key(&key_bytes)?;
+    for PendingWorkerKey { kid, bytes } in keys {
+        let key = copy_content_key(&bytes)?;
         output.push(WorkerKey { kid, key });
     }
     write_sync_frame(writer, &WorkerResponse::Keys { keys: output })

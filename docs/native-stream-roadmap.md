@@ -107,17 +107,27 @@ timeBase and time-expression validation, namespace/element restrictions,
 whitespace/entities, malformed or oversized XML, sample and output bounds,
 and unchanged WVTT and FFmpeg finalization paths.
 
-### 4. Explicit-key encrypted media support
+### 4. Shared DRM across HLS and DASH
 
-Evaluate HLS SAMPLE-AES and fragmented-MP4 CENC decryption as separate features.
-The first scope is user-supplied keys only. Do not add license-server discovery,
-Widevine/PlayReady acquisition, browser secret extraction, or automatic key
-fetching in this phase. Audit per-track encryption metadata and sample auxiliary
-information before enabling any format; reject unsupported schemes and patterns.
+Keep protocol parsing separate from the shared protection-system, CDM, key
+handling, and sample-decryption layers. HLS already has identity AES-128 and
+MPEG-TS identity SAMPLE-AES handling; DASH has bounded ClearKey CENC/CBCS
+decryption. The shared metadata layer now recognizes DASH Widevine PSSH and
+HLS Widevine/PlayReady/FairPlay signaling, but those HLS providers still fall
+back until their shared CDM/decryption path is implemented.
 
-Acceptance: validated track-scoped keys/IVs, correct clear/encrypted sample
-boundaries, bounded parsing, no key leakage into logs or argv, and known-answer
-fixtures for each enabled scheme.
+Next, add an isolated Widevine/PlayReady CDM worker and license exchange usable
+by both DASH and HLS CMAF. Keep FairPlay Streaming separate because its
+SAMPLE-AES and skd URI flow uses Apple-specific application key handling rather
+than the Widevine or PlayReady CDM protocol. Do not extract browser secrets or
+log license challenges, license responses, content keys, or device material.
+
+Acceptance: validated protocol-specific initialization data mapped to a shared
+track-scoped KID/key model; exact CENC/CBCS sample auxiliary-data validation;
+bounded worker IPC, license responses, and resource parsing; zeroizing parent
+key storage; no key leakage into logs or argv; and known-answer fixtures for
+each enabled scheme. Unsupported schemes continue through the extractor
+fallback.
 
 ### 5. Broader DASH index addressing
 

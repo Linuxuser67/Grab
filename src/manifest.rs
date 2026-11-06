@@ -2347,11 +2347,11 @@ clear-2.ts
         .expect("parse local playlist");
         assert_eq!(local.segments.len(), 3);
         assert_eq!(
-            local.segments[0].key.as_ref().map(|key| key.method),
+            local.segments[0].key.as_ref().map(|key| key.method.clone()),
             Some(KeyMethod::AES128)
         );
         assert_eq!(
-            local.segments[1].key.as_ref().map(|key| key.method),
+            local.segments[1].key.as_ref().map(|key| key.method.clone()),
             Some(KeyMethod::None)
         );
         assert!(

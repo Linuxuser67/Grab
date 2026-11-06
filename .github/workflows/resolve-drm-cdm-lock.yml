@@ -7,7 +7,7 @@ on:
       - .github/workflows/resolve-drm-cdm-lock.yml
 
 permissions:
-  contents: read
+  contents: write
 
 jobs:
   resolve:
@@ -27,3 +27,12 @@ jobs:
             build-aux/cargo-sources.json
           if-no-files-found: error
           retention-days: 1
+      - name: Commit generated dependency files to the staging branch
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add Cargo.lock build-aux/cargo-sources.json
+          if ! git diff --cached --quiet; then
+            git commit -m "build(drm): lock CDM dependency graph"
+            git push origin "HEAD:${GITHUB_HEAD_REF}"
+          fi

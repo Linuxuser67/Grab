@@ -1,4 +1,4 @@
-//! Bounded DASH Common Encryption support using HTTPS ClearKey licenses.
+//! Bounded DASH Common Encryption support using HTTPS ClearKey and PlayReady licenses.
 //!
 //! Grab keeps downloaded encrypted resources as its resumable source of truth.
 //! License keys are held in zeroizing memory, and decryption produces a separate
@@ -973,11 +973,29 @@ mod tests {
     }
 
     #[test]
+    #[test]
     fn rejects_conflicting_playready_psshs_in_one_scope() {
         let first = playready_pro();
         let mut second = playready_pro();
-        let last = second.last_mut().expect("nonempty PlayReady PRO");
-        *last ^= 1;
+        let encoded_url: Vec<u8> = "Acquire"
+            .encode_utf16()
+            .flat_map(u16::to_le_bytes)
+            .collect();
+        let url_offset = second
+            .windows(encoded_url.len())
+            .position(|window| window == encoded_url)
+            .expect("test PRO contains its license URL");
+        second[url_offset] = b'B';
+
+        let parse_wr_header = |pro: &[u8]| {
+            Pssh::from_bytes(pro)
+                .expect("test PRO should parse")
+                .wrm_headers()
+                .len()
+        };
+        assert_eq!(parse_wr_header(&first), 1);
+        assert_eq!(parse_wr_header(&second), 1);
+
         let descriptor = |pro: Vec<u8>| dash_mpd_core::ContentProtection {
             schemeIdUri: PLAYREADY_SCHEME.to_string(),
             msprpro: Some(dash_mpd_core::MsprPro {
@@ -987,6 +1005,63 @@ mod tests {
             ..Default::default()
         };
         assert!(playready_pssh_from_scopes(&[&[descriptor(first), descriptor(second)]]).is_err());
+    }
+
+    #[test]
+    fn playready_pssh_inherits_until_a_more_specific_scope_overrides_it() {
+        let parent = dash_mpd_core::ContentProtection {
+            schemeIdUri: PLAYREADY_SCHEME.to_string(),
+            msprpro: Some(dash_mpd_core::MsprPro {
+                content: Some(STANDARD.encode(playready_pro())),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        let child = dash_mpd_core::ContentProtection {
+            schemeIdUri: PLAYREADY_SCHEME.to_string(),
+            ..Default::default()
+        };
+        let parent_pssh =
+            playready_pssh_from_scopes(&[std::slice::from_ref(&parent)])
+                .expect("parent PlayReady data")
+                .expect("parent PSSH");
+        assert_eq!(
+            playready_pssh_from_scopes(&[
+                std::slice::from_ref(&parent),
+                std::slice::from_ref(&child),
+            ])
+            .expect("inherited PlayReady data")
+            .as_deref(),
+            Some(parent_pssh.as_slice())
+        );
+
+        let overriding = dash_mpd_core::ContentProtection {
+            schemeIdUri: PLAYREADY_SCHEME.to_string(),
+            msprpro: Some(dash_mpd_core::MsprPro {
+                content: Some(STANDARD.encode({
+                    let mut pro = playready_pro();
+                    let encoded_url: Vec<u8> = "Acquire"
+                        .encode_utf16()
+                        .flat_map(u16::to_le_bytes)
+                        .collect();
+                    let offset = pro
+                        .windows(encoded_url.len())
+                        .position(|window| window == encoded_url)
+                        .expect("test PRO URL");
+                    pro[offset] = b'B';
+                    pro
+                })),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        let overriding_pssh = playready_pssh_from_scopes(&[
+            std::slice::from_ref(&parent),
+            std::slice::from_ref(&overriding),
+        ])
+        .expect("representation PlayReady data")
+        .expect("representation PSSH");
+        assert_ne!(overriding_pssh, parent_pssh);
     }
 
     #[test]

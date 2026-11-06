@@ -364,11 +364,22 @@ fn validate_playready_object(bytes: &[u8]) -> Result<(), String> {
 /// only one Key on each media segment. Silently retaining only the last tag
 /// would lose a valid protection descriptor and could select the wrong path.
 pub(crate) fn validate_hls_keyformat_multiplexing(body: &[u8]) -> Result<(), String> {
+    hls_key_reset_state_by_segment(body).map(|_| ())
+}
+
+/// Return whether METHOD=NONE is the most recent key declaration for each segment.
+///
+/// m3u8-rs stores typed keys and unknown METHOD=NONE tags separately. Keeping
+/// the source-order state prevents a reset from overriding a later typed key
+/// declaration that belongs to the same media segment.
+pub(crate) fn hls_key_reset_state_by_segment(body: &[u8]) -> Result<Vec<bool>, String> {
     use std::collections::HashSet;
 
     let text =
         std::str::from_utf8(body).map_err(|_| "HLS playlist is not valid UTF-8".to_string())?;
     let mut active_formats = HashSet::new();
+    let mut method_none_is_active = false;
+    let mut reset_state = Vec::new();
     for line in text.lines().map(str::trim) {
         if let Some(attributes) = line.strip_prefix("#EXT-X-KEY:") {
             let mut fields = HashMap::new();
@@ -394,17 +405,22 @@ pub(crate) fn validate_hls_keyformat_multiplexing(body: &[u8]) -> Result<(), Str
                 // HLS 2nd Edition defines METHOD=NONE as a presentation-wide
                 // key reset, regardless of the preceding KEYFORMAT.
                 active_formats.clear();
+                method_none_is_active = true;
                 continue;
             }
             active_formats.insert(format.to_string());
-        } else if !line.is_empty() && !line.starts_with('#') && active_formats.len() > 1 {
-            return Err(
-                "HLS media segment uses multiple KEYFORMATs which the current parser cannot preserve"
-                    .to_string(),
-            );
+            method_none_is_active = false;
+        } else if !line.is_empty() && !line.starts_with('#') {
+            if active_formats.len() > 1 {
+                return Err(
+                    "HLS media segment uses multiple KEYFORMATs which the current parser cannot preserve"
+                        .to_string(),
+                );
+            }
+            reset_state.push(method_none_is_active);
         }
     }
-    Ok(())
+    Ok(reset_state)
 }
 
 fn parse_hls_attribute_list(input: &str) -> Result<Vec<(String, String)>, String> {
@@ -596,7 +612,7 @@ segment.ts
         assert_eq!(
             validate_hls_keyformat_multiplexing(body),
             Ok(()),
-            "METHOD=NONE clears the active PlayReady keyformat before identity encryption starts"
+            "METHOD=NONE clears the active DRM keyformat before identity encryption starts"
         );
 
         let invalid_reset = std::str::from_utf8(body)

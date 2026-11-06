@@ -2526,33 +2526,42 @@ async fn decrypt_hls_playready_track(
         })
         .collect();
     let directory = directory.to_path_buf();
-    let inspect_directory = directory.clone();
-    let inspect_resources = resources.clone();
     let scheme = request.scheme;
-    let (encryption, required_kids) = tokio::task::spawn_blocking(move || {
-        let init_path = inspect_directory.join(
-            inspect_resources
+    let cancelled = Arc::new(AtomicBool::new(false));
+    let scan_cancelled = Arc::clone(&cancelled);
+    let (resources, directory, encryption, required_kids) =
+        tokio::task::spawn_blocking(move || {
+            let init_resource = resources
                 .first()
-                .ok_or_else(|| "HLS CMAF initialization resource is missing".to_string())?
-                .filename
-                .as_str(),
-        );
-        let init = crate::bounded_file::read_regular_file_bounded(&init_path, 16 * 1024 * 1024)
-            .map_err(|error| format!("Could not read HLS CMAF initialization: {error}"))?;
-        let encryption = crate::dash_drm_mp4::hls_encryption_from_init(
-            &init,
-            scheme,
-            crate::drm::ProtectionSystem::PlayReady,
-        )?;
-        let required =
-            crate::dash_drm_mp4::required_kids(&inspect_resources, &inspect_directory, encryption)?;
-        Ok::<_, String>((encryption, required))
-    })
-    .await
-    .map_err(|_| {
-        ManifestRunError::Failed("HLS PlayReady sample inspection task failed".to_string())
-    })?
-    .map_err(ManifestRunError::Unsupported)?;
+                .ok_or_else(|| "HLS CMAF initialization resource is missing".to_string())?;
+            let init_path = directory.join(&init_resource.filename);
+            let init = crate::bounded_file::read_regular_file_bounded(&init_path, 16 * 1024 * 1024)
+                .map_err(|error| format!("Could not read HLS CMAF initialization: {error}"))?;
+            let encryption = crate::dash_drm_mp4::hls_encryption_from_init(
+                &init,
+                scheme,
+                crate::drm::ProtectionSystem::PlayReady,
+            )?;
+            let required = crate::dash_drm_mp4::required_kids_with_cancel(
+                &resources,
+                &directory,
+                encryption,
+                &scan_cancelled,
+            )?;
+            Ok::<_, String>((resources, directory, encryption, required))
+        });
+    let (resources, directory, encryption, required_kids) = tokio::select! {
+        biased;
+        _ = &mut *abort => {
+            cancelled.store(true, Ordering::Release);
+            return Ok(false);
+        }
+        result = scan => result
+            .map_err(|_| {
+                ManifestRunError::Failed("HLS PlayReady sample inspection task failed".to_string())
+            })?
+            .map_err(ManifestRunError::Unsupported)?,
+    };
 
     let mut key_request = Box::pin(crate::dash_playready::acquire_keys(
         client,
@@ -2568,7 +2577,6 @@ async fn decrypt_hls_playready_track(
     };
 
     let output = directory.join(output_name);
-    let cancelled = Arc::new(AtomicBool::new(false));
     let task_cancelled = Arc::clone(&cancelled);
     let mut decrypt = Box::pin(tokio::task::spawn_blocking(move || {
         crate::dash_drm_mp4::decrypt_track(

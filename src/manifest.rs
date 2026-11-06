@@ -1184,11 +1184,13 @@ fn build_hls_plan(
 
         if key_was_cleared {
             active_key = None;
-        } else if let Some(key) = segment.key.as_ref() {
-            active_key = Some(key.clone());
-            // m3u8-rs writes the typed key before unknown tags. When a new
-            // key follows METHOD=NONE before this segment URI, retaining the
-            // reset tag would reverse their source order in the local playlist.
+        } else {
+            if let Some(key) = segment.key.as_ref() {
+                active_key = Some(key.clone());
+            }
+            // m3u8-rs writes the typed key before unknown tags. Remove a reset
+            // when a later key supersedes it before this segment URI; this also
+            // discards a trailing reset that follows the final media segment.
             segment.unknown_tags.retain(|tag| !is_hls_key_reset_tag(tag));
         }
         if let Some(map) = segment.map.as_ref() {

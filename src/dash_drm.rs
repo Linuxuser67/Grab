@@ -16,7 +16,10 @@ use zeroize::{Zeroize as _, Zeroizing};
 
 const MP4_PROTECTION_SCHEME: &str = "urn:mpeg:dash:mp4protection:2011";
 const WIDEVINE_SCHEME: &str = "urn:uuid:edef8ba9-79d6-4ace-a3c8-27dcd51d21ed";
-const WIDEVINE_SYSTEM_ID: [u8; 16] = [0xed, 0xef, 0x8b, 0xa9, 0x79, 0xd6, 0x4a, 0xce, 0xa3, 0xc8, 0x27, 0xdc, 0xd5, 0x1d, 0x21, 0xed];
+const WIDEVINE_SYSTEM_ID: [u8; 16] = [
+    0xed, 0xef, 0x8b, 0xa9, 0x79, 0xd6, 0x4a, 0xce, 0xa3, 0xc8, 0x27, 0xdc, 0xd5, 0x1d, 0x21,
+    0xed,
+];
 const PLAYREADY_SCHEME: &str = "urn:uuid:9a04f079-9840-4286-ab92-e65be0885f95";
 const CLEARKEY_SCHEME: &str = "urn:uuid:e2719d58-a985-b3c9-781a-ab030af78d30";
 const MAX_LICENSE_RESPONSE_BYTES: usize = 64 * 1024;
@@ -160,8 +163,12 @@ pub(crate) fn widevine_pssh_from_scopes(
             else {
                 continue;
             };
+            let compact: Vec<u8> = encoded
+                .bytes()
+                .filter(|byte| !byte.is_ascii_whitespace())
+                .collect();
             let decoded = STANDARD
-                .decode(encoded.as_bytes())
+                .decode(compact)
                 .map_err(|_| "DASH Widevine PSSH is not valid base64".to_string())?;
             validate_widevine_pssh(&decoded)?;
             if !pssh_boxes.contains(&decoded) {
@@ -552,7 +559,7 @@ mod tests {
         let pssh = "AAAAIHBzc2gAAAAA7e+LqXnWSs6jyCfc1R0h7QAAAAA=";
         let mut descriptor = widevine();
         descriptor.cenc_pssh.push(dash_mpd_core::CencPssh {
-            content: Some(pssh.to_string()),
+            content: Some(format!("\n  {pssh}\n")),
         });
         let common_encryption = protection("cenc", "00112233445566778899aabbccddeeff");
         let scopes = [
@@ -571,7 +578,7 @@ mod tests {
     }
 
     #[test]
-    fn rejects_malformed_and_conflicting_widevine_pssh() {
+    fn rejects_malformed_and_retains_distinct_widevine_pssh() {
         let mut malformed = widevine();
         malformed.cenc_pssh.push(dash_mpd_core::CencPssh {
             content: Some("bm90LWEtcHNzaA==".to_string()),

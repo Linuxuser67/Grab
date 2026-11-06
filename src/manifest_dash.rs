@@ -2738,11 +2738,8 @@ mod tests {
     </AdaptationSet>
   </Period>
 </MPD>"#;
-        let manifest = parse_dash_manifest(BASE_URL, body)
-            .expect("MPD structure should parse before addressing is selected");
-        let representation = &manifest.video_representations[0];
         assert_eq!(
-            plan_dash_representation(&manifest, &representation.key).err(),
+            parse_dash_manifest(BASE_URL, body).err(),
             Some(DashError::UnsupportedAddressing)
         );
     }

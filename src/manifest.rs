@@ -273,8 +273,7 @@ impl HlsPlan {
     ) -> Result<Self, ManifestError> {
         let _validated = HlsLiveAccumulator::from_local_playlist_bytes(body)?;
         let playlist_url = parse_manifest_url(manifest_url)?;
-        let mut local_playlist = m3u8_rs::parse_media_playlist_res(body)
-            .map_err(|error| hls_parse_error(body, error))?;
+        let mut local_playlist = parse_hls_media_playlist(body)?;
         local_playlist.end_list = true;
         local_playlist.playlist_type = Some(MediaPlaylistType::Vod);
 
@@ -450,8 +449,7 @@ impl HlsLiveAccumulator {
                 "playlist exceeds its supported size limit".to_string(),
             ));
         }
-        let mut playlist = m3u8_rs::parse_media_playlist_res(body)
-            .map_err(|error| hls_parse_error(body, error))?;
+        let mut playlist = parse_hls_media_playlist(body)?;
         if !playlist.end_list
             || playlist.playlist_type != Some(MediaPlaylistType::Vod)
             || playlist.segments.is_empty()
@@ -2400,7 +2398,7 @@ clear-2.ts
                 .count(),
             1
         );
-        let local = m3u8_rs::parse_media_playlist_res(
+        let local = parse_hls_media_playlist(
             &plan
                 .local_playlist_bytes()
                 .expect("serialize local playlist"),
@@ -2529,7 +2527,6 @@ one.ts
     #[test]
     fn rejects_uri_affecting_hls_extensions_until_they_are_supported() {
         let body = br#"#EXTM3U
-#EXT-X-TARGETDURATION:2
 #EXT-X-CONTENT-STEERING:SERVER-URI="steering.json",PATHWAY-ID="default"
 #EXT-X-STREAM-INF:BANDWIDTH=1000000
 video.m3u8
@@ -2547,12 +2544,12 @@ video.m3u8
     }
 
     #[test]
-    fn rejects_live_playlists_without_end_list() {
+    fn accepts_ordinary_live_playlists_without_end_list() {
         let body = b"#EXTM3U\n#EXT-X-TARGETDURATION:2\n#EXTINF:2,\none.ts\n";
-        assert_eq!(
-            plan_hls_media_playlist(BASE_URL, body).err(),
-            Some(ManifestError::UnsupportedPlaylist)
-        );
+        let plan = plan_hls_media_playlist(BASE_URL, body)
+            .expect("ordinary live playlists remain supported");
+        assert!(plan.is_live);
+        assert!(!plan.end_list);
     }
 
     #[test]

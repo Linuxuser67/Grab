@@ -328,7 +328,7 @@ enum Tracks {
         subtitle_language: Option<String>,
     },
     Dash {
-        video: DashRepresentationPlan,
+        video: Box<DashRepresentationPlan>,
         audio: Option<Box<DashRepresentationPlan>>,
         subtitle: Option<Box<DashRepresentationPlan>>,
         subtitle_language: Option<String>,
@@ -981,7 +981,7 @@ async fn transfer_static_manifest_tracks(
             if !fetch_and_write_dash_track(ManifestDashTrackTransfer {
                 client,
                 staging,
-                plan: video,
+                plan: video.as_ref(),
                 directory: video_dir,
                 filename: "video-track.mp4",
                 destination,
@@ -1618,7 +1618,7 @@ pub(crate) async fn run_manifest_download(
         }
     } else if live_dash {
         let (video_plan, audio_plan) = match &tracks {
-            Tracks::Dash { video, audio, .. } => (Some(video), audio.as_deref()),
+            Tracks::Dash { video, audio, .. } => (Some(video.as_ref()), audio.as_deref()),
             Tracks::DashLiveOffline { .. } => (None, None),
             Tracks::Hls { .. } => {
                 return Err(ManifestRunError::Failed(
@@ -2129,7 +2129,7 @@ async fn resolve_tracks(
                 .as_ref()
                 .and_then(|track| track.representation.language.clone());
             Ok(Tracks::Dash {
-                video: *video,
+                video,
                 audio,
                 subtitle,
                 subtitle_language,

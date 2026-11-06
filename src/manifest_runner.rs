@@ -3387,10 +3387,10 @@ async fn resolve_dash_segment_base_resources(
                 let child_node =
                     parse_child_segment_index(index, &child, &child_bytes, media_resource_length)
                         .map_err(|error| {
-                            ManifestRunError::Unsupported(format!(
-                                "The DASH child SIDX is unsupported: {error}"
-                            ))
-                        })?;
+                        ManifestRunError::Unsupported(format!(
+                            "The DASH child SIDX is unsupported: {error}"
+                        ))
+                    })?;
                 total_entry_count = total_entry_count
                     .checked_add(child_node.entries.len())
                     .filter(|count| *count <= MAX_DASH_SIDX_SEGMENTS)

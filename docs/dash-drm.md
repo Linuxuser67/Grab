@@ -49,11 +49,13 @@ preferences. Grab stores only the file path in GSettings and reads device
 material inside the short-lived PlayReady worker.
 
 The parent process retains network transport, host validation, proxy policy,
-and bounded HTTPS license requests. The worker performs device verification,
-challenge creation, and response parsing. PlayReady GUID KIDs are converted to
-ISO Common Encryption byte order before the existing fragment KID map is
-populated. Only keys matching selected media samples are retained in
-zeroizing storage. This process boundary is not an OS sandbox.
+and bounded HTTPS license requests, including the PlayReady SOAP
+`AcquireLicense` action header. The worker performs device verification,
+challenge creation, and response parsing. The PlayReady CDM normalizes
+GUID-layout KIDs to ISO Common Encryption byte order before returning them;
+Grab preserves that byte order when matching fragment sample KIDs. Retrieved
+content-key allocations are moved into zeroizing storage immediately. This
+process boundary is not an OS sandbox.
 
 PlayReady licenses requiring custom authorization headers, DASHIF authorization
 URL workflows, multiple WRMHEADER records, or non-standard challenge formats

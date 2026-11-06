@@ -174,16 +174,86 @@ fn decode_bounded_protection_data(encoded: &str, label: &str) -> Result<Vec<u8>,
     Ok(decoded)
 }
 
-fn validate_playready_pssh(pssh: &[u8]) -> Result<(), String> {
+fn playready_object_from_pssh(pssh: &[u8]) -> Result<&[u8], String> {
     crate::drm::validate_pssh(pssh, ProtectionSystem::PlayReady)?;
-    let parsed =
-        Pssh::from_bytes(pssh).map_err(|_| "DASH PlayReady PSSH is malformed".to_string())?;
-    if parsed.wrm_headers().len() != 1 {
-        return Err(
-            "Native DASH PlayReady supports exactly one WRMHEADER per PSSH".to_string(),
+    let invalid = || "DASH PlayReady PSSH data is malformed".to_string();
+    let version = *pssh.get(8).ok_or_else(invalid)?;
+    let mut offset = 28_usize;
+    if version == 1 {
+        let count_end = offset.checked_add(4).ok_or_else(invalid)?;
+        let kid_count = u32::from_be_bytes(
+            pssh.get(offset..count_end)
+                .ok_or_else(invalid)?
+                .try_into()
+                .map_err(|_| invalid())?,
         );
+        let kid_bytes = usize::try_from(kid_count)
+            .ok()
+            .and_then(|count| count.checked_mul(16))
+            .ok_or_else(invalid)?;
+        offset = count_end.checked_add(kid_bytes).ok_or_else(invalid)?;
+    }
+    let size_end = offset.checked_add(4).ok_or_else(invalid)?;
+    let data_size = u32::from_be_bytes(
+        pssh.get(offset..size_end)
+            .ok_or_else(invalid)?
+            .try_into()
+            .map_err(|_| invalid())?,
+    );
+    let data_len = usize::try_from(data_size).map_err(|_| invalid())?;
+    let data_end = size_end.checked_add(data_len).ok_or_else(invalid)?;
+    if data_end != pssh.len() {
+        return Err(invalid());
+    }
+    Ok(&pssh[size_end..data_end])
+}
+
+fn validate_playready_pro(pro: &[u8]) -> Result<(), String> {
+    let invalid = || "DASH PlayReady PRO must contain exactly one WRMHEADER record".to_string();
+    let declared_size = u32::from_le_bytes(
+        pro.get(..4)
+            .ok_or_else(invalid)?
+            .try_into()
+            .map_err(|_| invalid())?,
+    );
+    if usize::try_from(declared_size).ok() != Some(pro.len()) {
+        return Err(invalid());
+    }
+    let record_count = u16::from_le_bytes(
+        pro.get(4..6)
+            .ok_or_else(invalid)?
+            .try_into()
+            .map_err(|_| invalid())?,
+    );
+    let record_type = u16::from_le_bytes(
+        pro.get(6..8)
+            .ok_or_else(invalid)?
+            .try_into()
+            .map_err(|_| invalid())?,
+    );
+    let record_len = u16::from_le_bytes(
+        pro.get(8..10)
+            .ok_or_else(invalid)?
+            .try_into()
+            .map_err(|_| invalid())?,
+    );
+    if record_count != 1
+        || record_type != 1
+        || usize::from(record_len) != pro.len().saturating_sub(10)
+    {
+        return Err(invalid());
+    }
+
+    let parsed = Pssh::from_bytes(pro)
+        .map_err(|_| "DASH PlayReady PRO is malformed".to_string())?;
+    if parsed.wrm_headers().len() != 1 {
+        return Err(invalid());
     }
     Ok(())
+}
+
+fn validate_playready_pssh(pssh: &[u8]) -> Result<(), String> {
+    validate_playready_pro(playready_object_from_pssh(pssh)?)
 }
 
 fn playready_pssh_from_descriptor(
@@ -223,13 +293,7 @@ fn playready_pssh_from_descriptor(
         return Ok(None);
     };
     let pro = decode_bounded_protection_data(encoded_pro, "PlayReady PRO")?;
-    let parsed =
-        Pssh::from_bytes(&pro).map_err(|_| "DASH PlayReady PRO is malformed".to_string())?;
-    if parsed.wrm_headers().len() != 1 {
-        return Err(
-            "Native DASH PlayReady supports exactly one WRMHEADER per PRO".to_string(),
-        );
-    }
+    validate_playready_pro(&pro)?;
 
     let pssh_len = PLAYREADY_PSSH_FIXED_BYTES
         .checked_add(pro.len())
@@ -280,14 +344,6 @@ pub(crate) fn playready_pssh_from_scopes(
         }
     }
     Ok(selected)
-}
-
-/// Convert a PlayReady GUID-layout KID into ISO Common Encryption UUID byte order.
-pub(crate) fn playready_kid_to_cenc(mut kid: [u8; 16]) -> [u8; 16] {
-    kid[..4].reverse();
-    kid[4..6].reverse();
-    kid[6..8].reverse();
-    kid
 }
 
 /// Resolve ClearKey or PlayReady license URLs across inherited DASH protection scopes.
@@ -974,6 +1030,33 @@ mod tests {
 
     #[test]
     #[test]
+    fn rejects_playready_pro_with_extra_records_or_trailing_bytes() {
+        let valid = playready_pro();
+        let descriptor = |pro: Vec<u8>| dash_mpd_core::ContentProtection {
+            schemeIdUri: PLAYREADY_SCHEME.to_string(),
+            msprpro: Some(dash_mpd_core::MsprPro {
+                content: Some(STANDARD.encode(pro)),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+
+        let mut extra_record = valid.clone();
+        extra_record[4..6].copy_from_slice(&2_u16.to_le_bytes());
+        assert!(
+            playready_pssh_from_scopes(&[&[descriptor(extra_record)]]).is_err(),
+            "unexpected extra PRO record must fail closed"
+        );
+
+        let mut trailing_bytes = valid;
+        trailing_bytes.push(0);
+        assert!(
+            playready_pssh_from_scopes(&[&[descriptor(trailing_bytes)]]).is_err(),
+            "PRO trailing bytes must fail closed"
+        );
+    }
+
+    #[test]
     fn rejects_conflicting_playready_psshs_in_one_scope() {
         let first = playready_pro();
         let mut second = playready_pro();
@@ -1094,21 +1177,6 @@ mod tests {
                 license_url_from_scopes(&[std::slice::from_ref(&insecure)], &manifest).is_err()
             );
         }
-    }
-
-    #[test]
-    fn playready_key_ids_convert_to_iso_cenc_byte_order() {
-        let playready_kid = [
-            0x33, 0x22, 0x11, 0x00, 0x55, 0x44, 0x77, 0x66, 0x88, 0x99, 0xaa, 0xbb, 0xcc, 0xdd,
-            0xee, 0xff,
-        ];
-        assert_eq!(
-            playready_kid_to_cenc(playready_kid),
-            [
-                0x00, 0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88, 0x99, 0xaa, 0xbb, 0xcc,
-                0xdd, 0xee, 0xff,
-            ]
-        );
     }
 
     #[test]

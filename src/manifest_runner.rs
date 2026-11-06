@@ -3573,7 +3573,9 @@ async fn fetch_and_write_dash_track(
                     zeroize::Zeroizing<[u8; 16]>,
                 > = std::collections::BTreeMap::new();
                 for key in keys {
-                    let kid = crate::dash_drm::playready_kid_to_cenc(key.kid);
+                    // playready::cdm::KeyId::from_uuid normalizes the GUID fields
+                    // into ISO/CENC byte order before returning the key from the CDM.
+                    let kid = key.kid;
                     if required_kids.contains(&kid)
                         && accepted.insert(kid, key.key).is_some()
                     {

@@ -33,6 +33,8 @@ const MAX_CHALLENGE_BYTES: usize = 128 * 1024;
 const MAX_LICENSE_RESPONSE_BYTES: usize = 64 * 1024;
 const MAX_LICENSE_KEYS: usize = 64;
 const LICENSE_REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
+const PLAYREADY_SOAP_ACTION: &str =
+    "http://schemas.microsoft.com/DRM/2007/03/protocols/AcquireLicense";
 const WORKER_TIMEOUT: Duration = Duration::from_secs(60);
 const WORKER_EXIT_TIMEOUT: Duration = Duration::from_secs(5);
 
@@ -88,7 +90,7 @@ impl WorkerFailure {
 
 /// One PlayReady content key, held in zeroizing memory.
 pub(crate) struct PlayReadyKey {
-    /// The 16-byte key identifier in PlayReady GUID byte order.
+    /// The 16-byte key identifier in ISO Common Encryption byte order.
     pub(crate) kid: [u8; 16],
     /// The 16-byte AES content key. It is zeroized when dropped.
     pub(crate) key: Zeroizing<[u8; 16]>,
@@ -229,6 +231,7 @@ async fn acquire_keys_with_child(
             .post(license_url.clone())
             .timeout(LICENSE_REQUEST_TIMEOUT)
             .header(reqwest::header::CONTENT_TYPE, "text/xml; charset=utf-8")
+            .header("SOAPAction", PLAYREADY_SOAP_ACTION)
             .body(challenge.to_string())
             .send(),
     )
@@ -400,7 +403,10 @@ fn process_worker<R: BufRead, W: Write>(
     let mut output = Vec::with_capacity(keys.len());
     for (kid, key) in keys {
         let kid: [u8; 16] = kid.into();
-        let key = copy_content_key(key.as_ref())?;
+        // Consume the crate's ordinary Box allocation into zeroizing storage
+        // before copying the 128-bit key into the worker protocol type.
+        let key_bytes: Zeroizing<Box<[u8]>> = Zeroizing::new(key.into());
+        let key = copy_content_key(&key_bytes)?;
         output.push(WorkerKey { kid, key });
     }
     write_sync_frame(writer, &WorkerResponse::Keys { keys: output })

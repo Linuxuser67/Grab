@@ -131,9 +131,11 @@ audio tracks. The Advanced → Media preferences page accepts a user-selected
 `.prd` device file; only its path is stored in GSettings. DASH planning
 accepts bounded PlayReady `cenc:pssh` or `mspr:pro` initialization data and
 an explicit HTTPS DASHIF `Laurl`. The parent uses Grab's guarded reqwest
-client for the license exchange, and the worker's PlayReady GUID KIDs are
-converted to ISO Common Encryption UUID byte order before they are matched
-against fragment sample KIDs. The existing shared `DrmKeyMap` and CENC/CBCS
+client for the license exchange, including the standard PlayReady SOAP
+`AcquireLicense` action header. The PlayReady crate normalizes returned KIDs
+to ISO Common Encryption UUID byte order, which Grab preserves when matching
+fragment sample KIDs. Retrieved content-key allocations are moved into
+zeroizing storage immediately. The existing shared `DrmKeyMap` and CENC/CBCS
 decryptor handle key lookup and sample decryption without a second decryptor.
 
 HLS CMAF is the next PlayReady integration target. HLS PlayReady, dynamic or

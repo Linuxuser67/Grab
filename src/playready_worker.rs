@@ -7,7 +7,7 @@
 use std::collections::BTreeSet;
 use std::ffi::OsStr;
 use std::fs;
-use std::io::{self, BufRead, BufReader, BufWriter, Write};
+use std::io::{self, BufRead, BufReader, BufWriter, Read as _, Write};
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::time::Duration;
@@ -137,16 +137,13 @@ pub(crate) fn run_worker() -> i32 {
 ///
 /// Returns an error when the device, PSSH, license endpoint, worker exchange,
 /// or bounded license response is invalid.
-pub async fn acquire_keys(
+pub(crate) async fn acquire_keys(
     client: &reqwest::Client,
     device_path: &Path,
     pssh: &[u8],
     license_url: &Url,
 ) -> Result<Vec<PlayReadyKey>, String> {
     crate::drm::validate_pssh(pssh, crate::drm::ProtectionSystem::PlayReady)?;
-    if device_path.as_os_str().as_encoded_bytes().len() > MAX_DEVICE_PATH_BYTES {
-        return Err("The PlayReady device path exceeds its size limit".to_string());
-    }
     if pssh.len() > crate::drm::MAX_PSSH_BYTES {
         return Err("The PlayReady PSSH exceeds its size limit".to_string());
     }
@@ -172,6 +169,24 @@ pub async fn acquire_keys(
         .spawn()
         .map_err(|_| "Could not start the PlayReady CDM worker".to_string())?;
 
+    let result =
+        acquire_keys_with_child(client, device_path, pssh, license_url, &mut child).await;
+    if result.is_err() {
+        if child.try_wait().await.ok().flatten().is_none() {
+            let _ = child.start_kill();
+        }
+        let _ = tokio::time::timeout(WORKER_EXIT_TIMEOUT, child.wait()).await;
+    }
+    result
+}
+
+async fn acquire_keys_with_child(
+    client: &reqwest::Client,
+    device_path: &Path,
+    pssh: &[u8],
+    license_url: &Url,
+    child: &mut tokio::process::Child,
+) -> Result<Vec<PlayReadyKey>, String> {
     let mut child_stdin = child
         .stdin
         .take()
@@ -251,7 +266,9 @@ pub async fn acquire_keys(
             .len()
             .checked_add(chunk.len())
             .filter(|length| *length <= MAX_LICENSE_RESPONSE_BYTES)
-            .ok_or_else(|| "The PlayReady license response exceeds its size limit".to_string())?;
+            .ok_or_else(|| {
+                "The PlayReady license response exceeds its size limit".to_string()
+            })?;
         response_bytes.extend_from_slice(&chunk);
         debug_assert_eq!(response_bytes.len(), next_len);
     }
@@ -316,11 +333,24 @@ fn process_worker<R: BufRead, W: Write>(
         return Err(WorkerFailure::Protocol);
     };
 
-    let metadata = fs::metadata(&device_path).map_err(|_| WorkerFailure::InvalidDevice)?;
+    let device_file = fs::File::open(&device_path).map_err(|_| WorkerFailure::InvalidDevice)?;
+    let metadata = device_file
+        .metadata()
+        .map_err(|_| WorkerFailure::InvalidDevice)?;
     if !metadata.is_file() || metadata.len() > MAX_DEVICE_FILE_BYTES {
         return Err(WorkerFailure::InvalidDevice);
     }
-    let device = Device::from_prd(&device_path).map_err(|_| WorkerFailure::InvalidDevice)?;
+    let capacity =
+        usize::try_from(metadata.len()).map_err(|_| WorkerFailure::InvalidDevice)?;
+    let mut device_bytes = Zeroizing::new(Vec::with_capacity(capacity));
+    let mut bounded_device_file = device_file.take(MAX_DEVICE_FILE_BYTES + 1);
+    bounded_device_file
+        .read_to_end(&mut device_bytes)
+        .map_err(|_| WorkerFailure::InvalidDevice)?;
+    if device_bytes.len() as u64 > MAX_DEVICE_FILE_BYTES {
+        return Err(WorkerFailure::InvalidDevice);
+    }
+    let device = Device::from_bytes(&device_bytes).map_err(|_| WorkerFailure::InvalidDevice)?;
     device.verify().map_err(|_| WorkerFailure::InvalidDevice)?;
 
     let pssh_bytes = Zeroizing::new(

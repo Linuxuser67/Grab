@@ -116,10 +116,28 @@ decryption. The shared metadata layer recognizes DASH Widevine PSSH and HLS
 Widevine/PlayReady/FairPlay signalling, but non-identity providers remain on
 extractor fallback until an audited CDM path is available.
 
-Implement PlayReady first using the maintained `playready 0.4.x` API in a
-short-lived worker. Its dependency graph must remain on the patched
-`crypto-bigint >= 0.7.6` line. The previous `playready 0.3.x` dependency
-resolved `crypto-bigint 0.5.5`, which is affected by RUSTSEC-2026-0387.
+The first PlayReady worker increment is implemented using the
+maintained `playready 0.4.x` API. Grab launches its own executable in a
+short-lived child-process mode; the parent retains HTTPS transport and its
+existing reqwest network policy, while the child loads and verifies a
+provisioned `.prd` device, accepts one validated PlayReady PSSH/WRMHEADER,
+creates a challenge, and processes the bounded license response. IPC is
+length-bounded JSON Lines; device paths, PSSH data, challenges, responses, and
+keys are not placed in argv or logs. Key material crosses the pipe in
+zeroizing buffers and is returned as zeroizing 128-bit values. This is a
+process-lifetime boundary, not an OS sandbox. The worker is not yet wired into
+manifest planning or native decryption, so DASH and HLS PlayReady media still
+use the extractor fallback.
+
+The shared `DrmKeyMap` now owns zeroizing KID-to-key storage for the existing
+DASH ClearKey path and the PlayReady worker output. Next, integrate PlayReady
+license URL and device-path selection into DASH planning and route the resulting
+keys through the existing CENC/CBCS MP4 decryptor; only after that should the
+same key path be connected to HLS CMAF.
+
+Keep the dependency graph on the patched `crypto-bigint >= 0.7.6` line. The
+previous `playready 0.3.x` dependency resolved `crypto-bigint 0.5.5`, which
+is affected by RUSTSEC-2026-0387.
 
 Do not add the current Rust Widevine CDM crates while they require
 `rsa 0.9.x`: both `widevine 0.1.0` and `rswidevine 0.1.1` resolve
@@ -134,7 +152,7 @@ Apple-specific application key handling rather than the Widevine or PlayReady
 CDM protocol. Do not extract browser secrets or log license challenges,
 license responses, content keys, or device material.
 
-Acceptance: validated protocol-specific initialization data mapped to a shared
+Acceptance: validated protocol-specific initialization data mapped to a
 track-scoped KID/key model; exact CENC/CBCS sample auxiliary-data validation;
 bounded worker IPC, license responses, and resource parsing; zeroizing parent
 key storage; no key leakage into logs or argv; and known-answer fixtures for

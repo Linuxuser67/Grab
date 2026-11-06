@@ -2242,7 +2242,7 @@ three.m4s
             })
         );
 
-        let interrupted = b"#EXTM3U\n#EXTINF:1,\nmedia.mp4\n#EXTINF:1,\n#EXT-X-BYTERANGE:4@0\nmedia.mp4\n#EXTINF:1,\nother.mp4\n#EXTINF:1,\n#EXT-X-BYTERANGE:4\nmedia.mp4\n#EXT-X-ENDLIST\n";
+        let interrupted = b"#EXTM3U\n#EXT-X-TARGETDURATION:4\n#EXTINF:1,\nmedia.mp4\n#EXTINF:1,\n#EXT-X-BYTERANGE:4@0\nmedia.mp4\n#EXTINF:1,\nother.mp4\n#EXTINF:1,\n#EXT-X-BYTERANGE:4\nmedia.mp4\n#EXT-X-ENDLIST\n";
         assert_eq!(
             plan_hls_media_playlist(BASE_URL, interrupted).err(),
             Some(ManifestError::MissingByteRangeOffset)
@@ -2648,6 +2648,7 @@ one.m4s
         );
 
         let fairplay = br#"#EXTM3U
+#EXT-X-TARGETDURATION:4
 #EXT-X-KEY:METHOD=SAMPLE-AES,URI="skd://asset",KEYFORMAT="com.apple.streamingkeydelivery"
 #EXTINF:2,
 one.ts
@@ -2706,7 +2707,7 @@ one.ts
         );
 
         let insecure_body =
-            b"#EXTM3U\n#EXTINF:2,\nhttp://cdn.example.test/one.ts\n#EXT-X-ENDLIST\n";
+            b"#EXTM3U\n#EXT-X-TARGETDURATION:4\n#EXTINF:2,\nhttp://cdn.example.test/one.ts\n#EXT-X-ENDLIST\n";
         assert_eq!(
             plan_hls_media_playlist(BASE_URL, insecure_body).err(),
             Some(ManifestError::UnsupportedResourceUrl)

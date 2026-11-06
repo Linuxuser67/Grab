@@ -740,7 +740,11 @@ async fn prepare_manifest_attempt(
                 .protections
                 .first()
                 .or_else(|| audio.as_ref().and_then(|track| track.protections.first()))
-                .or_else(|| subtitle.as_ref().and_then(|track| track.protections.first()));
+                .or_else(|| {
+                    subtitle
+                        .as_ref()
+                        .and_then(|track| track.protections.first())
+                });
             if let Some(protection) = protection {
                 return Err(ManifestRunError::Unsupported(format!(
                     "Native HLS decryption is not available yet ({})",

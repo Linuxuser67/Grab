@@ -31,7 +31,6 @@ const MAX_LICENSE_RESPONSE_BYTES: usize = 64 * 1024;
 const MAX_LICENSE_KEYS: usize = 64;
 const LICENSE_REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 
-
 /// Resolve inherited DASH ContentProtection descriptors into one supported
 /// Common Encryption scheme and one default KID.
 ///

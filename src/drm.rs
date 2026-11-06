@@ -601,7 +601,7 @@ segment.ts
 
         let invalid_reset = std::str::from_utf8(body)
             .expect("test playlist is UTF-8")
-            .replace("METHOD=NONE", "METHOD=NONE,URI=\\"ignored\\"");
+            .replace("METHOD=NONE", "METHOD=NONE,URI=\"ignored\"");
         assert!(
             validate_hls_keyformat_multiplexing(invalid_reset.as_bytes()).is_err(),
             "METHOD=NONE must not carry attributes"

@@ -728,8 +728,7 @@ async fn prepare_manifest_attempt(
                     .and_then(|track| track.representation.license_url.as_ref())
                     .ok_or_else(|| {
                         ManifestRunError::Unsupported(
-                            "The selected DASH audio representation has no license URL"
-                                .to_string(),
+                            "The selected DASH audio representation has no license URL".to_string(),
                         )
                     })?;
                 guard_manifest_child_url(&job.source.url, license_url, &mut guarded_child_hosts)?;
@@ -2299,8 +2298,7 @@ fn validate_playready_configuration(
 
     let Some(device_path) = device_path else {
         return Err(ManifestRunError::Unsupported(
-            "Select a valid PlayReady .prd device file in Advanced → Media preferences"
-                .to_string(),
+            "Select a valid PlayReady .prd device file in Advanced → Media preferences".to_string(),
         ));
     };
     if !device_path.is_file()

@@ -1134,7 +1134,7 @@ pub(super) async fn run_live_dash_tracks(
         )
         .await;
         let refreshed = match refreshed {
-            Ok(Tracks::Dash { video, audio, .. }) => (video, audio.map(|audio| *audio)),
+            Ok(Tracks::Dash { video, audio, .. }) => (*video, audio.map(|audio| *audio)),
             Ok(_) => {
                 finish_capture!(if video.state.segments.is_empty() {
                     DashLiveCaptureOutcome::Discard

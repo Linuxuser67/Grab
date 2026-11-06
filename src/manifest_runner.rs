@@ -4162,6 +4162,13 @@ mod tests {
         );
     }
 
+    #[test]
+    fn sample_aes_iv_rejects_non_hexadecimal_bytes() {
+        assert!(
+            hls_sample_aes_iv(Some("éééééééééééééééé"), 0).is_err()
+        );
+    }
+
     fn valid_transport_stream(packet_count: usize, continuity_seed: u8) -> Vec<u8> {
         let mut bytes = vec![0xff; packet_count * mpeg_ts::ts::TS_PACKET_SIZE];
         for (index, packet) in bytes

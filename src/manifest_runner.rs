@@ -681,7 +681,9 @@ async fn prepare_manifest_attempt(
                         .to_string(),
                 ));
             }
-            if video.representation.encryption.is_some_and(|encryption| encryption.system != crate::dash_drm::ProtectionSystem::ClearKey) {
+            if video.representation.encryption.is_some_and(|encryption| {
+                encryption.system != crate::dash_drm::ProtectionSystem::ClearKey
+            }) {
                 return Err(ManifestRunError::Unsupported(
                     "Native DASH Widevine decryption is not available yet".to_string(),
                 ));

@@ -322,8 +322,8 @@ struct Resource {
 
 enum Tracks {
     Hls {
-        video: HlsPlan,
-        audio: Option<HlsPlan>,
+        video: Box<HlsPlan>,
+        audio: Option<Box<HlsPlan>>,
         subtitle: Option<Box<HlsPlan>>,
         subtitle_language: Option<String>,
     },
@@ -344,7 +344,7 @@ impl Tracks {
             Self::Hls { video, audio, .. } => {
                 video.is_destination_assemblable_candidate()
                     && audio
-                        .as_ref()
+                        .as_deref()
                         .is_none_or(HlsPlan::is_destination_assemblable_candidate)
             }
             Self::Dash { .. } => true,
@@ -882,7 +882,7 @@ async fn transfer_static_manifest_tracks(
                 if !fetch_and_write_hls_track(ManifestHlsTrackTransfer {
                     client,
                     staging,
-                    plan: video,
+                    plan: video.as_ref(),
                     directory: video_dir,
                     filename: "video-track.ts",
                     destination,
@@ -900,7 +900,7 @@ async fn transfer_static_manifest_tracks(
                     match fetch_and_write_hls_track(ManifestHlsTrackTransfer {
                         client,
                         staging,
-                        plan: audio,
+                        plan: audio.as_ref(),
                         directory: audio_dir,
                         filename: "audio-track.ts",
                         destination,
@@ -920,7 +920,7 @@ async fn transfer_static_manifest_tracks(
             } else {
                 if !fetch_resources(
                     client,
-                    hls_resources(video),
+                    hls_resources(video.as_ref()),
                     video_dir,
                     HLS_STATIC_RESOURCE_CONNECTIONS,
                     tx,
@@ -934,7 +934,7 @@ async fn transfer_static_manifest_tracks(
                 if let Some(audio) = audio
                     && !fetch_resources(
                         client,
-                        hls_resources(audio),
+                        hls_resources(audio.as_ref()),
                         audio_dir,
                         HLS_STATIC_RESOURCE_CONNECTIONS,
                         tx,
@@ -945,11 +945,11 @@ async fn transfer_static_manifest_tracks(
                 {
                     return Ok(false);
                 }
-                write_playlist(video_dir, video).await?;
-                decrypt_hls_sample_aes_segments(video_dir, video).await?;
+                write_playlist(video_dir, video.as_ref()).await?;
+                decrypt_hls_sample_aes_segments(video_dir, video.as_ref()).await?;
                 if let Some(audio) = audio {
-                    write_playlist(audio_dir, audio).await?;
-                    decrypt_hls_sample_aes_segments(audio_dir, audio).await?;
+                    write_playlist(audio_dir, audio.as_ref()).await?;
+                    decrypt_hls_sample_aes_segments(audio_dir, audio.as_ref()).await?;
                 }
             }
             if let Some(subtitle) = subtitle {
@@ -1577,8 +1577,8 @@ pub(crate) async fn run_manifest_download(
             item_id: job.item_id,
             staging: &staging,
             finish_only: finish_requested,
-            video,
-            audio: audio.as_ref(),
+            video: video.as_ref(),
+            audio: audio.as_deref(),
             video_dir: &video_dir,
             audio_dir: &audio_dir,
             concurrency,
@@ -2040,7 +2040,7 @@ async fn resolve_tracks(
         ManifestDownloadPlan::HlsMedia(video) => {
             guard_hls_resources(&source.url, &video, guarded_child_hosts)?;
             Ok(Tracks::Hls {
-                video: *video,
+                video,
                 audio: None,
                 subtitle: None,
                 subtitle_language: None,
@@ -2092,8 +2092,8 @@ async fn resolve_tracks(
                 ));
             }
             Ok(Tracks::Hls {
-                video,
-                audio,
+                video: Box::new(video),
+                audio: audio.map(Box::new),
                 subtitle,
                 subtitle_language,
             })

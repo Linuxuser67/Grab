@@ -2537,12 +2537,12 @@ async fn decrypt_hls_playready_track(
         let init_path = directory.join(&init_resource.filename);
         let init = crate::bounded_file::read_regular_file_bounded(&init_path, 16 * 1024 * 1024)
             .map_err(|error| format!("Could not read HLS CMAF initialization: {error}"))?;
-        let encryption = crate::dash_drm_mp4::hls_encryption_from_init(
+        let encryption = crate::dash_drm::hls_encryption_from_init(
             &init,
             scheme,
             crate::drm::ProtectionSystem::PlayReady,
         )?;
-        let required = crate::dash_drm_mp4::required_kids_with_cancel(
+        let required = crate::dash_drm::required_kids_with_cancel(
             &resources,
             &directory,
             encryption,
@@ -2579,7 +2579,7 @@ async fn decrypt_hls_playready_track(
     let output = directory.join(output_name);
     let task_cancelled = Arc::clone(&cancelled);
     let mut decrypt = Box::pin(tokio::task::spawn_blocking(move || {
-        crate::dash_drm_mp4::decrypt_track(
+        crate::dash_drm::decrypt_track(
             &resources,
             &directory,
             &output,

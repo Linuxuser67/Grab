@@ -47,18 +47,20 @@ struct SidxExpectation {
 pub(crate) fn parse_segment_base_index(
     index: &DashSegmentBaseIndex,
     bytes: &[u8],
-    total_length: u64,
+    index_total_length: u64,
+    media_total_length: u64,
 ) -> Result<DashSidxNode, DashError> {
     let index_end = checked_range_end(index.index_range)?;
     let initialization_end = checked_range_end(index.initialization_range)?;
     if index.index_range.length == 0
         || index.index_range.length > MAX_SEGMENT_INDEX_BYTES
         || u64::try_from(bytes.len()).ok() != Some(index.index_range.length)
-        || index_end > total_length
+        || index_end > index_total_length
         || index.initialization_range.length == 0
         || index.initialization_range.length > crate::manifest_writer::MAX_RESOURCE_BYTES
-        || initialization_end > total_length
-        || ranges_overlap(index.index_range, index.initialization_range)?
+        || initialization_end > media_total_length
+        || (!index.index_is_external
+            && ranges_overlap(index.index_range, index.initialization_range)?)
     {
         return Err(DashError::InvalidSegment);
     }
@@ -66,9 +68,11 @@ pub(crate) fn parse_segment_base_index(
     parse_sidx_node(SidxNodeContext {
         index_range: index.index_range,
         bytes,
-        total_length,
+        index_total_length,
+        reference_total_length: media_total_length,
+        index_is_external: index.index_is_external,
         initialization_range: index.initialization_range,
-        manifest_timescale: index.timescale,
+        manifest_timescale: Some(index.timescale),
         expectation: None,
         index_range_exact: index.index_range_exact,
         require_exact_box: false,
@@ -101,7 +105,9 @@ pub(crate) fn parse_child_segment_index(
     parse_sidx_node(SidxNodeContext {
         index_range: child.range,
         bytes,
-        total_length,
+        index_total_length: total_length,
+        reference_total_length: total_length,
+        index_is_external: false,
         initialization_range: index.initialization_range,
         manifest_timescale: None,
         expectation: Some(expectation),
@@ -119,7 +125,9 @@ pub(crate) fn validate_segment_base_sidx_ranges(
 ) -> Result<(), DashError> {
     let mut ranges = Vec::with_capacity(child_indexes.len() + media.len() + 2);
     ranges.push(index.initialization_range);
-    ranges.push(index.index_range);
+    if !index.index_is_external {
+        ranges.push(index.index_range);
+    }
     ranges.extend_from_slice(child_indexes);
     ranges.extend_from_slice(media);
 
@@ -162,7 +170,9 @@ pub(crate) fn dash_sidx_media_resource(
 struct SidxNodeContext<'a> {
     index_range: ManifestByteRange,
     bytes: &'a [u8],
-    total_length: u64,
+    index_total_length: u64,
+    reference_total_length: u64,
+    index_is_external: bool,
     initialization_range: ManifestByteRange,
     manifest_timescale: Option<u64>,
     expectation: Option<SidxExpectation>,
@@ -176,7 +186,9 @@ fn parse_sidx_node(context: SidxNodeContext<'_>) -> Result<DashSidxNode, DashErr
     let SidxNodeContext {
         index_range,
         bytes,
-        total_length,
+        index_total_length,
+        reference_total_length,
+        index_is_external,
         initialization_range,
         manifest_timescale,
         expectation,
@@ -188,7 +200,7 @@ fn parse_sidx_node(context: SidxNodeContext<'_>) -> Result<DashSidxNode, DashErr
     if index_range.length == 0
         || index_range.length > MAX_SEGMENT_INDEX_BYTES
         || u64::try_from(bytes.len()).ok() != Some(index_range.length)
-        || index_end > total_length
+        || index_end > index_total_length
     {
         return Err(DashError::InvalidSegment);
     }
@@ -247,12 +259,16 @@ fn parse_sidx_node(context: SidxNodeContext<'_>) -> Result<DashSidxNode, DashErr
         return Err(DashError::UnsupportedAddressing);
     }
 
-    let mut reference_offset = index_range
-        .offset
-        .checked_add(sidx_end)
-        .and_then(|offset| offset.checked_add(data.first_offset))
-        .ok_or(DashError::InvalidSegment)?;
-    if index_range_exact && reference_offset < index_end {
+    let mut reference_offset = if index_is_external {
+        data.first_offset
+    } else {
+        index_range
+            .offset
+            .checked_add(sidx_end)
+            .and_then(|offset| offset.checked_add(data.first_offset))
+            .ok_or(DashError::InvalidSegment)?
+    };
+    if index_range_exact && !index_is_external && reference_offset < index_end {
         return Err(DashError::UnsupportedAddressing);
     }
 
@@ -265,7 +281,7 @@ fn parse_sidx_node(context: SidxNodeContext<'_>) -> Result<DashSidxNode, DashErr
         let length = u64::from(reference.referenced_size);
         let end = reference_offset
             .checked_add(length)
-            .filter(|end| *end <= total_length)
+            .filter(|end| *end <= reference_total_length)
             .ok_or(DashError::InvalidSegment)?;
         let range = ManifestByteRange {
             offset: reference_offset,
@@ -342,7 +358,7 @@ pub(crate) fn resolve_segment_base_index(
     bytes: &[u8],
     total_length: u64,
 ) -> Result<Vec<DashResource>, DashError> {
-    let node = parse_segment_base_index(index, bytes, total_length)?;
+    let node = parse_segment_base_index(index, bytes, total_length, total_length)?;
     let mut resources = Vec::with_capacity(node.entries.len());
     for entry in node.entries {
         let DashSidxEntry::Media(range) = entry else {
@@ -394,16 +410,21 @@ mod tests {
     fn test_index(index_bytes: &[u8]) -> DashSegmentBaseIndex {
         DashSegmentBaseIndex {
             url: Url::parse("https://cdn.example.test/path/media.mp4").expect("test media URL"),
+            index_url: Url::parse("https://cdn.example.test/path/media.mp4").expect("test index URL"),
             index_range: ManifestByteRange {
                 offset: 100,
                 length: u64::try_from(index_bytes.len()).expect("test index length"),
             },
+            index_is_external: false,
+            byte_range_template: None,
             initialization_range: ManifestByteRange {
                 offset: 0,
                 length: 100,
             },
             index_range_exact: true,
-            timescale: Some(1_000),
+            timescale: 1_000,
+            presentation_time_offset: 0,
+            period_start: std::time::Duration::ZERO,
         }
     }
 

@@ -134,8 +134,18 @@ jobs:
           # No job pushes or fetches; don't persist the token in git config.
           persist-credentials: false
       - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
-      # --locked fails when the lock would need re-resolution; read-only otherwise.
-      - run: cargo metadata --locked --format-version 1 >/dev/null
+      # Temporary PR-only lockfile refresh to capture Cargo's exact resolution.
+      - name: Generate Cargo lock and vendor metadata
+        run: |
+          cargo metadata --format-version 1 >/dev/null
+          ./build-aux/gen-cargo-sources.py
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: generated-cargo-metadata
+          path: |
+            Cargo.lock
+            cargo-sources.json
+          if-no-files-found: error
       # Run the release metadata gate on every PR, not only after a tag is published.
       - name: Check release metadata consistency
         run: ./build-aux/check-release-consistency.py

@@ -145,8 +145,7 @@ fn playready_wrm_header(pro: &[u8]) -> Result<String, String> {
         return Err(invalid());
     }
 
-    let parsed =
-        Pssh::from_bytes(pro).map_err(|_| "PlayReady Object is malformed".to_string())?;
+    let parsed = Pssh::from_bytes(pro).map_err(|_| "PlayReady Object is malformed".to_string())?;
     if parsed.wrm_headers().len() != 1 {
         return Err(invalid());
     }
@@ -161,8 +160,8 @@ fn playready_object_to_pssh(pro: &[u8]) -> Result<Vec<u8>, String> {
         .ok_or_else(|| "PlayReady Object exceeds the PSSH size limit".to_string())?;
     let data_len = u32::try_from(pro.len())
         .map_err(|_| "PlayReady Object exceeds the PSSH size limit".to_string())?;
-    let box_len = u32::try_from(pssh_len)
-        .map_err(|_| "PlayReady PSSH exceeds its size limit".to_string())?;
+    let box_len =
+        u32::try_from(pssh_len).map_err(|_| "PlayReady PSSH exceeds its size limit".to_string())?;
 
     let mut pssh = Vec::with_capacity(pssh_len);
     pssh.extend_from_slice(&box_len.to_be_bytes());
@@ -195,7 +194,9 @@ pub(crate) fn hls_license_request(pro: &[u8]) -> Result<(Vec<u8>, Url), String> 
         || authority_has_userinfo
         || url.fragment().is_some()
     {
-        return Err("HLS PlayReady LA_URL must be HTTPS without user-info or a fragment".to_string());
+        return Err(
+            "HLS PlayReady LA_URL must be HTTPS without user-info or a fragment".to_string(),
+        );
     }
     Ok((playready_object_to_pssh(pro)?, url))
 }
@@ -253,8 +254,7 @@ fn playready_la_url(header: &str) -> Result<String, String> {
                 }
             }
             Ok(Event::Text(text)) if la_url_depth == Some(depth) => {
-                let decoded = quick_xml::escape::unescape(text.as_ref())
-                    .map_err(|_| invalid())?;
+                let decoded = quick_xml::escape::unescape(text.as_ref()).map_err(|_| invalid())?;
                 let value = la_url.as_mut().ok_or_else(invalid)?;
                 value.push_str(&decoded);
                 if value.len() > 2048 {

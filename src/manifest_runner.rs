@@ -2404,12 +2404,12 @@ fn hls_playready_request(plan: &HlsPlan) -> Result<Option<HlsPlayReadyRequest>, 
         return Err("The HLS PlayReady playlist has no media segments".to_string());
     }
     for segment in &playlist.segments {
-        let key = segment
-            .key
-            .as_ref()
-            .ok_or_else(|| "The HLS PlayReady playlist changes to an unencrypted segment".to_string())?;
-        let active = crate::drm::hls_protection_from_key(key)?
-            .ok_or_else(|| "The HLS PlayReady playlist uses an unsupported identity key".to_string())?;
+        let key = segment.key.as_ref().ok_or_else(|| {
+            "The HLS PlayReady playlist changes to an unencrypted segment".to_string()
+        })?;
+        let active = crate::drm::hls_protection_from_key(key)?.ok_or_else(|| {
+            "The HLS PlayReady playlist uses an unsupported identity key".to_string()
+        })?;
         if active != *protection {
             return Err(
                 "Native HLS PlayReady requires one unchanged PlayReady Object and scheme across the track"
@@ -2417,8 +2417,7 @@ fn hls_playready_request(plan: &HlsPlan) -> Result<Option<HlsPlayReadyRequest>, 
             );
         }
     }
-    let crate::drm::HlsInitializationData::PlayReadyObject(pro) =
-        &protection.initialization_data
+    let crate::drm::HlsInitializationData::PlayReadyObject(pro) = &protection.initialization_data
     else {
         return Err("The HLS PlayReady initialization data is not a PlayReady Object".to_string());
     };
@@ -2502,8 +2501,7 @@ async fn decrypt_hls_playready_track(
         .map_err(ManifestRunError::Unsupported)?
         .ok_or_else(|| {
             ManifestRunError::Unsupported(
-                "The selected HLS track has no supported PlayReady initialization data"
-                    .to_string(),
+                "The selected HLS track has no supported PlayReady initialization data".to_string(),
             )
         })?;
     let resources: Vec<DashResource> = plan
@@ -2533,25 +2531,25 @@ async fn decrypt_hls_playready_track(
     let cancelled = Arc::new(AtomicBool::new(false));
     let scan_cancelled = Arc::clone(&cancelled);
     let mut scan = Box::pin(tokio::task::spawn_blocking(move || {
-            let init_resource = resources
-                .first()
-                .ok_or_else(|| "HLS CMAF initialization resource is missing".to_string())?;
-            let init_path = directory.join(&init_resource.filename);
-            let init = crate::bounded_file::read_regular_file_bounded(&init_path, 16 * 1024 * 1024)
-                .map_err(|error| format!("Could not read HLS CMAF initialization: {error}"))?;
-            let encryption = crate::dash_drm_mp4::hls_encryption_from_init(
-                &init,
-                scheme,
-                crate::drm::ProtectionSystem::PlayReady,
-            )?;
-            let required = crate::dash_drm_mp4::required_kids_with_cancel(
-                &resources,
-                &directory,
-                encryption,
-                &scan_cancelled,
-            )?;
-            Ok::<_, String>((resources, directory, encryption, required))
-        }));
+        let init_resource = resources
+            .first()
+            .ok_or_else(|| "HLS CMAF initialization resource is missing".to_string())?;
+        let init_path = directory.join(&init_resource.filename);
+        let init = crate::bounded_file::read_regular_file_bounded(&init_path, 16 * 1024 * 1024)
+            .map_err(|error| format!("Could not read HLS CMAF initialization: {error}"))?;
+        let encryption = crate::dash_drm_mp4::hls_encryption_from_init(
+            &init,
+            scheme,
+            crate::drm::ProtectionSystem::PlayReady,
+        )?;
+        let required = crate::dash_drm_mp4::required_kids_with_cancel(
+            &resources,
+            &directory,
+            encryption,
+            &scan_cancelled,
+        )?;
+        Ok::<_, String>((resources, directory, encryption, required))
+    }));
     let (resources, directory, encryption, required_kids) = tokio::select! {
         biased;
         _ = &mut *abort => {
@@ -4676,14 +4674,12 @@ mod tests {
         use base64::Engine as _;
         use base64::engine::general_purpose::STANDARD;
 
-        let xml = format!(
-            concat!(
-                "<WRMHEADER xmlns=\"http://schemas.microsoft.com/DRM/2007/03/PlayReadyHeader\" ",
-                "version=\"4.3.0.0\"><DATA><LA_URL>{license_url}</LA_URL>",
-                "<PROTECTINFO><KIDS><KID ALGID=\"AESCTR\" VALUE=\"{kid_suffix}\"/>",
-                "</KIDS></PROTECTINFO></DATA></WRMHEADER>"
-            )
-        );
+        let xml = format!(concat!(
+            "<WRMHEADER xmlns=\"http://schemas.microsoft.com/DRM/2007/03/PlayReadyHeader\" ",
+            "version=\"4.3.0.0\"><DATA><LA_URL>{license_url}</LA_URL>",
+            "<PROTECTINFO><KIDS><KID ALGID=\"AESCTR\" VALUE=\"{kid_suffix}\"/>",
+            "</KIDS></PROTECTINFO></DATA></WRMHEADER>"
+        ));
         let utf16: Vec<u8> = xml.encode_utf16().flat_map(u16::to_le_bytes).collect();
         let mut pro = Vec::with_capacity(10 + utf16.len());
         pro.extend_from_slice(
@@ -4706,23 +4702,24 @@ mod tests {
     }
 
     fn hls_playready_plan(playready_uri: &str, include_clear_segment: bool) -> HlsPlan {
-        let mut playlist = format!(
-            concat!(
-                "#EXTM3U\n",
-                "#EXT-X-VERSION:7\n",
-                "#EXT-X-TARGETDURATION:2\n",
-                "#EXT-X-MAP:URI=\"init.mp4\"\n",
-                "#EXT-X-KEY:METHOD=SAMPLE-AES,URI=\"{playready_uri}\",",
-                "KEYFORMAT=\"com.microsoft.playready\"\n",
-                "#EXTINF:2,\nsegment-1.m4s\n"
-            )
-        );
+        let mut playlist = format!(concat!(
+            "#EXTM3U\n",
+            "#EXT-X-VERSION:7\n",
+            "#EXT-X-TARGETDURATION:2\n",
+            "#EXT-X-MAP:URI=\"init.mp4\"\n",
+            "#EXT-X-KEY:METHOD=SAMPLE-AES,URI=\"{playready_uri}\",",
+            "KEYFORMAT=\"com.microsoft.playready\"\n",
+            "#EXTINF:2,\nsegment-1.m4s\n"
+        ));
         if include_clear_segment {
             playlist.push_str("#EXT-X-KEY:METHOD=NONE\n#EXTINF:2,\nsegment-2.m4s\n");
         }
         playlist.push_str("#EXT-X-ENDLIST\n");
-        crate::manifest::plan_hls_media_playlist("https://cdn.example.test/master.m3u8", playlist.as_bytes())
-            .expect("test static PlayReady CMAF playlist")
+        crate::manifest::plan_hls_media_playlist(
+            "https://cdn.example.test/master.m3u8",
+            playlist.as_bytes(),
+        )
+        .expect("test static PlayReady CMAF playlist")
     }
 
     #[test]
@@ -4753,16 +4750,14 @@ mod tests {
             "https://license.example.test/acquire",
             "MyIRAFVEd2aImaq7zN3u/x==",
         );
-        let rotation = format!(
-            concat!(
-                "#EXTM3U\n#EXT-X-VERSION:7\n#EXT-X-TARGETDURATION:2\n",
-                "#EXT-X-MAP:URI=\"init.mp4\"\n",
-                "#EXT-X-KEY:METHOD=SAMPLE-AES,URI=\"{first_uri}\",KEYFORMAT=\"com.microsoft.playready\"\n",
-                "#EXTINF:2,\nsegment-1.m4s\n",
-                "#EXT-X-KEY:METHOD=SAMPLE-AES,URI=\"{second_uri}\",KEYFORMAT=\"com.microsoft.playready\"\n",
-                "#EXTINF:2,\nsegment-2.m4s\n#EXT-X-ENDLIST\n"
-            )
-        );
+        let rotation = format!(concat!(
+            "#EXTM3U\n#EXT-X-VERSION:7\n#EXT-X-TARGETDURATION:2\n",
+            "#EXT-X-MAP:URI=\"init.mp4\"\n",
+            "#EXT-X-KEY:METHOD=SAMPLE-AES,URI=\"{first_uri}\",KEYFORMAT=\"com.microsoft.playready\"\n",
+            "#EXTINF:2,\nsegment-1.m4s\n",
+            "#EXT-X-KEY:METHOD=SAMPLE-AES,URI=\"{second_uri}\",KEYFORMAT=\"com.microsoft.playready\"\n",
+            "#EXTINF:2,\nsegment-2.m4s\n#EXT-X-ENDLIST\n"
+        ));
         let rotation_plan = crate::manifest::plan_hls_media_playlist(
             "https://cdn.example.test/master.m3u8",
             rotation.as_bytes(),

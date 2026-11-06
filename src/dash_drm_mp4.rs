@@ -250,10 +250,7 @@ pub(crate) fn hls_encryption_from_init(
     scheme: EncryptionScheme,
     system: crate::drm::ProtectionSystem,
 ) -> Result<DashEncryption, String> {
-    if !matches!(
-        system,
-        crate::drm::ProtectionSystem::PlayReady
-    ) {
+    if !matches!(system, crate::drm::ProtectionSystem::PlayReady) {
         return Err("Native HLS CMAF currently supports PlayReady only".to_string());
     }
     let parsed = parse_init_encryption_inner(init, scheme, None)?;
@@ -425,7 +422,10 @@ fn parse_init_encryption_inner(
     kid.copy_from_slice(kid_bytes);
     offset = kid_end;
     if is_protected != 1 || expected_default_kid.is_some_and(|expected| kid != expected) {
-        return Err("MP4 tenc protection or KID does not match the selected encryption metadata".to_string());
+        return Err(
+            "MP4 tenc protection or KID does not match the selected encryption metadata"
+                .to_string(),
+        );
     }
 
     let mut constant_iv_size = None;
@@ -2029,18 +2029,12 @@ mod tests {
             (EncryptionScheme::Cbcs, b"cbcs", 1, (1, 9)),
         ] {
             let (init, kid) = synthetic_init(fourcc, version, pattern, false);
-            let encryption = hls_encryption_from_init(
-                &init,
-                scheme,
-                crate::drm::ProtectionSystem::PlayReady,
-            )
-            .expect("HLS init should expose the tenc KID");
+            let encryption =
+                hls_encryption_from_init(&init, scheme, crate::drm::ProtectionSystem::PlayReady)
+                    .expect("HLS init should expose the tenc KID");
             assert_eq!(encryption.default_kid, kid);
             assert_eq!(encryption.scheme, scheme);
-            assert_eq!(
-                encryption.system,
-                crate::drm::ProtectionSystem::PlayReady
-            );
+            assert_eq!(encryption.system, crate::drm::ProtectionSystem::PlayReady);
             assert!(
                 parse_init_encryption(&init, encryption).is_ok(),
                 "the HLS-derived KID should satisfy the existing strict DASH parser"

@@ -34,7 +34,7 @@ const MAX_LICENSE_RESPONSE_BYTES: usize = 64 * 1024;
 const MAX_LICENSE_KEYS: usize = 64;
 const LICENSE_REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 const PLAYREADY_SOAP_ACTION: &str =
-    "http://schemas.microsoft.com/DRM/2007/03/protocols/AcquireLicense";
+    "\"http://schemas.microsoft.com/DRM/2007/03/protocols/AcquireLicense\"";
 const WORKER_TIMEOUT: Duration = Duration::from_secs(60);
 const WORKER_EXIT_TIMEOUT: Duration = Duration::from_secs(5);
 
@@ -231,7 +231,7 @@ async fn acquire_keys_with_child(
             .post(license_url.clone())
             .timeout(LICENSE_REQUEST_TIMEOUT)
             .header(reqwest::header::CONTENT_TYPE, "text/xml; charset=utf-8")
-            .header("SOAPAction", format!("\"{PLAYREADY_SOAP_ACTION}\""))
+            .header("SOAPAction", PLAYREADY_SOAP_ACTION)
             .body(challenge.to_string())
             .send(),
     )
@@ -396,16 +396,18 @@ fn process_worker<R: BufRead, W: Write>(
     let keys = cdm
         .get_keys_from_challenge_response(body.as_str())
         .map_err(|_| WorkerFailure::LicenseResponseInvalid)?;
+    // The crate returns ordinary Box allocations. Move every key into zeroizing
+    // storage before count/length checks so all early-return paths wipe the keys.
+    let keys: Vec<([u8; 16], Zeroizing<Box<[u8]>>)> = keys
+        .into_iter()
+        .map(|(kid, key)| (kid.into(), Zeroizing::new(key.into())))
+        .collect();
     if keys.is_empty() || keys.len() > MAX_LICENSE_KEYS {
         return Err(WorkerFailure::KeyMaterialInvalid);
     }
 
     let mut output = Vec::with_capacity(keys.len());
-    for (kid, key) in keys {
-        let kid: [u8; 16] = kid.into();
-        // Consume the crate's ordinary Box allocation into zeroizing storage
-        // before copying the 128-bit key into the worker protocol type.
-        let key_bytes: Zeroizing<Box<[u8]>> = Zeroizing::new(key.into());
+    for (kid, key_bytes) in keys {
         let key = copy_content_key(&key_bytes)?;
         output.push(WorkerKey { kid, key });
     }

@@ -156,7 +156,7 @@ impl DashRepresentationPlan {
         let period_start = i128::try_from(index.period_start.as_nanos()).ok()?;
         let media_offset = i128::from(index.presentation_time_offset)
             .checked_mul(1_000_000_000)?
-            .checked_div(i128::from(index.timescale))?;
+            .checked_div(i128::from(index.timescale.unwrap_or(1)))?;
         let offset = period_start.checked_sub(media_offset)?;
         Some(format_signed_nanoseconds(offset))
     }
@@ -208,7 +208,7 @@ pub(crate) struct DashSegmentBaseIndex {
     pub(crate) byte_range_template: Option<String>,
     initialization_range: ManifestByteRange,
     index_range_exact: bool,
-    timescale: u64,
+    timescale: Option<u64>,
     presentation_time_offset: u64,
     period_start: Duration,
 }
@@ -238,7 +238,7 @@ struct DashBaseIndex {
     index_range: ManifestByteRange,
     initialization_range: ManifestByteRange,
     index_range_exact: bool,
-    timescale: u64,
+    timescale: Option<u64>,
     presentation_time_offset: u64,
 }
 
@@ -1179,7 +1179,7 @@ fn stable_representation_key(identity: RepresentationIdentity<'_>) -> String {
             hash_optional_range(&mut hasher, Some(index.index_range));
             hash_optional_range(&mut hasher, Some(index.initialization_range));
             hasher.update([u8::from(index.index_range_exact)]);
-            hash_optional_number(&mut hasher, Some(index.timescale));
+            hash_optional_number(&mut hasher, index.timescale);
             hash_optional_number(&mut hasher, Some(index.presentation_time_offset));
         }
     }
@@ -1253,7 +1253,7 @@ fn stable_live_representation_key(identity: RepresentationIdentity<'_>) -> Strin
             hash_optional_range(&mut hasher, Some(index.index_range));
             hash_optional_range(&mut hasher, Some(index.initialization_range));
             hasher.update([u8::from(index.index_range_exact)]);
-            hash_optional_number(&mut hasher, Some(index.timescale));
+            hash_optional_number(&mut hasher, index.timescale);
             hash_optional_number(&mut hasher, Some(index.presentation_time_offset));
         }
     }
@@ -1359,7 +1359,7 @@ pub(crate) fn build_byte_range_url(
         return Err(DashError::UnsupportedAddressing);
     }
     if !has_query && !query.is_empty() {
-        output.push('?');
+        output.push(if output.contains('?') { '&' } else { '?' });
         output.push_str(query);
     }
     let url = Url::parse(&output).map_err(|_| DashError::UnsupportedAddressing)?;
@@ -1599,7 +1599,6 @@ fn effective_addressing(
             if ranges_overlap(index_range, initialization_range)? {
                 return Err(DashError::UnsupportedAddressing);
             }
-            let timescale = timescale.unwrap_or(1);
             let presentation_time_offset = presentation_time_offset.unwrap_or(0);
             return Ok(DashAddressing::IndexedBase(DashBaseIndex {
                 index_url: index_url.clone(),
@@ -2722,7 +2721,7 @@ mod tests {
             byte_range_template: None,
             initialization_range,
             index_range_exact,
-            timescale: 1_000,
+            timescale: Some(1_000),
             presentation_time_offset: 0,
             period_start: Duration::ZERO,
         }
@@ -2768,7 +2767,7 @@ mod tests {
             }
         );
         assert!(index.index_range_exact);
-        assert_eq!(index.timescale, 1_000);
+        assert_eq!(index.timescale, Some(1_000));
         assert_eq!(plan.resources.len(), 1);
         assert_eq!(plan.resources[0].kind, DashResourceKind::Initialization);
         assert_eq!(plan.resources[0].range, Some(index.initialization_range));
@@ -4513,7 +4512,7 @@ mod tests {
             }
         );
         assert!(index.index_is_external);
-        assert_eq!(index.timescale, 1_000);
+        assert_eq!(index.timescale, Some(1_000));
         assert_eq!(index.presentation_time_offset, 3_000);
         assert_eq!(index.period_start, Duration::from_secs(2));
         assert_eq!(plan.ffmpeg_timestamp_offset().as_deref(), Some("-1"));

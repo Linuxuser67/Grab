@@ -112,15 +112,27 @@ and unchanged WVTT and FFmpeg finalization paths.
 Keep protocol parsing separate from the shared protection-system, CDM, key
 handling, and sample-decryption layers. HLS already has identity AES-128 and
 MPEG-TS identity SAMPLE-AES handling; DASH has bounded ClearKey CENC/CBCS
-decryption. The shared metadata layer now recognizes DASH Widevine PSSH and
-HLS Widevine/PlayReady/FairPlay signaling, but those HLS providers still fall
-back until their shared CDM/decryption path is implemented.
+decryption. The shared metadata layer recognizes DASH Widevine PSSH and HLS
+Widevine/PlayReady/FairPlay signalling, but non-identity providers remain on
+extractor fallback until an audited CDM path is available.
 
-Next, add an isolated Widevine/PlayReady CDM worker and license exchange usable
-by both DASH and HLS CMAF. Keep FairPlay Streaming separate because its
-SAMPLE-AES and skd URI flow uses Apple-specific application key handling rather
-than the Widevine or PlayReady CDM protocol. Do not extract browser secrets or
-log license challenges, license responses, content keys, or device material.
+Implement PlayReady first using the maintained `playready 0.4.x` API in a
+short-lived worker. Its dependency graph must remain on the patched
+`crypto-bigint >= 0.7.6` line. The previous `playready 0.3.x` dependency
+resolved `crypto-bigint 0.5.5`, which is affected by RUSTSEC-2026-0387.
+
+Do not add the current Rust Widevine CDM crates while they require
+`rsa 0.9.x`: both `widevine 0.1.0` and `rswidevine 0.1.1` resolve
+RUSTSEC-2023-0071, for which RustSec lists no patched release. Do not suppress
+the advisory. Re-evaluate Widevine when a safe implementation is available;
+an official system-CDM host is a separate option because it depends on a
+locally installed proprietary CDM and must be evaluated for Flatpak isolation,
+availability, and licensing before adoption.
+
+Keep FairPlay Streaming separate because its SAMPLE-AES and skd URI flow uses
+Apple-specific application key handling rather than the Widevine or PlayReady
+CDM protocol. Do not extract browser secrets or log license challenges,
+license responses, content keys, or device material.
 
 Acceptance: validated protocol-specific initialization data mapped to a shared
 track-scoped KID/key model; exact CENC/CBCS sample auxiliary-data validation;

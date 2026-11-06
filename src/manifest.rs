@@ -1088,15 +1088,22 @@ pub(crate) fn plan_hls_media_playlist(
             "playlist exceeds its supported size limit".to_string(),
         ));
     }
-    crate::drm::validate_hls_keyformat_multiplexing(body)
+    let key_reset_state_by_segment = crate::drm::hls_key_reset_state_by_segment(body)
         .map_err(|_| ManifestError::UnsupportedEncryption)?;
     let base_url = parse_manifest_url(manifest_url)?;
     let playlist =
         m3u8_rs::parse_media_playlist_res(body).map_err(|error| hls_parse_error(body, error))?;
-    build_hls_plan(base_url, playlist)
+    build_hls_plan(base_url, playlist, key_reset_state_by_segment)
 }
 
-fn build_hls_plan(base_url: Url, mut playlist: MediaPlaylist) -> Result<HlsPlan, ManifestError> {
+fn build_hls_plan(
+    base_url: Url,
+    mut playlist: MediaPlaylist,
+    key_reset_state_by_segment: Vec<bool>,
+) -> Result<HlsPlan, ManifestError> {
+    if key_reset_state_by_segment.len() != playlist.segments.len() {
+        return Err(ManifestError::UnsupportedPlaylist);
+    }
     let is_live = !playlist.end_list;
     let end_list = playlist.end_list;
     let source_target_duration = playlist.target_duration;
@@ -1139,7 +1146,12 @@ fn build_hls_plan(base_url: Url, mut playlist: MediaPlaylist) -> Result<HlsPlan,
     let mut total_duration = Duration::ZERO;
     let mut maximum_segment_duration = 0.0_f64;
 
-    for (index, segment) in playlist.segments.iter_mut().enumerate() {
+    for (index, (segment, key_was_cleared)) in playlist
+        .segments
+        .iter_mut()
+        .zip(key_reset_state_by_segment)
+        .enumerate()
+    {
         let sequence_index = u64::try_from(index).map_err(|_| ManifestError::DurationOverflow)?;
         let media_sequence = playlist
             .media_sequence
@@ -1170,12 +1182,14 @@ fn build_hls_plan(base_url: Url, mut playlist: MediaPlaylist) -> Result<HlsPlan,
             return Err(ManifestError::UnsupportedPlaylist);
         }
 
-        if segment.unknown_tags.iter().any(is_hls_key_reset_tag) {
-            // METHOD=NONE explicitly clears the preceding key. m3u8-rs
-            // exposes this standards-defined reset as an unknown tag.
+        if key_was_cleared {
             active_key = None;
         } else if let Some(key) = segment.key.as_ref() {
             active_key = Some(key.clone());
+            // m3u8-rs writes the typed key before unknown tags. When a new
+            // key follows METHOD=NONE before this segment URI, retaining the
+            // reset tag would reverse their source order in the local playlist.
+            segment.unknown_tags.retain(|tag| !is_hls_key_reset_tag(tag));
         }
         if let Some(map) = segment.map.as_ref() {
             active_map = Some(map.clone());
@@ -2352,26 +2366,68 @@ two.m4s
     }
 
     #[test]
-    fn rejects_method_none_key_tags_with_or_without_iv() {
-        let without_iv = br#"#EXTM3U
+    fn accepts_method_none_without_attributes_and_rejects_extra_attributes() {
+        let without_attributes = br#"#EXTM3U
 #EXT-X-KEY:METHOD=NONE
 #EXTINF:2,
 one.ts
 #EXT-X-ENDLIST
 "#;
+        assert!(
+            plan_hls_media_playlist(BASE_URL, without_attributes).is_ok(),
+            "METHOD=NONE without additional attributes is a valid key reset"
+        );
+
         let with_iv = br#"#EXTM3U
 #EXT-X-KEY:METHOD=NONE,IV=0x00000000000000000000000000000001
 #EXTINF:2,
 one.ts
 #EXT-X-ENDLIST
 "#;
+        assert_eq!(
+            plan_hls_media_playlist(BASE_URL, with_iv).err(),
+            Some(ManifestError::UnsupportedEncryption)
+        );
+    }
 
-        for body in [without_iv.as_slice(), with_iv.as_slice()] {
-            assert_eq!(
-                plan_hls_media_playlist(BASE_URL, body).err(),
-                Some(ManifestError::UnsupportedEncryption)
-            );
-        }
+    #[test]
+    fn method_none_before_a_new_key_preserves_source_order_in_local_playlist() {
+        let body = br#"#EXTM3U
+#EXT-X-TARGETDURATION:2
+#EXT-X-KEY:METHOD=SAMPLE-AES,URI="key-one.bin"
+#EXTINF:2,
+one.ts
+#EXT-X-KEY:METHOD=NONE
+#EXTINF:2,
+two.ts
+#EXT-X-KEY:METHOD=SAMPLE-AES,URI="key-two.bin"
+#EXTINF:2,
+three.ts
+#EXT-X-ENDLIST
+"#;
+        let plan = plan_hls_media_playlist(BASE_URL, body)
+            .expect("key reset followed by a new key should remain supported");
+        let local = String::from_utf8(
+            plan.local_playlist_bytes()
+                .expect("serialize local HLS playlist"),
+        )
+        .expect("local playlist is UTF-8");
+        let key_lines = local
+            .lines()
+            .filter(|line| line.starts_with("#EXT-X-KEY:"))
+            .collect::<Vec<_>>();
+
+        assert_eq!(key_lines.len(), 3);
+        assert!(key_lines[0].contains("key-"));
+        assert_eq!(key_lines[1], "#EXT-X-KEY:METHOD=NONE");
+        assert!(key_lines[2].contains("key-"));
+        assert_ne!(key_lines[0], key_lines[2]);
+
+        let parsed = m3u8_rs::parse_media_playlist_res(local.as_bytes())
+            .expect("serialized key-order playlist should parse");
+        assert!(parsed.segments[0].key.is_some());
+        assert!(parsed.segments[1].key.is_none());
+        assert!(parsed.segments[2].key.is_some());
     }
 
     /// Gap markers move to segment unknown tags, where the same reject list still

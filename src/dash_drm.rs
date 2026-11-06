@@ -63,10 +63,10 @@ impl DashKeyMap {
 /// Resolve inherited DASH ContentProtection descriptors into one supported
 /// Common Encryption scheme and one default KID.
 ///
-/// Native license acquisition currently supports ClearKey only. Widevine and
-/// PlayReady descriptors are rejected until their CDM exchanges have a safe,
-/// reusable integration. Fragment-local seig KID rotation is resolved from
-/// media fragments; conflicting default KIDs across descriptor scopes remain unsupported.
+/// ClearKey and Widevine are distinguished during planning; the runner currently
+/// executes ClearKey only and falls back for Widevine. PlayReady remains unsupported.
+/// Fragment-local seig KID rotation is resolved from media fragments; conflicting
+/// default KIDs across descriptor scopes remain unsupported.
 pub(crate) fn encryption_from_scopes(
     scopes: &[&[dash_mpd_core::ContentProtection]],
 ) -> Result<Option<DashEncryption>, String> {
@@ -588,6 +588,7 @@ mod tests {
             .expect("CENC descriptor should be valid")
             .expect("CENC descriptor should be recognized");
         assert_eq!(cenc_result.scheme, EncryptionScheme::Cenc);
+        assert_eq!(cenc_result.system, ProtectionSystem::ClearKey);
         assert_eq!(
             cenc_result.default_kid,
             [

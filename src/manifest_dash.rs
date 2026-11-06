@@ -66,6 +66,7 @@ pub(crate) struct DashRepresentation {
     pub(crate) language: Option<String>,
     pub(crate) kind: DashTrackKind,
     pub(crate) encryption: Option<crate::dash_drm::DashEncryption>,
+    pub(crate) widevine_pssh: Option<Vec<u8>>,
     pub(crate) license_url: Option<Url>,
     pub(crate) is_default_audio: bool,
     pub(crate) is_default_subtitle: bool,
@@ -565,6 +566,8 @@ pub(crate) fn parse_dash_manifest_at(
                     &adaptation.ContentProtection[..],
                     &representation.ContentProtection[..],
                 ];
+                let widevine_pssh = crate::dash_drm::widevine_pssh_from_scopes(&protection_scopes)
+                    .map_err(DashError::UnsupportedProtection)?;
                 let encryption = crate::dash_drm::encryption_from_scopes(&protection_scopes)
                     .map_err(DashError::UnsupportedProtection)?;
                 let license_url =
@@ -610,6 +613,7 @@ pub(crate) fn parse_dash_manifest_at(
                     language,
                     kind,
                     encryption,
+                    widevine_pssh,
                     license_url,
                     is_default_audio,
                     is_default_subtitle: kind == DashTrackKind::Subtitle && is_main,

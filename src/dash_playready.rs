@@ -493,26 +493,28 @@ mod tests {
             .expect("HLS PRO should be wrapped as a PlayReady PSSH");
         assert_eq!(url.as_str(), "https://license.example.test/Acquire");
 
-        let xml = concat!(
-            "<WRMHEADER><DATA>",
+        let multiple = test_pro_from_xml(concat!(
+            "<DATA>",
             "<LA_URL>https://one.example.test/license</LA_URL>",
             "<LA_URL>https://two.example.test/license</LA_URL>",
-            "</DATA></WRMHEADER>"
-        );
-        let multiple = test_pro_from_xml(xml);
+            "</DATA>"
+        ));
         assert!(hls_license_request(&multiple).is_err());
 
-        for value in [
-            "<WRMHEADER><DATA></DATA></WRMHEADER>",
-            "<WRMHEADER><DATA><LA_URL>http://license.example.test</LA_URL></DATA></WRMHEADER>",
-            "<WRMHEADER><DATA><LA_URL>https://user:pass@license.example.test</LA_URL></DATA></WRMHEADER>",
-            "<WRMHEADER><DATA><LUI_URL>https://license.example.test/ui</LUI_URL></DATA></WRMHEADER>",
+        for content in [
+            "<DATA></DATA>",
+            "<DATA><LA_URL>http://license.example.test</LA_URL></DATA>",
+            "<DATA><LA_URL>https://user:pass@license.example.test</LA_URL></DATA>",
+            "<DATA><LUI_URL>https://license.example.test/ui</LUI_URL></DATA>",
         ] {
-            assert!(hls_license_request(&test_pro_from_xml(value)).is_err());
+            assert!(hls_license_request(&test_pro_from_xml(content)).is_err());
         }
     }
 
     fn test_pro_from_xml(xml: &str) -> Vec<u8> {
+        let xml = format!(
+            "<WRMHEADER xmlns=\"http://schemas.microsoft.com/DRM/2007/03/PlayReadyHeader\" version=\"4.3.0.0\">{xml}</WRMHEADER>"
+        );
         let utf16: Vec<u8> = xml.encode_utf16().flat_map(u16::to_le_bytes).collect();
         let mut pro = Vec::with_capacity(10 + utf16.len());
         pro.extend_from_slice(

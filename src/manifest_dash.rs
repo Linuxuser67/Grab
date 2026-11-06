@@ -2744,7 +2744,7 @@ mod tests {
     fn rejects_base_url_byte_range_alternative_request_templates() {
         let body = r#"<?xml version="1.0"?>
 <MPD xmlns="urn:mpeg:dash:schema:mpd:2011" type="static" mediaPresentationDuration="PT2S">
-  <BaseURL byteRange="0-100">media.mp4</BaseURL>
+  <BaseURL byteRange="$base$-$first$-$last$">media.mp4</BaseURL>
   <Period duration="PT2S">
     <AdaptationSet contentType="video" mimeType="video/mp4">
       <Representation id="v1">

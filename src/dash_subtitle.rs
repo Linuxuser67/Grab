@@ -9,10 +9,14 @@ use std::fs::{self, File, OpenOptions};
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::Path;
 
+use crate::mp4_validation::{BoundedReader, MAX_PARSER_READ_BYTES, ReadBudget};
+
 /// Caps the assembled track before parsing its MP4 box tree.
 pub(super) const MAX_TRACK_BYTES: u64 = 64 * 1024 * 1024;
 /// Bounds the sample-table allocation performed by mp4box.
 pub(super) const MAX_SAMPLE_COUNT: usize = 50_000;
+/// Bounds decoded MP4 sample-table metadata while retaining support for the 50,000-sample limit.
+pub(super) const MAX_SAMPLE_TABLE_READ_BYTES: u64 = 2 * 1024 * 1024;
 /// Prevents one subtitle sample from dominating parsing memory.
 pub(super) const MAX_SAMPLE_BYTES: usize = 256 * 1024;
 /// Bounds total bytes read from subtitle samples.
@@ -89,7 +93,9 @@ pub(crate) fn extract_to_vtt(
 
     // Inspect fragment run counts before asking the sample-table API to
     // materialize per-sample metadata from untrusted input.
-    let boxes = mp4box::get_boxes(&mut file, track_bytes, false).map_err(|error| {
+    let bounded_reader = BoundedReader::new(&mut file, 0, track_bytes);
+    let mut parser_reader = ReadBudget::new(bounded_reader, MAX_PARSER_READ_BYTES);
+    let boxes = mp4box::get_boxes(&mut parser_reader, track_bytes, false).map_err(|error| {
         DashSubtitleError::UnsupportedMp4(format!(
             "The staged DASH subtitle track has malformed or unsupported MP4 boxes: {error}"
         ))
@@ -123,7 +129,9 @@ pub(crate) fn extract_to_vtt(
             "Could not rewind the staged DASH subtitle track: {error}"
         ))
     })?;
-    let tracks = mp4box::track_samples_from_reader(&mut file).map_err(|error| {
+    let bounded_reader = BoundedReader::new(&mut file, 0, track_bytes);
+    let parser_reader = ReadBudget::new(bounded_reader, MAX_SAMPLE_TABLE_READ_BYTES);
+    let tracks = mp4box::track_samples_from_reader(parser_reader).map_err(|error| {
         DashSubtitleError::UnsupportedMp4(format!(
             "The staged DASH subtitle track has malformed or unsupported MP4 sample tables: {error}"
         ))

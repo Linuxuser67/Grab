@@ -17,11 +17,13 @@ use quick_xml::events::{BytesStart, Event};
 use quick_xml::name::ResolveResult;
 use quick_xml::reader::NsReader;
 
+use crate::mp4_validation::{BoundedReader, MAX_PARSER_READ_BYTES, ReadBudget};
+
 use crate::dash_subtitle::{
     DashSubtitleError, MAX_CUE_COUNT, MAX_CUE_TEXT_BYTES, MAX_OUTPUT_BYTES, MAX_SAMPLE_BYTES,
-    MAX_SAMPLE_COUNT, MAX_SAMPLE_TOTAL_BYTES, MAX_TRACK_BYTES, clear_destination, contains_box,
-    count_boxes, count_fragment_samples, find_box, open_source, sample_is_within_media_data,
-    units_to_millis, write_private_output,
+    MAX_SAMPLE_COUNT, MAX_SAMPLE_TABLE_READ_BYTES, MAX_SAMPLE_TOTAL_BYTES, MAX_TRACK_BYTES,
+    clear_destination, contains_box, count_boxes, count_fragment_samples, find_box, open_source,
+    sample_is_within_media_data, units_to_millis, write_private_output,
 };
 
 const TTML_NAMESPACE: &str = "http://www.w3.org/ns/ttml";
@@ -109,7 +111,9 @@ pub(crate) fn extract_to_vtt(
         ));
     }
 
-    let boxes = mp4box::get_boxes(&mut file, track_bytes, false).map_err(|error| {
+    let bounded_reader = BoundedReader::new(&mut file, 0, track_bytes);
+    let mut parser_reader = ReadBudget::new(bounded_reader, MAX_PARSER_READ_BYTES);
+    let boxes = mp4box::get_boxes(&mut parser_reader, track_bytes, false).map_err(|error| {
         DashSubtitleError::UnsupportedMp4(format!(
             "The staged DASH subtitle track has malformed or unsupported MP4 boxes: {error}"
         ))
@@ -148,7 +152,9 @@ pub(crate) fn extract_to_vtt(
             "Could not rewind the staged DASH subtitle track: {error}"
         ))
     })?;
-    let tracks = mp4box::track_samples_from_reader(&mut file).map_err(|error| {
+    let bounded_reader = BoundedReader::new(&mut file, 0, track_bytes);
+    let parser_reader = ReadBudget::new(bounded_reader, MAX_SAMPLE_TABLE_READ_BYTES);
+    let tracks = mp4box::track_samples_from_reader(parser_reader).map_err(|error| {
         DashSubtitleError::UnsupportedMp4(format!(
             "The staged DASH subtitle track has malformed or unsupported sample tables: {error}"
         ))

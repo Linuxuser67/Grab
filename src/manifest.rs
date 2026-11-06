@@ -2600,10 +2600,7 @@ one.ts
         assert_eq!(plan.protections.len(), 1);
         let protection = &plan.protections[0];
         assert_eq!(protection.system, crate::drm::ProtectionSystem::FairPlay);
-        assert_eq!(
-            protection.scheme,
-            crate::drm::EncryptionScheme::Cbcs
-        );
+        assert_eq!(protection.scheme, crate::drm::EncryptionScheme::Cbcs);
         assert_eq!(
             protection.initialization_data,
             crate::drm::HlsInitializationData::FairPlayKeyUri("skd://asset".to_string())

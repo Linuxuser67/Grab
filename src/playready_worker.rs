@@ -26,6 +26,7 @@ use zeroize::Zeroizing;
 const INTERNAL_WORKER_ARG: &str = "--grab-internal-playready-worker";
 const MAX_WORKER_FRAME_BYTES: usize = 256 * 1024;
 const MAX_DEVICE_FILE_BYTES: u64 = 4 * 1024 * 1024;
+const MAX_DEVICE_PATH_BYTES: usize = 4096;
 const MAX_CHALLENGE_BYTES: usize = 128 * 1024;
 const MAX_LICENSE_RESPONSE_BYTES: usize = 64 * 1024;
 const MAX_LICENSE_KEYS: usize = 64;
@@ -150,6 +151,9 @@ pub async fn acquire_keys(
     license_url: &Url,
 ) -> Result<Vec<PlayReadyKey>, String> {
     crate::drm::validate_pssh(pssh, crate::drm::ProtectionSystem::PlayReady)?;
+    if device_path.as_os_str().as_encoded_bytes().len() > MAX_DEVICE_PATH_BYTES {
+        return Err("The PlayReady device path exceeds its size limit".to_string());
+    }
     if pssh.len() > crate::drm::MAX_PSSH_BYTES {
         return Err("The PlayReady PSSH exceeds its size limit".to_string());
     }
@@ -343,7 +347,7 @@ fn process_worker<R: BufRead, W: Write>(
         return Err(WorkerFailure::InvalidPssh);
     }
 
-    let mut cdm = Cdm::from_device(device);
+    let cdm = Cdm::from_device(device);
     let challenge = Zeroizing::new(
         cdm.get_license_challenge(wrm_header, None)
             .map_err(|_| WorkerFailure::ChallengeFailed)?,

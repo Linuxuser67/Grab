@@ -99,7 +99,9 @@ pub(crate) fn encryption_from_scopes(
                 default_kid: kid,
                 system: system.unwrap_or(ProtectionSystem::ClearKey),
             };
-            if selected.is_some_and(|previous| previous != encryption) {
+            if selected.is_some_and(|previous: DashEncryption| {
+                previous.scheme != encryption.scheme || previous.default_kid != encryption.default_kid
+            }) {
                 return Err(
                     "DASH uses conflicting encryption schemes or default KIDs across scopes"
                         .to_string(),
@@ -168,7 +170,7 @@ pub(crate) fn widevine_pssh_from_scopes(
 fn validate_widevine_pssh(bytes: &[u8]) -> Result<(), String> {
     let invalid = || "DASH Widevine PSSH box is malformed or has the wrong system ID".to_string();
     if bytes.len() < 32
-        || bytes.get(4..8) != Some(b"pssh")
+        || bytes.get(4..8) != Some(&b"pssh"[..])
         || bytes.get(8).is_none_or(|version| *version > 1)
         || bytes.get(12..28) != Some(WIDEVINE_SYSTEM_ID.as_slice())
     {
@@ -569,7 +571,7 @@ mod tests {
             content: Some("AAAAIHBzc2gAAAAA7e+LqXnWSs6jyCfc1R0h7QAAAAA=".to_string()),
         });
         second.cenc_pssh[0].content = Some(
-            "AAAAIHBzc2gAAAAA7e+LqXnWSs6jyCfc1R0h7QAAAAA=".replace("AAAAA=", "AAAAAQ==")
+            "AAAAIXBzc2gAAAAA7e+LqXnWSs6jyCfc1R0h7QAAAAEB".to_string()
         );
         assert!(widevine_pssh_from_scopes(&[
             std::slice::from_ref(&first),

@@ -2576,7 +2576,7 @@ segment-1.m4s
     }
 
     #[test]
-    fn rejects_sample_aes_fragmented_mp4_and_non_identity_key_formats() {
+    fn rejects_identity_sample_aes_fragmented_mp4_but_retains_fairplay_metadata() {
         let fragmented = br#"#EXTM3U
 #EXT-X-KEY:METHOD=SAMPLE-AES,URI="key.bin",IV=0x00000000000000000000000000000001
 #EXT-X-MAP:URI="init.mp4"
@@ -2595,9 +2595,24 @@ one.m4s
 one.ts
 #EXT-X-ENDLIST
 "#;
+        let plan = plan_hls_media_playlist(BASE_URL, fairplay)
+            .expect("FairPlay signalling should be retained for extractor fallback");
+        assert_eq!(plan.protections.len(), 1);
+        let protection = &plan.protections[0];
+        assert_eq!(protection.system, crate::drm::ProtectionSystem::FairPlay);
         assert_eq!(
-            plan_hls_media_playlist(BASE_URL, fairplay).err(),
-            Some(ManifestError::UnsupportedEncryption)
+            protection.scheme,
+            crate::drm::EncryptionScheme::Cbcs
+        );
+        assert_eq!(
+            protection.initialization_data,
+            crate::drm::HlsInitializationData::FairPlayKeyUri("skd://asset".to_string())
+        );
+        assert!(
+            plan.resources
+                .iter()
+                .all(|resource| resource.kind != HlsResourceKind::Key),
+            "skd:// identifiers are metadata, not downloadable key URLs"
         );
     }
 

@@ -1116,9 +1116,11 @@ fn build_hls_plan(base_url: Url, mut playlist: MediaPlaylist) -> Result<HlsPlan,
         return Err(ManifestError::EmptyPlaylist);
     }
     strip_llhls_schedule_tags(&mut playlist);
-    if playlist.unknown_tags.iter().any(|tag| {
-        tag.tag == "X-KEY" || is_unsupported_hls_tag(&tag.tag)
-    }) {
+    if playlist
+        .unknown_tags
+        .iter()
+        .any(|tag| is_unsupported_hls_tag(&tag.tag))
+    {
         return Err(ManifestError::UnsupportedPlaylist);
     }
 
@@ -1163,7 +1165,7 @@ fn build_hls_plan(base_url: Url, mut playlist: MediaPlaylist) -> Result<HlsPlan,
         if segment
             .unknown_tags
             .iter()
-            .any(|tag| is_unsupported_hls_tag(&tag.tag))
+            .any(|tag| is_unsupported_hls_tag(&tag.tag) && !is_hls_key_reset_tag(tag))
         {
             return Err(ManifestError::UnsupportedPlaylist);
         }
@@ -1376,7 +1378,7 @@ fn minimum_hls_playlist_version(playlist: &MediaPlaylist) -> usize {
 fn is_unsupported_hls_tag(tag: &str) -> bool {
     matches!(
         tag,
-        "X-GAP" | "X-SKIP" | "X-DEFINE" | "X-CONTENT-STEERING"
+        "X-GAP" | "X-SKIP" | "X-KEY" | "X-DEFINE" | "X-CONTENT-STEERING"
     )
 }
 

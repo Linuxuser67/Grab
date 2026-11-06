@@ -4719,6 +4719,17 @@ mod tests {
             playlist.push_str("#EXT-X-KEY:METHOD=NONE\n#EXTINF:2,\nsegment-2.m4s\n");
         }
         playlist.push_str("#EXT-X-ENDLIST\n");
+        let parsed = m3u8_rs::parse_media_playlist_res(playlist.as_bytes())
+            .expect("parse test PlayReady CMAF playlist");
+        let key = parsed
+            .segments
+            .first()
+            .and_then(|segment| segment.key.as_ref())
+            .expect("parsed segment retains its active PlayReady key");
+        assert_eq!(key.keyformat.as_deref(), Some("com.microsoft.playready"));
+        crate::drm::hls_protection_from_key(key)
+            .expect("parsed PlayReady key descriptor is valid")
+            .expect("parsed PlayReady key descriptor is retained");
         crate::manifest::plan_hls_media_playlist(
             "https://cdn.example.test/master.m3u8",
             playlist.as_bytes(),

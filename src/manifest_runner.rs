@@ -2405,7 +2405,7 @@ async fn decrypt_hls_sample_aes_segments(
     let mut changed = false;
     let mut resource_uses = std::collections::HashMap::new();
     for segment in &playlist.segments {
-        *resource_uses.entry(segment.uri.as_str()).or_insert(0_usize) += 1;
+        *resource_uses.entry(segment.uri.clone()).or_insert(0_usize) += 1;
     }
 
     // A playlist may reference the same staged URI more than once. Preserve
@@ -2415,7 +2415,7 @@ async fn decrypt_hls_sample_aes_segments(
             .key
             .as_ref()
             .is_some_and(|key| key.method == m3u8_rs::KeyMethod::SampleAES)
-            || resource_uses.get(segment.uri.as_str()).copied().unwrap_or(0) <= 1
+            || resource_uses.get(&segment.uri).copied().unwrap_or(0) <= 1
         {
             continue;
         }

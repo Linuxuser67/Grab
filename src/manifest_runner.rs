@@ -2403,13 +2403,7 @@ async fn decrypt_hls_sample_aes_segments(
         ))
     })?;
     let mut changed = false;
-    let mut resource_uses = std::collections::HashMap::new();
-    for segment in &playlist.segments {
-        *resource_uses.entry(segment.uri.clone()).or_insert(0_usize) += 1;
-    }
 
-    // A playlist may reference the same staged URI more than once. Preserve
-    // shared encrypted bytes and decrypt a private copy for each occurrence.
     for (index, segment) in playlist.segments.iter_mut().enumerate() {
         if !segment
             .key
@@ -2579,7 +2573,14 @@ async fn decrypt_hls_sample_aes_segments(
             ));
         }
 
-        let temporary = directory.join(format!("{segment_uri}.sample-aes.part"));
+        // Write each decrypted occurrence to a distinct staged file. Keep
+        // encrypted source resources untouched until the whole playlist succeeds.
+        let decrypted_uri = format!("sample-aes-decrypted-{index}.bin");
+        let decrypted_path = local_hls_resource_path(directory, &decrypted_uri)?;
+        remove_regular_file_if_present(&decrypted_path)
+            .await
+            .map_err(ManifestRunError::Failed)?;
+        let temporary = directory.join(format!("{decrypted_uri}.part"));
         remove_regular_file_if_present(&temporary)
             .await
             .map_err(ManifestRunError::Failed)?;
@@ -2597,7 +2598,7 @@ async fn decrypt_hls_sample_aes_segments(
                 .await
                 .map_err(|error| format!("Could not flush decrypted HLS segment staging: {error}"))?;
             drop(file);
-            tokio::fs::rename(&temporary, &segment_path)
+            tokio::fs::rename(&temporary, &decrypted_path)
                 .await
                 .map_err(|error| format!("Could not publish the decrypted HLS segment: {error}"))
         }
@@ -2607,6 +2608,7 @@ async fn decrypt_hls_sample_aes_segments(
             return Err(ManifestRunError::Failed(error));
         }
 
+        segment.uri = decrypted_uri;
         segment.key = None;
         changed = true;
     }

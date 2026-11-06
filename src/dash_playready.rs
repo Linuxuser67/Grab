@@ -410,7 +410,7 @@ mod tests {
         assert_eq!(
             pssh_from_scopes(&[std::slice::from_ref(&parent), std::slice::from_ref(&child),])
                 .expect("inherited PlayReady data")
-                    .as_deref(),
+                .as_deref(),
             Some(parent_pssh.as_slice())
         );
 

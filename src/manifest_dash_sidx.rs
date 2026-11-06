@@ -229,8 +229,8 @@ fn parse_sidx_node(context: SidxNodeContext<'_>) -> Result<DashSidxNode, DashErr
         return Err(DashError::UnsupportedAddressing);
     }
 
-    if let Some(expected) = expectation {
-        if data.reference_id != expected.reference_id
+    if let Some(expected) = expectation
+        && (data.reference_id != expected.reference_id
             || !presentation_time_matches(
                 data.earliest_presentation_time,
                 data.timescale,
@@ -242,10 +242,9 @@ fn parse_sidx_node(context: SidxNodeContext<'_>) -> Result<DashSidxNode, DashErr
                 data.timescale,
                 expected.duration,
                 expected.parent_timescale,
-            )
-        {
-            return Err(DashError::UnsupportedAddressing);
-        }
+            ))
+    {
+        return Err(DashError::UnsupportedAddressing);
     }
 
     let mut reference_offset = index_range

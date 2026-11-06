@@ -2176,11 +2176,16 @@ video.m3u8
 
     #[test]
     fn resource_filenames_change_when_a_segment_url_changes() {
-        let first =
-            plan_hls_media_playlist(BASE_URL, b"#EXTM3U\n#EXT-X-TARGETDURATION:4\n#EXTINF:2,\none.ts\n#EXT-X-ENDLIST\n")
-                .expect("first media playlist");
+        let first = plan_hls_media_playlist(
+            BASE_URL,
+            b"#EXTM3U\n#EXT-X-TARGETDURATION:4\n#EXTINF:2,\none.ts\n#EXT-X-ENDLIST\n",
+        )
+        .expect("first media playlist");
         let second =
-            plan_hls_media_playlist(BASE_URL, b"#EXTM3U\n#EXTINF:2,\ntwo.ts\n#EXT-X-ENDLIST\n")
+            plan_hls_media_playlist(
+                BASE_URL,
+                b"#EXTM3U\n#EXT-X-TARGETDURATION:4\n#EXTINF:2,\ntwo.ts\n#EXT-X-ENDLIST\n",
+            )
                 .expect("second media playlist");
         assert_ne!(
             first.resources[0].filename, second.resources[0].filename,
@@ -2495,7 +2500,8 @@ video.m3u8
 
     #[test]
     fn rejects_gapped_segments() {
-        let gap_body = b"#EXTM3U\n#EXT-X-TARGETDURATION:2\n#EXTINF:2,\n#EXT-X-GAP\none.ts\n#EXT-X-ENDLIST\n";
+        let gap_body =
+            b"#EXTM3U\n#EXT-X-TARGETDURATION:2\n#EXTINF:2,\n#EXT-X-GAP\none.ts\n#EXT-X-ENDLIST\n";
         assert_eq!(
             plan_hls_media_playlist(BASE_URL, gap_body).err(),
             Some(ManifestError::UnsupportedPlaylist)

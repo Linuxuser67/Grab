@@ -197,6 +197,11 @@
       <summary>Live from start</summary>
       <description>Record live streams from the beginning when the site supports it.</description>
     </key>
+    <key name="playready-device-path" type="s">
+      <default>''</default>
+      <summary>PlayReady device file</summary>
+      <description>Path to a user-provisioned PlayReady device file (.prd) used for native DASH license acquisition. Empty disables native PlayReady decryption.</description>
+    </key>
     <key name="window-width" type="i">
       <default>900</default>
       <summary>Window width</summary>

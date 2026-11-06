@@ -87,11 +87,11 @@ impl WorkerFailure {
 }
 
 /// One PlayReady content key, held in zeroizing memory.
-pub struct PlayReadyKey {
-    /// The 16-byte key identifier.
-    pub kid: [u8; 16],
+pub(crate) struct PlayReadyKey {
+    /// The 16-byte key identifier in PlayReady GUID byte order.
+    pub(crate) kid: [u8; 16],
     /// The 16-byte AES content key. It is zeroized when dropped.
-    pub key: Zeroizing<[u8; 16]>,
+    pub(crate) key: Zeroizing<[u8; 16]>,
 }
 
 impl std::fmt::Debug for PlayReadyKey {
@@ -137,7 +137,7 @@ pub(crate) fn run_worker() -> i32 {
 ///
 /// Returns an error when the device, PSSH, license endpoint, worker exchange,
 /// or bounded license response is invalid.
-pub async fn acquire_keys(
+pub(crate) async fn acquire_keys(
     client: &reqwest::Client,
     device_path: &Path,
     pssh: &[u8],

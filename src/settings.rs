@@ -41,6 +41,7 @@ pub mod key {
     pub const REMUX_VIDEO: &str = "remux-video";
     pub const EMBED_CHAPTERS: &str = "embed-chapters";
     pub const LIVE_FROM_START: &str = "live-from-start";
+    pub const PLAYREADY_DEVICE_PATH: &str = "playready-device-path";
     pub const WINDOW_WIDTH: &str = "window-width";
     pub const WINDOW_HEIGHT: &str = "window-height";
 }
@@ -55,6 +56,10 @@ impl AppSettings {
 
     pub fn download_dir(&self) -> String {
         self.0.string(key::DOWNLOAD_DIR).to_string()
+    }
+    /// Path to the user-provisioned PlayReady device file; empty disables native PlayReady.
+    pub fn playready_device_path(&self) -> String {
+        self.0.string(key::PLAYREADY_DEVICE_PATH).to_string()
     }
     /// Fold download filenames to ASCII-only.
     pub fn restrict_filenames(&self) -> bool {

@@ -120,20 +120,26 @@ The first PlayReady worker increment is implemented using the
 maintained `playready 0.4.x` API. Grab launches its own executable in a
 short-lived child-process mode; the parent retains HTTPS transport and its
 existing reqwest network policy, while the child loads and verifies a
-provisioned `.prd` device, accepts one validated PlayReady PSSH/WRMHEADER,
-creates a challenge, and processes the bounded license response. IPC is
-length-bounded JSON Lines; device paths, PSSH data, challenges, responses, and
-keys are not placed in argv or logs. Key material crosses the pipe in
-zeroizing buffers and is returned as zeroizing 128-bit values. This is a
-process-lifetime boundary, not an OS sandbox. The worker is not yet wired into
-manifest planning or native decryption, so DASH and HLS PlayReady media still
-use the extractor fallback.
+provisioned `.prd` device, creates a challenge, and processes the bounded
+license response. IPC is length-bounded JSON Lines; device paths, PSSH data,
+challenges, responses, and keys are not placed in argv or logs. Key material
+crosses the pipe in zeroizing buffers and is returned as zeroizing 128-bit
+values. This is a process-lifetime boundary, not an OS sandbox.
 
-The shared `DrmKeyMap` now owns zeroizing KID-to-key storage for the existing
-DASH ClearKey path and the PlayReady worker output. Next, integrate PlayReady
-license URL and device-path selection into DASH planning and route the resulting
-keys through the existing CENC/CBCS MP4 decryptor; only after that should the
-same key path be connected to HLS CMAF.
+The worker is now connected to static, single-Period DASH CENC/CBCS video and
+audio tracks. The Advanced → Media preferences page accepts a user-selected
+`.prd` device file; only its path is stored in GSettings. DASH planning
+accepts bounded PlayReady `cenc:pssh` or `mspr:pro` initialization data and
+an explicit HTTPS DASHIF `Laurl`. The parent uses Grab's guarded reqwest
+client for the license exchange, and the worker's PlayReady GUID KIDs are
+converted to ISO Common Encryption UUID byte order before they are matched
+against fragment sample KIDs. The existing shared `DrmKeyMap` and CENC/CBCS
+decryptor handle key lookup and sample decryption without a second decryptor.
+
+HLS CMAF is the next PlayReady integration target. HLS PlayReady, dynamic or
+multi-Period DASH, encrypted subtitles, multiple WRMHEADER records, embedded
+license URLs without DASHIF `Laurl`, authorization-header workflows, and
+non-standard challenge formats continue to use extractor fallback.
 
 Keep the dependency graph on the patched `crypto-bigint >= 0.7.6` line. The
 previous `playready 0.3.x` dependency resolved `crypto-bigint 0.5.5`, which

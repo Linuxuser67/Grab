@@ -182,6 +182,7 @@ pub(crate) struct ManifestJob {
     pub(crate) cookies_browser: String,
     pub(crate) connections: usize,
     pub(crate) embed_subs: bool,
+    pub(crate) playready_device_path: Option<PathBuf>,
 }
 
 /// Classifies native manifest failures so transient transfers do not discard staged resources.
@@ -672,6 +673,10 @@ async fn prepare_manifest_attempt(
             subtitle,
             ..
         } => {
+            validate_playready_configuration(video, job.playready_device_path.as_deref())?;
+            if let Some(audio) = audio {
+                validate_playready_configuration(audio, job.playready_device_path.as_deref())?;
+            }
             if subtitle
                 .as_ref()
                 .is_some_and(|track| track.representation.encryption.is_some())
@@ -694,7 +699,7 @@ async fn prepare_manifest_attempt(
             if video.representation.encryption.is_some() {
                 let license_url = video.representation.license_url.as_ref().ok_or_else(|| {
                     ManifestRunError::Unsupported(
-                        "The selected DASH representation has no ClearKey license URL".to_string(),
+                        "The selected DASH representation has no license URL".to_string(),
                     )
                 })?;
                 guard_manifest_child_url(&job.source.url, license_url, &mut guarded_child_hosts)?;
@@ -723,7 +728,7 @@ async fn prepare_manifest_attempt(
                     .and_then(|track| track.representation.license_url.as_ref())
                     .ok_or_else(|| {
                         ManifestRunError::Unsupported(
-                            "The selected DASH audio representation has no ClearKey license URL"
+                            "The selected DASH audio representation has no license URL"
                                 .to_string(),
                         )
                     })?;
@@ -924,6 +929,7 @@ async fn resolve_manifest_tracks(
 struct ManifestStaticTransfer<'a> {
     client: &'a reqwest::Client,
     tracks: &'a Tracks,
+    playready_device_path: Option<&'a Path>,
     destination_parts: bool,
     staging: &'a Path,
     destination: &'a Path,
@@ -945,6 +951,7 @@ async fn transfer_static_manifest_tracks(
     let ManifestStaticTransfer {
         client,
         tracks,
+        playready_device_path,
         destination_parts,
         staging,
         destination,
@@ -1065,6 +1072,7 @@ async fn transfer_static_manifest_tracks(
         } => {
             if !fetch_and_write_dash_track(ManifestDashTrackTransfer {
                 client,
+                playready_device_path,
                 staging,
                 plan: video,
                 directory: video_dir,
@@ -1084,6 +1092,7 @@ async fn transfer_static_manifest_tracks(
             if let Some(audio) = audio
                 && !fetch_and_write_dash_track(ManifestDashTrackTransfer {
                     client,
+                    playready_device_path,
                     staging,
                     plan: audio,
                     directory: audio_dir,
@@ -1128,6 +1137,7 @@ async fn transfer_static_manifest_tracks(
                     };
                 if !fetch_and_write_dash_track(ManifestDashTrackTransfer {
                     client,
+                    playready_device_path,
                     staging,
                     plan: subtitle,
                     directory: &subtitle_dir,
@@ -1747,6 +1757,7 @@ pub(crate) async fn run_manifest_download(
         match transfer_static_manifest_tracks(ManifestStaticTransfer {
             client: &client,
             tracks: &tracks,
+            playready_device_path: job.playready_device_path.as_deref(),
             destination_parts: static_destination_parts,
             staging: &staging,
             destination: &job.dest,
@@ -2271,6 +2282,47 @@ fn guard_hls_resources(
 ) -> Result<(), ManifestChildUrlError> {
     for resource in plan.resources.iter() {
         guard_manifest_child_url(parent_url, &resource.url, seen_hosts)?;
+    }
+    Ok(())
+}
+
+fn validate_playready_configuration(
+    plan: &DashRepresentationPlan,
+    device_path: Option<&Path>,
+) -> Result<(), ManifestRunError> {
+    let Some(encryption) = plan.representation.encryption else {
+        return Ok(());
+    };
+    if encryption.system != crate::dash_drm::ProtectionSystem::PlayReady {
+        return Ok(());
+    }
+
+    let Some(device_path) = device_path else {
+        return Err(ManifestRunError::Unsupported(
+            "Select a valid PlayReady .prd device file in Advanced → Media preferences"
+                .to_string(),
+        ));
+    };
+    if !device_path.is_file()
+        || !device_path
+            .extension()
+            .and_then(|extension| extension.to_str())
+            .is_some_and(|extension| extension.eq_ignore_ascii_case("prd"))
+    {
+        return Err(ManifestRunError::Unsupported(
+            "The configured PlayReady device must be an existing .prd file".to_string(),
+        ));
+    }
+    if plan.representation.playready_pssh.is_none() {
+        return Err(ManifestRunError::Unsupported(
+            "The selected DASH PlayReady representation has no supported PSSH or mspr:pro data"
+                .to_string(),
+        ));
+    }
+    if plan.representation.license_url.is_none() {
+        return Err(ManifestRunError::Unsupported(
+            "The selected DASH PlayReady representation has no DASHIF license URL".to_string(),
+        ));
     }
     Ok(())
 }
@@ -3366,6 +3418,7 @@ async fn fetch_dash_index_bytes(
 
 struct ManifestDashTrackTransfer<'a> {
     client: &'a reqwest::Client,
+    playready_device_path: Option<&'a Path>,
     staging: &'a Path,
     plan: &'a DashRepresentationPlan,
     directory: &'a Path,
@@ -3384,6 +3437,7 @@ async fn fetch_and_write_dash_track(
 ) -> Result<bool, ManifestRunError> {
     let ManifestDashTrackTransfer {
         client,
+        playready_device_path,
         staging,
         plan,
         directory,
@@ -3468,24 +3522,82 @@ async fn fetch_and_write_dash_track(
         };
         let license_url = plan.representation.license_url.as_ref().ok_or_else(|| {
             ManifestRunError::Unsupported(
-                "The selected DASH representation has no ClearKey license URL".to_string(),
+                "The selected DASH representation has no license URL".to_string(),
             )
         })?;
-        let license_requests = [(license_url.clone(), required_kids)];
-        let mut key_request = Box::pin(crate::dash_drm::acquire_required_keys(
-            client,
-            &license_requests,
-        ));
-        let acquired_keys = tokio::select! {
-            biased;
-            _ = &mut *abort => return Ok(false),
-            result = &mut key_request => result.map_err(ManifestRunError::Failed)?,
+        let track_keys = match encryption.system {
+            crate::dash_drm::ProtectionSystem::ClearKey => {
+                let license_requests = [(license_url.clone(), required_kids)];
+                let mut key_request = Box::pin(crate::dash_drm::acquire_required_keys(
+                    client,
+                    &license_requests,
+                ));
+                let acquired_keys = tokio::select! {
+                    biased;
+                    _ = &mut *abort => return Ok(false),
+                    result = &mut key_request => result.map_err(ManifestRunError::Failed)?,
+                };
+                acquired_keys.ok_or_else(|| {
+                    ManifestRunError::Failed(
+                        "DASH ClearKey acquisition returned no content keys".to_string(),
+                    )
+                })?
+            }
+            crate::dash_drm::ProtectionSystem::PlayReady => {
+                let device_path = playready_device_path.ok_or_else(|| {
+                    ManifestRunError::Unsupported(
+                        "A PlayReady device file is required for native DASH decryption"
+                            .to_string(),
+                    )
+                })?;
+                let pssh = plan.representation.playready_pssh.as_deref().ok_or_else(|| {
+                    ManifestRunError::Unsupported(
+                        "The selected DASH PlayReady representation has no supported initialization data"
+                            .to_string(),
+                    )
+                })?;
+                let mut key_request = Box::pin(crate::playready_worker::acquire_keys(
+                    client,
+                    device_path,
+                    pssh,
+                    license_url,
+                ));
+                let keys = tokio::select! {
+                    biased;
+                    _ = &mut *abort => return Ok(false),
+                    result = &mut key_request => result.map_err(ManifestRunError::Failed)?,
+                };
+
+                let mut accepted: std::collections::BTreeMap<
+                    [u8; 16],
+                    zeroize::Zeroizing<[u8; 16]>,
+                > = std::collections::BTreeMap::new();
+                for key in keys {
+                    let kid = crate::dash_drm::playready_kid_to_cenc(key.kid);
+                    if required_kids.contains(&kid)
+                        && accepted.insert(kid, key.key).is_some()
+                    {
+                        return Err(ManifestRunError::Failed(
+                            "PlayReady returned duplicate keys for a selected KID".to_string(),
+                        ));
+                    }
+                }
+                if accepted.len() != required_kids.len() {
+                    return Err(ManifestRunError::Failed(
+                        "The PlayReady license did not return every selected content key"
+                            .to_string(),
+                    ));
+                }
+                crate::drm::DrmKeyMap::from_keys(accepted)
+                    .map_err(ManifestRunError::Failed)?
+            }
+            crate::dash_drm::ProtectionSystem::Widevine
+            | crate::dash_drm::ProtectionSystem::FairPlay => {
+                return Err(ManifestRunError::Unsupported(
+                    "The selected DASH DRM system has no enabled native CDM".to_string(),
+                ));
+            }
         };
-        let track_keys = acquired_keys.ok_or_else(|| {
-            ManifestRunError::Failed(
-                "DASH ClearKey acquisition returned no content keys".to_string(),
-            )
-        })?;
         let directory = directory.to_path_buf();
         let output = directory.join(format!("{filename}.decrypted"));
         let cancelled = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
@@ -4971,6 +5083,7 @@ segment-2.m4s
         assert!(
             fetch_and_write_dash_track(ManifestDashTrackTransfer {
                 client: &client,
+                playready_device_path: None,
                 staging: staging.path(),
                 plan: &plan,
                 directory: &video_dir,
@@ -5285,6 +5398,7 @@ segment-2.m4s
             cookies_browser: "none".to_string(),
             connections: 1,
             embed_subs: false,
+            playready_device_path: None,
         };
         let gate = crate::attempt_gate::AttemptGate::new();
         let (_stop_tx, stop_rx) = tokio::sync::oneshot::channel();

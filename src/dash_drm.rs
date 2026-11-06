@@ -480,6 +480,29 @@ mod tests {
         }
     }
 
+    fn playready_pro() -> Vec<u8> {
+        let wrm_header = concat!(
+            "<WRMHEADER xmlns=\"http://schemas.microsoft.com/DRM/2007/03/PlayReadyHeader\" ",
+            "version=\"4.3.0.0\"><DATA><PROTECTINFO><KIDS>",
+            "<KID ALGID=\"AESCTR\" VALUE=\"ABEiM0RVZneImaq7zN3u/w==\"/>",
+            "</KIDS></PROTECTINFO><LA_URL>https://license.example.test/Acquire</LA_URL>",
+            "</DATA></WRMHEADER>"
+        );
+        let xml: Vec<u8> = wrm_header
+            .encode_utf16()
+            .flat_map(u16::to_le_bytes)
+            .collect();
+        let record_len = u16::try_from(xml.len()).expect("test WRMHEADER length");
+        let total_len = 10_u32 + u32::from(record_len);
+        let mut pro = Vec::with_capacity(total_len as usize);
+        pro.extend_from_slice(&total_len.to_le_bytes());
+        pro.extend_from_slice(&1_u16.to_le_bytes());
+        pro.extend_from_slice(&1_u16.to_le_bytes());
+        pro.extend_from_slice(&record_len.to_le_bytes());
+        pro.extend_from_slice(&xml);
+        pro
+    }
+
     #[test]
     fn parses_widevine_pssh_and_associates_its_protection_system() {
         let pssh = "AAAAIHBzc2gAAAAA7e+LqXnWSs6jyCfc1R0h7QAAAAA=";
@@ -726,14 +749,142 @@ mod tests {
     }
 
     #[test]
-    fn rejects_widevine_and_playready_without_cdms() {
-        for scheme in [WIDEVINE_SCHEME, PLAYREADY_SCHEME] {
-            let descriptor = dash_mpd_core::ContentProtection {
-                schemeIdUri: scheme.to_string(),
+    fn recognizes_playready_common_encryption_metadata() {
+        let mp4_protection = protection("cenc", "00112233445566778899aabbccddeeff");
+        let playready = dash_mpd_core::ContentProtection {
+            schemeIdUri: PLAYREADY_SCHEME.to_string(),
+            ..Default::default()
+        };
+        let encryption = encryption_from_scopes(&[&[mp4_protection, playready]])
+            .expect("PlayReady encryption metadata should be accepted")
+            .expect("mp4protection declares encryption");
+        assert_eq!(encryption.system, ProtectionSystem::PlayReady);
+        assert_eq!(encryption.scheme, EncryptionScheme::Cenc);
+    }
+
+    #[test]
+    fn extracts_playready_pssh_from_mspr_pro() {
+        let descriptor = dash_mpd_core::ContentProtection {
+            schemeIdUri: PLAYREADY_SCHEME.to_string(),
+            msprpro: Some(dash_mpd_core::MsprPro {
+                content: Some(STANDARD.encode(playready_pro())),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        let pssh = playready_pssh_from_scopes(&[std::slice::from_ref(&descriptor)])
+            .expect("valid PlayReady PRO should parse")
+            .expect("PlayReady initialization data should be retained");
+        crate::drm::validate_pssh(&pssh, ProtectionSystem::PlayReady)
+            .expect("wrapped PSSH should have the PlayReady system ID");
+        assert_eq!(
+            Pssh::from_bytes(&pssh)
+                .expect("wrapped PSSH")
+                .wrm_headers()
+                .len(),
+            1
+        );
+    }
+
+    #[test]
+    fn playready_cenc_pssh_takes_precedence_over_mspr_pro() {
+        let pro = playready_pro();
+        let mut pssh = Vec::with_capacity(32 + pro.len());
+        pssh.extend_from_slice(
+            &u32::try_from(32 + pro.len())
+                .expect("PSSH length")
+                .to_be_bytes(),
+        );
+        pssh.extend_from_slice(b"pssh");
+        pssh.extend_from_slice(&[0, 0, 0, 0]);
+        pssh.extend_from_slice(&PLAYREADY_SYSTEM_ID);
+        pssh.extend_from_slice(&u32::try_from(pro.len()).expect("PRO length").to_be_bytes());
+        pssh.extend_from_slice(&pro);
+
+        let descriptor = dash_mpd_core::ContentProtection {
+            schemeIdUri: PLAYREADY_SCHEME.to_string(),
+            cenc_pssh: vec![dash_mpd_core::CencPssh {
+                content: Some(STANDARD.encode(&pssh)),
+            }],
+            msprpro: Some(dash_mpd_core::MsprPro {
+                content: Some("not-base64".to_string()),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        let selected = playready_pssh_from_scopes(&[std::slice::from_ref(&descriptor)])
+            .expect("valid cenc:pssh should take precedence");
+        assert_eq!(selected.as_deref(), Some(pssh.as_slice()));
+    }
+
+    #[test]
+    fn rejects_conflicting_playready_psshs_in_one_scope() {
+        let first = playready_pro();
+        let mut second = playready_pro();
+        let last = second.last_mut().expect("nonempty PlayReady PRO");
+        *last ^= 1;
+        let descriptor = |pro: Vec<u8>| dash_mpd_core::ContentProtection {
+            schemeIdUri: PLAYREADY_SCHEME.to_string(),
+            msprpro: Some(dash_mpd_core::MsprPro {
+                content: Some(STANDARD.encode(pro)),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        assert!(playready_pssh_from_scopes(&[&[descriptor(first), descriptor(second)]]).is_err());
+    }
+
+    #[test]
+    fn playready_license_url_uses_dashif_laurl_and_requires_https() {
+        let descriptor = dash_mpd_core::ContentProtection {
+            schemeIdUri: PLAYREADY_SCHEME.to_string(),
+            laurl: Some(dash_mpd_core::Laurl {
+                content: Some("../license".to_string()),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        let manifest =
+            Url::parse("https://media.example.test/path/manifest.mpd").expect("manifest URL");
+        let url = license_url_from_scopes(&[std::slice::from_ref(&descriptor)], &manifest)
+            .expect("relative PlayReady license URL should parse")
+            .expect("license URL should be present");
+        assert_eq!(url.as_str(), "https://media.example.test/license");
+
+        for value in ["http://license.example.test/key", "javascript:alert(1)"] {
+            let insecure = dash_mpd_core::ContentProtection {
+                schemeIdUri: PLAYREADY_SCHEME.to_string(),
+                laurl: Some(dash_mpd_core::Laurl {
+                    content: Some(value.to_string()),
+                    ..Default::default()
+                }),
                 ..Default::default()
             };
-            assert!(encryption_from_scopes(&[std::slice::from_ref(&descriptor)]).is_err());
+            assert!(
+                license_url_from_scopes(&[std::slice::from_ref(&insecure)], &manifest).is_err()
+            );
         }
+    }
+
+    #[test]
+    fn playready_key_ids_convert_to_iso_cenc_byte_order() {
+        let playready_kid = [
+            0x33, 0x22, 0x11, 0x00, 0x55, 0x44, 0x77, 0x66, 0x88, 0x99, 0xaa, 0xbb, 0xcc, 0xdd,
+            0xee, 0xff,
+        ];
+        assert_eq!(
+            playready_kid_to_cenc(playready_kid),
+            [
+                0x00, 0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88, 0x99, 0xaa, 0xbb, 0xcc,
+                0xdd, 0xee, 0xff,
+            ]
+        );
+    }
+
+    #[test]
+    fn rejects_widevine_without_a_supported_cdm() {
+        let descriptor = widevine();
+        assert!(encryption_from_scopes(&[std::slice::from_ref(&descriptor)]).is_err());
     }
 
     #[test]

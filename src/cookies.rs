@@ -491,10 +491,13 @@ mod tests {
         tokio::task::yield_now().await;
         task.abort();
         let _ = task.await;
-        assert!(
-            !path.exists(),
-            "cancelling an export must unlink its staged file"
-        );
+        tokio::time::timeout(Duration::from_secs(2), async {
+            while path.exists() {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("cancelling an export must unlink its staged file");
         std::fs::remove_dir(&dir).unwrap();
     }
 

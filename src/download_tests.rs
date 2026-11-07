@@ -9273,6 +9273,14 @@ fn remove_during_finished_name_rename_waits_for_final_path_cleanup() {
     manager.remove(id);
     assert!(manager.dest_reserved(&old_path));
     assert!(manager.dest_reserved(&moved_path));
+    assert!(
+        !manager
+            .discards
+            .borrow()
+            .get(&id)
+            .is_some_and(|pending| pending.finalizer.is_finished()),
+        "discard finalizer must wait for the in-flight GLib pump"
+    );
 
     barrier.release();
     let context = glib::MainContext::default();

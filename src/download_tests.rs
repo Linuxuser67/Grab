@@ -9327,7 +9327,7 @@ fn finished_name_candidates_are_reserved_while_the_worker_runs() {
     let directory_name = directory.path().to_string_lossy().into_owned();
     let existing = vec!["clip.mp4".to_string()];
 
-    let (candidates, claims) = manager
+    let (candidates, mut claims) = manager
         .reserve_final_name_candidates(&directory_name, "clip.mp4", &existing)
         .expect("reserve finished-name candidates");
     let first = directory.path().join(&candidates[0]);

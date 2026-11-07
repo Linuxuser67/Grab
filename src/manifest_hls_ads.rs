@@ -341,7 +341,7 @@ fn parse_non_negative_decimal(value: &str) -> Option<f64> {
 
 fn is_base64_marker(value: &str) -> bool {
     let bytes = value.as_bytes();
-    if bytes.is_empty() || bytes.len() % 4 != 0 {
+    if bytes.is_empty() || !bytes.len().is_multiple_of(4) {
         return false;
     }
     let padding = if bytes.ends_with(b"==") {

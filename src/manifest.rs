@@ -1507,7 +1507,7 @@ fn build_hls_plan(base_url: Url, mut playlist: MediaPlaylist) -> Result<HlsPlan,
     for (segment, disposition) in playlist
         .segments
         .into_iter()
-        .zip(ad_removal.segments.into_iter())
+        .zip(ad_removal.segments)
     {
         if disposition != hls_ads::AdSegmentDisposition::Remove {
             retained_segments.push(segment);

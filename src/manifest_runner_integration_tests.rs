@@ -2483,10 +2483,16 @@ program-after.ts
         .collect::<Vec<_>>();
     assert_eq!(
         segment_urls,
-        [
-            "https://cdn.fixture.invalid/program-before.ts",
-            "https://cdn.fixture.invalid/program-after.ts",
+        vec![
+            "https://cdn.fixture.invalid/program-before.ts".to_string(),
+            "https://cdn.fixture.invalid/program-after.ts".to_string(),
         ]
+    );
+    assert!(
+        plan.resources
+            .iter()
+            .all(|resource| resource.url.host_str() != Some("ads.fixture.invalid")),
+        "ad-origin resources must not enter the native fetch plan"
     );
 
     let urls = plan
@@ -2541,12 +2547,5 @@ program-after.ts
             "planned program resource was not staged: {}",
             resource.filename
         );
-    }
-    assert!(
-        plan.resources
-            .iter()
-            .all(|resource| !resource.url.host_str().is_some_and(|host| host == "ads.fixture.invalid")),
-        "ad-origin resources must not enter the native fetch plan"
-    );
-}
+    }}
 

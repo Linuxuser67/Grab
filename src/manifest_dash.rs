@@ -154,7 +154,11 @@ impl DashTimestampOffset {
         let magnitude = self.nanoseconds.unsigned_abs();
         let seconds = magnitude / 1_000_000_000;
         let fraction = magnitude % 1_000_000_000;
-        let sign = if self.nanoseconds.is_negative() { "-" } else { "" };
+        let sign = if self.nanoseconds.is_negative() {
+            "-"
+        } else {
+            ""
+        };
         Some(format!("{sign}{seconds}.{fraction:09}"))
     }
 }
@@ -221,10 +225,9 @@ fn source_timestamp_offset(
         }
         DashAddressing::List(_) => (1, 0),
         DashAddressing::Base(base) => (base.timescale, base.presentation_time_offset),
-        DashAddressing::IndexedBase(index) => (
-            index.timescale.unwrap_or(1),
-            index.presentation_time_offset,
-        ),
+        DashAddressing::IndexedBase(index) => {
+            (index.timescale.unwrap_or(1), index.presentation_time_offset)
+        }
     };
     if timescale == 0 {
         return Err(DashError::InvalidSegment);
@@ -1484,9 +1487,7 @@ fn effective_addressing(
             index_range = base.indexRange.as_deref().or(index_range);
             index_range_exact = base.indexRangeExact.or(index_range_exact);
             timescale = base.timescale.or(timescale);
-            presentation_time_offset = base
-                .presentationTimeOffset
-                .or(presentation_time_offset);
+            presentation_time_offset = base.presentationTimeOffset.or(presentation_time_offset);
             if let Some(representation_index) = base.representation_index.as_ref() {
                 // Child elements replace inherited children rather than
                 // inheriting individual attributes from the parent element.
@@ -2814,8 +2815,8 @@ mod tests {
     </AdaptationSet>
   </Period>
 </MPD>"#;
-        let manifest = parse_dash_manifest(BASE_URL, body)
-            .expect("static SegmentBase PTO should be planned");
+        let manifest =
+            parse_dash_manifest(BASE_URL, body).expect("static SegmentBase PTO should be planned");
         let representation = &manifest.video_representations[0];
         let plan = plan_dash_representation(&manifest, &representation.key)
             .expect("non-zero SegmentBase PTO should produce a plan");
@@ -4259,16 +4260,10 @@ mod tests {
 </MPD>"#;
         let manifest = parse_dash_manifest(BASE_URL, body)
             .expect("static DASH with distinct track PTO values should parse");
-        let video = plan_dash_representation(
-            &manifest,
-            &manifest.video_representations[0].key,
-        )
-        .expect("plan video representation");
-        let audio = plan_dash_representation(
-            &manifest,
-            &manifest.audio_representations[0].key,
-        )
-        .expect("plan audio representation");
+        let video = plan_dash_representation(&manifest, &manifest.video_representations[0].key)
+            .expect("plan video representation");
+        let audio = plan_dash_representation(&manifest, &manifest.audio_representations[0].key)
+            .expect("plan audio representation");
 
         assert_eq!(
             video.input_timestamp_offset.ffmpeg_argument().as_deref(),
@@ -4291,13 +4286,10 @@ mod tests {
     </AdaptationSet>
   </Period>
 </MPD>"#;
-        let manifest = parse_dash_manifest(BASE_URL, body)
-            .expect("zero-origin static DASH should parse");
-        let plan = plan_dash_representation(
-            &manifest,
-            &manifest.video_representations[0].key,
-        )
-        .expect("plan zero-origin representation");
+        let manifest =
+            parse_dash_manifest(BASE_URL, body).expect("zero-origin static DASH should parse");
+        let plan = plan_dash_representation(&manifest, &manifest.video_representations[0].key)
+            .expect("plan zero-origin representation");
         assert_eq!(plan.input_timestamp_offset.ffmpeg_argument(), None);
     }
 
@@ -4332,8 +4324,14 @@ mod tests {
 
         let (first_key, first_offset) = plan_for_pto(8_000);
         let (second_key, second_offset) = plan_for_pto(9_000);
-        assert_eq!(first_key, second_key, "persisted representation keys remain stable");
-        assert_ne!(first_offset, second_offset, "PTO remains separate plan metadata");
+        assert_eq!(
+            first_key, second_key,
+            "persisted representation keys remain stable"
+        );
+        assert_ne!(
+            first_offset, second_offset,
+            "PTO remains separate plan metadata"
+        );
     }
 
     #[test]

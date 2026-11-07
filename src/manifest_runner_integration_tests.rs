@@ -103,7 +103,11 @@ fn shift_fragmented_mp4_decode_times(path: &Path, delta: u64) {
     fn shift_boxes(bytes: &mut [u8], start: usize, end: usize, delta: u64, shifted: &mut usize) {
         let mut cursor = start;
         while cursor < end {
-            assert!(cursor.checked_add(8).is_some_and(|header_end| header_end <= end));
+            assert!(
+                cursor
+                    .checked_add(8)
+                    .is_some_and(|header_end| header_end <= end)
+            );
             let size = u32::from_be_bytes(
                 bytes[cursor..cursor + 4]
                     .try_into()
@@ -123,9 +127,15 @@ fn shift_fragmented_mp4_decode_times(path: &Path, delta: u64) {
                         16_usize,
                     )
                 }
-                value => (usize::try_from(value).expect("generated MP4 box fits usize"), 8),
+                value => (
+                    usize::try_from(value).expect("generated MP4 box fits usize"),
+                    8,
+                ),
             };
-            assert!(box_size >= header_size, "generated MP4 box has a short header");
+            assert!(
+                box_size >= header_size,
+                "generated MP4 box has a short header"
+            );
             let box_end = cursor
                 .checked_add(box_size)
                 .filter(|box_end| *box_end <= end)

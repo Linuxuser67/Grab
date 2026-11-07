@@ -239,9 +239,7 @@ pub(super) fn has_nonzero_segment_list_presentation_time_offset(body: &[u8]) -> 
             for attribute in start.attributes() {
                 let attribute = attribute.ok()?;
                 if attribute.key.as_ref() == b"presentationTimeOffset" {
-                    let value = attribute
-                        .normalized_value(XmlVersion::Implicit1_0)
-                        .ok()?;
+                    let value = attribute.normalized_value(XmlVersion::Implicit1_0).ok()?;
                     let offset = value.parse::<u64>().ok()?;
                     has_nonzero_offset |= offset != 0;
                 }

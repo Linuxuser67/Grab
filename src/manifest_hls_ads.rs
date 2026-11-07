@@ -297,10 +297,26 @@ fn parse_attributes(
             .ok_or_else(|| unsupported_ad_marker("malformed ad-marker attribute"))?;
         let name = name.trim().to_ascii_uppercase();
         let value = value.trim();
-        let value = value
-            .strip_prefix('"')
-            .and_then(|value| value.strip_suffix('"'))
-            .unwrap_or(value);
+        let value = if let Some(quoted) = value.strip_prefix('"') {
+            let Some(unquoted) = quoted.strip_suffix('"') else {
+                return Err(unsupported_ad_marker(
+                    "malformed quoted ad-marker attribute",
+                ));
+            };
+            if unquoted.contains('"') {
+                return Err(unsupported_ad_marker(
+                    "malformed quoted ad-marker attribute",
+                ));
+            }
+            unquoted
+        } else {
+            if value.contains('"') {
+                return Err(unsupported_ad_marker(
+                    "malformed quoted ad-marker attribute",
+                ));
+            }
+            value
+        };
         if value.is_empty()
             || !allowed.iter().any(|allowed_name| *allowed_name == name)
             || attributes.insert(name, value.to_string()).is_some()
@@ -636,6 +652,44 @@ program.ts
 "#;
         assert!(matches!(
             plan_hls_media_playlist(BASE_URL, start_offset).err(),
+            Some(crate::manifest::ManifestError::UnsupportedAdInsertion(_))
+        ));
+    }
+
+    #[test]
+    fn malformed_ad_marker_attributes_and_cue_timing_fall_back() {
+        for marker in [
+            "#EXT-X-ASSET:CAID=\\"unterminated",
+            "#EXT-X-CUE-OUT: DURATION=\\"8",
+            "#EXT-X-CUE-OUT-CONT:ElapsedTime=0.5,Duration=8,URI=\\"https://ads.example.test/ad.ts\\"",
+        ] {
+            let body = format!(
+                "#EXTM3U\\n#EXT-X-TARGETDURATION:4\\n#EXT-X-CUE-OUT:8\\n{marker}\\n#EXTINF:4,\\nad.ts\\n#EXT-X-CUE-IN\\n#EXTINF:4,\\nprogram.ts\\n#EXT-X-ENDLIST\\n"
+            );
+            assert!(
+                matches!(
+                    plan_hls_media_playlist(BASE_URL, body.as_bytes()).err(),
+                    Some(crate::manifest::ManifestError::UnsupportedAdInsertion(_))
+                ),
+                "malformed or resource-bearing ad marker must remain on fallback: {marker}"
+            );
+        }
+
+        let mismatched_elapsed = br#"#EXTM3U
+#EXT-X-TARGETDURATION:4
+#EXT-X-CUE-OUT:8
+#EXTINF:4,
+ad-one.ts
+#EXT-X-CUE-OUT-CONT:ElapsedTime=6,Duration=8
+#EXTINF:4,
+ad-two.ts
+#EXT-X-CUE-IN
+#EXTINF:4,
+program.ts
+#EXT-X-ENDLIST
+"#;
+        assert!(matches!(
+            plan_hls_media_playlist(BASE_URL, mismatched_elapsed).err(),
             Some(crate::manifest::ManifestError::UnsupportedAdInsertion(_))
         ));
     }

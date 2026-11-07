@@ -1132,7 +1132,10 @@ mod tests {
     async fn dash_xlink_rejects_private_off_origin_targets() {
         let client = reqwest::Client::new();
         let parent = Url::parse("https://cdn.example.test/manifest.mpd").expect("parent URL");
-        for target in ["https://127.0.0.1/period.xml", "https://localhost/period.xml"] {
+        for target in [
+            "https://127.0.0.1/period.xml",
+            "https://localhost/period.xml",
+        ] {
             let body = format!(
                 r#"<MPD xmlns="urn:mpeg:dash:schema:mpd:2011" xmlns:xlink="http://www.w3.org/1999/xlink"><Period xlink:href="{target}" xlink:actuate="onLoad"/></MPD>"#
             );

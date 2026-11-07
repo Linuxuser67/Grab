@@ -1186,7 +1186,12 @@ mod tests {
             let body = format!(
                 r#"<MPD xmlns="urn:mpeg:dash:schema:mpd:2011" xmlns:xlink="http://www.w3.org/1999/xlink"><Period xlink:href="{target}" xlink:actuate="onLoad"/></MPD>"#
             );
-            let error = resolve_dash_xlinks(&client, &parent, body.as_bytes())
+            let error = resolve_dash_xlinks(
+                &client,
+                &parent,
+                body.as_bytes(),
+                ManifestTransportPolicy::HttpsOnly,
+            )
                 .await
                 .expect_err("off-origin private XLink target must be rejected before fetching");
             assert!(matches!(error, ManifestIntakeError::Unsupported(_)));

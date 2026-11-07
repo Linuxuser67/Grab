@@ -163,6 +163,14 @@ fn analyze_document(body: &[u8], require_onload: bool) -> Result<DocumentAnalysi
         let (namespace, event) = reader
             .read_resolved_event_into(&mut buffer)
             .map_err(|_| DashXlinkError::InvalidDocument)?;
+        let is_dash_namespace = matches!(
+            &namespace,
+            ResolveResult::Bound(namespace)
+                if namespace.into_inner() == DASH_MPD_NAMESPACE
+        );
+        drop(namespace);
+        let event_end = usize::try_from(reader.buffer_position())
+            .map_err(|_| DashXlinkError::InvalidDocument)?;
         match event {
             Event::Start(start) => {
                 element_count = element_count
@@ -172,19 +180,14 @@ fn analyze_document(body: &[u8], require_onload: bool) -> Result<DocumentAnalysi
                 if stack.len() >= MAX_XML_DEPTH {
                     return Err(DashXlinkError::InvalidDocument);
                 }
-                let end = usize::try_from(reader.buffer_position())
-                    .map_err(|_| DashXlinkError::InvalidDocument)?;
+                let end = event_end;
                 let start_offset = body
                     .get(previous_event_end..end)
                     .and_then(|event| event.iter().position(|byte| *byte == b'<'))
                     .and_then(|offset| previous_event_end.checked_add(offset))
                     .ok_or(DashXlinkError::InvalidDocument)?;
                 let local_name = start.name().local_name();
-                let is_dash = matches!(
-                    &namespace,
-                    ResolveResult::Bound(namespace)
-                        if namespace.into_inner() == DASH_MPD_NAMESPACE
-                );
+                let is_dash = is_dash_namespace;
 
                 if stack.is_empty() {
                     root_count = root_count
@@ -209,19 +212,14 @@ fn analyze_document(body: &[u8], require_onload: bool) -> Result<DocumentAnalysi
                     .checked_add(1)
                     .filter(|count| *count <= MAX_XML_ELEMENTS)
                     .ok_or(DashXlinkError::InvalidDocument)?;
-                let end = usize::try_from(reader.buffer_position())
-                    .map_err(|_| DashXlinkError::InvalidDocument)?;
+                let end = event_end;
                 let start_offset = body
                     .get(previous_event_end..end)
                     .and_then(|event| event.iter().position(|byte| *byte == b'<'))
                     .and_then(|offset| previous_event_end.checked_add(offset))
                     .ok_or(DashXlinkError::InvalidDocument)?;
                 let local_name = start.name().local_name();
-                let is_dash = matches!(
-                    &namespace,
-                    ResolveResult::Bound(namespace)
-                        if namespace.into_inner() == DASH_MPD_NAMESPACE
-                );
+                let is_dash = is_dash_namespace;
 
                 if stack.is_empty() {
                     root_count = root_count
@@ -247,8 +245,7 @@ fn analyze_document(body: &[u8], require_onload: bool) -> Result<DocumentAnalysi
                 }
             }
             Event::End(_) => {
-                let end = usize::try_from(reader.buffer_position())
-                    .map_err(|_| DashXlinkError::InvalidDocument)?;
+                let end = event_end;
                 let frame = stack.pop().ok_or(DashXlinkError::InvalidDocument)?;
                 if stack.is_empty() {
                     root_range = Some(frame.start..end);
@@ -271,8 +268,7 @@ fn analyze_document(body: &[u8], require_onload: bool) -> Result<DocumentAnalysi
             _ => {}
         }
         buffer.clear();
-        previous_event_end = usize::try_from(reader.buffer_position())
-            .map_err(|_| DashXlinkError::InvalidDocument)?;
+        previous_event_end = event_end;
     }
 
     if !stack.is_empty() || root_count != 1 {

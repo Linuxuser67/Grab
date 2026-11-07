@@ -17,15 +17,23 @@ pub struct GalleryCard {
     pub items: Vec<GalleryItem>,
     /// Per-host sticky mode preference.
     pub sticky: Option<StickyMode>,
+    /// Source URL, used when the user opens the explicit file picker.
+    url: String,
 }
 
 impl GalleryCard {
-    pub fn new(items: Vec<GalleryItem>, sticky: Option<StickyMode>) -> Self {
+    pub fn new(items: Vec<GalleryItem>, sticky: Option<StickyMode>, url: String) -> Self {
         Self {
             filter: Rc::new(RefCell::new(GalleryFilter::All)),
             items,
             sticky,
+            url,
         }
+    }
+
+    /// The gallery URL used to enumerate files for the explicit picker.
+    pub fn url(&self) -> &str {
+        &self.url
     }
 
     /// Filtered items based on the current filter selection.
@@ -86,6 +94,7 @@ mod tests {
         let card = GalleryCard::new(
             vec![test_item("a.jpg", "jpg"), test_item("b.mp4", "mp4")],
             None,
+            "https://example.com".to_string(),
         );
         assert_eq!(card.file_count(), 2);
     }
@@ -103,7 +112,7 @@ mod tests {
 
     #[test]
     fn sticky_defaults_to_video() {
-        let card = GalleryCard::new(vec![], None);
+        let card = GalleryCard::new(vec![], None, "https://example.com".to_string());
         assert_eq!(card.sticky_mode(), StickyMode::Video);
     }
 
@@ -112,6 +121,7 @@ mod tests {
         let card = GalleryCard::new(
             vec![],
             Some(StickyMode::Gallery),
+            "https://example.com".to_string(),
         );
         assert_eq!(card.sticky_mode(), StickyMode::Gallery);
     }

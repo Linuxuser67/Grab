@@ -51,18 +51,24 @@ pub(crate) fn parse_segment_base_index(
     media_resource_length: u64,
 ) -> Result<DashSidxNode, DashError> {
     let index_end = checked_range_end(index.index_range)?;
-    let initialization_end = checked_range_end(index.initialization_range)?;
     if index.index_range.length == 0
         || index.index_range.length > MAX_SEGMENT_INDEX_BYTES
         || u64::try_from(bytes.len()).ok() != Some(index.index_range.length)
         || index_end > index_resource_length
-        || index.initialization_range.length == 0
-        || index.initialization_range.length > crate::manifest_writer::MAX_RESOURCE_BYTES
-        || initialization_end > media_resource_length
-        || (!index.index_is_external
-            && ranges_overlap(index.index_range, index.initialization_range)?)
     {
         return Err(DashError::InvalidSegment);
+    }
+    if let Some(initialization_range) = index.initialization_range {
+        let initialization_end = checked_range_end(initialization_range)?;
+        if initialization_range.length == 0
+            || initialization_range.length > crate::manifest_writer::MAX_RESOURCE_BYTES
+            || (!index.initialization_is_external && initialization_end > media_resource_length)
+            || (!index.initialization_is_external
+                && !index.index_is_external
+                && ranges_overlap(index.index_range, initialization_range)?)
+        {
+            return Err(DashError::InvalidSegment);
+        }
     }
 
     parse_sidx_node(SidxNodeContext {
@@ -71,6 +77,7 @@ pub(crate) fn parse_segment_base_index(
         index_resource_length,
         media_resource_length,
         initialization_range: index.initialization_range,
+        initialization_is_external: index.initialization_is_external,
         manifest_timescale: index.timescale,
         index_is_external: index.index_is_external,
         expectation: None,
@@ -93,7 +100,12 @@ pub(crate) fn parse_child_segment_index(
         || child.range.length > MAX_SEGMENT_INDEX_BYTES
         || u64::try_from(bytes.len()).ok() != Some(child.range.length)
         || child_end > total_length
-        || ranges_overlap(child.range, index.initialization_range)?
+    {
+        return Err(DashError::InvalidSegment);
+    }
+    if !index.initialization_is_external
+        && let Some(initialization_range) = index.initialization_range
+        && ranges_overlap(child.range, initialization_range)?
     {
         return Err(DashError::InvalidSegment);
     }
@@ -110,6 +122,7 @@ pub(crate) fn parse_child_segment_index(
         index_resource_length: total_length,
         media_resource_length: total_length,
         initialization_range: index.initialization_range,
+        initialization_is_external: index.initialization_is_external,
         manifest_timescale: None,
         index_is_external: false,
         expectation: Some(expectation),
@@ -126,7 +139,11 @@ pub(crate) fn validate_segment_base_sidx_ranges(
     total_length: u64,
 ) -> Result<(), DashError> {
     let mut ranges = Vec::with_capacity(child_indexes.len() + media.len() + 2);
-    ranges.push(index.initialization_range);
+    if !index.initialization_is_external
+        && let Some(initialization_range) = index.initialization_range
+    {
+        ranges.push(initialization_range);
+    }
     if !index.index_is_external {
         ranges.push(index.index_range);
     }
@@ -174,7 +191,8 @@ struct SidxNodeContext<'a> {
     bytes: &'a [u8],
     index_resource_length: u64,
     media_resource_length: u64,
-    initialization_range: ManifestByteRange,
+    initialization_range: Option<ManifestByteRange>,
+    initialization_is_external: bool,
     manifest_timescale: Option<u64>,
     index_is_external: bool,
     expectation: Option<SidxExpectation>,
@@ -191,6 +209,7 @@ fn parse_sidx_node(context: SidxNodeContext<'_>) -> Result<DashSidxNode, DashErr
         index_resource_length,
         media_resource_length,
         initialization_range,
+        initialization_is_external,
         manifest_timescale,
         index_is_external,
         expectation,
@@ -291,7 +310,10 @@ fn parse_sidx_node(context: SidxNodeContext<'_>) -> Result<DashSidxNode, DashErr
             offset: reference_offset,
             length,
         };
-        if ranges_overlap(range, initialization_range)? {
+        if !initialization_is_external
+            && let Some(initialization) = initialization_range
+            && ranges_overlap(range, initialization)?
+        {
             return Err(DashError::InvalidSegment);
         }
 
@@ -421,10 +443,13 @@ mod tests {
                 length: u64::try_from(index_bytes.len()).expect("test index length"),
             },
             index_is_external: false,
-            initialization_range: ManifestByteRange {
+            initialization_url: Url::parse("https://cdn.example.test/path/media.mp4")
+                .expect("test initialization URL"),
+            initialization_is_external: false,
+            initialization_range: Some(ManifestByteRange {
                 offset: 0,
                 length: 100,
-            },
+            }),
             index_range_exact: true,
             timescale: Some(1_000),
         }
@@ -668,6 +693,46 @@ mod tests {
             224,
         )
         .expect("external index and media ranges use their respective resources");
+    }
+
+    #[test]
+    fn validates_separate_initialization_ranges_against_their_own_resource() {
+        let bytes = build_sidx_box(7, 1_000, 0, 144, &[(80, 2_000, 0x9000_0000)]);
+        let mut index = test_index(&bytes);
+        index.index_url =
+            Url::parse("https://cdn.example.test/path/index.sidx").expect("external index URL");
+        index.index_range = ManifestByteRange {
+            offset: 0,
+            length: u64::try_from(bytes.len()).expect("external SIDX length"),
+        };
+        index.index_is_external = true;
+        index.initialization_url =
+            Url::parse("https://cdn.example.test/path/init.mp4").expect("separate init URL");
+        index.initialization_is_external = true;
+        index.initialization_range = Some(ManifestByteRange {
+            offset: 500,
+            length: 100,
+        });
+
+        let node = parse_segment_base_index(&index, &bytes, 44, 224)
+            .expect("external init range is not relative to the media resource");
+        assert_eq!(
+            node.entries,
+            [DashSidxEntry::Media(ManifestByteRange {
+                offset: 144,
+                length: 80,
+            })]
+        );
+        validate_segment_base_sidx_ranges(
+            &index,
+            &[],
+            &[ManifestByteRange {
+                offset: 144,
+                length: 80,
+            }],
+            224,
+        )
+        .expect("separate init ranges do not overlap media-resource ranges");
     }
 
     #[test]

@@ -15,6 +15,11 @@ use url::Url;
 #[cfg(test)]
 use crate::manifest::HlsVariant;
 use crate::manifest::{HlsMasterPlan, HlsPlan, MAX_MANIFEST_BYTES};
+
+#[path = "manifest_dash_xlink.rs"]
+mod dash_xlink;
+
+const MAX_DASH_XLINK_COUNT: usize = 16;
 use crate::manifest_plan::{hls_audio_rendition_key, hls_subtitle_rendition_key, hls_variant_key};
 
 /// Download-time manifest requests retain their normal network tolerance.
@@ -634,6 +639,7 @@ async fn lookup_with_client_policy(
             }
         }
         crate::media_types::ManifestKind::Dash => {
+            let body = resolve_dash_xlinks(client, &final_url, &body, transport_policy).await?;
             let body = std::str::from_utf8(&body).map_err(|error| {
                 ManifestIntakeError::Unsupported(format!(
                     "The DASH manifest is not valid UTF-8: {error}"
@@ -667,6 +673,144 @@ async fn lookup_with_http_fixture_client(
         ManifestFetchMode::Preview,
     )
     .await
+}
+
+/// Resolve one bounded layer of DASH XLink onLoad references before MPD parsing.
+async fn resolve_dash_xlinks(
+    client: &reqwest::Client,
+    parent_url: &Url,
+    body: &[u8],
+    transport_policy: ManifestTransportPolicy,
+) -> Result<Vec<u8>, ManifestIntakeError> {
+    let links = dash_xlink::find_onload_links(body).map_err(|error| {
+        ManifestIntakeError::Unsupported(format!(
+            "The DASH XLink structure is not supported: {error}"
+        ))
+    })?;
+    if links.is_empty() {
+        return Ok(body.to_vec());
+    }
+    if links.len() > MAX_DASH_XLINK_COUNT {
+        return Err(ManifestIntakeError::Unsupported(
+            "The DASH MPD contains too many XLink references".to_string(),
+        ));
+    }
+
+    let mut seen_hosts = HashSet::new();
+    let mut total_link_bytes = 0_usize;
+    let mut replacements = Vec::with_capacity(links.len());
+    for link in &links {
+        let replacement = match &link.action {
+            dash_xlink::DashXlinkAction::Remove => Vec::new(),
+            dash_xlink::DashXlinkAction::Fetch(href) => {
+                let target = parent_url.join(href).map_err(|_| {
+                    ManifestIntakeError::Unsupported(
+                        "A DASH XLink reference has an invalid URL".to_string(),
+                    )
+                })?;
+                if !transport_policy.accepts_url(&target) || target.fragment().is_some() {
+                    return Err(ManifestIntakeError::Unsupported(
+                        "DASH XLink references must be credential-free HTTPS URLs without fragments"
+                            .to_string(),
+                    ));
+                }
+                let host = target.host_str().ok_or_else(|| {
+                    ManifestIntakeError::Unsupported(
+                        "A DASH XLink target has no hostname".to_string(),
+                    )
+                })?;
+                let host_key = host.trim_end_matches('.').to_ascii_lowercase();
+                if !seen_hosts.contains(&host_key)
+                    && seen_hosts.len()
+                        >= crate::download_net::MAX_GUARDED_CHILD_HOSTS_PER_COLLECTION
+                {
+                    return Err(ManifestIntakeError::Unsupported(
+                        "The DASH MPD references too many distinct XLink hosts".to_string(),
+                    ));
+                }
+                // A directly entered manifest is trusted as the user-selected
+                // origin, but a different host is still an untrusted remote
+                // link. Force public-only DNS for those children so a hostile
+                // MPD cannot turn XLink into a request to a private address.
+                if target.origin() != parent_url.origin()
+                    && !crate::download_net::require_public_resolution(host)
+                {
+                    return Err(ManifestIntakeError::Unsupported(
+                        "A DASH XLink target failed the public-host safety policy".to_string(),
+                    ));
+                }
+                crate::download_net::inherit_public_resolution_for_collection(
+                    parent_url.as_str(),
+                    target.as_str(),
+                    &mut seen_hosts,
+                )
+                .map_err(|_| {
+                    ManifestIntakeError::Unsupported(
+                        "A DASH XLink target failed the child-host safety policy".to_string(),
+                    )
+                })?;
+                seen_hosts.insert(host_key);
+
+                let remaining = MAX_MANIFEST_BYTES
+                    .checked_sub(body.len())
+                    .and_then(|size| size.checked_sub(total_link_bytes))
+                    .ok_or_else(|| {
+                        ManifestIntakeError::Unsupported(
+                            "The expanded DASH manifest exceeds its size limit".to_string(),
+                        )
+                    })?;
+                let response = client
+                    .get(target.clone())
+                    .timeout(MANIFEST_REQUEST_TIMEOUT)
+                    .send()
+                    .await
+                    .map_err(|error| {
+                        manifest_request_error("Could not retrieve a DASH XLink resource", error)
+                    })?;
+                if !response.status().is_success() {
+                    return Err(manifest_status_error(
+                        response.status(),
+                        ManifestFetchMode::Download,
+                    ));
+                }
+                let final_url = response.url();
+                if !transport_policy.accepts_url(final_url) || final_url.origin() != target.origin()
+                {
+                    return Err(ManifestIntakeError::Unsupported(
+                        "A DASH XLink resource redirected outside its original HTTPS origin"
+                            .to_string(),
+                    ));
+                }
+                let linked_body =
+                    read_bounded_response_with_limit(response, remaining, "DASH XLink resource")
+                        .await?;
+                total_link_bytes =
+                    total_link_bytes
+                        .checked_add(linked_body.len())
+                        .ok_or_else(|| {
+                            ManifestIntakeError::Unsupported(
+                                "The expanded DASH manifest exceeds its size limit".to_string(),
+                            )
+                        })?;
+                dash_xlink::linked_element(&linked_body, link.element)
+                    .map_err(|error| {
+                        ManifestIntakeError::Unsupported(format!(
+                            "A DASH XLink resource did not contain one supported linked element: {error}"
+                        ))
+                    })?
+                    .to_vec()
+            }
+        };
+        replacements.push(replacement);
+    }
+
+    dash_xlink::replace_linked_elements(body, &links, &replacements, MAX_MANIFEST_BYTES).map_err(
+        |error| {
+            ManifestIntakeError::Unsupported(format!(
+                "The expanded DASH manifest exceeds the supported structure or size limits: {error}"
+            ))
+        },
+    )
 }
 
 /// Fetch and parse an HLS child media playlist using the caller's guarded client.
@@ -937,15 +1081,22 @@ pub(crate) fn valid_source(source: &crate::media_types::ManifestSource) -> bool 
 }
 
 async fn read_bounded_response(
+    response: reqwest::Response,
+) -> Result<Vec<u8>, ManifestIntakeError> {
+    read_bounded_response_with_limit(response, MAX_MANIFEST_BYTES, "stream manifest").await
+}
+
+async fn read_bounded_response_with_limit(
     mut response: reqwest::Response,
+    max_bytes: usize,
+    context: &str,
 ) -> Result<Vec<u8>, ManifestIntakeError> {
     if response
         .content_length()
-        .is_some_and(|length| length > MAX_MANIFEST_BYTES as u64)
+        .is_some_and(|length| usize::try_from(length).map_or(true, |length| length > max_bytes))
     {
         return Err(ManifestIntakeError::Unsupported(format!(
-            "The stream manifest exceeds the {} MiB size limit",
-            MAX_MANIFEST_BYTES / (1024 * 1024)
+            "The {context} exceeds its byte limit"
         )));
     }
 
@@ -953,12 +1104,11 @@ async fn read_bounded_response(
     while let Some(chunk) = response
         .chunk()
         .await
-        .map_err(|error| manifest_request_error("Could not read the stream manifest", error))?
+        .map_err(|error| manifest_request_error(&format!("Could not read the {context}"), error))?
     {
-        if body.len().saturating_add(chunk.len()) > MAX_MANIFEST_BYTES {
+        if body.len().saturating_add(chunk.len()) > max_bytes {
             return Err(ManifestIntakeError::Unsupported(format!(
-                "The stream manifest exceeds the {} MiB size limit",
-                MAX_MANIFEST_BYTES / (1024 * 1024)
+                "The {context} exceeds its byte limit"
             )));
         }
         body.extend_from_slice(&chunk);
@@ -972,6 +1122,81 @@ mod tests {
     use crate::manifest_plan::{
         hls_audio_rendition_key, hls_audio_rendition_keys, hls_variant_key, hls_variant_keys,
     };
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn dash_xlink_resolves_a_period_through_the_bounded_client() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0))
+            .await
+            .expect("bind XLink fixture");
+        let address = listener.local_addr().expect("fixture address");
+        let server = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.expect("accept XLink request");
+            let mut request = Vec::new();
+            let mut chunk = [0_u8; 1024];
+            loop {
+                let read = stream.read(&mut chunk).await.expect("read XLink request");
+                if read == 0 {
+                    break;
+                }
+                request.extend_from_slice(&chunk[..read]);
+                if request.windows(4).any(|window| window == b"\r\n\r\n") {
+                    break;
+                }
+            }
+            let request = String::from_utf8(request).expect("HTTP request is UTF-8");
+            assert!(request.starts_with("GET /period.xml "));
+            let linked = r#"<Period xmlns="urn:mpeg:dash:schema:mpd:2011" duration="PT2S"/>"#;
+            let response = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/xml\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                linked.len(),
+                linked
+            );
+            stream
+                .write_all(response.as_bytes())
+                .await
+                .expect("write XLink response");
+        });
+
+        let client = reqwest::Client::builder()
+            .no_proxy()
+            .build()
+            .expect("build fixture client");
+        let parent = Url::parse(&format!("http://{address}/manifest.mpd")).expect("parent URL");
+        let body = br#"<MPD xmlns="urn:mpeg:dash:schema:mpd:2011" xmlns:xlink="http://www.w3.org/1999/xlink"><Period xlink:href="period.xml" xlink:actuate="onLoad"/></MPD>"#;
+        let expanded =
+            resolve_dash_xlinks(&client, &parent, body, ManifestTransportPolicy::HttpFixture)
+                .await
+                .expect("bounded Period XLink resolution");
+        server.await.expect("XLink fixture task");
+        let expanded = std::str::from_utf8(&expanded).expect("expanded MPD is UTF-8");
+        assert!(expanded.contains(r#"duration="PT2S""#));
+        assert!(!expanded.contains("xlink:href"));
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn dash_xlink_rejects_private_off_origin_targets() {
+        let client = reqwest::Client::new();
+        let parent = Url::parse("https://cdn.example.test/manifest.mpd").expect("parent URL");
+        for target in [
+            "https://127.0.0.1/period.xml",
+            "https://localhost/period.xml",
+        ] {
+            let body = format!(
+                r#"<MPD xmlns="urn:mpeg:dash:schema:mpd:2011" xmlns:xlink="http://www.w3.org/1999/xlink"><Period xlink:href="{target}" xlink:actuate="onLoad"/></MPD>"#
+            );
+            let error = resolve_dash_xlinks(
+                &client,
+                &parent,
+                body.as_bytes(),
+                ManifestTransportPolicy::HttpsOnly,
+            )
+            .await
+            .expect_err("off-origin private XLink target must be rejected before fetching");
+            assert!(matches!(error, ManifestIntakeError::Unsupported(_)));
+        }
+    }
 
     #[test]
     fn native_manifest_gate_accepts_explicit_format_query_hints() {

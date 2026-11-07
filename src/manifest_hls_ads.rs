@@ -564,7 +564,7 @@ program-after.m4s
             .filter(|resource| resource.kind == crate::manifest::HlsResourceKind::InitMap)
             .map(|resource| resource.url.as_str())
             .collect::<Vec<_>>();
-        assert_eq!(init_urls, ["https://cdn.example.test/path/init-content.mp4"]);
+        assert_eq!(init_urls, vec!["https://cdn.example.test/path/init-content.mp4"]);
         assert!(
             plan.resources
                 .iter()

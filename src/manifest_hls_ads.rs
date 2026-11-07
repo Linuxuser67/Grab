@@ -401,7 +401,7 @@ mod tests {
         let plan = plan_hls_media_playlist(BASE_URL, body)
             .expect("paired ad markers should be planned after dropping ad media");
 
-        let expected_urls = [
+        let expected_urls: &[&str] = &[
             "https://cdn.example.test/path/segment-8779957.ts?m=1566416212",
             "https://cdn.example.test/path/segment-8779958.ts?m=1566416212",
             "https://cdn.example.test/path/segment-8779959.ts?m=1566416212",

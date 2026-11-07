@@ -2455,8 +2455,11 @@ async fn hls_ad_break_segments_are_not_fetched_or_written_to_the_local_playlist(
     let fixture_dir = root.path().join("fixture");
     std::fs::create_dir_all(&fixture_dir).expect("create HLS ad-removal fixture directory");
     for filename in ["program-before.ts", "program-after.ts"] {
-        std::fs::write(fixture_dir.join(filename), format!("fixture bytes for {filename}"))
-            .expect("write HLS segment fixture");
+        std::fs::write(
+            fixture_dir.join(filename),
+            format!("fixture bytes for {filename}"),
+        )
+        .expect("write HLS segment fixture");
     }
 
     let manifest = br#"#EXTM3U
@@ -2540,10 +2543,17 @@ program-after.ts
     let local = m3u8_rs::parse_media_playlist_res(&local_bytes)
         .expect("parse the ad-free local HLS playlist");
     assert_eq!(local.segments.len(), 2);
-    assert!(local.segments.iter().all(|segment| !segment.uri.contains("ad.ts")));
+    assert!(
+        local
+            .segments
+            .iter()
+            .all(|segment| !segment.uri.contains("ad.ts"))
+    );
     for resource in &plan.resources {
         assert!(
-            tokio::fs::metadata(video_dir.join(&resource.filename)).await.is_ok(),
+            tokio::fs::metadata(video_dir.join(&resource.filename))
+                .await
+                .is_ok(),
             "planned program resource was not staged: {}",
             resource.filename
         );

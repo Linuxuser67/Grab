@@ -231,10 +231,7 @@ pub(super) fn is_ad_marker_tag(tag: &ExtTag) -> bool {
     )
 }
 
-fn one_marker<'a>(
-    tags: &'a [ExtTag],
-    name: &str,
-) -> Result<Option<&'a ExtTag>, ManifestError> {
+fn one_marker<'a>(tags: &'a [ExtTag], name: &str) -> Result<Option<&'a ExtTag>, ManifestError> {
     let mut matches = tags.iter().filter(|tag| tag.tag == name);
     let first = matches.next();
     if matches.next().is_some() {
@@ -280,7 +277,9 @@ fn parse_cue_out_cont(tag: &ExtTag) -> Result<(f64, f64), ManifestError> {
         .get("SCTE35")
         .is_some_and(|value| !is_base64_marker(value))
     {
-        return Err(unsupported_ad_marker("CUE-OUT-CONT SCTE35 data is malformed"));
+        return Err(unsupported_ad_marker(
+            "CUE-OUT-CONT SCTE35 data is malformed",
+        ));
     }
     Ok((elapsed, duration))
 }
@@ -388,7 +387,9 @@ mod tests {
             .collect::<Vec<_>>();
         assert_eq!(actual_urls.as_slice(), expected_urls);
 
-        let local = plan.local_playlist_bytes().expect("serialize local playlist");
+        let local = plan
+            .local_playlist_bytes()
+            .expect("serialize local playlist");
         let local = String::from_utf8(local).expect("local playlist is UTF-8");
         assert!(!local.contains("EXT-X-CUE"));
         assert!(!local.contains("EXT-OATCLS-SCTE35"));
@@ -407,14 +408,16 @@ mod tests {
 #EXTINF:4,
 ad.ts
 #EXT-X-ENDLIST
-".as_slice(),
+"
+                .as_slice(),
             b"#EXTM3U
 #EXT-X-TARGETDURATION:4
 #EXT-X-CUE-IN
 #EXTINF:4,
 program.ts
 #EXT-X-ENDLIST
-".as_slice(),
+"
+                .as_slice(),
             b"#EXTM3U
 #EXT-X-TARGETDURATION:4
 #EXTINF:4,
@@ -426,7 +429,8 @@ ad.ts
 #EXTINF:4,
 program2.ts
 #EXT-X-ENDLIST
-".as_slice(),
+"
+                .as_slice(),
         ] {
             assert!(
                 matches!(
@@ -484,8 +488,8 @@ program.ts
 program2.ts
 #EXT-X-ENDLIST
 ";
-        let plan = plan_hls_media_playlist(BASE_URL, body)
-            .expect("ordinary playlists remain unchanged");
+        let plan =
+            plan_hls_media_playlist(BASE_URL, body).expect("ordinary playlists remain unchanged");
         assert_eq!(
             plan.resources
                 .iter()
@@ -564,7 +568,10 @@ program-after.m4s
             .filter(|resource| resource.kind == crate::manifest::HlsResourceKind::InitMap)
             .map(|resource| resource.url.as_str())
             .collect::<Vec<_>>();
-        assert_eq!(init_urls, vec!["https://cdn.example.test/path/init-content.mp4"]);
+        assert_eq!(
+            init_urls,
+            vec!["https://cdn.example.test/path/init-content.mp4"]
+        );
         assert!(
             plan.resources
                 .iter()
@@ -593,7 +600,9 @@ clear-program.ts
 "#;
         let plan = plan_hls_media_playlist(BASE_URL, body)
             .expect("a reset in an omitted ad must remain active for the program segment");
-        let local = plan.local_playlist_bytes().expect("serialize local playlist");
+        let local = plan
+            .local_playlist_bytes()
+            .expect("serialize local playlist");
         let local = m3u8_rs::parse_media_playlist_res(&local)
             .expect("parse the ad-free local playlist");
         assert_eq!(local.segments.len(), 2);
@@ -761,11 +770,12 @@ program.ts
             assert!(
                 matches!(
                     plan_hls_media_playlist(BASE_URL, body.as_bytes()).err(),
-                    Some(crate::manifest::ManifestError::UnsupportedPlaylistFeature(_))
+                    Some(crate::manifest::ManifestError::UnsupportedPlaylistFeature(
+                        _
+                    ))
                 ),
                 "unsupported tag must remain a fallback: {tag}"
             );
         }
     }
-
 }

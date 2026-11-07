@@ -607,8 +607,8 @@ clear-program.ts
         let local_bytes = plan
             .local_playlist_bytes()
             .expect("serialize local playlist");
-        let local_text = std::str::from_utf8(&local_bytes)
-            .expect("serialized local playlist is UTF-8");
+        let local_text =
+            std::str::from_utf8(&local_bytes).expect("serialized local playlist is UTF-8");
         assert!(
             local_text.contains("#EXT-X-KEY:METHOD=NONE"),
             "removing the in-ad reset must emit a METHOD=NONE tag before clear program media"

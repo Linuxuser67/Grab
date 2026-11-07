@@ -1090,8 +1090,8 @@ fn parse_probe_messages(messages: &[serde_json::Value]) -> Result<Vec<GalleryIte
 }
 
 /// Count files without downloading: `gallery-dl --config-ignore -g --no-download <url>`.
-/// Returns the line count of direct file URLs, or `None` on any failure
-/// (the card then shows an indeterminate count).
+/// Returns the line count of direct file URLs, or `None` on any failure.
+/// The gallery progress bar remains indeterminate until a count is available.
 #[cfg(test)]
 pub async fn count_gallery_files(
     tool: &Path,

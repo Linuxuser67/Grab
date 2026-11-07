@@ -46,7 +46,7 @@ mod imp {
         /// True if this is a gallery download (image gallery via gallery-dl).
         #[property(get, set)]
         pub is_gallery: Cell<bool>,
-        /// Total files in the gallery (0 if not a gallery).
+        /// Progress denominator for a gallery download (0 if unknown or not a gallery).
         #[property(get, set)]
         pub gallery_file_count: Cell<u32>,
         /// Files downloaded so far (for progress).

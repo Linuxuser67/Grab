@@ -1,7 +1,7 @@
 //! Gallery card UI: mode toggle, filter picker, file list.
 //!
 //! Shown when the probe finds an image gallery. The user picks a filter
-//! (All/Images/Videos), sees the file count and list, then adds the download.
+//! (All/Images/Videos), previews the available items, then adds the download.
 
 use std::cell::RefCell;
 use std::rc::Rc;
@@ -17,10 +17,10 @@ pub struct GalleryCard {
     pub items: Vec<GalleryItem>,
     /// Per-host sticky mode preference.
     pub sticky: Option<StickyMode>,
-    /// Total file counts per filter (from `count_gallery_files`).
-    /// `None` = not yet counted.
+    /// Per-filter file totals used as progress denominators when available.
+    /// `None` = not yet counted or the count request failed.
     total: RefCell<std::collections::HashMap<GalleryFilter, Option<u32>>>,
-    /// Source URL (for filter-toggle recounts).
+    /// Source URL, used to retrieve progress totals when the filter changes.
     url: String,
 }
 
@@ -159,53 +159,5 @@ mod tests {
         );
         set_filter_index(&card, 2);
         assert_eq!(card.file_count(), 1);
-    }
-}
-
-/// Display rule for the gallery file count.
-/// - `total`: exact count from `count_gallery_files`, if known.
-/// - `items_len`: number of probe items (capped at 5 by `--range 1-5`).
-/// - `cap`: the probe cap (5).
-///
-/// When total is unknown and we've hit the cap, show "5+ files".
-pub fn display_count(items_len: usize, cap: usize, total: Option<u32>) -> String {
-    match total {
-        Some(n) => {
-            if n == 1 {
-                "1 file".to_string()
-            } else {
-                format!("{n} files")
-            }
-        }
-        None if items_len >= cap => format!("{cap}+ files"),
-        None => {
-            if items_len == 1 {
-                "1 file".to_string()
-            } else {
-                format!("{items_len} files")
-            }
-        }
-    }
-}
-
-#[cfg(test)]
-mod display_count_tests {
-    use super::*;
-
-    #[test]
-    fn exact_count() {
-        assert_eq!(display_count(5, 5, Some(42)), "42 files");
-        assert_eq!(display_count(5, 5, Some(1)), "1 file");
-    }
-
-    #[test]
-    fn capped_unknown() {
-        assert_eq!(display_count(5, 5, None), "5+ files");
-    }
-
-    #[test]
-    fn uncapped_unknown() {
-        assert_eq!(display_count(3, 5, None), "3 files");
-        assert_eq!(display_count(1, 5, None), "1 file");
     }
 }

@@ -1367,7 +1367,7 @@ impl DownloadManager {
         item.set_gallery_file_count(job.file_count.unwrap_or(0));
         item.set_gallery_files_done(0);
         item.set_gallery_url(url.clone());
-        item.set_detail(format!("Gallery • {} files", job.file_count.unwrap_or(0)));
+        item.set_detail("Gallery".to_string());
         let gallery_dir = std::path::Path::new(&dir).join(&unique_title);
         let mut stored_job = job.clone();
         stored_job.dest_dir = gallery_dir;
@@ -1736,7 +1736,7 @@ impl DownloadManager {
         item.set_is_gallery(true);
         let file_count = job.file_count.unwrap_or(0);
         item.set_gallery_file_count(file_count);
-        // Done rows show the full count; others start at 0.
+        // Restore the completion counter used by the gallery progress bar.
         let files_done = if stored.status == DownloadStatus::Done {
             file_count
         } else {
@@ -1744,13 +1744,7 @@ impl DownloadManager {
         };
         item.set_gallery_files_done(files_done);
         item.set_gallery_url(url.clone());
-        // Done rows show the finished count; others mirror enqueue_gallery's
-        // total-count format (done_label(0) would read "Gallery • 0 files").
-        if stored.status == DownloadStatus::Done {
-            item.set_detail(crate::gallery_runner::done_label(files_done as usize, 0));
-        } else {
-            item.set_detail(format!("Gallery • {file_count} files"));
-        }
+        item.set_detail("Gallery".to_string());
         // Status: Done/Failed/Paused kept; Downloading → Queued via the _ arm.
         // (Scheduled doesn't apply to galleries.)
         item.set_status(match stored.status {
@@ -3684,12 +3678,9 @@ impl DownloadManager {
                                 let done =
                                     crate::gallery_runner::done_count(r.files.len(), r.skipped);
                                 let detail = if r.exit_code.is_some() {
-                                    format!(
-                                        "{} \u{2022} some failed",
-                                        crate::gallery_runner::done_label(r.files.len(), r.skipped)
-                                    )
+                                    "Gallery \u{2022} some failed".to_string()
                                 } else {
-                                    crate::gallery_runner::done_label(r.files.len(), r.skipped)
+                                    "Gallery".to_string()
                                 };
                                 item_c.set_gallery_files_done(done);
                                 item_c.set_progress(1.0);

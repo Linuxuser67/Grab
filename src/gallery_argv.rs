@@ -245,8 +245,8 @@ pub(crate) fn cookie_source_args(
     }
 }
 
-/// Build argv for counting files in a gallery (probe).
-/// Used by the gallery card UI to show "N files" before download.
+/// Build argv for counting all files in a gallery without downloading.
+/// The result supplies the denominator for determinate download progress.
 #[cfg(test)]
 pub fn count_argv(
     tool: &Path,

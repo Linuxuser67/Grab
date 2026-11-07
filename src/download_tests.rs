@@ -8606,8 +8606,8 @@ fn gallery_round_trip_failed() {
     let item = m.store().item(0).and_downcast::<DownloadItem>().unwrap();
     assert!(item.is_gallery());
     assert_eq!(item.status(), DownloadStatus::Failed);
-    // Non-Done restores show the total count, not "0 files".
-    assert_eq!(item.detail(), "Gallery • 5 files");
+    // Gallery row details no longer duplicate the total file count.
+    assert_eq!(item.detail(), "Gallery");
     let _ = std::fs::remove_file(&qf);
 }
 

@@ -401,7 +401,7 @@ pub fn build_window(
     }
     let (active_section, active_list) = section_list(&gettext("Active"));
     let (queued_section, queued_list) = section_list(&gettext("Queued"));
-    let (downloaded_section, downloaded_list) = section_list(&gettext("Downloaded"));
+    let (downloaded_section, downloaded_list) = section_list(&gettext("Done"));
     active_section.set_widget_name("download-section-active");
     queued_section.set_widget_name("download-section-queued");
     downloaded_section.set_widget_name("download-section-downloaded");

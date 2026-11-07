@@ -537,6 +537,43 @@ program-after.ts
     }
 
     #[test]
+    fn ad_only_initialization_map_is_not_planned_when_program_map_is_restored() {
+        let body = br#"#EXTM3U
+#EXT-X-VERSION:6
+#EXT-X-TARGETDURATION:4
+#EXT-X-MAP:URI="init-content.mp4"
+#EXTINF:4,
+program-before.m4s
+#EXT-X-MAP:URI="init-ad.mp4"
+#EXT-X-CUE-OUT:8
+#EXTINF:4,
+ad-one.m4s
+#EXTINF:4,
+ad-two.m4s
+#EXT-X-CUE-IN
+#EXT-X-MAP:URI="init-content.mp4"
+#EXTINF:4,
+program-after.m4s
+#EXT-X-ENDLIST
+"#;
+        let plan = plan_hls_media_playlist(BASE_URL, body)
+            .expect("paired cue markers should omit the ad initialization resource");
+        let init_urls = plan
+            .resources
+            .iter()
+            .filter(|resource| resource.kind == crate::manifest::HlsResourceKind::InitMap)
+            .map(|resource| resource.url.as_str())
+            .collect::<Vec<_>>();
+        assert_eq!(init_urls, ["https://cdn.example.test/path/init-content.mp4"]);
+        assert!(
+            plan.resources
+                .iter()
+                .all(|resource| !resource.url.as_str().contains("init-ad.mp4")),
+            "ad-only initialization maps must not be fetched"
+        );
+    }
+
+    #[test]
     fn method_none_reset_inside_removed_ad_is_reapplied_to_program_segment() {
         let body = br#"#EXTM3U
 #EXT-X-TARGETDURATION:4

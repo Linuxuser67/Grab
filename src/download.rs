@@ -2504,7 +2504,8 @@ impl DownloadManager {
                                 // claim-then-move it. Keep GTK objects on this context and send
                                 // only plain paths/candidate names to the blocking worker.
                                 let this = if existing.iter().any(|entry| entry == &current) {
-                                    match this.reserve_final_name_candidates(&dir, &name, &existing) {
+                                    match this.reserve_final_name_candidates(&dir, &name, &existing)
+                                    {
                                         Some((candidates, mut claims)) => {
                                             let old_path = item.file_path();
                                             let worker_old_path = old_path.clone();
@@ -2533,10 +2534,14 @@ impl DownloadManager {
                                                 // The manager is gone. Restore the original path
                                                 // when possible rather than leaving an untracked move.
                                                 if let Some(final_name) = adopted {
-                                                    let moved_path = std::path::Path::new(&dir).join(&final_name);
+                                                    let moved_path = std::path::Path::new(&dir)
+                                                        .join(&final_name);
                                                     let rollback_old_path = old_path.clone();
                                                     let rollback = gio::spawn_blocking(move || {
-                                                        rename_noreplace(&moved_path, &rollback_old_path)
+                                                        rename_noreplace(
+                                                            &moved_path,
+                                                            &rollback_old_path,
+                                                        )
                                                     })
                                                     .await;
                                                     if !matches!(rollback, Ok(Ok(()))) {
@@ -2558,14 +2563,20 @@ impl DownloadManager {
                                                 let row_removed = this.find(id).is_none();
                                                 let update_detached_path = stopped || row_removed;
                                                 if let Some(final_name) = adopted {
-                                                    let moved_path = std::path::Path::new(&dir).join(&final_name);
+                                                    let moved_path = std::path::Path::new(&dir)
+                                                        .join(&final_name);
                                                     let rollback_old_path = old_path.clone();
                                                     drop(this);
                                                     let rollback = gio::spawn_blocking(move || {
-                                                        rename_noreplace(&moved_path, &rollback_old_path)
+                                                        rename_noreplace(
+                                                            &moved_path,
+                                                            &rollback_old_path,
+                                                        )
                                                     })
                                                     .await;
-                                                    if !matches!(rollback, Ok(Ok(()))) && update_detached_path {
+                                                    if !matches!(rollback, Ok(Ok(())))
+                                                        && update_detached_path
+                                                    {
                                                         item.set_filename(final_name);
                                                         if row_removed {
                                                             // Removal already reserved old_path. Keep the

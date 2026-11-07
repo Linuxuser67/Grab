@@ -561,7 +561,10 @@ fn discover_dash_parts(staging: &Path) -> std::io::Result<Vec<(PathBuf, u64)>> {
             continue;
         };
         let path = entry.path();
-        let name = path.file_name().and_then(|name| name.to_str()).unwrap_or("");
+        let name = path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or("");
         // Match .f<id>.ext or .f<id>.ext.part (DASH format files).
         let is_dash_part = name.contains(".f")
             && name
@@ -687,10 +690,11 @@ async fn try_merge_dash_partials(
     // Merge in an exclusive private directory beside staging, keeping the final
     // no-clobber move on the same filesystem without touching user-owned temp names.
     let staging_dir = staging.to_path_buf();
-    let mut merged_dir = tokio::task::spawn_blocking(move || DashMergeTempDir::create(&staging_dir))
-        .await
-        .ok()?
-        .ok()?;
+    let mut merged_dir =
+        tokio::task::spawn_blocking(move || DashMergeTempDir::create(&staging_dir))
+            .await
+            .ok()?
+            .ok()?;
     let merged_tmp = merged_dir.output_path()?;
     let argv = dash_merge_argv(video_part, audio_part, &merged_tmp, page_url);
     let mut cmd = tokio::process::Command::new(ffmpeg_bin);
@@ -704,10 +708,12 @@ async fn try_merge_dash_partials(
         return None;
     }
     let size_path = merged_tmp.clone();
-    let size = tokio::task::spawn_blocking(move || std::fs::metadata(size_path).map(|metadata| metadata.len()))
-        .await
-        .ok()?
-        .ok()?;
+    let size = tokio::task::spawn_blocking(move || {
+        std::fs::metadata(size_path).map(|metadata| metadata.len())
+    })
+    .await
+    .ok()?
+    .ok()?;
     if size == 0 {
         merged_dir.cleanup().await;
         return None;
@@ -718,15 +724,9 @@ async fn try_merge_dash_partials(
         return None;
     }
     // Claim the destination atomically; a file created after preflight must survive.
-    if let Err(error) = publish_merged_dash_blocking(
-        merged_tmp,
-        dest.to_path_buf(),
-        merged_dir,
-        gate,
-    )
-    .await
+    if let Err(error) =
+        publish_merged_dash_blocking(merged_tmp, dest.to_path_buf(), merged_dir, gate).await
     {
-
         tracing::warn!(
             error = %error,
             "could not preserve merged DASH partial without clobbering the destination"

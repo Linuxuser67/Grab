@@ -543,7 +543,10 @@ fn status_views_use_gnome_adaptive_view_switcher() {
             .and_downcast::<gtk4::Label>()
             .expect("Done section heading exists");
         let expected_done_title = gettextrs::gettext("Done");
-        assert_eq!(downloaded_heading.text().as_str(), expected_done_title.as_str());
+        assert_eq!(
+            downloaded_heading.text().as_str(),
+            expected_done_title.as_str()
+        );
 
         for name in ["active", "downloaded", "all"] {
             view_stack.set_visible_child_name(name);

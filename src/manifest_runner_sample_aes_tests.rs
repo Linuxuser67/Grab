@@ -100,14 +100,14 @@ fn sample_aes_aac_transport_stream(split_at: usize, elementary_stream: &[u8]) ->
         .write_ts_packet(&ts_packet(AAC_PID, 0, TsPayload::Pes(pes)))
         .expect("write PES start");
 
-    if !continuation.is_empty() {
+    for (index, chunk) in continuation.chunks(130).enumerate() {
+        let continuity_counter =
+            u8::try_from(index + 1).expect("fixture continuity counter fits");
         writer
             .write_ts_packet(&ts_packet(
                 AAC_PID,
-                1,
-                TsPayload::Raw(
-                    Bytes::new(continuation).expect("fixture continuation fits in one TS packet"),
-                ),
+                continuity_counter,
+                TsPayload::Raw(Bytes::new(chunk).expect("fixture continuation fits in one TS packet")),
             ))
             .expect("write PES continuation");
     }
@@ -145,7 +145,7 @@ fn accepts_adts_frame_split_across_pes_and_raw_continuation() {
     elementary_stream.extend(adts_frame(59));
     assert_eq!(elementary_stream.len(), 359);
 
-    let transport_stream = sample_aes_aac_transport_stream(175, &elementary_stream);
+    let transport_stream = sample_aes_aac_transport_stream(100, &elementary_stream);
     assert!(validate_iori_sample_aes_segment(&transport_stream).is_ok());
 }
 

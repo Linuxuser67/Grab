@@ -2572,8 +2572,8 @@ fn wire_video_preview(step: Rc<VideoStep>) {
                 selection.replace(selected_key);
             });
     }
-    // Keep the card's filter selection synchronized with the segmented control.
-    // No secondary gallery-dl count request is needed when the filter changes.
+    // Keep the progress denominator current for the selected gallery filter.
+    // Counts are internal now; no numeric count is shown in the UI.
     {
         let card_rc = step.gallery_card.clone();
         step.gallery_filter
@@ -2583,8 +2583,69 @@ fn wire_video_preview(step: Rc<VideoStep>) {
                     Some("videos") => crate::gallery_argv::GalleryFilter::VideosOnly,
                     _ => crate::gallery_argv::GalleryFilter::All,
                 };
-                if let Some(card) = card_rc.borrow().as_ref() {
-                    *card.filter.borrow_mut() = filter;
+                let (needs_count, url) = {
+                    if let Some(card_ref) = card_rc.borrow().as_ref() {
+                        *card_ref.filter.borrow_mut() = filter;
+                        if card_ref.is_count_cached(filter) {
+                            (false, String::new())
+                        } else {
+                            (true, card_ref.url().to_string())
+                        }
+                    } else {
+                        (false, String::new())
+                    }
+                };
+                if needs_count {
+                    let card_rc = card_rc.clone();
+                    glib::spawn_future_local(async move {
+                        let url_for_count = url.clone();
+                        let filter_c = filter;
+                        let count_settings = crate::settings::AppSettings::new();
+                        let browser = count_settings.cookies_browser();
+                        let proxy =
+                            crate::download::DownloadOptions::from_settings(&count_settings)
+                                .proxy_config();
+                        let count_result = crate::runtime::tokio_rt()
+                            .spawn(async move {
+                                let proxy = match proxy {
+                                    Ok(proxy) => proxy,
+                                    Err(error) => {
+                                        tracing::warn!(error = %error, "gallery progress count proxy invalid");
+                                        return None;
+                                    }
+                                };
+                                let auth = crate::inline_gallery::resolve_gallery_auth(
+                                    &url_for_count,
+                                    browser.as_str(),
+                                );
+                                if let Ok(tool) = crate::gallery_argv::resolve_tool() {
+                                    crate::gallery_probe::count_gallery_files_with_proxy(
+                                        &tool,
+                                        &url_for_count,
+                                        auth.cookies_path.as_deref(),
+                                        auth.cookies_browser.as_deref(),
+                                        auth.user_agent.as_deref(),
+                                        filter_c,
+                                        proxy.as_ref(),
+                                    )
+                                    .await
+                                } else {
+                                    None
+                                }
+                            })
+                            .await
+                            .ok()
+                            .flatten();
+                        if let Some(card_ref) = card_rc.borrow().as_ref()
+                            && card_ref.url() == url
+                        {
+                            match count_result {
+                                Some(total) => card_ref.set_total(filter, total),
+                                None => card_ref.set_total_failed(filter),
+                            }
+                        }
+                        // Staged cookies drop here and remove the temporary file.
+                    });
                 }
             });
     }

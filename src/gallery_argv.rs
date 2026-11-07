@@ -245,53 +245,6 @@ pub(crate) fn cookie_source_args(
     }
 }
 
-/// Build argv for counting files in a gallery (probe).
-/// Used by the gallery card UI to show "N files" before download.
-#[cfg(test)]
-pub fn count_argv(
-    tool: &Path,
-    url: &str,
-    cookies_file: Option<&Path>,
-    user_agent: Option<&str>,
-    filter: GalleryFilter,
-) -> Vec<String> {
-    count_argv_with_proxy(tool, url, cookies_file, None, user_agent, filter, None)
-}
-
-pub fn count_argv_with_proxy(
-    tool: &Path,
-    url: &str,
-    cookies_file: Option<&Path>,
-    cookies_browser: Option<&str>,
-    user_agent: Option<&str>,
-    filter: GalleryFilter,
-    proxy: Option<&crate::net_types::ResolvedProxy>,
-) -> Vec<String> {
-    let mut argv = vec![
-        tool.to_string_lossy().to_string(),
-        "--config-ignore".to_string(),
-        "-g".to_string(),
-        "--no-download".to_string(),
-        "-o".to_string(),
-        "output.fallback=false".to_string(),
-        "-o".to_string(),
-        "extractor.cookies-update=false".to_string(),
-    ];
-    argv.extend(cookie_source_args(cookies_file, cookies_browser));
-    if let Some(ua) = user_agent {
-        argv.push("--user-agent".to_string());
-        argv.push(ua.to_string());
-    }
-    push_filter(&mut argv, filter);
-    // Instagram throttling for the extraction requests (no --sleep: count
-    // doesn't download files).
-    argv.extend(instagram_throttle_args(url, false));
-    argv.extend(crate::video_argv::proxy_cli_args(proxy));
-    argv.push("--".to_string());
-    argv.push(url.to_string());
-    argv
-}
-
 /// Append `--filter <expr>` for the given gallery filter, if it has one.
 pub(crate) fn push_filter(argv: &mut Vec<String>, filter: GalleryFilter) {
     if let Some(expr) = filter.to_filter_expr() {
@@ -577,7 +530,7 @@ mod tests {
     }
 
     #[test]
-    fn proxy_argv_precedes_url_terminator_for_download_and_count() {
+    fn proxy_argv_precedes_url_terminator_for_download() {
         let proxy = crate::net_types::ResolvedProxy {
             proxies: vec![reqwest::Proxy::all("http://127.0.0.1:8080").unwrap()],
             cli_url: "http://127.0.0.1:8080".into(),
@@ -594,20 +547,9 @@ mod tests {
             None,
             Some(&proxy),
         );
-        let b = count_argv_with_proxy(
-            &tool(),
-            "https://example.com/",
-            None,
-            None,
-            None,
-            GalleryFilter::All,
-            Some(&proxy),
-        );
-        for argv in [a, b] {
-            let end = argv.iter().position(|x| x == "--").unwrap();
-            assert_eq!(argv[end - 2], "--proxy");
-            assert_eq!(argv[end - 1], "http://127.0.0.1:8080");
-        }
+        let end = a.iter().position(|x| x == "--").unwrap();
+        assert_eq!(a[end - 2], "--proxy");
+        assert_eq!(a[end - 1], "http://127.0.0.1:8080");
     }
 
     #[test]
@@ -627,35 +569,6 @@ mod tests {
         );
         assert!(cookie_source_args(None, None).is_empty());
         assert!(cookie_source_args(None, Some("none")).is_empty());
-    }
-
-    #[test]
-    fn count_argv_no_fallback() {
-        let argv = count_argv(
-            &tool(),
-            "https://example.com/gallery",
-            None,
-            None,
-            GalleryFilter::All,
-        );
-        assert!(argv.contains(&"output.fallback=false".to_string()));
-        assert!(argv.contains(&"-g".to_string()));
-    }
-
-    #[test]
-    fn count_argv_applies_filter() {
-        let argv = count_argv(
-            &tool(),
-            "https://example.com/gallery",
-            None,
-            None,
-            GalleryFilter::ImagesOnly,
-        );
-        let pos = argv
-            .iter()
-            .position(|a| a == "--filter")
-            .expect("filter flag");
-        assert!(argv[pos + 1].contains("jpg"));
     }
 
     #[test]
@@ -789,17 +702,5 @@ mod tests {
         assert!(instagram_throttle_args("https://example.com/gallery", false).is_empty());
     }
 
-    #[test]
-    fn count_argv_instagram_gets_sleep_request() {
-        let argv = count_argv(
-            &tool(),
-            "https://www.instagram.com/p/ABC123/",
-            None,
-            None,
-            GalleryFilter::All,
-        );
-        assert!(argv.contains(&"--sleep-request".to_string()));
-        // Count doesn't download: no --sleep.
-        assert!(!argv.iter().any(|a| a == "--sleep"));
-    }
+
 }

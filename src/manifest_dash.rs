@@ -1203,7 +1203,7 @@ fn stable_representation_key(identity: RepresentationIdentity<'_>) -> String {
                 hash_optional_range(&mut hasher, segment.range);
             }
         }
-        DashAddressing::Base => {
+        DashAddressing::Base(_) => {
             hasher.update(b"base");
         }
         DashAddressing::IndexedBase(index) => {
@@ -1273,7 +1273,7 @@ fn stable_live_representation_key(identity: RepresentationIdentity<'_>) -> Strin
             }
         }
         DashAddressing::List(_) => {}
-        DashAddressing::Base => {
+        DashAddressing::Base(_) => {
             hasher.update(b"base");
         }
         DashAddressing::IndexedBase(index) => {

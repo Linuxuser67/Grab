@@ -708,8 +708,7 @@ async fn resolve_dash_xlinks(
                         "A DASH XLink reference has an invalid URL".to_string(),
                     )
                 })?;
-                if !transport_policy.accepts_url(&target) || target.fragment().is_some()
-                {
+                if !transport_policy.accepts_url(&target) || target.fragment().is_some() {
                     return Err(ManifestIntakeError::Unsupported(
                         "DASH XLink references must be credential-free HTTPS URLs without fragments"
                             .to_string(),
@@ -775,9 +774,7 @@ async fn resolve_dash_xlinks(
                     ));
                 }
                 let final_url = response.url();
-                if !transport_policy.accepts_url(final_url)
-                    || final_url.origin() != target.origin()
-                {
+                if !transport_policy.accepts_url(final_url) || final_url.origin() != target.origin() {
                     return Err(ManifestIntakeError::Unsupported(
                         "A DASH XLink resource redirected outside its original HTTPS origin"
                             .to_string(),
@@ -1149,8 +1146,7 @@ mod tests {
             }
             let request = String::from_utf8(request).expect("HTTP request is UTF-8");
             assert!(request.starts_with("GET /period.xml "));
-            let linked =
-                r#"<Period xmlns="urn:mpeg:dash:schema:mpd:2011" duration="PT2S"/>"#;
+            let linked = r#"<Period xmlns="urn:mpeg:dash:schema:mpd:2011" duration="PT2S"/>"#;
             let response = format!(
                 "HTTP/1.1 200 OK\r\nContent-Type: application/xml\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
                 linked.len(),
@@ -1168,14 +1164,10 @@ mod tests {
             .expect("build fixture client");
         let parent = Url::parse(&format!("http://{address}/manifest.mpd")).expect("parent URL");
         let body = br#"<MPD xmlns="urn:mpeg:dash:schema:mpd:2011" xmlns:xlink="http://www.w3.org/1999/xlink"><Period xlink:href="period.xml" xlink:actuate="onLoad"/></MPD>"#;
-        let expanded = resolve_dash_xlinks(
-            &client,
-            &parent,
-            body,
-            ManifestTransportPolicy::HttpFixture,
-        )
-        .await
-        .expect("bounded Period XLink resolution");
+        let expanded =
+            resolve_dash_xlinks(&client, &parent, body, ManifestTransportPolicy::HttpFixture)
+                .await
+                .expect("bounded Period XLink resolution");
         server.await.expect("XLink fixture task");
         let expanded = std::str::from_utf8(&expanded).expect("expanded MPD is UTF-8");
         assert!(expanded.contains(r#"duration="PT2S""#));

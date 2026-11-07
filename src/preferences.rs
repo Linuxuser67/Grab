@@ -491,7 +491,7 @@ pub fn show(
                             None
                         }
                         Ok(Err(error)) => Some(error.to_string()),
-                        Err(error) => Some(error.to_string()),
+                        Err(_) => Some(gettext("The background pairing task failed")),
                     };
                     button.set_sensitive(true);
                     if let Some(error) = error {

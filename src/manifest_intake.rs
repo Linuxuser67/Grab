@@ -639,7 +639,7 @@ async fn lookup_with_client_policy(
             }
         }
         crate::media_types::ManifestKind::Dash => {
-            let body = resolve_dash_xlinks(client, &final_url, &body).await?;
+            let body = resolve_dash_xlinks(client, &final_url, &body, transport_policy).await?;
             let body = std::str::from_utf8(&body).map_err(|error| {
                 ManifestIntakeError::Unsupported(format!(
                     "The DASH manifest is not valid UTF-8: {error}"
@@ -680,6 +680,7 @@ async fn resolve_dash_xlinks(
     client: &reqwest::Client,
     parent_url: &Url,
     body: &[u8],
+    transport_policy: ManifestTransportPolicy,
 ) -> Result<Vec<u8>, ManifestIntakeError> {
     let links = dash_xlink::find_onload_links(body).map_err(|error| {
         ManifestIntakeError::Unsupported(format!(
@@ -707,11 +708,7 @@ async fn resolve_dash_xlinks(
                         "A DASH XLink reference has an invalid URL".to_string(),
                     )
                 })?;
-                if target.scheme() != "https"
-                    || target.host_str().is_none()
-                    || !target.username().is_empty()
-                    || target.password().is_some()
-                    || target.fragment().is_some()
+                if !transport_policy.accepts_url(&target) || target.fragment().is_some()
                 {
                     return Err(ManifestIntakeError::Unsupported(
                         "DASH XLink references must be credential-free HTTPS URLs without fragments"
@@ -778,7 +775,7 @@ async fn resolve_dash_xlinks(
                     ));
                 }
                 let final_url = response.url();
-                if !ManifestTransportPolicy::HttpsOnly.accepts_url(final_url)
+                if !transport_policy.accepts_url(final_url)
                     || final_url.origin() != target.origin()
                 {
                     return Err(ManifestIntakeError::Unsupported(
@@ -1127,6 +1124,63 @@ mod tests {
     use crate::manifest_plan::{
         hls_audio_rendition_key, hls_audio_rendition_keys, hls_variant_key, hls_variant_keys,
     };
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn dash_xlink_resolves_a_period_through_the_bounded_client() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0))
+            .await
+            .expect("bind XLink fixture");
+        let address = listener.local_addr().expect("fixture address");
+        let server = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.expect("accept XLink request");
+            let mut request = Vec::new();
+            let mut chunk = [0_u8; 1024];
+            loop {
+                let read = stream.read(&mut chunk).await.expect("read XLink request");
+                if read == 0 {
+                    break;
+                }
+                request.extend_from_slice(&chunk[..read]);
+                if request.windows(4).any(|window| window == b"\r\n\r\n") {
+                    break;
+                }
+            }
+            let request = String::from_utf8(request).expect("HTTP request is UTF-8");
+            assert!(request.starts_with("GET /period.xml "));
+            let linked =
+                r#"<Period xmlns="urn:mpeg:dash:schema:mpd:2011" duration="PT2S"/>"#;
+            let response = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/xml\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                linked.len(),
+                linked
+            );
+            stream
+                .write_all(response.as_bytes())
+                .await
+                .expect("write XLink response");
+        });
+
+        let client = reqwest::Client::builder()
+            .no_proxy()
+            .build()
+            .expect("build fixture client");
+        let parent = Url::parse(&format!("http://{address}/manifest.mpd")).expect("parent URL");
+        let body = br#"<MPD xmlns="urn:mpeg:dash:schema:mpd:2011" xmlns:xlink="http://www.w3.org/1999/xlink"><Period xlink:href="period.xml" xlink:actuate="onLoad"/></MPD>"#;
+        let expanded = resolve_dash_xlinks(
+            &client,
+            &parent,
+            body,
+            ManifestTransportPolicy::HttpFixture,
+        )
+        .await
+        .expect("bounded Period XLink resolution");
+        server.await.expect("XLink fixture task");
+        let expanded = std::str::from_utf8(&expanded).expect("expanded MPD is UTF-8");
+        assert!(expanded.contains(r#"duration="PT2S""#));
+        assert!(!expanded.contains("xlink:href"));
+    }
 
     #[tokio::test(flavor = "current_thread")]
     async fn dash_xlink_rejects_private_off_origin_targets() {

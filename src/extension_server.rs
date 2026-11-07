@@ -978,20 +978,73 @@ fn take_handoff_cookie_path(url: &str) -> Option<PathBuf> {
     })
 }
 
-/// Delete every staged cookie file. Called at shutdown: the entries only live
-/// in memory, so files left behind would never be cleaned until the next
-/// startup sweep.
-pub(crate) fn purge_handoff_cookies() {
-    let paths: Vec<PathBuf> = {
-        let mut store = lock_handoff_cookies();
-        store.order.clear();
-        store.suppressed_hosts.clear();
-        store.suppressed_order.clear();
-        store.by_key.drain().map(|(_, e)| e.path).collect()
-    };
-    for p in paths {
-        let _ = std::fs::remove_file(p);
+/// Remove all entries from the in-memory handoff store and return their files.
+fn take_handoff_cookie_paths() -> Vec<PathBuf> {
+    let mut store = lock_handoff_cookies();
+    store.order.clear();
+    store.suppressed_hosts.clear();
+    store.suppressed_order.clear();
+    store.by_key.drain().map(|(_, entry)| entry.path).collect()
+}
+
+/// Unlink staged cookie files. This function must only run on a blocking worker.
+fn remove_handoff_cookie_files(paths: Vec<PathBuf>) {
+    for path in paths {
+        if let Err(error) = std::fs::remove_file(&path)
+            && error.kind() != std::io::ErrorKind::NotFound
+        {
+            tracing::warn!(
+                path = ?path,
+                error = %error,
+                "could not remove staged extension cookie file"
+            );
+        }
     }
+}
+
+/// Delete every staged cookie file on Tokio's blocking pool. The in-memory
+/// entries are drained before awaiting so no store lock crosses the await.
+pub(crate) async fn purge_handoff_cookies_async() {
+    let paths = take_handoff_cookie_paths();
+    if paths.is_empty() {
+        return;
+    }
+    if let Err(error) = crate::runtime::tokio_rt()
+        .spawn_blocking(move || remove_handoff_cookie_files(paths))
+        .await
+    {
+        tracing::warn!(
+            error = ?error,
+            "staged extension cookie cleanup worker did not complete"
+        );
+    }
+}
+
+/// Synchronous shutdown fallback and test helper. Filesystem work still runs
+/// on a dedicated worker, which is joined so shutdown cannot discard it.
+pub(crate) fn purge_handoff_cookies() {
+    let paths = take_handoff_cookie_paths();
+    if paths.is_empty() {
+        return;
+    }
+    std::thread::scope(|scope| {
+        let worker = std::thread::Builder::new()
+            .name("grab-cookie-cleanup".to_owned())
+            .spawn_scoped(scope, move || remove_handoff_cookie_files(paths));
+        match worker {
+            Ok(worker) => {
+                if worker.join().is_err() {
+                    tracing::warn!("staged extension cookie cleanup worker panicked");
+                }
+            }
+            Err(error) => {
+                tracing::warn!(
+                    error = %error,
+                    "could not start staged extension cookie cleanup worker; leftovers will be removed by the startup sweep"
+                );
+            }
+        }
+    });
 }
 
 #[derive(Deserialize)]

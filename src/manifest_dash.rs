@@ -373,6 +373,11 @@ pub(crate) fn parse_dash_manifest_at(
     // does not restrict native download planning. ContentProtection remains
     // explicitly rejected below because it signals protected media.
     let mpd = dash_mpd_core::parse(body).map_err(|_| DashError::Parse)?;
+    if dash_roles::has_nonzero_segment_list_presentation_time_offset(body.as_bytes())
+        .ok_or(DashError::Parse)?
+    {
+        return Err(DashError::UnsupportedAddressing);
+    }
 
     let mut presentation = match mpd.mpdtype.as_deref() {
         None | Some("static") => {

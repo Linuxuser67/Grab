@@ -12,9 +12,7 @@ fn install_content(pkgs: Option<crate::video_tools::DistroPackages>) -> gtk4::Bo
     let content = gtk4::Box::new(gtk4::Orientation::Vertical, 12);
     match pkgs {
         Some(pkgs) => {
-            let group = adw::PreferencesGroup::builder()
-                .title(pkgs.distro)
-                .build();
+            let group = adw::PreferencesGroup::builder().title(pkgs.distro).build();
             command_row(&group, &gettext("Install tools"), &pkgs.install_all);
             content.append(&group);
         }

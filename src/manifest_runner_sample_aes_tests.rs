@@ -107,7 +107,9 @@ fn sample_aes_aac_transport_stream(split_at: usize, elementary_stream: &[u8]) ->
             .write_ts_packet(&ts_packet(
                 AAC_PID,
                 continuity_counter,
-                TsPayload::Raw(Bytes::new(chunk).expect("fixture continuation fits in one TS packet")),
+                TsPayload::Raw(
+                    Bytes::new(chunk).expect("fixture continuation fits in one TS packet"),
+                ),
             ))
             .expect("write PES continuation");
     }
@@ -138,9 +140,9 @@ fn accepts_multiple_complete_adts_frames_in_one_pes() {
 }
 
 #[test]
-fn accepts_adts_frame_split_across_pes_and_raw_continuation() {
+fn accepts_adts_frame_split_across_pes_and_raw_continuations() {
     // The PES data ends inside the first frame; the following TS Raw payload
-    // completes it and contains the second frame.
+    // complete it and contain the second frame.
     let mut elementary_stream = adts_frame(300);
     elementary_stream.extend(adts_frame(59));
     assert_eq!(elementary_stream.len(), 359);

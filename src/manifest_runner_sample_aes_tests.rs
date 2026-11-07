@@ -1,0 +1,159 @@
+//! Focused tests for the preflight protecting iori-ssa's SAMPLE-AES parser.
+
+use super::{validate_iori_adts_pes, validate_iori_sample_aes_segment};
+use mpeg2ts::{
+    es::{StreamId, StreamType},
+    pes::PesHeader,
+    ts::{
+        ContinuityCounter, EsInfo, Pid, ProgramAssociation, TsHeader, TsPacket, TsPacketWriter,
+        TsPayload, TransportScramblingControl, VersionNumber, WriteTsPacket,
+        payload::{Bytes, Pat, Pes, Pmt},
+    },
+};
+
+const PMT_PID: u16 = 480;
+const AAC_PID: u16 = 257;
+
+fn adts_header(frame_length: usize) -> [u8; 7] {
+    assert!(frame_length <= 0x1fff, "ADTS length is a 13-bit field");
+    [
+        0xff,
+        0xf1,
+        0x50,
+        u8::try_from((frame_length >> 11) & 0x03).expect("two-bit field fits"),
+        u8::try_from((frame_length >> 3) & 0xff).expect("eight-bit field fits"),
+        u8::try_from(((frame_length & 0x07) << 5) | 0x1f)
+            .expect("ADTS length bits fit"),
+        0xfc,
+    ]
+}
+
+fn adts_frame(frame_length: usize) -> Vec<u8> {
+    let mut frame = adts_header(frame_length).to_vec();
+    frame.resize(frame_length.max(7), 0);
+    frame
+}
+
+fn ts_packet(pid: u16, continuity_counter: u8, payload: TsPayload) -> TsPacket {
+    TsPacket {
+        header: TsHeader {
+            transport_error_indicator: false,
+            transport_priority: false,
+            pid: Pid::new(pid).expect("fixture PID is valid"),
+            transport_scrambling_control: TransportScramblingControl::NotScrambled,
+            continuity_counter: ContinuityCounter::from_u8(continuity_counter)
+                .expect("fixture continuity counter is valid"),
+        },
+        adaptation_field: None,
+        payload: Some(payload),
+    }
+}
+
+fn sample_aes_aac_transport_stream(split_at: usize, elementary_stream: &[u8]) -> Vec<u8> {
+    let (pes_data, continuation) = elementary_stream.split_at(split_at);
+    let mut writer = TsPacketWriter::new(Vec::new());
+
+    let pat = Pat {
+        transport_stream_id: 1,
+        version_number: VersionNumber::new(),
+        table: vec![ProgramAssociation {
+            program_num: 1,
+            program_map_pid: Pid::new(PMT_PID).expect("fixture PMT PID is valid"),
+        }],
+    };
+    writer
+        .write_ts_packet(&ts_packet(0, 0, TsPayload::Pat(pat)))
+        .expect("write PAT");
+
+    let pmt = Pmt {
+        program_num: 1,
+        pcr_pid: Some(Pid::new(AAC_PID).expect("fixture AAC PID is valid")),
+        version_number: VersionNumber::new(),
+        program_info: Vec::new(),
+        es_info: vec![EsInfo {
+            stream_type: StreamType::AdtsAac,
+            elementary_pid: Pid::new(AAC_PID).expect("fixture AAC PID is valid"),
+            descriptors: Vec::new(),
+        }],
+    };
+    writer
+        .write_ts_packet(&ts_packet(PMT_PID, 0, TsPayload::Pmt(pmt)))
+        .expect("write PMT");
+
+    let pes_header = PesHeader {
+        stream_id: StreamId::new_audio(StreamId::AUDIO_MIN).expect("valid audio stream id"),
+        priority: false,
+        data_alignment_indicator: false,
+        copyright: false,
+        original_or_copy: false,
+        pts: None,
+        dts: None,
+        escr: None,
+    };
+    let pes_packet_len = u16::try_from(3 + pes_data.len()).expect("fixture PES length fits");
+    let pes = Pes {
+        header: pes_header,
+        pes_packet_len,
+        data: Bytes::new(pes_data).expect("fixture PES payload fits in one TS packet"),
+    };
+    writer
+        .write_ts_packet(&ts_packet(AAC_PID, 0, TsPayload::Pes(pes)))
+        .expect("write PES start");
+
+    if !continuation.is_empty() {
+        writer
+            .write_ts_packet(&ts_packet(
+                AAC_PID,
+                1,
+                TsPayload::Raw(
+                    Bytes::new(continuation).expect("fixture continuation fits in one TS packet"),
+                ),
+            ))
+            .expect("write PES continuation");
+    }
+
+    writer.into_stream()
+}
+
+#[test]
+fn rejects_zero_length_adts_frame() {
+    assert!(validate_iori_adts_pes(&adts_header(0)).is_err());
+}
+
+#[test]
+fn rejects_adts_frame_shorter_than_its_header() {
+    assert!(validate_iori_adts_pes(&adts_header(6)).is_err());
+}
+
+#[test]
+fn rejects_adts_frame_longer_than_the_remaining_pes_data() {
+    assert!(validate_iori_adts_pes(&adts_header(8)).is_err());
+}
+
+#[test]
+fn accepts_multiple_complete_adts_frames_in_one_pes() {
+    let mut pes = adts_frame(17);
+    pes.extend(adts_frame(31));
+    assert!(validate_iori_adts_pes(&pes).is_ok());
+}
+
+#[test]
+fn accepts_adts_frame_split_across_pes_and_raw_continuation() {
+    // The PES data ends inside the first frame; the following TS Raw payload
+    // completes it and contains the second frame.
+    let mut elementary_stream = adts_frame(300);
+    elementary_stream.extend(adts_frame(59));
+    assert_eq!(elementary_stream.len(), 359);
+
+    let transport_stream = sample_aes_aac_transport_stream(175, &elementary_stream);
+    assert!(validate_iori_sample_aes_segment(&transport_stream).is_ok());
+}
+
+#[test]
+fn rejects_id3_and_packed_audio_before_iori_ssa() {
+    let id3_tag = b"ID3\x04\x00\x00\x00\x00\x00\x00";
+    let packed_audio_frame = [0xff, 0xfb, 0x90, 0x64];
+
+    assert!(validate_iori_sample_aes_segment(id3_tag).is_err());
+    assert!(validate_iori_sample_aes_segment(&packed_audio_frame).is_err());
+}

@@ -13,6 +13,8 @@ use mpeg2ts::{
 
 const PMT_PID: u16 = 480;
 const AAC_PID: u16 = 257;
+// Smaller than the TS payload capacity so the fixture uses multiple Raw packets.
+const RAW_CONTINUATION_CHUNK_SIZE: usize = 130;
 
 fn adts_header(frame_length: usize) -> [u8; 7] {
     assert!(frame_length <= 0x1fff, "ADTS length is a 13-bit field");
@@ -100,7 +102,7 @@ fn sample_aes_aac_transport_stream(split_at: usize, elementary_stream: &[u8]) ->
         .write_ts_packet(&ts_packet(AAC_PID, 0, TsPayload::Pes(pes)))
         .expect("write PES start");
 
-    for (index, chunk) in continuation.chunks(130).enumerate() {
+    for (index, chunk) in continuation.chunks(RAW_CONTINUATION_CHUNK_SIZE).enumerate() {
         let continuity_counter =
             u8::try_from(index + 1).expect("fixture continuity counter fits");
         writer
@@ -119,24 +121,47 @@ fn sample_aes_aac_transport_stream(split_at: usize, elementary_stream: &[u8]) ->
 
 #[test]
 fn rejects_zero_length_adts_frame() {
-    assert!(validate_iori_adts_pes(&adts_header(0)).is_err());
+    assert!(
+        validate_iori_adts_pes(&adts_header(0)).is_err(),
+        "a zero-length frame must not leave iori-ssa's parser loop stationary"
+    );
+}
+
+#[test]
+fn rejects_zero_length_adts_frame_in_transport_stream() {
+    let pes_data = adts_header(0);
+    let transport_stream = sample_aes_aac_transport_stream(pes_data.len(), &pes_data);
+
+    assert!(
+        validate_iori_sample_aes_segment(&transport_stream).is_err(),
+        "the transport-stream preflight must reject the malformed AAC PES"
+    );
 }
 
 #[test]
 fn rejects_adts_frame_shorter_than_its_header() {
-    assert!(validate_iori_adts_pes(&adts_header(6)).is_err());
+    assert!(
+        validate_iori_adts_pes(&adts_header(6)).is_err(),
+        "the declared frame length must include its seven-byte ADTS header"
+    );
 }
 
 #[test]
 fn rejects_adts_frame_longer_than_the_remaining_pes_data() {
-    assert!(validate_iori_adts_pes(&adts_header(8)).is_err());
+    assert!(
+        validate_iori_adts_pes(&adts_header(8)).is_err(),
+        "the declared frame length must fit within the remaining PES data"
+    );
 }
 
 #[test]
 fn accepts_multiple_complete_adts_frames_in_one_pes() {
     let mut pes = adts_frame(17);
     pes.extend(adts_frame(31));
-    assert!(validate_iori_adts_pes(&pes).is_ok());
+    assert!(
+        validate_iori_adts_pes(&pes).is_ok(),
+        "all complete frames in a PES should be accepted"
+    );
 }
 
 #[test]
@@ -148,7 +173,10 @@ fn accepts_adts_frame_split_across_pes_and_raw_continuations() {
     assert_eq!(elementary_stream.len(), 359);
 
     let transport_stream = sample_aes_aac_transport_stream(100, &elementary_stream);
-    assert!(validate_iori_sample_aes_segment(&transport_stream).is_ok());
+    assert!(
+        validate_iori_sample_aes_segment(&transport_stream).is_ok(),
+        "the PES assembler must validate frames after joining Raw continuations"
+    );
 }
 
 #[test]
@@ -156,6 +184,12 @@ fn rejects_id3_and_packed_audio_before_iori_ssa() {
     let id3_tag = b"ID3\x04\x00\x00\x00\x00\x00\x00";
     let packed_audio_frame = [0xff, 0xfb, 0x90, 0x64];
 
-    assert!(validate_iori_sample_aes_segment(id3_tag).is_err());
-    assert!(validate_iori_sample_aes_segment(&packed_audio_frame).is_err());
+    assert!(
+        validate_iori_sample_aes_segment(id3_tag).is_err(),
+        "an ID3-tagged packed-audio resource is not a transport stream"
+    );
+    assert!(
+        validate_iori_sample_aes_segment(&packed_audio_frame).is_err(),
+        "a packed MPEG-audio frame is not a transport stream"
+    );
 }

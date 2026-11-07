@@ -27,6 +27,12 @@ pub struct GalleryResult {
     pub exit_code: Option<i32>,
 }
 
+/// Total files handled (downloaded + skipped), for internal progress bookkeeping.
+/// Skipped files were already on disk from a previous run.
+pub fn done_count(files: usize, skipped: u32) -> u32 {
+    files as u32 + skipped
+}
+
 /// Progress update from the runner.
 #[derive(Debug, Clone)]
 pub struct GalleryProgressUpdate {

@@ -1736,7 +1736,7 @@ impl DownloadManager {
         item.set_is_gallery(true);
         let file_count = job.file_count.unwrap_or(0);
         item.set_gallery_file_count(file_count);
-        // Done rows show the full count; others start at 0.
+        // Restore the completion counter used by the gallery progress bar.
         let files_done = if stored.status == DownloadStatus::Done {
             file_count
         } else {

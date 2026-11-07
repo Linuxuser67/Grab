@@ -127,8 +127,8 @@ pub(crate) fn form_is_visible(nav: &adw::NavigationView) -> bool {
 /// denser row. Back pops the navigation page (Esc still collapses the
 /// whole card); the selection actions stay in the bottom action bar.
 ///
-/// Returns the header and its count label: pickers that fill in from a
-/// streamed enumeration update the count as items arrive.
+/// Returns the header and count-label handle. Pass an empty count to hide
+/// the count label when a picker does not need to display one.
 pub(crate) fn picker_header(
     nav: &adw::NavigationView,
     title: &str,
@@ -164,6 +164,7 @@ pub(crate) fn picker_header(
         .label(count)
         .css_classes(["dimmed", "caption"])
         .valign(gtk4::Align::Center)
+        .visible(!count.is_empty())
         .build();
     header.append(&back);
     header.append(&title_label);

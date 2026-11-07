@@ -1192,8 +1192,8 @@ mod tests {
                 body.as_bytes(),
                 ManifestTransportPolicy::HttpsOnly,
             )
-                .await
-                .expect_err("off-origin private XLink target must be rejected before fetching");
+            .await
+            .expect_err("off-origin private XLink target must be rejected before fetching");
             assert!(matches!(error, ManifestIntakeError::Unsupported(_)));
         }
     }

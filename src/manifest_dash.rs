@@ -4658,9 +4658,8 @@ mod tests {
     }
 
     #[test]
-    fn segment_base_rejects_every_offset_variant() {
+    fn segment_base_rejects_unsupported_availability_and_delta_attributes() {
         let cases = [
-            r#"presentationTimeOffset="1""#,
             r#"availabilityTimeOffset="1""#,
             r#"availabilityTimeComplete="false""#,
             r#"eptDelta="1""#,

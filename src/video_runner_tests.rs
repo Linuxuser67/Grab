@@ -55,13 +55,18 @@ fn dash_preserve_success_marks_delivery() {
     let dest = base.join("video.mp4");
     let gate = AttemptGate::new();
 
-    let result = crate::runtime::tokio_rt().block_on(try_merge_dash_partials(
-        std::path::Path::new("unused-ffmpeg"),
-        &staging,
-        &dest,
-        "https://example.com/video",
-        &gate,
-    ));
+    let result = crate::runtime::tokio_rt().block_on(async {
+        let result = try_merge_dash_partials(
+            std::path::Path::new("unused-ffmpeg"),
+            &staging,
+            &dest,
+            "https://example.com/video",
+            &gate,
+        )
+        .await;
+        gate.wait_for_rollbacks().await;
+        result
+    });
 
     assert_eq!(result, Some(part_content.len() as u64));
     assert_eq!(std::fs::read(&dest).unwrap(), part_content);
@@ -540,7 +545,7 @@ fn staging_claim_skips_existing_base_file() {
 
     // Claim a staging name: should skip Title.mp4 (== dest) and Title.1.mp4 (exists),
     // landing on Title.1-1.mp4.
-    let (out, staging_name) = claim_staging_name(&job, "mp4").unwrap();
+    let (out, staging_name) = claim_staging_name(&job.dest, job.item_id, "mp4").unwrap();
 
     assert_eq!(staging_name, "Title.1-1.mp4");
     assert_eq!(out, dir.join("Title.1-1.mp4"));

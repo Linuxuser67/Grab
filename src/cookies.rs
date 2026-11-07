@@ -238,7 +238,17 @@ impl StagedCookies {
 
 impl Drop for StagedCookies {
     fn drop(&mut self) {
-        let _ = std::fs::remove_file(&self.0);
+        let path = std::mem::take(&mut self.0);
+        match tokio::runtime::Handle::try_current() {
+            Ok(runtime) => {
+                // Cookie staging can be dropped on a Tokio worker during
+                // success, failure, or cancellation; never unlink there.
+                drop(runtime.spawn_blocking(move || std::fs::remove_file(path)));
+            }
+            Err(_) => {
+                let _ = std::fs::remove_file(path);
+            }
+        }
     }
 }
 
@@ -481,10 +491,13 @@ mod tests {
         tokio::task::yield_now().await;
         task.abort();
         let _ = task.await;
-        assert!(
-            !path.exists(),
-            "cancelling an export must unlink its staged file"
-        );
+        tokio::time::timeout(Duration::from_secs(2), async {
+            while path.exists() {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("cancelling an export must unlink its staged file");
         std::fs::remove_dir(&dir).unwrap();
     }
 

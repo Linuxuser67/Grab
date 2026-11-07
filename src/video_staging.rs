@@ -730,6 +730,124 @@ pub(crate) fn drop_empty_staging_root(root: &Path) {
     let _ = std::fs::remove_dir(canon);
 }
 
+fn dash_merge_temp_root() -> PathBuf {
+    state_root().join("video").join("dash-merge")
+}
+
+/// Ensure the app-owned, private directory used for intermediate DASH merges.
+pub(crate) fn ensure_dash_merge_temp_root() -> std::io::Result<PathBuf> {
+    let root = dash_merge_temp_root();
+    ensure_private_dir(&root)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::{MetadataExt as _, PermissionsExt as _};
+        let metadata = std::fs::symlink_metadata(&root)?;
+        if metadata.uid() != crate::download_net::current_uid()
+            || metadata.permissions().mode() & 0o777 != 0o700
+        {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::PermissionDenied,
+                "DASH merge root is not an owner-only directory",
+            ));
+        }
+    }
+    Ok(root)
+}
+
+/// Reclaim crash-left private DASH merge workspaces belonging to dead Grab processes.
+/// Deletion requires an exact generated name, a private directory owned by this uid,
+/// a dead Linux PID, and only the expected regular merge output (or no contents).
+#[cfg(target_os = "linux")]
+fn sweep_stale_dash_merge_directories(root_dir: &Path) {
+    use std::os::unix::fs::{MetadataExt as _, PermissionsExt as _};
+
+    let current_uid = crate::download_net::current_uid();
+    let Ok(root_metadata) = std::fs::symlink_metadata(root_dir) else {
+        return;
+    };
+    if !root_metadata.file_type().is_dir()
+        || root_metadata.uid() != current_uid
+        || root_metadata.permissions().mode() & 0o777 != 0o700
+    {
+        return;
+    }
+    let proc_root = Path::new("/proc");
+    if !proc_root.is_dir() {
+        return;
+    }
+    let Ok(root) = std::fs::canonicalize(root_dir) else {
+        return;
+    };
+    let Ok(entries) = std::fs::read_dir(&root) else {
+        return;
+    };
+
+    for entry in entries.filter_map(Result::ok) {
+        let Some(name) = entry.file_name().to_str().map(str::to_owned) else {
+            continue;
+        };
+        let Some(pid) = dash_merge_directory_pid(&name) else {
+            continue;
+        };
+        // A live or reused PID makes cleanup unsafe; retain the directory.
+        if proc_root.join(pid.to_string()).is_dir() {
+            continue;
+        }
+
+        let path = entry.path();
+        let Ok(metadata) = std::fs::symlink_metadata(&path) else {
+            continue;
+        };
+        if !metadata.file_type().is_dir()
+            || metadata.uid() != current_uid
+            || metadata.permissions().mode() & 0o777 != 0o700
+        {
+            continue;
+        }
+        let Ok(directory) = std::fs::canonicalize(&path) else {
+            continue;
+        };
+        if directory.parent() != Some(root.as_path()) {
+            continue;
+        }
+
+        // Only the exact output file created by DashMergeTempDir is expected.
+        // Unknown entries and symlinks are evidence against deleting the dir.
+        let Ok(children) = std::fs::read_dir(&directory) else {
+            continue;
+        };
+        let safe_contents = children.filter_map(Result::ok).all(|child| {
+            if child.file_name().to_string_lossy() != "merged.tmp" {
+                return false;
+            }
+            let Ok(file_metadata) = std::fs::symlink_metadata(child.path()) else {
+                return false;
+            };
+            file_metadata.file_type().is_file() && file_metadata.uid() == current_uid
+        });
+        if safe_contents {
+            let _ = std::fs::remove_dir_all(directory);
+        }
+    }
+}
+
+#[cfg(not(target_os = "linux"))]
+fn sweep_stale_dash_merge_directories(_root_dir: &Path) {}
+
+/// Parse `.grab-dash-merge-<pid>-<sequence>` without accepting path-like suffixes.
+#[cfg(target_os = "linux")]
+fn dash_merge_directory_pid(name: &str) -> Option<u32> {
+    let rest = name.strip_prefix(".grab-dash-merge-")?;
+    let (pid, sequence) = rest.split_once('-')?;
+    if pid.is_empty()
+        || sequence.is_empty()
+        || !pid.bytes().all(|byte| byte.is_ascii_digit())
+        || !sequence.bytes().all(|byte| byte.is_ascii_digit())
+    {
+        return None;
+    }
+    pid.parse().ok()
+}
 /// Startup sweep for manifests that older versions left in the destination
 /// dir (canonical + legacy names). New manifests live in the state dir and are
 /// handled by [`sweep_state_staging`]. A missing dest dir is a no-op.
@@ -805,6 +923,9 @@ pub fn sweep_dest_staging(dest_dir: &Path, keep: &std::collections::HashSet<u64>
 /// dest strings; keys are normalized here so a trailing slash cannot hide a
 /// live row. Also clears stale runtime scratch.
 pub fn sweep_state_staging(keep: &std::collections::HashSet<(String, u64)>) {
+    // Merge workspaces are app-owned state, not destination-side user files,
+    // so sweep them even when the originating queue row was removed before exit.
+    sweep_stale_dash_merge_directories(&dash_merge_temp_root());
     let keep: std::collections::HashSet<(String, u64)> = keep
         .iter()
         .map(|(dest, id)| (dest_key(Path::new(dest)), *id))
@@ -1057,11 +1178,11 @@ pub(crate) fn reserve_remux_temp(
     Err(VideoError::staging("no free remux slot"))
 }
 
-/// Drop the lease from `reserve_remux_temp` (best-effort; a stale lease only costs one slot).
-pub(crate) fn release_remux_lease(temp: &Path) {
+/// Drop the lease from `reserve_remux_temp` without blocking an async worker.
+pub(crate) async fn release_remux_lease(temp: &Path) {
     let mut lease = temp.as_os_str().to_os_string();
     lease.push(".lease");
-    let _ = std::fs::remove_file(std::path::PathBuf::from(lease));
+    let _ = tokio::fs::remove_file(PathBuf::from(lease)).await;
 }
 
 /// Suffix of `file_name` past a `<stem>.` prefix, if any. Pure.
@@ -1660,6 +1781,41 @@ mod tests {
         ))
     }
 
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn startup_sweep_reclaims_only_private_dash_merge_dirs_from_dead_pids() {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let dest = ensure_dash_merge_temp_root().expect("create private merge root");
+        let stale = dest.join(format!(".grab-dash-merge-{}-7", u32::MAX));
+        std::fs::create_dir(&stale).expect("create stale merge directory");
+        std::fs::write(stale.join("merged.tmp"), b"partial merge").expect("write stale output");
+        std::fs::set_permissions(&stale, std::fs::Permissions::from_mode(0o700))
+            .expect("make private merge directory");
+
+        let active = dest.join(format!(".grab-dash-merge-{}-8", std::process::id()));
+        std::fs::create_dir(&active).expect("create active merge directory");
+        std::fs::write(active.join("merged.tmp"), b"active merge").expect("write active output");
+        std::fs::set_permissions(&active, std::fs::Permissions::from_mode(0o700))
+            .expect("make active merge directory private");
+
+        let unexpected = dest.join(format!(".grab-dash-merge-{}-9", u32::MAX));
+        std::fs::create_dir(&unexpected).expect("create unexpected merge directory");
+        std::fs::write(unexpected.join("keep.txt"), b"user file").expect("write unexpected file");
+        std::fs::set_permissions(&unexpected, std::fs::Permissions::from_mode(0o700))
+            .expect("make unexpected directory private");
+
+        sweep_state_staging(&std::collections::HashSet::new());
+
+        assert!(!stale.exists(), "dead process workspace is reclaimed");
+        assert!(active.exists(), "live process workspace is preserved");
+        assert!(
+            unexpected.join("keep.txt").exists(),
+            "unknown contents are preserved"
+        );
+        let _ = std::fs::remove_dir_all(&active);
+        let _ = std::fs::remove_dir_all(&unexpected);
+    }
     #[test]
     fn native_manifest_staging_is_private_and_owned_cleanup_is_exact() {
         let dest = unique_dir("native-manifest-owned");
@@ -2599,8 +2755,10 @@ mod tests {
             .unwrap();
         }
         let stale_temp = info_json_path(orphan_id);
+        let stale_live_temp = live_info_json_path(orphan_id);
         ensure_private_dir(stale_temp.parent().unwrap()).unwrap();
         std::fs::write(&stale_temp, b"{}").unwrap();
+        std::fs::write(&stale_live_temp, b"{}").unwrap();
 
         let keep =
             std::collections::HashSet::from([(live.to_string_lossy().into_owned(), live_id)]);
@@ -2620,6 +2778,10 @@ mod tests {
             "the orphan manifest's owned part is reclaimed"
         );
         assert!(!stale_temp.exists(), "startup clears stale probe temps");
+        assert!(
+            !stale_live_temp.exists(),
+            "startup clears stale live-capture info JSON"
+        );
 
         let _ = std::fs::remove_file(manifest_path(&live, live_id));
         let _ = std::fs::remove_dir_all(&live);

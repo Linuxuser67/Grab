@@ -944,17 +944,16 @@ pub(crate) fn handoff_cookie_args(url: &str) -> Vec<String> {
     }
 }
 
-/// Drop a URL's staged handoff cookies and delete the file. Called when its
-/// download finishes; failures and aborts keep the entry (bounded) so a retry
-/// or resume still passes the challenge.
+/// Synchronous cleanup retained only for deterministic unit-test fixtures.
+#[cfg(test)]
 pub(crate) fn discard_handoff_cookies(url: &str) {
-    if let Some(p) = take_handoff_cookie_path(url) {
-        let _ = std::fs::remove_file(p);
+    if let Some(path) = take_handoff_cookie_path(url) {
+        let _ = std::fs::remove_file(path);
     }
 }
 
-/// GTK-safe variant: drop the in-memory entry now and unlink its file on the
-/// runtime's blocking pool.
+/// Non-blocking variant: drop the in-memory entry now and unlink its file on
+/// the runtime's blocking pool. Safe for GTK callbacks and async handlers.
 pub(crate) fn discard_handoff_cookies_async(url: &str) {
     if let Some(p) = take_handoff_cookie_path(url) {
         drop(crate::runtime::tokio_rt().spawn_blocking(move || {
@@ -1129,13 +1128,22 @@ pub async fn serve(tx: Sender<Handoff>) {
         }
     };
     tracing::info!("Extension HTTP server listening on {addr}");
-    let pairing = pairing_path().and_then(|path| match Pairing::load_or_create(&path) {
-        Ok(p) => Some(Arc::new(p)),
-        Err(e) => {
-            tracing::warn!("Extension pairing secret unavailable ({path:?}): {e}");
-            None
+    let pairing = if let Some(path) = pairing_path() {
+        let worker_path = path.clone();
+        match tokio::task::spawn_blocking(move || Pairing::load_or_create(&worker_path)).await {
+            Ok(Ok(pairing)) => Some(Arc::new(pairing)),
+            Ok(Err(error)) => {
+                tracing::warn!("Extension pairing secret unavailable ({path:?}): {error}");
+                None
+            }
+            Err(error) => {
+                tracing::warn!("Extension pairing worker failed for {path:?}: {error}");
+                None
+            }
         }
-    });
+    } else {
+        None
+    };
     if let Some(p) = &pairing {
         let _ = PAIRING.set(Arc::clone(p));
     }
@@ -1433,7 +1441,7 @@ async fn handle_add(
                 (true, accepted)
             }
             None => {
-                discard_handoff_cookies(&req.url);
+                discard_handoff_cookies_async(&req.url);
                 (false, 0)
             }
         }
@@ -1453,7 +1461,7 @@ async fn handle_add(
         }
         Err(TrySendError::Full(_)) => {
             if staged {
-                discard_handoff_cookies(&req.url);
+                discard_handoff_cookies_async(&req.url);
             }
             // Keep the nonce reserved. The extension creates a fresh nonce on
             // each 429 retry; releasing this one would let a captured rejected
@@ -1462,7 +1470,7 @@ async fn handle_add(
         }
         Err(TrySendError::Closed(_)) => {
             if staged {
-                discard_handoff_cookies(&req.url);
+                discard_handoff_cookies_async(&req.url);
             }
             // Do not reopen a consumed nonce after an internal queue failure.
             return StatusCode::INTERNAL_SERVER_ERROR.into_response();
@@ -1484,7 +1492,7 @@ async fn handle_add(
                     suppression.release();
                 }
                 if staged {
-                    discard_handoff_cookies(&req.url);
+                    discard_handoff_cookies_async(&req.url);
                 }
                 // The explicit release above prevents the Drop guard from
                 // decrementing a second time.
@@ -1501,7 +1509,7 @@ async fn handle_add(
             }
             drop(suppression);
             if staged {
-                discard_handoff_cookies(&req.url);
+                discard_handoff_cookies_async(&req.url);
             }
             let status = if outcome.is_err() {
                 StatusCode::REQUEST_TIMEOUT

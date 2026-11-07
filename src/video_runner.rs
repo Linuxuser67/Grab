@@ -59,12 +59,28 @@ impl InfoJsonGuard {
     fn new(path: Option<PathBuf>) -> Self {
         Self { path }
     }
+
+    async fn cleanup(&mut self) {
+        if let Some(path) = self.path.take() {
+            let _ = tokio::task::spawn_blocking(move || std::fs::remove_file(path)).await;
+        }
+    }
 }
 
 impl Drop for InfoJsonGuard {
     fn drop(&mut self) {
         if let Some(path) = self.path.take() {
-            let _ = std::fs::remove_file(path);
+            match tokio::runtime::Handle::try_current() {
+                Ok(handle) => {
+                    // Cancellation can drop the guard on a runtime worker; enqueue cleanup
+                    // rather than blocking that worker in Drop.
+                    drop(handle.spawn_blocking(move || std::fs::remove_file(path)));
+                }
+                Err(_) => {
+                    // Outside a runtime there is no async executor to own the cleanup.
+                    let _ = std::fs::remove_file(path);
+                }
+            }
         }
     }
 }
@@ -87,7 +103,7 @@ pub async fn run_video_download(
     let page_url = job.page_url.clone();
     let outcome = run_video_download_inner(job, gate, abort, tx).await;
     if matches!(outcome, Ok(VideoOutcome::Finished(_))) {
-        crate::extension_server::discard_handoff_cookies(&page_url);
+        crate::extension_server::discard_handoff_cookies_async(&page_url);
     }
     outcome
 }
@@ -463,13 +479,15 @@ async fn run_video_download_inner(
 
 static DASH_MERGE_TEMP_DIR_COUNTER: AtomicU64 = AtomicU64::new(0);
 
-/// Private same-filesystem workspace for the user-stopped DASH merge.
-/// Never reuse a predictable output filename in the download directory: a
-/// pre-existing `<dest>.merged.tmp` belongs to the user, not this attempt.
-struct DashMergeTempDir(PathBuf);
+/// Private XDG-state workspace for a user-stopped DASH merge.
+/// Intermediate merge files stay out of the user's download directory.
+struct DashMergeTempDir {
+    path: Option<PathBuf>,
+}
 
 impl DashMergeTempDir {
-    fn create(parent: &Path) -> std::io::Result<Self> {
+    fn create() -> std::io::Result<Self> {
+        let parent = crate::video_staging::ensure_dash_merge_temp_root()?;
         for _ in 0..128 {
             let sequence = DASH_MERGE_TEMP_DIR_COUNTER.fetch_add(1, Ordering::Relaxed);
             let path = parent.join(format!(
@@ -477,7 +495,7 @@ impl DashMergeTempDir {
                 std::process::id()
             ));
             match create_private_merge_dir(&path) {
-                Ok(()) => return Ok(Self(path)),
+                Ok(()) => return Ok(Self { path: Some(path) }),
                 Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
                 Err(error) => return Err(error),
             }
@@ -488,14 +506,38 @@ impl DashMergeTempDir {
         ))
     }
 
-    fn output_path(&self) -> PathBuf {
-        self.0.join("merged.tmp")
+    fn output_path(&self) -> Option<PathBuf> {
+        self.path.as_ref().map(|path| path.join("merged.tmp"))
+    }
+
+    async fn cleanup(&mut self) {
+        if let Some(path) = self.path.take() {
+            let _ = tokio::task::spawn_blocking(move || std::fs::remove_dir_all(path)).await;
+        }
+    }
+
+    /// Called only from a blocking worker that owns the directory through a
+    /// potentially detached final rename.
+    fn cleanup_blocking(&mut self) {
+        if let Some(path) = self.path.take() {
+            let _ = std::fs::remove_dir_all(path);
+        }
     }
 }
 
 impl Drop for DashMergeTempDir {
     fn drop(&mut self) {
-        let _ = std::fs::remove_dir_all(&self.0);
+        if let Some(path) = self.path.take() {
+            match tokio::runtime::Handle::try_current() {
+                Ok(handle) => {
+                    // Cancellation may drop the temporary directory on a runtime worker.
+                    drop(handle.spawn_blocking(move || std::fs::remove_dir_all(path)));
+                }
+                Err(_) => {
+                    let _ = std::fs::remove_dir_all(path);
+                }
+            }
+        }
     }
 }
 
@@ -511,6 +553,112 @@ fn create_private_merge_dir(path: &Path) -> std::io::Result<()> {
     std::fs::create_dir(path)
 }
 
+/// Enumerate DASH format fragments and their sizes on a blocking worker.
+fn discover_dash_parts(staging: &Path) -> std::io::Result<Vec<(PathBuf, u64)>> {
+    let mut parts = Vec::new();
+    for entry in std::fs::read_dir(staging)? {
+        let Ok(entry) = entry else {
+            continue;
+        };
+        let path = entry.path();
+        let name = path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or("");
+        // Match .f<id>.ext or .f<id>.ext.part (DASH format files).
+        let is_dash_part = name.contains(".f")
+            && name
+                .split(".f")
+                .nth(1)
+                .is_some_and(|suffix| suffix.chars().next().is_some_and(|c| c.is_ascii_digit()));
+        if !is_dash_part {
+            continue;
+        }
+        if let Ok(metadata) = std::fs::metadata(&path)
+            && metadata.len() > 1024
+        {
+            parts.push((path, metadata.len()));
+        }
+    }
+    parts.sort_by_key(|(_, len)| std::cmp::Reverse(*len));
+    Ok(parts)
+}
+
+/// Owns one gate rollback registration until the corresponding blocking
+/// filesystem operation has stopped, including when its async waiter is dropped.
+struct PendingAttemptOperation(std::sync::Arc<AttemptGate>);
+
+impl PendingAttemptOperation {
+    fn new(gate: &std::sync::Arc<AttemptGate>) -> Self {
+        gate.begin_rollback();
+        Self(std::sync::Arc::clone(gate))
+    }
+}
+
+impl Drop for PendingAttemptOperation {
+    fn drop(&mut self) {
+        self.0.finish_rollback();
+    }
+}
+
+/// Run a filesystem operation whose side effects must finish before a
+/// discarded attempt's cleanup is allowed to sweep its staging files.
+async fn spawn_blocking_attempt<T, F>(
+    gate: &std::sync::Arc<AttemptGate>,
+    operation: F,
+) -> Result<T, tokio::task::JoinError>
+where
+    T: Send + 'static,
+    F: FnOnce() -> T + Send + 'static,
+{
+    let completion = PendingAttemptOperation::new(gate);
+    tokio::task::spawn_blocking(move || {
+        let _completion = completion;
+        operation()
+    })
+    .await
+}
+
+/// Run the no-clobber rename on Tokio's blocking pool. The worker records
+/// delivery itself because the async caller may be cancelled while it runs.
+async fn rename_noreplace_blocking(
+    old: PathBuf,
+    new: PathBuf,
+    gate: &std::sync::Arc<AttemptGate>,
+) -> std::io::Result<()> {
+    let worker_gate = std::sync::Arc::clone(gate);
+    spawn_blocking_attempt(gate, move || {
+        let result = crate::file_names::rename_noreplace(&old, &new);
+        if result.is_ok() {
+            worker_gate.mark_delivered();
+        }
+        result
+    })
+    .await
+    .map_err(std::io::Error::other)?
+}
+
+/// Publish a merged partial while the blocking worker owns its private
+/// directory. This prevents cancellation cleanup from racing the final rename.
+async fn publish_merged_dash_blocking(
+    old: PathBuf,
+    new: PathBuf,
+    mut merge_dir: DashMergeTempDir,
+    gate: &std::sync::Arc<AttemptGate>,
+) -> std::io::Result<()> {
+    let worker_gate = std::sync::Arc::clone(gate);
+    spawn_blocking_attempt(gate, move || {
+        let result = crate::file_names::rename_noreplace(&old, &new);
+        if result.is_ok() {
+            worker_gate.mark_delivered();
+        }
+        merge_dir.cleanup_blocking();
+        result
+    })
+    .await
+    .map_err(std::io::Error::other)?
+}
+
 /// One direct download through a single yt-dlp invocation: Grab claims the output into place (EXDEV-safe, no clobber) and wipes staging.
 /// Returns the finished size, or `None` on user abort (the caller stays quiet).
 /// On Preserve abort of a DASH download, partial video+audio are merged into
@@ -520,56 +668,46 @@ async fn try_merge_dash_partials(
     staging: &Path,
     dest: &Path,
     page_url: &str,
-    gate: &AttemptGate,
+    gate: &std::sync::Arc<AttemptGate>,
 ) -> Option<u64> {
     // Find DASH format files in staging: both in-progress (.part) and
     // completed (.f137.mp4 without .part). yt-dlp renames completed formats,
     // so a Stop after video finished leaves a mix.
-    let mut parts: Vec<(PathBuf, u64)> = std::fs::read_dir(staging)
+    let staging_dir = staging.to_path_buf();
+    let mut parts = tokio::task::spawn_blocking(move || discover_dash_parts(&staging_dir))
+        .await
         .ok()?
-        .filter_map(|e| e.ok().map(|x| x.path()))
-        .filter(|p| {
-            let name = p.file_name().and_then(|n| n.to_str()).unwrap_or("");
-            // Match .f<id>.ext or .f<id>.ext.part (DASH format files).
-            name.contains(".f")
-                && name
-                    .split(".f")
-                    .nth(1)
-                    .is_some_and(|s| s.chars().next().is_some_and(|c| c.is_ascii_digit()))
-        })
-        .filter_map(|p| std::fs::metadata(&p).ok().map(|m| (p, m.len())))
-        .filter(|(_, len)| *len > 1024) // Ignore tiny fragments.
-        .collect();
+        .ok()?;
     if parts.is_empty() {
         return None;
     }
-    parts.sort_by_key(|(_, len)| std::cmp::Reverse(*len));
 
     // Single part (audio-only): just rename into place, no merge needed.
     if parts.len() == 1 {
-        let (part, _) = &parts[0];
-        let size = std::fs::metadata(part).ok()?.len();
+        let (part, size) = parts.pop()?;
         if !gate.try_commit() {
             return None;
         }
-        if let Err(error) = crate::file_names::rename_noreplace(part, dest) {
+        if let Err(error) = rename_noreplace_blocking(part, dest.to_path_buf(), gate).await {
             tracing::warn!(
                 error = %error,
                 "could not preserve DASH partial without clobbering the destination"
             );
             return None;
         }
-        gate.mark_delivered();
         return Some(size);
     }
 
     let (video_part, _) = &parts[0];
     let (audio_part, _) = &parts[1];
 
-    // Merge in an exclusive private directory beside staging, keeping the final
-    // no-clobber move on the same filesystem without touching user-owned temp names.
-    let merged_dir = DashMergeTempDir::create(staging).ok()?;
-    let merged_tmp = merged_dir.output_path();
+    // Merge in private XDG state scratch, away from the user's download
+    // directory. The tracked no-clobber publisher handles cross-device delivery.
+    let mut merged_dir = tokio::task::spawn_blocking(DashMergeTempDir::create)
+        .await
+        .ok()?
+        .ok()?;
+    let merged_tmp = merged_dir.output_path()?;
     let argv = dash_merge_argv(video_part, audio_part, &merged_tmp, page_url);
     let mut cmd = tokio::process::Command::new(ffmpeg_bin);
     cmd.args(&argv);
@@ -578,32 +716,44 @@ async fn try_merge_dash_partials(
         .stderr(std::process::Stdio::null());
     let status = cmd.status().await.ok()?;
     if !status.success() {
-        let _ = std::fs::remove_file(&merged_tmp);
+        merged_dir.cleanup().await;
         return None;
     }
-    let size = std::fs::metadata(&merged_tmp).ok()?.len();
+    let size_path = merged_tmp.clone();
+    let size = tokio::task::spawn_blocking(move || {
+        std::fs::metadata(size_path).map(|metadata| metadata.len())
+    })
+    .await
+    .ok()?
+    .ok()?;
     if size == 0 {
-        let _ = std::fs::remove_file(&merged_tmp);
+        merged_dir.cleanup().await;
         return None;
     }
     // Removal can win while FFmpeg is merging; only commit if this row still owns delivery.
     if !gate.try_commit() {
-        let _ = std::fs::remove_file(&merged_tmp);
+        merged_dir.cleanup().await;
         return None;
     }
     // Claim the destination atomically; a file created after preflight must survive.
-    if let Err(error) = crate::file_names::rename_noreplace(&merged_tmp, dest) {
-        let _ = std::fs::remove_file(&merged_tmp);
+    if let Err(error) =
+        publish_merged_dash_blocking(merged_tmp, dest.to_path_buf(), merged_dir, gate).await
+    {
         tracing::warn!(
             error = %error,
             "could not preserve merged DASH partial without clobbering the destination"
         );
         return None;
     }
-    gate.mark_delivered();
-    // Clean up the parts we merged.
-    let _ = std::fs::remove_file(video_part);
-    let _ = std::fs::remove_file(audio_part);
+    // The blocking publisher recorded delivery and removed its private merge directory.
+    // Clean up the source fragments on the blocking pool.
+    let video_part = video_part.clone();
+    let audio_part = audio_part.clone();
+    let _ = tokio::task::spawn_blocking(move || {
+        let _ = std::fs::remove_file(video_part);
+        let _ = std::fs::remove_file(audio_part);
+    })
+    .await;
     Some(size)
 }
 
@@ -679,7 +829,7 @@ pub(crate) async fn run_unified_ytdlp(
         None
     };
     // Single-use: removed on drop, including every early return below.
-    let info_guard = InfoJsonGuard::new(json_path);
+    let mut info_guard = InfoJsonGuard::new(json_path);
     // Single-counter progress with the pump's granularity gate; `done` is capped against the metadata total so the bar never passes 100%.
     let sent = Arc::new(AtomicU64::new(0));
     let report = {
@@ -722,7 +872,7 @@ pub(crate) async fn run_unified_ytdlp(
     .await;
     let (done, after_move, abort_intent) = attempt_result?;
     // yt-dlp is done reading it; don't keep signed URLs on disk through merge.
-    drop(info_guard);
+    info_guard.cleanup().await;
     let Some(()) = done else {
         // User abort: on Finish, try merging partial DASH parts into a
         // single file instead of abandoning them.
@@ -1220,7 +1370,7 @@ async fn sweep_live_capture(
         && let Some(path) = final_tmp
     {
         let _ = tokio::fs::remove_file(path).await;
-        release_remux_lease(path);
+        release_remux_lease(path).await;
     }
     // Staging is the dest dir itself: never remove it. The item's
     // `grab-<id>-*` files were already swept above; the dir stays.
@@ -1524,15 +1674,12 @@ impl Drop for RecordingWatcherGuard {
 /// Skips the final dest and any existing base file (user's files are never
 /// overwritten or deleted by staging selection).
 fn claim_staging_name(
-    job: &crate::video_argv::VideoJob,
+    dest: &Path,
+    item_id: u64,
     ext: &str,
 ) -> Result<(std::path::PathBuf, String), VideoError> {
-    let dir = job
-        .dest
-        .parent()
-        .unwrap_or_else(|| std::path::Path::new(""));
-    let stem = job
-        .dest
+    let dir = dest.parent().unwrap_or_else(|| Path::new(""));
+    let stem = dest
         .file_stem()
         .map(|s| s.to_string_lossy().into_owned())
         .unwrap_or_else(|| "part".to_string());
@@ -1541,7 +1688,7 @@ fn claim_staging_name(
     // id reuse. Find an unused name and claim it atomically via create_new
     // on the .part file: exists()-then-use races, but create_new fails if
     // another process claimed it first.
-    let id = job.item_id;
+    let id = item_id;
     let mut n = 0;
     loop {
         let name = if n == 0 {
@@ -1551,7 +1698,7 @@ fn claim_staging_name(
         };
         let path = dir.join(&name);
         // Never use the final dest as staging.
-        if path == job.dest {
+        if path.as_path() == dest {
             n += 1;
             if n > 1000 {
                 return Err(VideoError::staging("too many conflicting files"));
@@ -1603,6 +1750,41 @@ fn claim_staging_name(
             }
         }
     }
+}
+
+/// Claim a live capture's staging name and perform its synchronous
+/// destination preflight. This operation runs on Tokio's blocking pool.
+fn prepare_live_staging(
+    staging: &Path,
+    dest: &Path,
+    item_id: u64,
+    ext: &str,
+) -> Result<(PathBuf, String), VideoError> {
+    let (out, staging_name) = claim_staging_name(dest, item_id, ext)?;
+
+    // Clean the previous attempt's .part if its manifest names a different
+    // staging file. Never delete the base recording.
+    if let Some(old) = read_manifest(staging, item_id)
+        && let Some(old_name) = old.staging_name.as_deref()
+        && old_name != staging_name
+    {
+        let old_part = staging.join(format!("{old_name}.part"));
+        let _ = std::fs::remove_file(old_part);
+    }
+
+    // Refuse an existing destination before spending time recording.
+    if dest.exists() {
+        clean_dest_parts(dest);
+        let part = out
+            .parent()
+            .unwrap_or_else(|| Path::new(""))
+            .join(format!("{staging_name}.part"));
+        let _ = std::fs::remove_file(part);
+        let _ = std::fs::remove_file(out.with_extension(format!("{ext}.ytdl")));
+        return Err(VideoError::exists());
+    }
+
+    Ok((out, staging_name))
 }
 
 /// Splice args before the `--` URL terminator. Pure: anything past `--` is a
@@ -1681,47 +1863,27 @@ pub(crate) async fn run_live_ytdlp(
     // The id rides in the name (e.g., "My Video.4.mp4"); on collision,
     // -1, -2, ... after the id. The chosen name is stored in the manifest for
     // cleanup. Never equal to job.dest (the final file); staging is always distinct.
-    let (out, staging_name) = claim_staging_name(job, ext)?;
-    // Clean up the previous attempt's .part if the manifest points to a
-    // different staging name (crash/retry orphan). Never delete the base
-    // recording — only the .part shell.
-    // NOTE: the `&staging` borrow is required (&PathBuf -> &Path coercion);
-    // clippy::needless_borrow false-positives on it inside let-chains (1.99).
-    #[expect(
-        clippy::needless_borrow,
-        reason = "clippy false positive inside a let-chain: `&staging` is `&PathBuf -> &Path`"
-    )]
-    if let Some(old) = read_manifest(&staging, job.item_id)
-        && let Some(old_name) = old.staging_name.as_deref()
-        && old_name != staging_name
-    {
-        let old_part = staging.join(format!("{old_name}.part"));
-        let _ = std::fs::remove_file(&old_part);
-    }
-    // Overwrite pre-flight: refuse if dest exists. The manifest proves ownership for future retries,
-    // but never delete here — a weak match could delete a completed output from a quality/format-changed retry.
-    if job.dest.exists() {
-        clean_dest_parts(&job.dest);
-        // Reclaim only our .part claim from the staging selection above.
-        // Never delete `out` (the base): it was verified non-existent at claim
-        // time, and deleting it could remove a user's file if a race occurred.
+    let staging_for_prepare = staging.to_path_buf();
+    let dest_for_prepare = job.dest.clone();
+    let item_id = job.item_id;
+    let ext_for_prepare = ext.to_string();
+    let (out, staging_name) = spawn_blocking_attempt(gate, move || {
+        prepare_live_staging(
+            &staging_for_prepare,
+            &dest_for_prepare,
+            item_id,
+            &ext_for_prepare,
+        )
+    })
+    .await
+    .map_err(VideoError::staging)??;
+    if let Err(error) = tokio::fs::create_dir_all(staging).await {
         let part = out
             .parent()
-            .unwrap_or_else(|| std::path::Path::new(""))
+            .unwrap_or_else(|| Path::new(""))
             .join(format!("{staging_name}.part"));
-        let _ = std::fs::remove_file(&part);
-        let _ = std::fs::remove_file(out.with_extension(format!("{ext}.ytdl")));
-        return Err(VideoError::exists());
-    }
-    if let Err(e) = tokio::fs::create_dir_all(staging).await {
-        // The .part was claimed before the staging dir was ensured: remove
-        // the zero-byte claim so a failed start doesn't leave litter.
-        let part = out
-            .parent()
-            .unwrap_or_else(|| std::path::Path::new(""))
-            .join(format!("{staging_name}.part"));
-        let _ = std::fs::remove_file(&part);
-        return Err(VideoError::staging(e));
+        let _ = tokio::fs::remove_file(part).await;
+        return Err(VideoError::staging(error));
     }
     // Record the chosen staging name in the manifest for crash cleanup.
     // The manifest is the ownership proof: without it, a leftover .part
@@ -1743,8 +1905,17 @@ pub(crate) async fn run_live_ytdlp(
         },
     )
     .await;
-    // Reclaim partial remuxes from attempts that died mid-ffmpeg: worthless by construction (a completed one is renamed), so this bounds crash litter without risking a real recording.
-    sweep_partial_remuxes(staging, job.item_id);
+    // Reclaim partial remuxes from attempts that died mid-ffmpeg. The sweep
+    // scans the destination directory, so keep it off the Tokio worker.
+    let staging_for_sweep = staging.to_path_buf();
+    let remux_item_id = job.item_id;
+    if let Err(error) = spawn_blocking_attempt(gate, move || {
+        sweep_partial_remuxes(&staging_for_sweep, remux_item_id)
+    })
+    .await
+    {
+        tracing::warn!(error = %error, "live capture remux sweep worker failed");
+    }
     // At most two attempts: the from-start capture, then — only if it recorded nothing and wasn't stopped — one retry from the live edge.
     let part = out.with_extension(format!("{ext}.part"));
     let state = out.with_extension(format!("{ext}.ytdl"));
@@ -1771,7 +1942,7 @@ pub(crate) async fn run_live_ytdlp(
     };
     // Reclaim a previous run's crash debris (the normal path deletes it below).
     if live_info_path.is_none() {
-        let _ = std::fs::remove_file(live_info_json_path(job.item_id));
+        let _ = tokio::fs::remove_file(live_info_json_path(job.item_id)).await;
     }
     // Deleted on drop: the attempt loop has early returns (quiesce failure,
     // nothing recorded) that would otherwise leak it.
@@ -2004,9 +2175,16 @@ pub(crate) async fn run_live_ytdlp(
         // Whatever stopped the capture — stop, stall, stream end or crash —
         // adopt what landed: MPEG-TS needs no finalizing, and yt-dlp renames
         // the `.part` shell on clean completion, so prefer the finished name.
-        let src = [out.clone(), part.clone()]
-            .into_iter()
-            .find(|p| file_len(p).is_some_and(|n| n > 0));
+        let mut src = None;
+        for candidate in [out.clone(), part.clone()] {
+            if tokio::fs::metadata(&candidate)
+                .await
+                .is_ok_and(|metadata| metadata.len() > 0)
+            {
+                src = Some(candidate);
+                break;
+            }
+        }
         let Some(src) = src else {
             // From-start attempt that never got going: retry once from the live
             // edge instead of failing the row, and say so. Only a startup miss
@@ -2053,11 +2231,19 @@ pub(crate) async fn run_live_ytdlp(
         break src;
     };
     tx.send(EngineMsg::Phase(gettext("Finalizing…"))).ok();
-    let final_tmp = match reserve_remux_temp(staging, job.item_id, ext) {
+    let staging_for_remux = staging.to_path_buf();
+    let remux_item_id = job.item_id;
+    let remux_ext = ext.to_string();
+    let final_tmp = match spawn_blocking_attempt(gate, move || {
+        reserve_remux_temp(&staging_for_remux, remux_item_id, &remux_ext)
+    })
+    .await
+    .map_err(VideoError::staging)?
+    {
         Ok(path) => path,
         // No claimable slot: leave the recorded shell for salvage rather
         // than risk sharing one. This is the pre-existing behaviour.
-        Err(e) => {
+        Err(error) => {
             sweep_live_capture(
                 &out,
                 &part,
@@ -2068,7 +2254,7 @@ pub(crate) async fn run_live_ytdlp(
                 Exit::RemuxFailed,
             )
             .await;
-            return Err(e);
+            return Err(error);
         }
     };
     if let Err(e) = remux_live_capture(
@@ -2113,10 +2299,8 @@ pub(crate) async fn run_live_ytdlp(
         .await;
         return Ok(None);
     }
-    match crate::file_names::rename_noreplace(&final_tmp, &job.dest) {
-        Ok(()) => {
-            gate.mark_delivered();
-        }
+    match rename_noreplace_blocking(final_tmp.clone(), job.dest.clone(), gate).await {
+        Ok(()) => {}
         Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
             // The name was claimed mid-capture; the row fails Parabolic-style
             // instead of recording again, so the shell is redundant.
@@ -2164,8 +2348,23 @@ pub(crate) async fn run_live_ytdlp(
     .await;
     // Delivered: the manifest's job is done. Failure paths above keep it,
     // because it is the ownership proof for a salvaged recording.
-    sweep_staging_preserving_recordings(staging, job.item_id);
-    Ok(file_len(&job.dest))
+    let staging_for_cleanup = staging.to_path_buf();
+    let cleanup_item_id = job.item_id;
+    if let Err(error) = spawn_blocking_attempt(gate, move || {
+        sweep_staging_preserving_recordings(&staging_for_cleanup, cleanup_item_id)
+    })
+    .await
+    {
+        tracing::warn!(
+            error = %error,
+            item_id = cleanup_item_id,
+            "live capture staging cleanup worker failed"
+        );
+    }
+    Ok(tokio::fs::metadata(&job.dest)
+        .await
+        .ok()
+        .map(|metadata| metadata.len()))
 }
 
 #[expect(

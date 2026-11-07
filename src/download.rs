@@ -72,6 +72,22 @@ struct PendingDiscard {
     finalizer: tokio::task::JoinHandle<()>,
 }
 
+/// Await a GLib-local future without allowing shutdown to exceed its join budget.
+async fn wait_for_local_future<F>(future: F, timeout: Duration) -> bool
+where
+    F: std::future::Future<Output = ()>,
+{
+    use futures_util::future::{Either, select};
+
+    if timeout.is_zero() {
+        return false;
+    }
+    matches!(
+        select(Box::pin(future), Box::pin(glib::timeout_future(timeout)),).await,
+        Either::Left(_)
+    )
+}
+
 /// Remove a discarded download's owned files, preserving native ownership records on error.
 fn cleanup_discarded_video_files(dest: &std::path::Path, id: u64) -> Result<(), String> {
     if let Some(dest_dir) = dest.parent() {
@@ -80,6 +96,10 @@ fn cleanup_discarded_video_files(dest: &std::path::Path, id: u64) -> Result<(), 
             crate::manifest_destination::remove_planned_parts(&staging, dest_dir, id)?;
         }
         crate::video::clean_staging_files(dest_dir, id);
+        // Native/live remux temporaries are lease-owned scratch, not resumable
+        // recording data. Reclaim them only after the attempt's tracked
+        // blocking workers have finished.
+        crate::video_staging::sweep_partial_remuxes(dest_dir, id);
     }
     crate::video::clean_dest_parts(dest);
     Ok(())
@@ -263,6 +283,38 @@ impl Reservations {
     }
 }
 
+/// Temporary finished-name claims held while a blocking worker performs a no-clobber rename.
+struct FinalNameReservations {
+    reservations: std::sync::Arc<std::sync::Mutex<Reservations>>,
+    paths: Vec<std::path::PathBuf>,
+}
+
+impl FinalNameReservations {
+    /// Leave one reservation alive for a discard finalizer to release after it
+    /// has swept the moved file and row-owned staging.
+    fn retain_path(&mut self, retained: &std::path::Path) {
+        if let Ok(mut reservations) = self.reservations.lock() {
+            for path in self.paths.drain(..) {
+                if path.as_path() != retained {
+                    reservations.remove(&path);
+                }
+            }
+        }
+    }
+}
+
+impl Drop for FinalNameReservations {
+    fn drop(&mut self) {
+        if let Ok(mut reservations) = self.reservations.lock() {
+            for path in &self.paths {
+                reservations.remove(path);
+            }
+        }
+        // A row restored through Undo may have been parked behind one of these claims.
+        wake_queue();
+    }
+}
+
 fn decrement<K: Eq + std::hash::Hash>(counts: &mut std::collections::HashMap<K, usize>, key: &K) {
     let empty = counts
         .get_mut(key)
@@ -325,6 +377,8 @@ pub struct DownloadManager {
     preparation_handles: RefCell<HashMap<u64, glib::JoinHandle<()>>>,
     /// Pump task handles by download ID, so tests can wait for pump completion (a `spawn_future_local` task reaped on another thread trips glib's thread guard).
     pub(crate) pump_handles: RefCell<HashMap<u64, glib::JoinHandle<()>>>,
+    #[cfg(test)]
+    final_name_after_move_hook: RefCell<Option<std::sync::Arc<dyn Fn() + Send + Sync>>>,
     next_id: Cell<u64>,
     on_change: RefCell<Option<Box<dyn Fn()>>>,
     batch: Cell<u32>,
@@ -650,6 +704,8 @@ impl DownloadManager {
             preparing: RefCell::new(HashSet::new()),
             preparation_handles: RefCell::new(HashMap::new()),
             pump_handles: RefCell::new(HashMap::new()),
+            #[cfg(test)]
+            final_name_after_move_hook: RefCell::new(None),
             next_id: Cell::new(1),
             on_change: RefCell::new(None),
             batch: Cell::new(0),
@@ -2228,29 +2284,21 @@ impl DownloadManager {
         self.pump(item, item_id, generation, rx);
     }
 
-    /// Atomically adopt a finished filename. The directory listing can go stale between
-    /// deduplication and rename, so remember each candidate that lost EEXIST rather
-    /// than retrying the same name from the stale snapshot.
-    fn adopt_final_name(
+    /// Claim one of the pre-reserved candidates without replacing an existing file.
+    /// The candidate list is computed on the GTK thread; this worker receives only paths and strings.
+    fn adopt_final_name_candidates(
         old_path: &std::path::Path,
         dir: &std::path::Path,
-        wanted: &str,
-        is_taken: impl Fn(&str) -> bool,
+        candidates: &[String],
     ) -> Option<String> {
-        let lost_claims = RefCell::new(Vec::<String>::new());
-        let taken =
-            |name: &str| lost_claims.borrow().iter().any(|lost| lost == name) || is_taken(name);
-        for _ in 0..8 {
-            let candidate = dedupe_filename(wanted, taken);
-            let target = dir.join(&candidate);
+        for candidate in candidates {
+            let target = dir.join(candidate);
             if old_path == target {
-                return Some(candidate);
+                return Some(candidate.clone());
             }
             match rename_noreplace(old_path, &target) {
-                Ok(()) => return Some(candidate),
-                Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
-                    lost_claims.borrow_mut().push(candidate);
-                }
+                Ok(()) => return Some(candidate.clone()),
+                Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
                 Err(_) => return None,
             }
         }
@@ -2267,6 +2315,53 @@ impl DownloadManager {
             || self.dest_reserved(&std::path::Path::new(dir).join(n))
             || self.items()
                 .any(|it| it.dest_dir() == dir && it.filename() == n)
+    }
+
+    /// Reserve up to eight collision-free names before yielding the main context to the filesystem worker.
+    fn reserve_final_name_candidates(
+        &self,
+        dir: &str,
+        wanted: &str,
+        existing: &[String],
+    ) -> Option<(Vec<String>, FinalNameReservations)> {
+        let row_names = self
+            .items()
+            .map(|item| (item.dest_dir().to_string(), item.filename().to_string()))
+            .collect::<Vec<_>>();
+        let reservations = std::sync::Arc::clone(&self.reservations);
+        let mut reserved = reservations.lock().ok()?;
+        let mut candidates = Vec::with_capacity(8);
+        let directory = std::path::Path::new(dir);
+
+        for _ in 0..8 {
+            let candidate = dedupe_filename(wanted, |name| {
+                existing.iter().any(|entry| entry == name)
+                    || crate::video_staging::stem_reserved_in(existing, name_stem(name))
+                    || row_names
+                        .iter()
+                        .any(|(row_dir, row_name)| row_dir == dir && row_name == name)
+                    || reserved.contains(&directory.join(name))
+                    || candidates.iter().any(|claimed| claimed == name)
+            });
+            candidates.push(candidate);
+        }
+
+        let paths = candidates
+            .iter()
+            .map(|candidate| directory.join(candidate))
+            .collect::<Vec<_>>();
+        for path in &paths {
+            reserved.insert(path);
+        }
+        drop(reserved);
+
+        Some((
+            candidates,
+            FinalNameReservations {
+                reservations,
+                paths,
+            },
+        ))
     }
 
     /// Drain one engine's message channel into its row. Shared by the HTTP and torrent engines.
@@ -2429,31 +2524,131 @@ impl DownloadManager {
                                     done = true;
                                     break;
                                 }
-                                // Claim-then-move so a file appearing between dedupe and rename is never clobbered.
-                                let old_path = item.file_path();
-                                let (final_name, moved) =
-                                    if !existing.iter().any(|entry| entry == &current) {
-                                        (
-                                            dedupe_filename(&name, |n| {
-                                                this.is_name_taken(&dir, &existing, n)
-                                            }),
-                                            true,
-                                        )
-                                    } else {
-                                        match Self::adopt_final_name(
-                                            &old_path,
-                                            std::path::Path::new(&dir),
-                                            &name,
-                                            |n| this.is_name_taken(&dir, &existing, n),
-                                        ) {
-                                            Some(name) => (name, true),
-                                            None => (current.clone(), false),
+                                // If the current file is present, the collision path must
+                                // claim-then-move it. Keep GTK objects on this context and send
+                                // only plain paths/candidate names to the blocking worker.
+                                if existing.iter().any(|entry| entry == &current) {
+                                    match this.reserve_final_name_candidates(&dir, &name, &existing)
+                                    {
+                                        Some((candidates, mut claims)) => {
+                                            let old_path = item.file_path();
+                                            let worker_old_path = old_path.clone();
+                                            let worker_dir = std::path::PathBuf::from(dir.as_str());
+                                            #[cfg(test)]
+                                            let after_move_hook =
+                                                this.final_name_after_move_hook.borrow_mut().take();
+                                            drop(this);
+                                            let worker_result = gio::spawn_blocking(move || {
+                                                let adopted = Self::adopt_final_name_candidates(
+                                                    &worker_old_path,
+                                                    &worker_dir,
+                                                    &candidates,
+                                                );
+                                                #[cfg(test)]
+                                                if let Some(hook) = after_move_hook {
+                                                    hook();
+                                                }
+                                                adopted
+                                            })
+                                            .await;
+                                            let adopted = match worker_result {
+                                                Ok(name) => name,
+                                                Err(error) => {
+                                                    tracing::warn!(
+                                                        item_id = id,
+                                                        error = ?error,
+                                                        "finished-name rename worker failed"
+                                                    );
+                                                    None
+                                                }
+                                            };
+                                            let Some(this) = weak.upgrade() else {
+                                                // The manager is gone. Restore the original path
+                                                // when possible rather than leaving an untracked move.
+                                                if let Some(final_name) = adopted {
+                                                    let moved_path = std::path::Path::new(&dir)
+                                                        .join(&final_name);
+                                                    let rollback_old_path = old_path.clone();
+                                                    let rollback = gio::spawn_blocking(move || {
+                                                        rename_noreplace(
+                                                            &moved_path,
+                                                            &rollback_old_path,
+                                                        )
+                                                    })
+                                                    .await;
+                                                    if !matches!(rollback, Ok(Ok(()))) {
+                                                        item.set_filename(final_name);
+                                                    }
+                                                }
+                                                done = true;
+                                                break;
+                                            };
+                                            let current_attempt = this.is_current(id, generation);
+                                            let stopped = matches!(
+                                                item.status(),
+                                                DownloadStatus::Cancelled | DownloadStatus::Paused
+                                            );
+                                            if !current_attempt || stopped {
+                                                // Preserve the pre-yield path on removal/pause
+                                                // when possible. If an external file took it,
+                                                // retain the moved path for discard cleanup.
+                                                let row_removed = this.find(id).is_none();
+                                                let update_detached_path = stopped || row_removed;
+                                                if let Some(final_name) = adopted {
+                                                    let moved_path = std::path::Path::new(&dir)
+                                                        .join(&final_name);
+                                                    let rollback_moved_path = moved_path.clone();
+                                                    let rollback_old_path = old_path.clone();
+                                                    drop(this);
+                                                    let rollback = gio::spawn_blocking(move || {
+                                                        rename_noreplace(
+                                                            &rollback_moved_path,
+                                                            &rollback_old_path,
+                                                        )
+                                                    })
+                                                    .await;
+                                                    if !matches!(rollback, Ok(Ok(())))
+                                                        && update_detached_path
+                                                    {
+                                                        item.set_filename(final_name);
+                                                        if row_removed {
+                                                            // Removal already reserved old_path. Keep the
+                                                            // new path until its discard finalizer finishes.
+                                                            claims.retain_path(&moved_path);
+                                                        }
+                                                    }
+                                                }
+                                                done = true;
+                                                break;
+                                            }
+                                            if let Some(final_name) = adopted
+                                                && final_name != current
+                                            {
+                                                item.set_filename(final_name);
+                                            }
                                         }
-                                    };
-                                if moved && final_name != current {
-                                    item.set_filename(final_name);
+                                        None => {
+                                            tracing::warn!(
+                                                item_id = id,
+                                                "could not reserve a finished filename candidate; keeping the current name"
+                                            );
+                                        }
+                                    }
+                                } else {
+                                    // The engine no longer has the old path; only update the
+                                    // suggested name using the original in-memory dedupe policy.
+                                    let final_name = dedupe_filename(&name, |candidate| {
+                                        this.is_name_taken(&dir, &existing, candidate)
+                                    });
+                                    if final_name != current {
+                                        item.set_filename(final_name);
+                                    }
                                 }
                             }
+                            let Some(this) = weak.upgrade() else {
+                                done = true;
+                                break;
+                            };
                             // Size off the final path, measured off-thread (see
                             // `set_finished_detail`): the engine measured the
                             // pre-rename one. Paints the engine's size now,
@@ -3428,7 +3623,7 @@ impl DownloadManager {
             // Discard handoff cookies only on clean success (exit_code.is_none()).
             // Partial success (exit_code.is_some()) retains them for retry.
             if matches!(&result, Ok(r) if r.exit_code.is_none()) {
-                crate::extension_server::discard_handoff_cookies(&page_url);
+                crate::extension_server::discard_handoff_cookies_async(&page_url);
             }
             let _ = tx.send(GalleryMsg::Finished(result.map_err(|e| e.to_string())));
         });
@@ -3780,18 +3975,43 @@ impl DownloadManager {
         // `self` (Rc, !Send) cannot go to the tokio runtime: carry reservations as an `Arc` clone.
         // Queue wakeups go through `wake_queue()` (thread-safe, no manager handle needed).
         let reservations = std::sync::Arc::clone(&self.reservations);
+        // A final-name claim may be awaiting GIO's blocking pool. Wait for the
+        // pump before cleanup, then use the row's final path rather than the
+        // stale filename captured when Remove was clicked.
+        let pump = self.pump_handles.borrow_mut().remove(&id);
+        let pump_item = self.find(id);
+        let pump_dest = dest.clone();
+        let (pump_path_tx, pump_path_rx) = tokio::sync::oneshot::channel();
+        if let Some(pump) = pump {
+            glib::spawn_future_local(async move {
+                let _ = pump.await;
+                let final_dest = pump_item
+                    .map(|item| item.file_path())
+                    .unwrap_or(pump_dest.clone());
+                let _ = pump_path_tx.send(final_dest);
+            });
+        } else {
+            let final_dest = pump_item
+                .map(|item| item.file_path())
+                .unwrap_or_else(|| dest.clone());
+            let _ = pump_path_tx.send(final_dest);
+        }
         match self.running.borrow_mut().remove(&id) {
             Some(handle) => {
                 let worker_abort = handle.abort_handle();
                 let finalizer = crate::runtime::tokio_rt().spawn(async move {
                     let _ = handle.await;
+                    let final_dest = pump_path_rx.await.unwrap_or_else(|_| dest.clone());
                     // A cancelled publisher may have detached its blocking rollback.
                     // Do not inspect delivery until that filesystem work has completed.
                     gate.wait_for_rollbacks().await;
                     let remove_delivered_orphan = gate.was_delivered();
-                    cleanup_discarded_files(dest.clone(), id, remove_delivered_orphan).await;
+                    cleanup_discarded_files(final_dest.clone(), id, remove_delivered_orphan).await;
                     if let Ok(mut r) = reservations.lock() {
                         r.remove(&dest);
+                        if final_dest != dest {
+                            r.remove(&final_dest);
+                        }
                     }
                     // The destination is free: wake the queue on the main
                     // thread so a row parked by `unremove()` starts now
@@ -3812,9 +4032,13 @@ impl DownloadManager {
             // cleanup off GTK too; a large staging dir must not stall the UI.
             None => {
                 let finalizer = crate::runtime::tokio_rt().spawn(async move {
-                    cleanup_discarded_files(dest.clone(), id, false).await;
+                    let final_dest = pump_path_rx.await.unwrap_or_else(|_| dest.clone());
+                    cleanup_discarded_files(final_dest.clone(), id, false).await;
                     if let Ok(mut r) = reservations.lock() {
                         r.remove(&dest);
+                        if final_dest != dest {
+                            r.remove(&final_dest);
+                        }
                     }
                     wake_queue();
                 });
@@ -5333,6 +5557,7 @@ impl DownloadManager {
         let handles: Vec<_> = self.running.borrow_mut().drain().map(|(_, h)| h).collect();
         let finals: Vec<PendingDiscard> =
             self.discards.borrow_mut().drain().map(|(_, p)| p).collect();
+        let gates: Vec<_> = self.gates.borrow().values().cloned().collect();
         for handle in &handles {
             handle.abort();
         }
@@ -5342,14 +5567,22 @@ impl DownloadManager {
             }
         }
 
+        // Engine/finalizer joins and GTK-local pump joins share one deadline.
+        // A pump may be waiting for a blocking filename rename, so it cannot
+        // extend Quit beyond the same bound.
+        let shutdown_deadline = Instant::now() + Self::SHUTDOWN_JOIN_TIMEOUT;
+        let worker_join_timeout = shutdown_deadline.saturating_duration_since(Instant::now());
         let (joined_tx, joined_rx) = tokio::sync::oneshot::channel();
         tokio_rt().spawn(async move {
-            let joined = tokio::time::timeout(Self::SHUTDOWN_JOIN_TIMEOUT, async {
+            let joined = tokio::time::timeout(worker_join_timeout, async {
                 for handle in handles {
                     let _ = handle.await;
                 }
                 for pending in finals {
                     let _ = pending.finalizer.await;
+                }
+                for gate in gates {
+                    gate.wait_for_rollbacks().await;
                 }
             })
             .await
@@ -5357,9 +5590,31 @@ impl DownloadManager {
             let _ = joined_tx.send(joined);
         });
         let joined = joined_rx.await.unwrap_or(false);
-        if !joined {
+        // A timed-out pump leaves its final filename unknown. Do not snapshot
+        // the in-memory queue or truncate partials unless every pump has joined.
+        let pumps: Vec<_> = self
+            .pump_handles
+            .borrow_mut()
+            .drain()
+            .map(|(_, handle)| handle)
+            .collect();
+        let pumps_joined = if pumps.is_empty() {
+            true
+        } else {
+            wait_for_local_future(
+                async move {
+                    for pump in pumps {
+                        let _ = pump.await;
+                    }
+                },
+                shutdown_deadline.saturating_duration_since(Instant::now()),
+            )
+            .await
+        };
+        let persist_snapshot = joined && pumps_joined;
+        if !persist_snapshot {
             tracing::warn!(
-                "shutdown: async join deadline elapsed; persisting without truncating partial files"
+                "shutdown: async/pump join deadline elapsed; preserving the saved queue and skipping partial-file reconciliation"
             );
         } else {
             // Truncating a partially written segmented file is filesystem I/O;
@@ -5395,23 +5650,27 @@ impl DownloadManager {
                 }
             }
         }
-        self.persist_for_shutdown_async().await;
+        self.persist_for_shutdown_async(persist_snapshot).await;
         self.shutdown_finished.set(true);
     }
 
-    async fn persist_for_shutdown_async(&self) {
+    async fn persist_for_shutdown_async(&self, persist_snapshot: bool) {
         #[cfg(test)]
-        {
+        if persist_snapshot {
             self.persist_for_shutdown();
         }
         #[cfg(not(test))]
         {
-            if self.restore_state.get() == RestoreState::Ready {
+            if persist_snapshot && self.restore_state.get() == RestoreState::Ready {
                 if let (Some(queue), Some(tx)) =
                     (self.snapshot_queue_inner(true), &*self.persist_tx.borrow())
                 {
                     tx.send_replace(Some(queue));
                 }
+            } else if !persist_snapshot {
+                tracing::warn!(
+                    "shutdown: preserving the saved queue because an engine or GTK pump did not quiesce"
+                );
             } else {
                 tracing::warn!(
                     "shutdown: queue restore did not complete; preserving the saved queue file"

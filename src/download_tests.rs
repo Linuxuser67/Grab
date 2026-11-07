@@ -50,6 +50,88 @@ fn test_locks() -> (
     (lock_queue_file(), lock_main_loop())
 }
 
+struct FinalNameAfterMoveBarrier {
+    entered: std::sync::mpsc::Receiver<()>,
+    released: Arc<(std::sync::Mutex<bool>, std::sync::Condvar)>,
+}
+
+impl FinalNameAfterMoveBarrier {
+    fn wait_until_entered(&self) {
+        let context = glib::MainContext::default();
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        loop {
+            match self.entered.try_recv() {
+                Ok(()) => return,
+                Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                    panic!("final-name worker exited before reaching the test barrier");
+                }
+                Err(std::sync::mpsc::TryRecvError::Empty) => {}
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "timed out waiting for the final-name worker"
+            );
+            context.iteration(false);
+            std::thread::sleep(Duration::from_millis(1));
+        }
+    }
+
+    fn release(&self) {
+        let (lock, changed) = &*self.released;
+        *lock
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = true;
+        changed.notify_all();
+    }
+}
+
+impl Drop for FinalNameAfterMoveBarrier {
+    fn drop(&mut self) {
+        self.release();
+    }
+}
+
+fn hold_final_name_worker_after_move(manager: &DownloadManager) -> FinalNameAfterMoveBarrier {
+    let (entered_tx, entered) = std::sync::mpsc::channel();
+    let released = Arc::new((std::sync::Mutex::new(false), std::sync::Condvar::new()));
+    let worker_released = Arc::clone(&released);
+    manager
+        .final_name_after_move_hook
+        .borrow_mut()
+        .replace(Arc::new(move || {
+            let _ = entered_tx.send(());
+            let (lock, changed) = &*worker_released;
+            let mut released = lock
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            while !*released {
+                released = changed
+                    .wait(released)
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+            }
+        }));
+    FinalNameAfterMoveBarrier { entered, released }
+}
+
+fn start_finished_name_pump(
+    manager: &Rc<DownloadManager>,
+    item: &DownloadItem,
+    suggested_name: &str,
+) {
+    let id = item.id();
+    item.set_status(DownloadStatus::Downloading);
+    manager.store().append(item);
+    manager.epoch.borrow_mut().insert(id, 1);
+    manager
+        .pending_names
+        .borrow_mut()
+        .insert(id, suggested_name.to_string());
+    let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+    manager.pump(item.clone(), id, 1, rx);
+    tx.send(crate::engine_msg::EngineMsg::Finished { size: 10 })
+        .expect("send finished event");
+}
+
 /// Wait for the asynchronous spawn preparation to hand a queued row to its engine.
 fn wait_for_started(manager: &DownloadManager, id: u64, timeout: Duration) -> bool {
     let ctx = glib::MainContext::default();
@@ -149,6 +231,11 @@ fn drain_engine(manager: &DownloadManager, id: u64) {
         || manager.preparing.borrow().contains(&id)
         || manager.preparation_handles.borrow().contains_key(&id)
         || manager.pump_handles.borrow().contains_key(&id)
+        || manager
+            .discards
+            .borrow()
+            .get(&id)
+            .is_some_and(|pending| !pending.finalizer.is_finished())
         || manager
             .find(id)
             .is_some_and(|item| manager.dest_reserved(&item.file_path()))
@@ -4805,6 +4892,13 @@ fn remove_cleans_video_staging() {
     }
     // Manifest-owned files (will be deleted)
     std::fs::write(destdir.join(format!("v.{id}.mp4.part")), b"x").unwrap();
+    // Remux scratch is lease-owned rather than manifest-owned.
+    let remux_part = destdir.join(format!("final.{id}.1.mp4.part"));
+    let remux_lease = destdir.join(format!("final.{id}.1.mp4.lease"));
+    let unleased_remux_part = destdir.join(format!("final.{id}.2.mp4.part"));
+    std::fs::write(&remux_part, b"partial remux").unwrap();
+    std::fs::write(&remux_lease, b"grab-remux-lease-v1\n").unwrap();
+    std::fs::write(&unleased_remux_part, b"foreign part").unwrap();
     let item = DownloadItem::new(
         id,
         "https://x.com/u/status/1",
@@ -4827,6 +4921,7 @@ fn remove_cleans_video_staging() {
         },
     );
     manager.remove(id);
+    drain_engine(&manager, id);
     assert!(
         !manifest_file.exists(),
         "staged sidecar must go with the row"
@@ -4834,6 +4929,18 @@ fn remove_cleans_video_staging() {
     assert!(
         !destdir.join(format!("v.{id}.mp4.part")).exists(),
         "manifest-owned part goes too"
+    );
+    assert!(
+        !remux_part.exists(),
+        "lease-owned remux partial is reclaimed"
+    );
+    assert!(
+        !remux_lease.exists(),
+        "remux lease is reclaimed with its partial"
+    );
+    assert!(
+        unleased_remux_part.exists(),
+        "a remux-looking file without its ownership lease is preserved"
     );
     assert!(destdir.join("v.mp4").exists(), "finished file stays");
     assert!(destdir.join("v.srt").exists(), "foreign files stay");
@@ -9047,6 +9154,23 @@ fn start_next_counts_preparing_rows_against_the_cap() {
 }
 
 #[test]
+fn shutdown_glib_pump_wait_respects_its_deadline() {
+    let (_queue_lock, _main_loop_lock) = test_locks();
+    let context = glib::MainContext::default();
+    let started = std::time::Instant::now();
+    let joined = context.block_on(super::wait_for_local_future(
+        std::future::pending::<()>(),
+        Duration::from_millis(20),
+    ));
+
+    assert!(!joined, "a permanently pending pump must time out");
+    assert!(
+        started.elapsed() < Duration::from_secs(1),
+        "the GLib pump wait exceeded its shutdown budget"
+    );
+}
+
+#[test]
 fn finished_name_adoption_retries_after_stale_listing_collision() {
     let dir = std::env::temp_dir().join(format!("grab-finished-name-race-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
@@ -9058,13 +9182,167 @@ fn finished_name_adoption_retries_after_stale_listing_collision() {
 
     // Simulate a stale listing that says every name is free. The atomic rename
     // must reject a.mp4 and retry with a distinct name, never overwrite it.
-    let adopted = DownloadManager::adopt_final_name(&source, &dir, "a.mp4", |_| false)
+    let candidates = vec!["a.mp4".to_string(), "a (1).mp4".to_string()];
+    let adopted = DownloadManager::adopt_final_name_candidates(&source, &dir, &candidates)
         .expect("a later collision-free candidate should be adopted");
     assert_ne!(adopted, "a.mp4");
     assert!(dir.join(&adopted).exists());
     assert_eq!(std::fs::read(&occupied).unwrap(), b"foreign");
     assert_eq!(std::fs::read(dir.join(adopted)).unwrap(), b"downloaded");
     let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn pause_during_finished_name_rename_restores_the_original_path() {
+    let (_queue_lock, _main_loop_lock) = test_locks();
+    let _queue_file = test_queue_file("pause-finished-name-rename");
+    let manager = DownloadManager::new(gio::ListStore::new::<DownloadItem>(), test_settings());
+    let directory = tempfile::tempdir().expect("create destination");
+    let id = 951_000 + std::process::id() as u64;
+    let item = DownloadItem::new(
+        id,
+        "https://example.test/video",
+        "old.mp4",
+        &directory.path().to_string_lossy(),
+    );
+    let old_path = item.file_path();
+    let contents = b"completed download".to_vec();
+    std::fs::write(&old_path, &contents).expect("write current finished path");
+
+    let barrier = hold_final_name_worker_after_move(&manager);
+    start_finished_name_pump(&manager, &item, "renamed.mp4");
+    barrier.wait_until_entered();
+    let moved_path = directory.path().join("renamed.mp4");
+    assert_eq!(std::fs::read(&moved_path).unwrap(), contents);
+
+    manager.pause(id);
+    barrier.release();
+
+    let context = glib::MainContext::default();
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    while manager.pump_handles.borrow().contains_key(&id) && std::time::Instant::now() < deadline {
+        context.iteration(false);
+        std::thread::sleep(Duration::from_millis(1));
+    }
+    assert!(
+        !manager.pump_handles.borrow().contains_key(&id),
+        "paused row's pump did not finish"
+    );
+    assert_eq!(item.status(), DownloadStatus::Paused);
+    assert_eq!(std::fs::read(&old_path).unwrap(), contents);
+    assert!(!moved_path.exists(), "the rename must roll back on Pause");
+    quiesce(&context);
+}
+
+#[test]
+fn remove_during_finished_name_rename_waits_for_final_path_cleanup() {
+    let (_queue_lock, _main_loop_lock) = test_locks();
+    let _queue_file = test_queue_file("remove-finished-name-rename");
+    let manager = DownloadManager::new(gio::ListStore::new::<DownloadItem>(), test_settings());
+    let directory = tempfile::tempdir().expect("create destination");
+    let id = 952_000 + std::process::id() as u64;
+    let item = DownloadItem::new(
+        id,
+        "https://example.test/video",
+        "old.mp4",
+        &directory.path().to_string_lossy(),
+    );
+    let old_path = item.file_path();
+    let contents = b"completed download".to_vec();
+    std::fs::write(&old_path, &contents).expect("write current finished path");
+    manager.video_sources.borrow_mut().insert(
+        id,
+        crate::media_types::VideoSource::Page {
+            page_url: "https://example.test/video".to_string(),
+            media_url: None,
+            expires_at: None,
+            quality: "720p".to_string(),
+            audio_only: false,
+            is_live: false,
+            video_format_id: None,
+            playlist_item_id: None,
+            backend: None,
+        },
+    );
+
+    let barrier = hold_final_name_worker_after_move(&manager);
+    start_finished_name_pump(&manager, &item, "renamed.mp4");
+    barrier.wait_until_entered();
+    let moved_path = directory.path().join("renamed.mp4");
+    assert_eq!(std::fs::read(&moved_path).unwrap(), contents);
+
+    // Force the worker's no-clobber rollback to lose. The discard finalizer
+    // must retain the moved path until its pump handoff and cleanup complete.
+    std::fs::write(&old_path, b"foreign file").expect("claim the original path");
+    manager.remove(id);
+    assert!(manager.dest_reserved(&old_path));
+    assert!(manager.dest_reserved(&moved_path));
+    assert!(
+        !manager
+            .discards
+            .borrow()
+            .get(&id)
+            .is_some_and(|pending| pending.finalizer.is_finished()),
+        "discard finalizer must wait for the in-flight GLib pump"
+    );
+
+    barrier.release();
+    let context = glib::MainContext::default();
+    let deadline = std::time::Instant::now() + Duration::from_secs(10);
+    loop {
+        context.iteration(false);
+        // start_next prunes completed finalizers, so absence from the
+        // registry is also a completed state.
+        let finalizer_finished = manager
+            .discards
+            .borrow()
+            .get(&id)
+            .is_none_or(|pending| pending.finalizer.is_finished());
+        if finalizer_finished {
+            break;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "discard finalizer did not wait for the GLib pump and finish cleanup"
+        );
+        std::thread::sleep(Duration::from_millis(1));
+    }
+
+    assert!(manager.find(id).is_none(), "the row should remain removed");
+    assert_eq!(std::fs::read(&old_path).unwrap(), b"foreign file");
+    assert_eq!(
+        std::fs::read(&moved_path).unwrap(),
+        contents,
+        "removing the row must not delete its already-finished media file"
+    );
+    assert!(!manager.dest_reserved(&old_path));
+    assert!(!manager.dest_reserved(&moved_path));
+    quiesce(&context);
+}
+
+#[test]
+fn finished_name_candidates_are_reserved_while_the_worker_runs() {
+    let (_q, _l) = test_locks();
+    let _qf = test_queue_file("finished-name-reservations");
+    let manager = DownloadManager::new(gio::ListStore::new::<DownloadItem>(), test_settings());
+    let directory = tempfile::tempdir().expect("create destination");
+    let directory_name = directory.path().to_string_lossy().into_owned();
+    let existing = vec!["clip.mp4".to_string()];
+
+    let (candidates, mut claims) = manager
+        .reserve_final_name_candidates(&directory_name, "clip.mp4", &existing)
+        .expect("reserve finished-name candidates");
+    let first = directory.path().join(&candidates[0]);
+    assert_ne!(candidates[0], "clip.mp4");
+    assert!(manager.dest_reserved(&first));
+
+    claims.retain_path(&first);
+    drop(claims);
+    assert!(manager.dest_reserved(&first));
+    let other = directory.path().join(&candidates[1]);
+    assert!(!manager.dest_reserved(&other));
+    manager.release_dest(&first);
+    assert!(!manager.dest_reserved(&first));
 }
 
 #[test]

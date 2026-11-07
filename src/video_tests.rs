@@ -5195,7 +5195,7 @@ fn a_remux_slot_is_claimed_exactly_once() {
     assert_ne!(second, first, "two claims shared one remux slot");
 
     // An occupied temp is skipped too, not just an occupied lease.
-    release_remux_lease(&first);
+    crate::runtime::tokio_rt().block_on(release_remux_lease(&first));
     std::fs::write(&first, b"an earlier recording").unwrap();
     let third = reserve_remux_temp(&staging, 7, "mp4").unwrap();
     assert_eq!(

@@ -42,7 +42,8 @@ and implicit byte-range offsets advance across removed source segments.
 `METHOD=NONE` resets are preserved when their original boundary is inside an
 omitted ad. Live playlists with ad markers, ad intervals containing a
 discontinuity, playlists using `EXT-X-START`, ambiguous or incomplete cues,
-and SCTE-35/DATERANGE-only ad signals remain on yt-dlp fallback.
+and all `EXT-X-DATERANGE` playlists remain on yt-dlp fallback until
+date-time ranges can be mapped unambiguously to individual media segments.
 
 This is a deliberately bounded profile, not a claim of support for every HLS
 extension. Unknown parser tags and unsupported resource-affecting extensions

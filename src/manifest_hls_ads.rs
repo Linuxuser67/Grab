@@ -33,11 +33,10 @@ pub(super) fn plan_ad_removal(
     if playlist
         .segments
         .iter()
-        .filter_map(|segment| segment.daterange.as_ref())
-        .any(has_ad_daterange_signal)
+        .any(|segment| segment.daterange.is_some())
     {
         return Err(unsupported_ad_marker(
-            "SCTE-35 or interstitial DATERANGE needs date-time mapping",
+            "EXT-X-DATERANGE boundaries are not mapped to exact media segments",
         ));
     }
 
@@ -356,35 +355,6 @@ fn is_base64_marker(value: &str) -> bool {
             .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'+' | b'/'))
 }
 
-fn has_ad_daterange_signal(range: &m3u8_rs::DateRange) -> bool {
-    let class_is_ad = range.class.as_deref().is_some_and(|class| {
-        let class = class.to_ascii_lowercase();
-        class.contains("interstitial")
-            || class.contains("splice")
-            || class.contains("scte")
-            || class.contains("advert")
-            || class == "ad"
-            || class.ends_with(".ad")
-    });
-    let attributes_signal_ad = range
-        .other_attributes
-        .as_ref()
-        .is_some_and(|attributes| {
-            attributes.keys().any(|name| {
-                matches!(
-                    name.as_str(),
-                    "SCTE35-OUT" | "SCTE35-IN" | "SCTE35-CMD"
-                )
-            })
-        });
-    let asset_signal_ad = range.x_prefixed.as_ref().is_some_and(|attributes| {
-        attributes
-            .keys()
-            .any(|name| matches!(name.as_str(), "X-ASSET-URI" | "X-ASSET-LIST"))
-    });
-    class_is_ad || attributes_signal_ad || asset_signal_ad
-}
-
 fn unsupported_ad_marker(reason: &str) -> ManifestError {
     ManifestError::UnsupportedAdInsertion(reason.to_string())
 }
@@ -481,17 +451,27 @@ ad.ts
             Some(crate::manifest::ManifestError::UnsupportedAdInsertion(_))
         ));
 
-        let daterange = br#"#EXTM3U
+        for daterange in [
+            br#"#EXTM3U
 #EXT-X-TARGETDURATION:4
 #EXT-X-DATERANGE:ID="splice",CLASS="com.apple.hls.interstitial",START-DATE="2026-01-01T00:00:00Z",PLANNED-DURATION=8.0,SCTE35-OUT=0xFC30
 #EXTINF:4,
 ad.ts
 #EXT-X-ENDLIST
-"#;
-        assert!(matches!(
-            plan_hls_media_playlist(BASE_URL, daterange).err(),
-            Some(crate::manifest::ManifestError::UnsupportedAdInsertion(_))
-        ));
+"#.as_slice(),
+            br#"#EXTM3U
+#EXT-X-TARGETDURATION:4
+#EXT-X-DATERANGE:ID="event",CLASS="com.example.unknown",START-DATE="2026-01-01T00:00:00Z",DURATION=4.0
+#EXTINF:4,
+program.ts
+#EXT-X-ENDLIST
+"#.as_slice(),
+        ] {
+            assert!(matches!(
+                plan_hls_media_playlist(BASE_URL, daterange).err(),
+                Some(crate::manifest::ManifestError::UnsupportedAdInsertion(_))
+            ));
+        }
     }
 
     #[test]

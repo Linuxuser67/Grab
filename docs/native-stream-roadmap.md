@@ -26,16 +26,20 @@ variants and external audio/subtitle renditions; static VOD and EVENT media
 playlists; ordinary non-low-latency live capture; MPEG-TS and fragmented-MP4
 media with initialization maps; explicit and valid implicit byte ranges;
 discontinuities; identity AES-128 keys (including key rotation and
-`METHOD=NONE` resets); and identity SAMPLE-AES for MPEG-TS.
+`METHOD=NONE` resets); and identity SAMPLE-AES for MPEG-TS. Master-playlist
+`EXT-X-SESSION-KEY` hints are accepted only for AES-128 with an explicit or
+implicit identity key format; Grab never fetches or substitutes these hints for
+the selected media playlist's authoritative `EXT-X-KEY`.
 
 This is a deliberately bounded profile, not a claim of support for every HLS
 extension. Unknown parser tags and unsupported resource-affecting extensions
 fall back to yt-dlp. This includes alternate VIDEO rendition groups, LL-HLS
 parts, preload hints, delta updates, rendition reports, and blocking-reload
 query parameters. Gapped segments, I-frame-only media playlists, variable
-substitution, content steering, non-identity key formats, SAMPLE-AES over
-fragmented MP4/CBCS, and other unsupported encryption schemes also remain on
-fallback. AES-128 and supported SAMPLE-AES keys continue to use the existing
+substitution, content steering, unsupported session-key methods, non-identity
+session-key formats, non-identity media-key formats, SAMPLE-AES over fragmented
+MP4/CBCS, and other unsupported encryption schemes also remain on fallback.
+AES-128 and supported SAMPLE-AES keys continue to use the existing
 bounded key-resource path; no license or CDM acquisition is added.
 
 ## Explicitly unplanned

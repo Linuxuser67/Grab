@@ -718,6 +718,31 @@ async fn resolve_dash_xlinks(
                             .to_string(),
                     ));
                 }
+                let host = target.host_str().ok_or_else(|| {
+                    ManifestIntakeError::Unsupported(
+                        "A DASH XLink target has no hostname".to_string(),
+                    )
+                })?;
+                let host_key = host.trim_end_matches('.').to_ascii_lowercase();
+                if !seen_hosts.contains(&host_key)
+                    && seen_hosts.len()
+                        >= crate::download_net::MAX_GUARDED_CHILD_HOSTS_PER_COLLECTION
+                {
+                    return Err(ManifestIntakeError::Unsupported(
+                        "The DASH MPD references too many distinct XLink hosts".to_string(),
+                    ));
+                }
+                // A directly entered manifest is trusted as the user-selected
+                // origin, but a different host is still an untrusted remote
+                // link. Force public-only DNS for those children so a hostile
+                // MPD cannot turn XLink into a request to a private address.
+                if target.origin() != parent_url.origin()
+                    && !crate::download_net::require_public_resolution(host)
+                {
+                    return Err(ManifestIntakeError::Unsupported(
+                        "A DASH XLink target failed the public-host safety policy".to_string(),
+                    ));
+                }
                 crate::download_net::inherit_public_resolution_for_collection(
                     parent_url.as_str(),
                     target.as_str(),
@@ -728,6 +753,7 @@ async fn resolve_dash_xlinks(
                         "A DASH XLink target failed the child-host safety policy".to_string(),
                     )
                 })?;
+                seen_hosts.insert(host_key);
 
                 let remaining = MAX_MANIFEST_BYTES
                     .checked_sub(body.len())
@@ -1101,6 +1127,21 @@ mod tests {
     use crate::manifest_plan::{
         hls_audio_rendition_key, hls_audio_rendition_keys, hls_variant_key, hls_variant_keys,
     };
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn dash_xlink_rejects_private_off_origin_targets() {
+        let client = reqwest::Client::new();
+        let parent = Url::parse("https://cdn.example.test/manifest.mpd").expect("parent URL");
+        for target in ["https://127.0.0.1/period.xml", "https://localhost/period.xml"] {
+            let body = format!(
+                r#"<MPD xmlns="urn:mpeg:dash:schema:mpd:2011" xmlns:xlink="http://www.w3.org/1999/xlink"><Period xlink:href="{target}" xlink:actuate="onLoad"/></MPD>"#
+            );
+            let error = resolve_dash_xlinks(&client, &parent, body.as_bytes())
+                .await
+                .expect_err("off-origin private XLink target must be rejected before fetching");
+            assert!(matches!(error, ManifestIntakeError::Unsupported(_)));
+        }
+    }
 
     #[test]
     fn native_manifest_gate_accepts_explicit_format_query_hints() {

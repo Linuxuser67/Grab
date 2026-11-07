@@ -2301,11 +2301,12 @@ fn build_url_controls() -> UrlControls {
     // Select files and turn the latter into the normal labeled Add action.
     let select_files_btn = gtk4::Button::builder()
         .label(gettext("Select files"))
-        .css_classes(["flat"])
         .tooltip_text(gettext("Choose which files to download"))
         .valign(gtk4::Align::Center)
         .visible(false)
         .build();
+    // Match Add's suggested-action color without using its circular icon shape.
+    select_files_btn.add_css_class("suggested-action");
     select_files_btn
         .update_property(&[gtk4::accessible::Property::Label(&gettext("Select files"))]);
     let add_btn = gtk4::Button::builder()
@@ -2491,8 +2492,7 @@ fn build_video_preview(
     // AdwToggleGroup doesn't implement GtkAccessible; the label goes on a
     // wrapper so screen readers announce the filter's purpose.
     let filter_wrap = gtk4::Box::new(gtk4::Orientation::Horizontal, 6);
-    // HIG spacing: the count subtitle above and this filter are separate
-    // blocks, so raise the filter above the boxed list's bare row separator.
+    // Keep the filter above the boxed list's bare row separator.
     filter_wrap.set_margin_top(6);
     filter_wrap.set_hexpand(true);
     filter_wrap.update_property(&[gtk4::accessible::Property::Label(&gettext(
@@ -2575,12 +2575,10 @@ fn wire_video_preview(step: Rc<VideoStep>) {
                 selection.replace(selected_key);
             });
     }
-    // Gallery filter toggle: update the card's filter and refresh the info row.
-    // Connected once; reads the current card from the Rc.
-    // On filter change, re-count if not cached (async), then refresh.
+    // Keep the card's filter selection synchronized with the segmented control.
+    // No secondary gallery-dl count request is needed when the filter changes.
     {
         let card_rc = step.gallery_card.clone();
-        let info = step.gallery_info.clone();
         step.gallery_filter
             .connect_active_name_notify(move |toggle| {
                 let filter = match toggle.active_name().as_deref() {
@@ -2588,101 +2586,8 @@ fn wire_video_preview(step: Rc<VideoStep>) {
                     Some("videos") => crate::gallery_argv::GalleryFilter::VideosOnly,
                     _ => crate::gallery_argv::GalleryFilter::All,
                 };
-                // Check cache first (synchronous).
-                let (needs_count, url) = {
-                    if let Some(card_ref) = card_rc.borrow().as_ref() {
-                        *card_ref.filter.borrow_mut() = filter;
-                        if card_ref.is_count_cached(filter) {
-                            // Cached (success or failure): refresh immediately.
-                            let count_text = crate::gallery_card::display_count(
-                                card_ref.file_count(),
-                                5,
-                                card_ref.total(filter),
-                            );
-                            info.set_subtitle(&count_text);
-                            (false, String::new())
-                        } else {
-                            (true, card_ref.url().to_string())
-                        }
-                    } else {
-                        (false, String::new())
-                    }
-                };
-                // Not cached: count async, cache, refresh.
-                if needs_count {
-                    let card_rc = card_rc.clone();
-                    let info = info.clone();
-                    glib::spawn_future_local(async move {
-                        let url_for_count = url.clone();
-                        let filter_c = filter;
-                        // Read settings before spawn: AppSettings is !Send.
-                        let count_settings = crate::settings::AppSettings::new();
-                        let browser = count_settings.cookies_browser();
-                        let proxy =
-                            crate::download::DownloadOptions::from_settings(&count_settings)
-                                .proxy_config();
-                        // Run auth + count on Tokio worker (not GTK main).
-                        let count_result = crate::runtime::tokio_rt()
-                            .spawn(async move {
-                                let proxy = match proxy {
-                                    Ok(proxy) => proxy,
-                                    Err(e) => {
-                                        tracing::warn!(error = %e, "gallery count proxy invalid");
-                                        return None;
-                                    }
-                                };
-                                // Unified auth: handoff jar first, browser
-                                // export as fallback (was handoff-only: auth-
-                                // gated galleries could count zero here but
-                                // download fine).
-                                let auth = crate::inline_gallery::resolve_gallery_auth(
-                                    &url_for_count,
-                                    browser.as_str(),
-                                );
-                                if let Ok(tool) = crate::gallery_argv::resolve_tool() {
-                                    crate::gallery_probe::count_gallery_files_with_proxy(
-                                        &tool,
-                                        &url_for_count,
-                                        auth.cookies_path.as_deref(),
-                                        auth.cookies_browser.as_deref(),
-                                        auth.user_agent.as_deref(),
-                                        filter_c,
-                                        proxy.as_ref(),
-                                    )
-                                    .await
-                                } else {
-                                    None
-                                }
-                            })
-                            .await
-                            .ok()
-                            .flatten();
-                        if let Some(card_ref) = card_rc.borrow().as_ref()
-                            // Only update if the card still shows the same URL.
-                            // The user may have changed the URL while the count was running.
-                            && card_ref.url() == url
-                        {
-                            match count_result {
-                                Some(n) => {
-                                    card_ref.set_total(filter, n);
-                                    // Refresh only if the filter hasn't changed again.
-                                    if *card_ref.filter.borrow() == filter {
-                                        let count_text = crate::gallery_card::display_count(
-                                            card_ref.file_count(),
-                                            5,
-                                            Some(n),
-                                        );
-                                        info.set_subtitle(&count_text);
-                                    }
-                                }
-                                None => {
-                                    // Cache the failure so we don't re-stage cookies on every toggle.
-                                    card_ref.set_total_failed(filter);
-                                }
-                            }
-                        }
-                        // `cookies` (StagedCookies) drops here, deleting the file.
-                    });
+                if let Some(card) = card_rc.borrow().as_ref() {
+                    *card.filter.borrow_mut() = filter;
                 }
             });
     }
@@ -4757,15 +4662,10 @@ fn show_gallery_ready(v: &VideoStep, card: crate::gallery_card::GalleryCard, tit
     sync_entry_icon(v);
 }
 
-/// Refresh the gallery info row from the current card state.
+/// Refresh the gallery info row with the collection title only.
 fn refresh_gallery_info(v: &VideoStep, title: &str) {
-    if let Some(card) = v.gallery_card.borrow().as_ref() {
-        let filter = *card.filter.borrow();
-        let total = card.total(filter);
-        let count_text = crate::gallery_card::display_count(card.file_count(), 5, total);
-        v.gallery_info.set_title(title);
-        v.gallery_info.set_subtitle(&count_text);
-    }
+    v.gallery_info.set_title(title);
+    v.gallery_info.set_subtitle("");
 }
 
 #[cfg(test)]

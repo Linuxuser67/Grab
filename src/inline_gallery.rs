@@ -179,19 +179,11 @@ pub(crate) async fn dual_probe(ctx: DualProbeCtx<'_>) -> DualProbeOutcome {
     DualProbeOutcome::Complete { gallery, ytdlp }
 }
 
-/// The picker header's "{n} files" text; shared by the initial paint and
-/// the streamed count updates.
-fn header_count_text(n: usize) -> String {
-    ngettext("{} file", "{} files", n as u32).replace("{}", &n.to_string())
-}
-
-/// Handles into a live gallery-picker page, so a streamed enumeration can
-/// fill it in: the count in the header, the error caption, and the gated
-/// action bar.
+/// Handles into a live gallery-picker page, so streamed enumeration can
+/// fill the grid and update the error caption and gated action bar.
 pub(crate) struct GalleryPickerStream {
     grid: GalleryGrid,
     page_url: String,
-    count_label: gtk4::Label,
     error_caption: gtk4::Label,
     add_btn: gtk4::Button,
     select_all_btn: gtk4::Button,
@@ -199,7 +191,7 @@ pub(crate) struct GalleryPickerStream {
 }
 
 impl GalleryPickerStream {
-    /// Append one burst of streamed items and update the running count.
+    /// Append one burst of streamed items to the picker grid.
     pub(crate) fn append(&self, items: &[crate::gallery_probe::GalleryItem]) {
         let titles = items
             .iter()
@@ -213,8 +205,6 @@ impl GalleryPickerStream {
             })
             .collect::<Vec<_>>();
         self.grid.append(&titles);
-        self.count_label
-            .set_label(&header_count_text(self.grid.len()));
     }
 
     /// Stream finished: enable the action bar.
@@ -284,7 +274,7 @@ pub(crate) fn push_gallery_picker_page(
     list_box.append(&error_caption);
 
     let toolbar = adw::ToolbarView::new();
-    let (header, count_label) = picker_header(nav, &title, &header_count_text(grid.len()));
+    let (header, _) = picker_header(nav, &title, "");
     toolbar.add_top_bar(&header);
     toolbar.set_content(Some(&list_box));
     let (action_bar, select_all_btn, select_none_btn, add_btn) = selection_action_bar();
@@ -379,7 +369,6 @@ pub(crate) fn push_gallery_picker_page(
     Some(GalleryPickerStream {
         grid,
         page_url,
-        count_label,
         error_caption,
         add_btn,
         select_all_btn,

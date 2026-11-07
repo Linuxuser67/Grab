@@ -2391,18 +2391,18 @@ fn build_video_preview(
     let video_group = adw::PreferencesGroup::new();
     // Media-type switcher (Video ⇄ Gallery): the established AdwToggleGroup,
     // same pattern as the gallery filter below. Hidden until both backends
-    // are viable for a decode; the wrapper carries the accessible label
-    // (AdwToggleGroup doesn't implement GtkAccessible).
+    // are viable for a decode.
     let mode_toggle = adw::ToggleGroup::new();
     for (name, label) in [("video", gettext("Video")), ("gallery", gettext("Gallery"))] {
         let toggle = adw::Toggle::builder().name(name).label(&label).build();
         mode_toggle.add(toggle);
     }
     mode_toggle.set_active_name(Some("video"));
-    // The wrapper owns visibility; the group stays visible inside it.
+    mode_toggle.update_property(&[gtk4::accessible::Property::Label(&gettext(
+        "Preview type",
+    ))]);
+    // The wrapper only provides layout and visibility.
     let mode_toggle_wrap = gtk4::Box::new(gtk4::Orientation::Horizontal, 6);
-    mode_toggle_wrap
-        .update_property(&[gtk4::accessible::Property::Label(&gettext("Preview type"))]);
     mode_toggle_wrap.append(&mode_toggle);
     mode_toggle_wrap.set_visible(false);
     video_group.add(&mode_toggle_wrap);
@@ -2484,17 +2484,14 @@ fn build_video_preview(
     // Span the section width: the segmented control reads as one control
     // across the card instead of a floating pill row.
     gallery_filter.set_hexpand(true);
-    // The wrapper owns visibility; the group stays visible inside it. (Phase
-    // 10 hid the group here and never re-showed it: the filter never rendered.)
-    // AdwToggleGroup doesn't implement GtkAccessible; the label goes on a
-    // wrapper so screen readers announce the filter's purpose.
+    gallery_filter.update_property(&[gtk4::accessible::Property::Label(&gettext(
+        "Filter gallery by type",
+    ))]);
+    // The wrapper owns layout and visibility; the group stays visible inside it.
     let filter_wrap = gtk4::Box::new(gtk4::Orientation::Horizontal, 6);
     // Keep the filter above the boxed list's bare row separator.
     filter_wrap.set_margin_top(6);
     filter_wrap.set_hexpand(true);
-    filter_wrap.update_property(&[gtk4::accessible::Property::Label(&gettext(
-        "Filter gallery by type",
-    ))]);
     filter_wrap.append(&gallery_filter);
     filter_wrap.set_visible(false);
     video_group.add(&filter_wrap);

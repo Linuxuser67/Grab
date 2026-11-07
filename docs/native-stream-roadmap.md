@@ -198,11 +198,33 @@ The native path now supports:
 - Bounded hierarchical SIDX when the index and media ranges are in the same
   media resource.
 
+The native path also supports a separate `SegmentBase/Initialization@sourceURL`.
+The initialization resource is resolved against the representation BaseURL and
+is transferred as the first ordinary journaled track resource. An optional
+initialization range uses the existing strict HTTP Range/Content-Range checks;
+without a range, only a separate URL is accepted and the normal per-resource
+size limit applies. The SIDX and media byte ranges continue to address the
+representation media resource. The resolved initialization URL and range are
+part of the representation identity only when a separate URL is declared, so
+legacy in-file initialization-range keys remain unchanged.
+
+The bounded XLink profile resolves `onLoad` references on Period,
+AdaptationSet, and Representation elements before typed MPD parsing. Each link
+must resolve to one matching DASH element or the
+`urn:mpeg:dash:resolve-to-zero:2013` sentinel. Resolution is limited to 16
+references, one link layer, credential-free HTTPS URLs without fragments, and
+an aggregate 4 MiB budget including the original MPD. Linked elements are
+fetched through the existing guarded client; cross-origin redirects, nested
+XLinks, and unsupported XML structures fall back rather than triggering
+recursive resolution. Resolve-to-zero removes the source element.
+
 The following remain explicit yt-dlp fallbacks:
 - External RepresentationIndex hierarchies and external index resources without
   an explicit bounded range.
-- Separate initialization URLs, dynamic SegmentBase, and non-zero
-  `eptDelta`/`pbDelta`.
+- XLink `onRequest` or unknown actuation modes, nested/recursive links,
+  linked payloads that are not one matching Period/AdaptationSet/Representation,
+  and link targets using fragments or non-HTTPS URLs.
+- Dynamic SegmentBase and non-zero `eptDelta`/`pbDelta`.
 
 `BaseURL@byteRange` remains unsupported. ISO/IEC 23009-1 Annex E defines it
 as an alternate byte-range URL template for regular GET requests when HTTP

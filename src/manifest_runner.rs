@@ -4141,6 +4141,7 @@ struct SubtitleOutput<'a> {
     sidecar: Option<&'a Path>,
 }
 
+#[cfg(test)]
 async fn run_ffmpeg(
     ffmpeg: &Path,
     video_input: &Path,

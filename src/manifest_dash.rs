@@ -484,9 +484,6 @@ pub(crate) fn parse_dash_manifest_at(
         let period_start = period.start.unwrap_or(previous_period_end);
         // Live DASH finish/resume restores track files without a retained
         // representation plan, so it cannot apply a non-zero Period offset.
-        if is_dynamic && !period_start.is_zero() {
-            return Err(DashError::UnsupportedPresentation);
-        }
         if mpd.periods.len() > 1
             && ((period_index == 0 && period_start != Duration::ZERO)
                 || period_start != previous_period_end)
@@ -1056,12 +1053,13 @@ pub(crate) fn plan_dash_representation(
             resources.push(resource);
         }
     }
-    let input_timestamp_offset = source_timestamp_offset(&representation.source)?;
+    let input_timestamp_offset = if matches!(&manifest.presentation, DashPresentation::Static) {
+        source_timestamp_offset(&representation.source)?
+    } else {
+        DashTimestampOffset { nanoseconds: 0 }
+    };
     let segment_base_index = match (&representation.source.addressing, sources.len()) {
         (DashAddressing::IndexedBase(index), 1) => {
-            if !representation.source.period_start.is_zero() {
-                return Err(DashError::UnsupportedAddressing);
-            }
             let index_url = index
                 .index_url
                 .as_deref()
@@ -2804,9 +2802,9 @@ mod tests {
     #[test]
     fn plans_nonzero_segment_base_presentation_time_offset() {
         let body = r#"<?xml version="1.0"?>
-<MPD xmlns="urn:mpeg:dash:schema:mpd:2011" type="static" mediaPresentationDuration="PT2S">
+<MPD xmlns="urn:mpeg:dash:schema:mpd:2011" type="static" mediaPresentationDuration="PT4S">
   <BaseURL>media.mp4</BaseURL>
-  <Period duration="PT2S">
+  <Period start="PT2S" duration="PT2S">
     <AdaptationSet contentType="video" mimeType="video/mp4">
       <Representation id="v1">
         <SegmentBase timescale="1000" presentationTimeOffset="8100" indexRange="100-143">
@@ -2823,7 +2821,7 @@ mod tests {
             .expect("non-zero SegmentBase PTO should produce a plan");
         assert_eq!(
             plan.input_timestamp_offset.ffmpeg_argument().as_deref(),
-            Some("-8.100000000")
+            Some("-6.100000000")
         );
     }
 
@@ -3672,6 +3670,15 @@ mod tests {
             panic!("fixture is dynamic");
         };
         assert_eq!(dynamic.period_start, Duration::from_secs(3600));
+
+        let representation = &manifest.video_representations[0];
+        let plan = plan_dash_representation(&manifest, &representation.key)
+            .expect("existing dynamic Period-start planning remains supported");
+        assert_eq!(
+            plan.input_timestamp_offset.ffmpeg_argument(),
+            None,
+            "the static PTO change must not change dynamic finalization semantics"
+        );
     }
 
     #[test]
@@ -4327,19 +4334,6 @@ mod tests {
         let (second_key, second_offset) = plan_for_pto(9_000);
         assert_eq!(first_key, second_key, "persisted representation keys remain stable");
         assert_ne!(first_offset, second_offset, "PTO remains separate plan metadata");
-    }
-
-    #[test]
-    fn nonzero_period_start_on_dynamic_dash_uses_fallback() {
-        let body = dynamic_mpd(
-            r#"<SegmentTemplate timescale="1" duration="4" media="seg-$Number$.m4s"/>"#,
-            "",
-        )
-        .replace("PT0S", "PT3S");
-        assert_eq!(
-            parse_dash_manifest_at(BASE_URL, &body, dynamic_test_clock(20)).err(),
-            Some(DashError::UnsupportedPresentation)
-        );
     }
 
     #[test]

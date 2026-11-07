@@ -2361,7 +2361,10 @@ pub(crate) async fn run_live_ytdlp(
             "live capture staging cleanup worker failed"
         );
     }
-    Ok(tokio::fs::metadata(&job.dest).await.ok().map(|metadata| metadata.len()))
+    Ok(tokio::fs::metadata(&job.dest)
+        .await
+        .ok()
+        .map(|metadata| metadata.len()))
 }
 
 #[expect(

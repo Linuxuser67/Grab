@@ -83,11 +83,7 @@ where
         return false;
     }
     matches!(
-        select(
-            Box::pin(future),
-            Box::pin(glib::timeout_future(timeout)),
-        )
-        .await,
+        select(Box::pin(future), Box::pin(glib::timeout_future(timeout)),).await,
         Either::Left(_)
     )
 }

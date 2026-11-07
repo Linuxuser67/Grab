@@ -4930,8 +4930,14 @@ fn remove_cleans_video_staging() {
         !destdir.join(format!("v.{id}.mp4.part")).exists(),
         "manifest-owned part goes too"
     );
-    assert!(!remux_part.exists(), "lease-owned remux partial is reclaimed");
-    assert!(!remux_lease.exists(), "remux lease is reclaimed with its partial");
+    assert!(
+        !remux_part.exists(),
+        "lease-owned remux partial is reclaimed"
+    );
+    assert!(
+        !remux_lease.exists(),
+        "remux lease is reclaimed with its partial"
+    );
     assert!(
         unleased_remux_part.exists(),
         "a remux-looking file without its ownership lease is preserved"
@@ -9214,9 +9220,7 @@ fn pause_during_finished_name_rename_restores_the_original_path() {
 
     let context = glib::MainContext::default();
     let deadline = std::time::Instant::now() + Duration::from_secs(5);
-    while manager.pump_handles.borrow().contains_key(&id)
-        && std::time::Instant::now() < deadline
-    {
+    while manager.pump_handles.borrow().contains_key(&id) && std::time::Instant::now() < deadline {
         context.iteration(false);
         std::thread::sleep(Duration::from_millis(1));
     }

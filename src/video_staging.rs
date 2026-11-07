@@ -1809,7 +1809,10 @@ mod tests {
 
         assert!(!stale.exists(), "dead process workspace is reclaimed");
         assert!(active.exists(), "live process workspace is preserved");
-        assert!(unexpected.join("keep.txt").exists(), "unknown contents are preserved");
+        assert!(
+            unexpected.join("keep.txt").exists(),
+            "unknown contents are preserved"
+        );
         let _ = std::fs::remove_dir_all(&active);
         let _ = std::fs::remove_dir_all(&unexpected);
     }

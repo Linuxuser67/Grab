@@ -50,6 +50,17 @@
     </screenshot>
   </screenshots>
   <releases>
+    <release version="6.5.0~beta.13" date="2026-11-07">
+      <description>
+        <ul>
+          <li>Update dependencies to their latest stable releases.</li>
+          <li>Native HLS: accept fMP4 init segments with codec sample entries and mixed-case playlist types.</li>
+          <li>Native HLS: reuse the manifest preview cache across staged cookie handoffs.</li>
+          <li>Native DASH: align static tracks with presentation offsets and bounded XLink.</li>
+          <li>UI: multi-file selection and queue-all actions.</li>
+        </ul>
+      </description>
+    </release>
     <release version="6.5.0~beta.12" date="2026-11-06">
       <description>
         <ul>

@@ -1642,7 +1642,6 @@ fn push_playlist_items_page(
         let grid = grid.clone();
         let add_btn_click = add_btn.clone();
         let add_btn_guard = add_btn.clone();
-        let queue_all = queue_all;
         add_btn_click.clone().connect_clicked(move |_| {
             // Guard against re-entry: Enter emits clicked directly, bypassing
             // the sensitivity check, so a second press while the import is in

@@ -98,10 +98,7 @@ pub(crate) fn linked_element(
         DashXlinkElement::AdaptationSet => "AdaptationSet",
         DashXlinkElement::Representation => "Representation",
     };
-    if !analysis.root_is_dash
-        || analysis.root_name != expected_name
-        || !analysis.links.is_empty()
-    {
+    if !analysis.root_is_dash || analysis.root_name != expected_name || !analysis.links.is_empty() {
         return Err(DashXlinkError::UnsupportedLink);
     }
     body.get(analysis.root_range)

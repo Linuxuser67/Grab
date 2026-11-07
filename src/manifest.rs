@@ -39,6 +39,8 @@ pub(crate) enum ManifestError {
     InvalidSubtitleGroup,
     #[error("unsupported HLS playlist type")]
     UnsupportedPlaylist,
+    #[error("unsupported HLS playlist feature: {0}")]
+    UnsupportedPlaylistFeature(String),
     #[error("unsupported HLS encryption method")]
     UnsupportedEncryption,
     #[error("unsupported HLS resource url")]
@@ -57,6 +59,44 @@ pub(crate) enum ManifestError {
     LiveCaptureLimit,
     #[error("the live HLS playlist can no longer be continued without losing media")]
     LiveSequenceGap,
+}
+
+/// Unknown tags that do not affect resource selection or timing.
+fn is_benign_hls_tag(tag: &m3u8_rs::ExtTag) -> bool {
+    matches!(tag.tag.as_str(), "X-ALLOW-CACHE" | "X-BITRATE")
+}
+
+fn reject_unsupported_hls_tags(tags: &[m3u8_rs::ExtTag]) -> Result<(), ManifestError> {
+    let mut rejected: Vec<&str> = tags
+        .iter()
+        .filter(|tag| !is_benign_hls_tag(tag))
+        .map(|tag| tag.tag.as_str())
+        .collect();
+    if rejected.is_empty() {
+        return Ok(());
+    }
+    rejected.sort_unstable();
+    rejected.dedup();
+    let names = rejected
+        .iter()
+        .map(|tag| format!("#EXT-{}", tag.escape_default()))
+        .collect::<Vec<_>>()
+        .join(", ");
+    Err(ManifestError::UnsupportedPlaylistFeature(names))
+}
+
+/// m3u8-rs matches playlist types case-sensitively. Real playlists mix case,
+/// and some emit `LIVE`, which RFC 8216 leaves to ENDLIST semantics.
+fn normalize_hls_playlist_type(playlist_type: MediaPlaylistType) -> Option<MediaPlaylistType> {
+    match playlist_type {
+        MediaPlaylistType::Other(value) => match value.trim().to_ascii_lowercase().as_str() {
+            "vod" => Some(MediaPlaylistType::Vod),
+            "event" => Some(MediaPlaylistType::Event),
+            "live" => None,
+            _ => Some(MediaPlaylistType::Other(value)),
+        },
+        known => Some(known),
+    }
 }
 
 /// Convert a nom diagnostic into a safe parser kind and byte offset without
@@ -945,9 +985,7 @@ pub(crate) fn parse_hls_master_playlist(
     {
         return Err(ManifestError::UnsupportedPlaylist);
     }
-    if !master.unknown_tags.is_empty() {
-        return Err(ManifestError::UnsupportedPlaylist);
-    }
+    reject_unsupported_hls_tags(&master.unknown_tags)?;
 
     let variants = master
         .variants
@@ -1124,6 +1162,10 @@ fn parse_hls_media_playlist(body: &[u8]) -> Result<MediaPlaylist, ManifestError>
             key.iv = None;
         }
     }
+    playlist.playlist_type = playlist
+        .playlist_type
+        .take()
+        .and_then(normalize_hls_playlist_type);
     Ok(playlist)
 }
 
@@ -1156,7 +1198,12 @@ fn build_hls_plan(base_url: Url, mut playlist: MediaPlaylist) -> Result<HlsPlan,
     }
 
     match playlist.playlist_type.as_ref() {
-        Some(MediaPlaylistType::Other(_)) => return Err(ManifestError::UnsupportedPlaylist),
+        Some(MediaPlaylistType::Other(value)) => {
+            return Err(ManifestError::UnsupportedPlaylistFeature(format!(
+                "#EXT-X-PLAYLIST-TYPE:{}",
+                value.escape_default()
+            )));
+        }
         Some(MediaPlaylistType::Vod) if is_live => {
             return Err(ManifestError::UnsupportedPlaylist);
         }
@@ -1166,9 +1213,7 @@ fn build_hls_plan(base_url: Url, mut playlist: MediaPlaylist) -> Result<HlsPlan,
     if playlist.segments.is_empty() {
         return Err(ManifestError::EmptyPlaylist);
     }
-    if !playlist.unknown_tags.is_empty() {
-        return Err(ManifestError::UnsupportedPlaylist);
-    }
+    reject_unsupported_hls_tags(&playlist.unknown_tags)?;
 
     let mut resources = Vec::with_capacity(playlist.segments.len());
     let mut map_filenames: HashMap<(String, Option<ManifestByteRange>), String> = HashMap::new();
@@ -1208,9 +1253,9 @@ fn build_hls_plan(base_url: Url, mut playlist: MediaPlaylist) -> Result<HlsPlan,
             // into FFmpeg, where it could bypass our encryption policy.
             return Err(ManifestError::UnsupportedEncryption);
         }
-        if !segment.unknown_tags.is_empty() {
-            return Err(ManifestError::UnsupportedPlaylist);
-        }
+        reject_unsupported_hls_tags(&segment.unknown_tags)?;
+        // Keep the local playlist limited to resource-affecting metadata.
+        segment.unknown_tags.retain(|tag| !is_benign_hls_tag(tag));
 
         if let Some(key) = segment.key.take() {
             if key.method == KeyMethod::None {
@@ -1533,6 +1578,52 @@ segment-2.ts
     }
 
     #[test]
+    fn mixed_case_playlist_types_and_benign_extension_tags_are_accepted() {
+        for (value, end_list) in [
+            ("vod", true),
+            ("Vod", true),
+            ("VOD", true),
+            ("event", false),
+            ("EVENT", false),
+            ("live", false),
+        ] {
+            let end = if end_list { "#EXT-X-ENDLIST\n" } else { "" };
+            let body = format!(
+                "#EXTM3U\n#EXT-X-TARGETDURATION:4\n#EXT-X-PLAYLIST-TYPE:{value}\n#EXTINF:4,\nsegment.ts\n{end}"
+            );
+            plan_hls_media_playlist(BASE_URL, body.as_bytes())
+                .unwrap_or_else(|error| panic!("{value}: {error}"));
+        }
+
+        let vod_without_end_list =
+            b"#EXTM3U\n#EXT-X-TARGETDURATION:4\n#EXT-X-PLAYLIST-TYPE:vod\n#EXTINF:4,\nsegment.ts\n";
+        assert_eq!(
+            plan_hls_media_playlist(BASE_URL, vod_without_end_list).err(),
+            Some(ManifestError::UnsupportedPlaylist)
+        );
+
+        let body = b"#EXTM3U\n#EXT-X-TARGETDURATION:4\n#EXT-X-ALLOW-CACHE:NO\n#EXT-X-BITRATE:1200\n#EXTINF:4,\nsegment.ts\n#EXT-X-ENDLIST\n";
+        let plan = plan_hls_media_playlist(BASE_URL, body)
+            .expect("benign extension tags should be ignored");
+        assert_eq!(plan.resources.len(), 1);
+        let local = String::from_utf8(plan.local_playlist_bytes().expect("local playlist"))
+            .expect("local playlist is UTF-8");
+        assert!(!local.contains("EXT-X-BITRATE"));
+        assert!(!local.contains("EXT-X-ALLOW-CACHE"));
+    }
+
+    #[test]
+    fn unsupported_playlist_type_names_the_rejected_tag() {
+        let body = b"#EXTM3U\n#EXT-X-TARGETDURATION:4\n#EXT-X-PLAYLIST-TYPE:LINEAR\n#EXTINF:4,\nsegment.ts\n#EXT-X-ENDLIST\n";
+        assert_eq!(
+            plan_hls_media_playlist(BASE_URL, body).err(),
+            Some(ManifestError::UnsupportedPlaylistFeature(
+                "#EXT-X-PLAYLIST-TYPE:LINEAR".to_string(),
+            ))
+        );
+    }
+
+    #[test]
     fn destination_assemblable_candidate_accepts_one_leading_init_section() {
         let fragmented_mp4 = br#"#EXTM3U
 #EXT-X-VERSION:6
@@ -1825,9 +1916,12 @@ media.mp4
             b"#EXTM3U\n#EXT-X-TARGETDURATION:2\n#EXT-X-RENDITION-REPORT:URI=\"audio.m3u8\"\n#EXTINF:2,\n1.ts\n",
         ];
         for body in cases {
-            assert_eq!(
-                plan_hls_media_playlist(BASE_URL, body).err(),
-                Some(ManifestError::UnsupportedPlaylist)
+            assert!(
+                matches!(
+                    plan_hls_media_playlist(BASE_URL, body).err(),
+                    Some(ManifestError::UnsupportedPlaylistFeature(_))
+                ),
+                "LL-HLS tags must stay on the fallback path"
             );
         }
     }
@@ -1864,9 +1958,12 @@ video.m3u8
 #EXTINF:2.0,
 1006.ts
 "#;
-        assert_eq!(
-            plan_hls_media_playlist(BASE_URL, body).err(),
-            Some(ManifestError::UnsupportedPlaylist)
+        assert!(
+            matches!(
+                plan_hls_media_playlist(BASE_URL, body).err(),
+                Some(ManifestError::UnsupportedPlaylistFeature(_))
+            ),
+            "skip lists must stay on the fallback path"
         );
     }
 
@@ -2484,7 +2581,9 @@ one.ts
 "#;
         assert_eq!(
             plan_hls_media_playlist(BASE_URL, media).err(),
-            Some(ManifestError::UnsupportedPlaylist)
+            Some(ManifestError::UnsupportedPlaylistFeature(
+                "#EXT-X-EXPERIMENTAL".to_string(),
+            ))
         );
 
         let master = br#"#EXTM3U
@@ -2494,7 +2593,9 @@ video.m3u8
 "#;
         assert_eq!(
             parse_hls_master_playlist(BASE_URL, master).err(),
-            Some(ManifestError::UnsupportedPlaylist)
+            Some(ManifestError::UnsupportedPlaylistFeature(
+                "#EXT-X-EXPERIMENTAL".to_string(),
+            ))
         );
     }
 
@@ -2504,7 +2605,9 @@ video.m3u8
             b"#EXTM3U\n#EXT-X-TARGETDURATION:2\n#EXTINF:2,\n#EXT-X-GAP\none.ts\n#EXT-X-ENDLIST\n";
         assert_eq!(
             plan_hls_media_playlist(BASE_URL, gap_body).err(),
-            Some(ManifestError::UnsupportedPlaylist)
+            Some(ManifestError::UnsupportedPlaylistFeature(
+                "#EXT-X-GAP".to_string(),
+            ))
         );
     }
 
@@ -2533,13 +2636,17 @@ video.m3u8
 "#;
         assert_eq!(
             parse_hls_master_playlist(BASE_URL, body).err(),
-            Some(ManifestError::UnsupportedPlaylist)
+            Some(ManifestError::UnsupportedPlaylistFeature(
+                "#EXT-X-CONTENT-STEERING".to_string(),
+            ))
         );
 
         let media = b"#EXTM3U\n#EXT-X-TARGETDURATION:2\n#EXT-X-DEFINE:NAME=\"path\",VALUE=\"video\"\n#EXTINF:2,\n{$path}/one.ts\n#EXT-X-ENDLIST\n";
         assert_eq!(
             plan_hls_media_playlist(BASE_URL, media).err(),
-            Some(ManifestError::UnsupportedPlaylist)
+            Some(ManifestError::UnsupportedPlaylistFeature(
+                "#EXT-X-DEFINE".to_string(),
+            ))
         );
     }
 

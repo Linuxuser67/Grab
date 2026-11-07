@@ -2398,7 +2398,10 @@ fn build_video_preview(
         mode_toggle.add(toggle);
     }
     mode_toggle.set_active_name(Some("video"));
-    mode_toggle.update_property(&[gtk4::accessible::Property::Label(&gettext("Preview type"))]);
+    mode_toggle
+        .dynamic_cast_ref::<gtk4::Accessible>()
+        .expect("AdwToggleGroup implements GtkAccessible")
+        .update_property(&[gtk4::accessible::Property::Label(&gettext("Preview type"))]);
     // The wrapper only provides layout and visibility.
     let mode_toggle_wrap = gtk4::Box::new(gtk4::Orientation::Horizontal, 6);
     mode_toggle_wrap.append(&mode_toggle);
@@ -2482,9 +2485,12 @@ fn build_video_preview(
     // Span the section width: the segmented control reads as one control
     // across the card instead of a floating pill row.
     gallery_filter.set_hexpand(true);
-    gallery_filter.update_property(&[gtk4::accessible::Property::Label(&gettext(
-        "Filter gallery by type",
-    ))]);
+    gallery_filter
+        .dynamic_cast_ref::<gtk4::Accessible>()
+        .expect("AdwToggleGroup implements GtkAccessible")
+        .update_property(&[gtk4::accessible::Property::Label(&gettext(
+            "Filter gallery by type",
+        ))]);
     // The wrapper owns layout and visibility; the group stays visible inside it.
     let filter_wrap = gtk4::Box::new(gtk4::Orientation::Horizontal, 6);
     // Keep the filter above the boxed list's bare row separator.

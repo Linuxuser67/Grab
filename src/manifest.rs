@@ -52,8 +52,6 @@ pub(crate) enum ManifestError {
     UnsupportedSessionKeyFormat,
     #[error("unsupported HLS ad insertion marker: {0}")]
     UnsupportedAdInsertion(String),
-    #[error("unsupported HLS ad insertion marker: {0}")]
-    UnsupportedAdInsertion(String),
     #[error("unsupported HLS resource url")]
     UnsupportedResourceUrl,
     #[error("HLS byte range has no usable offset")]

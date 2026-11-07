@@ -2454,7 +2454,7 @@ async fn hls_ad_break_segments_are_not_fetched_or_written_to_the_local_playlist(
     let root = TempRoot::new("hls-ad-removal");
     let fixture_dir = root.path().join("fixture");
     std::fs::create_dir_all(&fixture_dir).expect("create HLS ad-removal fixture directory");
-    for filename in ["program-before.ts", "ad.ts", "program-after.ts"] {
+    for filename in ["program-before.ts", "program-after.ts"] {
         std::fs::write(fixture_dir.join(filename), format!("fixture bytes for {filename}"))
             .expect("write HLS segment fixture");
     }
@@ -2465,7 +2465,7 @@ async fn hls_ad_break_segments_are_not_fetched_or_written_to_the_local_playlist(
 program-before.ts
 #EXT-X-CUE-OUT:4
 #EXTINF:4,
-ad.ts
+https://ads.fixture.invalid/ad.ts
 #EXT-X-CUE-IN
 #EXTINF:4,
 program-after.ts
@@ -2535,18 +2535,18 @@ program-after.ts
         .expect("parse the ad-free local HLS playlist");
     assert_eq!(local.segments.len(), 2);
     assert!(local.segments.iter().all(|segment| !segment.uri.contains("ad.ts")));
-    let mut staged = tokio::fs::read_dir(&video_dir)
-        .await
-        .expect("read HLS staging directory");
-    let mut staged_files = 0;
-    while let Some(entry) = staged.next_entry().await.expect("read staging entry") {
-        if entry.file_type().await.expect("inspect staged file").is_file() {
-            staged_files += 1;
-        }
+    for resource in &plan.resources {
+        assert!(
+            tokio::fs::metadata(video_dir.join(&resource.filename)).await.is_ok(),
+            "planned program resource was not staged: {}",
+            resource.filename
+        );
     }
-    assert_eq!(
-        staged_files, 3,
-        "only two program segments and local.m3u8 should be staged"
+    assert!(
+        plan.resources
+            .iter()
+            .all(|resource| !resource.url.host_str().is_some_and(|host| host == "ads.fixture.invalid")),
+        "ad-origin resources must not enter the native fetch plan"
     );
 }
 

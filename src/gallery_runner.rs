@@ -33,6 +33,18 @@ pub fn done_count(files: usize, skipped: u32) -> u32 {
     files as u32 + skipped
 }
 
+#[cfg(test)]
+mod done_count_tests {
+    use super::done_count;
+
+    #[test]
+    fn includes_downloaded_and_previously_skipped_files() {
+        assert_eq!(done_count(5, 0), 5);
+        assert_eq!(done_count(0, 3), 3);
+        assert_eq!(done_count(2, 3), 5);
+    }
+}
+
 /// Progress update from the runner.
 #[derive(Debug, Clone)]
 pub struct GalleryProgressUpdate {

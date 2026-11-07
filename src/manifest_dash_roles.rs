@@ -367,8 +367,8 @@ mod tests {
             "</Other>".repeat(super::MAX_ELEMENT_DEPTH)
         );
         let nested = format!(
-            r#"<MPD xmlns="{namespace}"><Period><AdaptationSet><Representation>{nested_tags}</Representation></AdaptationSet></Period></MPD>"#
-                .replace("{namespace}", super::DASH_MPD_NAMESPACE)
+            r#"<MPD xmlns="{}"><Period><AdaptationSet><Representation>{nested_tags}</Representation></AdaptationSet></Period></MPD>"#,
+            super::DASH_MPD_NAMESPACE
         );
 
         assert_eq!(

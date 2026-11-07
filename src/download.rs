@@ -2527,7 +2527,7 @@ impl DownloadManager {
                                 // If the current file is present, the collision path must
                                 // claim-then-move it. Keep GTK objects on this context and send
                                 // only plain paths/candidate names to the blocking worker.
-                                let this = if existing.iter().any(|entry| entry == &current) {
+                                if existing.iter().any(|entry| entry == &current) {
                                     match this.reserve_final_name_candidates(&dir, &name, &existing)
                                     {
                                         Some((candidates, mut claims)) => {
@@ -2626,14 +2626,12 @@ impl DownloadManager {
                                             {
                                                 item.set_filename(final_name);
                                             }
-                                            this
                                         }
                                         None => {
                                             tracing::warn!(
                                                 item_id = id,
                                                 "could not reserve a finished filename candidate; keeping the current name"
                                             );
-                                            this
                                         }
                                     }
                                 } else {
@@ -2645,9 +2643,12 @@ impl DownloadManager {
                                     if final_name != current {
                                         item.set_filename(final_name);
                                     }
-                                    this
-                                };
+                                }
                             }
+                            let Some(this) = weak.upgrade() else {
+                                done = true;
+                                break;
+                            };
                             // Size off the final path, measured off-thread (see
                             // `set_finished_detail`): the engine measured the
                             // pre-rename one. Paints the engine's size now,

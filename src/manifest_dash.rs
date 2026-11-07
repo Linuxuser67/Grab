@@ -4335,7 +4335,7 @@ mod tests {
             r#"<SegmentTemplate timescale="1" duration="4" media="seg-$Number$.m4s"/>"#,
             "",
         )
-        .replace("start=\\\"PT0S\\\"", "start=\\\"PT3S\\\"");
+        .replace("PT0S", "PT3S");
         assert_eq!(
             parse_dash_manifest_at(BASE_URL, &body, dynamic_test_clock(20)).err(),
             Some(DashError::UnsupportedPresentation)

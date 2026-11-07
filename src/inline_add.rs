@@ -2398,9 +2398,7 @@ fn build_video_preview(
         mode_toggle.add(toggle);
     }
     mode_toggle.set_active_name(Some("video"));
-    mode_toggle.update_property(&[gtk4::accessible::Property::Label(&gettext(
-        "Preview type",
-    ))]);
+    mode_toggle.update_property(&[gtk4::accessible::Property::Label(&gettext("Preview type"))]);
     // The wrapper only provides layout and visibility.
     let mode_toggle_wrap = gtk4::Box::new(gtk4::Orientation::Horizontal, 6);
     mode_toggle_wrap.append(&mode_toggle);

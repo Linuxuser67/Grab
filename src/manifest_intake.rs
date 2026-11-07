@@ -9,6 +9,7 @@ use std::sync::{LazyLock, Mutex};
 use std::time::{Duration, Instant, SystemTime};
 
 use gettextrs::gettext;
+use sha2::{Digest, Sha256};
 use url::Url;
 
 #[cfg(test)]
@@ -27,14 +28,14 @@ const MANIFEST_RETRY_BASE_DELAY: Duration = Duration::from_millis(250);
 
 // Preview metadata is short-lived: HLS/DASH source manifests can change, and
 // signed child URLs may expire. Dynamic presentations are never cached.
-const MANIFEST_PREVIEW_CACHE_TTL: Duration = Duration::from_secs(15);
+const MANIFEST_PREVIEW_CACHE_TTL: Duration = Duration::from_secs(5 * 60);
 const MANIFEST_PREVIEW_CACHE_CAPACITY: usize = 32;
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 struct ManifestPreviewCacheKey {
     url: String,
     cookies_browser: String,
-    handoff_cookie_path: Option<std::path::PathBuf>,
+    handoff_cookie_hash: Option<[u8; 32]>,
     proxy: Option<String>,
 }
 
@@ -51,14 +52,14 @@ enum ManifestClientAuth {
 impl ManifestPreviewCacheKey {
     fn matches_auth(&self, auth: ManifestClientAuth) -> bool {
         match auth {
-            ManifestClientAuth::Handoff => self.handoff_cookie_path.is_some(),
+            ManifestClientAuth::Handoff => self.handoff_cookie_hash.is_some(),
             ManifestClientAuth::Browser => {
-                self.handoff_cookie_path.is_none()
+                self.handoff_cookie_hash.is_none()
                     && !self.cookies_browser.is_empty()
                     && self.cookies_browser != "none"
             }
             ManifestClientAuth::Anonymous => {
-                self.handoff_cookie_path.is_none()
+                self.handoff_cookie_hash.is_none()
                     && (self.cookies_browser.is_empty() || self.cookies_browser == "none")
             }
         }
@@ -74,8 +75,8 @@ static MANIFEST_PREVIEW_CACHE: LazyLock<
 ///
 /// A browser profile is keyed by the browser setting, never by cookie contents,
 /// so a rotation is at most [`MANIFEST_PREVIEW_CACHE_TTL`] stale. Extension
-/// handoff jars have a unique staged path and therefore form a short-lived
-/// identity.
+/// handoff jars are keyed by cookie contents, so a re-handoff of the same
+/// credentials reuses the preview despite a new staged path.
 fn manifest_preview_cache_key(
     raw_url: &str,
     cookies_browser: &str,
@@ -89,16 +90,25 @@ fn manifest_preview_cache_key(
 
     let effective_browser =
         preview_cookie_browser(&url, cookies_browser, ManifestTransportPolicy::HttpsOnly);
-    let handoff_cookie_path = crate::extension_server::live_handoff_identity(raw_url)
-        .map(|(path, _)| path)
-        .filter(|path| std::fs::File::open(path).is_ok());
+    let handoff_cookie_hash = crate::extension_server::live_handoff_identity(raw_url)
+        .and_then(|(path, _)| handoff_cookie_hash(&path));
 
     Some(ManifestPreviewCacheKey {
         url: url.to_string(),
         cookies_browser: effective_browser.to_string(),
-        handoff_cookie_path,
+        handoff_cookie_hash,
         proxy: proxy.map(|resolved| resolved.cli_url.clone()),
     })
+}
+
+/// Hash a staged handoff jar by content so a fresh jar with the same cookies
+/// reuses the preview instead of missing on its new temporary path.
+fn handoff_cookie_hash(path: &std::path::Path) -> Option<[u8; 32]> {
+    let contents = std::fs::read(path).ok()?;
+    let digest = Sha256::digest(contents);
+    let mut hash = [0_u8; 32];
+    hash.copy_from_slice(&digest);
+    Some(hash)
 }
 
 fn manifest_preview_cache_get(key: &ManifestPreviewCacheKey) -> Option<ManifestLookup> {
@@ -2047,7 +2057,7 @@ segment.ts
         let key = ManifestPreviewCacheKey {
             url: lookup.source_url.clone(),
             cookies_browser: "none".to_string(),
-            handoff_cookie_path: None,
+            handoff_cookie_hash: None,
             proxy: None,
         };
         manifest_preview_cache_insert(key.clone(), &lookup);
@@ -2098,7 +2108,7 @@ segment.ts
         let key = ManifestPreviewCacheKey {
             url: "https://cache-expiry.example.test/media.m3u8".to_string(),
             cookies_browser: "none".to_string(),
-            handoff_cookie_path: None,
+            handoff_cookie_hash: None,
             proxy: None,
         };
         MANIFEST_PREVIEW_CACHE.lock().expect("cache lock").insert(
@@ -2157,12 +2167,32 @@ segment.ts
     }
 
     #[test]
+    fn preview_cache_hashes_handoff_cookie_contents_not_paths() {
+        let directory = tempfile::tempdir().expect("temporary cookie directory");
+        let first = directory.path().join("first.jar");
+        let second = directory.path().join("second.jar");
+        let contents = b"# Netscape HTTP Cookie File\n.example.test\tTRUE\t/\tFALSE\t0\tsid\tv\n";
+        std::fs::write(&first, contents).expect("first jar");
+        std::fs::write(&second, contents).expect("second jar");
+
+        assert_eq!(
+            handoff_cookie_hash(&first),
+            handoff_cookie_hash(&second),
+            "a new staged path with the same cookies must reuse the preview"
+        );
+
+        std::fs::write(&second, b"# Netscape HTTP Cookie File\n").expect("changed jar");
+        assert_ne!(handoff_cookie_hash(&first), handoff_cookie_hash(&second));
+        assert!(handoff_cookie_hash(&directory.path().join("missing.jar")).is_none());
+    }
+
+    #[test]
     fn preview_cache_key_only_matches_the_source_that_served_it() {
         let url = "https://cache-preview.example.test/master.m3u8";
         let anonymous = manifest_preview_cache_key(url, "none", None).expect("anonymous key");
         let browser = manifest_preview_cache_key(url, "firefox", None).expect("browser key");
         let handoff = ManifestPreviewCacheKey {
-            handoff_cookie_path: Some(std::path::PathBuf::from("/tmp/handoff.jar")),
+            handoff_cookie_hash: Some([7_u8; 32]),
             ..browser.clone()
         };
 

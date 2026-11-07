@@ -7,6 +7,8 @@ import os
 import re
 import subprocess
 import tempfile
+import time
+import urllib.error
 import urllib.request
 from pathlib import Path
 
@@ -24,6 +26,8 @@ BASE = "https://codeberg.org/mikf/gallery-dl/releases/download"
 MAX_METADATA = 2 * 1024 * 1024
 MAX_CHECKSUMS = 1024 * 1024
 MAX_BINARY = 128 * 1024 * 1024
+MAX_HTTP_ATTEMPTS = 4
+RETRYABLE_HTTP_STATUSES = frozenset({408, 429, 500, 502, 503, 504})
 
 
 def request(url):
@@ -32,8 +36,30 @@ def request(url):
     )
 
 
+def open_with_retries(url, timeout):
+    """Open a public release URL, retrying only transient HTTP/network errors."""
+    for attempt in range(MAX_HTTP_ATTEMPTS):
+        try:
+            return urllib.request.urlopen(url, timeout=timeout)
+        except urllib.error.HTTPError as error:
+            if error.code not in RETRYABLE_HTTP_STATUSES or attempt + 1 == MAX_HTTP_ATTEMPTS:
+                raise
+            retry_after = error.headers.get("Retry-After") if error.headers else None
+            error.close()
+            try:
+                delay = min(8.0, max(0.0, float(retry_after)))
+            except (TypeError, ValueError):
+                delay = min(8.0, 2.0**attempt)
+        except (urllib.error.URLError, TimeoutError):
+            if attempt + 1 == MAX_HTTP_ATTEMPTS:
+                raise
+            delay = min(8.0, 2.0**attempt)
+        time.sleep(delay)
+    raise RuntimeError("release download retry loop exited unexpectedly")
+
+
 def read_bounded(url, limit):
-    with urllib.request.urlopen(request(url), timeout=30) as response:
+    with open_with_retries(request(url), timeout=30) as response:
         length = response.headers.get("Content-Length")
         if length and int(length) > limit:
             raise RuntimeError(f"response exceeds {limit} bytes: {url}")
@@ -96,7 +122,7 @@ fd, temporary = tempfile.mkstemp(prefix="gallery-dl.", dir="/usr/local/bin")
 actual = hashlib.sha256()
 size = 0
 try:
-    with os.fdopen(fd, "wb") as output, urllib.request.urlopen(
+    with os.fdopen(fd, "wb") as output, open_with_retries(
         request(binary_url), timeout=60
     ) as response:
         length = response.headers.get("Content-Length")

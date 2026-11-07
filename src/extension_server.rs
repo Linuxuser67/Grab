@@ -944,6 +944,14 @@ pub(crate) fn handoff_cookie_args(url: &str) -> Vec<String> {
     }
 }
 
+/// Synchronous cleanup retained only for deterministic unit-test fixtures.
+#[cfg(test)]
+pub(crate) fn discard_handoff_cookies(url: &str) {
+    if let Some(path) = take_handoff_cookie_path(url) {
+        let _ = std::fs::remove_file(path);
+    }
+}
+
 /// Non-blocking variant: drop the in-memory entry now and unlink its file on
 /// the runtime's blocking pool. Safe for GTK callbacks and async handlers.
 pub(crate) fn discard_handoff_cookies_async(url: &str) {

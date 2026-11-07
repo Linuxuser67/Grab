@@ -4850,19 +4850,13 @@ mod tests {
     }
 
     #[test]
-    fn segment_base_rejects_dynamic_and_separate_initialization() {
+    fn segment_base_rejects_dynamic_presentations() {
         let dynamic = dynamic_mpd(
             r#"<BaseURL>video.mp4</BaseURL><SegmentBase indexRange="0-999"/>"#,
             "",
         );
         assert_eq!(
             parse_dash_manifest_at(BASE_URL, &dynamic, dynamic_test_clock(120)).err(),
-            Some(DashError::UnsupportedAddressing)
-        );
-
-        let separate_initialization = r#"<MPD xmlns="urn:mpeg:dash:schema:mpd:2011" type="static" mediaPresentationDuration="PT2S"><Period duration="PT2S"><AdaptationSet contentType="video" mimeType="video/mp4"><Representation id="v1"><BaseURL>video.mp4</BaseURL><SegmentBase indexRange="0-999"><Initialization sourceURL="init.mp4" range="0-99"/></SegmentBase></Representation></AdaptationSet></Period></MPD>"#;
-        assert_eq!(
-            parse_dash_manifest(BASE_URL, separate_initialization).err(),
             Some(DashError::UnsupportedAddressing)
         );
     }

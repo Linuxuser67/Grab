@@ -1235,10 +1235,11 @@ fn stable_representation_key(identity: RepresentationIdentity<'_>) -> String {
             hash_optional_text(&mut hasher, index.index_url.as_deref());
             // Keep the historical key byte-for-byte when Initialization uses
             // an in-file range; only the newly supported addressing adds identity.
-            if let Some(url) = index.initialization_url.as_deref() {
-                hasher.update(b"separate-init");
-                hash_optional_text(&mut hasher, Some(url));
-            }
+            hash_separate_initialization_identity(
+                &mut hasher,
+                base_url,
+                index.initialization_url.as_deref(),
+            );
             hasher.update([u8::from(index.index_range_exact)]);
             hash_optional_number(&mut hasher, index.timescale);
         }
@@ -1309,10 +1310,11 @@ fn stable_live_representation_key(identity: RepresentationIdentity<'_>) -> Strin
             hash_optional_range(&mut hasher, Some(index.index_range));
             hash_optional_range(&mut hasher, index.initialization_range);
             hash_optional_text(&mut hasher, index.index_url.as_deref());
-            if let Some(url) = index.initialization_url.as_deref() {
-                hasher.update(b"separate-init");
-                hash_optional_text(&mut hasher, Some(url));
-            }
+            hash_separate_initialization_identity(
+                &mut hasher,
+                base_url,
+                index.initialization_url.as_deref(),
+            );
             hasher.update([u8::from(index.index_range_exact)]);
             hash_optional_number(&mut hasher, index.timescale);
         }
@@ -1323,6 +1325,21 @@ fn stable_live_representation_key(identity: RepresentationIdentity<'_>) -> Strin
         .map(|byte| format!("{byte:02x}"))
         .collect();
     format!("dash-live-{fingerprint}")
+}
+
+fn hash_separate_initialization_identity(
+    hasher: &mut Sha256,
+    base_url: &Url,
+    source_url: Option<&str>,
+) {
+    if let Some(source_url) = source_url {
+        hasher.update(b"separate-init");
+        let identity = base_url
+            .join(source_url)
+            .map(|url| super::resource_cache_key(&url))
+            .unwrap_or_else(|_| source_url.to_string());
+        hash_optional_text(hasher, Some(&identity));
+    }
 }
 
 fn hash_optional_text(hasher: &mut Sha256, value: Option<&str>) {
@@ -2846,6 +2863,32 @@ mod tests {
             parse_dash_manifest(BASE_URL, &second).expect("second initialization URL parses");
 
         assert_ne!(
+            first_manifest.video_representations[0].key,
+            second_manifest.video_representations[0].key
+        );
+    }
+
+    #[test]
+    fn rotating_initialization_signatures_do_not_change_representation_identity() {
+        let body = r#"<MPD xmlns="urn:mpeg:dash:schema:mpd:2011" type="static" mediaPresentationDuration="PT2S">
+  <BaseURL>media.mp4</BaseURL>
+  <Period duration="PT2S">
+    <AdaptationSet contentType="video" mimeType="video/mp4">
+      <Representation id="v1">
+        <SegmentBase timescale="1000" indexRange="100-143">
+          <Initialization sourceURL="init.mp4?sig=first"/>
+        </SegmentBase>
+      </Representation>
+    </AdaptationSet>
+  </Period>
+</MPD>"#;
+        let second = body.replace("sig=first", "sig=second");
+        let first_manifest =
+            parse_dash_manifest(BASE_URL, body).expect("first signed init URL parses");
+        let second_manifest =
+            parse_dash_manifest(BASE_URL, &second).expect("rotated signed init URL parses");
+
+        assert_eq!(
             first_manifest.video_representations[0].key,
             second_manifest.video_representations[0].key
         );

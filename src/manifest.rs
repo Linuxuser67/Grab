@@ -1791,11 +1791,8 @@ video/1080.m3u8
 one.ts
 #EXT-X-ENDLIST
 "#;
-        let media_plan = plan_hls_media_playlist(
-            "https://cdn.example.test/path/video.m3u8",
-            media,
-        )
-        .expect("media-playlist AES-128 key should be planned normally");
+        let media_plan = plan_hls_media_playlist("https://cdn.example.test/path/video.m3u8", media)
+            .expect("media-playlist AES-128 key should be planned normally");
         assert_eq!(
             media_plan
                 .resources

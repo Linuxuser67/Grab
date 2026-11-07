@@ -79,7 +79,7 @@ struct LinkAttributes {
 
 pub(crate) fn find_onload_links(body: &[u8]) -> Result<Vec<DashXlinkReference>, DashXlinkError> {
     let analysis = analyze_document(body, true)?;
-    if analysis.root_name.as_slice() != b"MPD" || !analysis.root_is_dash {
+    if analysis.root_name.as_str() != "MPD" || !analysis.root_is_dash {
         return Err(DashXlinkError::InvalidDocument);
     }
     Ok(analysis.links)
@@ -340,7 +340,7 @@ fn xlink_attributes<R: BufRead>(
 
 fn link_action(
     is_dash: bool,
-    local_name: &[u8],
+    local_name: &str,
     attributes: LinkAttributes,
     require_onload: bool,
 ) -> Result<Option<(DashXlinkElement, DashXlinkAction)>, DashXlinkError> {

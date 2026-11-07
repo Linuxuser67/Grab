@@ -43,6 +43,10 @@ pub(crate) enum ManifestError {
     UnsupportedPlaylistFeature(String),
     #[error("unsupported HLS encryption method")]
     UnsupportedEncryption,
+    #[error("unsupported HLS session key method")]
+    UnsupportedSessionKeyMethod,
+    #[error("unsupported HLS session key format")]
+    UnsupportedSessionKeyFormat,
     #[error("unsupported HLS resource url")]
     UnsupportedResourceUrl,
     #[error("HLS byte range has no usable offset")]
@@ -64,6 +68,26 @@ pub(crate) enum ManifestError {
 /// Unknown tags that do not affect resource selection or timing.
 fn is_benign_hls_tag(tag: &m3u8_rs::ExtTag) -> bool {
     matches!(tag.tag.as_str(), "X-ALLOW-CACHE" | "X-BITRATE")
+}
+
+/// Accept only identity AES-128 session keys; media-playlist keys remain authoritative.
+fn reject_unsupported_hls_session_keys(
+    session_keys: &[m3u8_rs::SessionKey],
+) -> Result<(), ManifestError> {
+    for session_key in session_keys {
+        let key = &session_key.0;
+        if key.method != KeyMethod::AES128 {
+            return Err(ManifestError::UnsupportedSessionKeyMethod);
+        }
+        if key
+            .keyformat
+            .as_deref()
+            .is_some_and(|keyformat| keyformat != "identity")
+        {
+            return Err(ManifestError::UnsupportedSessionKeyFormat);
+        }
+    }
+    Ok(())
 }
 
 fn reject_unsupported_hls_tags(tags: &[m3u8_rs::ExtTag]) -> Result<(), ManifestError> {
@@ -941,8 +965,8 @@ fn hls_segment_identity(segment: &m3u8_rs::MediaSegment) -> String {
 /// are trick-play indexes, not independently downloadable video presentations.
 ///
 /// # Errors
-/// Returns an error for malformed playlists, unsupported session encryption,
-/// or resource URLs that are not HTTPS.
+/// Returns an error for malformed playlists, unsupported session-key methods or
+/// formats, or resource URLs that are not HTTPS.
 pub(crate) fn parse_hls_master_playlist(
     manifest_url: &str,
     body: &[u8],
@@ -966,11 +990,9 @@ pub(crate) fn parse_hls_master_playlist(
         return Err(ManifestError::ExpectedMasterPlaylist);
     };
 
-    // Session keys and unimplemented URI-affecting extensions need the
-    // established extractor path; silently ignoring them can select wrong media.
-    if !master.session_key.is_empty() {
-        return Err(ManifestError::UnsupportedEncryption);
-    }
+    // Session keys are optional preloading hints, not media-key substitutes.
+    // Never fetch them; the selected media playlist's EXT-X-KEY remains authoritative.
+    reject_unsupported_hls_session_keys(&master.session_key)?;
     // Alternate VIDEO groups are separate selectable renditions. The native
     // HLS picker models variant playlists, audio, and subtitles, not video
     // angles, so do not silently select the variant URI and omit its group.
@@ -1742,6 +1764,65 @@ video/1080.m3u8
             plan.audio_renditions[0].url.as_ref().map(Url::as_str),
             Some("https://cdn.example.test/path/audio/en.m3u8")
         );
+    }
+
+    #[test]
+    fn identity_aes_128_session_keys_are_hints_and_media_keys_remain_authoritative() {
+        for session_key_tag in [
+            "#EXT-X-SESSION-KEY:METHOD=AES-128,URI=\"keys/media.key\",IV=0x00000000000000000000000000000001\n",
+            "#EXT-X-SESSION-KEY:METHOD=AES-128,URI=\"keys/media.key\",IV=0x00000000000000000000000000000001,KEYFORMAT=\"identity\"\n",
+        ] {
+            let master = format!(
+                "#EXTM3U\n{session_key_tag}#EXT-X-STREAM-INF:BANDWIDTH=1000000\nvideo.m3u8\n"
+            );
+            let plan = parse_hls_master_playlist(BASE_URL, master.as_bytes())
+                .expect("identity AES-128 session-key hints should be accepted");
+            assert_eq!(plan.variants.len(), 1);
+            assert_eq!(
+                plan.variants[0].url.as_str(),
+                "https://cdn.example.test/path/video.m3u8"
+            );
+        }
+
+        let media = br#"#EXTM3U
+#EXT-X-TARGETDURATION:2
+#EXT-X-KEY:METHOD=AES-128,URI="keys/media.key",IV=0x00000000000000000000000000000001,KEYFORMAT="identity"
+#EXTINF:2,
+one.ts
+#EXT-X-ENDLIST
+"#;
+        let media_plan = plan_hls_media_playlist("https://cdn.example.test/path/video.m3u8", media)
+            .expect("media-playlist AES-128 key should be planned normally");
+        assert_eq!(
+            media_plan
+                .resources
+                .iter()
+                .find(|resource| resource.kind == HlsResourceKind::Key)
+                .map(|resource| resource.url.as_str()),
+            Some("https://cdn.example.test/path/keys/media.key")
+        );
+    }
+
+    #[test]
+    fn unsupported_hls_session_key_methods_and_formats_fall_back() {
+        for (session_key_tag, expected_error) in [
+            (
+                "#EXT-X-SESSION-KEY:METHOD=SAMPLE-AES,URI=\"keys/media.key\"\n",
+                ManifestError::UnsupportedSessionKeyMethod,
+            ),
+            (
+                "#EXT-X-SESSION-KEY:METHOD=AES-128,URI=\"keys/media.key\",KEYFORMAT=\"com.apple.streamingkeydelivery\"\n",
+                ManifestError::UnsupportedSessionKeyFormat,
+            ),
+        ] {
+            let master = format!(
+                "#EXTM3U\n{session_key_tag}#EXT-X-STREAM-INF:BANDWIDTH=1000000\nvideo.m3u8\n"
+            );
+            assert_eq!(
+                parse_hls_master_playlist(BASE_URL, master.as_bytes()).err(),
+                Some(expected_error)
+            );
+        }
     }
 
     #[test]

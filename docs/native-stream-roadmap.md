@@ -31,14 +31,23 @@ discontinuities; identity AES-128 keys (including key rotation and
 implicit identity key format; Grab never fetches or substitutes these hints for
 the selected media playlist's authoritative `EXT-X-KEY`.
 
+For complete static VOD/EVENT playlists, paired `EXT-X-CUE-OUT` /
+`EXT-X-CUE-IN` boundaries are used to omit every segment in the marked ad
+break from native resource planning and from the local FFmpeg playlist. Valid
+`EXT-X-CUE-OUT-CONT` markers are checked against preceding ad-segment time.
+The first segment after `CUE-IN` remains program content. Ad-only keys and
+initialization resources are not fetched, and surviving resource names retain
+their source segment indices. Ambiguous or incomplete cues, live playlists with
+ad markers, and SCTE-35/DATERANGE-only ad signals remain on yt-dlp fallback.
+
 This is a deliberately bounded profile, not a claim of support for every HLS
 extension. Unknown parser tags and unsupported resource-affecting extensions
 fall back to yt-dlp. This includes alternate VIDEO rendition groups, LL-HLS
-parts, preload hints, delta updates, rendition reports, and blocking-reload
-query parameters. Gapped segments, I-frame-only media playlists, variable
-substitution, content steering, unsupported session-key methods, non-identity
-session-key formats, non-identity media-key formats, SAMPLE-AES over fragmented
-MP4/CBCS, and other unsupported encryption schemes also remain on fallback.
+parts, preload hints, delta updates, rendition reports, blocking-reload
+query parameters, GAP, DEFINE, SKIP, and CONTENT-STEERING. I-frame-only media
+playlists, unsupported session-key methods, non-identity session-key formats,
+non-identity media-key formats, SAMPLE-AES over fragmented MP4/CBCS, and other
+unsupported encryption schemes also remain on fallback.
 AES-128 and supported SAMPLE-AES keys continue to use the existing
 bounded key-resource path; no license or CDM acquisition is added.
 

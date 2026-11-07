@@ -206,13 +206,25 @@ fn is_main_role(start: &BytesStart<'_>) -> Option<bool> {
 pub(super) fn has_nonzero_segment_list_presentation_time_offset(body: &[u8]) -> Option<bool> {
     let mut reader = NsReader::from_reader(body);
     let mut buffer = Vec::new();
+    let mut depth = 0_usize;
     let mut has_nonzero_offset = false;
 
     loop {
         let (namespace, event) = reader.read_resolved_event_into(&mut buffer).ok()?;
         let start = match &event {
-            Event::Start(start) | Event::Empty(start) => Some(start),
-            Event::Eof => return Some(has_nonzero_offset),
+            Event::Start(start) => {
+                depth = depth.checked_add(1)?;
+                if depth > MAX_ELEMENT_DEPTH {
+                    return None;
+                }
+                Some(start)
+            }
+            Event::Empty(start) => Some(start),
+            Event::End(_) => {
+                depth = depth.checked_sub(1)?;
+                None
+            }
+            Event::Eof => return (depth == 0).then_some(has_nonzero_offset),
             _ => None,
         };
 
@@ -346,6 +358,23 @@ mod tests {
         assert_eq!(
             super::has_nonzero_segment_list_presentation_time_offset(foreign),
             Some(false)
+        );
+    }
+
+    #[test]
+    fn segment_list_timestamp_scan_rejects_excessive_xml_depth() {
+        let nested_tags = format!(
+            "{}{}",
+            "<Other>".repeat(MAX_ELEMENT_DEPTH),
+            "</Other>".repeat(MAX_ELEMENT_DEPTH)
+        );
+        let nested = format!(
+            r#"<MPD xmlns="{DASH_MPD_NAMESPACE}"><Period><AdaptationSet><Representation>{nested_tags}</Representation></AdaptationSet></Period></MPD>"#
+        );
+
+        assert_eq!(
+            super::has_nonzero_segment_list_presentation_time_offset(nested.as_bytes()),
+            None
         );
     }
 

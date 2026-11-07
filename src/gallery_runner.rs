@@ -27,22 +27,6 @@ pub struct GalleryResult {
     pub exit_code: Option<i32>,
 }
 
-/// Total files handled (downloaded + skipped) for display.
-/// Skipped files were already on disk from a previous run.
-pub fn done_count(files: usize, skipped: u32) -> u32 {
-    files as u32 + skipped
-}
-
-/// Detail label for a gallery row: "Gallery • 1 file" / "Gallery • N files".
-pub fn done_label(files: usize, skipped: u32) -> String {
-    let done = done_count(files, skipped);
-    if done == 1 {
-        "Gallery \u{2022} 1 file".to_string()
-    } else {
-        format!("Gallery \u{2022} {done} files")
-    }
-}
-
 /// Progress update from the runner.
 #[derive(Debug, Clone)]
 pub struct GalleryProgressUpdate {
@@ -424,16 +408,6 @@ mod tests {
         assert!(classify_result(files, 0, Some(4)).is_ok());
     }
 
-    #[test]
-    fn done_label_all_new() {
-        assert_eq!(done_label(5, 0), "Gallery \u{2022} 5 files");
-    }
-
-    #[test]
-    fn done_label_all_skipped() {
-        assert_eq!(done_label(0, 3), "Gallery \u{2022} 3 files");
-    }
-
     #[cfg(unix)]
     #[tokio::test]
     async fn cancel_kills_the_download_process_group() {
@@ -526,17 +500,6 @@ mod tests {
             redact_query_tokens("]https://media.example/file#frag[ok"),
             "]https://media.example/file(...)[ok"
         );
-    }
-
-    #[test]
-    fn done_label_mixed() {
-        assert_eq!(done_label(2, 3), "Gallery \u{2022} 5 files");
-    }
-
-    #[test]
-    fn done_label_singular() {
-        assert_eq!(done_label(1, 0), "Gallery \u{2022} 1 file");
-        assert_eq!(done_label(0, 1), "Gallery \u{2022} 1 file");
     }
 
     #[test]

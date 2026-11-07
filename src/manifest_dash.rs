@@ -4309,8 +4309,8 @@ mod tests {
   </Period>
 </MPD>"#
             );
-            let manifest = parse_dash_manifest(BASE_URL, &body)
-                .expect("static PTO manifest should parse");
+            let manifest =
+                parse_dash_manifest(BASE_URL, &body).expect("static PTO manifest should parse");
             let representation = &manifest.video_representations[0];
             let plan = plan_dash_representation(&manifest, &representation.key)
                 .expect("static PTO representation should be planned");

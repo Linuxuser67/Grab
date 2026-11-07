@@ -774,7 +774,8 @@ async fn resolve_dash_xlinks(
                     ));
                 }
                 let final_url = response.url();
-                if !transport_policy.accepts_url(final_url) || final_url.origin() != target.origin() {
+                if !transport_policy.accepts_url(final_url) || final_url.origin() != target.origin()
+                {
                     return Err(ManifestIntakeError::Unsupported(
                         "A DASH XLink resource redirected outside its original HTTPS origin"
                             .to_string(),

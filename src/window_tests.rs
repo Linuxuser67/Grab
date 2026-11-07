@@ -370,7 +370,7 @@ fn count_queue_rows(widget: &gtk4::Widget) -> usize {
                 [
                     gettextrs::gettext("Active"),
                     gettextrs::gettext("Queued"),
-                    gettextrs::gettext("Downloaded"),
+                    gettextrs::gettext("Done"),
                 ]
                 .iter()
                 .any(|title| title == label.text().as_str())
@@ -538,6 +538,11 @@ fn status_views_use_gnome_adaptive_view_switcher() {
         let downloaded_section =
             find_widget_by_name(window.upcast_ref(), "download-section-downloaded")
                 .expect("downloaded downloads section exists");
+        let downloaded_heading = downloaded_section
+            .first_child()
+            .and_downcast::<gtk4::Label>()
+            .expect("Done section heading exists");
+        assert_eq!(downloaded_heading.text(), "Done");
 
         for name in ["active", "downloaded", "all"] {
             view_stack.set_visible_child_name(name);

@@ -242,7 +242,7 @@ async fn single_loop(ctx: &FetchCtx, tries: &mut i32, expected: Option<u64>, cla
                     .await
                     .map(|m| m.len())
                     .unwrap_or(0);
-                crate::extension_server::discard_handoff_cookies(&ctx.url);
+                crate::extension_server::discard_handoff_cookies_async(&ctx.url);
                 ctx.tx.send(EngineMsg::Finished { size }).ok();
                 return;
             }
@@ -299,7 +299,7 @@ async fn multi_loop(
                     .await
                     .map(|m| m.len())
                     .unwrap_or(0);
-                crate::extension_server::discard_handoff_cookies(&ctx.url);
+                crate::extension_server::discard_handoff_cookies_async(&ctx.url);
                 ctx.tx.send(EngineMsg::Finished { size }).ok();
                 return false;
             }

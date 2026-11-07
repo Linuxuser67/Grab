@@ -150,6 +150,11 @@ fn drain_engine(manager: &DownloadManager, id: u64) {
         || manager.preparation_handles.borrow().contains_key(&id)
         || manager.pump_handles.borrow().contains_key(&id)
         || manager
+            .discards
+            .borrow()
+            .get(&id)
+            .is_some_and(|pending| !pending.finalizer.is_finished())
+        || manager
             .find(id)
             .is_some_and(|item| manager.dest_reserved(&item.file_path()))
         || manager.sizing_inflight.get() > 0)
@@ -9058,13 +9063,39 @@ fn finished_name_adoption_retries_after_stale_listing_collision() {
 
     // Simulate a stale listing that says every name is free. The atomic rename
     // must reject a.mp4 and retry with a distinct name, never overwrite it.
-    let adopted = DownloadManager::adopt_final_name(&source, &dir, "a.mp4", |_| false)
+    let candidates = vec!["a.mp4".to_string(), "a (1).mp4".to_string()];
+    let adopted = DownloadManager::adopt_final_name_candidates(&source, &dir, &candidates)
         .expect("a later collision-free candidate should be adopted");
     assert_ne!(adopted, "a.mp4");
     assert!(dir.join(&adopted).exists());
     assert_eq!(std::fs::read(&occupied).unwrap(), b"foreign");
     assert_eq!(std::fs::read(dir.join(adopted)).unwrap(), b"downloaded");
     let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn finished_name_candidates_are_reserved_while_the_worker_runs() {
+    let (_q, _l) = test_locks();
+    let _qf = test_queue_file("finished-name-reservations");
+    let manager = DownloadManager::new(gio::ListStore::new::<DownloadItem>(), test_settings());
+    let directory = tempfile::tempdir().expect("create destination");
+    let directory_name = directory.path().to_string_lossy().into_owned();
+    let existing = vec!["clip.mp4".to_string()];
+
+    let (candidates, claims) = manager
+        .reserve_final_name_candidates(&directory_name, "clip.mp4", &existing)
+        .expect("reserve finished-name candidates");
+    let first = directory.path().join(&candidates[0]);
+    assert_ne!(candidates[0], "clip.mp4");
+    assert!(manager.dest_reserved(&first));
+
+    claims.retain_path(&first);
+    drop(claims);
+    assert!(manager.dest_reserved(&first));
+    let other = directory.path().join(&candidates[1]);
+    assert!(!manager.dest_reserved(&other));
+    manager.release_dest(&first);
+    assert!(!manager.dest_reserved(&first));
 }
 
 #[test]

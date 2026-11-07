@@ -1934,7 +1934,7 @@ async fn finalize_manifest_download(
             return Ok(ManifestOutcome::Aborted);
         }
         Ok(crate::manifest_publish::ManifestPublishOutcome::Published) => {
-            crate::extension_server::discard_handoff_cookies(&job.source.url);
+            crate::extension_server::discard_handoff_cookies_async(&job.source.url);
         }
         Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
             return Err(ManifestRunError::Failed(

@@ -55,13 +55,18 @@ fn dash_preserve_success_marks_delivery() {
     let dest = base.join("video.mp4");
     let gate = AttemptGate::new();
 
-    let result = crate::runtime::tokio_rt().block_on(try_merge_dash_partials(
-        std::path::Path::new("unused-ffmpeg"),
-        &staging,
-        &dest,
-        "https://example.com/video",
-        &gate,
-    ));
+    let result = crate::runtime::tokio_rt().block_on(async {
+        let result = try_merge_dash_partials(
+            std::path::Path::new("unused-ffmpeg"),
+            &staging,
+            &dest,
+            "https://example.com/video",
+            &gate,
+        )
+        .await;
+        gate.wait_for_rollbacks().await;
+        result
+    });
 
     assert_eq!(result, Some(part_content.len() as u64));
     assert_eq!(std::fs::read(&dest).unwrap(), part_content);

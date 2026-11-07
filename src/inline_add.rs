@@ -69,10 +69,12 @@ impl Drop for TorrentPickerGuard {
 /// Where a submit came from: Enter, the Add button or tick icon, or auto-add.
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum SubmitSource {
-    /// Enter in the URL entry.
+    /// Enter in the URL entry, or its embedded lookup icon.
     Enter,
-    /// The Add button or the entry's tick icon.
+    /// The URL row's primary action: Queue all for collections, Add for singles.
     Button,
+    /// The explicit Select files button.
+    SelectFiles,
     /// The debounced submit that auto-add fires after a lookup.
     Auto,
 }
@@ -702,10 +704,9 @@ pub(crate) struct VideoStep {
     /// probe generation bump discards its completion), so the changed
     /// handler clears this and the icon follows.
     pub(crate) looking_up: Cell<bool>,
-    /// Revealer wrapping the Add button: it slides in from the left
-    /// (SlideRight) once the lookup resolves, pushing the gear and X
-    /// buttons aside; it slides out on enqueue or card close. The slide
-    /// uses GtkRevealer, the established API — no hand-rolled animation.
+    /// Revealer wrapping the URL-row actions: Select files and Queue all
+    /// slide in from the left (SlideRight) once a collection resolves,
+    /// before the gear and X controls. The transition uses GtkRevealer.
     pub(crate) action_revealer: gtk4::Revealer,
     /// Slide-down revealer wrapping the preview block's PreferencesGroup:
     /// the block animates in/out instead of snapping.
@@ -752,9 +753,9 @@ pub(crate) struct VideoStep {
     pub(crate) is_gallery: Rc<Cell<bool>>,
     /// The gallery card state (filter, items) when is_gallery is true.
     pub(crate) gallery_card: Rc<RefCell<Option<crate::gallery_card::GalleryCard>>>,
-    /// "Select files…" button: opens the full-enumeration picker.
-    /// Suffix of gallery_info; shows/hides with the row.
-    pub(crate) gallery_select_btn: gtk4::Button,
+    /// URL-row Select files button: opens the relevant collection picker
+    /// and is visible only when a result can resolve to multiple files.
+    pub(crate) select_files_btn: gtk4::Button,
     /// Opener for the gallery picker, set at probe completion (where nav,
     /// manager, dest, etc. are in scope). The button invokes it if set.
     /// The nested Rc/RefCell/Option is the wiring cost of connecting the
@@ -776,16 +777,16 @@ pub(crate) struct VideoStep {
     /// closes: dropping the task kills its probe children (kill_on_drop)
     /// instead of letting them run out their timeouts on a dead URL.
     pub(crate) lookup_abort: Rc<RefCell<Option<glib::JoinHandle<()>>>>,
-    /// The form's Add button: icon-only until a format is picked, then a
-    /// labeled "Add" pill (HIG: primary actions carry a text label).
+    /// Queue-all action for collections; reused as the labeled Add action
+    /// for single-media results.
     pub(crate) add_btn: gtk4::Button,
 }
 
 /// The URL entry's secondary icon: exactly one state shows at a time.
 /// The tick submits the URL; while looking up it morphs into a spinner in
-/// place (browser-address-bar style); once the Add button appears beside
-/// the entry — or the preview block shows an error/tools state with its
-/// own recovery button — the entry carries no icon.
+/// place (browser-address-bar style); once the URL-row actions appear beside
+/// the entry — or the preview block shows an error/tools recovery action —
+/// the entry carries no icon.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum EntryIcon {
     Tick,
@@ -876,13 +877,13 @@ pub(crate) fn hide_video_step(v: &VideoStep) {
     // Slide the preview block closed; the child-revealed handler hides the
     // revealer once the animation finishes, so no dead spacing remains.
     v.group_revealer.set_reveal_child(false);
-    // NOTE: the action revealer (Add button) is NOT touched here: its
-    // visibility is owned by the submit/lookup flow (show_video_ready
-    // reveals, close_card hides). Hiding it here would break
-    // show_video_ready, which resets the step before showing Add.
+    // NOTE: the action revealer is NOT touched here: its visibility is
+    // owned by the submit/lookup flow (ready states reveal; close_card hides).
+    // Hiding it here would interrupt the existing SlideRight transition.
     // NOTE: the entry icon is NOT touched here either: the caller owns the
     // lookup state (show_video_loading sets the spinner, the terminal
     // states clear it) and sync_entry_icon derives the icon from it.
+    v.select_files_btn.set_sensitive(true);
     v.name.set_visible(false);
     v.revert.set_visible(false);
     v.format.set_visible(false);
@@ -891,14 +892,14 @@ pub(crate) fn hide_video_step(v: &VideoStep) {
     v.tools.set_visible(false);
     v.error.set_visible(false);
     v.gallery_info.set_visible(false);
+    v.select_files_btn.set_visible(false);
     v.gallery_filter_wrap.set_visible(false);
     v.mode_toggle_wrap.set_visible(false);
     v.is_gallery.set(false);
     v.gallery_card.borrow_mut().take();
-    // NOTE: the Add button keeps its labeled-pill appearance while sliding
-    // out: the revealer is only ever revealed after show_video_ready /
-    // show_video_playlist set the label, so the icon-only form is never
-    // visible — resetting it here would flash a blue tick mid-slide.
+    // NOTE: the URL actions keep their current appearance while the revealer
+    // slides out; resetting their styles here would flash a different icon
+    // during the transition.
 }
 
 /// Clear a native manifest preview and its transient selection.
@@ -1014,6 +1015,8 @@ fn show_manifest_ready(
     step.action_revealer.set_reveal_child(true);
     step.add_btn.set_icon_name("");
     step.add_btn.remove_css_class("circular");
+    step.add_btn.set_tooltip_text(Some(&gettext("Add download")));
+    step.add_btn.update_property(&[gtk4::accessible::Property::Label(&gettext("Add download"))]);
     step.add_btn.set_label(&gettext("Add"));
     set_looking_up(step, false);
     set_lookup_add(lookup_add, true);
@@ -1072,7 +1075,7 @@ fn reset_video_step(step: &VideoStep) {
     // otherwise keep the spinner).
     set_looking_up(step, false);
     sync_entry_icon(step);
-    // Slide the Add button out: card is closing, gear + X slide back.
+    // Slide the URL-row action group out: card is closing, gear + X slide back.
     step.action_revealer.set_reveal_child(false);
 }
 
@@ -1117,6 +1120,12 @@ fn show_video_ready(v: &VideoStep) {
     // here without a show_video_loading (no new lookup to reveal it).
     v.action_revealer.set_visible(true);
     v.action_revealer.set_reveal_child(true);
+    v.select_files_btn.set_visible(false);
+    v.add_btn.set_icon_name("");
+    v.add_btn.remove_css_class("circular");
+    v.add_btn.set_tooltip_text(Some(&gettext("Add download")));
+    v.add_btn.update_property(&[gtk4::accessible::Property::Label(&gettext("Add download"))]);
+    v.add_btn.set_label(&gettext("Add"));
     v.name.set_visible(true);
     v.revert.set_visible(true);
     v.format.set_visible(true);
@@ -1127,10 +1136,6 @@ fn show_video_ready(v: &VideoStep) {
     // SlideDown has a mapped widget to animate (see slide_down_revealer).
     v.group_revealer.set_visible(true);
     v.group_revealer.set_reveal_child(true);
-    // Format picked: the Add button earns its text label.
-    v.add_btn.set_icon_name("");
-    v.add_btn.remove_css_class("circular");
-    v.add_btn.set_label(&gettext("Add"));
     sync_entry_icon(v);
 }
 
@@ -1317,6 +1322,7 @@ fn submit_probe(
     nav: &adw::NavigationView,
     probe: crate::video::ProbeResult,
     scheduled_at: Option<i64>,
+    queue_all: bool,
 ) {
     match probe {
         crate::video::ProbeResult::Single(v) => {
@@ -1354,13 +1360,14 @@ fn submit_probe(
                 close_card.clone(),
                 pl,
                 scheduled_at,
+                queue_all,
             );
         }
     }
 }
 
-/// Queue a gallery as a whole from the form's Add action. The separate
-/// "Select files…" button continues to provide explicit per-file selection.
+/// Queue a gallery as a whole from the URL row's Queue all action. The
+/// separate Select files action continues to provide explicit per-file selection.
 fn submit_gallery_all(
     manager: &Rc<DownloadManager>,
     dest: &Rc<RefCell<String>>,
@@ -1533,6 +1540,7 @@ fn push_playlist_items_page(
     close_card: Rc<dyn Fn()>,
     playlist: crate::media_types::PlaylistInfo,
     scheduled_at: Option<i64>,
+    queue_all: bool,
 ) {
     // Only the form opens a picker: auto-add can resolve a playlist while the
     // user is already in the gallery or torrent picker, and a second page
@@ -1624,10 +1632,13 @@ fn push_playlist_items_page(
     let guarded_child_hosts = Rc::new(RefCell::new(std::collections::HashSet::new()));
 
     {
+        let nav_on_error = nav.clone();
+        let picker_page_on_error = picker_page.clone();
         let guarded_child_hosts = guarded_child_hosts.clone();
         let close_card = close_card.clone();
         let grid = grid.clone();
         let add_btn_click = add_btn.clone();
+        let queue_all = queue_all;
         add_btn_click.clone().connect_clicked(move |_| {
             // Guard against re-entry: Enter emits clicked directly, bypassing
             // the sensitivity check, so a second press while the import is in
@@ -1672,7 +1683,14 @@ fn push_playlist_items_page(
             // The GTK clicked handler is an `Fn` and may run repeatedly;
             // clone the shared collection-host state for each import future.
             let guarded_child_hosts = guarded_child_hosts.clone();
+            let nav_on_error = nav_on_error.clone();
+            let picker_page_on_error = picker_page_on_error.clone();
             glib::spawn_future_local(async move {
+                let reveal_picker_on_error = || {
+                    if queue_all && crate::window_rows::form_is_visible(&nav_on_error) {
+                        nav_on_error.push(&picker_page_on_error);
+                    }
+                };
                 // One blocking call for subdir creation + readdir.
                 let (dir, existing) = match gio::spawn_blocking(move || {
                     let dir = if multi {
@@ -1691,6 +1709,7 @@ fn push_playlist_items_page(
                         error_caption.set_text(&gettext("Could not inspect the download folder"));
                         error_caption.set_visible(true);
                         add_btn.set_sensitive(true);
+                        reveal_picker_on_error();
                         return;
                     }
                     Err(error) => {
@@ -1698,6 +1717,7 @@ fn push_playlist_items_page(
                         error_caption.set_text(&gettext("Could not prepare the download folder"));
                         error_caption.set_visible(true);
                         add_btn.set_sensitive(true);
+                        reveal_picker_on_error();
                         return;
                     }
                 };
@@ -1791,6 +1811,7 @@ fn push_playlist_items_page(
                     error_caption.set_text(&message);
                     error_caption.set_visible(true);
                     add_btn.set_sensitive(true);
+                    reveal_picker_on_error();
                     return;
                 }
                 if skipped_by_host_limit > 0 {
@@ -1809,6 +1830,7 @@ fn push_playlist_items_page(
                     );
                     error_caption.set_visible(true);
                     add_btn.set_sensitive(true);
+                    reveal_picker_on_error();
                     return;
                 }
                 // Complete success collapses the whole New Download card; a partial failure stays
@@ -1818,8 +1840,14 @@ fn push_playlist_items_page(
         });
     }
 
-    // Playlist links always require explicit selection before any items queue.
-    nav.push(&picker_page);
+    if queue_all {
+        // GalleryGrid::append selects every entry. Reuse the importer while
+        // keeping the picker off-screen unless an error needs user attention.
+        add_btn.emit_clicked();
+    } else {
+        // Explicit Select files mode requires confirmation.
+        nav.push(&picker_page);
+    }
 }
 
 /// Multi-file .torrent intake presents a selection page before any files queue.
@@ -2084,17 +2112,29 @@ fn clear_field_error(field: &impl IsA<gtk4::Widget>) {
     field.update_property(&[gtk4::accessible::Property::Description("")]);
 }
 
-fn show_video_playlist(v: &VideoStep, _pl: &crate::media_types::PlaylistInfo) {
-    // Playlists carry no format choice (pins don't apply across items), so
-    // the preview block stays hidden — but the probe resolved, so Add earns
-    // its label like a single video; tapping it opens the title picker.
+fn show_video_playlist(v: &VideoStep, playlist: &crate::media_types::PlaylistInfo) {
+    // Select files opens the checklist; the circular action queues every
+    // resolved item. A capped preview describes the subset it can enqueue.
     hide_video_step(v);
     set_looking_up(v, false);
+    v.select_files_btn.set_label(&gettext("Select files"));
+    v.select_files_btn.set_sensitive(true);
+    v.select_files_btn.set_visible(true);
+    let queue_label = if crate::video_probe::playlist_truncated(playlist) {
+        gettext("Queue first {shown} of {total} items")
+            .replace("{shown}", &playlist.items.len().to_string())
+            .replace("{total}", &playlist.total.to_string())
+    } else {
+        gettext("Queue all items")
+    };
+    v.add_btn.set_label("");
+    v.add_btn.set_icon_name("object-select-symbolic");
+    v.add_btn.add_css_class("circular");
+    v.add_btn.set_tooltip_text(Some(&queue_label));
+    v.add_btn
+        .update_property(&[gtk4::accessible::Property::Label(&queue_label)]);
     v.action_revealer.set_visible(true);
     v.action_revealer.set_reveal_child(true);
-    v.add_btn.set_icon_name("");
-    v.add_btn.remove_css_class("circular");
-    v.add_btn.set_label(&gettext("Add"));
     sync_entry_icon(v);
 }
 
@@ -2227,6 +2267,7 @@ struct UrlControls {
     url_bar: gtk4::Box,
     url_entry: gtk4::Entry,
     spinner_paintable: adw::SpinnerPaintable,
+    select_files_btn: gtk4::Button,
     add_btn: gtk4::Button,
     action_revealer: gtk4::Revealer,
     cancel_btn: gtk4::Button,
@@ -2237,8 +2278,8 @@ fn build_url_controls() -> UrlControls {
     // URL bar: plain GtkEntry (entry styling, 6px corners) with the action
     // buttons beside it — AdwEntryRow would render card styling (12px).
     // The tick lives inside the entry as the secondary icon (the established
-    // GtkEntry icon API): it submits the URL for lookup. The Add button /
-    // spinner slides in beside the entry after submit, via a GtkRevealer.
+    // GtkEntry icon API): it looks up the URL. The collection actions slide
+    // in after lookup through the existing GtkRevealer transition.
     let url_bar = gtk4::Box::new(gtk4::Orientation::Horizontal, 12);
     let url_entry = gtk4::Entry::builder()
         .placeholder_text(gettext("Paste a download link"))
@@ -2252,22 +2293,33 @@ fn build_url_controls() -> UrlControls {
     // Spinner paintable for the entry's secondary icon slot, animated by
     // the entry's own frame clock.
     let spinner_paintable = adw::SpinnerPaintable::new(Some(&url_entry));
-    // Add button: appears only after the lookup finishes. Labeled pill once
-    // a format is picked; icon-only checkmark otherwise. Colored rounded
-    // HIG button.
+    // Multi-file collections expose two actions: a text Select files button
+    // followed by the circular Queue all button. Single-media results hide
+    // Select files and turn the latter into the normal labeled Add action.
+    let select_files_btn = gtk4::Button::builder()
+        .label(gettext("Select files"))
+        .css_classes(["flat"])
+        .tooltip_text(gettext("Choose which files to download"))
+        .valign(gtk4::Align::Center)
+        .visible(false)
+        .build();
+    select_files_btn.update_property(&[gtk4::accessible::Property::Label(&gettext(
+        "Select files",
+    ))]);
     let add_btn = gtk4::Button::builder()
         .icon_name("object-select-symbolic")
-        .tooltip_text(gettext("Add download"))
+        .tooltip_text(gettext("Queue all files"))
         .css_classes(["suggested-action", "circular"])
         .valign(gtk4::Align::Center)
         .build();
-    add_btn.update_property(&[gtk4::accessible::Property::Label(&gettext("Add download"))]);
-    // The revealer slides the Add button in from the left (SlideRight) once
-    // the lookup resolves, pushing the gear and X buttons aside; it slides
-    // out on enqueue or card close. Hidden (no spacing) until revealed, and
-    // collapses back when the slide-out finishes.
+    add_btn.update_property(&[gtk4::accessible::Property::Label(&gettext("Queue all files"))]);
+    // Keep the existing SlideRight GtkRevealer: the two collection actions
+    // appear together, before the gear and close controls.
+    let actions = gtk4::Box::new(gtk4::Orientation::Horizontal, 6);
+    actions.append(&select_files_btn);
+    actions.append(&add_btn);
     let action_revealer = slide_revealer(gtk4::RevealerTransitionType::SlideRight);
-    action_revealer.set_child(Some(&add_btn));
+    action_revealer.set_child(Some(&actions));
     url_bar.append(&action_revealer);
     // Gear toggle for the download options: the HIG settings icon
     // (emblem-system-symbolic), bound to the options revealer below.
@@ -2314,6 +2366,7 @@ fn build_url_controls() -> UrlControls {
         url_bar,
         url_entry,
         spinner_paintable,
+        select_files_btn,
         add_btn,
         action_revealer,
         cancel_btn,
@@ -2326,6 +2379,7 @@ fn build_video_preview(
     url_entry: &gtk4::Entry,
     spinner_paintable: adw::SpinnerPaintable,
     action_revealer: &gtk4::Revealer,
+    select_files_btn: &gtk4::Button,
     add_btn: &gtk4::Button,
 ) -> (Rc<VideoStep>, gtk4::Revealer, gtk4::Button, gtk4::Button) {
     // Video preview block: hidden until a lookup runs; exactly one state shows.
@@ -2410,14 +2464,8 @@ fn build_video_preview(
         .title(gettext("Gallery"))
         .use_markup(false)
         .build();
-    // "Select files…" opener: suffix button on the gallery row. Runs a full
-    // enumeration on demand, then pushes the checklist picker.
-    let gallery_select_btn = gtk4::Button::builder()
-        .label(gettext("Select files…"))
-        .valign(gtk4::Align::Center)
-        .css_classes(["flat"])
-        .build();
-    gallery_info.add_suffix(&gallery_select_btn);
+    // File selection is in the URL action row; the info row only carries
+    // the gallery title and count.
     gallery_info.set_visible(false);
     video_group.add(&gallery_info);
     // Gallery filter toggle: All / Images / Videos. Hidden by default.
@@ -2480,7 +2528,7 @@ fn build_video_preview(
         toggle_items: Rc::new(RefCell::new(None)),
         is_gallery: Rc::new(Cell::new(false)),
         gallery_card: Rc::new(RefCell::new(None)),
-        gallery_select_btn: gallery_select_btn.clone(),
+        select_files_btn: select_files_btn.clone(),
         gallery_select_opener: Rc::new(RefCell::new(None)),
         enumerate_abort: Rc::new(RefCell::new(None)),
         enumerate_gen: Cell::new(0),
@@ -2522,14 +2570,6 @@ fn wire_video_preview(step: Rc<VideoStep>) {
                     .map(|choice| choice.key.clone());
                 selection.replace(selected_key);
             });
-    }
-    {
-        let opener = step.gallery_select_opener.clone();
-        step.gallery_select_btn.connect_clicked(move |_| {
-            if let Some(open) = opener.borrow().as_ref() {
-                open();
-            }
-        });
     }
     // Gallery filter toggle: update the card's filter and refresh the info row.
     // Connected once; reads the current card from the Rc.
@@ -3416,6 +3456,7 @@ fn build_video_lookup_kicker(context: VideoLookupContext) -> VideoLookupKick {
                                         close_b.clone(),
                                         pl,
                                         scheduled_at_b.get(),
+                                        false,
                                     );
                                 }
                             }
@@ -3463,9 +3504,8 @@ fn build_submit_handler(context: SubmitContext) -> SubmitHandler {
         nav,
         scheduled_at,
     } = context;
-    // One submit path for the Add button and Enter: video pages go through the
-    // media pipeline (a matching preview is required so the row stores the
-    // resolved page, not a stale URL); everything else keeps direct enqueue.
+    // One submit path for the URL row: collection actions distinguish explicit
+    // selection from queue-all; singles and direct URLs retain the existing path.
     {
         let m = manager.clone();
         let dd = dest_dir.clone();
@@ -3481,17 +3521,23 @@ fn build_submit_handler(context: SubmitContext) -> SubmitHandler {
         let magnet_lookup_state = Rc::clone(&magnet_lookup_in_flight);
         Rc::new(move |source: SubmitSource| {
             let from_activate = matches!(source, SubmitSource::Enter | SubmitSource::Auto);
-            // Add queues the whole gallery. The separate "Select files…"
-            // button is the only path that opens per-file selection.
+            // Gallery actions share the URL row: Select files opens its
+            // enumerated picker; the circular check queues the active filter.
             if step2.is_gallery.get() {
-                submit_gallery_all(
-                    &m,
-                    &dd,
-                    &close_card,
-                    &step2,
-                    &lookup_add_submit,
-                    scheduled_at.get(),
-                );
+                if matches!(source, SubmitSource::SelectFiles) {
+                    if let Some(open) = step2.gallery_select_opener.borrow().as_ref() {
+                        open();
+                    }
+                } else {
+                    submit_gallery_all(
+                        &m,
+                        &dd,
+                        &close_card,
+                        &step2,
+                        &lookup_add_submit,
+                        scheduled_at.get(),
+                    );
+                }
                 return;
             }
             let url = url_entry.text().trim().to_string();
@@ -3511,6 +3557,10 @@ fn build_submit_handler(context: SubmitContext) -> SubmitHandler {
                 let lookup_step = Rc::clone(&step2);
                 let lookup_scheduled = Rc::clone(&scheduled_at);
                 let lookup_entry = url_entry.clone();
+                let lookup_add_actions = lookup_add_submit.clone();
+                let lookup_select_files = step2.select_files_btn.clone();
+                set_lookup_add(&lookup_add_submit, false);
+                step2.select_files_btn.set_sensitive(false);
                 set_looking_up(&step2, true);
                 sync_entry_icon(&step2);
                 let lookup = glib::spawn_future_local(async move {
@@ -3536,9 +3586,14 @@ fn build_submit_handler(context: SubmitContext) -> SubmitHandler {
                         Err(error) => Err(error),
                     };
                     set_looking_up(&lookup_step, false);
+                    set_lookup_add(&lookup_add_actions, true);
+                    lookup_select_files.set_sensitive(true);
                     sync_entry_icon(&lookup_step);
                     match resolved {
-                        Ok((magnet, name, entries)) if entries.len() > 1 => {
+                        Ok((magnet, name, entries))
+                            if entries.len() > 1
+                                && !matches!(source, SubmitSource::Button) =>
+                        {
                             push_torrent_picker_page(
                                 &lookup_nav,
                                 lookup_manager,
@@ -3558,6 +3613,10 @@ fn build_submit_handler(context: SubmitContext) -> SubmitHandler {
                                 &lookup_close,
                                 lookup_scheduled.get(),
                                 move |directory| async move {
+                                    if enqueue_manager.has_nonterminal_url(&enqueue_url) {
+                                        return Err(gettext("Torrent is already in the queue"));
+                                    }
+                                    crate::torrent::drop_selection(&enqueue_url);
                                     enqueue_manager
                                         .enqueue_async_batched(
                                             &enqueue_url,
@@ -3658,6 +3717,7 @@ fn build_submit_handler(context: SubmitContext) -> SubmitHandler {
                         &nav2,
                         probe,
                         scheduled_at.get(),
+                        matches!(source, SubmitSource::Button),
                     ),
                     None => {
                         // A tap while the lookup is still running: don't stack
@@ -3724,6 +3784,7 @@ fn build_submit_handler(context: SubmitContext) -> SubmitHandler {
                                 close_card.clone(),
                                 pl,
                                 scheduled_at.get(),
+                                false,
                             );
                         }
                         None => {}
@@ -3759,6 +3820,7 @@ fn build_submit_handler(context: SubmitContext) -> SubmitHandler {
 /// Connect submit, keyboard, icon, and debounced URL-edit behavior.
 fn wire_url_entry(
     add_btn: &gtk4::Button,
+    select_files_btn: &gtk4::Button,
     url_entry: &gtk4::Entry,
     step: Rc<VideoStep>,
     probe: Rc<RefCell<ProbeState>>,
@@ -3771,6 +3833,10 @@ fn wire_url_entry(
     }
     {
         let s = submit.clone();
+        select_files_btn.connect_clicked(move |_| s(SubmitSource::SelectFiles));
+    }
+    {
+        let s = submit.clone();
         url_entry.connect_activate(move |_| s(SubmitSource::Enter));
     }
     // Tick icon inside the entry submits like Enter; the spinner cancels the
@@ -3779,6 +3845,8 @@ fn wire_url_entry(
         let s = submit.clone();
         let step = step.clone();
         let probe = Rc::clone(&probe);
+        let add_btn = add_btn.clone();
+        let select_files_btn = select_files_btn.clone();
         url_entry.connect_icon_press(move |_, pos| {
             if pos != gtk4::EntryIconPosition::Secondary {
                 return;
@@ -3787,9 +3855,11 @@ fn wire_url_entry(
                 probe.borrow_mut().bump_generation();
                 abort_lookup(&step);
                 set_looking_up(&step, false);
+                add_btn.set_sensitive(true);
+                select_files_btn.set_sensitive(true);
                 sync_entry_icon(&step);
             } else {
-                s(SubmitSource::Button);
+                s(SubmitSource::Enter);
             }
         });
     }
@@ -3878,6 +3948,19 @@ fn wire_url_entry(
                 step2.action_revealer.set_reveal_child(false);
                 probe.borrow_mut().info.take();
                 clear_manifest_preview(&step2);
+            }
+            if crate::torrent::is_magnet(&text) {
+                step2.select_files_btn.set_visible(true);
+                step2.select_files_btn.set_label(&gettext("Select files"));
+                step2.add_btn.set_label("");
+                step2.add_btn.set_icon_name("object-select-symbolic");
+                step2.add_btn.add_css_class("circular");
+                step2.add_btn.set_tooltip_text(Some(&gettext("Queue all files")));
+                step2.add_btn.update_property(&[gtk4::accessible::Property::Label(&gettext(
+                    "Queue all files",
+                ))]);
+                step2.action_revealer.set_visible(true);
+                step2.action_revealer.set_reveal_child(true);
             }
             // Any edit clears the lookup-in-flight state, and the icon
             // follows: the tick returns for non-empty text, the spinner
@@ -4088,6 +4171,7 @@ pub fn build_add_card(manager: Rc<DownloadManager>) -> AddCard {
         url_bar,
         url_entry,
         spinner_paintable,
+        select_files_btn,
         add_btn,
         action_revealer,
         cancel_btn,
@@ -4095,8 +4179,13 @@ pub fn build_add_card(manager: Rc<DownloadManager>) -> AddCard {
     } = build_url_controls();
     form.append(&url_bar);
     form.append(&opts_revealer);
-    let (step, video_revealer, video_install_btn, video_retry_btn) =
-        build_video_preview(&url_entry, spinner_paintable, &action_revealer, &add_btn);
+    let (step, video_revealer, video_install_btn, video_retry_btn) = build_video_preview(
+        &url_entry,
+        spinner_paintable,
+        &action_revealer,
+        &select_files_btn,
+        &add_btn,
+    );
     wire_video_preview(Rc::clone(&step));
 
     form.append(&video_revealer);
@@ -4229,6 +4318,7 @@ pub fn build_add_card(manager: Rc<DownloadManager>) -> AddCard {
 
     wire_url_entry(
         &add_btn,
+        &select_files_btn,
         &url_entry,
         Rc::clone(&step),
         Rc::clone(&probe),
@@ -4446,9 +4536,9 @@ fn make_gallery_picker_opener(
         // Disable the button and show a loading label while enumerating;
         // the picker replaces it on success.
         let loading_label = gettext("Loading…");
-        let orig_label = step2.gallery_select_btn.label().unwrap_or_default();
-        step2.gallery_select_btn.set_sensitive(false);
-        step2.gallery_select_btn.set_label(&loading_label);
+        let orig_label = step2.select_files_btn.label().unwrap_or_default();
+        step2.select_files_btn.set_sensitive(false);
+        step2.select_files_btn.set_label(&loading_label);
         let step3 = step2.clone();
         let nav3 = nav2.clone();
         let manager3 = manager2.clone();
@@ -4461,8 +4551,8 @@ fn make_gallery_picker_opener(
             crate::download::DownloadOptions::from_settings(&picker_settings).proxy_config();
         glib::spawn_future_local(async move {
             let restore_btn = || {
-                step3.gallery_select_btn.set_sensitive(true);
-                step3.gallery_select_btn.set_label(&orig_label);
+                step3.select_files_btn.set_sensitive(true);
+                step3.select_files_btn.set_label(&orig_label);
             };
             // Surface enumeration failures on the gallery row instead of
             // only logging: the user clicked a button and deserves feedback.
@@ -4631,8 +4721,14 @@ fn show_gallery_ready(v: &VideoStep, card: crate::gallery_card::GalleryCard, tit
     *v.gallery_card.borrow_mut() = Some(card);
     // A superseded enumeration can leave the button on "Loading…"; every
     // resolved gallery row gets a working opener.
-    v.gallery_select_btn.set_sensitive(true);
-    v.gallery_select_btn.set_label(&gettext("Select files…"));
+    v.select_files_btn.set_sensitive(true);
+    v.select_files_btn.set_label(&gettext("Select files"));
+    v.select_files_btn.set_visible(true);
+    v.add_btn.set_label("");
+    v.add_btn.set_icon_name("object-select-symbolic");
+    v.add_btn.add_css_class("circular");
+    v.add_btn.set_tooltip_text(Some(&gettext("Queue all files")));
+    v.add_btn.update_property(&[gtk4::accessible::Property::Label(&gettext("Queue all files"))]);
     // Reset filter to All.
     v.gallery_filter.set_active_name(Some("all"));
     refresh_gallery_info(v, title);
@@ -4647,10 +4743,6 @@ fn show_gallery_ready(v: &VideoStep, card: crate::gallery_card::GalleryCard, tit
     v.action_revealer.set_reveal_child(true);
     v.group_revealer.set_visible(true);
     v.group_revealer.set_reveal_child(true);
-    // The Add button earns its text label.
-    v.add_btn.set_icon_name("");
-    v.add_btn.remove_css_class("circular");
-    v.add_btn.set_label(&gettext("Add"));
     sync_entry_icon(v);
 }
 
@@ -4711,6 +4803,7 @@ mod tests {
                 .into_boxed_slice(),
             },
             None,
+            false,
         );
         assert_eq!(nav.visible_page_tag().as_deref(), Some("playlist"));
         assert_eq!(store.n_items(), 0, "playlist must wait for Add");

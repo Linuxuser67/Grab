@@ -1089,6 +1089,74 @@ fn parse_probe_messages(messages: &[serde_json::Value]) -> Result<Vec<GalleryIte
     Ok(items)
 }
 
+/// Count files without downloading: `gallery-dl --config-ignore -g --no-download <url>`.
+/// Returns the line count of direct file URLs, or `None` on any failure.
+/// The gallery progress bar remains indeterminate until a count is available.
+#[cfg(test)]
+pub async fn count_gallery_files(
+    tool: &Path,
+    url: &str,
+    cookies_file: Option<&Path>,
+    user_agent: Option<&str>,
+    filter: crate::gallery_argv::GalleryFilter,
+) -> Option<u32> {
+    count_gallery_files_with_proxy(tool, url, cookies_file, None, user_agent, filter, None).await
+}
+
+pub async fn count_gallery_files_with_proxy(
+    tool: &Path,
+    url: &str,
+    cookies_file: Option<&Path>,
+    cookies_browser: Option<&str>,
+    user_agent: Option<&str>,
+    filter: crate::gallery_argv::GalleryFilter,
+    proxy: Option<&crate::net_types::ResolvedProxy>,
+) -> Option<u32> {
+    let untrusted_handoff = url::Url::parse(url)
+        .ok()
+        .and_then(|parsed| parsed.host_str().map(str::to_string))
+        .is_some_and(|host| crate::download_net::is_untrusted_handoff_host(&host));
+    // A user proxy cannot replace the DNS-filtering proxy required for browser
+    // handoffs. Do not rely on option order between two --proxy arguments.
+    if untrusted_handoff && proxy.is_some() {
+        return None;
+    }
+    let argv = crate::gallery_argv::count_argv_with_proxy(
+        tool,
+        url,
+        cookies_file,
+        cookies_browser,
+        user_agent,
+        filter,
+        proxy,
+    );
+    let guarded_proxy = if untrusted_handoff {
+        crate::video_spawn::validate_guarded_proxy_args(&argv).ok()?;
+        Some(crate::subprocess_proxy::ensure_started().ok()?)
+    } else {
+        None
+    };
+    let mut cmd = tokio::process::Command::new(&argv[0]);
+    crate::video_spawn::prepend_user_lib_to_path(&mut cmd);
+    cmd.args(&argv[1..]);
+    crate::video_spawn::apply_configured_proxy_env(&mut cmd, proxy);
+    crate::video_spawn::apply_guarded_proxy_env(&mut cmd, guarded_proxy.as_deref());
+    // The shared runner bounds stdout/stderr, kills the process group on timeout,
+    // and drains both pipes concurrently instead of buffering unbounded output.
+    let output = run_to_completion(cmd, PROBE_TIMEOUT, "gallery-dl count")
+        .await
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let count = output
+        .stdout
+        .split(|byte| *byte == b'\n')
+        .filter(|line| line.iter().any(|byte| !byte.is_ascii_whitespace()))
+        .count();
+    u32::try_from(count).ok()
+}
+
 #[cfg(test)]
 mod capped_line_reader_tests {
     use super::*;
@@ -1401,6 +1469,32 @@ done
         assert_eq!(names.len(), 12);
         assert_eq!(names.first().map(String::as_str), Some("1.jpg"));
         assert_eq!(names.last().map(String::as_str), Some("12.jpg"));
+        let _ = std::fs::remove_dir_all(&directory);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn gallery_count_rejects_output_over_the_probe_limit() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let directory =
+            std::env::temp_dir().join(format!("grab-gallery-count-limit-{}", std::process::id()));
+        std::fs::create_dir_all(&directory).unwrap();
+        let script = directory.join("gallery-dl");
+        std::fs::write(&script, "#!/bin/sh\nhead -c 67108865 /dev/zero\n").unwrap();
+        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+        let count = count_gallery_files_with_proxy(
+            &script,
+            "https://example.com/gallery",
+            None,
+            None,
+            None,
+            crate::gallery_argv::GalleryFilter::All,
+            None,
+        )
+        .await;
+        assert_eq!(count, None);
         let _ = std::fs::remove_dir_all(&directory);
     }
 
@@ -2020,6 +2114,26 @@ done
         .expect("thread panicked");
         // Should be an Err (couldn't spawn), not a panic.
         assert!(result.is_err());
+    }
+
+    /// Regression: count_gallery_files must work from a thread without
+    /// a Tokio runtime.
+    #[test]
+    fn count_gallery_files_works_without_tokio_runtime() {
+        let result = std::thread::spawn(|| {
+            assert!(tokio::runtime::Handle::try_current().is_err());
+            crate::runtime::tokio_rt().block_on(count_gallery_files(
+                std::path::Path::new("/nonexistent/gallery-dl"),
+                "https://example.com/",
+                None,
+                None,
+                crate::gallery_argv::GalleryFilter::All,
+            ))
+        })
+        .join()
+        .expect("thread panicked");
+        // Should be None (failure), not a panic.
+        assert_eq!(result, None);
     }
 
     /// Regression: dropping the probe future (as `timeout()` does on expiry)

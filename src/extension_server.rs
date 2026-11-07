@@ -944,15 +944,6 @@ pub(crate) fn handoff_cookie_args(url: &str) -> Vec<String> {
     }
 }
 
-/// Drop a URL's staged handoff cookies and delete the file. Called when its
-/// download finishes; failures and aborts keep the entry (bounded) so a retry
-/// or resume still passes the challenge.
-pub(crate) fn discard_handoff_cookies(url: &str) {
-    if let Some(p) = take_handoff_cookie_path(url) {
-        let _ = std::fs::remove_file(p);
-    }
-}
-
 /// Non-blocking variant: drop the in-memory entry now and unlink its file on
 /// the runtime's blocking pool. Safe for GTK callbacks and async handlers.
 pub(crate) fn discard_handoff_cookies_async(url: &str) {

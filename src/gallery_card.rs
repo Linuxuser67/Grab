@@ -17,7 +17,10 @@ pub struct GalleryCard {
     pub items: Vec<GalleryItem>,
     /// Per-host sticky mode preference.
     pub sticky: Option<StickyMode>,
-    /// Source URL, used when the user opens the explicit file picker.
+    /// Total file counts per filter (from `count_gallery_files`).
+    /// `None` = not yet counted.
+    total: RefCell<std::collections::HashMap<GalleryFilter, Option<u32>>>,
+    /// Source URL (for filter-toggle recounts).
     url: String,
 }
 
@@ -27,13 +30,34 @@ impl GalleryCard {
             filter: Rc::new(RefCell::new(GalleryFilter::All)),
             items,
             sticky,
+            total: RefCell::new(std::collections::HashMap::new()),
             url,
         }
     }
 
-    /// The gallery URL used to enumerate files for the explicit picker.
+    /// The gallery URL (for recounts).
     pub fn url(&self) -> &str {
         &self.url
+    }
+
+    /// Store the total file count for a filter.
+    pub fn set_total(&self, filter: GalleryFilter, n: u32) {
+        self.total.borrow_mut().insert(filter, Some(n));
+    }
+
+    /// Mark a filter's count as attempted but failed (don't retry on every toggle).
+    pub fn set_total_failed(&self, filter: GalleryFilter) {
+        self.total.borrow_mut().insert(filter, None);
+    }
+
+    /// Get the cached total for a filter, if counted successfully.
+    pub fn total(&self, filter: GalleryFilter) -> Option<u32> {
+        self.total.borrow().get(&filter).copied().flatten()
+    }
+
+    /// Whether a count has been attempted for a filter (success or failure).
+    pub fn is_count_cached(&self, filter: GalleryFilter) -> bool {
+        self.total.borrow().contains_key(&filter)
     }
 
     /// Filtered items based on the current filter selection.

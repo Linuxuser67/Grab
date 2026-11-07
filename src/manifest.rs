@@ -1504,7 +1504,7 @@ fn build_hls_plan(base_url: Url, mut playlist: MediaPlaylist) -> Result<HlsPlan,
     }
 
     let mut retained_segments = Vec::with_capacity(playlist.segments.len());
-    for (segment, skip) in playlist
+    for (segment, disposition) in playlist
         .segments
         .into_iter()
         .zip(ad_removal.segments.into_iter())

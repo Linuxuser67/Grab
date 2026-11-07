@@ -31,14 +31,24 @@ discontinuities; identity AES-128 keys (including key rotation and
 implicit identity key format; Grab never fetches or substitutes these hints for
 the selected media playlist's authoritative `EXT-X-KEY`.
 
+The native planner also accepts and drops only the documented non-resource
+ad-marker metadata tags `EXT-OATCLS-SCTE35`, `EXT-X-ASSET`,
+`EXT-X-CUE`, `EXT-X-CUE-OUT`, `EXT-X-CUE-OUT-CONT`, and
+`EXT-X-CUE-IN` with their validated metadata attributes. These tags signal
+splice/ad-avail identity and timing; they do not select, remove, or rewrite
+segment URIs. Grab downloads every segment listed by the selected media
+playlist, including any ad segments already inserted by the origin. The local
+FFmpeg playlist omits these metadata tags. URI-bearing or malformed variants
+of these tags remain on yt-dlp fallback.
+
 This is a deliberately bounded profile, not a claim of support for every HLS
-extension. Unknown parser tags and unsupported resource-affecting extensions
-fall back to yt-dlp. This includes alternate VIDEO rendition groups, LL-HLS
-parts, preload hints, delta updates, rendition reports, and blocking-reload
-query parameters. Gapped segments, I-frame-only media playlists, variable
-substitution, content steering, unsupported session-key methods, non-identity
-session-key formats, non-identity media-key formats, SAMPLE-AES over fragmented
-MP4/CBCS, and other unsupported encryption schemes also remain on fallback.
+extension. Other unknown parser tags and unsupported resource-affecting
+extensions fall back to yt-dlp. This includes alternate VIDEO rendition groups,
+LL-HLS parts, preload hints, delta updates, rendition reports, blocking-reload
+query parameters, GAP, DEFINE, SKIP, and CONTENT-STEERING. I-frame-only media
+playlists, unsupported session-key methods, non-identity session-key formats,
+non-identity media-key formats, SAMPLE-AES over fragmented MP4/CBCS, and other
+unsupported encryption schemes also remain on fallback.
 AES-128 and supported SAMPLE-AES keys continue to use the existing
 bounded key-resource path; no license or CDM acquisition is added.
 

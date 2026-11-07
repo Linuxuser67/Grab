@@ -17,6 +17,11 @@ pub(crate) const MAX_MANIFEST_BYTES: usize = 4 * 1024 * 1024;
 #[path = "manifest_dash.rs"]
 pub(crate) mod dash;
 
+#[path = "manifest_hls_tags.rs"]
+mod hls_tags;
+
+use hls_tags::is_benign_hls_tag;
+
 #[path = "manifest_dash_roles.rs"]
 mod dash_roles;
 
@@ -63,11 +68,6 @@ pub(crate) enum ManifestError {
     LiveCaptureLimit,
     #[error("the live HLS playlist can no longer be continued without losing media")]
     LiveSequenceGap,
-}
-
-/// Unknown tags that do not affect resource selection or timing.
-fn is_benign_hls_tag(tag: &m3u8_rs::ExtTag) -> bool {
-    matches!(tag.tag.as_str(), "X-ALLOW-CACHE" | "X-BITRATE")
 }
 
 /// Accept only identity AES-128 session keys; media-playlist keys remain authoritative.

@@ -267,6 +267,7 @@ struct DashBaseIndex {
     initialization_range: ManifestByteRange,
     index_range_exact: bool,
     timescale: Option<u64>,
+    presentation_time_offset: u64,
 }
 
 #[derive(Clone, Copy)]

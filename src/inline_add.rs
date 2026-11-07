@@ -1641,12 +1641,13 @@ fn push_playlist_items_page(
         let close_card = close_card.clone();
         let grid = grid.clone();
         let add_btn_click = add_btn.clone();
+        let add_btn_guard = add_btn.clone();
         let queue_all = queue_all;
         add_btn_click.clone().connect_clicked(move |_| {
             // Guard against re-entry: Enter emits clicked directly, bypassing
             // the sensitivity check, so a second press while the import is in
             // flight would enqueue duplicates.
-            if !add_btn.is_sensitive() {
+            if !add_btn_guard.is_sensitive() {
                 return;
             }
             let picked: Vec<usize> = grid.selected_indices();
@@ -1675,13 +1676,13 @@ fn push_playlist_items_page(
             let title = playlist.title.clone();
             // Disable the button while the import is in flight: a second
             // click would see the selection unchanged and enqueue duplicates.
-            add_btn.set_sensitive(false);
+            add_btn_guard.set_sensitive(false);
             let manager = manager.clone();
             let grid = grid.clone();
             let error_caption = error_caption.clone();
             let close_card = close_card.clone();
             let page_url = playlist.page_url.clone();
-            let add_btn = add_btn.clone();
+            let add_btn = add_btn_guard.clone();
             let audio_only = audio_only.is_active();
             // The GTK clicked handler is an `Fn` and may run repeatedly;
             // clone the shared collection-host state for each import future.

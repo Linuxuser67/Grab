@@ -202,6 +202,44 @@ fn is_main_role(start: &BytesStart<'_>) -> Option<bool> {
     Some(scheme.as_deref() == Some(DASH_ROLE_SCHEME) && value.as_deref() == Some("main"))
 }
 
+/// Detect non-zero SegmentList PTO that the pinned typed MPD model omits.
+pub(super) fn has_nonzero_segment_list_presentation_time_offset(body: &[u8]) -> Option<bool> {
+    let mut reader = NsReader::from_reader(body);
+    let mut buffer = Vec::new();
+    let mut has_nonzero_offset = false;
+
+    loop {
+        let (namespace, event) = reader.read_resolved_event_into(&mut buffer).ok()?;
+        let start = match &event {
+            Event::Start(start) | Event::Empty(start) => Some(start),
+            Event::Eof => return Some(has_nonzero_offset),
+            _ => None,
+        };
+
+        if let Some(start) = start
+            && matches!(
+                &namespace,
+                ResolveResult::Bound(namespace)
+                    if namespace.into_inner() == DASH_MPD_NAMESPACE
+            )
+            && start.name().local_name().as_ref() == b"SegmentList"
+        {
+            for attribute in start.attributes() {
+                let attribute = attribute.ok()?;
+                if attribute.key.as_ref() == b"presentationTimeOffset" {
+                    let value = attribute
+                        .normalized_value(XmlVersion::Implicit1_0)
+                        .ok()?;
+                    let offset = value.parse::<u64>().ok()?;
+                    has_nonzero_offset |= offset != 0;
+                }
+            }
+        }
+
+        buffer.clear();
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::representation_metadata;
@@ -288,6 +326,27 @@ mod tests {
             representation_metadata(body, 1).expect("foreign attributes do not invalidate the MPD");
         assert_eq!(metadata[0][0][0].id.as_deref(), Some("main"));
         assert!(!metadata[0][0][0].is_main);
+    }
+
+    #[test]
+    fn detects_nonzero_segment_list_presentation_time_offsets() {
+        let nonzero = br#"<MPD xmlns="urn:mpeg:dash:schema:mpd:2011"><Period><AdaptationSet><SegmentList presentationTimeOffset="9000"/></AdaptationSet></Period></MPD>"#;
+        assert_eq!(
+            super::has_nonzero_segment_list_presentation_time_offset(nonzero),
+            Some(true)
+        );
+
+        let zero = br#"<MPD xmlns="urn:mpeg:dash:schema:mpd:2011"><Period><AdaptationSet><SegmentList presentationTimeOffset="0"/></AdaptationSet></Period></MPD>"#;
+        assert_eq!(
+            super::has_nonzero_segment_list_presentation_time_offset(zero),
+            Some(false)
+        );
+
+        let foreign = br#"<MPD xmlns="urn:mpeg:dash:schema:mpd:2011" xmlns:foreign="urn:example:foreign"><Period><AdaptationSet><foreign:SegmentList presentationTimeOffset="9000"/></AdaptationSet></Period></MPD>"#;
+        assert_eq!(
+            super::has_nonzero_segment_list_presentation_time_offset(foreign),
+            Some(false)
+        );
     }
 
     #[test]

@@ -99,6 +99,123 @@ fn assert_has_audio_and_video(ffprobe: &Path, output: &Path) {
     );
 }
 
+fn shift_fragmented_mp4_decode_times(path: &Path, delta: u64) {
+    fn shift_boxes(bytes: &mut [u8], start: usize, end: usize, delta: u64, shifted: &mut usize) {
+        let mut cursor = start;
+        while cursor < end {
+            assert!(cursor.checked_add(8).is_some_and(|header_end| header_end <= end));
+            let size = u32::from_be_bytes(
+                bytes[cursor..cursor + 4]
+                    .try_into()
+                    .expect("read generated MP4 box size"),
+            );
+            let kind = bytes[cursor + 4..cursor + 8].to_vec();
+            let (box_size, header_size) = match size {
+                0 => (end - cursor, 8_usize),
+                1 => {
+                    let extended = u64::from_be_bytes(
+                        bytes[cursor + 8..cursor + 16]
+                            .try_into()
+                            .expect("read generated MP4 extended box size"),
+                    );
+                    (
+                        usize::try_from(extended).expect("generated MP4 box fits usize"),
+                        16_usize,
+                    )
+                }
+                value => (usize::try_from(value).expect("generated MP4 box fits usize"), 8),
+            };
+            assert!(box_size >= header_size, "generated MP4 box has a short header");
+            let box_end = cursor
+                .checked_add(box_size)
+                .filter(|box_end| *box_end <= end)
+                .expect("generated MP4 box stays within its parent");
+            let payload_start = cursor + header_size;
+
+            match kind.as_slice() {
+                b"moof" | b"traf" => {
+                    shift_boxes(bytes, payload_start, box_end, delta, shifted);
+                }
+                b"tfdt" => {
+                    let version = bytes[payload_start];
+                    let decode_time_start = payload_start + 4;
+                    match version {
+                        0 => {
+                            let value = u32::from_be_bytes(
+                                bytes[decode_time_start..decode_time_start + 4]
+                                    .try_into()
+                                    .expect("read generated 32-bit tfdt"),
+                            );
+                            let shifted_value = value
+                                .checked_add(u32::try_from(delta).expect("tfdt shift fits u32"))
+                                .expect("generated tfdt does not overflow");
+                            bytes[decode_time_start..decode_time_start + 4]
+                                .copy_from_slice(&shifted_value.to_be_bytes());
+                        }
+                        1 => {
+                            let value = u64::from_be_bytes(
+                                bytes[decode_time_start..decode_time_start + 8]
+                                    .try_into()
+                                    .expect("read generated 64-bit tfdt"),
+                            );
+                            let shifted_value = value
+                                .checked_add(delta)
+                                .expect("generated tfdt does not overflow");
+                            bytes[decode_time_start..decode_time_start + 8]
+                                .copy_from_slice(&shifted_value.to_be_bytes());
+                        }
+                        other => panic!("generated fMP4 has unsupported tfdt version {other}"),
+                    }
+                    *shifted += 1;
+                }
+                _ => {}
+            }
+
+            cursor = box_end;
+        }
+        assert_eq!(cursor, end, "generated MP4 boxes exactly fill their parent");
+    }
+
+    let mut bytes = std::fs::read(path).expect("read generated fragmented MP4");
+    let length = bytes.len();
+    let mut shifted = 0;
+    shift_boxes(&mut bytes, 0, length, delta, &mut shifted);
+    assert!(shifted > 0, "generated fragmented MP4 contains tfdt boxes");
+    std::fs::write(path, bytes).expect("write shifted fragmented MP4 timestamps");
+}
+
+fn ffprobe_stream_start_times(ffprobe: &Path, path: &Path) -> HashMap<String, f64> {
+    let probe = Command::new(ffprobe)
+        .args([
+            "-v",
+            "error",
+            "-show_entries",
+            "stream=codec_type,start_time",
+            "-of",
+            "compact=p=0",
+        ])
+        .arg(path)
+        .output()
+        .expect("run ffprobe for stream start times");
+    assert_command_succeeded(&probe, "ffprobe could not inspect stream timestamps");
+
+    String::from_utf8_lossy(&probe.stdout)
+        .lines()
+        .filter_map(|line| {
+            let mut codec_type = None;
+            let mut start_time = None;
+            for field in line.split('|') {
+                if let Some(value) = field.strip_prefix("codec_type=") {
+                    codec_type = Some(value.to_string());
+                } else if let Some(value) = field.strip_prefix("start_time=") {
+                    start_time = value.parse::<f64>().ok();
+                }
+            }
+            Some((codec_type?, start_time?))
+        })
+        .collect()
+}
+
 fn fixture_files(directory: &Path, urls: &[Url]) -> HashMap<String, Vec<u8>> {
     let mut files = HashMap::with_capacity(urls.len());
     for url in urls {
@@ -1603,6 +1720,117 @@ async fn hls_fmp4_fixture_downloads_and_finalizes_with_audio_and_video() {
         "destination part FFmpeg finalization unexpectedly aborted"
     );
     assert_has_audio_and_video(Path::new("ffprobe"), &part_output);
+}
+
+#[tokio::test]
+async fn dash_per_track_timestamp_offsets_align_fragmented_mp4_inputs() {
+    if !tools_available() {
+        return;
+    }
+
+    let root = TempRoot::new("dash-pto-finalize");
+    let video_input = root.path().join("video-track.mp4");
+    let audio_input = root.path().join("audio-track.mp4");
+
+    let video = Command::new("ffmpeg")
+        .args([
+            "-hide_banner",
+            "-loglevel",
+            "error",
+            "-y",
+            "-f",
+            "lavfi",
+            "-i",
+            "testsrc2=size=96x64:rate=12",
+            "-t",
+            "3",
+            "-c:v",
+            "mpeg4",
+            "-q:v",
+            "5",
+            "-video_track_timescale",
+            "1000",
+            "-movflags",
+            "+empty_moov+frag_keyframe+default_base_moof",
+            "-f",
+            "mp4",
+        ])
+        .arg(&video_input)
+        .output()
+        .expect("generate fragmented-MP4 video fixture");
+    assert_command_succeeded(&video, "FFmpeg could not generate the video input");
+
+    let audio = Command::new("ffmpeg")
+        .args([
+            "-hide_banner",
+            "-loglevel",
+            "error",
+            "-y",
+            "-f",
+            "lavfi",
+            "-i",
+            "sine=frequency=880:sample_rate=48000",
+            "-t",
+            "3",
+            "-c:a",
+            "aac",
+            "-b:a",
+            "64k",
+            "-movflags",
+            "+empty_moov+frag_keyframe+default_base_moof",
+            "-f",
+            "mp4",
+        ])
+        .arg(&audio_input)
+        .output()
+        .expect("generate fragmented-MP4 audio fixture");
+    assert_command_succeeded(&audio, "FFmpeg could not generate the audio input");
+
+    // DASH PTO maps the video sample timeline five seconds behind the Period
+    // presentation timeline. Shift every generated video fragment decode time
+    // to model that source without relying on an external media packager.
+    shift_fragmented_mp4_decode_times(&video_input, 5_000);
+
+    let ffprobe = Path::new("ffprobe");
+    let video_starts = ffprobe_stream_start_times(ffprobe, &video_input);
+    let audio_starts = ffprobe_stream_start_times(ffprobe, &audio_input);
+    let video_start = *video_starts.get("video").expect("video input stream");
+    let audio_start = *audio_starts.get("audio").expect("audio input stream");
+    assert!(
+        (video_start - 5.0).abs() < 0.01,
+        "the input video must start at 5 seconds to exercise the PTO offset: {video_start}"
+    );
+    assert!(
+        audio_start.abs() < 0.01,
+        "the input audio must start at zero: {audio_start}"
+    );
+
+    let output = root.path().join("dash-pto-output.part.mp4");
+    let (_stop_tx, mut abort) = tokio::sync::oneshot::channel();
+    assert!(
+        run_ffmpeg_with_offsets(
+            Path::new("ffmpeg"),
+            &video_input,
+            Some("-5.000000000"),
+            Some(&audio_input),
+            None,
+            SubtitleOutput::default(),
+            &output,
+            &mut abort,
+        )
+        .await
+        .expect("finalize independently offset DASH tracks"),
+        "DASH FFmpeg timestamp-offset finalization unexpectedly aborted"
+    );
+
+    let output_starts = ffprobe_stream_start_times(ffprobe, &output);
+    let video_start = *output_starts.get("video").expect("finalized video stream");
+    let audio_start = *output_starts.get("audio").expect("finalized audio stream");
+    let one_video_frame = 1.0 / 12.0;
+    assert!(
+        (video_start - audio_start).abs() < one_video_frame,
+        "finalized video/audio starts differ by more than one video frame: video={video_start}, audio={audio_start}"
+    );
 }
 
 #[tokio::test]

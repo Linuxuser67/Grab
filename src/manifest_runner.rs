@@ -1888,10 +1888,21 @@ async fn finalize_manifest_download(
     // filesystem (staged inputs plus mux output) and destination filesystem
     // (the no-clobber cross-device publication fallback).
     ensure_manifest_mux_spaces(staging, dest_dir, staged_bytes)?;
-    if !run_ffmpeg(
+    let (video_timestamp_offset, audio_timestamp_offset) = match &tracks {
+        Tracks::Dash { video, audio, .. } => (
+            video.input_timestamp_offset.ffmpeg_argument(),
+            audio
+                .as_ref()
+                .and_then(|plan| plan.input_timestamp_offset.ffmpeg_argument()),
+        ),
+        _ => (None, None),
+    };
+    if !run_ffmpeg_with_offsets(
         &ffmpeg,
         &video_input,
+        video_timestamp_offset.as_deref(),
         audio_input.as_deref(),
+        audio_timestamp_offset.as_deref(),
         SubtitleOutput {
             input: subtitle_input.as_deref(),
             embed: job.embed_subs,
@@ -4138,20 +4149,45 @@ async fn run_ffmpeg(
     output: &Path,
     abort: &mut tokio::sync::oneshot::Receiver<crate::video::StopIntent>,
 ) -> Result<bool, ManifestRunError> {
+    run_ffmpeg_with_offsets(
+        ffmpeg,
+        video_input,
+        None,
+        audio_input,
+        None,
+        subtitles,
+        output,
+        abort,
+    )
+    .await
+}
+
+async fn run_ffmpeg_with_offsets(
+    ffmpeg: &Path,
+    video_input: &Path,
+    video_input_offset: Option<&str>,
+    audio_input: Option<&Path>,
+    audio_input_offset: Option<&str>,
+    subtitles: SubtitleOutput<'_>,
+    output: &Path,
+    abort: &mut tokio::sync::oneshot::Receiver<crate::video::StopIntent>,
+) -> Result<bool, ManifestRunError> {
     let output_container = ManifestOutputContainer::from_path(output)?;
     let mut command = tokio::process::Command::new(ffmpeg);
     if is_hls_playlist_input(video_input) {
         add_hls_staging_options(&mut command);
     }
-    command
-        .arg("-hide_banner")
-        .arg("-nostdin")
-        .arg("-n")
-        .arg("-i")
-        .arg(video_input);
+    command.arg("-hide_banner").arg("-nostdin").arg("-n");
+    if let Some(offset) = video_input_offset {
+        command.arg("-itsoffset").arg(offset);
+    }
+    command.arg("-i").arg(video_input);
     if let Some(audio_input) = audio_input {
         if is_hls_playlist_input(audio_input) {
             add_hls_staging_options(&mut command);
+        }
+        if let Some(offset) = audio_input_offset {
+            command.arg("-itsoffset").arg(offset);
         }
         command.arg("-i").arg(audio_input);
         command.arg("-map").arg("0:v:0?").arg("-map").arg("1:a:0?");

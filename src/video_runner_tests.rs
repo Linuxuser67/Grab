@@ -545,7 +545,7 @@ fn staging_claim_skips_existing_base_file() {
 
     // Claim a staging name: should skip Title.mp4 (== dest) and Title.1.mp4 (exists),
     // landing on Title.1-1.mp4.
-    let (out, staging_name) = claim_staging_name(&job, "mp4").unwrap();
+    let (out, staging_name) = claim_staging_name(&job.dest, job.item_id, "mp4").unwrap();
 
     assert_eq!(staging_name, "Title.1-1.mp4");
     assert_eq!(out, dir.join("Title.1-1.mp4"));

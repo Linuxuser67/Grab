@@ -72,6 +72,26 @@ struct PendingDiscard {
     finalizer: tokio::task::JoinHandle<()>,
 }
 
+/// Await a GLib-local future without allowing shutdown to exceed its join budget.
+async fn wait_for_local_future<F>(future: F, timeout: Duration) -> bool
+where
+    F: std::future::Future<Output = ()>,
+{
+    use futures_util::future::{Either, select};
+
+    if timeout.is_zero() {
+        return false;
+    }
+    matches!(
+        select(
+            Box::pin(future),
+            Box::pin(glib::timeout_future(timeout)),
+        )
+        .await,
+        Either::Left(_)
+    )
+}
+
 /// Remove a discarded download's owned files, preserving native ownership records on error.
 fn cleanup_discarded_video_files(dest: &std::path::Path, id: u64) -> Result<(), String> {
     if let Some(dest_dir) = dest.parent() {
@@ -80,6 +100,10 @@ fn cleanup_discarded_video_files(dest: &std::path::Path, id: u64) -> Result<(), 
             crate::manifest_destination::remove_planned_parts(&staging, dest_dir, id)?;
         }
         crate::video::clean_staging_files(dest_dir, id);
+        // Native/live remux temporaries are lease-owned scratch, not resumable
+        // recording data. Reclaim them only after the attempt's tracked
+        // blocking workers have finished.
+        crate::video_staging::sweep_partial_remuxes(dest_dir, id);
     }
     crate::video::clean_dest_parts(dest);
     Ok(())
@@ -357,6 +381,8 @@ pub struct DownloadManager {
     preparation_handles: RefCell<HashMap<u64, glib::JoinHandle<()>>>,
     /// Pump task handles by download ID, so tests can wait for pump completion (a `spawn_future_local` task reaped on another thread trips glib's thread guard).
     pub(crate) pump_handles: RefCell<HashMap<u64, glib::JoinHandle<()>>>,
+    #[cfg(test)]
+    final_name_after_move_hook: RefCell<Option<std::sync::Arc<dyn Fn() + Send + Sync>>>,
     next_id: Cell<u64>,
     on_change: RefCell<Option<Box<dyn Fn()>>>,
     batch: Cell<u32>,
@@ -682,6 +708,8 @@ impl DownloadManager {
             preparing: RefCell::new(HashSet::new()),
             preparation_handles: RefCell::new(HashMap::new()),
             pump_handles: RefCell::new(HashMap::new()),
+            #[cfg(test)]
+            final_name_after_move_hook: RefCell::new(None),
             next_id: Cell::new(1),
             on_change: RefCell::new(None),
             batch: Cell::new(0),
@@ -2510,13 +2538,21 @@ impl DownloadManager {
                                             let old_path = item.file_path();
                                             let worker_old_path = old_path.clone();
                                             let worker_dir = std::path::PathBuf::from(dir.as_str());
+                                            #[cfg(test)]
+                                            let after_move_hook =
+                                                this.final_name_after_move_hook.borrow_mut().take();
                                             drop(this);
                                             let worker_result = gio::spawn_blocking(move || {
-                                                Self::adopt_final_name_candidates(
+                                                let adopted = Self::adopt_final_name_candidates(
                                                     &worker_old_path,
                                                     &worker_dir,
                                                     &candidates,
-                                                )
+                                                );
+                                                #[cfg(test)]
+                                                if let Some(hook) = after_move_hook {
+                                                    hook();
+                                                }
+                                                adopted
                                             })
                                             .await;
                                             let adopted = match worker_result {
@@ -2565,11 +2601,12 @@ impl DownloadManager {
                                                 if let Some(final_name) = adopted {
                                                     let moved_path = std::path::Path::new(&dir)
                                                         .join(&final_name);
+                                                    let rollback_moved_path = moved_path.clone();
                                                     let rollback_old_path = old_path.clone();
                                                     drop(this);
                                                     let rollback = gio::spawn_blocking(move || {
                                                         rename_noreplace(
-                                                            &moved_path,
+                                                            &rollback_moved_path,
                                                             &rollback_old_path,
                                                         )
                                                     })
@@ -3937,9 +3974,9 @@ impl DownloadManager {
     /// Engine invariant: a finished file is never deleted. The `remove_file` below is the single exception — a commit that won the race against its row's discard, leaving an orphan no row can own.
     fn finish_discard(&self, id: u64, dest: std::path::PathBuf, gate: std::sync::Arc<AttemptGate>) {
         let _ = gate.discard();
-        // Staging files live visibly in the dest dir as grab-<id>-*; no subfolder.
-        // self (Rc, !Send) cannot go to the tokio runtime: carry reservations as an Arc clone.
-        // Queue wakeups go through wake_queue() (thread-safe, no manager handle needed).
+        // Staging files live visibly in the dest dir as `grab-<id>-*`; no subfolder.
+        // `self` (Rc, !Send) cannot go to the tokio runtime: carry reservations as an `Arc` clone.
+        // Queue wakeups go through `wake_queue()` (thread-safe, no manager handle needed).
         let reservations = std::sync::Arc::clone(&self.reservations);
         // A final-name claim may be awaiting GIO's blocking pool. Wait for the
         // pump before cleanup, then use the row's final path rather than the
@@ -5523,6 +5560,7 @@ impl DownloadManager {
         let handles: Vec<_> = self.running.borrow_mut().drain().map(|(_, h)| h).collect();
         let finals: Vec<PendingDiscard> =
             self.discards.borrow_mut().drain().map(|(_, p)| p).collect();
+        let gates: Vec<_> = self.gates.borrow().values().cloned().collect();
         for handle in &handles {
             handle.abort();
         }
@@ -5532,14 +5570,22 @@ impl DownloadManager {
             }
         }
 
+        // Engine/finalizer joins and GTK-local pump joins share one deadline.
+        // A pump may be waiting for a blocking filename rename, so it cannot
+        // extend Quit beyond the same bound.
+        let shutdown_deadline = Instant::now() + Self::SHUTDOWN_JOIN_TIMEOUT;
+        let worker_join_timeout = shutdown_deadline.saturating_duration_since(Instant::now());
         let (joined_tx, joined_rx) = tokio::sync::oneshot::channel();
         tokio_rt().spawn(async move {
-            let joined = tokio::time::timeout(Self::SHUTDOWN_JOIN_TIMEOUT, async {
+            let joined = tokio::time::timeout(worker_join_timeout, async {
                 for handle in handles {
                     let _ = handle.await;
                 }
                 for pending in finals {
                     let _ = pending.finalizer.await;
+                }
+                for gate in gates {
+                    gate.wait_for_rollbacks().await;
                 }
             })
             .await
@@ -5547,20 +5593,31 @@ impl DownloadManager {
             let _ = joined_tx.send(joined);
         });
         let joined = joined_rx.await.unwrap_or(false);
-        // GLib pumps can still be awaiting a blocking final-name rename after
-        // their engine task has exited. Finish them before persisting filenames.
+        // A timed-out pump leaves its final filename unknown. Do not snapshot
+        // the in-memory queue or truncate partials unless every pump has joined.
         let pumps: Vec<_> = self
             .pump_handles
             .borrow_mut()
             .drain()
             .map(|(_, handle)| handle)
             .collect();
-        for pump in pumps {
-            let _ = pump.await;
-        }
-        if !joined {
+        let pumps_joined = if pumps.is_empty() {
+            true
+        } else {
+            wait_for_local_future(
+                async move {
+                    for pump in pumps {
+                        let _ = pump.await;
+                    }
+                },
+                shutdown_deadline.saturating_duration_since(Instant::now()),
+            )
+            .await
+        };
+        let persist_snapshot = joined && pumps_joined;
+        if !persist_snapshot {
             tracing::warn!(
-                "shutdown: async join deadline elapsed; persisting without truncating partial files"
+                "shutdown: async/pump join deadline elapsed; preserving the saved queue and skipping partial-file reconciliation"
             );
         } else {
             // Truncating a partially written segmented file is filesystem I/O;
@@ -5596,23 +5653,27 @@ impl DownloadManager {
                 }
             }
         }
-        self.persist_for_shutdown_async().await;
+        self.persist_for_shutdown_async(persist_snapshot).await;
         self.shutdown_finished.set(true);
     }
 
-    async fn persist_for_shutdown_async(&self) {
+    async fn persist_for_shutdown_async(&self, persist_snapshot: bool) {
         #[cfg(test)]
-        {
+        if persist_snapshot {
             self.persist_for_shutdown();
         }
         #[cfg(not(test))]
         {
-            if self.restore_state.get() == RestoreState::Ready {
+            if persist_snapshot && self.restore_state.get() == RestoreState::Ready {
                 if let (Some(queue), Some(tx)) =
                     (self.snapshot_queue_inner(true), &*self.persist_tx.borrow())
                 {
                     tx.send_replace(Some(queue));
                 }
+            } else if !persist_snapshot {
+                tracing::warn!(
+                    "shutdown: preserving the saved queue because an engine or GTK pump did not quiesce"
+                );
             } else {
                 tracing::warn!(
                     "shutdown: queue restore did not complete; preserving the saved queue file"

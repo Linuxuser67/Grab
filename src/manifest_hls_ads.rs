@@ -7,11 +7,19 @@ use m3u8_rs::{ExtTag, MediaPlaylist};
 use super::ManifestError;
 
 const CUE_ELAPSED_TOLERANCE_SECONDS: f64 = 0.25;
+// Publishers can round CUE-OUT-CONT duration to whole seconds while CUE-OUT
+// carries fractional seconds; the published MediaTailor example differs by 0.98s.
 const CUE_DURATION_TOLERANCE_SECONDS: f64 = 1.0;
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum AdSegmentDisposition {
+    Keep,
+    KeepAndStripMarkers,
+    Remove,
+}
+
 pub(super) struct AdRemovalPlan {
-    pub(super) skip_segments: Vec<bool>,
-    pub(super) strip_marker_tags: Vec<bool>,
+    pub(super) segments: Vec<AdSegmentDisposition>,
 }
 
 /// Identify ad segments from paired CUE markers without changing source identities.
@@ -40,8 +48,7 @@ pub(super) fn plan_ad_removal(
         .any(is_ad_marker_tag);
     if !has_ad_marker {
         return Ok(AdRemovalPlan {
-            skip_segments: vec![false; playlist.segments.len()],
-            strip_marker_tags: vec![false; playlist.segments.len()],
+            segments: vec![AdSegmentDisposition::Keep; playlist.segments.len()],
         });
     }
     if is_live {
@@ -56,8 +63,7 @@ pub(super) fn plan_ad_removal(
     }
 
     let segment_count = playlist.segments.len();
-    let mut skip_segments = vec![false; segment_count];
-    let mut strip_marker_tags = vec![false; segment_count];
+    let mut segments = vec![AdSegmentDisposition::Keep; segment_count];
     let mut in_ad_break = false;
     let mut partial_break = false;
     let mut expected_elapsed = 0.0_f64;
@@ -117,8 +123,7 @@ pub(super) fn plan_ad_removal(
             expected_elapsed = 0.0;
             partial_break = false;
             in_ad_break = true;
-            skip_segments[index] = true;
-            strip_marker_tags[index] = true;
+            segments[index] = AdSegmentDisposition::Remove;
         } else if let Some(tag) = cue_out_cont {
             let (elapsed, duration) = parse_cue_out_cont(tag)?;
             if !in_ad_break {
@@ -133,11 +138,6 @@ pub(super) fn plan_ad_removal(
                 expected_elapsed = elapsed;
                 actual_duration = 0.0;
             } else {
-                if (elapsed - expected_elapsed).abs() > CUE_ELAPSED_TOLERANCE_SECONDS {
-                    return Err(unsupported_ad_marker(
-                        "CUE-OUT-CONT elapsed time does not match preceding ad segments",
-                    ));
-                }
                 if declared_duration.is_some_and(|current| {
                     (current - duration).abs() > CUE_DURATION_TOLERANCE_SECONDS
                 }) {
@@ -154,8 +154,7 @@ pub(super) fn plan_ad_removal(
             if declared_duration.is_none() {
                 declared_duration = Some(duration);
             }
-            skip_segments[index] = true;
-            strip_marker_tags[index] = true;
+            segments[index] = AdSegmentDisposition::Remove;
         } else if cue_in.is_some() {
             if !in_ad_break {
                 return Err(unsupported_ad_marker("CUE-IN has no preceding ad break"));
@@ -174,13 +173,12 @@ pub(super) fn plan_ad_removal(
             declared_duration = None;
             expected_elapsed = 0.0;
             actual_duration = 0.0;
-            strip_marker_tags[index] = true;
+            segments[index] = AdSegmentDisposition::KeepAndStripMarkers;
         } else if in_ad_break {
-            skip_segments[index] = true;
-            strip_marker_tags[index] = true;
+            segments[index] = AdSegmentDisposition::Remove;
         }
 
-        if skip_segments[index] {
+        if segments[index] == AdSegmentDisposition::Remove {
             if !segment.duration.is_finite() || segment.duration <= 0.0 {
                 return Err(ManifestError::InvalidDuration);
             }
@@ -224,10 +222,7 @@ pub(super) fn plan_ad_removal(
         ));
     }
 
-    Ok(AdRemovalPlan {
-        skip_segments,
-        strip_marker_tags,
-    })
+    Ok(AdRemovalPlan { segments })
 }
 
 pub(super) fn is_ad_marker_tag(tag: &ExtTag) -> bool {

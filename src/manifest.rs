@@ -1276,11 +1276,12 @@ fn build_hls_plan(base_url: Url, mut playlist: MediaPlaylist) -> Result<HlsPlan,
         } else {
             index
         };
-        let skip_ad_segment = ad_removal.skip_segments[index];
+        let disposition = ad_removal.segments[index];
+        let skip_ad_segment = disposition == hls_ads::AdSegmentDisposition::Remove;
         if segment.unknown_tags.iter().any(|tag| tag.tag == "X-KEY") {
             return Err(ManifestError::UnsupportedEncryption);
         }
-        if ad_removal.strip_marker_tags[index] {
+        if disposition != hls_ads::AdSegmentDisposition::Keep {
             segment
                 .unknown_tags
                 .retain(|tag| !hls_ads::is_ad_marker_tag(tag));
@@ -1506,9 +1507,9 @@ fn build_hls_plan(base_url: Url, mut playlist: MediaPlaylist) -> Result<HlsPlan,
     for (segment, skip) in playlist
         .segments
         .into_iter()
-        .zip(ad_removal.skip_segments.into_iter())
+        .zip(ad_removal.segments.into_iter())
     {
-        if !skip {
+        if disposition != hls_ads::AdSegmentDisposition::Remove {
             retained_segments.push(segment);
         }
     }

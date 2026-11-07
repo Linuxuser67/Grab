@@ -1504,11 +1504,7 @@ fn build_hls_plan(base_url: Url, mut playlist: MediaPlaylist) -> Result<HlsPlan,
     }
 
     let mut retained_segments = Vec::with_capacity(playlist.segments.len());
-    for (segment, disposition) in playlist
-        .segments
-        .into_iter()
-        .zip(ad_removal.segments)
-    {
+    for (segment, disposition) in playlist.segments.into_iter().zip(ad_removal.segments) {
         if disposition != hls_ads::AdSegmentDisposition::Remove {
             retained_segments.push(segment);
         }

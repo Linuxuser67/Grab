@@ -1015,8 +1015,10 @@ fn show_manifest_ready(
     step.action_revealer.set_reveal_child(true);
     step.add_btn.set_icon_name("");
     step.add_btn.remove_css_class("circular");
-    step.add_btn.set_tooltip_text(Some(&gettext("Add download")));
-    step.add_btn.update_property(&[gtk4::accessible::Property::Label(&gettext("Add download"))]);
+    step.add_btn
+        .set_tooltip_text(Some(&gettext("Add download")));
+    step.add_btn
+        .update_property(&[gtk4::accessible::Property::Label(&gettext("Add download"))]);
     step.add_btn.set_label(&gettext("Add"));
     set_looking_up(step, false);
     set_lookup_add(lookup_add, true);
@@ -1124,7 +1126,8 @@ fn show_video_ready(v: &VideoStep) {
     v.add_btn.set_icon_name("");
     v.add_btn.remove_css_class("circular");
     v.add_btn.set_tooltip_text(Some(&gettext("Add download")));
-    v.add_btn.update_property(&[gtk4::accessible::Property::Label(&gettext("Add download"))]);
+    v.add_btn
+        .update_property(&[gtk4::accessible::Property::Label(&gettext("Add download"))]);
     v.add_btn.set_label(&gettext("Add"));
     v.name.set_visible(true);
     v.revert.set_visible(true);
@@ -2303,16 +2306,17 @@ fn build_url_controls() -> UrlControls {
         .valign(gtk4::Align::Center)
         .visible(false)
         .build();
-    select_files_btn.update_property(&[gtk4::accessible::Property::Label(&gettext(
-        "Select files",
-    ))]);
+    select_files_btn
+        .update_property(&[gtk4::accessible::Property::Label(&gettext("Select files"))]);
     let add_btn = gtk4::Button::builder()
         .icon_name("object-select-symbolic")
         .tooltip_text(gettext("Queue all files"))
         .css_classes(["suggested-action", "circular"])
         .valign(gtk4::Align::Center)
         .build();
-    add_btn.update_property(&[gtk4::accessible::Property::Label(&gettext("Queue all files"))]);
+    add_btn.update_property(&[gtk4::accessible::Property::Label(&gettext(
+        "Queue all files",
+    ))]);
     // Keep the existing SlideRight GtkRevealer: the two collection actions
     // appear together, before the gear and close controls.
     let actions = gtk4::Box::new(gtk4::Orientation::Horizontal, 6);
@@ -3591,8 +3595,7 @@ fn build_submit_handler(context: SubmitContext) -> SubmitHandler {
                     sync_entry_icon(&lookup_step);
                     match resolved {
                         Ok((magnet, name, entries))
-                            if entries.len() > 1
-                                && !matches!(source, SubmitSource::Button) =>
+                            if entries.len() > 1 && !matches!(source, SubmitSource::Button) =>
                         {
                             push_torrent_picker_page(
                                 &lookup_nav,
@@ -3955,10 +3958,14 @@ fn wire_url_entry(
                 step2.add_btn.set_label("");
                 step2.add_btn.set_icon_name("object-select-symbolic");
                 step2.add_btn.add_css_class("circular");
-                step2.add_btn.set_tooltip_text(Some(&gettext("Queue all files")));
-                step2.add_btn.update_property(&[gtk4::accessible::Property::Label(&gettext(
-                    "Queue all files",
-                ))]);
+                step2
+                    .add_btn
+                    .set_tooltip_text(Some(&gettext("Queue all files")));
+                step2
+                    .add_btn
+                    .update_property(&[gtk4::accessible::Property::Label(&gettext(
+                        "Queue all files",
+                    ))]);
                 step2.action_revealer.set_visible(true);
                 step2.action_revealer.set_reveal_child(true);
             }
@@ -4727,8 +4734,12 @@ fn show_gallery_ready(v: &VideoStep, card: crate::gallery_card::GalleryCard, tit
     v.add_btn.set_label("");
     v.add_btn.set_icon_name("object-select-symbolic");
     v.add_btn.add_css_class("circular");
-    v.add_btn.set_tooltip_text(Some(&gettext("Queue all files")));
-    v.add_btn.update_property(&[gtk4::accessible::Property::Label(&gettext("Queue all files"))]);
+    v.add_btn
+        .set_tooltip_text(Some(&gettext("Queue all files")));
+    v.add_btn
+        .update_property(&[gtk4::accessible::Property::Label(&gettext(
+            "Queue all files",
+        ))]);
     // Reset filter to All.
     v.gallery_filter.set_active_name(Some("all"));
     refresh_gallery_info(v, title);

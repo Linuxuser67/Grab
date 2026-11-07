@@ -20,7 +20,10 @@ pub(super) fn is_benign_hls_tag(tag: &m3u8_rs::ExtTag) -> bool {
                     .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'+' | b'/' | b'='))
         }
         "X-ASSET" => has_only_attributes(rest, &["CAID", "UPID"]),
-        "X-CUE" => has_only_attributes(rest, &["DURATION", "ID", "TYPE", "TIME", "ELAPSEDTIME"]),
+        "X-CUE" => has_only_attributes(
+            rest,
+            &["DURATION", "ID", "TYPE", "TIME", "ELAPSEDTIME"],
+        ),
         "X-CUE-OUT" => {
             is_positive_decimal(rest) || has_only_attributes(rest, &["DURATION"])
         }
@@ -67,7 +70,7 @@ mod tests {
         let plan = plan_hls_media_playlist(BASE_URL, body)
             .expect("documented ad-marker metadata should remain on the native path");
 
-        let expected_urls = [
+        let expected_urls: &[&str] = &[
             "https://cdn.example.test/path/segment-8779957.ts?m=1566416212",
             "https://cdn.example.test/path/segment-8779958.ts?m=1566416212",
             "https://cdn.example.test/path/segment-8779959.ts?m=1566416212",
@@ -86,7 +89,7 @@ mod tests {
             .iter()
             .map(|resource| resource.url.as_str())
             .collect::<Vec<_>>();
-        assert_eq!(actual_urls, expected_urls);
+        assert_eq!(actual_urls.as_slice(), expected_urls);
 
         let local = plan.local_playlist_bytes().expect("serialize local playlist");
         let local = String::from_utf8(local).expect("local playlist should be UTF-8");

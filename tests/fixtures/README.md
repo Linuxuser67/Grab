@@ -10,4 +10,4 @@
 
 - `hls-ad-marker-metadata.m3u8` is based on the AWS Elemental MediaTailor origin-manifest example for `EXT-OATCLS-SCTE35`, `EXT-X-CUE-OUT`, `EXT-X-CUE-OUT-CONT`, and `EXT-X-CUE-IN`: https://docs.aws.amazon.com/mediatailor/latest/ug/manifest-hls-example.html
 - Its `EXT-X-ASSET` and `EXT-X-CUE` markers follow the AWS Elemental MediaLive examples: https://docs.aws.amazon.com/medialive/latest/ug/sample-manifests-hls.html
-- Segment URIs are replaced with deterministic fixture names while preserving the published marker syntax and order. The fixture checks that marker removal leaves all 12 listed segment resources unchanged.
+- Segment URIs are replaced with deterministic fixture names and SCTE-35 payloads with a fixed non-secret base64 placeholder. Marker syntax and order are preserved, and the fixture checks that marker removal leaves all 12 listed segment resources unchanged.

@@ -20,7 +20,7 @@ pub(crate) mod dash;
 #[path = "manifest_hls_tags.rs"]
 mod hls_tags;
 
-use hls_tags::is_benign_hls_tag;
+use self::hls_tags::is_benign_hls_tag;
 
 #[path = "manifest_dash_roles.rs"]
 mod dash_roles;

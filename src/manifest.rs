@@ -17,6 +17,9 @@ pub(crate) const MAX_MANIFEST_BYTES: usize = 4 * 1024 * 1024;
 #[path = "manifest_dash.rs"]
 pub(crate) mod dash;
 
+#[path = "manifest_hls_ads.rs"]
+mod hls_ads;
+
 #[path = "manifest_dash_roles.rs"]
 mod dash_roles;
 
@@ -47,6 +50,8 @@ pub(crate) enum ManifestError {
     UnsupportedSessionKeyMethod,
     #[error("unsupported HLS session key format")]
     UnsupportedSessionKeyFormat,
+    #[error("unsupported HLS ad insertion marker: {0}")]
+    UnsupportedAdInsertion(String),
     #[error("unsupported HLS resource url")]
     UnsupportedResourceUrl,
     #[error("HLS byte range has no usable offset")]
@@ -1251,6 +1256,9 @@ fn build_hls_plan(base_url: Url, mut playlist: MediaPlaylist) -> Result<HlsPlan,
     let mut active_map = None;
     let mut total_duration = Duration::ZERO;
     let mut maximum_segment_duration = 0.0_f64;
+    let mut pending_method_none_reset = false;
+
+    let ad_removal = hls_ads::plan_ad_removal(&playlist, is_live)?;
 
     for (index, segment) in playlist.segments.iter_mut().enumerate() {
         let sequence_index = u64::try_from(index).map_err(|_| ManifestError::DurationOverflow)?;
@@ -1258,10 +1266,8 @@ fn build_hls_plan(base_url: Url, mut playlist: MediaPlaylist) -> Result<HlsPlan,
             .media_sequence
             .checked_add(sequence_index)
             .ok_or(ManifestError::DurationOverflow)?;
-        // Static VOD playlists retain their established zero-based staging
-        // names. Live and EVENT/unspecified-type playlists use absolute media
-        // sequence identities, including a final ENDLIST snapshot, so retry
-        // windows continue to resolve to the same local resource names.
+        // Use source positions for durable staging names. Ad removal must not
+        // renumber the surviving resources in an EVENT/sequence-based playlist.
         let stable_live_identity = is_live
             || (playlist.playlist_type != Some(MediaPlaylistType::Vod)
                 && playlist.media_sequence > 0);
@@ -1270,21 +1276,33 @@ fn build_hls_plan(base_url: Url, mut playlist: MediaPlaylist) -> Result<HlsPlan,
         } else {
             index
         };
+        let disposition = ad_removal.segments[index];
+        let skip_ad_segment = disposition == hls_ads::AdSegmentDisposition::Remove;
         if segment.unknown_tags.iter().any(|tag| tag.tag == "X-KEY") {
-            // A key tag the parser could not decode must never pass through
-            // into FFmpeg, where it could bypass our encryption policy.
             return Err(ManifestError::UnsupportedEncryption);
         }
+        if disposition != hls_ads::AdSegmentDisposition::Keep {
+            segment
+                .unknown_tags
+                .retain(|tag| !hls_ads::is_ad_marker_tag(tag));
+        }
         reject_unsupported_hls_tags(&segment.unknown_tags)?;
-        // Keep the local playlist limited to resource-affecting metadata.
         segment.unknown_tags.retain(|tag| !is_benign_hls_tag(tag));
 
+        // Preserve the first METHOD=NONE reset on the next kept program
+        // segment if its original boundary was inside the removed ad interval.
         if let Some(key) = segment.key.take() {
             if key.method == KeyMethod::None {
-                // Keep METHOD=NONE on the first segment after the explicit
-                // reset, then omit the parser's repeated inherited copies.
                 if !method_none_active {
+                    if skip_ad_segment {
+                        pending_method_none_reset = true;
+                    } else {
+                        segment.key = Some(key);
+                        pending_method_none_reset = false;
+                    }
+                } else if pending_method_none_reset && !skip_ad_segment {
                     segment.key = Some(key);
+                    pending_method_none_reset = false;
                 }
                 active_key = None;
                 method_none_active = true;
@@ -1292,9 +1310,20 @@ fn build_hls_plan(base_url: Url, mut playlist: MediaPlaylist) -> Result<HlsPlan,
                 active_key = Some(key.clone());
                 segment.key = Some(key);
                 method_none_active = false;
+                pending_method_none_reset = false;
             }
         } else {
             segment.key = active_key.clone();
+            if !skip_ad_segment && pending_method_none_reset {
+                segment.key = Some(m3u8_rs::Key {
+                    method: KeyMethod::None,
+                    uri: None,
+                    iv: None,
+                    keyformat: None,
+                    keyformatversions: None,
+                });
+                pending_method_none_reset = false;
+            }
         }
         if let Some(map) = segment.map.as_ref() {
             active_map = Some(map.clone());
@@ -1310,13 +1339,77 @@ fn build_hls_plan(base_url: Url, mut playlist: MediaPlaylist) -> Result<HlsPlan,
         total_duration = total_duration
             .checked_add(duration)
             .ok_or(ManifestError::DurationOverflow)?;
+        if segment_duration.round() > source_target_duration as f64 {
+            return Err(ManifestError::InvalidDuration);
+        }
+
+        if skip_ad_segment {
+            // Ad resources are not fetched, so do not apply the native
+            // same-origin guard to their URLs. Preserve range continuation
+            // only when their URL and byte range can be parsed safely.
+            previous_segment_range = match segment.byte_range.as_ref() {
+                Some(byte_range) if byte_range.length > 0 => {
+                    let resource_url = base_url
+                        .join(&segment.uri)
+                        .ok()
+                        .map(|url| resource_cache_key(&url));
+                    resource_url.and_then(|resource_url| {
+                        let offset = byte_range.offset.or_else(|| {
+                            previous_segment_range
+                                .as_ref()
+                                .filter(|(previous_url, _)| previous_url == &resource_url)
+                                .map(|(_, next_offset)| *next_offset)
+                        })?;
+                        offset
+                            .checked_add(byte_range.length)
+                            .map(|next_offset| (resource_url, next_offset))
+                    })
+                }
+                _ => None,
+            };
+            continue;
+        }
+
+        let segment_url = resolve_resource_url(&base_url, &segment.uri)?;
+        let range = match segment.byte_range.as_ref() {
+            Some(byte_range) => {
+                let resource_url = resource_cache_key(&segment_url);
+                let offset = match byte_range.offset {
+                    Some(offset) => offset,
+                    None => previous_segment_range
+                        .as_ref()
+                        .filter(|(previous_url, _)| previous_url == &resource_url)
+                        .map(|(_, next_offset)| *next_offset)
+                        .ok_or(ManifestError::MissingByteRangeOffset)?,
+                };
+                let range = checked_byte_range(byte_range.length, offset)?;
+                let next_offset = offset
+                    .checked_add(byte_range.length)
+                    .ok_or(ManifestError::InvalidByteRange)?;
+                previous_segment_range = Some((resource_url, next_offset));
+                Some(range)
+            }
+            None => {
+                previous_segment_range = None;
+                None
+            }
+        };
+
         maximum_segment_duration = maximum_segment_duration.max(segment_duration);
+
+        if segment
+            .key
+            .as_ref()
+            .is_some_and(|key| key.method == KeyMethod::SampleAES)
+            && [".m4s", ".mp4", ".cmfv", ".cmfa"]
+                .iter()
+                .any(|extension| segment_url.path().to_ascii_lowercase().ends_with(extension))
+        {
+            return Err(ManifestError::UnsupportedEncryption);
+        }
 
         if let Some(map) = segment.map.as_mut() {
             let map_url = resolve_resource_url(&base_url, &map.uri)?;
-            // EXT-X-MAP byte ranges do not have a preceding media-segment
-            // range to infer from. Require an explicit offset rather than
-            // guessing and fetching the wrong initialization bytes.
             let map_range = map
                 .byte_range
                 .as_ref()
@@ -1346,8 +1439,6 @@ fn build_hls_plan(base_url: Url, mut playlist: MediaPlaylist) -> Result<HlsPlan,
 
         if let Some(key) = segment.key.as_mut() {
             if key.method == KeyMethod::None {
-                // RFC 8216 METHOD=NONE has no key resource or encryption
-                // parameters. Preserve the reset tag; do not fetch a key.
                 if key.uri.is_some()
                     || key.iv.is_some()
                     || key.keyformat.is_some()
@@ -1360,15 +1451,9 @@ fn build_hls_plan(base_url: Url, mut playlist: MediaPlaylist) -> Result<HlsPlan,
                 if key.method != KeyMethod::AES128 && !sample_aes {
                     return Err(ManifestError::UnsupportedEncryption);
                 }
-                // VSD's HLS decrypter handles SAMPLE-AES MPEG-TS elementary
-                // streams. SAMPLE-AES in fragmented MP4 is the Common Encryption
-                // cbcs scheme and is deliberately not routed through this path.
                 if sample_aes && segment.map.is_some() {
                     return Err(ManifestError::UnsupportedEncryption);
                 }
-                // RFC 8216 requires an explicit IV for AES-128-encrypted
-                // initialization sections; the media-sequence-derived IV rule
-                // applies to media segments, not initialization sections.
                 if segment.map.is_some() && key.iv.is_none() {
                     return Err(ManifestError::UnsupportedEncryption);
                 }
@@ -1407,41 +1492,6 @@ fn build_hls_plan(base_url: Url, mut playlist: MediaPlaylist) -> Result<HlsPlan,
             }
         }
 
-        let segment_url = resolve_resource_url(&base_url, &segment.uri)?;
-        if segment
-            .key
-            .as_ref()
-            .is_some_and(|key| key.method == KeyMethod::SampleAES)
-            && [".m4s", ".mp4", ".cmfv", ".cmfa"]
-                .iter()
-                .any(|extension| segment_url.path().to_ascii_lowercase().ends_with(extension))
-        {
-            return Err(ManifestError::UnsupportedEncryption);
-        }
-        let range = match segment.byte_range.as_ref() {
-            Some(byte_range) => {
-                let resource_url = resource_cache_key(&segment_url);
-                let offset = match byte_range.offset {
-                    Some(offset) => offset,
-                    None => previous_segment_range
-                        .as_ref()
-                        .filter(|(previous_url, _)| previous_url == &resource_url)
-                        .map(|(_, next_offset)| *next_offset)
-                        .ok_or(ManifestError::MissingByteRangeOffset)?,
-                };
-                let range = checked_byte_range(byte_range.length, offset)?;
-                let next_offset = offset
-                    .checked_add(byte_range.length)
-                    .ok_or(ManifestError::InvalidByteRange)?;
-                previous_segment_range = Some((resource_url, next_offset));
-                Some(range)
-            }
-            None => {
-                // A full-resource segment breaks implicit range continuation.
-                previous_segment_range = None;
-                None
-            }
-        };
         let filename = resource_filename("segment", Some(resource_index), &segment_url, range);
         resources.push(HlsResource {
             url: segment_url,
@@ -1451,6 +1501,17 @@ fn build_hls_plan(base_url: Url, mut playlist: MediaPlaylist) -> Result<HlsPlan,
         });
         segment.uri = filename;
         segment.byte_range = None;
+    }
+
+    let mut retained_segments = Vec::with_capacity(playlist.segments.len());
+    for (segment, disposition) in playlist.segments.into_iter().zip(ad_removal.segments) {
+        if disposition != hls_ads::AdSegmentDisposition::Remove {
+            retained_segments.push(segment);
+        }
+    }
+    playlist.segments = retained_segments;
+    if playlist.segments.is_empty() {
+        return Err(ManifestError::EmptyPlaylist);
     }
 
     // Preserve checked cumulative-duration validation without storing an

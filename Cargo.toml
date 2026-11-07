@@ -20,13 +20,14 @@ gio = "0.22"
 url = "2"
 # HLS playlist parsing and local media-playlist serialization.
 m3u8-rs = "6.0.1"
-# Validate MPEG-TS/PES structure before iori-ssa SAMPLE-AES processing.
+# SAMPLE-AES preflight reassembles PES/Raw packets with the API also used by iori-ssa.
+# Post-decryption transport-stream validation uses the separate mpeg-ts parser.
 mpeg2ts = "=0.3.1"
 # Parse and validate MPEG-2 transport packets in native HLS segments.
 mpeg-ts = { version = "=0.6.2", default-features = false, features = ["std"] }
 # Parse ISO BMFF box trees for structural validation of native fMP4 resources.
 mp4box = { version = "=0.14.0", default-features = false }
-# VSD uses iori-ssa for identity-key SAMPLE-AES MPEG-TS decryption.
+# Keep this exact pin: the ADTS safety guard is audited against iori-ssa 0.2.1 parser behavior.
 iori-ssa = "=0.2.1"
 # Parse HLS diagnostics without exposing playlist contents. m3u8-rs exposes nom 7 parser errors.
 nom = "7"
@@ -82,6 +83,8 @@ proptest = "1"
 # Enable ignored-MPD-element diagnostics only in test builds.
 dash-mpd-core = { version = "=0.1.0", features = ["warn_ignored_elements"] }
 
+# Keep the default unwind strategy: SAMPLE-AES contains iori-ssa panics with catch_unwind.
+# Switching to panic = "abort" would make malformed segments process-fatal.
 [profile.release]
 opt-level = 3
 lto = "fat"

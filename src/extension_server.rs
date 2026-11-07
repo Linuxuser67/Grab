@@ -1019,8 +1019,8 @@ pub(crate) async fn purge_handoff_cookies_async() {
     }
 }
 
-/// Synchronous shutdown fallback and test helper. Filesystem work still runs
-/// on a dedicated worker, which is joined so shutdown cannot discard it.
+/// Synchronous shutdown fallback and test helper. Filesystem work runs on a
+/// dedicated worker, but this caller blocks until that worker has joined.
 pub(crate) fn purge_handoff_cookies() {
     let paths = take_handoff_cookie_paths();
     if paths.is_empty() {

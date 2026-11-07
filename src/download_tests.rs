@@ -9291,11 +9291,13 @@ fn remove_during_finished_name_rename_waits_for_final_path_cleanup() {
     let deadline = std::time::Instant::now() + Duration::from_secs(10);
     loop {
         context.iteration(false);
+        // start_next prunes completed finalizers, so absence from the
+        // registry is also a completed state.
         let finalizer_finished = manager
             .discards
             .borrow()
             .get(&id)
-            .is_some_and(|pending| pending.finalizer.is_finished());
+            .is_none_or(|pending| pending.finalizer.is_finished());
         if finalizer_finished {
             break;
         }

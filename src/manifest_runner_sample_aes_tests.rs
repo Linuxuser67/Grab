@@ -5,8 +5,8 @@ use mpeg2ts::{
     es::{StreamId, StreamType},
     pes::PesHeader,
     ts::{
-        ContinuityCounter, EsInfo, Pid, ProgramAssociation, TsHeader, TsPacket, TsPacketWriter,
-        TsPayload, TransportScramblingControl, VersionNumber, WriteTsPacket,
+        ContinuityCounter, EsInfo, Pid, ProgramAssociation, TransportScramblingControl, TsHeader,
+        TsPacket, TsPacketWriter, TsPayload, VersionNumber, WriteTsPacket,
         payload::{Bytes, Pat, Pes, Pmt},
     },
 };
@@ -24,8 +24,7 @@ fn adts_header(frame_length: usize) -> [u8; 7] {
         0x50,
         u8::try_from((frame_length >> 11) & 0x03).expect("two-bit field fits"),
         u8::try_from((frame_length >> 3) & 0xff).expect("eight-bit field fits"),
-        u8::try_from(((frame_length & 0x07) << 5) | 0x1f)
-            .expect("ADTS length bits fit"),
+        u8::try_from(((frame_length & 0x07) << 5) | 0x1f).expect("ADTS length bits fit"),
         0xfc,
     ]
 }
@@ -103,8 +102,7 @@ fn sample_aes_aac_transport_stream(split_at: usize, elementary_stream: &[u8]) ->
         .expect("write PES start");
 
     for (index, chunk) in continuation.chunks(RAW_CONTINUATION_CHUNK_SIZE).enumerate() {
-        let continuity_counter =
-            u8::try_from(index + 1).expect("fixture continuity counter fits");
+        let continuity_counter = u8::try_from(index + 1).expect("fixture continuity counter fits");
         writer
             .write_ts_packet(&ts_packet(
                 AAC_PID,

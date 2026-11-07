@@ -17,10 +17,10 @@ pub struct GalleryCard {
     pub items: Vec<GalleryItem>,
     /// Per-host sticky mode preference.
     pub sticky: Option<StickyMode>,
-    /// Total file counts per filter (from `count_gallery_files`).
-    /// `None` = not yet counted.
+    /// Per-filter file totals used as progress denominators when available.
+    /// `None` = not yet counted or the count request failed.
     total: RefCell<std::collections::HashMap<GalleryFilter, Option<u32>>>,
-    /// Source URL (for filter-toggle recounts).
+    /// Source URL, used to retrieve progress totals when the filter changes.
     url: String,
 }
 

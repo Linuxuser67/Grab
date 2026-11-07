@@ -658,20 +658,56 @@ program.ts
 
     #[test]
     fn malformed_ad_marker_attributes_and_cue_timing_fall_back() {
-        for marker in [
-            "#EXT-X-ASSET:CAID=\\"unterminated",
-            "#EXT-X-CUE-OUT: DURATION=\\"8",
-            "#EXT-X-CUE-OUT-CONT:ElapsedTime=0.5,Duration=8,URI=\\"https://ads.example.test/ad.ts\\"",
+        let malformed_asset = br#"#EXTM3U
+#EXT-X-TARGETDURATION:4
+#EXT-X-CUE-OUT:8
+#EXT-X-ASSET:CAID="unterminated
+#EXTINF:4,
+ad-one.ts
+#EXTINF:4,
+ad-two.ts
+#EXT-X-CUE-IN
+#EXTINF:4,
+program.ts
+#EXT-X-ENDLIST
+"#;
+        let malformed_cue_out = br#"#EXTM3U
+#EXT-X-TARGETDURATION:4
+#EXT-X-CUE-OUT:DURATION="8
+#EXTINF:4,
+ad-one.ts
+#EXTINF:4,
+ad-two.ts
+#EXT-X-CUE-IN
+#EXTINF:4,
+program.ts
+#EXT-X-ENDLIST
+"#;
+        let resource_bearing_continuation = br#"#EXTM3U
+#EXT-X-TARGETDURATION:4
+#EXT-X-CUE-OUT:8
+#EXTINF:4,
+ad-one.ts
+#EXT-X-CUE-OUT-CONT:ElapsedTime=4,Duration=8,URI="https://ads.example.test/ad.ts"
+#EXTINF:4,
+ad-two.ts
+#EXT-X-CUE-IN
+#EXTINF:4,
+program.ts
+#EXT-X-ENDLIST
+"#;
+
+        for body in [
+            malformed_asset.as_slice(),
+            malformed_cue_out.as_slice(),
+            resource_bearing_continuation.as_slice(),
         ] {
-            let body = format!(
-                "#EXTM3U\\n#EXT-X-TARGETDURATION:4\\n#EXT-X-CUE-OUT:8\\n{marker}\\n#EXTINF:4,\\nad.ts\\n#EXT-X-CUE-IN\\n#EXTINF:4,\\nprogram.ts\\n#EXT-X-ENDLIST\\n"
-            );
             assert!(
                 matches!(
-                    plan_hls_media_playlist(BASE_URL, body.as_bytes()).err(),
+                    plan_hls_media_playlist(BASE_URL, body).err(),
                     Some(crate::manifest::ManifestError::UnsupportedAdInsertion(_))
                 ),
-                "malformed or resource-bearing ad marker must remain on fallback: {marker}"
+                "malformed or resource-bearing ad markers must remain on fallback"
             );
         }
 

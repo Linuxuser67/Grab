@@ -2547,5 +2547,6 @@ program-after.ts
             "planned program resource was not staged: {}",
             resource.filename
         );
-    }}
+    }
+}
 

@@ -80,7 +80,10 @@ pub fn show(parent: &impl glib::object::IsA<gtk4::Widget>, on_check: impl Fn() +
         let pkgs = match result {
             Ok(pkgs) => pkgs,
             Err(error) => {
-                tracing::warn!(error = ?error, "could not read distribution metadata for install help");
+                tracing::warn!(
+                    error = ?error,
+                    "could not read distribution metadata for install help"
+                );
                 None
             }
         };

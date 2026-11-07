@@ -3000,7 +3000,10 @@ mod tests {
         }
         assert!(paths.iter().all(|path| path.exists()));
         crate::runtime::tokio_rt().block_on(purge_handoff_cookies_async());
-        assert!(paths.iter().all(|path| !path.exists()), "files must be deleted");
+        assert!(
+            paths.iter().all(|path| !path.exists()),
+            "files must be deleted"
+        );
         assert!(handoff_cookie_args("https://example.com/async-purge-0").is_empty());
     }
 

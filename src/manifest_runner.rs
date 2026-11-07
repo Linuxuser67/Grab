@@ -5541,10 +5541,12 @@ segment-2.m4s
                 length: 44,
             },
             index_is_external: true,
-            initialization_range: ManifestByteRange {
+            initialization_url: media_url.clone(),
+            initialization_is_external: false,
+            initialization_range: Some(ManifestByteRange {
                 offset: 0,
                 length: 100,
-            },
+            }),
             index_range_exact: false,
             timescale: Some(1_000),
         };

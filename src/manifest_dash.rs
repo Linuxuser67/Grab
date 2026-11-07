@@ -1078,6 +1078,7 @@ pub(crate) fn plan_dash_representation(
                 .map(|raw| resolve_resource(&representation.source.base_url, raw))
                 .transpose()?
                 .unwrap_or_else(|| representation.source.base_url.clone());
+            let index_is_external = index_url != representation.source.base_url;
             let initialization_url = index
                 .initialization_url
                 .as_deref()
@@ -2540,12 +2541,7 @@ fn expand_indexed_base(
     if url == media_url && index.initialization_range.is_none() {
         return Err(DashError::UnsupportedAddressing);
     }
-    let filename = super::resource_filename(
-        "dash-init",
-        Some(0),
-        &url,
-        index.initialization_range,
-    );
+    let filename = super::resource_filename("dash-init", Some(0), &url, index.initialization_range);
     Ok(vec![DashResource {
         url,
         range: index.initialization_range,
@@ -2778,7 +2774,10 @@ mod tests {
         let plan = plan_dash_representation(&manifest, &representation.key)
             .expect("separate init URL should be planned");
 
-        let index = plan.segment_base_index.as_ref().expect("deferred SIDX request");
+        let index = plan
+            .segment_base_index
+            .as_ref()
+            .expect("deferred SIDX request");
         assert!(index.initialization_is_external);
         assert_eq!(
             index.initialization_url.as_str(),
@@ -2805,17 +2804,25 @@ mod tests {
     </AdaptationSet>
   </Period>
 </MPD>"#;
-        let manifest = parse_dash_manifest(BASE_URL, body).expect("ranged separate init should parse");
+        let manifest =
+            parse_dash_manifest(BASE_URL, body).expect("ranged separate init should parse");
         let representation = &manifest.video_representations[0];
         let plan = plan_dash_representation(&manifest, &representation.key)
             .expect("ranged separate init should be planned");
-        let expected = ManifestByteRange { offset: 20, length: 100 };
+        let expected = ManifestByteRange {
+            offset: 20,
+            length: 100,
+        };
         assert_eq!(plan.resources[0].range, Some(expected));
         assert_eq!(
             plan.resources[0].url.as_str(),
             "https://cdn.example.test/path/init.mp4"
         );
-        assert!(plan.segment_base_index.expect("indexed base").initialization_is_external);
+        assert!(
+            plan.segment_base_index
+                .expect("indexed base")
+                .initialization_is_external
+        );
     }
 
     #[test]

@@ -25,11 +25,11 @@ pub(crate) enum DashXlinkElement {
 }
 
 impl DashXlinkElement {
-    fn from_name(name: &[u8]) -> Option<Self> {
+    fn from_name(name: &str) -> Option<Self> {
         match name {
-            b"Period" => Some(Self::Period),
-            b"AdaptationSet" => Some(Self::AdaptationSet),
-            b"Representation" => Some(Self::Representation),
+            "Period" => Some(Self::Period),
+            "AdaptationSet" => Some(Self::AdaptationSet),
+            "Representation" => Some(Self::Representation),
             _ => None,
         }
     }
@@ -66,7 +66,7 @@ struct ElementFrame {
 }
 
 struct DocumentAnalysis {
-    root_name: Vec<u8>,
+    root_name: String,
     root_is_dash: bool,
     root_range: Range<usize>,
     links: Vec<DashXlinkReference>,
@@ -94,17 +94,18 @@ pub(crate) fn linked_element(
 ) -> Result<&[u8], DashXlinkError> {
     let analysis = analyze_document(body, false)?;
     let expected_name = match expected {
-        DashXlinkElement::Period => b"Period".as_slice(),
-        DashXlinkElement::AdaptationSet => b"AdaptationSet".as_slice(),
-        DashXlinkElement::Representation => b"Representation".as_slice(),
+        DashXlinkElement::Period => "Period",
+        DashXlinkElement::AdaptationSet => "AdaptationSet",
+        DashXlinkElement::Representation => "Representation",
     };
     if !analysis.root_is_dash
-        || analysis.root_name.as_slice() != expected_name
+        || analysis.root_name != expected_name
         || !analysis.links.is_empty()
     {
         return Err(DashXlinkError::UnsupportedLink);
     }
-    body.get(analysis.root_range).ok_or(DashXlinkError::InvalidDocument)
+    body.get(analysis.root_range)
+        .ok_or(DashXlinkError::InvalidDocument)
 }
 
 pub(crate) fn replace_linked_elements(
@@ -120,7 +121,10 @@ pub(crate) fn replace_linked_elements(
     let mut output_length = body.len();
     let mut previous_end = 0_usize;
     for (link, replacement) in links.iter().zip(replacements) {
-        if link.range.start < previous_end || link.range.end < link.range.start || link.range.end > body.len() {
+        if link.range.start < previous_end
+            || link.range.end < link.range.start
+            || link.range.end > body.len()
+        {
             return Err(DashXlinkError::OverlappingLinks);
         }
         output_length = output_length
@@ -142,10 +146,7 @@ pub(crate) fn replace_linked_elements(
     Ok(output)
 }
 
-fn analyze_document(
-    body: &[u8],
-    require_onload: bool,
-) -> Result<DocumentAnalysis, DashXlinkError> {
+fn analyze_document(body: &[u8], require_onload: bool) -> Result<DocumentAnalysis, DashXlinkError> {
     if body.is_empty() {
         return Err(DashXlinkError::InvalidDocument);
     }
@@ -159,6 +160,7 @@ fn analyze_document(
     let mut root_range = None;
     let mut root_count = 0_usize;
     let mut element_count = 0_usize;
+    let mut previous_event_end = 0_usize;
 
     loop {
         let (namespace, event) = reader
@@ -176,8 +178,9 @@ fn analyze_document(
                 let end = usize::try_from(reader.buffer_position())
                     .map_err(|_| DashXlinkError::InvalidDocument)?;
                 let start_offset = body
-                    .get(..end)
-                    .and_then(|prefix| prefix.iter().rposition(|byte| *byte == b'<'))
+                    .get(previous_event_end..end)
+                    .and_then(|event| event.iter().position(|byte| *byte == b'<'))
+                    .and_then(|offset| previous_event_end.checked_add(offset))
                     .ok_or(DashXlinkError::InvalidDocument)?;
                 let local_name = start.name().local_name();
                 let is_dash = matches!(
@@ -193,17 +196,12 @@ fn analyze_document(
                     if root_count != 1 {
                         return Err(DashXlinkError::InvalidDocument);
                     }
-                    root_name = Some(local_name.as_ref().to_vec());
+                    root_name = Some(local_name.as_ref().to_string());
                     root_is_dash = is_dash;
                 }
 
                 let attributes = xlink_attributes(&reader, &start)?;
-                let link = link_action(
-                    is_dash,
-                    local_name.as_ref(),
-                    attributes,
-                    require_onload,
-                )?;
+                let link = link_action(is_dash, local_name.as_ref(), attributes, require_onload)?;
                 stack.push(ElementFrame {
                     start: start_offset,
                     link,
@@ -217,8 +215,9 @@ fn analyze_document(
                 let end = usize::try_from(reader.buffer_position())
                     .map_err(|_| DashXlinkError::InvalidDocument)?;
                 let start_offset = body
-                    .get(..end)
-                    .and_then(|prefix| prefix.iter().rposition(|byte| *byte == b'<'))
+                    .get(previous_event_end..end)
+                    .and_then(|event| event.iter().position(|byte| *byte == b'<'))
+                    .and_then(|offset| previous_event_end.checked_add(offset))
                     .ok_or(DashXlinkError::InvalidDocument)?;
                 let local_name = start.name().local_name();
                 let is_dash = matches!(
@@ -234,18 +233,15 @@ fn analyze_document(
                     if root_count != 1 {
                         return Err(DashXlinkError::InvalidDocument);
                     }
-                    root_name = Some(local_name.as_ref().to_vec());
+                    root_name = Some(local_name.as_ref().to_string());
                     root_is_dash = is_dash;
                     root_range = Some(start_offset..end);
                 }
 
                 let attributes = xlink_attributes(&reader, &start)?;
-                if let Some((element, action)) = link_action(
-                    is_dash,
-                    local_name.as_ref(),
-                    attributes,
-                    require_onload,
-                )? {
+                if let Some((element, action)) =
+                    link_action(is_dash, local_name.as_ref(), attributes, require_onload)?
+                {
                     links.push(DashXlinkReference {
                         range: start_offset..end,
                         element,
@@ -269,7 +265,7 @@ fn analyze_document(
                 }
             }
             Event::Text(text) if stack.is_empty() => {
-                if text.as_ref().iter().any(|byte| !byte.is_ascii_whitespace()) {
+                if !text.as_ref().chars().all(char::is_whitespace) {
                     return Err(DashXlinkError::InvalidDocument);
                 }
             }
@@ -278,6 +274,8 @@ fn analyze_document(
             _ => {}
         }
         buffer.clear();
+        previous_event_end = usize::try_from(reader.buffer_position())
+            .map_err(|_| DashXlinkError::InvalidDocument)?;
     }
 
     if !stack.is_empty() || root_count != 1 {
@@ -320,13 +318,13 @@ fn xlink_attributes<R: BufRead>(
                 .map_err(|_| DashXlinkError::InvalidDocument)?
                 .into_owned();
             match local_name.as_ref() {
-                b"href" => {
+                "href" => {
                     if href.is_some() {
                         return Err(DashXlinkError::UnsupportedLink);
                     }
                     href = Some(value);
                 }
-                b"actuate" => {
+                "actuate" => {
                     if actuate.is_some() {
                         return Err(DashXlinkError::UnsupportedLink);
                     }
@@ -392,16 +390,13 @@ mod tests {
             DashXlinkAction::Fetch("period.xml".to_string())
         );
         let replacement = format!(r#"<Period xmlns="{MPD}" duration="PT2S"/>"#).into_bytes();
-        let expanded = replace_linked_elements(
-            body.as_bytes(),
-            &links,
-            &[replacement],
-            4096,
-        )
-        .expect("replacement should fit");
-        assert!(std::str::from_utf8(&expanded)
-            .expect("expanded MPD is UTF-8")
-            .contains(r#"duration="PT2S""#));
+        let expanded = replace_linked_elements(body.as_bytes(), &links, &[replacement], 4096)
+            .expect("replacement should fit");
+        assert!(
+            std::str::from_utf8(&expanded)
+                .expect("expanded MPD is UTF-8")
+                .contains(r#"duration="PT2S""#)
+        );
     }
 
     #[test]

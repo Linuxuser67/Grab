@@ -763,13 +763,14 @@ async fn resolve_dash_xlinks(
                 let linked_body =
                     read_bounded_response_with_limit(response, remaining, "DASH XLink resource")
                         .await?;
-                total_link_bytes = total_link_bytes
-                    .checked_add(linked_body.len())
-                    .ok_or_else(|| {
-                        ManifestIntakeError::Unsupported(
-                            "The expanded DASH manifest exceeds its size limit".to_string(),
-                        )
-                    })?;
+                total_link_bytes =
+                    total_link_bytes
+                        .checked_add(linked_body.len())
+                        .ok_or_else(|| {
+                            ManifestIntakeError::Unsupported(
+                                "The expanded DASH manifest exceeds its size limit".to_string(),
+                            )
+                        })?;
                 dash_xlink::linked_element(&linked_body, link.element)
                     .map_err(|error| {
                         ManifestIntakeError::Unsupported(format!(
@@ -782,12 +783,13 @@ async fn resolve_dash_xlinks(
         replacements.push(replacement);
     }
 
-    dash_xlink::replace_linked_elements(body, &links, &replacements, MAX_MANIFEST_BYTES)
-        .map_err(|error| {
+    dash_xlink::replace_linked_elements(body, &links, &replacements, MAX_MANIFEST_BYTES).map_err(
+        |error| {
             ManifestIntakeError::Unsupported(format!(
                 "The expanded DASH manifest exceeds the supported structure or size limits: {error}"
             ))
-        })
+        },
+    )
 }
 
 /// Fetch and parse an HLS child media playlist using the caller's guarded client.
@@ -1068,9 +1070,10 @@ async fn read_bounded_response_with_limit(
     max_bytes: usize,
     context: &str,
 ) -> Result<Vec<u8>, ManifestIntakeError> {
-    if response.content_length().is_some_and(|length| {
-        usize::try_from(length).map_or(true, |length| length > max_bytes)
-    }) {
+    if response
+        .content_length()
+        .is_some_and(|length| usize::try_from(length).map_or(true, |length| length > max_bytes))
+    {
         return Err(ManifestIntakeError::Unsupported(format!(
             "The {context} exceeds its byte limit"
         )));

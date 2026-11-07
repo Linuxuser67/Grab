@@ -31,7 +31,7 @@ where
     let Ok((boxes, issues)) = mp4box::parser::parse_boxes_tolerant(&mut reader, start, end) else {
         return false;
     };
-    if !issues.is_empty() || boxes.is_empty() || !boxes_cover_range(&boxes, start, end) {
+    if !issues.is_empty() || boxes.is_empty() || !boxes_cover_range(&boxes, start, end, false) {
         return false;
     }
 
@@ -51,7 +51,7 @@ where
     (has_file_type && has_movie) || (has_movie_fragment && has_media_data)
 }
 
-fn boxes_cover_range(boxes: &[BoxRef], start: u64, end: u64) -> bool {
+fn boxes_cover_range(boxes: &[BoxRef], start: u64, end: u64, sample_entry_children: bool) -> bool {
     let mut next_offset = start;
 
     for box_ref in boxes {
@@ -72,10 +72,17 @@ fn boxes_cover_range(boxes: &[BoxRef], start: u64, end: u64) -> bool {
 
         let children_are_contiguous = match &box_ref.kind {
             NodeKind::Container(children) => {
-                let Some(children_start) = header.start.checked_add(header.header_size) else {
-                    return false;
+                // Sample entries carry codec-specific fixed fields between the
+                // box header and their first child box.
+                let children_start = if sample_entry_children {
+                    children.first().map_or(header_end, |child| child.hdr.start)
+                } else {
+                    header_end
                 };
-                boxes_cover_range(children, children_start, box_end)
+                if children_start < header_end || children_start > box_end {
+                    return false;
+                }
+                boxes_cover_range(children, children_start, box_end, false)
             }
             NodeKind::FullContainer {
                 data_offset,
@@ -89,7 +96,8 @@ fn boxes_cover_range(boxes: &[BoxRef], start: u64, end: u64) -> bool {
 
                 // stsd carries its entry_count after version/flags. Other
                 // FullContainer types place child boxes immediately after flags.
-                let prefix_len = if header.typ.0 == *b"stsd" { 4 } else { 0 };
+                let sample_entries = header.typ.0 == *b"stsd";
+                let prefix_len = if sample_entries { 4 } else { 0 };
                 let Some(children_start) = data_offset.checked_add(prefix_len) else {
                     return false;
                 };
@@ -99,7 +107,7 @@ fn boxes_cover_range(boxes: &[BoxRef], start: u64, end: u64) -> bool {
 
                 match children.first() {
                     Some(first_child) if first_child.hdr.start == children_start => {
-                        boxes_cover_range(children, children_start, box_end)
+                        boxes_cover_range(children, children_start, box_end, sample_entries)
                     }
                     Some(_) => false,
                     None => children_start == box_end,
@@ -294,6 +302,32 @@ mod tests {
         [ftyp, moov].concat()
     }
 
+    fn init_segment_with_sample_entries(entries: &[(&[u8; 4], usize, &[u8; 4])]) -> Vec<u8> {
+        let mut ftyp_payload = Vec::from(*b"isom");
+        ftyp_payload.extend_from_slice(&0_u32.to_be_bytes());
+        ftyp_payload.extend_from_slice(b"isom");
+        let ftyp = box_bytes(b"ftyp", &ftyp_payload);
+
+        let mut stsd_children = Vec::new();
+        for &(entry_type, fixed_len, child_type) in entries {
+            let mut entry_payload = vec![0_u8; fixed_len];
+            entry_payload.extend_from_slice(&box_bytes(child_type, &[]));
+            stsd_children.extend_from_slice(&box_bytes(entry_type, &entry_payload));
+        }
+
+        let mut stsd_payload = vec![0, 0, 0, 0];
+        let entry_count = u32::try_from(entries.len()).expect("test entry count fits in a u32");
+        stsd_payload.extend_from_slice(&entry_count.to_be_bytes());
+        stsd_payload.extend_from_slice(&stsd_children);
+        let stsd = box_bytes(b"stsd", &stsd_payload);
+        let stbl = box_bytes(b"stbl", &stsd);
+        let minf = box_bytes(b"minf", &stbl);
+        let mdia = box_bytes(b"mdia", &minf);
+        let trak = box_bytes(b"trak", &mdia);
+        let moov = box_bytes(b"moov", &trak);
+        [ftyp, moov].concat()
+    }
+
     fn media_segment() -> Vec<u8> {
         let mut mfhd_payload = vec![0, 0, 0, 0];
         mfhd_payload.extend_from_slice(&1_u32.to_be_bytes());
@@ -423,6 +457,19 @@ mod tests {
             &mut Cursor::new(empty_stsd.clone()),
             0,
             empty_stsd.len() as u64
+        ));
+    }
+
+    #[test]
+    fn accepts_sample_entries_with_codec_fixed_fields() {
+        // avc1 and mp4a keep codec-specific fixed fields before their first
+        // child box (avcC and esds respectively).
+        let init =
+            init_segment_with_sample_entries(&[(b"avc1", 78, b"avcC"), (b"mp4a", 28, b"esds")]);
+        assert!(is_fmp4_resource(
+            &mut Cursor::new(init.clone()),
+            0,
+            init.len() as u64
         ));
     }
 

@@ -76,14 +76,15 @@ Fetch each bounded index range, decode SIDX with the existing `mp4box`
 dependency, and translate direct and nested references into ordered Grab
 byte-range resources. Separate initialization URLs, dynamic SegmentBase, malformed or out-of-file
 references, and hierarchies exceeding the explicit depth/node/size limits remain
-on yt-dlp fallback. Non-zero SegmentBase presentation-time offsets also remain
-on fallback, as explained in phase 5 below.
+on yt-dlp fallback.
 
 Acceptance is covered by tests for exact/non-exact index ranges, initialization
 and media extents, nested child indexes, reference identity/timing validation,
 overlap, overflow, and truncated responses. Index responses require strict
 `206`/Content-Range validation and bounded bodies; media bytes flow through the
-existing ordered writer and recovery journal.
+existing ordered writer and recovery journal. Static non-zero
+`SegmentBase@presentationTimeOffset` values are also retained for per-track
+timestamp alignment during finalization.
 
 ### 2. Static multi-period DASH — implemented
 
@@ -163,7 +164,30 @@ acquisition, Widevine/PlayReady device-file support, or CDM integration is
 included. The existing HLS identity SAMPLE-AES MPEG-TS path remains on `main`;
 shelving this phase does not remove that already-supported HLS behavior.
 
-### 5. Broader DASH index addressing — evaluated, bounded subset implemented
+### 5. DASH presentation-time offsets — implemented bounded profile
+
+Static `SegmentTemplate` and `SegmentBase` `presentationTimeOffset` values are
+converted using each representation's timescale and Period start, then applied
+to that track's FFmpeg input with `-itsoffset`. Video and audio are offset
+independently; a non-zero Period start with zero PTO is handled by the same
+mapping. Zero-origin tracks omit the FFmpeg option and retain the existing
+finalization argument sequence. Dynamic non-zero PTO and non-zero
+`SegmentList@presentationTimeOffset` remain on yt-dlp fallback. Existing
+single-Period dynamic Period-start handling is unchanged and does not receive
+the new static mux offsets.
+
+Multi-Period template sources must produce one identical effective timestamp
+offset across all Periods; otherwise the planner rejects the presentation.
+WVTT/STPP normalization retains its zero-origin restriction and falls back when
+the selected subtitle track cannot be mapped without a separate timestamp
+transformation.
+
+Acceptance covers per-representation video/audio offsets, Period-start
+mapping, SegmentBase PTO, zero-origin behavior, SegmentList fallback, and
+FFmpeg/ffprobe validation that independently offset video and audio start within
+one video frame.
+
+### 6. Broader DASH index addressing — evaluated, bounded subset implemented
 
 The native path now supports:
 - `RepresentationIndex@sourceURL` with an explicit bounded `range`, either
@@ -175,11 +199,6 @@ The native path now supports:
   media resource.
 
 The following remain explicit yt-dlp fallbacks:
-- Non-zero `SegmentBase@presentationTimeOffset`. It maps each representation's
-  sample timeline to the Period timeline. Grab's finalizer currently stream
-  copies video and audio as separate inputs without applying per-representation
-  input timestamp offsets; accepting non-zero values could therefore misalign
-  the tracks. Zero-offset SegmentBase remains supported.
 - External RepresentationIndex hierarchies and external index resources without
   an explicit bounded range.
 - Separate initialization URLs, dynamic SegmentBase, and non-zero

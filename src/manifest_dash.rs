@@ -137,6 +137,32 @@ pub(crate) struct DashResource {
     pub(crate) segment_number: Option<u64>,
 }
 
+/// A signed nanosecond offset applied to one representation before muxing.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct DashTimestampOffset {
+    nanoseconds: i128,
+}
+
+impl DashTimestampOffset {
+    /// Format the offset for FFmpeg, omitting zero to preserve the old input path.
+    #[must_use]
+    pub(crate) fn ffmpeg_argument(self) -> Option<String> {
+        if self.nanoseconds == 0 {
+            return None;
+        }
+
+        let magnitude = self.nanoseconds.unsigned_abs();
+        let seconds = magnitude / 1_000_000_000;
+        let fraction = magnitude % 1_000_000_000;
+        let sign = if self.nanoseconds.is_negative() {
+            "-"
+        } else {
+            ""
+        };
+        Some(format!("{sign}{seconds}.{fraction:09}"))
+    }
+}
+
 /// Expanded initialization and media resources for one representation.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct DashRepresentationPlan {
@@ -145,6 +171,8 @@ pub(crate) struct DashRepresentationPlan {
     pub(crate) presentation: DashPresentation,
     pub(crate) resources: Box<[DashResource]>,
     pub(crate) segment_base_index: Option<DashSegmentBaseIndex>,
+    /// Maps the representation's sample timestamps onto the MPD presentation timeline.
+    pub(crate) input_timestamp_offset: DashTimestampOffset,
 }
 
 impl DashRepresentationPlan {
@@ -188,14 +216,51 @@ struct DashRepresentationSource {
     period_start: Duration,
 }
 
+fn source_timestamp_offset(
+    source: &DashRepresentationSource,
+) -> Result<DashTimestampOffset, DashError> {
+    let (timescale, presentation_time_offset) = match &source.addressing {
+        DashAddressing::Template(template) => {
+            (template.timescale, template.presentation_time_offset)
+        }
+        DashAddressing::List(_) => (1, 0),
+        DashAddressing::Base(base) => (base.timescale, base.presentation_time_offset),
+        DashAddressing::IndexedBase(index) => {
+            (index.timescale.unwrap_or(1), index.presentation_time_offset)
+        }
+    };
+    if timescale == 0 {
+        return Err(DashError::InvalidSegment);
+    }
+
+    let period_start_nanos = i128::try_from(source.period_start.as_nanos())
+        .map_err(|_| DashError::UnsupportedPresentation)?;
+    let pto_nanos = i128::from(presentation_time_offset)
+        .checked_mul(1_000_000_000)
+        .and_then(|scaled| scaled.checked_add(i128::from(timescale / 2)))
+        .and_then(|scaled| scaled.checked_div(i128::from(timescale)))
+        .ok_or(DashError::UnsupportedPresentation)?;
+    let nanoseconds = period_start_nanos
+        .checked_sub(pto_nanos)
+        .ok_or(DashError::UnsupportedPresentation)?;
+
+    Ok(DashTimestampOffset { nanoseconds })
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 enum DashAddressing {
     Template(DashTemplate),
     List(DashList),
     /// A single media file addressed by `BaseURL` (SegmentBase).
-    Base,
+    Base(DashBase),
     /// A static single-file representation whose SIDX describes byte ranges.
     IndexedBase(DashBaseIndex),
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct DashBase {
+    timescale: u64,
+    presentation_time_offset: u64,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -205,6 +270,7 @@ struct DashBaseIndex {
     initialization_range: ManifestByteRange,
     index_range_exact: bool,
     timescale: Option<u64>,
+    presentation_time_offset: u64,
 }
 
 #[derive(Clone, Copy)]
@@ -307,6 +373,11 @@ pub(crate) fn parse_dash_manifest_at(
     // does not restrict native download planning. ContentProtection remains
     // explicitly rejected below because it signals protected media.
     let mpd = dash_mpd_core::parse(body).map_err(|_| DashError::Parse)?;
+    if dash_roles::has_nonzero_segment_list_presentation_time_offset(body.as_bytes())
+        .ok_or(DashError::Parse)?
+    {
+        return Err(DashError::UnsupportedAddressing);
+    }
 
     let mut presentation = match mpd.mpdtype.as_deref() {
         None | Some("static") => {
@@ -419,6 +490,8 @@ pub(crate) fn parse_dash_manifest_at(
             return Err(DashError::UnsupportedPresentation);
         }
         let period_start = period.start.unwrap_or(previous_period_end);
+        // Live DASH finish/resume restores track files without a retained
+        // representation plan, so it cannot apply a non-zero Period offset.
         if mpd.periods.len() > 1
             && ((period_index == 0 && period_start != Duration::ZERO)
                 || period_start != previous_period_end)
@@ -550,7 +623,7 @@ pub(crate) fn parse_dash_manifest_at(
                 )?;
                 if matches!(
                     &addressing,
-                    DashAddressing::Base | DashAddressing::IndexedBase(_)
+                    DashAddressing::Base(_) | DashAddressing::IndexedBase(_)
                 ) && !is_single_file_media_url(&representation_base, &manifest_url)
                 {
                     return Err(DashError::UnsupportedAddressing);
@@ -829,6 +902,9 @@ fn append_period_sources(
         else {
             return Err(DashError::UnsupportedAddressing);
         };
+        if source_timestamp_offset(previous_source)? != source_timestamp_offset(&next.source)? {
+            return Err(DashError::UnsupportedPresentation);
+        }
         if previous_template.timescale != next_template.timescale
             || previous_template.initialization.is_some() != next_template.initialization.is_some()
         {
@@ -881,7 +957,7 @@ pub(crate) fn plan_dash_representation(
         && sources.iter().any(|source| {
             matches!(
                 &source.addressing,
-                DashAddressing::Base | DashAddressing::IndexedBase(_)
+                DashAddressing::Base(_) | DashAddressing::IndexedBase(_)
             )
         })
     {
@@ -902,11 +978,11 @@ pub(crate) fn plan_dash_representation(
             }
             (
                 DashPresentation::Dynamic(_),
-                DashAddressing::Base | DashAddressing::IndexedBase(_),
+                DashAddressing::Base(_) | DashAddressing::IndexedBase(_),
             ) => {
                 return Err(DashError::UnsupportedAddressing);
             }
-            (DashPresentation::Static, DashAddressing::Base) => {
+            (DashPresentation::Static, DashAddressing::Base(_)) => {
                 expand_base(&period_representation)?
             }
             (DashPresentation::Static, DashAddressing::IndexedBase(index)) => {
@@ -985,11 +1061,13 @@ pub(crate) fn plan_dash_representation(
             resources.push(resource);
         }
     }
+    let input_timestamp_offset = if matches!(&manifest.presentation, DashPresentation::Static) {
+        source_timestamp_offset(&representation.source)?
+    } else {
+        DashTimestampOffset { nanoseconds: 0 }
+    };
     let segment_base_index = match (&representation.source.addressing, sources.len()) {
         (DashAddressing::IndexedBase(index), 1) => {
-            if !representation.source.period_start.is_zero() {
-                return Err(DashError::UnsupportedAddressing);
-            }
             let index_url = index
                 .index_url
                 .as_deref()
@@ -1026,6 +1104,7 @@ pub(crate) fn plan_dash_representation(
         presentation: manifest.presentation.clone(),
         resources: resources.into_boxed_slice(),
         segment_base_index,
+        input_timestamp_offset,
     })
 }
 
@@ -1130,7 +1209,7 @@ fn stable_representation_key(identity: RepresentationIdentity<'_>) -> String {
                 hash_optional_range(&mut hasher, segment.range);
             }
         }
-        DashAddressing::Base => {
+        DashAddressing::Base(_) => {
             hasher.update(b"base");
         }
         DashAddressing::IndexedBase(index) => {
@@ -1200,7 +1279,7 @@ fn stable_live_representation_key(identity: RepresentationIdentity<'_>) -> Strin
             }
         }
         DashAddressing::List(_) => {}
-        DashAddressing::Base => {
+        DashAddressing::Base(_) => {
             hasher.update(b"base");
         }
         DashAddressing::IndexedBase(index) => {
@@ -1390,13 +1469,11 @@ fn effective_addressing(
         let mut initialization_range = None;
         let mut index_range_exact = None;
         let mut timescale = None;
+        let mut presentation_time_offset = None;
         let mut index_source_url = None;
         let mut has_representation_index = false;
         for base in bases.iter().flatten() {
             if base.timescale == Some(0)
-                || base
-                    .presentationTimeOffset
-                    .is_some_and(|offset| offset != 0)
                 || base
                     .availabilityTimeOffset
                     .is_some_and(|offset| offset != 0.0)
@@ -1415,6 +1492,7 @@ fn effective_addressing(
             index_range = base.indexRange.as_deref().or(index_range);
             index_range_exact = base.indexRangeExact.or(index_range_exact);
             timescale = base.timescale.or(timescale);
+            presentation_time_offset = base.presentationTimeOffset.or(presentation_time_offset);
             if let Some(representation_index) = base.representation_index.as_ref() {
                 // Child elements replace inherited children rather than
                 // inheriting individual attributes from the parent element.
@@ -1464,12 +1542,16 @@ fn effective_addressing(
                 initialization_range,
                 index_range_exact: index_range_exact.unwrap_or(false),
                 timescale,
+                presentation_time_offset: presentation_time_offset.unwrap_or(0),
             }));
         }
         if has_representation_index {
             return Err(DashError::UnsupportedAddressing);
         }
-        return Ok(DashAddressing::Base);
+        return Ok(DashAddressing::Base(DashBase {
+            timescale: timescale.unwrap_or(1),
+            presentation_time_offset: presentation_time_offset.unwrap_or(0),
+        }));
     }
 
     if is_dynamic && (!has_template || has_list) {
@@ -2724,11 +2806,11 @@ mod tests {
     }
 
     #[test]
-    fn rejects_nonzero_segment_base_presentation_time_offset() {
+    fn plans_nonzero_segment_base_presentation_time_offset() {
         let body = r#"<?xml version="1.0"?>
-<MPD xmlns="urn:mpeg:dash:schema:mpd:2011" type="static" mediaPresentationDuration="PT2S">
+<MPD xmlns="urn:mpeg:dash:schema:mpd:2011" type="static" mediaPresentationDuration="PT4S">
   <BaseURL>media.mp4</BaseURL>
-  <Period duration="PT2S">
+  <Period start="PT2S" duration="PT2S">
     <AdaptationSet contentType="video" mimeType="video/mp4">
       <Representation id="v1">
         <SegmentBase timescale="1000" presentationTimeOffset="8100" indexRange="100-143">
@@ -2738,9 +2820,14 @@ mod tests {
     </AdaptationSet>
   </Period>
 </MPD>"#;
+        let manifest =
+            parse_dash_manifest(BASE_URL, body).expect("static SegmentBase PTO should be planned");
+        let representation = &manifest.video_representations[0];
+        let plan = plan_dash_representation(&manifest, &representation.key)
+            .expect("non-zero SegmentBase PTO should produce a plan");
         assert_eq!(
-            parse_dash_manifest(BASE_URL, body).err(),
-            Some(DashError::UnsupportedAddressing)
+            plan.input_timestamp_offset.ffmpeg_argument().as_deref(),
+            Some("-6.100000000")
         );
     }
 
@@ -3585,10 +3672,19 @@ mod tests {
 </MPD>"#;
         let manifest = parse_dash_manifest_at(BASE_URL, body, dynamic_test_clock(3604))
             .expect("single-period dynamic MPD may have a nonzero period start");
-        let DashPresentation::Dynamic(dynamic) = manifest.presentation else {
+        let DashPresentation::Dynamic(dynamic) = &manifest.presentation else {
             panic!("fixture is dynamic");
         };
         assert_eq!(dynamic.period_start, Duration::from_secs(3600));
+
+        let representation = &manifest.video_representations[0];
+        let plan = plan_dash_representation(&manifest, &representation.key)
+            .expect("existing dynamic Period-start planning remains supported");
+        assert_eq!(
+            plan.input_timestamp_offset.ffmpeg_argument(),
+            None,
+            "the static PTO change must not change dynamic finalization semantics"
+        );
     }
 
     #[test]
@@ -4151,6 +4247,119 @@ mod tests {
     }
 
     #[test]
+    fn representation_specific_pto_offsets_include_period_start() {
+        let body = r#"<?xml version="1.0"?>
+<MPD xmlns="urn:mpeg:dash:schema:mpd:2011" type="static" mediaPresentationDuration="PT6S">
+  <Period start="PT2S" duration="PT4S">
+    <AdaptationSet id="video" contentType="video" mimeType="video/mp4">
+      <SegmentTemplate timescale="1000" duration="2000"
+                       presentationTimeOffset="1000" media="video-$Time$.m4s"/>
+      <Representation id="v1"/>
+    </AdaptationSet>
+    <AdaptationSet id="audio" contentType="audio" mimeType="audio/mp4">
+      <SegmentTemplate timescale="1000" duration="2000"
+                       presentationTimeOffset="8000" media="audio-$Time$.m4s"/>
+      <Representation id="a1"/>
+    </AdaptationSet>
+  </Period>
+</MPD>"#;
+        let manifest = parse_dash_manifest(BASE_URL, body)
+            .expect("static DASH with distinct track PTO values should parse");
+        let video = plan_dash_representation(&manifest, &manifest.video_representations[0].key)
+            .expect("plan video representation");
+        let audio = plan_dash_representation(&manifest, &manifest.audio_representations[0].key)
+            .expect("plan audio representation");
+
+        assert_eq!(
+            video.input_timestamp_offset.ffmpeg_argument().as_deref(),
+            Some("1.000000000")
+        );
+        assert_eq!(
+            audio.input_timestamp_offset.ffmpeg_argument().as_deref(),
+            Some("-6.000000000")
+        );
+    }
+
+    #[test]
+    fn zero_origin_dash_omits_ffmpeg_timestamp_offset() {
+        let body = r#"<?xml version="1.0"?>
+<MPD xmlns="urn:mpeg:dash:schema:mpd:2011" type="static" mediaPresentationDuration="PT2S">
+  <Period duration="PT2S">
+    <AdaptationSet contentType="video" mimeType="video/mp4">
+      <SegmentTemplate timescale="1" duration="2" media="segment-$Number$.m4s"/>
+      <Representation id="v1"/>
+    </AdaptationSet>
+  </Period>
+</MPD>"#;
+        let manifest =
+            parse_dash_manifest(BASE_URL, body).expect("zero-origin static DASH should parse");
+        let plan = plan_dash_representation(&manifest, &manifest.video_representations[0].key)
+            .expect("plan zero-origin representation");
+        assert_eq!(plan.input_timestamp_offset.ffmpeg_argument(), None);
+    }
+
+    #[test]
+    fn pto_changes_preserve_the_existing_representation_key() {
+        fn plan_for_pto(presentation_time_offset: u64) -> (String, String) {
+            let body = format!(
+                r#"<?xml version="1.0"?>
+<MPD xmlns="urn:mpeg:dash:schema:mpd:2011" type="static" mediaPresentationDuration="PT2S">
+  <Period duration="PT2S">
+    <AdaptationSet contentType="video" mimeType="video/mp4">
+      <SegmentTemplate timescale="1000" duration="2000"
+                       presentationTimeOffset="{presentation_time_offset}"
+                       media="segment-$Time$.m4s"/>
+      <Representation id="v1"/>
+    </AdaptationSet>
+  </Period>
+</MPD>"#
+            );
+            let manifest =
+                parse_dash_manifest(BASE_URL, &body).expect("static PTO manifest should parse");
+            let representation = &manifest.video_representations[0];
+            let plan = plan_dash_representation(&manifest, &representation.key)
+                .expect("static PTO representation should be planned");
+            (
+                representation.key.clone(),
+                plan.input_timestamp_offset
+                    .ffmpeg_argument()
+                    .expect("non-zero PTO produces an offset"),
+            )
+        }
+
+        let (first_key, first_offset) = plan_for_pto(8_000);
+        let (second_key, second_offset) = plan_for_pto(9_000);
+        assert_eq!(
+            first_key, second_key,
+            "persisted representation keys remain stable"
+        );
+        assert_ne!(
+            first_offset, second_offset,
+            "PTO remains separate plan metadata"
+        );
+    }
+
+    #[test]
+    fn rejects_nonzero_segment_list_presentation_time_offset() {
+        let body = r#"<?xml version="1.0"?>
+<MPD xmlns="urn:mpeg:dash:schema:mpd:2011" type="static" mediaPresentationDuration="PT2S">
+  <Period duration="PT2S">
+    <AdaptationSet contentType="video" mimeType="video/mp4">
+      <SegmentList presentationTimeOffset="9000">
+        <Initialization sourceURL="init.mp4"/>
+        <SegmentURL media="segment.m4s"/>
+      </SegmentList>
+      <Representation id="v1"/>
+    </AdaptationSet>
+  </Period>
+</MPD>"#;
+        assert_eq!(
+            parse_dash_manifest(BASE_URL, body).err(),
+            Some(DashError::UnsupportedAddressing)
+        );
+    }
+
+    #[test]
     fn dynamic_template_with_nonzero_presentation_time_offset_uses_fallback() {
         let body = dynamic_mpd(
             r#"<SegmentTemplate timescale="1" duration="4"
@@ -4449,9 +4658,8 @@ mod tests {
     }
 
     #[test]
-    fn segment_base_rejects_every_offset_variant() {
+    fn segment_base_rejects_unsupported_availability_and_delta_attributes() {
         let cases = [
-            r#"presentationTimeOffset="1""#,
             r#"availabilityTimeOffset="1""#,
             r#"availabilityTimeComplete="false""#,
             r#"eptDelta="1""#,

@@ -1899,10 +1899,14 @@ async fn finalize_manifest_download(
     };
     if !run_ffmpeg_with_offsets(
         &ffmpeg,
-        &video_input,
-        video_timestamp_offset.as_deref(),
-        audio_input.as_deref(),
-        audio_timestamp_offset.as_deref(),
+        FfmpegInput {
+            path: &video_input,
+            timestamp_offset: video_timestamp_offset.as_deref(),
+        },
+        audio_input.as_deref().map(|path| FfmpegInput {
+            path,
+            timestamp_offset: audio_timestamp_offset.as_deref(),
+        }),
         SubtitleOutput {
             input: subtitle_input.as_deref(),
             embed: job.embed_subs,
@@ -4141,6 +4145,12 @@ struct SubtitleOutput<'a> {
     sidecar: Option<&'a Path>,
 }
 
+#[derive(Clone, Copy)]
+struct FfmpegInput<'a> {
+    path: &'a Path,
+    timestamp_offset: Option<&'a str>,
+}
+
 #[cfg(test)]
 async fn run_ffmpeg(
     ffmpeg: &Path,
@@ -4152,10 +4162,14 @@ async fn run_ffmpeg(
 ) -> Result<bool, ManifestRunError> {
     run_ffmpeg_with_offsets(
         ffmpeg,
-        video_input,
-        None,
-        audio_input,
-        None,
+        FfmpegInput {
+            path: video_input,
+            timestamp_offset: None,
+        },
+        audio_input.map(|path| FfmpegInput {
+            path,
+            timestamp_offset: None,
+        }),
         subtitles,
         output,
         abort,
@@ -4165,32 +4179,30 @@ async fn run_ffmpeg(
 
 async fn run_ffmpeg_with_offsets(
     ffmpeg: &Path,
-    video_input: &Path,
-    video_input_offset: Option<&str>,
-    audio_input: Option<&Path>,
-    audio_input_offset: Option<&str>,
+    video_input: FfmpegInput<'_>,
+    audio_input: Option<FfmpegInput<'_>>,
     subtitles: SubtitleOutput<'_>,
     output: &Path,
     abort: &mut tokio::sync::oneshot::Receiver<crate::video::StopIntent>,
 ) -> Result<bool, ManifestRunError> {
     let output_container = ManifestOutputContainer::from_path(output)?;
     let mut command = tokio::process::Command::new(ffmpeg);
-    if is_hls_playlist_input(video_input) {
+    if is_hls_playlist_input(video_input.path) {
         add_hls_staging_options(&mut command);
     }
     command.arg("-hide_banner").arg("-nostdin").arg("-n");
-    if let Some(offset) = video_input_offset {
+    if let Some(offset) = video_input.timestamp_offset {
         command.arg("-itsoffset").arg(offset);
     }
-    command.arg("-i").arg(video_input);
+    command.arg("-i").arg(video_input.path);
     if let Some(audio_input) = audio_input {
-        if is_hls_playlist_input(audio_input) {
+        if is_hls_playlist_input(audio_input.path) {
             add_hls_staging_options(&mut command);
         }
-        if let Some(offset) = audio_input_offset {
+        if let Some(offset) = audio_input.timestamp_offset {
             command.arg("-itsoffset").arg(offset);
         }
-        command.arg("-i").arg(audio_input);
+        command.arg("-i").arg(audio_input.path);
         command.arg("-map").arg("0:v:0?").arg("-map").arg("1:a:0?");
     } else {
         command.arg("-map").arg("0:v:0?").arg("-map").arg("0:a:0?");

@@ -1811,10 +1811,14 @@ async fn dash_per_track_timestamp_offsets_align_fragmented_mp4_inputs() {
     assert!(
         run_ffmpeg_with_offsets(
             Path::new("ffmpeg"),
-            &video_input,
-            Some("-5.000000000"),
-            Some(&audio_input),
-            Some("-2.000000000"),
+            FfmpegInput {
+                path: &video_input,
+                timestamp_offset: Some("-5.000000000"),
+            },
+            Some(FfmpegInput {
+                path: &audio_input,
+                timestamp_offset: Some("-2.000000000"),
+            }),
             SubtitleOutput::default(),
             &output,
             &mut abort,

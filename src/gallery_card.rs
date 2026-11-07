@@ -161,4 +161,3 @@ mod tests {
         assert_eq!(card.file_count(), 1);
     }
 }
-

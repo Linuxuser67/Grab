@@ -1786,10 +1786,11 @@ async fn dash_per_track_timestamp_offsets_align_fragmented_mp4_inputs() {
         .expect("generate fragmented-MP4 audio fixture");
     assert_command_succeeded(&audio, "FFmpeg could not generate the audio input");
 
-    // DASH PTO maps the video sample timeline five seconds behind the Period
-    // presentation timeline. Shift every generated video fragment decode time
-    // to model that source without relying on an external media packager.
+    // Model two independent DASH sample timelines: video begins five seconds
+    // behind the Period timeline, while audio begins two seconds behind it.
+    // This keeps the fixture local and deterministic without a media packager.
     shift_fragmented_mp4_decode_times(&video_input, 5_000);
+    shift_fragmented_mp4_decode_times(&audio_input, 96_000);
 
     let ffprobe = Path::new("ffprobe");
     let video_starts = ffprobe_stream_start_times(ffprobe, &video_input);
@@ -1801,8 +1802,8 @@ async fn dash_per_track_timestamp_offsets_align_fragmented_mp4_inputs() {
         "the input video must start at 5 seconds to exercise the PTO offset: {video_start}"
     );
     assert!(
-        audio_start.abs() < 0.01,
-        "the input audio must start at zero: {audio_start}"
+        (audio_start - 2.0).abs() < 0.01,
+        "the input audio must start at 2 seconds to exercise its independent PTO offset: {audio_start}"
     );
 
     let output = root.path().join("dash-pto-output.part.mp4");
@@ -1813,7 +1814,7 @@ async fn dash_per_track_timestamp_offsets_align_fragmented_mp4_inputs() {
             &video_input,
             Some("-5.000000000"),
             Some(&audio_input),
-            None,
+            Some("-2.000000000"),
             SubtitleOutput::default(),
             &output,
             &mut abort,

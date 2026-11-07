@@ -762,6 +762,7 @@ pub fn setup(app: &adw::Application) {
                     let ready = close_ready.clone();
                     glib::MainContext::default().spawn_local(async move {
                         manager.finish_async_shutdown().await;
+                        crate::extension_server::purge_handoff_cookies_async().await;
                         ready.set(true);
                         closing_done.set(false);
                         window.close();
@@ -850,7 +851,8 @@ pub fn setup(app: &adw::Application) {
             if let Some(s) = st.borrow().as_ref() {
                 s.manager.shutdown();
             }
-            // Staged extension cookies only live in memory; delete their files.
+            // Fallback for shutdown paths that did not complete the orderly
+            // async cleanup before GApplication emitted its shutdown signal.
             crate::extension_server::purge_handoff_cookies();
         });
     }
@@ -1213,6 +1215,7 @@ fn register_actions(
                             s.window.set_sensitive(false);
                             s.window.set_visible(false);
                             s.manager.finish_async_shutdown().await;
+                            crate::extension_server::purge_handoff_cookies_async().await;
                             app.quit();
                         });
                     } else {

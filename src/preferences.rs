@@ -476,10 +476,40 @@ pub fn show(
         ))]);
         {
             let row = code_row.clone();
-            regen_btn.connect_clicked(move |_| {
-                if let Ok(code) = pairing.regenerate(&pairing_path) {
-                    row.set_subtitle(&code);
-                }
+            regen_btn.connect_clicked(move |button| {
+                button.set_sensitive(false);
+                let button = button.clone();
+                let row = row.clone();
+                let pairing = pairing.clone();
+                let pairing_path = pairing_path.clone();
+                glib::spawn_future_local(async move {
+                    let result =
+                        gio::spawn_blocking(move || pairing.regenerate(&pairing_path)).await;
+                    let error = match result {
+                        Ok(Ok(code)) => {
+                            row.set_subtitle(&code);
+                            None
+                        }
+                        Ok(Err(error)) => Some(error.to_string()),
+                        Err(_) => Some(gettext("The background pairing task failed")),
+                    };
+                    button.set_sensitive(true);
+                    if let Some(error) = error {
+                        tracing::warn!(
+                            error = %error,
+                            "could not regenerate browser extension pairing code"
+                        );
+                        let body = crate::ui_util::esc_markup(&error);
+                        let alert = adw::AlertDialog::new(
+                            Some(&gettext("Could not generate a new pairing code")),
+                            Some(&body),
+                        );
+                        alert.add_response("ok", &gettext("OK"));
+                        alert.set_close_response("ok");
+                        let root = button.root().and_downcast::<gtk4::Window>();
+                        alert.present(root.as_ref());
+                    }
+                });
             });
         }
         code_row.add_suffix(&copy_btn);

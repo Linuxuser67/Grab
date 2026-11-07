@@ -7,24 +7,12 @@ use gtk4::glib;
 use gtk4::prelude::*;
 use libadwaita as adw;
 
-/// Show the install-help dialog; `on_check` re-resolves tools and refreshes the caller.
-pub fn show(parent: &impl glib::object::IsA<gtk4::Widget>, on_check: impl Fn() + 'static) {
-    let dialog = adw::AlertDialog::new(
-        Some(&gettext("Install Support Tools")),
-        Some(&gettext(
-            "Run the command in a terminal, then press Check Again.",
-        )),
-    );
-
+/// Build the distro-specific command or the portable manual-install fallback.
+fn install_content(pkgs: Option<crate::video_tools::DistroPackages>) -> gtk4::Box {
     let content = gtk4::Box::new(gtk4::Orientation::Vertical, 12);
-    let pkgs = std::fs::read_to_string("/etc/os-release")
-        .ok()
-        .and_then(|text| crate::video_tools::distro_packages(&text));
     match pkgs {
         Some(pkgs) => {
-            let group = adw::PreferencesGroup::builder()
-                .title(pkgs.distro.clone())
-                .build();
+            let group = adw::PreferencesGroup::builder().title(pkgs.distro).build();
             command_row(&group, &gettext("Install tools"), &pkgs.install_all);
             content.append(&group);
         }
@@ -49,7 +37,24 @@ pub fn show(parent: &impl glib::object::IsA<gtk4::Widget>, on_check: impl Fn() +
             content.append(&group);
         }
     }
-    dialog.set_extra_child(Some(&content));
+    content
+}
+
+/// Show the install-help dialog; `on_check` re-resolves tools and refreshes the caller.
+pub fn show(parent: &impl glib::object::IsA<gtk4::Widget>, on_check: impl Fn() + 'static) {
+    let dialog = adw::AlertDialog::new(
+        Some(&gettext("Install Support Tools")),
+        Some(&gettext(
+            "Run the command in a terminal, then press Check Again.",
+        )),
+    );
+
+    let loading = gtk4::Box::new(gtk4::Orientation::Vertical, 12);
+    let spinner = gtk4::Spinner::new();
+    spinner.start();
+    spinner.set_halign(gtk4::Align::Center);
+    loading.append(&spinner);
+    dialog.set_extra_child(Some(&loading));
 
     dialog.add_response("close", &gettext("Close"));
     dialog.add_response("check", &gettext("Check Again"));
@@ -59,6 +64,29 @@ pub fn show(parent: &impl glib::object::IsA<gtk4::Widget>, on_check: impl Fn() +
     dialog.connect_response(None, move |_, response| {
         if response == "check" {
             on_check();
+        }
+    });
+
+    let weak_dialog = dialog.downgrade();
+    glib::spawn_future_local(async move {
+        let result = gio::spawn_blocking(|| {
+            std::fs::read_to_string("/etc/os-release")
+                .ok()
+                .and_then(|text| crate::video_tools::distro_packages(&text))
+        })
+        .await;
+        let pkgs = match result {
+            Ok(pkgs) => pkgs,
+            Err(error) => {
+                tracing::warn!(
+                    error = ?error,
+                    "could not read distribution metadata for install help"
+                );
+                None
+            }
+        };
+        if let Some(dialog) = weak_dialog.upgrade() {
+            dialog.set_extra_child(Some(&install_content(pkgs)));
         }
     });
 

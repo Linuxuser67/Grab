@@ -52,6 +52,8 @@ pub(crate) enum ManifestError {
     UnsupportedSessionKeyFormat,
     #[error("unsupported HLS ad insertion marker: {0}")]
     UnsupportedAdInsertion(String),
+    #[error("unsupported HLS ad insertion marker: {0}")]
+    UnsupportedAdInsertion(String),
     #[error("unsupported HLS resource url")]
     UnsupportedResourceUrl,
     #[error("HLS byte range has no usable offset")]
@@ -1256,6 +1258,7 @@ fn build_hls_plan(base_url: Url, mut playlist: MediaPlaylist) -> Result<HlsPlan,
     let mut active_map = None;
     let mut total_duration = Duration::ZERO;
     let mut maximum_segment_duration = 0.0_f64;
+    let mut pending_method_none_reset = false;
 
     let ad_removal = hls_ads::plan_ad_removal(&playlist, is_live)?;
 
@@ -1287,18 +1290,20 @@ fn build_hls_plan(base_url: Url, mut playlist: MediaPlaylist) -> Result<HlsPlan,
         reject_unsupported_hls_tags(&segment.unknown_tags)?;
         segment.unknown_tags.retain(|tag| !is_benign_hls_tag(tag));
 
-        // Track key/map state through omitted ad segments. If an ad starts an
-        // unencrypted interval, the reset must be re-emitted on the first kept
-        // program segment rather than being lost with the ad segment itself.
-        let mut skipped_method_none_reset = false;
+        // Preserve the first METHOD=NONE reset on the next kept program
+        // segment if its original boundary was inside the removed ad interval.
         if let Some(key) = segment.key.take() {
             if key.method == KeyMethod::None {
                 if !method_none_active {
                     if skip_ad_segment {
-                        skipped_method_none_reset = true;
+                        pending_method_none_reset = true;
                     } else {
                         segment.key = Some(key);
+                        pending_method_none_reset = false;
                     }
+                } else if pending_method_none_reset && !skip_ad_segment {
+                    segment.key = Some(key);
+                    pending_method_none_reset = false;
                 }
                 active_key = None;
                 method_none_active = true;
@@ -1306,9 +1311,20 @@ fn build_hls_plan(base_url: Url, mut playlist: MediaPlaylist) -> Result<HlsPlan,
                 active_key = Some(key.clone());
                 segment.key = Some(key);
                 method_none_active = false;
+                pending_method_none_reset = false;
             }
         } else {
             segment.key = active_key.clone();
+            if !skip_ad_segment && pending_method_none_reset {
+                segment.key = Some(m3u8_rs::Key {
+                    method: KeyMethod::None,
+                    uri: None,
+                    iv: None,
+                    keyformat: None,
+                    keyformatversions: None,
+                });
+                pending_method_none_reset = false;
+            }
         }
         if let Some(map) = segment.map.as_ref() {
             active_map = Some(map.clone());
@@ -1326,6 +1342,33 @@ fn build_hls_plan(base_url: Url, mut playlist: MediaPlaylist) -> Result<HlsPlan,
             .ok_or(ManifestError::DurationOverflow)?;
         if segment_duration.round() > source_target_duration as f64 {
             return Err(ManifestError::InvalidDuration);
+        }
+
+        if skip_ad_segment {
+            // Ad resources are not fetched, so do not apply the native
+            // same-origin guard to their URLs. Preserve range continuation
+            // only when their URL and byte range can be parsed safely.
+            previous_segment_range = match segment.byte_range.as_ref() {
+                Some(byte_range) if byte_range.length > 0 => {
+                    let resource_url = base_url
+                        .join(&segment.uri)
+                        .ok()
+                        .map(|url| resource_cache_key(&url));
+                    resource_url.and_then(|resource_url| {
+                        let offset = byte_range.offset.or_else(|| {
+                            previous_segment_range
+                                .as_ref()
+                                .filter(|(previous_url, _)| previous_url == &resource_url)
+                                .map(|(_, next_offset)| *next_offset)
+                        })?;
+                        offset
+                            .checked_add(byte_range.length)
+                            .map(|next_offset| (resource_url, next_offset))
+                    })
+                }
+                _ => None,
+            };
+            continue;
         }
 
         let segment_url = resolve_resource_url(&base_url, &segment.uri)?;
@@ -1353,19 +1396,7 @@ fn build_hls_plan(base_url: Url, mut playlist: MediaPlaylist) -> Result<HlsPlan,
             }
         };
 
-        if skip_ad_segment {
-            continue;
-        }
         maximum_segment_duration = maximum_segment_duration.max(segment_duration);
-        if skipped_method_none_reset {
-            segment.key = Some(m3u8_rs::Key {
-                method: KeyMethod::None,
-                uri: None,
-                iv: None,
-                keyformat: None,
-                keyformatversions: None,
-            });
-        }
 
         if segment
             .key

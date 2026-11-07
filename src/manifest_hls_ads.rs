@@ -1,6 +1,6 @@
 //! Removes only complete, explicitly marked HLS ad breaks before resource planning.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 
 use m3u8_rs::{ExtTag, MediaPlaylist};
 
@@ -49,6 +49,11 @@ pub(super) fn plan_ad_removal(
             "live ad breaks cross manifest snapshots and cannot be resumed safely yet",
         ));
     }
+    if playlist.start.is_some() {
+        return Err(unsupported_ad_marker(
+            "EXT-X-START offsets cannot be preserved after removing ad segments",
+        ));
+    }
 
     let segment_count = playlist.segments.len();
     let mut skip_segments = vec![false; segment_count];
@@ -95,11 +100,10 @@ pub(super) fn plan_ad_removal(
         if asset.is_some() {
             let associated_with_ad =
                 cue_out.is_some() || cue_out_cont.is_some() || in_ad_break;
-            if !associated_with_ad
-                || !asset
-                    .and_then(|tag| tag.rest.as_deref())
-                    .is_some_and(|value| !value.trim().is_empty())
-            {
+            let valid_attributes = asset
+                .and_then(|tag| tag.rest.as_deref())
+                .is_some_and(|value| parse_attributes(value, &["CAID", "UPID"]).is_ok());
+            if !associated_with_ad || !valid_attributes {
                 return Err(unsupported_ad_marker("standalone or malformed X-ASSET marker"));
             }
         }
@@ -128,10 +132,19 @@ pub(super) fn plan_ad_removal(
                 declared_duration = Some(duration);
                 expected_elapsed = elapsed;
                 actual_duration = 0.0;
-            } else if (elapsed - expected_elapsed).abs() > CUE_ELAPSED_TOLERANCE_SECONDS {
-                return Err(unsupported_ad_marker(
-                    "CUE-OUT-CONT elapsed time does not match preceding ad segments",
-                ));
+            } else {
+                if (elapsed - expected_elapsed).abs() > CUE_ELAPSED_TOLERANCE_SECONDS {
+                    return Err(unsupported_ad_marker(
+                        "CUE-OUT-CONT elapsed time does not match preceding ad segments",
+                    ));
+                }
+                if declared_duration.is_some_and(|current| {
+                    (current - duration).abs() > CUE_DURATION_TOLERANCE_SECONDS
+                }) {
+                    return Err(unsupported_ad_marker(
+                        "CUE-OUT-CONT duration changes within one ad break",
+                    ));
+                }
             }
             if elapsed >= duration {
                 return Err(unsupported_ad_marker(
@@ -171,15 +184,36 @@ pub(super) fn plan_ad_removal(
             if !segment.duration.is_finite() || segment.duration <= 0.0 {
                 return Err(ManifestError::InvalidDuration);
             }
+            if segment.discontinuity {
+                return Err(unsupported_ad_marker(
+                    "ad interval contains a discontinuity boundary",
+                ));
+            }
             actual_duration += f64::from(segment.duration);
-            if cue_out_cont.is_none() {
-                expected_elapsed += f64::from(segment.duration);
+            if let Some(tag) = cue_out_cont {
+                let (elapsed, duration) = parse_cue_out_cont(tag)?;
+                if (elapsed - expected_elapsed).abs() > CUE_ELAPSED_TOLERANCE_SECONDS {
+                    return Err(unsupported_ad_marker(
+                        "CUE-OUT-CONT elapsed time does not match preceding ad segments",
+                    ));
+                }
+                if elapsed + f64::from(segment.duration)
+                    > duration + CUE_DURATION_TOLERANCE_SECONDS
+                {
+                    return Err(unsupported_ad_marker(
+                        "ad segment extends beyond the declared CUE-OUT-CONT duration",
+                    ));
+                }
+                expected_elapsed = elapsed + f64::from(segment.duration);
             } else {
-                let (_, duration) = parse_cue_out_cont(
-                    cue_out_cont.expect("CUE-OUT-CONT was checked above"),
-                )?;
-                expected_elapsed = duration.min(expected_elapsed);
                 expected_elapsed += f64::from(segment.duration);
+            }
+            if declared_duration.is_some_and(|duration| {
+                expected_elapsed > duration + CUE_DURATION_TOLERANCE_SECONDS
+            }) {
+                return Err(unsupported_ad_marker(
+                    "ad segments exceed the declared CUE-OUT duration",
+                ));
             }
         }
     }
@@ -293,10 +327,22 @@ fn parse_non_negative_decimal(value: &str) -> Option<f64> {
 }
 
 fn is_base64_marker(value: &str) -> bool {
-    !value.is_empty()
-        && value
-            .bytes()
-            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'+' | b'/' | b'='))
+    let bytes = value.as_bytes();
+    if bytes.is_empty() || bytes.len() % 4 != 0 {
+        return false;
+    }
+    let padding = if bytes.ends_with(b"==") {
+        2
+    } else if bytes.ends_with(b"=") {
+        1
+    } else {
+        0
+    };
+    let payload = &bytes[..bytes.len() - padding];
+    !payload.is_empty()
+        && payload
+            .iter()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'+' | b'/'))
 }
 
 fn has_ad_daterange_signal(range: &m3u8_rs::DateRange) -> bool {
@@ -457,4 +503,167 @@ program2.ts
             2
         );
     }
+    #[test]
+    fn skipped_ad_keys_are_not_fetched_and_content_key_rotation_is_preserved() {
+        let body = br#"#EXTM3U
+#EXT-X-TARGETDURATION:4
+#EXT-X-KEY:METHOD=AES-128,URI="keys/content.key",IV=0x00000000000000000000000000000001
+#EXTINF:4,
+program-before.ts
+#EXT-X-KEY:METHOD=AES-128,URI="keys/ad.key",IV=0x00000000000000000000000000000002
+#EXT-X-CUE-OUT:8
+#EXTINF:4,
+ad-one.ts
+#EXTINF:4,
+ad-two.ts
+#EXT-X-CUE-IN
+#EXT-X-KEY:METHOD=AES-128,URI="keys/content.key",IV=0x00000000000000000000000000000001
+#EXTINF:4,
+program-after.ts
+#EXT-X-ENDLIST
+"#;
+        let plan = plan_hls_media_playlist(BASE_URL, body)
+            .expect("paired cue markers should remove the ad resources");
+        assert_eq!(
+            plan.resources
+                .iter()
+                .filter(|resource| resource.kind == crate::manifest::HlsResourceKind::Segment)
+                .count(),
+            2
+        );
+        assert_eq!(
+            plan.resources
+                .iter()
+                .filter(|resource| resource.kind == crate::manifest::HlsResourceKind::Key)
+                .count(),
+            1
+        );
+        assert!(
+            plan.resources
+                .iter()
+                .all(|resource| !resource.url.as_str().contains("ad.key"))
+        );
+    }
+
+    #[test]
+    fn method_none_reset_inside_removed_ad_is_reapplied_to_program_segment() {
+        let body = br#"#EXTM3U
+#EXT-X-TARGETDURATION:4
+#EXT-X-KEY:METHOD=AES-128,URI="keys/content.key",IV=0x00000000000000000000000000000001
+#EXTINF:4,
+encrypted-program.ts
+#EXT-X-KEY:METHOD=NONE
+#EXT-X-CUE-OUT:8
+#EXTINF:4,
+clear-ad-one.ts
+#EXTINF:4,
+clear-ad-two.ts
+#EXT-X-CUE-IN
+#EXTINF:4,
+clear-program.ts
+#EXT-X-ENDLIST
+"#;
+        let plan = plan_hls_media_playlist(BASE_URL, body)
+            .expect("a reset in an omitted ad must remain active for the program segment");
+        let local = plan.local_playlist_bytes().expect("serialize local playlist");
+        let local = m3u8_rs::parse_media_playlist_res(&local)
+            .expect("parse the ad-free local playlist");
+        assert_eq!(local.segments.len(), 2);
+        assert_eq!(
+            local.segments[0].key.as_ref().map(|key| &key.method),
+            Some(&m3u8_rs::KeyMethod::AES128)
+        );
+        assert_eq!(
+            local.segments[1].key.as_ref().map(|key| &key.method),
+            Some(&m3u8_rs::KeyMethod::None)
+        );
+    }
+
+    #[test]
+    fn implicit_byte_ranges_continue_across_omitted_ad_segments() {
+        let body = br#"#EXTM3U
+#EXT-X-TARGETDURATION:4
+#EXT-X-BYTERANGE:4@0
+#EXTINF:4,
+media.ts
+#EXT-X-CUE-OUT:8
+#EXT-X-BYTERANGE:4
+#EXTINF:4,
+media.ts
+#EXT-X-BYTERANGE:4
+#EXTINF:4,
+media.ts
+#EXT-X-CUE-IN
+#EXT-X-BYTERANGE:4
+#EXTINF:4,
+media.ts
+#EXT-X-ENDLIST
+"#;
+        let plan = plan_hls_media_playlist(BASE_URL, body)
+            .expect("implicit byte ranges after the ad should retain source offsets");
+        let ranges = plan
+            .resources
+            .iter()
+            .filter(|resource| resource.kind == crate::manifest::HlsResourceKind::Segment)
+            .map(|resource| resource.range.map(|range| (range.offset, range.length)))
+            .collect::<Vec<_>>();
+        assert_eq!(ranges, vec![Some((0, 4)), Some((12, 4))]);
+    }
+
+    #[test]
+    fn ad_intervals_with_discontinuities_or_start_offsets_fall_back() {
+        let discontinuity = br#"#EXTM3U
+#EXT-X-TARGETDURATION:4
+#EXT-X-CUE-OUT:4
+#EXT-X-DISCONTINUITY
+#EXTINF:4,
+ad.ts
+#EXT-X-CUE-IN
+#EXTINF:4,
+program.ts
+#EXT-X-ENDLIST
+"#;
+        assert!(matches!(
+            plan_hls_media_playlist(BASE_URL, discontinuity).err(),
+            Some(crate::manifest::ManifestError::UnsupportedAdInsertion(_))
+        ));
+
+        let start_offset = br#"#EXTM3U
+#EXT-X-TARGETDURATION:4
+#EXT-X-START:TIME-OFFSET=1.0
+#EXT-X-CUE-OUT:4
+#EXTINF:4,
+ad.ts
+#EXT-X-CUE-IN
+#EXTINF:4,
+program.ts
+#EXT-X-ENDLIST
+"#;
+        assert!(matches!(
+            plan_hls_media_playlist(BASE_URL, start_offset).err(),
+            Some(crate::manifest::ManifestError::UnsupportedAdInsertion(_))
+        ));
+    }
+
+    #[test]
+    fn resource_affecting_and_unrecognized_tags_still_fall_back() {
+        for tag in [
+            "#EXT-X-GAP",
+            "#EXT-X-DEFINE:NAME=\"asset\",VALUE=\"other.m3u8\"",
+            "#EXT-X-CONTENT-STEERING:SERVER-URI=\"steering.json\"",
+            "#EXT-X-AD-UNKNOWN:URI=\"other.m3u8\"",
+        ] {
+            let body = format!(
+                "#EXTM3U\n#EXT-X-TARGETDURATION:4\n{tag}\n#EXTINF:4,\nprogram.ts\n#EXT-X-ENDLIST\n"
+            );
+            assert!(
+                matches!(
+                    plan_hls_media_playlist(BASE_URL, body.as_bytes()).err(),
+                    Some(crate::manifest::ManifestError::UnsupportedPlaylistFeature(_))
+                ),
+                "unsupported tag must remain a fallback: {tag}"
+            );
+        }
+    }
+
 }

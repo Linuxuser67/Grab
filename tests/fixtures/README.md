@@ -11,3 +11,4 @@
 - `hls-ad-marker-metadata.m3u8` is based on the AWS Elemental MediaTailor origin-manifest example: https://docs.aws.amazon.com/mediatailor/latest/ug/manifest-hls-example.html
 - The fixture preserves the published `EXT-X-CUE-OUT`, `EXT-X-CUE-OUT-CONT`, and `EXT-X-CUE-IN` boundary/timing shape while replacing the segment URIs with deterministic test names and SCTE-35 payloads with a non-secret placeholder.
 - Only the five segments inside the explicit ad break are omitted; all seven program segments retain their original source sequence-derived staging identities.
+- The resource-fetch integration test verifies ad segment URLs are absent from the fetch plan, no ad request is served, and the local FFmpeg playlist contains only program segments.

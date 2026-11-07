@@ -32,13 +32,17 @@ implicit identity key format; Grab never fetches or substitutes these hints for
 the selected media playlist's authoritative `EXT-X-KEY`.
 
 For complete static VOD/EVENT playlists, paired `EXT-X-CUE-OUT` /
-`EXT-X-CUE-IN` boundaries are used to omit every segment in the marked ad
-break from native resource planning and from the local FFmpeg playlist. Valid
-`EXT-X-CUE-OUT-CONT` markers are checked against preceding ad-segment time.
-The first segment after `CUE-IN` remains program content. Ad-only keys and
-initialization resources are not fetched, and surviving resource names retain
-their source segment indices. Ambiguous or incomplete cues, live playlists with
-ad markers, and SCTE-35/DATERANGE-only ad signals remain on yt-dlp fallback.
+`EXT-X-CUE-IN` boundaries omit every segment in the marked ad break from
+native resource planning and from the local FFmpeg playlist. Valid
+`EXT-X-CUE-OUT-CONT` markers are checked against elapsed media duration and
+must retain one consistent declared break duration. The first segment after
+`CUE-IN` remains program content. Ad-only keys and initialization resources
+are not fetched, surviving resource names retain their source segment indices,
+and implicit byte-range offsets advance across removed source segments.
+`METHOD=NONE` resets are preserved when their original boundary is inside an
+omitted ad. Live playlists with ad markers, ad intervals containing a
+discontinuity, playlists using `EXT-X-START`, ambiguous or incomplete cues,
+and SCTE-35/DATERANGE-only ad signals remain on yt-dlp fallback.
 
 This is a deliberately bounded profile, not a claim of support for every HLS
 extension. Unknown parser tags and unsupported resource-affecting extensions

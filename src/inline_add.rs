@@ -733,8 +733,7 @@ pub(crate) struct VideoStep {
     pub(crate) options: Rc<RefCell<Vec<FormatOption>>>,
     pub(crate) tools: adw::ActionRow,
     pub(crate) error: adw::ActionRow,
-    /// Gallery info row: shown when the probe finds an image gallery.
-    /// Title is "Gallery", subtitle is "N files • preview...".
+    /// Gallery info row: shows the collection title for an image gallery.
     pub(crate) gallery_info: adw::ActionRow,
     /// Gallery filter toggle (All/Images/Videos). Shown with gallery_info.
     pub(crate) gallery_filter: adw::ToggleGroup,
@@ -2301,12 +2300,11 @@ fn build_url_controls() -> UrlControls {
     // Select files and turn the latter into the normal labeled Add action.
     let select_files_btn = gtk4::Button::builder()
         .label(gettext("Select files"))
+        .css_classes(["suggested-action"])
         .tooltip_text(gettext("Choose which files to download"))
         .valign(gtk4::Align::Center)
         .visible(false)
         .build();
-    // Match Add's suggested-action color without using its circular icon shape.
-    select_files_btn.add_css_class("suggested-action");
     select_files_btn
         .update_property(&[gtk4::accessible::Property::Label(&gettext("Select files"))]);
     let add_btn = gtk4::Button::builder()
@@ -2469,8 +2467,7 @@ fn build_video_preview(
         .title(gettext("Gallery"))
         .use_markup(false)
         .build();
-    // File selection is in the URL action row; the info row only carries
-    // the gallery title and count.
+    // File selection is in the URL action row; this row carries the title only.
     gallery_info.set_visible(false);
     video_group.add(&gallery_info);
     // Gallery filter toggle: All / Images / Videos. Hidden by default.

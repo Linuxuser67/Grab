@@ -2989,6 +2989,22 @@ mod tests {
     }
 
     #[test]
+    fn purge_handoff_cookies_async_deletes_every_staged_file() {
+        let _g = exclusive();
+        let mut paths = Vec::new();
+        for i in 0..3 {
+            let url = format!("https://example.com/async-purge-{i}");
+            let path = write_handoff_cookies(&url, &[cookie("c", "v")]).expect("path");
+            store_handoff_cookies(&url, path.clone(), None);
+            paths.push(path);
+        }
+        assert!(paths.iter().all(|path| path.exists()));
+        crate::runtime::tokio_rt().block_on(purge_handoff_cookies_async());
+        assert!(paths.iter().all(|path| !path.exists()), "files must be deleted");
+        assert!(handoff_cookie_args("https://example.com/async-purge-0").is_empty());
+    }
+
+    #[test]
     fn store_handoff_cookies_deletes_the_file_when_the_url_has_no_key() {
         let _g = exclusive();
         let path =

@@ -75,10 +75,14 @@ pub(super) fn plan_ad_removal(
         let cue_in = one_marker(&segment.unknown_tags, "X-CUE-IN")?;
 
         if cue_out.is_some() && (cue_out_cont.is_some() || cue_in.is_some()) {
-            return Err(unsupported_ad_marker("multiple CUE boundaries share one segment"));
+            return Err(unsupported_ad_marker(
+                "multiple CUE boundaries share one segment",
+            ));
         }
         if cue_in.is_some() && cue_out_cont.is_some() {
-            return Err(unsupported_ad_marker("CUE-IN and CUE-OUT-CONT share one segment"));
+            return Err(unsupported_ad_marker(
+                "CUE-IN and CUE-OUT-CONT share one segment",
+            ));
         }
         if cue_in
             .and_then(|tag| tag.rest.as_deref())
@@ -103,13 +107,14 @@ pub(super) fn plan_ad_removal(
         }
         let asset = one_marker(&segment.unknown_tags, "X-ASSET")?;
         if asset.is_some() {
-            let associated_with_ad =
-                cue_out.is_some() || cue_out_cont.is_some() || in_ad_break;
+            let associated_with_ad = cue_out.is_some() || cue_out_cont.is_some() || in_ad_break;
             let valid_attributes = asset
                 .and_then(|tag| tag.rest.as_deref())
                 .is_some_and(|value| parse_attributes(value, &["CAID", "UPID"]).is_ok());
             if !associated_with_ad || !valid_attributes {
-                return Err(unsupported_ad_marker("standalone or malformed X-ASSET marker"));
+                return Err(unsupported_ad_marker(
+                    "standalone or malformed X-ASSET marker",
+                ));
             }
         }
 
@@ -194,8 +199,7 @@ pub(super) fn plan_ad_removal(
                         "CUE-OUT-CONT elapsed time does not match preceding ad segments",
                     ));
                 }
-                if elapsed + f64::from(segment.duration)
-                    > duration + CUE_DURATION_TOLERANCE_SECONDS
+                if elapsed + f64::from(segment.duration) > duration + CUE_DURATION_TOLERANCE_SECONDS
                 {
                     return Err(unsupported_ad_marker(
                         "ad segment extends beyond the declared CUE-OUT-CONT duration",
@@ -409,7 +413,7 @@ mod tests {
 ad.ts
 #EXT-X-ENDLIST
 "
-                .as_slice(),
+            .as_slice(),
             b"#EXTM3U
 #EXT-X-TARGETDURATION:4
 #EXT-X-CUE-IN
@@ -417,7 +421,7 @@ ad.ts
 program.ts
 #EXT-X-ENDLIST
 "
-                .as_slice(),
+            .as_slice(),
             b"#EXTM3U
 #EXT-X-TARGETDURATION:4
 #EXTINF:4,
@@ -430,7 +434,7 @@ ad.ts
 program2.ts
 #EXT-X-ENDLIST
 "
-                .as_slice(),
+            .as_slice(),
         ] {
             assert!(
                 matches!(
@@ -603,8 +607,8 @@ clear-program.ts
         let local = plan
             .local_playlist_bytes()
             .expect("serialize local playlist");
-        let local = m3u8_rs::parse_media_playlist_res(&local)
-            .expect("parse the ad-free local playlist");
+        let local =
+            m3u8_rs::parse_media_playlist_res(&local).expect("parse the ad-free local playlist");
         assert_eq!(local.segments.len(), 2);
         assert_eq!(
             local.segments[0].key.as_ref().map(|key| &key.method),

@@ -171,9 +171,10 @@ converted using each representation's timescale and Period start, then applied
 to that track's FFmpeg input with `-itsoffset`. Video and audio are offset
 independently; a non-zero Period start with zero PTO is handled by the same
 mapping. Zero-origin tracks omit the FFmpeg option and retain the existing
-finalization argument sequence. Dynamic non-zero PTO, non-zero dynamic
-Period starts, and non-zero `SegmentList@presentationTimeOffset` remain on
-yt-dlp fallback.
+finalization argument sequence. Dynamic non-zero PTO and non-zero
+`SegmentList@presentationTimeOffset` remain on yt-dlp fallback. Existing
+single-Period dynamic Period-start handling is unchanged and does not receive
+the new static mux offsets.
 
 Multi-Period template sources must produce one identical effective timestamp
 offset across all Periods; otherwise the planner rejects the presentation.

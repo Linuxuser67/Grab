@@ -604,20 +604,24 @@ clear-program.ts
 "#;
         let plan = plan_hls_media_playlist(BASE_URL, body)
             .expect("a reset in an omitted ad must remain active for the program segment");
-        let local = plan
+        let local_bytes = plan
             .local_playlist_bytes()
             .expect("serialize local playlist");
-        let local =
-            m3u8_rs::parse_media_playlist_res(&local).expect("parse the ad-free local playlist");
+        let local_text = std::str::from_utf8(&local_bytes)
+            .expect("serialized local playlist is UTF-8");
+        assert!(
+            local_text.contains("#EXT-X-KEY:METHOD=NONE"),
+            "removing the in-ad reset must emit a METHOD=NONE tag before clear program media"
+        );
+        let local = m3u8_rs::parse_media_playlist_res(&local_bytes)
+            .expect("parse the ad-free local playlist");
         assert_eq!(local.segments.len(), 2);
         assert_eq!(
             local.segments[0].key.as_ref().map(|key| &key.method),
             Some(&m3u8_rs::KeyMethod::AES128)
         );
-        assert_eq!(
-            local.segments[1].key.as_ref().map(|key| &key.method),
-            Some(&m3u8_rs::KeyMethod::None)
-        );
+        // m3u8-rs represents METHOD=NONE as no active key in its parsed model.
+        assert!(local.segments[1].key.is_none());
     }
 
     #[test]

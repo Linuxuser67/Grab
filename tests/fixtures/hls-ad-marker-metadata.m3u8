@@ -1,7 +1,3 @@
-# Source: AWS Elemental MediaTailor HLS origin-manifest example:
-# https://docs.aws.amazon.com/mediatailor/latest/ug/manifest-hls-example.html
-# Segment URIs are deterministic test names; the published cue timing/shape is retained.
-# SCTE-35 payload is replaced with a non-secret base64 placeholder.
 #EXTM3U
 #EXT-X-VERSION:3
 #EXT-X-TARGETDURATION:7

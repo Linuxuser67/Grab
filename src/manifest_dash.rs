@@ -3667,7 +3667,7 @@ mod tests {
 </MPD>"#;
         let manifest = parse_dash_manifest_at(BASE_URL, body, dynamic_test_clock(3604))
             .expect("single-period dynamic MPD may have a nonzero period start");
-        let DashPresentation::Dynamic(dynamic) = manifest.presentation else {
+        let DashPresentation::Dynamic(dynamic) = &manifest.presentation else {
             panic!("fixture is dynamic");
         };
         assert_eq!(dynamic.period_start, Duration::from_secs(3600));

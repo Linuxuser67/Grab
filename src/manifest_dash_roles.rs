@@ -234,11 +234,11 @@ pub(super) fn has_nonzero_segment_list_presentation_time_offset(body: &[u8]) -> 
                 ResolveResult::Bound(namespace)
                     if namespace.into_inner() == DASH_MPD_NAMESPACE
             )
-            && start.name().local_name().as_ref() == b"SegmentList"
+            && start.name().local_name().as_ref() == "SegmentList"
         {
             for attribute in start.attributes() {
                 let attribute = attribute.ok()?;
-                if attribute.key.as_ref() == b"presentationTimeOffset" {
+                if attribute.key.as_ref() == "presentationTimeOffset" {
                     let value = attribute.normalized_value(XmlVersion::Implicit1_0).ok()?;
                     let offset = value.parse::<u64>().ok()?;
                     has_nonzero_offset |= offset != 0;
@@ -363,11 +363,12 @@ mod tests {
     fn segment_list_timestamp_scan_rejects_excessive_xml_depth() {
         let nested_tags = format!(
             "{}{}",
-            "<Other>".repeat(MAX_ELEMENT_DEPTH),
-            "</Other>".repeat(MAX_ELEMENT_DEPTH)
+            "<Other>".repeat(super::MAX_ELEMENT_DEPTH),
+            "</Other>".repeat(super::MAX_ELEMENT_DEPTH)
         );
         let nested = format!(
-            r#"<MPD xmlns="{DASH_MPD_NAMESPACE}"><Period><AdaptationSet><Representation>{nested_tags}</Representation></AdaptationSet></Period></MPD>"#
+            r#"<MPD xmlns="{namespace}"><Period><AdaptationSet><Representation>{nested_tags}</Representation></AdaptationSet></Period></MPD>"#
+                .replace("{namespace}", super::DASH_MPD_NAMESPACE)
         );
 
         assert_eq!(

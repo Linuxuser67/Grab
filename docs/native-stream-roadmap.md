@@ -109,7 +109,9 @@ Finite non-negative availability offsets are bounded to 30 seconds.
 availabilityTimeComplete=false requires a positive offset, an initialization
 resource, and an explicit MP4 audio/video MIME type. The effective offset is
 evaluated against every refreshed MPD without making representation identity
-depend on the current offset or segment-duration window.
+depend on the current offset or segment-duration window. Existing
+policy-sensitive live keys are accepted as migration aliases, and restored
+capture state is rewritten using the policy-independent key.
 
 Grab streams the HTTP response body as it arrives into its owned staging
 .part file. For LL-DASH, initialization is fetched first, then available media
@@ -123,7 +125,7 @@ request again. Native transfers still have no automatic retries.
 
 BaseURL-level availability signalling, static LL-DASH, SegmentBase,
 SegmentList, dynamic multi-Period MPDs, missing initialization resources,
-unbounded or over-segment offsets, non-MP4 tracks, DRM, and unsupported
+offsets above the fixed 30-second bound, non-MP4 tracks, DRM, and unsupported
 addressing remain on yt-dlp fallback. Unknown or conflicting presentation
 semantics are not silently stripped.
 

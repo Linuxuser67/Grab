@@ -1843,7 +1843,7 @@ fn push_playlist_items_page(
                         playlist_group_id.get(),
                     )
                 {
-                    playlist_group_id.set(group_id);
+                    playlist_group_id.set(Some(group_id));
                 }
                 if let Some(e) = failed {
                     let message = if skipped_by_host_limit > 0 {

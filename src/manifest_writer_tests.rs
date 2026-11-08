@@ -1136,6 +1136,9 @@ async fn missing_appendable_checkpoint_preserves_existing_destination_part() {
     tokio::fs::remove_file(track_directory.join("video-track.mp4.checkpoint.json"))
         .await
         .expect("simulate missing checkpoint");
+    tokio::fs::remove_file(track_directory.join("video-track.mp4.resources"))
+        .await
+        .expect("simulate missing resource journal");
 
     let reopened = OrderedTrackWriter::open_appendable_destination_part(
         resources,

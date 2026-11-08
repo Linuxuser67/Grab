@@ -129,8 +129,7 @@ fn shorter_segment_timeline_on_refresh_does_not_invalidate_availability_offset()
         "timeline refreshes and availability-window changes must not alter identity"
     );
     assert!(
-        plan_dash_representation(&refreshed, &refreshed.video_representations[0].live_key,)
-            .is_ok(),
+        plan_dash_representation(&refreshed, &refreshed.video_representations[0].live_key,).is_ok(),
         "the previously accepted finite offset remains valid with shorter refreshed segments"
     );
 }

@@ -5130,15 +5130,26 @@ mod tests {
             "availabilityTimeOffset=\"2\"",
             "availabilityTimeOffset=\"INF\"",
         );
-        assert_eq!(
+        assert!(
             parse_dash_manifest_at(
                 BASE_URL,
                 &non_finite,
                 SystemTime::UNIX_EPOCH + Duration::from_secs(6),
             )
+            .is_err(),
+            "unbounded availability offsets remain unsupported"
+        );
+
+        let missing_init = inherited.replace("initialization=\"video-init.mp4\"\n", "");
+        assert_eq!(
+            parse_dash_manifest_at(
+                BASE_URL,
+                &missing_init,
+                SystemTime::UNIX_EPOCH + Duration::from_secs(6),
+            )
             .err(),
             Some(DashError::UnsupportedAddressing),
-            "unbounded availability offsets remain unsupported"
+            "chunked CMAF segments require an initialization resource"
         );
     }
 

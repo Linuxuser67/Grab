@@ -5142,4 +5142,18 @@ mod tests {
             Some(DashError::Parse)
         );
     }
+    #[test]
+    fn rejects_scte35_ad_signaling_in_period_and_inband_event_streams() {
+        let period_event = r#"<MPD xmlns="urn:mpeg:dash:schema:mpd:2011" type="static" mediaPresentationDuration="PT2S"><Period duration="PT2S"><EventStream schemeIdUri="urn:scte:scte35:2013:xml"><Event id="1" presentationTime="0" duration="2"/></EventStream><AdaptationSet contentType="video" mimeType="video/mp4"><SegmentTemplate media="v-$Number$.m4s" duration="2"/><Representation id="v1" bandwidth="500000"/></AdaptationSet></Period></MPD>"#;
+        let inband_event = r#"<MPD xmlns="urn:mpeg:dash:schema:mpd:2011" type="static" mediaPresentationDuration="PT2S"><Period duration="PT2S"><AdaptationSet contentType="video" mimeType="video/mp4"><InbandEventStream schemeIdUri="urn:scte:scte35:2013:bin"/><SegmentTemplate media="v-$Number$.m4s" duration="2"/><Representation id="v1" bandwidth="500000"/></AdaptationSet></Period></MPD>"#;
+
+        for body in [period_event, inband_event] {
+            assert_eq!(
+                parse_dash_manifest(BASE_URL, body).err(),
+                Some(DashError::AdSignaling),
+                "SCTE-35 ad signaling must fail closed: {body}"
+            );
+        }
+    }
+
 }

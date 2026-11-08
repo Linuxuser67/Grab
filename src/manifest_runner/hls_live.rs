@@ -213,6 +213,11 @@ pub(super) async fn load_live_hls_track(
         snapshot_at: Instant::now(),
         ended: false,
         next_poll_at: None,
+        target_duration: plan.source_target_duration,
+        part_target: plan.part_target,
+        blocking_reload: plan.blocking_reload,
+        can_skip_until: plan.can_skip_until,
+        rendition_reports: plan.rendition_reports.clone(),
         destination_part: None,
     })
 }
@@ -264,6 +269,47 @@ pub(super) async fn write_live_playlist(
         .await
         .map_err(|error| format!("Could not publish the live HLS playlist: {error}"))?;
     sync_staging_directory(directory).await
+}
+
+async fn missing_hls_resources(
+    directory: &Path,
+    resources: &[HlsResource],
+) -> Result<Vec<HlsResource>, ManifestRunError> {
+    let mut missing = Vec::new();
+    for resource in resources {
+        let path = directory.join(&resource.filename);
+        match tokio::fs::symlink_metadata(&path).await {
+            Ok(metadata) if metadata.file_type().is_file() => {
+                let size = metadata.len();
+                let valid_size = size > 0
+                    && size <= MAX_RESOURCE_BYTES
+                    && resource.range.is_none_or(|range| size == range.length)
+                    && (resource.kind != HlsResourceKind::Key || size == 16);
+                if valid_size {
+                    continue;
+                }
+                tokio::fs::remove_file(&path).await.map_err(|error| {
+                    manifest_storage_error("Could not remove an invalid staged HLS resource", error)
+                })?;
+                missing.push(resource.clone());
+            }
+            Ok(_) => {
+                return Err(ManifestRunError::Unsupported(
+                    "A staged HLS resource path is not a regular file".to_string(),
+                ));
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                missing.push(resource.clone());
+            }
+            Err(error) => {
+                return Err(manifest_storage_error(
+                    "Could not inspect a staged HLS resource",
+                    error,
+                ));
+            }
+        }
+    }
+    Ok(missing)
 }
 
 async fn fetched_hls_resource_bytes(
@@ -361,13 +407,17 @@ pub(super) async fn apply_live_hls_snapshot(
     };
     let changed = update.changed;
     let end_list = update.end_list;
+    let reload_delay = if plan.blocking_reload.is_some() && changed {
+        Duration::ZERO
+    } else if let Some(part_target) = plan.part_target {
+        part_target.min(MAX_LIVE_HLS_POLL_INTERVAL)
+    } else {
+        live_hls_poll_interval(plan.source_target_duration, changed)
+    };
     let next_poll_at = if end_list {
         None
     } else {
-        match track
-            .snapshot_at
-            .checked_add(live_hls_poll_interval(plan.source_target_duration, changed))
-        {
+        match track.snapshot_at.checked_add(reload_delay) {
             Some(deadline) => Some(deadline),
             None if track.accumulator.segment_count() > 0 => {
                 tracing::warn!(
@@ -383,17 +433,36 @@ pub(super) async fn apply_live_hls_snapshot(
             }
         }
     };
-    let resources = hls_resources_from(&update.resources);
-    let fetch_outcome = fetch_resources_with_stop(
-        client,
-        resources,
-        &track.directory,
-        connections,
-        tx,
-        downloaded,
-        abort,
-    )
-    .await;
+    // LL-HLS snapshots intentionally include overlapping resources so a
+    // missing staged file can be repaired. Do not fetch an already-staged
+    // regular file again (notably the shared EXT-X-MAP).
+    let missing_resources = match missing_hls_resources(&track.directory, &update.resources).await {
+        Ok(resources) => resources,
+        Err(ManifestRunError::Unsupported(error)) if track.accumulator.segment_count() > 0 => {
+            tracing::warn!(
+                playlist = %diagnostic_url(&playlist_url),
+                error = %error,
+                "a staged live HLS resource became unsafe; preserving captured media"
+            );
+            return Ok(LiveHlsSnapshotOutcome::ContinuityLost);
+        }
+        Err(error) => return Err(error),
+    };
+    let resources = hls_resources_from(&missing_resources);
+    let fetch_outcome = if resources.is_empty() {
+        Ok(ResourceFetchOutcome::Complete)
+    } else {
+        fetch_resources_with_stop(
+            client,
+            resources,
+            &track.directory,
+            connections,
+            tx,
+            downloaded,
+            abort,
+        )
+        .await
+    };
     let fetch_outcome = match fetch_outcome {
         Err(ManifestRunError::Unsupported(error)) if track.accumulator.segment_count() > 0 => {
             tracing::warn!(
@@ -413,8 +482,59 @@ pub(super) async fn apply_live_hls_snapshot(
         }
     }
 
+    let new_resource_names = update.new_resource_names().collect::<HashSet<_>>();
+    let newly_accounted_resources = update
+        .resources
+        .iter()
+        .filter(|resource| new_resource_names.contains(resource.filename.as_str()))
+        .cloned()
+        .collect::<Vec<_>>();
     let added_resource_bytes =
-        fetched_hls_resource_bytes(&track.directory, &update.resources).await?;
+        fetched_hls_resource_bytes(&track.directory, &newly_accounted_resources).await?;
+    for filename in track
+        .accumulator
+        .resource_names()
+        .chain(update.referenced_resource_names())
+    {
+        let path = track.directory.join(filename);
+        let metadata = match tokio::fs::symlink_metadata(&path).await {
+            Ok(metadata) => metadata,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                if track.accumulator.segment_count() > 0 {
+                    return Ok(LiveHlsSnapshotOutcome::ContinuityLost);
+                }
+                return Err(ManifestRunError::Unsupported(
+                    "An LL-HLS resource referenced by the local playlist is missing".to_string(),
+                ));
+            }
+            Err(error) => {
+                return Err(manifest_storage_error(
+                    "Could not verify an HLS staged resource",
+                    error,
+                ));
+            }
+        };
+        if !metadata.file_type().is_file() {
+            if track.accumulator.segment_count() > 0 {
+                return Ok(LiveHlsSnapshotOutcome::ContinuityLost);
+            }
+            return Err(ManifestRunError::Unsupported(
+                "An LL-HLS resource referenced by the local playlist is not a regular file"
+                    .to_string(),
+            ));
+        }
+    }
+    for filename in plan.ll_parts_without_init_map() {
+        if !super::is_mpegts_segment(&track.directory.join(filename)).await? {
+            if track.accumulator.segment_count() > 0 {
+                return Ok(LiveHlsSnapshotOutcome::ContinuityLost);
+            }
+            return Err(ManifestRunError::Unsupported(
+                "A Low-Latency HLS part without EXT-X-MAP is not a valid MPEG-TS fragment"
+                    .to_string(),
+            ));
+        }
+    }
     if track.destination_part.is_some() {
         for resource in &update.resources {
             if resource.kind != HlsResourceKind::Segment
@@ -464,7 +584,74 @@ pub(super) async fn apply_live_hls_snapshot(
     track.playlist_url = playlist_url;
     track.ended = end_list;
     track.next_poll_at = next_poll_at;
+    track.target_duration = plan.source_target_duration;
+    track.part_target = plan.part_target;
+    track.blocking_reload = plan.blocking_reload;
+    track.can_skip_until = plan.can_skip_until;
+    track.rendition_reports = plan.rendition_reports.clone();
     Ok(LiveHlsSnapshotOutcome::Committed)
+}
+
+fn reload_target_is_ahead(candidate: (u64, Option<u64>), current: (u64, Option<u64>)) -> bool {
+    if candidate.0 != current.0 {
+        return candidate.0 > current.0;
+    }
+    match (candidate.1, current.1) {
+        (Some(candidate_part), Some(current_part)) => candidate_part > current_part,
+        (Some(_), None) => true,
+        (None, Some(_)) | (None, None) => false,
+    }
+}
+
+/// Apply a selected rendition's report to its matching peer track.
+///
+/// Reports never cause Grab to fetch an arbitrary URI. The resolved report URI
+/// must identify the already-selected peer playlist, and the reported next
+/// position must be beyond the peer's last committed LL-HLS unit.
+fn apply_rendition_report(source: &LiveHlsTrack, peer: &mut LiveHlsTrack) -> bool {
+    if peer.ended || !peer.accumulator.is_ll_capture() {
+        return false;
+    }
+    let peer_identity = crate::manifest::resource_cache_key(&peer.playlist_url);
+    let Some(report) = source
+        .rendition_reports
+        .iter()
+        .find(|report| crate::manifest::resource_cache_key(&report.playlist_url) == peer_identity)
+    else {
+        return false;
+    };
+    let Some(target) = report.next_reload() else {
+        return false;
+    };
+    if peer
+        .blocking_reload
+        .is_some_and(|current| !reload_target_is_ahead(target, current))
+    {
+        return false;
+    }
+
+    let target_is_ahead = match peer.accumulator.last_ll_unit() {
+        None => true,
+        Some(crate::manifest::hls_ll::HlsLiveUnitId::Segment(sequence)) => target.0 > *sequence,
+        Some(crate::manifest::hls_ll::HlsLiveUnitId::Part {
+            media_sequence,
+            part_index,
+        }) => {
+            target.0 > *media_sequence
+                || (target.0 == *media_sequence
+                    && target.1.is_some_and(|part| part > u64::from(*part_index)))
+                || (target.0 == *media_sequence && target.1.is_none())
+        }
+    };
+    if !target_is_ahead {
+        return false;
+    }
+
+    if peer.blocking_reload.is_some() {
+        peer.blocking_reload = Some(target);
+    }
+    peer.next_poll_at = Some(Instant::now());
+    true
 }
 
 async fn live_hls_track_has_only_mpegts_resources(
@@ -628,13 +815,35 @@ async fn poll_live_hls_track(
                 stop.unwrap_or(crate::video::StopIntent::Discard),
             ));
         }
-        result = crate::manifest_intake::lookup_hls_media(
+        result = crate::manifest_intake::lookup_hls_live_media(
             client,
             track.playlist_url.as_str(),
+            track.blocking_reload,
+            track.can_skip_until,
         ) => result,
     };
     let plan = match result {
         Ok(plan) => plan,
+        Err(crate::manifest_intake::ManifestIntakeError::Retryable(error)) => {
+            // One failed blocking reload is not retried in-place. Schedule the
+            // next normal live poll and preserve already committed resources.
+            let delay = track
+                .part_target
+                .unwrap_or_else(|| live_hls_poll_interval(track.target_duration, false))
+                .min(MAX_LIVE_HLS_POLL_INTERVAL);
+            track.snapshot_at = Instant::now();
+            let Some(next_poll_at) = track.snapshot_at.checked_add(delay) else {
+                return Ok(LiveHlsSnapshotOutcome::ContinuityLost);
+            };
+            track.next_poll_at = Some(next_poll_at);
+            tracing::debug!(
+                playlist = %diagnostic_url(&track.playlist_url),
+                error = %error,
+                delay_ms = delay.as_millis() as u64,
+                "live HLS reload failed transiently; preserving capture and rescheduling the next poll"
+            );
+            return Ok(LiveHlsSnapshotOutcome::RetryScheduled);
+        }
         Err(crate::manifest_intake::ManifestIntakeError::Unsupported(error))
             if track.accumulator.segment_count() > 0 =>
         {
@@ -836,6 +1045,7 @@ pub(super) async fn run_live_hls_tracks(
                 downloaded.load(Ordering::Relaxed),
             )?;
         }
+        LiveHlsSnapshotOutcome::RetryScheduled => {}
         LiveHlsSnapshotOutcome::Stopped(intent) => {
             return Ok(LiveHlsCapture::new(
                 match intent {
@@ -900,6 +1110,7 @@ pub(super) async fn run_live_hls_tracks(
                     downloaded.load(Ordering::Relaxed),
                 )?;
             }
+            LiveHlsSnapshotOutcome::RetryScheduled => {}
             LiveHlsSnapshotOutcome::Stopped(intent) => {
                 return Ok(LiveHlsCapture::new(
                     match intent {
@@ -929,6 +1140,10 @@ pub(super) async fn run_live_hls_tracks(
                 ));
             }
         }
+    }
+    if let Some(track) = audio.as_mut() {
+        apply_rendition_report(&video, track);
+        apply_rendition_report(track, &mut video);
     }
 
     while !video.ended || audio.as_ref().is_some_and(|track| !track.ended) {
@@ -986,6 +1201,7 @@ pub(super) async fn run_live_hls_tracks(
                         downloaded.load(Ordering::Relaxed),
                     )?;
                 }
+                LiveHlsSnapshotOutcome::RetryScheduled => {}
                 LiveHlsSnapshotOutcome::Stopped(intent) => {
                     return Ok(LiveHlsCapture::new(
                         match intent {
@@ -1015,6 +1231,9 @@ pub(super) async fn run_live_hls_tracks(
                     ));
                 }
             }
+            if let Some(audio_track) = audio.as_mut() {
+                apply_rendition_report(&video, audio_track);
+            }
         }
         if let Some(audio) = audio.as_mut()
             && !audio.ended
@@ -1042,6 +1261,7 @@ pub(super) async fn run_live_hls_tracks(
                         downloaded.load(Ordering::Relaxed),
                     )?;
                 }
+                LiveHlsSnapshotOutcome::RetryScheduled => {}
                 LiveHlsSnapshotOutcome::Stopped(intent) => {
                     return Ok(LiveHlsCapture::new(
                         match intent {
@@ -1073,6 +1293,7 @@ pub(super) async fn run_live_hls_tracks(
                     ));
                 }
             }
+            apply_rendition_report(audio, &mut video);
         }
     }
 
@@ -1120,6 +1341,171 @@ mod destination_part_tests {
             bodies.push(body);
         }
         (bodies, bytes)
+    }
+
+    fn live_track_from_plan(plan: &HlsPlan, accumulator: HlsLiveAccumulator) -> LiveHlsTrack {
+        LiveHlsTrack {
+            playlist_url: plan.playlist_url.clone(),
+            directory: PathBuf::new(),
+            accumulator,
+            snapshot_at: Instant::now(),
+            ended: false,
+            next_poll_at: Some(Instant::now() + Duration::from_secs(30)),
+            target_duration: plan.source_target_duration,
+            part_target: plan.part_target,
+            blocking_reload: plan.blocking_reload,
+            can_skip_until: plan.can_skip_until,
+            rendition_reports: plan.rendition_reports.clone(),
+            destination_part: None,
+        }
+    }
+
+    fn committed_part_accumulator(plan: &HlsPlan) -> HlsLiveAccumulator {
+        let mut accumulator = HlsLiveAccumulator::new();
+        let update = accumulator
+            .prepare_update(plan)
+            .expect("prepare peer LL-HLS snapshot");
+        accumulator
+            .commit_update_with_budget(update, 0, 0)
+            .expect("commit peer LL-HLS media identities");
+        accumulator
+    }
+
+    #[test]
+    fn rendition_report_advances_only_the_matching_peer_track() {
+        let source = crate::manifest::plan_hls_media_playlist(
+            "https://cdn.example.test/live/video.m3u8",
+            br#"#EXTM3U
+#EXT-X-TARGETDURATION:2
+#EXT-X-MEDIA-SEQUENCE:30
+#EXT-X-SERVER-CONTROL:CAN-BLOCK-RELOAD=YES
+#EXTINF:1.0,
+30.m4s
+#EXT-X-RENDITION-REPORT:URI="audio.m3u8",LAST-MSN=31,LAST-PART=1
+"#,
+        )
+        .expect("source playlist with a rendition report");
+        let peer = crate::manifest::plan_hls_media_playlist(
+            "https://cdn.example.test/live/audio.m3u8",
+            br#"#EXTM3U
+#EXT-X-TARGETDURATION:2
+#EXT-X-MEDIA-SEQUENCE:31
+#EXT-X-MAP:URI="init.mp4"
+#EXT-X-SERVER-CONTROL:CAN-BLOCK-RELOAD=YES,PART-HOLD-BACK=1.5
+#EXT-X-PART-INF:PART-TARGET=0.5
+#EXT-X-PART:DURATION=0.5,URI="31.0.m4s",INDEPENDENT=YES
+"#,
+        )
+        .expect("peer LL-HLS playlist");
+        let mut source_track = live_track_from_plan(&source, HlsLiveAccumulator::new());
+        let peer_accumulator = committed_part_accumulator(&peer);
+        let mut peer_track = live_track_from_plan(&peer, peer_accumulator);
+        let previous_deadline = peer_track.next_poll_at;
+        let peer_identity = crate::manifest::resource_cache_key(&peer_track.playlist_url);
+
+        assert!(apply_rendition_report(&source_track, &mut peer_track));
+        assert_eq!(peer_track.blocking_reload, Some((31, Some(2))));
+        assert!(
+            peer_track.next_poll_at.expect("new peer poll deadline") <= Instant::now(),
+            "a newly reported peer part should expedite the selected track"
+        );
+        assert_ne!(peer_track.next_poll_at, previous_deadline);
+        assert_eq!(
+            crate::manifest::resource_cache_key(&peer_track.playlist_url),
+            peer_identity,
+            "a rendition report must not change the selected peer URL"
+        );
+
+        // A report for an unrelated child playlist cannot retarget the selected track.
+        source_track.rendition_reports = source_track
+            .rendition_reports
+            .iter()
+            .cloned()
+            .map(|mut report| {
+                report.playlist_url = Url::parse("https://cdn.example.test/live/other.m3u8")
+                    .expect("unrelated report URL");
+                report
+            })
+            .collect::<Vec<_>>()
+            .into_boxed_slice();
+        peer_track.next_poll_at = Some(Instant::now() + Duration::from_secs(30));
+        peer_track.blocking_reload = Some((31, Some(1)));
+        assert!(!apply_rendition_report(&source_track, &mut peer_track));
+        assert_eq!(peer_track.blocking_reload, Some((31, Some(1))));
+    }
+
+    #[test]
+    fn older_rendition_report_cannot_rewind_a_later_pending_reload() {
+        let source = crate::manifest::plan_hls_media_playlist(
+            "https://cdn.example.test/live/video.m3u8",
+            br#"#EXTM3U
+#EXT-X-TARGETDURATION:2
+#EXT-X-MEDIA-SEQUENCE:30
+#EXT-X-SERVER-CONTROL:CAN-BLOCK-RELOAD=YES
+#EXTINF:1.0,
+30.m4s
+#EXT-X-RENDITION-REPORT:URI="audio.m3u8",LAST-MSN=31,LAST-PART=2
+"#,
+        )
+        .expect("source playlist with a behind report");
+        let peer = crate::manifest::plan_hls_media_playlist(
+            "https://cdn.example.test/live/audio.m3u8",
+            br#"#EXTM3U
+#EXT-X-TARGETDURATION:2
+#EXT-X-MEDIA-SEQUENCE:31
+#EXT-X-MAP:URI="init.mp4"
+#EXT-X-SERVER-CONTROL:CAN-BLOCK-RELOAD=YES,PART-HOLD-BACK=1.5
+#EXT-X-PART-INF:PART-TARGET=0.5
+#EXT-X-PART:DURATION=0.5,URI="31.0.m4s",INDEPENDENT=YES
+#EXT-X-PART:DURATION=0.5,URI="31.1.m4s"
+"#,
+        )
+        .expect("peer LL-HLS playlist");
+        let source_track = live_track_from_plan(&source, HlsLiveAccumulator::new());
+        let mut peer_track = live_track_from_plan(&peer, committed_part_accumulator(&peer));
+        peer_track.blocking_reload = Some((31, Some(5)));
+        let deadline = peer_track.next_poll_at;
+
+        assert!(!apply_rendition_report(&source_track, &mut peer_track));
+        assert_eq!(peer_track.blocking_reload, Some((31, Some(5))));
+        assert_eq!(peer_track.next_poll_at, deadline);
+    }
+
+    #[test]
+    fn stale_rendition_report_does_not_rewind_or_repoll_a_peer() {
+        let source = crate::manifest::plan_hls_media_playlist(
+            "https://cdn.example.test/live/video.m3u8",
+            br#"#EXTM3U
+#EXT-X-TARGETDURATION:2
+#EXT-X-MEDIA-SEQUENCE:30
+#EXT-X-SERVER-CONTROL:CAN-BLOCK-RELOAD=YES
+#EXTINF:1.0,
+30.m4s
+#EXT-X-RENDITION-REPORT:URI="audio.m3u8",LAST-MSN=31,LAST-PART=0
+"#,
+        )
+        .expect("source playlist with stale rendition report");
+        let peer = crate::manifest::plan_hls_media_playlist(
+            "https://cdn.example.test/live/audio.m3u8",
+            br#"#EXTM3U
+#EXT-X-TARGETDURATION:2
+#EXT-X-MEDIA-SEQUENCE:31
+#EXT-X-MAP:URI="init.mp4"
+#EXT-X-SERVER-CONTROL:CAN-BLOCK-RELOAD=YES,PART-HOLD-BACK=1.5
+#EXT-X-PART-INF:PART-TARGET=0.5
+#EXT-X-PART:DURATION=0.5,URI="31.0.m4s",INDEPENDENT=YES
+#EXT-X-PART:DURATION=0.5,URI="31.1.m4s"
+"#,
+        )
+        .expect("peer playlist already ahead of report");
+        let source_track = live_track_from_plan(&source, HlsLiveAccumulator::new());
+        let mut peer_track = live_track_from_plan(&peer, committed_part_accumulator(&peer));
+        let deadline = peer_track.next_poll_at;
+        let blocking_reload = peer_track.blocking_reload;
+
+        assert!(!apply_rendition_report(&source_track, &mut peer_track));
+        assert_eq!(peer_track.next_poll_at, deadline);
+        assert_eq!(peer_track.blocking_reload, blocking_reload);
     }
 
     #[test]
@@ -1176,6 +1562,11 @@ mod destination_part_tests {
             snapshot_at: Instant::now(),
             ended: false,
             next_poll_at: None,
+            target_duration: first_plan.source_target_duration,
+            part_target: first_plan.part_target,
+            blocking_reload: first_plan.blocking_reload,
+            can_skip_until: first_plan.can_skip_until,
+            rendition_reports: first_plan.rendition_reports.clone(),
             destination_part: Some(destination_state.clone()),
         };
         let (_stop_tx, mut abort) = tokio::sync::oneshot::channel();

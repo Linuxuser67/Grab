@@ -386,6 +386,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "broadcast-hls"
+version = "0.4.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "fab3a52daf2a4274421f42aa21fc78b5a45809a845c36271bfb59628da9153dd"
+dependencies = [
+ "broadcast-common",
+ "serde",
+ "thiserror 2.0.21",
+]
+
+[[package]]
 name = "brotli"
 version = "9.1.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1468,6 +1479,7 @@ version = "6.5.0-beta.13"
 dependencies = [
  "axum",
  "base64",
+ "broadcast-hls",
  "dash-mpd-core",
  "futures-util",
  "getrandom 0.4.3",

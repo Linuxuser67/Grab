@@ -483,6 +483,19 @@
     {
         "type": "archive",
         "archive-type": "tar-gzip",
+        "url": "https://static.crates.io/crates/broadcast-hls/broadcast-hls-0.4.0.crate",
+        "sha256": "fab3a52daf2a4274421f42aa21fc78b5a45809a845c36271bfb59628da9153dd",
+        "dest": "cargo/broadcast-hls-0.4.0"
+    },
+    {
+        "type": "inline",
+        "contents": "{\"package\": \"fab3a52daf2a4274421f42aa21fc78b5a45809a845c36271bfb59628da9153dd\", \"files\": {}}",
+        "dest": "cargo/broadcast-hls-0.4.0",
+        "dest-filename": ".cargo-checksum.json"
+    },
+    {
+        "type": "archive",
+        "archive-type": "tar-gzip",
         "url": "https://static.crates.io/crates/brotli/brotli-9.1.1.crate",
         "sha256": "627b7cfb0578f0eafce087a90fcd40add1231900b69e4d4de2d456260a4f5d81",
         "dest": "cargo/brotli-9.1.1"

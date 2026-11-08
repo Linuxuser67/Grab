@@ -47,19 +47,46 @@ date-time ranges can be mapped unambiguously to individual media segments.
 
 This is a deliberately bounded profile, not a claim of support for every HLS
 extension. Unknown parser tags and unsupported resource-affecting extensions
-fall back to yt-dlp. This includes alternate VIDEO rendition groups, LL-HLS
-parts, preload hints, delta updates, rendition reports, blocking-reload
-query parameters, GAP, DEFINE, SKIP, and CONTENT-STEERING. I-frame-only media
-playlists, unsupported session-key methods, non-identity session-key formats,
-non-identity media-key formats, SAMPLE-AES over fragmented MP4/CBCS, and other
-unsupported encryption schemes also remain on fallback.
-AES-128 and supported SAMPLE-AES keys continue to use the existing
+fall back to yt-dlp. This includes alternate VIDEO rendition groups, GAP,
+DEFINE, CONTENT-STEERING, unsupported encryption schemes, and extensions with
+unmet REQ-prefixed attributes. I-frame-only media playlists, non-identity
+session-key formats, non-identity media-key formats, SAMPLE-AES over
+fragmented MP4/CBCS, and unsupported encryption remain on fallback. AES-128
+and supported SAMPLE-AES keys in ordinary HLS continue to use the existing
 bounded key-resource path; no license or CDM acquisition is added.
+
+## Native Low-Latency HLS supported profile
+
+LL-HLS media playlists are parsed with broadcast-hls; Grab retains ownership of
+network requests, per-origin guards, part scheduling, staging, recovery, and
+FFmpeg finalization. Confirmed EXT-X-PART resources are recorded as stable
+(media sequence, part index) units. A complete parent segment is recognized
+as closure of already captured parts only when the part indexes begin at zero,
+remain contiguous, and their durations and initialization map match the parent.
+An initialization map remains active across segments and snapshots.
+
+Blocking reload uses _HLS_msn and, only when an open part index exists,
+_HLS_part. Delta updates use _HLS_skip=YES only when CAN-SKIP-UNTIL is
+advertised; SKIPPED-SEGMENTS advances the first visible media sequence, and
+the omitted prefix must be covered by the committed capture before new media is
+accepted. Sliding windows retain stable part identities. A single failed
+blocking request is not retried in-place; the normal next-poll schedule resumes
+capture. Preload hints remain speculative and are not fetched until the part is
+confirmed in a later playlist.
+
+This LL-HLS profile remains deliberately bounded. The first captured part must
+be independently decodable (or covered by EXT-X-INDEPENDENT-SEGMENTS).
+CMAF part capture without a known EXT-X-MAP, mapless parts that fail
+MPEG-TS validation, unsupported encryption (including all LL-HLS media-playlist
+EXT-X-KEY signalling in this phase), incomplete continuity, EXT-X-START, GAP,
+DEFINE, unknown required attributes, and ad/date-range markers remain on
+yt-dlp fallback. Mapless parts are accepted only when their fetched bytes pass
+the existing MPEG-TS validation path. Ad removal from LL-HLS is
+parked; this PR does not strip ad markers or schedule ad-marked media. DRM,
+license acquisition, and CDM support remain unplanned.
 
 ## Explicitly unplanned
 
-- Low-Latency HLS (LL-HLS): part/preload scheduling, delta playlist updates,
-  rendition reports, and blocking reload.
 - Low-Latency DASH (LL-DASH): partial-segment availability and low-latency
   chunk transfer behavior.
 

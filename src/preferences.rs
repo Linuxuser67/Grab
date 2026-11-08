@@ -269,7 +269,9 @@ pub fn show(
 
     let proxy_mode = adw::ComboRow::builder()
         .title(gettext("Proxy"))
-        .subtitle(gettext("Torrents follow SOCKS5 proxies only. Changes take effect after restarting Grab."))
+        .subtitle(gettext(
+            "Torrents follow SOCKS5 proxies only. Changes take effect after restarting Grab.",
+        ))
         .build();
     {
         let labels = crate::download::proxy_mode_labels();

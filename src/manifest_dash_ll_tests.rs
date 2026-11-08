@@ -74,11 +74,8 @@ fn dynamic_segment_template_without_availability_offset_keeps_complete_segment_w
         SystemTime::UNIX_EPOCH + Duration::from_secs(6),
     )
     .expect("ordinary dynamic DASH should continue to parse");
-    let plan = plan_dash_representation(
-        &manifest,
-        &manifest.video_representations[0].live_key,
-    )
-    .expect("ordinary dynamic representation should expand");
+    let plan = plan_dash_representation(&manifest, &manifest.video_representations[0].live_key)
+        .expect("ordinary dynamic representation should expand");
 
     assert!(!plan.low_latency);
     assert_eq!(
@@ -116,11 +113,8 @@ fn dynamic_segment_template_inherits_and_bounds_availability_attributes() {
         SystemTime::UNIX_EPOCH + Duration::from_secs(5),
     )
     .expect("representation-level values should override inherited template values");
-    let plan = plan_dash_representation(
-        &manifest,
-        &manifest.video_representations[0].live_key,
-    )
-    .expect("inherited LL-DASH representation should expand");
+    let plan = plan_dash_representation(&manifest, &manifest.video_representations[0].live_key)
+        .expect("inherited LL-DASH representation should expand");
     assert!(plan.low_latency);
     assert_eq!(
         plan.resources

@@ -3079,6 +3079,7 @@ async fn dynamic_dash_fmp4_fixture_runs_live_capture_and_finalizes_playable_mp4(
     let mut guarded_child_hosts = std::collections::HashSet::new();
     let capture = run_live_dash_tracks(
         &client,
+        false,
         source_url,
         root.path(),
         &destination,
@@ -3212,6 +3213,7 @@ async fn dynamic_dash_live_runner_pauses_and_retains_committed_window() {
     let mut guarded_child_hosts = std::collections::HashSet::new();
     let capture = run_live_dash_tracks(
         &client,
+        false,
         "https://origin.example.test/live.mpd",
         root.path(),
         &destination,
@@ -3267,6 +3269,7 @@ async fn dynamic_dash_live_runner_pauses_and_retains_committed_window() {
         .expect("queue finish after restoring the paused capture");
     let finished = run_live_dash_tracks(
         &client,
+        false,
         "https://origin.example.test/live.mpd",
         root.path(),
         &destination,

@@ -235,6 +235,56 @@ fn stored_row(url: &str, dest_dir: &str, filename: &str, status: DownloadStatus)
     }
 }
 
+#[test]
+fn playlist_group_metadata_restores_with_each_child() {
+    let (_queue_lock, _main_loop_lock) = test_locks();
+    let queue_file = test_queue_file("playlist-group-restore");
+
+    let mut first = stored_row(
+        "https://example.com/playlist/one",
+        "/tmp/downloads/Course",
+        "one.mp4",
+        DownloadStatus::Paused,
+    );
+    first.group_id = Some(42);
+    first.group_title = Some("Course playlist".to_string());
+
+    let mut second = stored_row(
+        "https://example.com/playlist/two",
+        "/tmp/downloads/Course",
+        "two.mp4",
+        DownloadStatus::Paused,
+    );
+    second.group_id = Some(42);
+    second.group_title = Some("Course playlist".to_string());
+
+    let queue = StoredQueue {
+        version: QUEUE_VERSION,
+        items: vec![first, second],
+    };
+    std::fs::write(&queue_file, serde_json::to_vec(&queue).unwrap()).unwrap();
+
+    let manager = DownloadManager::new(
+        gio::ListStore::new::<DownloadItem>(),
+        test_settings(),
+    );
+    manager.restore_queue();
+
+    assert_eq!(manager.store().n_items(), 2);
+    for index in 0..manager.store().n_items() {
+        let item = manager
+            .store()
+            .item(index)
+            .and_downcast::<DownloadItem>()
+            .unwrap();
+        assert_eq!(item.group_id(), 42);
+        assert_eq!(item.group_title(), "Course playlist");
+        assert_eq!(item.status(), DownloadStatus::Paused);
+    }
+
+    let _ = std::fs::remove_file(&queue_file);
+}
+
 fn test_queue_file(tag: &str) -> std::path::PathBuf {
     let p = std::env::temp_dir().join(format!(
         "grab-q-{:?}-{tag}.json",

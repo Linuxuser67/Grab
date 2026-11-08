@@ -1641,6 +1641,7 @@ pub(crate) async fn run_manifest_download(
         };
         match prepare_live_dash_finalization(ManifestLiveDashFinalization {
             client: &client,
+            proxy_configured: job.proxy.is_some(),
             source_url: &job.source.url,
             dest_dir: &dest_dir,
             destination: &job.dest,

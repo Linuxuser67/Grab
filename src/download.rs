@@ -1506,13 +1506,14 @@ impl DownloadManager {
         let base_dir = this.resolve_dir(Some(&item.dest_dir()));
         let multi = pl.total > 1;
         let title = pl.title.clone();
-        let mut collection_group = None;
+        let collection_group = if multi {
+            crate::download_store::DownloadGroup::try_new(id, &title)
+        } else {
+            None
+        };
         // The local task must not keep a strong manager Rc pinned while the
         // directory worker is pending; upgrade again before touching queue state.
         drop(this);
-        if multi {
-            collection_group = crate::download_store::DownloadGroup::try_new(id, &title);
-        }
         let prepared = gio::spawn_blocking(move || {
             let dest_dir = if multi {
                 crate::file_names::collection_subdir(&base_dir, &title)

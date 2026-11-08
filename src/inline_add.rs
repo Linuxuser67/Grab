@@ -4797,7 +4797,9 @@ mod tests {
         let group_id = assign_playlist_group(&[first.clone()], "Course playlist", None)
             .expect("first successful child establishes the group");
         assert_eq!(group_id, 10);
-        let group = first.group().expect("first row belongs to a playlist group");
+        let group = first
+            .group()
+            .expect("first row belongs to a playlist group");
         assert_eq!(group.id(), 10);
         assert_eq!(group.title(), "Course playlist");
 

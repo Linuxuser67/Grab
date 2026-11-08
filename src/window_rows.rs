@@ -1399,8 +1399,7 @@ pub(crate) fn build_row(
                 video_source: m.video_source(id),
                 started: m.has_started(id),
                 public_only: it.public_only(),
-                group_id: it.group_id(),
-                group_title: it.group_title(),
+                group: it.group(),
             };
             let name = snapshot.filename.clone();
             m.remove(id);

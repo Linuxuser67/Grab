@@ -129,7 +129,6 @@ offsets above the fixed 30-second bound, non-MP4 tracks, DRM, and unsupported
 addressing remain on yt-dlp fallback. Unknown or conflicting presentation
 semantics are not silently stripped.
 
-
 ## Phases
 
 ### 1. Static DASH SegmentBase and hierarchical SIDX — implemented

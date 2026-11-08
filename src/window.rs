@@ -633,19 +633,17 @@ pub fn build_window(
 
             let mut group_sizes = HashMap::<u64, usize>::new();
             for item in &items {
-                let title = item.group_title();
-                if item.group_id() > 0 && !title.trim().is_empty() {
-                    *group_sizes.entry(item.group_id()).or_default() += 1;
+                if let Some(group) = item.group().filter(|group| group.is_valid()) {
+                    *group_sizes.entry(group.id).or_default() += 1;
                 }
             }
             let mut all_groups = HashMap::<u64, Vec<crate::download::DownloadItem>>::new();
             for item in &items {
-                let title = item.group_title();
-                if item.group_id() > 0
-                    && !title.trim().is_empty()
-                    && group_sizes.get(&item.group_id()).is_some_and(|count| *count > 1)
-                {
-                    all_groups.entry(item.group_id()).or_default().push(item.clone());
+                if let Some(group) = item.group().filter(|group| {
+                    group.is_valid()
+                        && group_sizes.get(&group.id).is_some_and(|count| *count > 1)
+                }) {
+                    all_groups.entry(group.id).or_default().push(item.clone());
                 }
             }
 
@@ -662,11 +660,13 @@ pub fn build_window(
             for item in &items {
                 present.insert(item.id());
                 let bucket = section_bucket(item.status());
-                let title = item.group_title();
-                let group_key = (item.group_id() > 0
-                    && !title.trim().is_empty()
-                    && group_sizes.get(&item.group_id()).is_some_and(|count| *count > 1))
-                    .then_some((item.group_id(), bucket));
+                let group_key = item
+                    .group()
+                    .filter(|group| {
+                        group.is_valid()
+                            && group_sizes.get(&group.id).is_some_and(|count| *count > 1)
+                    })
+                    .map(|group| (group.id, bucket));
 
                 let mut shown = sel == 0 || status_filter_bucket(item.status()) == sel;
                 if shown && !q.is_empty() && !item.filename().to_lowercase().contains(q.as_str()) {
@@ -701,7 +701,8 @@ pub fn build_window(
                 };
                 let title = members
                     .first()
-                    .map(crate::download::DownloadItem::group_title)
+                    .and_then(crate::download::DownloadItem::group)
+                    .map(|group| group.title)
                     .unwrap_or_default();
                 let group = {
                     let mut groups = groups.borrow_mut();
@@ -743,11 +744,13 @@ pub fn build_window(
                     3 => &l_queued,
                     _ => &l_active,
                 };
-                let title = item.group_title();
-                let group_key = (item.group_id() > 0
-                    && !title.trim().is_empty()
-                    && group_sizes.get(&item.group_id()).is_some_and(|count| *count > 1))
-                    .then_some((item.group_id(), bucket));
+                let group_key = item
+                    .group()
+                    .filter(|group| {
+                        group.is_valid()
+                            && group_sizes.get(&group.id).is_some_and(|count| *count > 1)
+                    })
+                    .map(|group| (group.id, bucket));
                 let location = (bucket, group_key.map(|(group_id, _)| group_id));
 
                 let row = if let Some(row) = r.borrow().get(&item.id()).cloned() {

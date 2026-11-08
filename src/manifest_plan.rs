@@ -152,7 +152,7 @@ impl ManifestLookup {
                 if !dash
                     .video_representations
                     .iter()
-                    .any(|representation| representation.key == video_key.as_str())
+                    .any(|representation| representation.matches_key(video_key.as_str()))
                 {
                     return Vec::new();
                 }
@@ -227,7 +227,7 @@ impl ManifestLookup {
                 if !dash
                     .video_representations
                     .iter()
-                    .any(|track| track.key == video_key.as_str())
+                    .any(|track| track.matches_key(video_key.as_str()))
                 {
                     return Vec::new();
                 }
@@ -319,44 +319,59 @@ impl ManifestLookup {
         audio_key: Option<&ManifestAudioKey>,
         subtitle_key: Option<&ManifestSubtitleKey>,
     ) -> Option<ManifestSource> {
-        let kind = match &self.manifest {
-            NativeManifest::HlsMaster(master) => {
-                hls_variant_keys(&master.variants)
-                    .iter()
-                    .any(|key| key.as_deref() == Some(representation_key.as_str()))
-                    .then_some(())?;
-                ManifestKind::Hls
-            }
-            NativeManifest::HlsMedia(_) if representation_key.as_str() == "hls-media" => {
-                ManifestKind::Hls
-            }
-            NativeManifest::HlsMedia(_) => return None,
-            NativeManifest::Dash(dash) => {
-                if !dash
-                    .video_representations
-                    .iter()
-                    .any(|representation| representation.key == representation_key.as_str())
-                {
-                    return None;
+        let kind =
+            match &self.manifest {
+                NativeManifest::HlsMaster(master) => {
+                    hls_variant_keys(&master.variants)
+                        .iter()
+                        .any(|key| key.as_deref() == Some(representation_key.as_str()))
+                        .then_some(())?;
+                    ManifestKind::Hls
                 }
-                ManifestKind::Dash
+                NativeManifest::HlsMedia(_) if representation_key.as_str() == "hls-media" => {
+                    ManifestKind::Hls
+                }
+                NativeManifest::HlsMedia(_) => return None,
+                NativeManifest::Dash(dash) => {
+                    if !dash.video_representations.iter().any(|representation| {
+                        representation.matches_key(representation_key.as_str())
+                    }) {
+                        return None;
+                    }
+                    ManifestKind::Dash
+                }
+            };
+        if let Some(selected) = audio_key {
+            let valid = match &self.manifest {
+                NativeManifest::Dash(dash) => dash
+                    .audio_representations
+                    .iter()
+                    .any(|track| track.matches_key(selected.as_str())),
+                NativeManifest::HlsMaster(_) => self
+                    .audio_choices(representation_key)
+                    .iter()
+                    .any(|choice| choice.key == *selected),
+                NativeManifest::HlsMedia(_) => false,
+            };
+            if !valid {
+                return None;
             }
-        };
-        if audio_key.is_some_and(|selected| {
-            !self
-                .audio_choices(representation_key)
-                .iter()
-                .any(|choice| choice.key.as_str() == selected.as_str())
-        }) {
-            return None;
         }
-        if subtitle_key.is_some_and(|selected| {
-            !self
-                .subtitle_choices(representation_key)
-                .iter()
-                .any(|choice| choice.key.as_str() == selected.as_str())
-        }) {
-            return None;
+        if let Some(selected) = subtitle_key {
+            let valid = match &self.manifest {
+                NativeManifest::Dash(dash) => dash
+                    .subtitle_representations
+                    .iter()
+                    .any(|track| track.matches_key(selected.as_str())),
+                NativeManifest::HlsMaster(_) => self
+                    .subtitle_choices(representation_key)
+                    .iter()
+                    .any(|choice| choice.key == *selected),
+                NativeManifest::HlsMedia(_) => false,
+            };
+            if !valid {
+                return None;
+            }
         }
         let subtitle_language = subtitle_key
             .and_then(|selected| {
@@ -488,7 +503,7 @@ pub(crate) fn download_plan(
                 Some(audio_key) => Some(
                     dash.audio_representations
                         .iter()
-                        .find(|track| track.key == audio_key || track.live_key == audio_key)
+                        .find(|track| track.matches_key(audio_key))
                         .ok_or_else(|| {
                             "The selected DASH audio representation is no longer available"
                                 .to_string()
@@ -521,7 +536,7 @@ pub(crate) fn download_plan(
                     let track = dash
                         .subtitle_representations
                         .iter()
-                        .find(|track| track.key == key || track.live_key == key)
+                        .find(|track| track.matches_key(key))
                         .ok_or_else(|| {
                             "The selected DASH subtitle representation is no longer available"
                                 .to_string()

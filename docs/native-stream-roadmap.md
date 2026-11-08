@@ -105,28 +105,30 @@ The supported profile is a single-period dynamic MPD with HTTPS SegmentTemplate
 addressing, an explicit MP4 audio/video MIME type, and an initialization
 resource. SegmentTemplate availability attributes use normal inheritance:
 a value on a lower-level SegmentTemplate overrides the inherited value.
-Finite non-negative availability offsets are bounded to 30 seconds and to the
-shortest declared segment duration. availabilityTimeComplete=false requires
-a positive offset and a known initialization resource. The planner extends
-the live availability window by the effective offset, allowing the current
-in-progress segment to be requested when its first CMAF chunk is advertised.
+Availability offsets must be finite and non-negative; their expanded
+resource window is bounded by the existing DASH segment-count and recording
+byte limits. availabilityTimeComplete=false requires a positive offset, an
+initialization resource, and an explicit MP4 audio/video MIME type. The effective offset is
+evaluated against every refreshed MPD without making representation identity
+depend on the current offset or segment-duration window. Existing
+policy-sensitive live keys are accepted as migration aliases, and restored
+capture state is rewritten using the policy-independent key.
 
 Grab streams the HTTP response body as it arrives into its owned staging
-.part file. For LL-DASH, the current in-progress segment is requested before
-older complete segments and segment requests are serialized per rendition;
-the next segment request begins only after the previous response closes.
-The live journal commits a segment only after its full response has completed,
-and retains presentation order regardless of fetch order. A stopped or
-interrupted in-progress response is not treated as committed media; a later
-resume starts that segment request again. Native transfers still have no
-automatic retries.
+.part file. For LL-DASH, initialization is fetched first, then available media
+segments are requested oldest-first with one active request per rendition.
+This drains the retained backlog before waiting for progressively delivered
+tail segments, avoiding time-shift-window starvation. The live journal commits
+a segment only after its full response has completed and retains presentation
+order regardless of fetch order. A stopped or interrupted in-progress
+response is not treated as committed media; a later resume starts that segment
+request again. Native transfers still have no automatic retries.
 
 BaseURL-level availability signalling, static LL-DASH, SegmentBase,
 SegmentList, dynamic multi-Period MPDs, missing initialization resources,
-unbounded or over-segment offsets, non-MP4 tracks, DRM, and unsupported
-addressing remain on yt-dlp fallback. Unknown or conflicting presentation
+resource windows that exceed the planner limits, non-MP4 tracks, DRM, and
+unsupported addressing remain on yt-dlp fallback. Unknown or conflicting presentation
 semantics are not silently stripped.
-
 
 ## Phases
 

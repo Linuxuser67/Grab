@@ -6,7 +6,7 @@ use gtk4::prelude::*;
 use gtk4::{gio, glib};
 use libadwaita as adw;
 use std::cell::{Cell, RefCell};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
 
 /// Facade: row widgets live in [`window_rows`](crate::window_rows) now.
@@ -574,11 +574,34 @@ pub fn build_window(
     content.append(&queued_section);
     content.append(&downloaded_section);
 
+    fn detach_download_row(row: &gtk4::ListBoxRow) {
+        if let Some(parent) = row.parent().and_downcast::<gtk4::ListBox>() {
+            parent.remove(row);
+        }
+    }
+
+    fn section_bucket(status: crate::download::DownloadStatus) -> u32 {
+        if status == crate::download::DownloadStatus::Done {
+            2
+        } else if status == crate::download::DownloadStatus::Queued {
+            3
+        } else {
+            1
+        }
+    }
+
     let rows: Rc<RefCell<HashMap<u64, gtk4::ListBoxRow>>> = Rc::new(RefCell::new(HashMap::new()));
+    let group_rows: Rc<
+        RefCell<HashMap<(u64, u32), crate::window_rows::DownloadGroupRow>>,
+    > = Rc::new(RefCell::new(HashMap::new()));
+    let row_placements: Rc<RefCell<HashMap<u64, (u32, Option<u64>)>>> =
+        Rc::new(RefCell::new(HashMap::new()));
     let sync: Rc<dyn Fn()> = {
         let m = Rc::clone(&manager);
         let t = Rc::clone(&toasts);
         let r = Rc::clone(&rows);
+        let groups = Rc::clone(&group_rows);
+        let placements = Rc::clone(&row_placements);
         let add = add_btn.clone();
         let search_btn = search_toggle.clone();
         let s = content_stack.clone();
@@ -600,67 +623,179 @@ pub fn build_window(
             let store = m.store();
             let q = query.borrow();
             let sel = status_sel.get();
-            let mut present = std::collections::HashSet::new();
+            let items = (0..store.n_items())
+                .filter_map(|index| {
+                    store
+                        .item(index)
+                        .and_downcast::<crate::download::DownloadItem>()
+                })
+                .collect::<Vec<_>>();
+
+            let mut group_sizes = HashMap::<u64, usize>::new();
+            for item in &items {
+                let title = item.group_title();
+                if item.group_id() > 0 && !title.trim().is_empty() {
+                    *group_sizes.entry(item.group_id()).or_default() += 1;
+                }
+            }
+
+            let mut present = HashSet::with_capacity(items.len());
+            let mut grouped =
+                HashMap::<(u64, u32), Vec<crate::download::DownloadItem>>::new();
+            let mut ordered_groups = Vec::new();
+            let mut seen_groups = HashSet::new();
+            let mut visible_groups = HashSet::new();
             let mut n_active = 0;
             let mut n_queued = 0;
             let mut n_downloaded = 0;
-            for i in 0..store.n_items() {
-                if let Some(it) = store
-                    .item(i)
-                    .and_downcast::<crate::download::DownloadItem>()
-                {
-                    present.insert(it.id());
-                    let mut shown = sel == 0 || status_filter_bucket(it.status()) == sel;
-                    if shown && !q.is_empty() && !it.filename().to_lowercase().contains(q.as_str())
-                    {
-                        shown = false;
+
+            for item in &items {
+                present.insert(item.id());
+                let bucket = section_bucket(item.status());
+                let title = item.group_title();
+                let group_key = (item.group_id() > 0
+                    && !title.trim().is_empty()
+                    && group_sizes.get(&item.group_id()).is_some_and(|count| *count > 1))
+                    .then_some((item.group_id(), bucket));
+
+                let mut shown = sel == 0 || status_filter_bucket(item.status()) == sel;
+                if shown && !q.is_empty() && !item.filename().to_lowercase().contains(q.as_str()) {
+                    shown = false;
+                }
+                if shown {
+                    if is_done(item) {
+                        n_downloaded += 1;
+                    } else if is_queued(item) {
+                        n_queued += 1;
+                    } else {
+                        n_active += 1;
+                    }
+                }
+
+                if let Some(key) = group_key {
+                    grouped.entry(key).or_default().push(item.clone());
+                    if seen_groups.insert(key) {
+                        ordered_groups.push(key);
                     }
                     if shown {
-                        if is_done(&it) {
-                            n_downloaded += 1;
-                        } else if is_queued(&it) {
-                            n_queued += 1;
-                        } else {
-                            n_active += 1;
-                        }
+                        visible_groups.insert(key);
                     }
-                    let existing = r.borrow().get(&it.id()).cloned();
-                    let row = if let Some(row) = existing {
-                        row
-                    } else {
-                        let row = build_row(&it, &m, &t);
-                        r.borrow_mut().insert(it.id(), row.clone());
-                        row
-                    };
-                    let target = if is_done(&it) {
-                        &l_downloaded
-                    } else if is_queued(&it) {
-                        &l_queued
-                    } else {
-                        &l_active
-                    };
-                    if !row.is_ancestor(target) {
-                        if let Some(old) = row.parent().and_downcast::<gtk4::ListBox>() {
-                            old.remove(&row);
-                        }
-                        target.append(&row);
-                    }
-                    row.set_visible(shown);
                 }
             }
+
+            // Create the parent before attaching its child rows. Group rows are
+            // separate per status section so the existing queue views stay intact.
+            for key in &ordered_groups {
+                let Some(members) = grouped.get(key) else {
+                    continue;
+                };
+                let title = members
+                    .first()
+                    .map(crate::download::DownloadItem::group_title)
+                    .unwrap_or_default();
+                let group = {
+                    let mut groups = groups.borrow_mut();
+                    groups
+                        .entry(*key)
+                        .or_insert_with(|| {
+                            crate::window_rows::build_download_group_row(&title, &m, &t)
+                        })
+                        .clone()
+                };
+                group.update(members);
+                group.row.set_visible(visible_groups.contains(key));
+
+                let target = match key.1 {
+                    2 => &l_downloaded,
+                    3 => &l_queued,
+                    _ => &l_active,
+                };
+                if group.row.parent().is_none() {
+                    target.append(&group.row);
+                }
+            }
+
+            for (key, group) in groups.borrow().iter() {
+                if !grouped.contains_key(key) {
+                    group.update(&[]);
+                    group.row.set_visible(false);
+                }
+            }
+
+            for item in &items {
+                let bucket = section_bucket(item.status());
+                let target = match bucket {
+                    2 => &l_downloaded,
+                    3 => &l_queued,
+                    _ => &l_active,
+                };
+                let title = item.group_title();
+                let group_key = (item.group_id() > 0
+                    && !title.trim().is_empty()
+                    && group_sizes.get(&item.group_id()).is_some_and(|count| *count > 1))
+                    .then_some((item.group_id(), bucket));
+                let location = (bucket, group_key.map(|(group_id, _)| group_id));
+
+                let row = if let Some(row) = r.borrow().get(&item.id()).cloned() {
+                    row
+                } else {
+                    let row = build_row(item, &m, &t);
+                    r.borrow_mut().insert(item.id(), row.clone());
+                    row
+                };
+
+                if placements.borrow().get(&item.id()) != Some(&location) {
+                    detach_download_row(&row);
+                    if let Some(key) = group_key {
+                        if let Some(group) = groups.borrow().get(&key) {
+                            group.row.add_row(&row);
+                        } else {
+                            target.append(&row);
+                        }
+                    } else {
+                        target.append(&row);
+                    }
+                    placements.borrow_mut().insert(item.id(), location);
+                }
+
+                let mut shown = sel == 0 || status_filter_bucket(item.status()) == sel;
+                if shown && !q.is_empty() && !item.filename().to_lowercase().contains(q.as_str()) {
+                    shown = false;
+                }
+                row.set_visible(shown);
+            }
+
             let stale: Vec<u64> = r
                 .borrow()
                 .keys()
                 .filter(|id| !present.contains(id))
-                .cloned()
+                .copied()
                 .collect();
             for id in stale {
-                if let Some(row) = r.borrow_mut().remove(&id)
-                    && let Some(old) = row.parent().and_downcast::<gtk4::ListBox>()
+                if let Some(row) = r.borrow_mut().remove(&id) {
+                    detach_download_row(&row);
+                }
+                placements.borrow_mut().remove(&id);
+            }
+
+            let live_group_ids = grouped
+                .keys()
+                .map(|(group_id, _)| *group_id)
+                .collect::<HashSet<_>>();
+            let stale_groups = groups
+                .borrow()
+                .keys()
+                .filter(|(group_id, _)| !live_group_ids.contains(group_id))
+                .copied()
+                .collect::<Vec<_>>();
+            for key in stale_groups {
+                if let Some(group) = groups.borrow_mut().remove(&key)
+                    && let Some(parent) = group.row.parent().and_downcast::<gtk4::ListBox>()
                 {
-                    old.remove(&row);
+                    parent.remove(&group.row);
                 }
             }
+
             sec_active.set_visible(n_active > 0);
             sec_queued.set_visible(n_queued > 0);
             sec_downloaded.set_visible(n_downloaded > 0);
@@ -684,7 +819,6 @@ pub fn build_window(
             }
             s.set_visible_child_name(if has_items { "list" } else { "empty" });
         })
-    };
 
     {
         let sync = Rc::clone(&sync);

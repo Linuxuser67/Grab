@@ -152,7 +152,7 @@ impl ManifestLookup {
                 if !dash
                     .video_representations
                     .iter()
-                    .any(|representation| representation.key == video_key.as_str())
+                    .any(|representation| representation.matches_key(video_key.as_str()))
                 {
                     return Vec::new();
                 }
@@ -227,7 +227,7 @@ impl ManifestLookup {
                 if !dash
                     .video_representations
                     .iter()
-                    .any(|track| track.key == video_key.as_str())
+                    .any(|track| track.matches_key(video_key.as_str()))
                 {
                     return Vec::new();
                 }
@@ -335,28 +335,44 @@ impl ManifestLookup {
                 if !dash
                     .video_representations
                     .iter()
-                    .any(|representation| representation.key == representation_key.as_str())
+                    .any(|representation| representation.matches_key(representation_key.as_str()))
                 {
                     return None;
                 }
                 ManifestKind::Dash
             }
         };
-        if audio_key.is_some_and(|selected| {
-            !self
-                .audio_choices(representation_key)
-                .iter()
-                .any(|choice| choice.key.as_str() == selected.as_str())
-        }) {
-            return None;
+        if let Some(selected) = audio_key {
+            let valid = match &self.manifest {
+                NativeManifest::Dash(dash) => dash
+                    .audio_representations
+                    .iter()
+                    .any(|track| track.matches_key(selected.as_str())),
+                NativeManifest::HlsMaster(_) => self
+                    .audio_choices(representation_key)
+                    .iter()
+                    .any(|choice| choice.key == *selected),
+                NativeManifest::HlsMedia(_) => false,
+            };
+            if !valid {
+                return None;
+            }
         }
-        if subtitle_key.is_some_and(|selected| {
-            !self
-                .subtitle_choices(representation_key)
-                .iter()
-                .any(|choice| choice.key.as_str() == selected.as_str())
-        }) {
-            return None;
+        if let Some(selected) = subtitle_key {
+            let valid = match &self.manifest {
+                NativeManifest::Dash(dash) => dash
+                    .subtitle_representations
+                    .iter()
+                    .any(|track| track.matches_key(selected.as_str())),
+                NativeManifest::HlsMaster(_) => self
+                    .subtitle_choices(representation_key)
+                    .iter()
+                    .any(|choice| choice.key == *selected),
+                NativeManifest::HlsMedia(_) => false,
+            };
+            if !valid {
+                return None;
+            }
         }
         let subtitle_language = subtitle_key
             .and_then(|selected| {

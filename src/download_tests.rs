@@ -257,6 +257,7 @@ fn playlist_group_metadata_restores_with_each_child() {
         DownloadStatus::Paused,
     );
     second.group = first.group.clone();
+    let expected_group = first.group.clone();
 
     let queue = StoredQueue {
         version: QUEUE_VERSION,
@@ -277,7 +278,7 @@ fn playlist_group_metadata_restores_with_each_child() {
             .item(index)
             .and_downcast::<DownloadItem>()
             .unwrap();
-        assert_eq!(item.group(), first.group.clone());
+        assert_eq!(item.group(), expected_group.clone());
         assert_eq!(item.status(), DownloadStatus::Paused);
     }
 

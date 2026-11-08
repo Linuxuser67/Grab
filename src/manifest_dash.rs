@@ -1725,11 +1725,13 @@ fn effective_addressing(
                 .flatten()
                 .map(parse_byte_range)
                 .transpose()?;
-            if initialization_source_url.is_none() && range.is_none() {
+            let Some(url) = initialization_source_url else {
+                // Without an index, an in-file initialization range would be
+                // duplicated by the whole-file media resource.
                 return Err(DashError::UnsupportedAddressing);
-            }
+            };
             Some(DashInitialization::Resource {
-                url: initialization_source_url,
+                url: Some(url),
                 range,
             })
         } else {
@@ -2709,7 +2711,7 @@ fn expand_base(representation: &DashRepresentation) -> Result<Vec<DashResource>,
             .transpose()?
             .unwrap_or_else(|| media_url.clone());
         validate_media_url(&initialization_url)?;
-        if initialization_url == media_url && range.is_none() {
+        if initialization_url == media_url {
             return Err(DashError::UnsupportedAddressing);
         }
         let filename = super::resource_filename(
@@ -5068,47 +5070,50 @@ mod tests {
     }
 
     #[test]
-    fn expands_unindexed_segment_base_with_in_file_initialization_range() {
+    fn expands_unindexed_segment_base_with_bounded_separate_initialization_url() {
         let body = r#"<MPD xmlns="urn:mpeg:dash:schema:mpd:2011" type="static" mediaPresentationDuration="PT4S">
   <Period duration="PT4S">
     <AdaptationSet contentType="video" mimeType="video/mp4">
       <Representation id="v1">
         <BaseURL>video.mp4</BaseURL>
-        <SegmentBase><Initialization range="0-99"/></SegmentBase>
+        <SegmentBase><Initialization sourceURL="init.mp4" range="20-119"/></SegmentBase>
       </Representation>
     </AdaptationSet>
   </Period>
 </MPD>"#;
-        let manifest = parse_dash_manifest(BASE_URL, body).expect("init range should parse");
+        let manifest = parse_dash_manifest(BASE_URL, body).expect("bounded external init should parse");
         let plan = plan_dash_representation(&manifest, &manifest.video_representations[0].key)
-            .expect("init range should expand");
+            .expect("bounded external init should expand");
         assert_eq!(plan.resources.len(), 2);
         assert_eq!(plan.resources[0].kind, DashResourceKind::Initialization);
         assert_eq!(
             plan.resources[0].range,
-            Some(ManifestByteRange { offset: 0, length: 100 })
+            Some(ManifestByteRange { offset: 20, length: 100 })
         );
-        assert_eq!(plan.resources[0].url, plan.resources[1].url);
+        assert_eq!(
+            plan.resources[0].url.as_str(),
+            "https://cdn.example.test/path/init.mp4"
+        );
         assert_eq!(plan.resources[1].kind, DashResourceKind::Segment);
     }
 
     #[test]
     fn rejects_unindexed_segment_base_initialization_that_duplicates_the_whole_media_file() {
-        let body = r#"<MPD xmlns="urn:mpeg:dash:schema:mpd:2011" type="static" mediaPresentationDuration="PT4S">
-  <Period duration="PT4S">
-    <AdaptationSet contentType="video" mimeType="video/mp4">
-      <Representation id="v1">
-        <BaseURL>video.mp4</BaseURL>
-        <SegmentBase><Initialization sourceURL="video.mp4"/></SegmentBase>
-      </Representation>
-    </AdaptationSet>
-  </Period>
-</MPD>"#;
-        let manifest = parse_dash_manifest(BASE_URL, body).expect("manifest metadata is valid");
-        assert_eq!(
-            plan_dash_representation(&manifest, &manifest.video_representations[0].key).err(),
-            Some(DashError::UnsupportedAddressing)
-        );
+        for initialization in [
+            r#"<Initialization sourceURL="video.mp4"/>"#,
+            r#"<Initialization range="0-99"/>"#,
+            r#"<Initialization sourceURL="video.mp4" range="0-99"/>"#,
+        ] {
+            let body = format!(
+                r#"<MPD xmlns="urn:mpeg:dash:schema:mpd:2011" type="static" mediaPresentationDuration="PT4S"><Period duration="PT4S"><AdaptationSet contentType="video" mimeType="video/mp4"><Representation id="v1"><BaseURL>video.mp4</BaseURL><SegmentBase>{initialization}</SegmentBase></Representation></AdaptationSet></Period></MPD>"#
+            );
+            let manifest = parse_dash_manifest(BASE_URL, &body).expect("manifest metadata is valid");
+            assert_eq!(
+                plan_dash_representation(&manifest, &manifest.video_representations[0].key).err(),
+                Some(DashError::UnsupportedAddressing),
+                "{initialization}"
+            );
+        }
     }
 
     #[test]

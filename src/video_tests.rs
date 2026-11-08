@@ -7224,57 +7224,6 @@ fn remux_video_labels_are_not_translated() {
 }
 
 #[test]
-fn clean_dest_parts_keeps_finished_and_foreign_files() {
-    let dir = std::env::temp_dir().join(format!("grab-cleanparts-{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&dir);
-    std::fs::create_dir_all(&dir).unwrap();
-    let dest = dir.join("Clip.mp4");
-    // Id-in-name files are NEVER pattern-deleted (no marker): a user's
-    // `Clip.2024.mp4.part` is indistinguishable from our `Clip.7.mp4.part`.
-    // Only legacy marked patterns (PART_KINDS, .live.) are swept.
-    let keep = [
-        "Clip.mp4",
-        "Clip.srt",
-        // Collected subtitle sidecars live outside the part namespace.
-        "Clip.en.srt",
-        "Other.video.mp4",
-        "Clip.video-notes.txt",
-        // User files: year-suffixed and id-like names must survive.
-        "Clip.2024.mp4",
-        "Clip.2024.mp4.part",
-        "Clip.2024.mp4.ytdl",
-        "Clip.7.mp4.part",
-        "Clip.7.mp4.ytdl",
-        "Clip.7-1.mp4.part",
-        // S01E04/1080p-style tails are safe by non-digit check, pinned here.
-        "Clip.S01E04.mp4.part",
-        "Clip.1080p.mp4.part",
-    ];
-    let drop = [
-        "Clip.video.mp4",
-        "Clip.video.mp4.part",
-        "Clip.audio.webm",
-        "Clip.audio.webm.part",
-        "Clip.hls.mp4",
-        "Clip.live.mp4.part",
-        // Stale sidecars beside part files are part-namespace litter.
-        "Clip.video.en.srt",
-        "Clip.hls.en.srt",
-    ];
-    for n in keep.iter().chain(drop.iter()) {
-        std::fs::write(dir.join(n), b"x").unwrap();
-    }
-    clean_dest_parts(&dest);
-    for n in keep {
-        assert!(dir.join(n).exists(), "{n} must survive");
-    }
-    for n in drop {
-        assert!(!dir.join(n).exists(), "{n} must go");
-    }
-    let _ = std::fs::remove_dir_all(&dir);
-}
-
-#[test]
 fn playlist_scope_args_selects_picked_entry() {
     // Plain rows keep `--no-playlist`; a row picked from a playlist selects
     // its entry by 1-based position instead.

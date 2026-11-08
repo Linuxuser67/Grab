@@ -789,7 +789,9 @@ pub(super) async fn apply_dash_live_snapshot(
             // A permanent failure for a newly advertised live segment is a
             // continuity boundary, not a reason to hand the recording to
             // yt-dlp. The caller preserves any already committed video.
-            Err(ManifestRunError::Unsupported(error)) => {
+            Err(ManifestRunError::Unsupported(error))
+                if track.committed_resource_count > 0 || other_rendition_bytes > 0 =>
+            {
                 tracing::warn!(
                     representation = %plan.representation.live_key,
                     error = %error,

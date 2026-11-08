@@ -93,7 +93,7 @@ pub(crate) enum DashPresentation {
     Dynamic(DashDynamicPresentation),
 }
 
-/// Server-clock information required to bound and refresh an ordinary live MPD.
+/// Server-clock information required to bound and refresh a dynamic MPD.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct DashDynamicPresentation {
     pub(crate) availability_start_time: SystemTime,

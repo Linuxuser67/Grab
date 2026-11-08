@@ -1123,7 +1123,6 @@ async fn missing_appendable_checkpoint_preserves_existing_destination_part() {
         .finish()
         .await
         .expect("flush committed destination prefix");
-    drop(writer);
 
     let part = crate::manifest_destination::part_path(
         &staging,

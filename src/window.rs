@@ -591,9 +591,8 @@ pub fn build_window(
     }
 
     let rows: Rc<RefCell<HashMap<u64, gtk4::ListBoxRow>>> = Rc::new(RefCell::new(HashMap::new()));
-    let group_rows: Rc<
-        RefCell<HashMap<(u64, u32), crate::window_rows::DownloadGroupRow>>,
-    > = Rc::new(RefCell::new(HashMap::new()));
+    let group_rows: Rc<RefCell<HashMap<(u64, u32), crate::window_rows::DownloadGroupRow>>> =
+        Rc::new(RefCell::new(HashMap::new()));
     let row_placements: Rc<RefCell<HashMap<u64, (u32, Option<u64>)>>> =
         Rc::new(RefCell::new(HashMap::new()));
     let sync: Rc<dyn Fn()> = {
@@ -640,16 +639,14 @@ pub fn build_window(
             let mut all_groups = HashMap::<u64, Vec<crate::download::DownloadItem>>::new();
             for item in &items {
                 if let Some(group) = item.group().filter(|group| {
-                    group.is_valid()
-                        && group_sizes.get(&group.id()).is_some_and(|count| *count > 1)
+                    group.is_valid() && group_sizes.get(&group.id()).is_some_and(|count| *count > 1)
                 }) {
                     all_groups.entry(group.id()).or_default().push(item.clone());
                 }
             }
 
             let mut present = HashSet::with_capacity(items.len());
-            let mut grouped =
-                HashMap::<(u64, u32), Vec<crate::download::DownloadItem>>::new();
+            let mut grouped = HashMap::<(u64, u32), Vec<crate::download::DownloadItem>>::new();
             let mut ordered_groups = Vec::new();
             let mut seen_groups = HashSet::new();
             let mut visible_groups = HashSet::new();
@@ -713,13 +710,9 @@ pub fn build_window(
                         })
                         .clone()
                 };
-                let all_members = all_groups
-                    .get(&key.0)
-                    .map(Vec::as_slice)
-                    .unwrap_or(&[]);
+                let all_members = all_groups.get(&key.0).map(Vec::as_slice).unwrap_or(&[]);
                 group.update(members, all_members);
                 group.row.set_visible(visible_groups.contains(key));
-
             }
 
             for (key, group) in groups.borrow().iter() {

@@ -1324,33 +1324,6 @@ fn stem_has_subtitle_sidecar(names: &[String], stem: &str) -> bool {
     })
 }
 
-/// Delete a row's dest-dir part files (never the finished file).
-/// Delete a row's dest-dir part files (never the finished file).
-/// Only legacy marked patterns (`PART_KINDS`, `.live.`) are matched: the
-/// id-in-name scheme has no marker, so pattern-deleting it would risk user
-/// files like `Movie.2024.mp4.part`. ID reuse is prevented separately by
-/// the allocator's `staging_occupied_in` check.
-pub fn clean_dest_parts(dest: &Path) {
-    let (Some(dir), Some(stem)) = (dest.parent(), dest.file_stem().and_then(|s| s.to_str())) else {
-        return;
-    };
-    let Ok(entries) = std::fs::read_dir(dir) else {
-        return;
-    };
-    for entry in entries.flatten() {
-        let path = entry.path();
-        if !path.is_file() {
-            continue;
-        }
-        if let Some(name) = path.file_name().and_then(|n| n.to_str())
-            && is_grab_part(name, stem)
-        {
-            let _ = std::fs::remove_file(&path);
-        }
-    }
-}
-
-/// `<output-stem>.<lang>.srt` beside `output` (allowlisted language, so it can never escape its directory).
 pub(crate) fn sidecar_path_for(output: &Path, lang: &str) -> PathBuf {
     let stem = output
         .file_stem()

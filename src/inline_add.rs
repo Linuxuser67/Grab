@@ -1712,6 +1712,9 @@ fn push_playlist_items_page(
             // only one entry is selected from a multi-entry playlist.
             let multi = playlist.total > 1;
             let title = playlist.title.clone();
+            // The directory worker consumes `title`; retain a separate copy
+            // for the collection metadata assigned after the async import.
+            let group_title = playlist.title.clone();
             // Disable the button while the import is in flight: a second
             // click would see the selection unchanged and enqueue duplicates.
             add_btn_guard.set_sensitive(false);
@@ -1726,6 +1729,7 @@ fn push_playlist_items_page(
             // clone the shared collection-host state for each import future.
             let guarded_child_hosts = guarded_child_hosts.clone();
             let playlist_group_id = playlist_group_id.clone();
+            let group_title = group_title.clone();
             let nav_on_error = nav_on_error.clone();
             let picker_page_on_error = picker_page_on_error.clone();
             glib::spawn_future_local(async move {
@@ -1839,7 +1843,7 @@ fn push_playlist_items_page(
                 if playlist.total > 1
                     && let Some(group_id) = assign_playlist_group(
                         &queued_items,
-                        &playlist.title,
+                        &group_title,
                         playlist_group_id.get(),
                     )
                 {

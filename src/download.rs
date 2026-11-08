@@ -3831,11 +3831,20 @@ impl DownloadManager {
         let mut queue_kick = false;
 
         for &id in ids {
-            if !self
-                .find(id)
-                .is_some_and(|item| item.status() == DownloadStatus::Downloading)
-            {
+            let Some(item) = self.find(id) else {
                 continue;
+            };
+            match item.status() {
+                DownloadStatus::Queued | DownloadStatus::Scheduled => {
+                    // Park pending children too, otherwise the scheduler would
+                    // start the next one as soon as an active sibling pauses.
+                    item.set_status(DownloadStatus::Paused);
+                    item.set_detail(gettext("Paused"));
+                    paused += 1;
+                    continue;
+                }
+                DownloadStatus::Downloading => {}
+                _ => continue,
             }
 
             if self.can_pause_live_capture(id) {
@@ -3884,11 +3893,19 @@ impl DownloadManager {
     /// Resume all paused rows in a group, then wake the scheduler once.
     pub fn resume_many(self: &Rc<Self>, ids: &[u64]) -> usize {
         let mut resumed = 0;
+        let now = glib::DateTime::now_local()
+            .map(|dt| dt.to_unix())
+            .unwrap_or(0);
         for &id in ids {
             if let Some(item) = self.find(id)
                 && item.status() == DownloadStatus::Paused
             {
-                item.set_status(DownloadStatus::Queued);
+                let next_status = if item.scheduled_at() > now {
+                    DownloadStatus::Scheduled
+                } else {
+                    DownloadStatus::Queued
+                };
+                item.set_status(next_status);
                 resumed += 1;
             }
         }

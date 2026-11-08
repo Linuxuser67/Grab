@@ -71,7 +71,9 @@ fn sync_cookies_override_row(
     restart_row: &adw::ActionRow,
     settings: &gio::Settings,
 ) {
-    let browser = settings.string(crate::settings::key::COOKIES_BROWSER).to_string();
+    let browser = settings
+        .string(crate::settings::key::COOKIES_BROWSER)
+        .to_string();
     let flatpak = crate::video_tools::in_flatpak();
     let row = row.downgrade();
     let restart_row = restart_row.downgrade();
@@ -88,7 +90,9 @@ fn sync_cookies_override_row(
     gtk4::glib::MainContext::default().spawn_local(async move {
         let missing_profile = lookup.await.unwrap_or(false);
         // Ignore stale results when the setting changed while the scan ran.
-        if settings.string(crate::settings::key::COOKIES_BROWSER).as_str()
+        if settings
+            .string(crate::settings::key::COOKIES_BROWSER)
+            .as_str()
             != browser.as_str()
         {
             return;

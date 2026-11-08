@@ -11,8 +11,8 @@ pub(super) fn parse_availability_time_offset(seconds: f64) -> Result<Duration, D
         return Err(DashError::UnsupportedAddressing);
     }
 
-    let offset = Duration::try_from_secs_f64(seconds)
-        .map_err(|_| DashError::UnsupportedAddressing)?;
+    let offset =
+        Duration::try_from_secs_f64(seconds).map_err(|_| DashError::UnsupportedAddressing)?;
     if offset > MAX_AVAILABILITY_TIME_OFFSET {
         return Err(DashError::UnsupportedAddressing);
     }
@@ -25,8 +25,7 @@ pub(super) fn validate_template_availability(
     availability_time_offset: Duration,
     availability_time_complete: bool,
 ) -> Result<(), DashError> {
-    if (!is_dynamic
-        && (!availability_time_offset.is_zero() || !availability_time_complete))
+    if (!is_dynamic && (!availability_time_offset.is_zero() || !availability_time_complete))
         || (!availability_time_complete && availability_time_offset.is_zero())
     {
         return Err(DashError::UnsupportedAddressing);

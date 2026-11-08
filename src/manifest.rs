@@ -682,9 +682,9 @@ impl HlsLiveAccumulator {
         if playlist.segments.len() > segment_limit {
             return Err(ManifestError::LiveCaptureLimit);
         }
-        let ll_index = ll_unit_ids.as_deref().map(|ids| {
-            hls_ll::HlsLiveIndex::from_units(ids, &playlist.segments)
-        });
+        let ll_index = ll_unit_ids
+            .as_deref()
+            .map(|ids| hls_ll::HlsLiveIndex::from_units(ids, &playlist.segments));
 
         Ok(Self {
             local_playlist: Some(playlist),

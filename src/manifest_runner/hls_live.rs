@@ -347,11 +347,6 @@ async fn fetched_hls_resource_bytes(
     Ok(total)
 }
 
-#[expect(
-    clippy::too_many_arguments,
-    reason = "one rendition update shares its client, cancellation, progress and aggregate byte-budget context"
-)]
-
 const LIVE_HLS_FULL_RESOURCE_VERIFY_INTERVAL: Duration = Duration::from_secs(60);
 
 async fn verify_live_hls_resource_files<'a>(
@@ -387,6 +382,12 @@ async fn verify_live_hls_resource_files<'a>(
     }
     Ok(())
 }
+
+
+#[expect(
+    clippy::too_many_arguments,
+    reason = "one rendition update shares its client, cancellation, progress and aggregate byte-budget context"
+)]
 
 pub(super) async fn apply_live_hls_snapshot(
     client: &reqwest::Client,
@@ -529,7 +530,7 @@ pub(super) async fn apply_live_hls_snapshot(
         .collect::<Vec<_>>();
     let added_resource_bytes =
         fetched_hls_resource_bytes(&track.directory, &newly_accounted_resources).await?;
-    // The full staged set is verified on restore, periodically, and before finalization.
+    // The full staged set is verified on restore, periodically, and on ENDLIST.
     // The steady-state poll path checks only the resources referenced by this snapshot.
     let full_resource_verification_due = end_list
         || track.last_full_resource_verification.elapsed()

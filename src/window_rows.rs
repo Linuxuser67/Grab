@@ -741,7 +741,6 @@ fn show_failure_dialog(
     dialog
 }
 
-
 /// One playlist group in a status section. Child rows remain the existing
 /// DownloadItem rows; only their parent row and group-level actions are new.
 #[derive(Clone)]
@@ -762,7 +761,11 @@ fn group_summary(items: &[DownloadItem]) -> String {
 
     let mut parts = vec![ngettext_count("{n} item", "{n} items", items.len())];
     for (status, singular, plural) in [
-        (DownloadStatus::Downloading, "{n} downloading", "{n} downloading"),
+        (
+            DownloadStatus::Downloading,
+            "{n} downloading",
+            "{n} downloading",
+        ),
         (DownloadStatus::Paused, "{n} paused", "{n} paused"),
         (DownloadStatus::Queued, "{n} queued", "{n} queued"),
         (DownloadStatus::Scheduled, "{n} scheduled", "{n} scheduled"),
@@ -859,7 +862,10 @@ pub(crate) fn build_download_group_row(
     menu.append(Some(&gettext("Resume All")), Some("group.resume"));
     menu.append(Some(&gettext("Cancel All")), Some("group.cancel"));
     menu.append(Some(&gettext("Retry Failed")), Some("group.retry-failed"));
-    menu.append(Some(&gettext("Open Collection Folder")), Some("group.open-folder"));
+    menu.append(
+        Some(&gettext("Open Collection Folder")),
+        Some("group.open-folder"),
+    );
 
     let menu_button = gtk4::MenuButton::builder()
         .icon_name("view-more-symbolic")
@@ -882,11 +888,7 @@ pub(crate) fn build_download_group_row(
 }
 
 impl DownloadGroupRow {
-    pub(crate) fn update(
-        &self,
-        section_items: &[DownloadItem],
-        group_items: &[DownloadItem],
-    ) {
+    pub(crate) fn update(&self, section_items: &[DownloadItem], group_items: &[DownloadItem]) {
         *self.members.borrow_mut() = group_items.iter().map(DownloadItem::id).collect();
         self.row.set_subtitle(&group_summary(section_items));
 
@@ -896,8 +898,11 @@ impl DownloadGroupRow {
                 DownloadStatus::Downloading | DownloadStatus::Queued | DownloadStatus::Scheduled
             )
         }));
-        self.resume
-            .set_enabled(group_items.iter().any(|item| item.status() == DownloadStatus::Paused));
+        self.resume.set_enabled(
+            group_items
+                .iter()
+                .any(|item| item.status() == DownloadStatus::Paused),
+        );
         self.cancel.set_enabled(group_items.iter().any(|item| {
             matches!(
                 item.status(),
@@ -908,7 +913,10 @@ impl DownloadGroupRow {
             )
         }));
         self.retry.set_enabled(group_items.iter().any(|item| {
-            matches!(item.status(), DownloadStatus::Failed | DownloadStatus::Cancelled)
+            matches!(
+                item.status(),
+                DownloadStatus::Failed | DownloadStatus::Cancelled
+            )
         }));
         self.open_folder.set_enabled(!group_items.is_empty());
     }
@@ -1550,7 +1558,6 @@ fn show_rename_dialog(
     dialog.present(anchor.root().as_ref());
 }
 
-
 #[cfg(test)]
 mod group_row_tests {
     use super::*;
@@ -1595,10 +1602,7 @@ mod group_row_tests {
         assert!(group.open_folder.is_enabled());
 
         second.set_status(DownloadStatus::Failed);
-        group.update(
-            std::slice::from_ref(&second),
-            &[first, second],
-        );
+        group.update(std::slice::from_ref(&second), &[first, second]);
         assert!(group.retry.is_enabled());
     }
 }

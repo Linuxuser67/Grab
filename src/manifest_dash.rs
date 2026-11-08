@@ -44,7 +44,9 @@ pub(crate) enum DashError {
     Parse,
     #[error("DASH presentation uses an unsupported period layout")]
     UnsupportedPresentation,
-    #[error("DASH presentation contains SCTE-35 ad signaling that native download cannot safely remove")]
+    #[error(
+        "DASH presentation contains SCTE-35 ad signaling that native download cannot safely remove"
+    )]
     AdSignaling,
     #[error("DASH addressing or resource URL is unsupported")]
     UnsupportedAddressing,
@@ -5153,5 +5155,4 @@ mod tests {
             );
         }
     }
-
 }

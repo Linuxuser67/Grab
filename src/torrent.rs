@@ -145,7 +145,7 @@ struct Active {
     paused: bool,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 struct SessionNetworkConfig {
     socks_proxy: Option<String>,
 }

@@ -50,7 +50,7 @@ use crate::video_staging::{
     resume_plan, sidecar_path_for, staging_root, stem_reserved_in, sweep_partial_remuxes,
     sweep_staging_preserving_recordings, unified_candidate, unified_temp_limit,
     ytdlp_output_template,
-}
+};
 use crate::video_tools::VideoError;
 use crate::video_tools::{
     COOKIES_BROWSERS, MIN_YTDLP_VERSION, browser_override_command_for, browser_override_dirs,

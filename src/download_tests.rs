@@ -230,6 +230,8 @@ fn stored_row(url: &str, dest_dir: &str, filename: &str, status: DownloadStatus)
         last_modified: None,
         public_only: None,
         gallery: None,
+        group_id: None,
+        group_title: None,
     }
 }
 
@@ -852,6 +854,8 @@ fn overcap_queue_keeps_active_first() {
             last_modified: None,
             public_only: None,
             gallery: None,
+            group_id: None,
+            group_title: None,
         },
         StoredItem {
             id: None,
@@ -870,6 +874,8 @@ fn overcap_queue_keeps_active_first() {
             last_modified: None,
             public_only: None,
             gallery: None,
+            group_id: None,
+            group_title: None,
         },
     ];
     for i in 0..1000 {
@@ -890,6 +896,8 @@ fn overcap_queue_keeps_active_first() {
             last_modified: None,
             public_only: None,
             gallery: None,
+            group_id: None,
+            group_title: None,
         });
     }
     let queue = StoredQueue {
@@ -1542,6 +1550,8 @@ fn a_fresh_row_never_lands_on_a_dest_side_leftover_staging_dir() {
             last_modified: None,
             public_only: None,
             gallery: None,
+            group_id: None,
+            group_title: None,
         },
         StoredItem {
             id: None,
@@ -1560,6 +1570,8 @@ fn a_fresh_row_never_lands_on_a_dest_side_leftover_staging_dir() {
             last_modified: None,
             public_only: None,
             gallery: None,
+            group_id: None,
+            group_title: None,
         },
     ];
     std::fs::write(
@@ -1826,6 +1838,8 @@ fn invalid_native_manifest_source_is_skipped_on_restore() {
         last_modified: None,
         public_only: None,
         gallery: None,
+        group_id: None,
+        group_title: None,
     };
     std::fs::write(
         &queue_file,
@@ -1878,6 +1892,8 @@ fn mismatched_video_source_dropped_on_restore() {
             last_modified: None,
             public_only: None,
             gallery: None,
+            group_id: None,
+            group_title: None,
         }],
     };
     std::fs::write(&qf, serde_json::to_string(&queue).unwrap()).unwrap();
@@ -1932,6 +1948,8 @@ fn done_video_keeps_page_source_on_restore() {
             last_modified: None,
             public_only: None,
             gallery: None,
+            group_id: None,
+            group_title: None,
         }],
     };
     std::fs::write(&qf, serde_json::to_string(&queue).unwrap()).unwrap();
@@ -3316,6 +3334,8 @@ fn queue_roundtrip_and_mapping() {
                 last_modified: None,
                 public_only: None,
                 gallery: None,
+                group_id: None,
+                group_title: None,
             },
             StoredItem {
                 id: None,
@@ -3334,6 +3354,8 @@ fn queue_roundtrip_and_mapping() {
                 last_modified: None,
                 public_only: None,
                 gallery: None,
+                group_id: None,
+                group_title: None,
             },
         ],
     };
@@ -3506,6 +3528,8 @@ fn batch_restore_hundred_done() {
             last_modified: None,
             public_only: None,
             gallery: None,
+            group_id: None,
+            group_title: None,
         })
         .collect();
     let queue = StoredQueue {
@@ -3714,6 +3738,8 @@ fn restore_preserves_intent() {
         last_modified: None,
         public_only: None,
         gallery: None,
+        group_id: None,
+        group_title: None,
     })
     .collect();
     let queue = StoredQueue {
@@ -4458,6 +4484,8 @@ fn killed_segmented_resume_starts_over() {
                 last_modified: None,
                 public_only: None,
                 gallery: None,
+                group_id: None,
+                group_title: None,
             }],
         })
         .unwrap(),
@@ -8369,6 +8397,8 @@ fn gallery_stored_item(status: DownloadStatus, job: Option<serde_json::Value>) -
         last_modified: None,
         public_only: None,
         gallery: job,
+        group_id: None,
+        group_title: None,
     }
 }
 

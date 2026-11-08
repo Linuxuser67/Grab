@@ -85,13 +85,39 @@ the existing MPEG-TS validation path. Ad removal from LL-HLS is
 parked; this PR does not strip ad markers or schedule ad-marked media. DRM,
 license acquisition, and CDM support remain unplanned.
 
-## Explicitly unplanned
+## Native Low-Latency DASH supported profile
 
-- Low-Latency DASH (LL-DASH): partial-segment availability and low-latency
-  chunk transfer behavior.
+The LL-DASH path reuses dash-mpd-core for typed MPD parsing and Grab's existing
+dynamic SegmentTemplate planner, guarded HTTP client, streamed resource writer,
+staging, live journal, recovery, and FFmpeg finalization. No separate DASH
+downloader or new parser dependency is introduced.
 
-Do not silently strip or ignore low-latency metadata and then treat the
-playlist as a complete segment-based presentation.
+The supported profile is a single-period dynamic MPD with HTTPS SegmentTemplate
+addressing, an explicit MP4 audio/video MIME type, and an initialization
+resource. SegmentTemplate availability attributes use normal inheritance:
+a value on a lower-level SegmentTemplate overrides the inherited value.
+Finite non-negative availability offsets are bounded to 30 seconds and to the
+shortest declared segment duration. availabilityTimeComplete=false requires
+a positive offset and a known initialization resource. The planner extends
+the live availability window by the effective offset, allowing the current
+in-progress segment to be requested when its first CMAF chunk is advertised.
+
+Grab streams the HTTP response body as it arrives into its owned staging
+.part file. For LL-DASH, the current in-progress segment is requested before
+older complete segments and segment requests are serialized per rendition;
+the next segment request begins only after the previous response closes.
+The live journal commits a segment only after its full response has completed,
+and retains presentation order regardless of fetch order. A stopped or
+interrupted in-progress response is not treated as committed media; a later
+resume starts that segment request again. Native transfers still have no
+automatic retries.
+
+BaseURL-level availability signalling, static LL-DASH, SegmentBase,
+SegmentList, dynamic multi-Period MPDs, missing initialization resources,
+unbounded or over-segment offsets, non-MP4 tracks, DRM, and unsupported
+addressing remain on yt-dlp fallback. Unknown or conflicting presentation
+semantics are not silently stripped.
+
 
 ## Phases
 

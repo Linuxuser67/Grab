@@ -1,5 +1,6 @@
 //! Row object: `DownloadItem` GObject subclass, wrapper and accessors.
 
+use crate::download_store::DownloadGroup;
 use gtk4::glib;
 use gtk4::glib::subclass::types::ObjectSubclassIsExt;
 

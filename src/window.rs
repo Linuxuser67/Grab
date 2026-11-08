@@ -14,6 +14,12 @@ use crate::window_rows::build_row;
 pub use crate::window_rows::launch_path;
 use crate::window_rows::ngettext_count;
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+struct RowPlacement {
+    section: u32,
+    group_id: Option<u64>,
+}
+
 pub const BACKGROUND_NOTIF_ID: &str = "grab-background";
 
 /// Suspend block held through the desktop portal. `sub` watches its Response so
@@ -593,7 +599,7 @@ pub fn build_window(
     let rows: Rc<RefCell<HashMap<u64, gtk4::ListBoxRow>>> = Rc::new(RefCell::new(HashMap::new()));
     let group_rows: Rc<RefCell<HashMap<(u64, u32), crate::window_rows::DownloadGroupRow>>> =
         Rc::new(RefCell::new(HashMap::new()));
-    let row_placements: Rc<RefCell<HashMap<u64, (u32, Option<u64>)>>> =
+    let row_placements: Rc<RefCell<HashMap<u64, RowPlacement>>> =
         Rc::new(RefCell::new(HashMap::new()));
     let sync: Rc<dyn Fn()> = {
         let m = Rc::clone(&manager);
@@ -736,7 +742,10 @@ pub fn build_window(
                             && group_sizes.get(&group.id()).is_some_and(|count| *count > 1)
                     })
                     .map(|group| (group.id(), bucket));
-                let location = (bucket, group_key.map(|(group_id, _)| group_id));
+                let location = RowPlacement {
+                    section: bucket,
+                    group_id: group_key.map(|(group_id, _)| group_id),
+                };
 
                 let row = if let Some(row) = r.borrow().get(&item.id()).cloned() {
                     row

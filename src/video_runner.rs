@@ -22,11 +22,11 @@ use crate::video_spawn::{
     fetch_video_page, join_drain, reap_child, spawn_piped_ytdlp, ytdlp_command,
 };
 use crate::video_staging::{
-    ResumePlan, ResumeQuery, VideoManifest, clean_staging_files, collect_sidecar,
-    dest_part_path, discover_unified_output, ensure_staging_dir_in, file_len, info_json_path,
-    live_info_json_path, read_manifest, release_remux_lease, reserve_remux_temp, resume_plan,
-    sidecar_path_for, staging_location_for_dest, sweep_partial_remuxes,
-    sweep_staging_preserving_recordings, write_private,
+    ResumePlan, ResumeQuery, VideoManifest, clean_staging_files, collect_sidecar, dest_part_path,
+    discover_unified_output, ensure_staging_dir_in, file_len, info_json_path, live_info_json_path,
+    read_manifest, release_remux_lease, reserve_remux_temp, resume_plan, sidecar_path_for,
+    staging_location_for_dest, sweep_partial_remuxes, sweep_staging_preserving_recordings,
+    write_private,
 };
 use crate::video_tools::{VideoError, ensure_tool_versions, resolve_libraries};
 use crate::video_types::{FetchedVideo, VideoOutcome, yt_dlp_reports_currently_live};

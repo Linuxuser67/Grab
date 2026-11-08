@@ -101,7 +101,8 @@ fn cleanup_discarded_video_files(dest: &std::path::Path, id: u64) -> Result<(), 
         // blocking workers have finished.
         crate::video_staging::sweep_partial_remuxes(dest_dir, id);
     }
-    crate::video::clean_dest_parts(dest);
+    // Legacy destination-side part names have no reliable ownership marker.
+    // Keep them rather than deleting user files based on a filename pattern.
     Ok(())
 }
 

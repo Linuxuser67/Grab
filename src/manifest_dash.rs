@@ -2046,6 +2046,13 @@ fn dynamic_segment_times(
                 }
                 _ => return Err(DashError::InvalidSegment),
             };
+            // SegmentTimeline entries after the inclusive endNumber are not
+            // part of this representation. Check before the saturating count
+            // calculation: saturating_sub would otherwise turn an exhausted
+            // range into one extra segment.
+            if template.end_number.is_some_and(|end| number > end) {
+                break;
+            }
             let total_count = total_count.min(
                 template
                     .end_number
@@ -3844,6 +3851,32 @@ mod tests {
                 "/path/seg-13-5.m4s",
             ]
         );
+    }
+
+    #[test]
+    fn dynamic_timeline_stops_at_inclusive_end_number() {
+        let body = dynamic_mpd(
+            r#"<SegmentTemplate timescale="1" startNumber="1" endNumber="2" media="seg-$Number$-$Time$.m4s">
+  <SegmentTimeline>
+    <S t="0" d="2"/>
+    <S t="2" d="2"/>
+    <S t="4" d="2"/>
+  </SegmentTimeline>
+</SegmentTemplate>"#,
+            r#"timeShiftBufferDepth="PT20S""#,
+        );
+        let manifest = parse_dash_manifest_at(BASE_URL, &body, dynamic_test_clock(11))
+            .expect("dynamic MPD with endNumber should parse");
+        let representation = &manifest.video_representations[0];
+        let plan = plan_dash_representation(&manifest, &representation.live_key)
+            .expect("expand segments through endNumber");
+        let numbers = plan
+            .resources
+            .iter()
+            .filter(|resource| resource.kind == DashResourceKind::Segment)
+            .map(|resource| resource.segment_number.expect("media segment number"))
+            .collect::<Vec<_>>();
+        assert_eq!(numbers, [1, 2]);
     }
 
     #[test]

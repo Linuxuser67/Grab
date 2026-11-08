@@ -22,11 +22,11 @@ use crate::video_spawn::{
     fetch_video_page, join_drain, reap_child, spawn_piped_ytdlp, ytdlp_command,
 };
 use crate::video_staging::{
-    ResumePlan, ResumeQuery, VideoManifest, clean_dest_parts, clean_staging_files, collect_sidecar,
-    dest_part_path, discover_unified_output, ensure_staging_dir_in, file_len, info_json_path,
-    live_info_json_path, read_manifest, release_remux_lease, reserve_remux_temp, resume_plan,
-    sidecar_path_for, staging_location_for_dest, sweep_partial_remuxes,
-    sweep_staging_preserving_recordings, write_private,
+    ResumePlan, ResumeQuery, VideoManifest, clean_staging_files, collect_sidecar, dest_part_path,
+    discover_unified_output, ensure_staging_dir_in, file_len, info_json_path, live_info_json_path,
+    read_manifest, release_remux_lease, reserve_remux_temp, resume_plan, sidecar_path_for,
+    staging_location_for_dest, sweep_partial_remuxes, sweep_staging_preserving_recordings,
+    write_private,
 };
 use crate::video_tools::{VideoError, ensure_tool_versions, resolve_libraries};
 use crate::video_types::{FetchedVideo, VideoOutcome, yt_dlp_reports_currently_live};
@@ -373,15 +373,12 @@ async fn run_video_download_inner(
             });
         }
         ResumePlan::Fresh => {
-            // Overwrite pre-flight (Parabolic parity): a finished file at `dest` means the atomic claim fails at the end, so refuse before a wasted download. This arm's cleanup drops our own shells too.
+            // Refuse an existing destination without sweeping neighboring files.
             if job.dest.exists() {
-                clean_dest_parts(&job.dest);
                 return Err(VideoError::exists());
             }
             // Clear this item's staging files (grab-<id>-*), not the dest dir itself: a previous attempt's detached writers may still hold old inodes, so unlink first. Only mismatches/oversize leftovers land here; same-selection resume never does.
             crate::video::clean_staging_files(&staging, job.item_id);
-            // Dest-dir parts are Grab-namespaced, so a mismatch restarts clean instead of resuming into a foreign lookalike. The finished file itself is never touched.
-            clean_dest_parts(&job.dest);
             // Record this attempt's selection up front: a pause from here on leaves a matchable sidecar, so the next attempt resumes instead of wiping.
             write_manifest(
                 &staging,
@@ -413,7 +410,6 @@ async fn run_video_download_inner(
             // is written with final_bytes: None and only updated on success, so a crash between the atomic rename
             // and the update would delete a good file.
             if job.dest.exists() {
-                clean_dest_parts(&job.dest);
                 return Err(VideoError::exists());
             }
             phase(gettext("Resuming download…"));
@@ -918,8 +914,6 @@ pub(crate) async fn run_unified_ytdlp(
     {
         collect_sidecar(&sidecar_path_for(&final_tmp, lang), &job.dest, lang);
     }
-    // Sweep legacy dest-dir parts, so pre-migration rows (or foreign lookalikes the Fresh arm never saw) don't sit beside the finished file forever.
-    clean_dest_parts(&job.dest);
     // Record the finished size so a later retry adopts the file.
     let final_bytes = file_len(&job.dest);
     if let Some(mut m) = read_manifest(staging, job.item_id) {
@@ -1774,7 +1768,6 @@ fn prepare_live_staging(
 
     // Refuse an existing destination before spending time recording.
     if dest.exists() {
-        clean_dest_parts(dest);
         let part = out
             .parent()
             .unwrap_or_else(|| Path::new(""))
@@ -2545,7 +2538,6 @@ pub(crate) async fn run_hls_ytdlp(
     // point as on the live leg. The part shells beside the finished file are
     // ours to sweep: no rename means no delivery happened.
     if !gate.try_commit() {
-        clean_dest_parts(&job.dest);
         // Lost the race: clear this item's staging files only, never the dest dir.
         clean_staging_files(staging, job.item_id);
         return Ok(None);

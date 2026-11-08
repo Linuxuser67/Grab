@@ -2865,6 +2865,9 @@ mod tests {
         let name = format!("v.{id}.mp4");
         std::fs::write(dir.join(format!("{name}.part")), b"scratch").unwrap();
         std::fs::write(dir.join("keep.txt"), b"user").unwrap();
+        // This matched the old destination-stem cleanup pattern but is not
+        // recorded by the row's manifest and therefore belongs to the user.
+        std::fs::write(dir.join("v.video.notes"), b"user part-like filename").unwrap();
         let manifest = test_manifest(&name, Some(dir.clone()));
         std::fs::write(
             manifest_path(&dir, id),
@@ -2890,6 +2893,10 @@ mod tests {
         assert!(!legacy_info.exists(), "old dest-dir info JSON must go");
         assert!(!legacy_live.exists(), "old dest-dir live JSON must go");
         assert!(dir.join("keep.txt").exists(), "user files stay");
+        assert!(
+            dir.join("v.video.notes").exists(),
+            "unowned files resembling legacy parts must survive row cleanup"
+        );
 
         let _ = std::fs::remove_dir_all(&dir);
     }

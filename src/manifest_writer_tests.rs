@@ -1079,7 +1079,6 @@ async fn streamed_destination_writer_resumes_without_staged_source_files() {
         .expect("remove HLS writer test directory");
 }
 
-
 #[tokio::test]
 async fn missing_appendable_checkpoint_preserves_existing_destination_part() {
     let root = test_directory();
@@ -1114,8 +1113,16 @@ async fn missing_appendable_checkpoint_preserves_existing_destination_part() {
     .expect("open appendable destination writer") else {
         panic!("fresh destination writer must be active");
     };
-    assert!(writer.append_next(&mut abort).await.expect("append resource"));
-    writer.finish().await.expect("flush committed destination prefix");
+    assert!(
+        writer
+            .append_next(&mut abort)
+            .await
+            .expect("append resource")
+    );
+    writer
+        .finish()
+        .await
+        .expect("flush committed destination prefix");
     drop(writer);
 
     let part = crate::manifest_destination::part_path(
@@ -1145,7 +1152,9 @@ async fn missing_appendable_checkpoint_preserves_existing_destination_part() {
         "a missing checkpoint must not reopen an existing appendable destination part as fresh"
     );
     assert_eq!(
-        tokio::fs::read(&part).await.expect("re-read preserved part"),
+        tokio::fs::read(&part)
+            .await
+            .expect("re-read preserved part"),
         before,
         "committed destination bytes must remain unchanged"
     );

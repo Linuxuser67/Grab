@@ -4807,13 +4807,12 @@ mod tests {
         assert_eq!(group.id(), 10);
         assert_eq!(group.title(), "Course playlist");
 
-        let retained_id =
-            assign_playlist_group(
-                std::slice::from_ref(&second),
-                "Course playlist",
-                Some(group_id),
-            )
-                .expect("a later partial-import retry reuses the original group");
+        let retained_id = assign_playlist_group(
+            std::slice::from_ref(&second),
+            "Course playlist",
+            Some(group_id),
+        )
+        .expect("a later partial-import retry reuses the original group");
         assert_eq!(retained_id, 10);
         assert_eq!(second.group(), first.group());
     }

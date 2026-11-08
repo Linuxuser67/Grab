@@ -90,9 +90,7 @@ pub(crate) struct DashRepresentation {
 
 impl DashRepresentation {
     pub(crate) fn matches_key(&self, key: &str) -> bool {
-        self.key == key
-            || self.live_key == key
-            || self.legacy_live_key.as_deref() == Some(key)
+        self.key == key || self.live_key == key || self.legacy_live_key.as_deref() == Some(key)
     }
 }
 

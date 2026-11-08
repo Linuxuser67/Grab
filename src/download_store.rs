@@ -38,6 +38,30 @@ impl DownloadStatus {
 
 pub(crate) const QUEUE_VERSION: u32 = 4;
 
+/// One multi-item source collection shared by its child downloads.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub(crate) struct DownloadGroup {
+    pub(crate) id: u64,
+    pub(crate) title: String,
+}
+
+impl DownloadGroup {
+    /// Construct a collection identity only when both of its required parts are valid.
+    pub(crate) fn new(id: u64, title: &str) -> Option<Self> {
+        if id == 0 || title.trim().is_empty() {
+            return None;
+        }
+        Some(Self {
+            id,
+            title: title.to_string(),
+        })
+    }
+
+    pub(crate) fn is_valid(&self) -> bool {
+        self.id > 0 && !self.title.trim().is_empty()
+    }
+}
+
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub(crate) struct StoredItem {
     /// Manager id, also staging key; absent before v3 (fresh id on restore). Persisted so retained recordings stay reachable after restart.
@@ -88,12 +112,9 @@ pub(crate) struct StoredItem {
     /// `None` = not a gallery row or predates the field.
     #[serde(default)]
     pub(crate) gallery: Option<serde_json::Value>,
-    /// Shared identity for multi-row collection downloads; additive queue metadata.
+    /// Optional collection identity shared by multi-row child downloads.
     #[serde(default)]
-    pub(crate) group_id: Option<u64>,
-    /// Collection title displayed above grouped child rows; additive queue metadata.
-    #[serde(default)]
-    pub(crate) group_title: Option<String>,
+    pub(crate) group: Option<DownloadGroup>,
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -117,8 +138,7 @@ mod public_only_metadata_tests {
         }))
         .expect("legacy queue item should deserialize");
         assert_eq!(item.public_only, None);
-        assert_eq!(item.group_id, None);
-        assert_eq!(item.group_title, None);
+        assert_eq!(item.group, None);
     }
 
     #[test]
@@ -149,16 +169,23 @@ mod group_metadata_tests {
             "dest_dir": "/tmp/downloads",
             "filename": "one.mp4",
             "status": "queued",
-            "group_id": 41,
-            "group_title": "Course playlist"
+            "group": {
+                "id": 41,
+                "title": "Course playlist"
+            }
         }))
         .expect("grouped queue item should deserialize");
 
-        assert_eq!(item.group_id, Some(41));
-        assert_eq!(item.group_title.as_deref(), Some("Course playlist"));
+        assert_eq!(
+            item.group,
+            Some(super::DownloadGroup {
+                id: 41,
+                title: "Course playlist".to_string(),
+            })
+        );
 
         let serialized = serde_json::to_value(item).expect("grouped queue item should serialize");
-        assert_eq!(serialized["group_id"], 41);
-        assert_eq!(serialized["group_title"], "Course playlist");
+        assert_eq!(serialized["group"]["id"], 41);
+        assert_eq!(serialized["group"]["title"], "Course playlist");
     }
 }

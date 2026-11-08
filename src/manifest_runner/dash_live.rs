@@ -118,8 +118,8 @@ async fn load_dash_live_track_inner(
     };
     let previous_representation_key = state.representation_key.clone();
     let expected_representation_key = current_plan
-        .map(|plan| plan.representation.live_key.as_str())
-        .unwrap_or(state.representation_key.as_str());
+        .map(|plan| plan.representation.live_key.clone())
+        .unwrap_or_else(|| state.representation_key.clone());
     if current_plan.is_some()
         && state.representation_key != representation_key
         && state.representation_key != expected_representation_key
@@ -128,8 +128,8 @@ async fn load_dash_live_track_inner(
             "The saved dynamic DASH state belongs to a different representation".to_string(),
         ));
     }
-    state.representation_key = expected_representation_key.to_string();
-    validate_dash_live_state(&state, expected_representation_key)?;
+    state.representation_key.clone_from(&expected_representation_key);
+    validate_dash_live_state(&state, &expected_representation_key)?;
 
     let resource_names = state
         .resource_names()

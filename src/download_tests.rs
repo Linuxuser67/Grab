@@ -5289,8 +5289,7 @@ fn remove_tells_a_live_worker_to_discard_and_waits_for_it_to_stop() {
     let settings = test_settings();
     let manager = DownloadManager::new(gio::ListStore::new::<DownloadItem>(), settings);
     let id = 922_000 + std::process::id() as u64;
-    // A destination unique to this test: `clean_dest_parts` scans the
-    // directory, so a shared one would let it delete files it does not own.
+    // Keep this fixture isolated because it exercises row-scoped filesystem cleanup.
     let dest_dir = std::env::temp_dir().join(format!("grab-rmdiscard-{id}"));
     let _ = std::fs::remove_dir_all(&dest_dir);
     std::fs::create_dir_all(&dest_dir).unwrap();
@@ -5399,14 +5398,15 @@ fn remove_tells_a_live_worker_to_discard_and_waits_for_it_to_stop() {
         !dest_dir.join(format!(".grab-{id}-manifest.json")).exists(),
         "manifest is removed with the row"
     );
-    // Under manifest-only cleanup, the late-written scratch (no manifest)
-    // is preserved. This is the safe behavior: without ownership proof,
-    // we don't delete.
     assert!(
-        dest_dir
+        !dest_dir
             .join(format!("grab-{id}-video.f137.mp4.part"))
             .exists(),
-        "late-written scratch without manifest is preserved (safe)"
+        "late-written scratch covered by the row's manifest prefix is reclaimed"
+    );
+    assert!(
+        foreign.exists(),
+        "cleanup must preserve a similarly named user file outside the manifest"
     );
     if part.exists() || dest_dir.join(format!("live-{id}.mp4")).exists() {
         panic!(
@@ -7324,6 +7324,8 @@ fn shutdown_during_a_pending_discard_stops_the_worker_rather_than_detaching_it()
     std::fs::write(dest_dir.join(format!(".grab-{id}-manifest.json")), b"{}").unwrap();
     let part = dest_dir.join("v.video.mp4");
     std::fs::write(&part, b"recorded").unwrap();
+    let foreign = dest_dir.join("v.video.notes");
+    std::fs::write(&foreign, b"user file").unwrap();
     write_discard_manifest(&dest_dir, id, Some("v.video.mp4".to_string()), None);
 
     // A worker that runs long and records that it was dropped.

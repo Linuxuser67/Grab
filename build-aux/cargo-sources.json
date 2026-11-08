@@ -489,7 +489,7 @@
     },
     {
         "type": "inline",
-        "contents": "{\"package\":\"fab3a52daf2a4274421f42aa21fc78b5a45809a845c36271bfb59628da9153dd\",\"files\":{}}",
+        "contents": "{\"package\": \"fab3a52daf2a4274421f42aa21fc78b5a45809a845c36271bfb59628da9153dd\", \"files\": {}}",
         "dest": "cargo/broadcast-hls-0.4.0",
         "dest-filename": ".cargo-checksum.json"
     },

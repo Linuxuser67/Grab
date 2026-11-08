@@ -386,7 +386,7 @@ pub(crate) async fn lookup(
     let (auth, result) = tokio::time::timeout(MANIFEST_LOOKUP_BUDGET, async {
         let (client, auth) =
             client_for_manifest_with_policy(raw_url, cookies_browser, proxy).await?;
-        let lookup = lookup_preview_with_client(&client, raw_url)
+        let lookup = lookup_preview_with_client(&client, raw_url, proxy.is_some())
             .await
             .map_err(|error| error.to_string())?;
         Ok::<_, String>((auth, lookup))
@@ -492,12 +492,14 @@ async fn client_for_manifest_with_policy(
 pub(crate) async fn lookup_with_client(
     client: &reqwest::Client,
     raw_url: &str,
+    proxy_configured: bool,
 ) -> Result<Option<ManifestLookup>, ManifestIntakeError> {
     lookup_with_client_policy(
         client,
         raw_url,
         ManifestTransportPolicy::HttpsOnly,
         ManifestFetchMode::Download,
+        proxy_configured,
     )
     .await
 }
@@ -506,12 +508,14 @@ pub(crate) async fn lookup_with_client(
 pub(crate) async fn lookup_preview_with_client(
     client: &reqwest::Client,
     raw_url: &str,
+    proxy_configured: bool,
 ) -> Result<Option<ManifestLookup>, ManifestIntakeError> {
     lookup_with_client_policy(
         client,
         raw_url,
         ManifestTransportPolicy::HttpsOnly,
         ManifestFetchMode::Preview,
+        proxy_configured,
     )
     .await
 }
@@ -580,6 +584,7 @@ async fn lookup_with_client_policy(
     raw_url: &str,
     transport_policy: ManifestTransportPolicy,
     fetch_mode: ManifestFetchMode,
+    proxy_configured: bool,
 ) -> Result<Option<ManifestLookup>, ManifestIntakeError> {
     let requested_url = Url::parse(raw_url)
         .map_err(|_| ManifestIntakeError::Failed(gettext("Invalid stream manifest URL")))?;
@@ -628,7 +633,14 @@ async fn lookup_with_client_policy(
             }
         }
         crate::media_types::ManifestKind::Dash => {
-            let body = resolve_dash_xlinks(client, &final_url, &body, transport_policy).await?;
+            let body = resolve_dash_xlinks(
+                client,
+                &final_url,
+                &body,
+                transport_policy,
+                proxy_configured,
+            )
+            .await?;
             let body = std::str::from_utf8(&body).map_err(|error| {
                 ManifestIntakeError::Unsupported(format!(
                     "The DASH manifest is not valid UTF-8: {error}"
@@ -668,6 +680,7 @@ async fn lookup_with_http_fixture_client(
         raw_url,
         ManifestTransportPolicy::HttpFixture,
         ManifestFetchMode::Preview,
+        false,
     )
     .await
 }
@@ -678,6 +691,7 @@ async fn resolve_dash_xlinks(
     parent_url: &Url,
     body: &[u8],
     transport_policy: ManifestTransportPolicy,
+    proxy_configured: bool,
 ) -> Result<Vec<u8>, ManifestIntakeError> {
     let links = dash_xlink::find_onload_links(body).map_err(|error| {
         ManifestIntakeError::Unsupported(format!(
@@ -686,6 +700,17 @@ async fn resolve_dash_xlinks(
     })?;
     if links.is_empty() {
         return Ok(body.to_vec());
+    }
+    // The configured proxy resolves destinations remotely, so even a
+    // same-origin XLink could redirect to a private host without passing
+    // through Grab's guarded resolver. Do not follow any XLinks with a proxy.
+    if proxy_configured || crate::subprocess_proxy::validate_proxy_compatibility().is_err() {
+        // Use Failed rather than Unsupported: Unsupported hands the URL to
+        // yt-dlp, which would repeat the same proxy-side DNS exposure.
+        return Err(ManifestIntakeError::Failed(
+            "DASH XLink fetching is disabled while an upstream proxy is configured because the proxy bypasses local destination-address checks"
+                .to_string(),
+        ));
     }
     if links.len() > MAX_DASH_XLINK_COUNT {
         return Err(ManifestIntakeError::Unsupported(
@@ -729,21 +754,12 @@ async fn resolve_dash_xlinks(
                 // origin, but a different host is still an untrusted remote
                 // link. Force public-only DNS for those children so a hostile
                 // MPD cannot turn XLink into a request to a private address.
-                if target.origin() != parent_url.origin() {
-                    // A proxy resolves the destination on its own side, outside
-                    // Grab's guarded DNS resolver. Do not let a remote MPD use an
-                    // XLink hostname to reach private addresses through that proxy.
-                    crate::subprocess_proxy::validate_proxy_compatibility().map_err(|_| {
-                        ManifestIntakeError::Unsupported(
-                            "DASH XLink references cannot be followed while an upstream proxy is configured"
-                                .to_string(),
-                        )
-                    })?;
-                    if !crate::download_net::require_public_resolution(host) {
-                        return Err(ManifestIntakeError::Unsupported(
-                            "A DASH XLink target failed the public-host safety policy".to_string(),
-                        ));
-                    }
+                if target.origin() != parent_url.origin()
+                    && !crate::download_net::require_public_resolution(host)
+                {
+                    return Err(ManifestIntakeError::Unsupported(
+                        "A DASH XLink target failed the public-host safety policy".to_string(),
+                    ));
                 }
                 crate::download_net::inherit_public_resolution_for_collection(
                     parent_url.as_str(),
@@ -1230,14 +1246,37 @@ mod tests {
             .expect("build fixture client");
         let parent = Url::parse(&format!("http://{address}/manifest.mpd")).expect("parent URL");
         let body = br#"<MPD xmlns="urn:mpeg:dash:schema:mpd:2011" xmlns:xlink="http://www.w3.org/1999/xlink"><Period xlink:href="period.xml" xlink:actuate="onLoad"/></MPD>"#;
-        let expanded =
-            resolve_dash_xlinks(&client, &parent, body, ManifestTransportPolicy::HttpFixture)
-                .await
-                .expect("bounded Period XLink resolution");
+        let expanded = resolve_dash_xlinks(
+            &client,
+            &parent,
+            body,
+            ManifestTransportPolicy::HttpFixture,
+            false,
+        )
+        .await
+        .expect("bounded Period XLink resolution");
         server.await.expect("XLink fixture task");
         let expanded = std::str::from_utf8(&expanded).expect("expanded MPD is UTF-8");
         assert!(expanded.contains(r#"duration="PT2S""#));
         assert!(!expanded.contains("xlink:href"));
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn dash_xlink_fails_without_fallback_when_proxy_is_configured() {
+        let client = reqwest::Client::new();
+        let parent = Url::parse("https://cdn.example.test/manifest.mpd").expect("parent URL");
+        let body = br#"<MPD xmlns="urn:mpeg:dash:schema:mpd:2011" xmlns:xlink="http://www.w3.org/1999/xlink"><Period xlink:href="https://other.example.test/period.xml" xlink:actuate="onLoad"/></MPD>"#;
+
+        let error = resolve_dash_xlinks(
+            &client,
+            &parent,
+            body,
+            ManifestTransportPolicy::HttpsOnly,
+            true,
+        )
+        .await
+        .expect_err("proxied XLinks must fail before fetching");
+        assert!(matches!(error, ManifestIntakeError::Failed(_)));
     }
 
     #[tokio::test(flavor = "current_thread")]
@@ -1256,6 +1295,7 @@ mod tests {
                 &parent,
                 body.as_bytes(),
                 ManifestTransportPolicy::HttpsOnly,
+                false,
             )
             .await
             .expect_err("off-origin private XLink target must be rejected before fetching");

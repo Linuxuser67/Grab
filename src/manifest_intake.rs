@@ -747,12 +747,11 @@ async fn resolve_dash_xlinks(
                                 .to_string(),
                         ));
                     }
-                    crate::download_net::require_public_resolution(host).then_some(()).ok_or_else(|| {
-                        ManifestIntakeError::Unsupported(
-                            "DASH XLink references cannot be followed while an upstream proxy is configured"
-                                .to_string(),
-                        )
-                    })?;
+                    if !crate::download_net::require_public_resolution(host) {
+                        return Err(ManifestIntakeError::Unsupported(
+                            "A DASH XLink target failed the public-host safety policy".to_string(),
+                        ));
+                    }
                 }
                 crate::download_net::inherit_public_resolution_for_collection(
                     parent_url.as_str(),

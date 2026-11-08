@@ -547,6 +547,10 @@ impl HlsRenditionReport {
     }
 }
 
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the shared planner carries URL, continuity, resource, and output state for both closed and open parts"
+)]
 fn append_part_units(
     base_url: &Url,
     media_sequence: u64,

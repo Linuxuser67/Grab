@@ -112,6 +112,9 @@ pub enum TorrentError {
     /// The underlying torrent session could not be initialized.
     #[error("{0}")]
     SessionStart(String),
+    /// The running torrent session was created with different SOCKS5 proxy settings.
+    #[error("{0}")]
+    SessionProxyMismatch(String),
     /// The archived torrent metadata needed to safely trash its files is unavailable.
     #[error("{0}")]
     TrashArchiveMissing(String),
@@ -142,7 +145,29 @@ struct Active {
     paused: bool,
 }
 
-static SESSION: OnceCell<Arc<Session>> = OnceCell::const_new();
+#[derive(Clone, PartialEq, Eq)]
+struct SessionNetworkConfig {
+    socks_proxy: Option<String>,
+}
+
+impl SessionNetworkConfig {
+    fn ensure_matches(&self, requested: &Self) -> Result<(), TorrentError> {
+        if self == requested {
+            Ok(())
+        } else {
+            Err(TorrentError::SessionProxyMismatch(gettext(
+                "The torrent engine is already running with different SOCKS5 proxy settings. Restart Grab to apply the new proxy.",
+            )))
+        }
+    }
+}
+
+struct TorrentSessionState {
+    session: Arc<Session>,
+    network: SessionNetworkConfig,
+}
+
+static SESSION: OnceCell<TorrentSessionState> = OnceCell::const_new();
 static ACTIVE: std::sync::LazyLock<Mutex<HashMap<u64, Active>>> =
     std::sync::LazyLock::new(|| Mutex::new(HashMap::new()));
 /// Pre-chosen file indices staged at intake (file-list dialog), consumed once at spawn; keyed by pseudo-URL.
@@ -1124,7 +1149,9 @@ async fn ensure_session(cfg: SessionConfig) -> Result<Arc<Session>, TorrentError
         blocklist_url,
         lsd,
     } = cfg;
-    SESSION
+    let requested_network = SessionNetworkConfig { socks_proxy };
+
+    let state = SESSION
         .get_or_try_init(|| async {
             let dir = glib::user_data_dir().join("grab");
             std::fs::create_dir_all(&dir).map_err(|source| TorrentError::SessionDirectory {
@@ -1146,14 +1173,14 @@ async fn ensure_session(cfg: SessionConfig) -> Result<Arc<Session>, TorrentError
             // Creation-scoped like DHT: no live setter exists, so edits apply to sessions created after them.
             opts.blocklist_url = blocklist_url;
             opts.disable_local_service_discovery = !lsd;
-            // Creation-scoped like DHT/listener: proxy edits apply to sessions created after them.
-            if let Some(proxy_url) = socks_proxy {
+            // The session owns its SOCKS5 transport for its entire lifetime.
+            if let Some(proxy_url) = requested_network.socks_proxy.as_ref() {
                 opts.connect = Some(ConnectionOptions {
-                    proxy_url: Some(proxy_url),
+                    proxy_url: Some(proxy_url.clone()),
                     ..Default::default()
                 });
             }
-            // No live setter: applies here and per add, so new downloads pick up edits. 0 = disabled; positive ports bind dual-stack.
+            // No live setter: applies here and per add. 0 = disabled; positive ports bind dual-stack.
             if listen_port > 0 {
                 let port = clamp_listen_port(listen_port)?;
                 opts.listen = Some(ListenerOptions {
@@ -1167,10 +1194,15 @@ async fn ensure_session(cfg: SessionConfig) -> Result<Arc<Session>, TorrentError
             })?;
             session.ratelimits.set_download_bps(bps(download_bps));
             session.ratelimits.set_upload_bps(bps(upload_bps));
-            Ok(session)
+            Ok(TorrentSessionState {
+                session,
+                network: requested_network.clone(),
+            })
         })
-        .await
-        .map(Arc::clone)
+        .await?;
+
+    state.network.ensure_matches(&requested_network)?;
+    Ok(Arc::clone(&state.session))
 }
 
 /// Validate the peer-blocklist preference (empty = off; anything else must be http(s), else fail loudly).
@@ -1189,15 +1221,15 @@ pub(crate) fn blocklist_url_of(raw: &str) -> Result<Option<String>, TorrentError
 }
 /// Live-apply the speed caps (peer limit has no live setter: creation + per-add only).
 pub(crate) fn apply_live_limits(download_bps: Option<u64>, upload_bps: Option<u64>) {
-    if let Some(s) = SESSION.get() {
-        s.ratelimits.set_download_bps(bps(download_bps));
-        s.ratelimits.set_upload_bps(bps(upload_bps));
+    if let Some(state) = SESSION.get() {
+        state.session.ratelimits.set_download_bps(bps(download_bps));
+        state.session.ratelimits.set_upload_bps(bps(upload_bps));
     }
 }
 
 /// Snapshot of the live session, if the engine has started.
 pub(crate) fn session_handle() -> Option<Arc<Session>> {
-    SESSION.get().cloned()
+    SESSION.get().map(|state| Arc::clone(&state.session))
 }
 
 /// Info-hash hexes claimed by live spawns (registered before the session exists, so not-yet-adding rows count).
@@ -1271,8 +1303,8 @@ pub(crate) fn pause_download(id: u64) {
                 None => return,
             }
         };
-        if let (Some(h), Some(s)) = (handle, SESSION.get()) {
-            let _ = s.pause(&h).await;
+        if let (Some(h), Some(session)) = (handle, session_handle()) {
+            let _ = session.pause(&h).await;
         }
     });
 }
@@ -1281,12 +1313,14 @@ pub(crate) fn pause_download(id: u64) {
 pub(crate) fn forget_download(id: u64) {
     tokio_rt().spawn(async move {
         let active = ACTIVE.lock().await.remove(&id);
-        if let (Some(a), Some(s)) = (active, SESSION.get())
+        if let (Some(a), Some(session)) = (active, session_handle())
             && let Some(h) = a.handle
         {
             // Same skip-guard as the orphan sweep: Session::delete panics on metadata-less magnets.
             if h.metadata.load().is_some() {
-                let _ = s.delete(TorrentIdOrHash::Hash(h.info_hash()), false).await;
+                let _ = session
+                    .delete(TorrentIdOrHash::Hash(h.info_hash()), false)
+                    .await;
             } else {
                 tracing::debug!(id, info_hash = %h.info_hash().as_string(), "keeping metadata-less torrent for the orphan sweep");
             }

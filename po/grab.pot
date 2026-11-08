@@ -689,7 +689,7 @@ msgid "Proxy"
 msgstr ""
 
 #: src/preferences.rs:270
-msgid "Torrents follow SOCKS5 proxies only"
+msgid "Torrents follow SOCKS5 proxies only. Changes take effect after restarting Grab."
 msgstr ""
 
 #: src/preferences.rs:287

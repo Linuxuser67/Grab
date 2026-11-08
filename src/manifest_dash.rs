@@ -2694,9 +2694,11 @@ fn validate_media_url(url: &Url) -> Result<(), DashError> {
 fn expand_base(representation: &DashRepresentation) -> Result<Vec<DashResource>, DashError> {
     let media_url = representation.source.base_url.clone();
     validate_media_url(&media_url)?;
-    let mut resources = Vec::with_capacity(
-        1 + usize::from(representation.source_initialization().is_some()),
-    );
+    let mut resources = Vec::with_capacity(if representation.source_initialization().is_some() {
+        2
+    } else {
+        1
+    });
 
     if let Some(DashInitialization::Resource { url, range }) =
         representation.source_initialization()

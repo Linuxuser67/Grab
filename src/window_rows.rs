@@ -890,9 +890,12 @@ impl DownloadGroupRow {
         *self.members.borrow_mut() = group_items.iter().map(DownloadItem::id).collect();
         self.row.set_subtitle(&group_summary(section_items));
 
-        self.pause.set_enabled(
-            group_items.iter().any(|item| item.status() == DownloadStatus::Downloading),
-        );
+        self.pause.set_enabled(group_items.iter().any(|item| {
+            matches!(
+                item.status(),
+                DownloadStatus::Downloading | DownloadStatus::Queued | DownloadStatus::Scheduled
+            )
+        }));
         self.resume
             .set_enabled(group_items.iter().any(|item| item.status() == DownloadStatus::Paused));
         self.cancel.set_enabled(group_items.iter().any(|item| {

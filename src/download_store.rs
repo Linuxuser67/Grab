@@ -165,7 +165,6 @@ mod public_only_metadata_tests {
     }
 }
 
-
 #[cfg(test)]
 mod group_metadata_tests {
     use super::StoredItem;

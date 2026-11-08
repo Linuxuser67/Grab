@@ -2342,7 +2342,11 @@ async fn low_latency_dash_does_not_commit_interrupted_tail_and_refetches_on_resu
     let saved_state: DashLiveState =
         serde_json::from_slice(&saved_bytes).expect("parse persisted state after interruption");
     assert_eq!(
-        saved_state.segments.iter().map(|segment| segment.number).collect::<Vec<_>>(),
+        saved_state
+            .segments
+            .iter()
+            .map(|segment| segment.number)
+            .collect::<Vec<_>>(),
         [26, 27, 28, 29, 30],
         "the persisted journal must not include the incomplete tail"
     );

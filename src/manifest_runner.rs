@@ -782,7 +782,7 @@ async fn resolve_manifest_tracks(
             )
         })?
     } else {
-        match crate::manifest_intake::lookup_with_client(&client, &job.source.url).await {
+        match crate::manifest_intake::lookup_with_client(&client, &job.source.url, job.proxy.is_some()).await {
             Ok(Some(lookup)) if lookup.kind() == job.source.kind => {
                 match resolve_tracks(&client, lookup, &job.source, &mut guarded_child_hosts).await {
                     Ok(tracks) => tracks,
@@ -1267,6 +1267,7 @@ async fn prepare_live_hls_finalization(
 ) -> Result<LiveCapturePreparation, ManifestRunError> {
     let ManifestLiveHlsFinalization {
         client,
+        proxy_configured,
         source_url,
         dest_dir,
         destination,
@@ -1287,6 +1288,7 @@ async fn prepare_live_hls_finalization(
 
     let capture = run_live_hls_tracks(
         client,
+        proxy_configured,
         source_url,
         dest_dir,
         destination,
@@ -1413,6 +1415,7 @@ async fn prepare_live_hls_finalization(
 /// Inputs for capturing live DASH tracks and preparing their local track files.
 struct ManifestLiveDashFinalization<'a> {
     client: &'a reqwest::Client,
+    proxy_configured: bool,
     source_url: &'a str,
     dest_dir: &'a Path,
     destination: &'a Path,
@@ -1437,6 +1440,7 @@ async fn prepare_live_dash_finalization(
 ) -> Result<LiveCapturePreparation, ManifestRunError> {
     let ManifestLiveDashFinalization {
         client,
+        proxy_configured,
         source_url,
         dest_dir,
         destination,
@@ -1457,6 +1461,7 @@ async fn prepare_live_dash_finalization(
 
     let capture = run_live_dash_tracks(
         client,
+        proxy_configured,
         source_url,
         dest_dir,
         destination,
@@ -1578,6 +1583,7 @@ pub(crate) async fn run_manifest_download(
         };
         match prepare_live_hls_finalization(ManifestLiveHlsFinalization {
             client: &client,
+            proxy_configured: job.proxy.is_some(),
             source_url: &job.source.url,
             dest_dir: &dest_dir,
             destination: &job.dest,
@@ -1635,6 +1641,7 @@ pub(crate) async fn run_manifest_download(
         };
         match prepare_live_dash_finalization(ManifestLiveDashFinalization {
             client: &client,
+            proxy_configured: job.proxy.is_some(),
             source_url: &job.source.url,
             dest_dir: &dest_dir,
             destination: &job.dest,

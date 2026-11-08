@@ -1545,3 +1545,56 @@ fn show_rename_dialog(
     name_row.grab_focus();
     dialog.present(anchor.root().as_ref());
 }
+
+
+#[cfg(test)]
+mod group_row_tests {
+    use super::*;
+
+    #[test]
+    #[ignore = "needs a display; run under Xvfb"]
+    fn expandable_playlist_group_row_updates_actions_and_children() {
+        gtk4::init().expect("gtk::init (run under Xvfb)");
+        // SAFETY: this UI test runs in its own process before constructing GSettings.
+        unsafe {
+            std::env::set_var("GSETTINGS_SCHEMA_DIR", env!("GRAB_SCHEMA_DIR"));
+            std::env::set_var("GSETTINGS_BACKEND", "memory");
+        }
+
+        let manager = DownloadManager::new(
+            gio::ListStore::new::<DownloadItem>(),
+            crate::settings::AppSettings::new(),
+        );
+        let toasts = Rc::new(adw::ToastOverlay::new());
+        let group = build_download_group_row("Course playlist", &manager, &toasts);
+
+        let first = DownloadItem::new(10, "https://example.com/one", "One.mp4", "/tmp");
+        first.set_status(DownloadStatus::Downloading);
+        let second = DownloadItem::new(11, "https://example.com/two", "Two.mp4", "/tmp");
+        second.set_status(DownloadStatus::Queued);
+
+        let first_row = gtk4::ListBoxRow::new();
+        let second_row = gtk4::ListBoxRow::new();
+        group.row.add_row(&first_row);
+        group.row.add_row(&second_row);
+        group.update(
+            std::slice::from_ref(&first),
+            &[first.clone(), second.clone()],
+        );
+
+        assert!(first_row.parent().is_some());
+        assert!(second_row.parent().is_some());
+        assert!(group.pause.is_enabled());
+        assert!(!group.resume.is_enabled());
+        assert!(group.cancel.is_enabled());
+        assert!(!group.retry.is_enabled());
+        assert!(group.open_folder.is_enabled());
+
+        second.set_status(DownloadStatus::Failed);
+        group.update(
+            std::slice::from_ref(&second),
+            &[first, second],
+        );
+        assert!(group.retry.is_enabled());
+    }
+}

@@ -638,6 +638,16 @@ pub fn build_window(
                     *group_sizes.entry(item.group_id()).or_default() += 1;
                 }
             }
+            let mut all_groups = HashMap::<u64, Vec<crate::download::DownloadItem>>::new();
+            for item in &items {
+                let title = item.group_title();
+                if item.group_id() > 0
+                    && !title.trim().is_empty()
+                    && group_sizes.get(&item.group_id()).is_some_and(|count| *count > 1)
+                {
+                    all_groups.entry(item.group_id()).or_default().push(item.clone());
+                }
+            }
 
             let mut present = HashSet::with_capacity(items.len());
             let mut grouped =
@@ -702,7 +712,11 @@ pub fn build_window(
                         })
                         .clone()
                 };
-                group.update(members);
+                let all_members = all_groups
+                    .get(&key.0)
+                    .map(Vec::as_slice)
+                    .unwrap_or(&[]);
+                group.update(members, all_members);
                 group.row.set_visible(visible_groups.contains(key));
 
                 let target = match key.1 {
@@ -717,7 +731,7 @@ pub fn build_window(
 
             for (key, group) in groups.borrow().iter() {
                 if !grouped.contains_key(key) {
-                    group.update(&[]);
+                    group.update(&[], &[]);
                     group.row.set_visible(false);
                 }
             }

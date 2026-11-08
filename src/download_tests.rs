@@ -277,7 +277,7 @@ fn playlist_group_metadata_restores_with_each_child() {
             .item(index)
             .and_downcast::<DownloadItem>()
             .unwrap();
-        assert_eq!(item.group, first.group);
+        assert_eq!(item.group(), first.group.clone());
         assert_eq!(item.status(), DownloadStatus::Paused);
     }
 

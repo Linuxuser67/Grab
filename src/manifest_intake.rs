@@ -721,12 +721,21 @@ async fn resolve_dash_xlinks(
                 // origin, but a different host is still an untrusted remote
                 // link. Force public-only DNS for those children so a hostile
                 // MPD cannot turn XLink into a request to a private address.
-                if target.origin() != parent_url.origin()
-                    && !crate::download_net::require_public_resolution(host)
-                {
-                    return Err(ManifestIntakeError::Unsupported(
-                        "A DASH XLink target failed the public-host safety policy".to_string(),
-                    ));
+                if target.origin() != parent_url.origin() {
+                    // A proxy resolves the destination on its own side, outside
+                    // Grab's guarded DNS resolver. Do not let a remote MPD use an
+                    // XLink hostname to reach private addresses through that proxy.
+                    crate::subprocess_proxy::validate_proxy_compatibility().map_err(|_| {
+                        ManifestIntakeError::Unsupported(
+                            "DASH XLink references cannot be followed while an upstream proxy is configured"
+                                .to_string(),
+                        )
+                    })?;
+                    if !crate::download_net::require_public_resolution(host) {
+                        return Err(ManifestIntakeError::Unsupported(
+                            "A DASH XLink target failed the public-host safety policy".to_string(),
+                        ));
+                    }
                 }
                 crate::download_net::inherit_public_resolution_for_collection(
                     parent_url.as_str(),

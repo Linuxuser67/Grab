@@ -784,6 +784,8 @@ pub(crate) fn build_download_group_row(
     toasts: &Rc<adw::ToastOverlay>,
 ) -> DownloadGroupRow {
     let row = adw::ExpanderRow::new();
+    // Playlist titles come from remote pages; do not interpret them as Pango markup.
+    row.set_use_markup(false);
     row.set_title(title);
     row.set_expanded(false);
 

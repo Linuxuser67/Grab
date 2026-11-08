@@ -880,16 +880,20 @@ pub(crate) fn build_download_group_row(
 }
 
 impl DownloadGroupRow {
-    pub(crate) fn update(&self, items: &[DownloadItem]) {
-        *self.members.borrow_mut() = items.iter().map(DownloadItem::id).collect();
-        self.row.set_subtitle(&group_summary(items));
+    pub(crate) fn update(
+        &self,
+        section_items: &[DownloadItem],
+        group_items: &[DownloadItem],
+    ) {
+        *self.members.borrow_mut() = group_items.iter().map(DownloadItem::id).collect();
+        self.row.set_subtitle(&group_summary(section_items));
 
         self.pause.set_enabled(
-            items.iter().any(|item| item.status() == DownloadStatus::Downloading),
+            group_items.iter().any(|item| item.status() == DownloadStatus::Downloading),
         );
         self.resume
-            .set_enabled(items.iter().any(|item| item.status() == DownloadStatus::Paused));
-        self.cancel.set_enabled(items.iter().any(|item| {
+            .set_enabled(group_items.iter().any(|item| item.status() == DownloadStatus::Paused));
+        self.cancel.set_enabled(group_items.iter().any(|item| {
             matches!(
                 item.status(),
                 DownloadStatus::Downloading
@@ -898,10 +902,10 @@ impl DownloadGroupRow {
                     | DownloadStatus::Scheduled
             )
         }));
-        self.retry.set_enabled(items.iter().any(|item| {
+        self.retry.set_enabled(group_items.iter().any(|item| {
             matches!(item.status(), DownloadStatus::Failed | DownloadStatus::Cancelled)
         }));
-        self.open_folder.set_enabled(!items.is_empty());
+        self.open_folder.set_enabled(!group_items.is_empty());
     }
 }
 

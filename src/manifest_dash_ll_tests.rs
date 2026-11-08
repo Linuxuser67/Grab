@@ -102,7 +102,7 @@ fn dynamic_segment_template_inherits_and_bounds_availability_attributes() {
     let manifest = parse_dash_manifest_at(
         BASE_URL,
         inherited,
-        SystemTime::UNIX_EPOCH + Duration::from_secs(6),
+        SystemTime::UNIX_EPOCH + Duration::from_secs(5),
     )
     .expect("representation-level values should override inherited template values");
     let plan = plan_dash_representation(
@@ -116,8 +116,8 @@ fn dynamic_segment_template_inherits_and_bounds_availability_attributes() {
             .iter()
             .filter_map(|resource| resource.segment_number)
             .collect::<Vec<_>>(),
-        vec![1, 2],
-        "the child ATO of two seconds overrides the parent ATO of three seconds"
+        vec![1],
+        "the child ATO of two seconds excludes the next segment at t=5; the parent ATO of three seconds would include it"
     );
 
     let no_offset = inherited.replace(

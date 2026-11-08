@@ -242,6 +242,25 @@ fn inflight_suppresses(
     marker.as_ref().is_some_and(|(_, g, _)| *g == generation)
 }
 
+/// Attach newly queued playlist children to the same collection group.
+/// `group_id` is retained by the picker after partial imports so a later retry
+/// adds children to the original group rather than creating another one.
+fn assign_playlist_group(items: &[DownloadItem], title: &str, group_id: u64) -> Option<u64> {
+    if items.is_empty() || title.trim().is_empty() {
+        return (group_id > 0).then_some(group_id);
+    }
+    let group_id = if group_id > 0 {
+        group_id
+    } else {
+        items.first()?.id()
+    };
+    for item in items {
+        item.set_group_id(group_id);
+        item.set_group_title(title);
+    }
+    Some(group_id)
+}
+
 /// Item-count label for a probed collection, kind-aware ("3 stories"). The
 /// playlist picker reuses the count label; the error stays a plain caption.
 pub(crate) fn playlist_count_label(kind: crate::media_types::PlaylistKind, count: usize) -> String {
@@ -1648,11 +1667,15 @@ fn push_playlist_items_page(
     // Otherwise repeatedly clicking Queue could reset the cap and eventually
     // register every host from a hostile playlist.
     let guarded_child_hosts = Rc::new(RefCell::new(std::collections::HashSet::new()));
+    // Keep one collection identity while a partial import remains on this
+    // picker, so retrying the remaining selection appends to the same group.
+    let playlist_group_id = Rc::new(Cell::new(0_u64));
 
     {
         let nav_on_error = nav.clone();
         let picker_page_on_error = picker_page.clone();
         let guarded_child_hosts = guarded_child_hosts.clone();
+        let playlist_group_id = playlist_group_id.clone();
         let close_card = close_card.clone();
         let grid = grid.clone();
         let add_btn_click = add_btn.clone();
@@ -1749,6 +1772,7 @@ fn push_playlist_items_page(
                 // highlights and non-story URLs return None and keep the tray.
                 let mut failed: Option<String> = None;
                 let mut skipped_by_host_limit = 0usize;
+                let mut queued_items = Vec::with_capacity(chosen.len());
                 for (i, item) in &chosen {
                     let item_page_url = crate::video_probe::story_segment_url(&page_url, &item.id)
                         .unwrap_or_else(|| item.page_url.clone());
@@ -1796,7 +1820,10 @@ fn push_playlist_items_page(
                         },
                         &existing,
                     ) {
-                        Ok(enqueued) => apply_scheduled_at(&enqueued, scheduled_at),
+                        Ok(enqueued) => {
+                            apply_scheduled_at(&enqueued, scheduled_at);
+                            queued_items.push(enqueued);
+                        }
                         Err(e) => {
                             failed = Some(e);
                             break;
@@ -1806,6 +1833,15 @@ fn push_playlist_items_page(
                     // them so a retry submits only the remainder (dedupe is by
                     // filename).
                     grid.unselect(*i);
+                }
+                if playlist.total > 1
+                    && let Some(group_id) = assign_playlist_group(
+                        &queued_items,
+                        &playlist.title,
+                        playlist_group_id.get(),
+                    )
+                {
+                    playlist_group_id.set(group_id);
                 }
                 if let Some(e) = failed {
                     let message = if skipped_by_host_limit > 0 {
@@ -4750,6 +4786,24 @@ fn refresh_gallery_info(v: &VideoStep, title: &str) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn playlist_group_assignment_keeps_the_original_id_across_partial_imports() {
+        let first = DownloadItem::new(10, "https://example.com/one", "One.mp4", "/tmp");
+        let second = DownloadItem::new(11, "https://example.com/two", "Two.mp4", "/tmp");
+
+        let group_id = assign_playlist_group(&[first.clone()], "Course playlist", 0)
+            .expect("first successful child establishes the group");
+        assert_eq!(group_id, 10);
+        assert_eq!(first.group_id(), 10);
+        assert_eq!(first.group_title(), "Course playlist");
+
+        let retained_id = assign_playlist_group(&[second.clone()], "Course playlist", group_id)
+            .expect("a later partial-import retry reuses the original group");
+        assert_eq!(retained_id, 10);
+        assert_eq!(second.group_id(), 10);
+        assert_eq!(second.group_title(), "Course playlist");
+    }
 
     // This runs with the existing picker_grid Xvfb job. It exercises the
     // playlist and torrent picker pages and proves they wait for user input.

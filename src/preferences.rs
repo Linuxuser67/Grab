@@ -79,8 +79,11 @@ fn sync_cookies_override_row(
 
     // Profile discovery scans browser directories and may read profiles.ini.
     // Keep that filesystem work off the GTK thread.
+    let lookup_browser = browser.clone();
     let lookup = crate::runtime::tokio_rt().spawn_blocking(move || {
-        flatpak && browser != "none" && crate::video_tools::browser_profile_dir(&browser).is_none()
+        flatpak
+            && lookup_browser != "none"
+            && crate::video_tools::browser_profile_dir(&lookup_browser).is_none()
     });
     gtk4::glib::MainContext::default().spawn_local(async move {
         let missing_profile = lookup.await.unwrap_or(false);

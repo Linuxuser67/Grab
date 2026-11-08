@@ -149,18 +149,17 @@ fn build_plan(manifest_url: &str, playlist: LlMediaPlaylist) -> Result<HlsPlan, 
         .skip
         .as_ref()
         .map_or(0, |skip| skip.skipped_segments);
-    if let Some(skip) = playlist.skip.as_ref() {
-        if low_latency_can_skip_until(&playlist).is_none()
+    if let Some(skip) = playlist.skip.as_ref()
+        && (low_latency_can_skip_until(&playlist).is_none()
             || !skip.recently_removed_daterange_ids.is_empty()
             || skip
                 .extra_attrs
                 .iter()
-                .any(|(name, _)| name.starts_with("REQ-"))
-        {
-            return Err(ManifestError::UnsupportedPlaylistFeature(
-                "#EXT-X-SKIP metadata cannot be reconstructed safely".to_string(),
-            ));
-        }
+                .any(|(name, _)| name.starts_with("REQ-")))
+    {
+        return Err(ManifestError::UnsupportedPlaylistFeature(
+            "#EXT-X-SKIP metadata cannot be reconstructed safely".to_string(),
+        ));
     }
     if !playlist.defines.is_empty() {
         return Err(ManifestError::UnsupportedPlaylistFeature(
@@ -793,10 +792,10 @@ pub(super) fn prepare_live_update(
             {
                 return Err(ManifestError::LiveSequenceGap);
             }
-            if let Some(predecessor) = predecessor {
-                if !id.is_successor_of(predecessor) {
-                    return Err(ManifestError::LiveSequenceGap);
-                }
+            if let Some(predecessor) = predecessor
+                && !id.is_successor_of(predecessor)
+            {
+                return Err(ManifestError::LiveSequenceGap);
             }
             saw_new = true;
             new_ids.push(id.clone());
@@ -971,7 +970,9 @@ mod tests {
 #EXT-X-PART-INF:PART-TARGET=0.5
 #EXT-X-PART:DURATION=0.5,URI="5.0.ts",INDEPENDENT=YES
 "#;
-        let plan = plan_hls_media_playlist(BASE, body).expect("mapless partial playlist");
+        let plan = plan_hls_media_playlist(BASE, body)
+            .expect("mapless partial playlist")
+            .expect("LL-HLS detected");
         assert_eq!(plan.resources.len(), 1);
         assert_eq!(plan.resources[0].kind, HlsResourceKind::Segment);
         assert!(plan.local_playlist.segments[0].map.is_none());
@@ -996,7 +997,9 @@ mod tests {
 #EXTINF:0.5,
 21.m4s
 "#;
-        let plan = plan_hls_media_playlist(BASE, body).expect("two-segment partial playlist");
+        let plan = plan_hls_media_playlist(BASE, body)
+            .expect("two-segment partial playlist")
+            .expect("LL-HLS detected");
         assert_eq!(
             plan.resources
                 .iter()
@@ -1133,7 +1136,9 @@ mod tests {
 #EXT-X-PART:DURATION=0.5,URI="7.0.m4s",INDEPENDENT=YES
 #EXT-X-PART:DURATION=0.5,URI="7.1.m4s"
 "#;
-        let initial_plan = plan_hls_media_playlist(BASE, initial).expect("initial LL-HLS playlist");
+        let initial_plan = plan_hls_media_playlist(BASE, initial)
+            .expect("initial LL-HLS playlist")
+            .expect("LL-HLS detected");
         let mut accumulator = HlsLiveAccumulator::new();
         let first_update = accumulator
             .prepare_update(&initial_plan)
@@ -1152,7 +1157,9 @@ mod tests {
 #EXT-X-PART:DURATION=0.5,URI="7.1.m4s"
 #EXT-X-PART:DURATION=0.5,URI="7.2.m4s"
 "#;
-        let next_plan = plan_hls_media_playlist(BASE, next).expect("overlapping part snapshot");
+        let next_plan = plan_hls_media_playlist(BASE, next)
+            .expect("overlapping part snapshot")
+            .expect("LL-HLS detected");
         let update = accumulator
             .prepare_update(&next_plan)
             .expect("prepare overlapping parts for missing-file repair");
@@ -1374,7 +1381,9 @@ mod tests {
 #EXT-X-PART-INF:PART-TARGET=0.5
 #EXT-X-PART:DURATION=0.5,URI="7.0.m4s"
 "#;
-        let plan = plan_hls_media_playlist(BASE, body).expect("first-part plan");
+        let plan = plan_hls_media_playlist(BASE, body)
+            .expect("first-part plan")
+            .expect("LL-HLS detected");
         let accumulator = HlsLiveAccumulator::new();
         assert!(matches!(
             accumulator.prepare_update(&plan),
@@ -1392,7 +1401,9 @@ mod tests {
 20.ts
 #EXT-X-RENDITION-REPORT:URI="audio/track.m3u8",LAST-MSN=31,LAST-PART=2
 "#;
-        let plan = plan_hls_media_playlist(BASE, with_part).expect("rendition report plan");
+        let plan = plan_hls_media_playlist(BASE, with_part)
+            .expect("rendition report plan")
+            .expect("LL-HLS detected");
         let report = plan
             .rendition_reports
             .first()
@@ -1412,7 +1423,8 @@ mod tests {
 #EXT-X-RENDITION-REPORT:URI="audio/track.m3u8",LAST-MSN=31
 "#;
         let plan = plan_hls_media_playlist(BASE, without_part)
-            .expect("rendition report without a partial segment");
+            .expect("rendition report without a partial segment")
+            .expect("LL-HLS detected");
         assert_eq!(plan.rendition_reports[0].next_reload(), Some((32, None)));
     }
 

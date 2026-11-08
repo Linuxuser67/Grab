@@ -7,6 +7,17 @@ use super::{DashError, parse_dash_manifest_at, plan_dash_representation};
 const BASE_URL: &str = "https://cdn.example.test/path/manifest.mpd";
 
 #[test]
+fn availability_time_offsets_are_finite_and_bounded() {
+    assert_eq!(
+        super::low_latency::parse_availability_time_offset(30.0),
+        Ok(Duration::from_secs(30))
+    );
+    assert!(super::low_latency::parse_availability_time_offset(30.001).is_err());
+    assert!(super::low_latency::parse_availability_time_offset(-1.0).is_err());
+    assert!(super::low_latency::parse_availability_time_offset(f64::INFINITY).is_err());
+}
+
+#[test]
 fn dynamic_segment_template_uses_availability_offset_for_chunked_live_segment() {
     let body = r#"<MPD xmlns="urn:mpeg:dash:schema:mpd:2011"
      type="dynamic"

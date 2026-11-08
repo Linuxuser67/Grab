@@ -760,9 +760,8 @@ pub(super) async fn apply_dash_live_snapshot(
 
     if !resources_to_fetch.is_empty() {
         if plan.low_latency {
-            // Fetch complete media from the oldest retained segment toward the live edge.
-            // Any progressively delivered tail segments are therefore queued only after
-            // the backlog, so a chunked response cannot make older media expire in TSBD.
+            // Fetch media in presentation order so a progressive response can never
+            // block an older retained segment that is still inside the time-shift window.
             resources_to_fetch.sort_by_key(|resource| {
                 (
                     resource.kind == DashResourceKind::Segment,

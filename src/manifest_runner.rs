@@ -1440,6 +1440,7 @@ async fn prepare_live_dash_finalization(
 ) -> Result<LiveCapturePreparation, ManifestRunError> {
     let ManifestLiveDashFinalization {
         client,
+        proxy_configured,
         source_url,
         dest_dir,
         destination,
@@ -1460,6 +1461,7 @@ async fn prepare_live_dash_finalization(
 
     let capture = run_live_dash_tracks(
         client,
+        proxy_configured,
         source_url,
         dest_dir,
         destination,

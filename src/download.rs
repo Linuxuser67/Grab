@@ -1870,9 +1870,6 @@ impl DownloadManager {
         // pre-rename one, and folders sum contents. Paints "Finished" now,
         // refines with the measured size when it lands.
         self.set_finished_detail(&item, 0);
-        // Restored non-torrent duplicates collapse too: the last Done row wins.
-        // A magnet can still represent multiple independently retained selections.
-        self.drop_finished_duplicates(&url, item.id());
         // Keep the row's media identity: a restored video page must not fall
         // back to the generic file icon (same page-URL guard as
         // `restore_existing`).
@@ -2676,9 +2673,6 @@ impl DownloadManager {
                             let weak_item = item.downgrade();
                             item.set_progress(1.0);
                             item.set_status(DownloadStatus::Done);
-                            // Non-torrent re-downloads replace their prior history row. Torrent
-                            // rows retain each completed selection, even when the magnet is shared.
-                            this.drop_finished_duplicates(&url, id);
                             this.segment_state.borrow_mut().remove(&id);
                             this.torrent_pieces.borrow_mut().remove(&id);
                             if cleanup_torrent {
@@ -2813,8 +2807,6 @@ impl DownloadManager {
                             item.set_progress(1.0);
                             this.pending_names.borrow_mut().remove(&id);
                             this.server_mtime.borrow_mut().remove(&id);
-                            // Like Finished: an older Done carrier for the URL leaves so re-expansions replace instead of stacking.
-                            this.drop_finished_duplicates(&url, id);
                         }
                         done = true;
                         break;
@@ -3717,10 +3709,6 @@ impl DownloadManager {
                                 } else {
                                     item_c.set_status(DownloadStatus::Done);
                                 }
-                                // One finished record per URL (Parabolic parity):
-                                // done here (not at enqueue) so a failed
-                                // re-download keeps the earlier good record.
-                                this.drop_finished_duplicates(&item_c.gallery_url(), item_c.id());
                                 tracing::info!(
                                     files = r.files.len(),
                                     skipped = r.skipped,
@@ -4500,30 +4488,6 @@ impl DownloadManager {
                 public_only: it.public_only(),
             })
             .collect()
-    }
-
-    /// Drop older non-torrent finished rows for the same URL. A magnet identifies
-    /// the torrent, not the selected file set, so completed torrent rows coexist.
-    /// Store-only; callers persist.
-    pub(crate) fn drop_finished_duplicates(&self, url: &str, keep_id: u64) {
-        if crate::torrent::is_torrent(url) {
-            return;
-        }
-        let Ok(key) = normalize_url(url) else {
-            return;
-        };
-        let ids: Vec<u64> = self
-            .items()
-            .filter(|it| {
-                it.status() == DownloadStatus::Done
-                    && it.id() != keep_id
-                    && normalize_url(&it.url()).is_ok_and(|u| u == key)
-            })
-            .map(|it| it.id())
-            .collect();
-        for id in ids {
-            self.drop_finished_row(id);
-        }
     }
 
     /// Drop one finished row: files stay on disk. Unlike `remove` there is nothing to cancel, snapshot or clean.

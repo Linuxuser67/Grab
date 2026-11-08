@@ -882,11 +882,8 @@ pub fn sweep_dest_staging(dest_dir: &Path, keep: &std::collections::HashSet<u64>
             }
             continue;
         }
-        // Old single-use probe JSONs: stale by definition after a restart.
-        if is_legacy_info_name(name_str) {
-            let _ = std::fs::remove_file(entry.path());
-            continue;
-        }
+        // Legacy destination-side probe names have no ownership marker.
+        // Leave them untouched: filename patterns alone cannot authorize deletion.
         // Find manifest files: .{id}.manifest.json (canonical) or legacy.
         let id = if let Some(id_str) = name_str
             .strip_prefix('.')
@@ -1041,15 +1038,6 @@ fn sweep_private_temps() {
             let _ = std::fs::remove_file(entry.path());
         }
     }
-}
-
-/// `.grab-info-{id}.json` / `.grab-live-{id}.json` (pre-runtime-dir names).
-fn is_legacy_info_name(name: &str) -> bool {
-    let rest = name
-        .strip_prefix(".grab-info-")
-        .or_else(|| name.strip_prefix(".grab-live-"));
-    rest.and_then(|s| s.strip_suffix(".json"))
-        .is_some_and(|id| !id.is_empty() && id.bytes().all(|b| b.is_ascii_digit()))
 }
 
 /// `info-{id}.json` / `live-{id}.json` in the private scratch root.

@@ -52,7 +52,7 @@ pub(crate) enum DashError {
     NoVideoRepresentations,
     #[error("DASH manifest contains too many representations or segments")]
     LimitExceeded,
-    #[error("dynamic DASH has no currently available complete media segments")]
+    #[error("dynamic DASH has no currently available media segments")]
     NoAvailableSegments,
 }
 
@@ -367,7 +367,7 @@ pub(crate) fn parse_dash_manifest(
 /// DRM, XLink, adaptation-set
 /// Subset/Preselection combinations, dynamic SegmentList, SegmentBase
 /// with an Initialization@sourceURL or non-zero presentation-time offset,
-/// hierarchical SIDX, non-zero offsets on dynamic SegmentTemplate, and WebM
+/// hierarchical SIDX, BaseURL-level availability signalling, and WebM
 /// remain on yt-dlp fallback.
 ///
 /// # Errors

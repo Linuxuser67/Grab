@@ -20,6 +20,7 @@
 
 use crate::download::DownloadManager;
 use crate::download_row::DownloadItem;
+use crate::download_store::DownloadGroup;
 use crate::gallery_grid::GalleryGrid;
 use crate::window_rows::{
     apply_scheduled_at, default_name_for, picker_enter_confirms, picker_header,
@@ -245,18 +246,18 @@ fn inflight_suppresses(
 /// Attach newly queued playlist children to the same collection group.
 /// `group_id` is retained by the picker after partial imports so a later retry
 /// adds children to the original group rather than creating another one.
-fn assign_playlist_group(items: &[DownloadItem], title: &str, group_id: u64) -> Option<u64> {
-    if items.is_empty() || title.trim().is_empty() {
-        return (group_id > 0).then_some(group_id);
+fn assign_playlist_group(
+    items: &[DownloadItem],
+    title: &str,
+    previous_group_id: Option<u64>,
+) -> Option<u64> {
+    if items.is_empty() {
+        return previous_group_id;
     }
-    let group_id = if group_id > 0 {
-        group_id
-    } else {
-        items.first()?.id()
-    };
+    let group_id = previous_group_id.unwrap_or(items.first()?.id());
+    let group = DownloadGroup::new(group_id, title)?;
     for item in items {
-        item.set_group_id(group_id);
-        item.set_group_title(title);
+        item.set_group(Some(group.clone()));
     }
     Some(group_id)
 }
@@ -1669,7 +1670,7 @@ fn push_playlist_items_page(
     let guarded_child_hosts = Rc::new(RefCell::new(std::collections::HashSet::new()));
     // Keep one collection identity while a partial import remains on this
     // picker, so retrying the remaining selection appends to the same group.
-    let playlist_group_id = Rc::new(Cell::new(0_u64));
+    let playlist_group_id = Rc::new(Cell::new(None));
 
     {
         let nav_on_error = nav.clone();
@@ -4793,17 +4794,22 @@ mod tests {
         let first = DownloadItem::new(10, "https://example.com/one", "One.mp4", "/tmp");
         let second = DownloadItem::new(11, "https://example.com/two", "Two.mp4", "/tmp");
 
-        let group_id = assign_playlist_group(&[first.clone()], "Course playlist", 0)
+        let group_id = assign_playlist_group(&[first.clone()], "Course playlist", None)
             .expect("first successful child establishes the group");
         assert_eq!(group_id, 10);
-        assert_eq!(first.group_id(), 10);
-        assert_eq!(first.group_title(), "Course playlist");
+        assert_eq!(
+            first.group(),
+            Some(DownloadGroup {
+                id: 10,
+                title: "Course playlist".to_string(),
+            })
+        );
 
-        let retained_id = assign_playlist_group(&[second.clone()], "Course playlist", group_id)
-            .expect("a later partial-import retry reuses the original group");
+        let retained_id =
+            assign_playlist_group(&[second.clone()], "Course playlist", Some(group_id))
+                .expect("a later partial-import retry reuses the original group");
         assert_eq!(retained_id, 10);
-        assert_eq!(second.group_id(), 10);
-        assert_eq!(second.group_title(), "Course playlist");
+        assert_eq!(second.group(), first.group());
     }
 
     // This runs with the existing picker_grid Xvfb job. It exercises the

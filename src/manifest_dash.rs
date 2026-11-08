@@ -1718,25 +1718,24 @@ fn effective_addressing(
         if has_representation_index {
             return Err(DashError::UnsupportedAddressing);
         }
-        let initialization = if initialization_source_url.is_some()
-            || initialization_range.is_some()
-        {
-            let range = initialization_range
-                .flatten()
-                .map(parse_byte_range)
-                .transpose()?;
-            let Some(url) = initialization_source_url else {
-                // Without an index, an in-file initialization range would be
-                // duplicated by the whole-file media resource.
-                return Err(DashError::UnsupportedAddressing);
+        let initialization =
+            if initialization_source_url.is_some() || initialization_range.is_some() {
+                let range = initialization_range
+                    .flatten()
+                    .map(parse_byte_range)
+                    .transpose()?;
+                let Some(url) = initialization_source_url else {
+                    // Without an index, an in-file initialization range would be
+                    // duplicated by the whole-file media resource.
+                    return Err(DashError::UnsupportedAddressing);
+                };
+                Some(DashInitialization::Resource {
+                    url: Some(url),
+                    range,
+                })
+            } else {
+                None
             };
-            Some(DashInitialization::Resource {
-                url: Some(url),
-                range,
-            })
-        } else {
-            None
-        };
         return Ok(DashAddressing::Base(DashBase {
             timescale: timescale.unwrap_or(1),
             presentation_time_offset: presentation_time_offset.unwrap_or(0),
@@ -2714,8 +2713,7 @@ fn expand_base(representation: &DashRepresentation) -> Result<Vec<DashResource>,
         if initialization_url == media_url {
             return Err(DashError::UnsupportedAddressing);
         }
-        let filename =
-            super::resource_filename("dash-init", None, &initialization_url, *range);
+        let filename = super::resource_filename("dash-init", None, &initialization_url, *range);
         resources.push(DashResource {
             url: initialization_url,
             range: *range,

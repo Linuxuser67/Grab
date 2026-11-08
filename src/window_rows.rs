@@ -1602,7 +1602,10 @@ mod group_row_tests {
         assert!(group.open_folder.is_enabled());
 
         second.set_status(DownloadStatus::Failed);
-        group.update(std::slice::from_ref(&second), &[first, second]);
+        group.update(
+            std::slice::from_ref(&second),
+            &[first.clone(), second.clone()],
+        );
         assert!(group.retry.is_enabled());
     }
 }

@@ -375,14 +375,12 @@ async fn verify_live_hls_resource_files<'a>(
         };
         if !metadata.file_type().is_file() {
             return Err(ManifestRunError::Unsupported(
-                "An LL-HLS resource referenced by the recording is not a regular file"
-                    .to_string(),
+                "An LL-HLS resource referenced by the recording is not a regular file".to_string(),
             ));
         }
     }
     Ok(())
 }
-
 
 #[expect(
     clippy::too_many_arguments,

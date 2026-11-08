@@ -4079,7 +4079,10 @@ impl DownloadManager {
             let Some(item) = self.find(id) else {
                 continue;
             };
-            if matches!(item.status(), DownloadStatus::Done | DownloadStatus::Cancelled) {
+            if matches!(
+                item.status(),
+                DownloadStatus::Done | DownloadStatus::Failed | DownloadStatus::Cancelled
+            ) {
                 continue;
             }
             if let Some(path) = self.cancel_inner(id, false, Stop::Preserve) {

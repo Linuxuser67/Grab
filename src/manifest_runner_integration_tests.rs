@@ -1953,6 +1953,46 @@ async fn dynamic_dash_snapshot_resumes_overlapping_window_and_repairs_missing_se
 }
 
 
+
+#[tokio::test]
+async fn low_latency_dash_restores_legacy_policy_key_as_stable_identity() {
+    let root = TempRoot::new("lldash-legacy-key");
+    let video_dir = root.path().join("video");
+    tokio::fs::create_dir_all(&video_dir)
+        .await
+        .expect("create legacy LL-DASH staging directory");
+    let plan = low_latency_dash_fixture_plan(120);
+    let legacy_key = plan
+        .representation
+        .legacy_live_key
+        .as_deref()
+        .expect("LL-DASH has a legacy policy-sensitive key")
+        .to_string();
+    let stable_key = plan.representation.live_key.clone();
+    assert_ne!(legacy_key, stable_key);
+
+    let (track, _) = load_dash_live_track(
+        &legacy_key,
+        &video_dir,
+        Some(&plan),
+        "video-track.mp4",
+    )
+    .await
+    .expect("restore a queue item carrying the previous LL-DASH key");
+
+    assert_eq!(
+        track.state.representation_key,
+        stable_key,
+        "restored live state is immediately migrated to the policy-independent key"
+    );
+    let saved = tokio::fs::read(video_dir.join(DASH_LIVE_STATE_NAME))
+        .await
+        .expect("read migrated live DASH state");
+    let saved: DashLiveState =
+        serde_json::from_slice(&saved).expect("parse migrated live DASH state");
+    assert_eq!(saved.representation_key, track.state.representation_key);
+}
+
 #[tokio::test]
 async fn low_latency_dash_fetches_initialization_then_oldest_segments_with_one_request() {
     let root = TempRoot::new("lldash-order");
@@ -2058,14 +2098,14 @@ async fn low_latency_dash_fetches_initialization_then_oldest_segments_with_one_r
     );
     assert_eq!(
         requests,
-        [
-            "/init.mp4",
-            "/seg-26.m4s",
-            "/seg-27.m4s",
-            "/seg-28.m4s",
-            "/seg-29.m4s",
-            "/seg-30.m4s",
-            "/seg-31.m4s",
+        vec![
+            "/init.mp4".to_string(),
+            "/seg-26.m4s".to_string(),
+            "/seg-27.m4s".to_string(),
+            "/seg-28.m4s".to_string(),
+            "/seg-29.m4s".to_string(),
+            "/seg-30.m4s".to_string(),
+            "/seg-31.m4s".to_string(),
         ],
         "initialization is followed by oldest-first media requests"
     );
@@ -2264,7 +2304,7 @@ async fn low_latency_dash_does_not_commit_interrupted_tail_and_refetches_on_resu
         .expect("progressive tail fixture server failed");
     assert_eq!(
         requests,
-        ["/seg-31.m4s", "/seg-31.m4s"],
+        vec!["/seg-31.m4s".to_string(), "/seg-31.m4s".to_string()],
         "resume fetches the incomplete segment again from byte zero"
     );
     assert!(

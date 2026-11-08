@@ -2900,9 +2900,14 @@ mod tests {
 
         sweep_dest_staging(&dir, &std::collections::HashSet::new());
 
-        assert_eq!(std::fs::read(&info).expect("read preserved info"), b"user-owned info");
-        assert_eq!(std::fs::read(&live).expect("read preserved live"), b"user-owned live");
+        assert_eq!(
+            std::fs::read(&info).expect("read preserved info"),
+            b"user-owned info"
+        );
+        assert_eq!(
+            std::fs::read(&live).expect("read preserved live"),
+            b"user-owned live"
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
-
 }

@@ -85,6 +85,22 @@ impl SubmitSource {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum MagnetResolutionAction {
+    OpenPicker,
+    QueueAll,
+}
+
+fn magnet_resolution_action(source: SubmitSource, file_count: usize) -> MagnetResolutionAction {
+    if matches!(source, SubmitSource::SelectFiles)
+        || (file_count > 1 && !matches!(source, SubmitSource::Button))
+    {
+        MagnetResolutionAction::OpenPicker
+    } else {
+        MagnetResolutionAction::QueueAll
+    }
+}
+
 /// Multi-file torrent picker opener: file name, raw bytes, parsed entries.
 type TorrentPickerOpener = Rc<dyn Fn(String, Vec<u8>, Vec<crate::torrent::TorrentFileEntry>)>;
 
@@ -1852,7 +1868,7 @@ fn push_playlist_items_page(
     }
 }
 
-/// Multi-file .torrent intake presents a selection page before any files queue.
+/// Torrent intake presents a selection page when the user explicitly requests one.
 #[expect(
     clippy::too_many_arguments,
     reason = "single call site; bundling these into a struct would only move the arguments"
@@ -1991,7 +2007,7 @@ fn push_torrent_picker_page(
         });
     }
 
-    // Multi-file torrents always require explicit confirmation.
+    // Explicit file selection always requires confirmation, even for one file.
     nav.push(&picker_page);
 }
 
@@ -3558,42 +3574,46 @@ fn build_submit_handler(context: SubmitContext) -> SubmitHandler {
                     lookup_select_files.set_sensitive(true);
                     sync_entry_icon(&lookup_step);
                     match resolved {
-                        Ok((magnet, name, entries))
-                            if entries.len() > 1 && !matches!(source, SubmitSource::Button) =>
-                        {
-                            push_torrent_picker_page(
-                                &lookup_nav,
-                                lookup_manager,
-                                lookup_dest,
-                                lookup_close,
-                                name,
-                                TorrentPickerSource::Magnet { url: magnet },
-                                entries,
-                                lookup_scheduled,
-                            );
-                        }
-                        Ok((magnet, name, _entries)) => {
-                            let enqueue_manager = Rc::clone(&lookup_manager);
-                            let enqueue_url = magnet;
-                            enqueue_and_close_async(
-                                &lookup_dest,
-                                &lookup_close,
-                                lookup_scheduled.get(),
-                                move |directory| async move {
-                                    if enqueue_manager.has_nonterminal_url(&enqueue_url) {
-                                        return Err(gettext("Torrent is already in the queue"));
-                                    }
-                                    crate::torrent::drop_selection(&enqueue_url);
-                                    enqueue_manager
-                                        .enqueue_async_batched(
-                                            &enqueue_url,
-                                            directory.as_deref(),
-                                            Some(&name),
-                                        )
-                                        .await
-                                },
-                                move |message| set_field_error(&lookup_entry, message),
-                            );
+                        Ok((magnet, name, entries)) => {
+                            match magnet_resolution_action(source, entries.len()) {
+                                MagnetResolutionAction::OpenPicker => {
+                                    push_torrent_picker_page(
+                                        &lookup_nav,
+                                        lookup_manager,
+                                        lookup_dest,
+                                        lookup_close,
+                                        name,
+                                        TorrentPickerSource::Magnet { url: magnet },
+                                        entries,
+                                        lookup_scheduled,
+                                    );
+                                }
+                                MagnetResolutionAction::QueueAll => {
+                                    let enqueue_manager = Rc::clone(&lookup_manager);
+                                    let enqueue_url = magnet;
+                                    enqueue_and_close_async(
+                                        &lookup_dest,
+                                        &lookup_close,
+                                        lookup_scheduled.get(),
+                                        move |directory| async move {
+                                            if enqueue_manager.has_nonterminal_url(&enqueue_url) {
+                                                return Err(gettext(
+                                                    "Torrent is already in the queue",
+                                                ));
+                                            }
+                                            crate::torrent::drop_selection(&enqueue_url);
+                                            enqueue_manager
+                                                .enqueue_async_batched(
+                                                    &enqueue_url,
+                                                    directory.as_deref(),
+                                                    Some(&name),
+                                                )
+                                                .await
+                                        },
+                                        move |message| set_field_error(&lookup_entry, message),
+                                    );
+                                }
+                            }
                         }
                         Err(message) => set_field_error(&lookup_entry, &message),
                     }
@@ -4731,8 +4751,8 @@ fn refresh_gallery_info(v: &VideoStep, title: &str) {
 mod tests {
     use super::*;
 
-    // This runs with the existing picker_grid Xvfb job. It exercises both
-    // page builders and proves neither queues anything before user input.
+    // This runs with the existing picker_grid Xvfb job. It exercises the
+    // playlist and torrent picker pages and proves they wait for user input.
     #[test]
     #[ignore = "needs a display; run under Xvfb (see ci.yml)"]
     fn playlist_and_torrent_picker_wait_for_confirmation() {
@@ -4807,6 +4827,35 @@ mod tests {
         assert_eq!(torrent_nav.visible_page_tag().as_deref(), Some("torrent"));
         assert_eq!(store.n_items(), 0, "torrent must wait for Add");
 
+        let single_magnet_nav = adw::NavigationView::new();
+        let single_magnet_form = adw::NavigationPage::builder()
+            .tag("form")
+            .title("New Download")
+            .child(&gtk4::Box::new(gtk4::Orientation::Vertical, 0))
+            .build();
+        single_magnet_nav.push(&single_magnet_form);
+        push_torrent_picker_page(
+            &single_magnet_nav,
+            Rc::clone(&manager),
+            Rc::clone(&destination),
+            Rc::clone(&close_card),
+            "Single-file magnet".into(),
+            TorrentPickerSource::Magnet {
+                url: "magnet:?xt=urn:btih:0123456789012345678901234567890123456789".into(),
+            },
+            vec![crate::torrent::TorrentFileEntry {
+                raw_path: "movie.mkv".into(),
+                display_path: "movie.mkv".into(),
+            }],
+            Rc::new(Cell::new(None)),
+        );
+        assert_eq!(
+            single_magnet_nav.visible_page_tag().as_deref(),
+            Some("torrent"),
+            "explicit selection must show the picker even for a single-file magnet",
+        );
+        assert_eq!(store.n_items(), 0, "single-file picker must wait for Add");
+
         let magnet_nav = adw::NavigationView::new();
         let magnet_form = adw::NavigationPage::builder()
             .tag("form")
@@ -4869,6 +4918,50 @@ mod tests {
         assert!(SubmitSource::Auto.automatically_enqueues_manifest());
         assert!(!SubmitSource::Button.automatically_enqueues_manifest());
         assert!(!SubmitSource::Enter.automatically_enqueues_manifest());
+    }
+
+    #[test]
+    fn explicit_single_file_magnet_selection_opens_picker() {
+        assert_eq!(
+            magnet_resolution_action(SubmitSource::SelectFiles, 1),
+            MagnetResolutionAction::OpenPicker
+        );
+    }
+
+    #[test]
+    fn single_file_magnet_add_and_enter_queue_without_picker() {
+        assert_eq!(
+            magnet_resolution_action(SubmitSource::Button, 1),
+            MagnetResolutionAction::QueueAll
+        );
+        assert_eq!(
+            magnet_resolution_action(SubmitSource::Enter, 1),
+            MagnetResolutionAction::QueueAll
+        );
+        assert_eq!(
+            magnet_resolution_action(SubmitSource::Auto, 1),
+            MagnetResolutionAction::QueueAll
+        );
+    }
+
+    #[test]
+    fn multi_file_magnets_keep_picker_and_queue_all_paths() {
+        assert_eq!(
+            magnet_resolution_action(SubmitSource::SelectFiles, 3),
+            MagnetResolutionAction::OpenPicker
+        );
+        assert_eq!(
+            magnet_resolution_action(SubmitSource::Enter, 3),
+            MagnetResolutionAction::OpenPicker
+        );
+        assert_eq!(
+            magnet_resolution_action(SubmitSource::Auto, 3),
+            MagnetResolutionAction::OpenPicker
+        );
+        assert_eq!(
+            magnet_resolution_action(SubmitSource::Button, 3),
+            MagnetResolutionAction::QueueAll
+        );
     }
 
     #[test]

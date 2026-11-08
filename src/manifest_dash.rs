@@ -1806,27 +1806,32 @@ fn effective_template(
         .transpose()?
         .unwrap_or_default();
     let availability_time_complete = availability_time_complete.unwrap_or(true);
-    // The bounded LL-DASH policy is isolated from the generic MPD model.
-    let shortest_segment = match timeline.as_deref() {
-        Some(entries) if !entries.is_empty() => entries
-            .iter()
-            .map(|entry| ticks_to_duration(entry.duration, timescale))
-            .collect::<Result<Vec<_>, _>>()?
-            .into_iter()
-            .min()
-            .ok_or(DashError::InvalidSegment)?,
-        Some(_) => return Err(DashError::InvalidSegment),
-        None => ticks_to_duration(
-            duration_ticks.ok_or(DashError::UnsupportedAddressing)?,
-            timescale,
-        )?,
-    };
     low_latency::validate_template_availability(
         is_dynamic,
         availability_time_offset,
         availability_time_complete,
-        shortest_segment,
     )?;
+    if !availability_time_offset.is_zero() {
+        let shortest_segment = match timeline.as_deref() {
+            Some(entries) => entries
+                .iter()
+                .try_fold(None, |shortest: Option<Duration>, entry| {
+                    let duration = ticks_to_duration(entry.duration, timescale)?;
+                    Ok::<_, DashError>(Some(
+                        shortest.map_or(duration, |current| current.min(duration)),
+                    ))
+                })?
+                .ok_or(DashError::InvalidSegment)?,
+            None => ticks_to_duration(
+                duration_ticks.ok_or(DashError::UnsupportedAddressing)?,
+                timescale,
+            )?,
+        };
+        low_latency::validate_availability_time_offset(
+            availability_time_offset,
+            shortest_segment,
+        )?;
+    }
 
     Ok(DashTemplate {
         media,

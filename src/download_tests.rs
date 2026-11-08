@@ -6112,69 +6112,79 @@ fn clear_finished_drops_only_done() {
 }
 
 #[test]
-fn restore_dedups_finished_urls() {
-    // Queue files before dedup may hold several Done rows per URL; newest (last) wins.
-    // Holds MAIN_LOOP_LOCK (via test_locks): restoring the Done row spawns a
-    // thread-bound sizing future that must be drained before this test ends.
+fn restore_keeps_finished_rows_for_same_url() {
+    // Holds MAIN_LOOP_LOCK: restoring Done rows spawns thread-bound sizing futures.
     let (_lock, _loop) = test_locks();
-    let qf = test_queue_file("history-dedup");
+    let qf = test_queue_file("history-retain");
     let settings = test_settings();
-    let m1 = DownloadManager::new(gio::ListStore::new::<DownloadItem>(), settings.clone());
+    let first = DownloadManager::new(gio::ListStore::new::<DownloadItem>(), settings.clone());
     for (id, name) in [(1u64, "old.iso"), (2, "new.iso")] {
-        let it = DownloadItem::new(id, "https://example.com/x.iso", name, "/tmp/dl");
-        it.set_progress(1.0);
-        it.set_status(DownloadStatus::Done);
-        it.set_detail("Finished".to_string());
-        m1.store().append(&it);
+        let item = DownloadItem::new(id, "https://example.com/x.iso", name, "/tmp/dl");
+        item.set_progress(1.0);
+        item.set_status(DownloadStatus::Done);
+        item.set_detail("Finished".to_string());
+        first.store().append(&item);
     }
-    m1.persist_queue();
+    first.persist_queue();
 
-    let m2 = DownloadManager::new(gio::ListStore::new::<DownloadItem>(), settings);
-    m2.restore_queue();
-    assert_eq!(m2.store().n_items(), 1);
-    let it = m2.store().item(0).and_downcast::<DownloadItem>().unwrap();
-    assert_eq!(it.filename(), "new.iso");
-    assert_eq!(it.status(), DownloadStatus::Done);
-    // Drain the restored Done row's async sizing so no thread-bound future
-    // outlives this test (glib thread guard, serial suite shares one context).
-    drain_sizing(&m2);
+    let restored = DownloadManager::new(gio::ListStore::new::<DownloadItem>(), settings);
+    restored.restore_queue();
+    assert_eq!(restored.store().n_items(), 2);
+    for (index, expected_name) in ["old.iso", "new.iso"].into_iter().enumerate() {
+        let item = restored
+            .store()
+            .item(index as u32)
+            .and_downcast::<DownloadItem>()
+            .unwrap();
+        assert_eq!(item.filename(), expected_name);
+        assert_eq!(item.status(), DownloadStatus::Done);
+    }
+    drain_sizing(&restored);
     let _ = std::fs::remove_file(&qf);
 }
 
 #[test]
-fn drop_finished_duplicates_keeps_active_and_newest() {
-    // The finish hook's policy, directly: the just-finished row stays,
-    // older Done rows for the URL go, everything else is user intent.
-    let _lock = lock_queue_file();
-    let _qf = test_queue_file("history-dedup-live");
-    let settings = test_settings();
-    let m = DownloadManager::new(gio::ListStore::new::<DownloadItem>(), settings);
-    let add = |id: u64, url: &str, status: DownloadStatus| {
-        let it = DownloadItem::new(id, url, &format!("f{id}.iso"), "/tmp/dl");
-        it.set_status(status);
-        m.store().append(&it);
-    };
-    add(1, "https://example.com/a.iso", DownloadStatus::Done);
-    add(2, "https://example.com/a.iso", DownloadStatus::Done);
-    add(3, "https://example.com/a.iso", DownloadStatus::Queued);
-    add(4, "https://example.com/b.iso", DownloadStatus::Done);
-    // Row 2 just finished: older Done for the URL drops, queued rows and other URLs stay.
-    m.drop_finished_duplicates("https://example.com/a.iso", 2);
-    let remaining: Vec<(u64, DownloadStatus)> = (0..m.store().n_items())
-        .filter_map(|i| m.store().item(i).and_downcast::<DownloadItem>())
-        .map(|it| (it.id(), it.status()))
-        .collect();
-    assert_eq!(
-        remaining,
-        vec![
-            (2, DownloadStatus::Done),
-            (3, DownloadStatus::Queued),
-            (4, DownloadStatus::Done)
-        ]
+fn finishing_download_keeps_previous_row_for_same_url() {
+    let (_lock, _loop) = test_locks();
+    let qf = test_queue_file("history-retain-finish");
+    let directory = tempfile::tempdir().expect("create download directory");
+    let dest_dir = directory.path().to_string_lossy().into_owned();
+    let url = "https://example.com/same.iso";
+    let manager = DownloadManager::new(gio::ListStore::new::<DownloadItem>(), test_settings());
+
+    let previous = DownloadItem::new(1, url, "previous.iso", &dest_dir);
+    previous.set_status(DownloadStatus::Done);
+    manager.store().append(&previous);
+
+    let current = DownloadItem::new(2, url, "current.iso", &dest_dir);
+    current.set_status(DownloadStatus::Downloading);
+    manager.store().append(&current);
+    manager.epoch.borrow_mut().insert(current.id(), 1);
+    let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+    manager.pump(current.clone(), current.id(), 1, rx);
+    tx.send(crate::engine_msg::EngineMsg::Finished { size: 10 })
+        .expect("send finished event");
+
+    let context = glib::MainContext::default();
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    while manager.pump_handles.borrow().contains_key(&current.id())
+        && std::time::Instant::now() < deadline
+    {
+        context.iteration(false);
+        std::thread::sleep(Duration::from_millis(1));
+    }
+    assert!(
+        !manager.pump_handles.borrow().contains_key(&current.id()),
+        "finished download pump did not exit"
     );
-    // Unnormalizable URLs skip quietly instead of dropping anything.
-    m.drop_finished_duplicates("", u64::MAX);
-    assert_eq!(m.store().n_items(), 3);
+    assert_eq!(manager.store().n_items(), 2);
+    assert_eq!(
+        manager.find(previous.id()).unwrap().status(),
+        DownloadStatus::Done
+    );
+    assert_eq!(current.status(), DownloadStatus::Done);
+    drain_sizing(&manager);
+    let _ = std::fs::remove_file(&qf);
 }
 
 #[test]

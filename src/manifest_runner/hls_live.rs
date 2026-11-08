@@ -271,6 +271,47 @@ pub(super) async fn write_live_playlist(
     sync_staging_directory(directory).await
 }
 
+async fn missing_hls_resources(
+    directory: &Path,
+    resources: &[HlsResource],
+) -> Result<Vec<HlsResource>, ManifestRunError> {
+    let mut missing = Vec::new();
+    for resource in resources {
+        let path = directory.join(&resource.filename);
+        match tokio::fs::symlink_metadata(&path).await {
+            Ok(metadata) if metadata.file_type().is_file() => {
+                let size = metadata.len();
+                let valid_size = size > 0
+                    && size <= MAX_RESOURCE_BYTES
+                    && resource.range.is_none_or(|range| size == range.length)
+                    && (resource.kind != HlsResourceKind::Key || size == 16);
+                if valid_size {
+                    continue;
+                }
+                tokio::fs::remove_file(&path).await.map_err(|error| {
+                    manifest_storage_error("Could not remove an invalid staged HLS resource", error)
+                })?;
+                missing.push(resource.clone());
+            }
+            Ok(_) => {
+                return Err(ManifestRunError::Unsupported(
+                    "A staged HLS resource path is not a regular file".to_string(),
+                ));
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                missing.push(resource.clone());
+            }
+            Err(error) => {
+                return Err(manifest_storage_error(
+                    "Could not inspect a staged HLS resource",
+                    error,
+                ));
+            }
+        }
+    }
+    Ok(missing)
+}
+
 async fn fetched_hls_resource_bytes(
     directory: &Path,
     resources: &[HlsResource],
@@ -392,17 +433,36 @@ pub(super) async fn apply_live_hls_snapshot(
             }
         }
     };
-    let resources = hls_resources_from(&update.resources);
-    let fetch_outcome = fetch_resources_with_stop(
-        client,
-        resources,
-        &track.directory,
-        connections,
-        tx,
-        downloaded,
-        abort,
-    )
-    .await;
+    // LL-HLS snapshots intentionally include overlapping resources so a
+    // missing staged file can be repaired. Do not fetch an already-staged
+    // regular file again (notably the shared EXT-X-MAP).
+    let missing_resources = match missing_hls_resources(&track.directory, &update.resources).await {
+        Ok(resources) => resources,
+        Err(ManifestRunError::Unsupported(error)) if track.accumulator.segment_count() > 0 => {
+            tracing::warn!(
+                playlist = %diagnostic_url(&playlist_url),
+                error = %error,
+                "a staged live HLS resource became unsafe; preserving captured media"
+            );
+            return Ok(LiveHlsSnapshotOutcome::ContinuityLost);
+        }
+        Err(error) => return Err(error),
+    };
+    let resources = hls_resources_from(&missing_resources);
+    let fetch_outcome = if resources.is_empty() {
+        Ok(ResourceFetchOutcome::Complete)
+    } else {
+        fetch_resources_with_stop(
+            client,
+            resources,
+            &track.directory,
+            connections,
+            tx,
+            downloaded,
+            abort,
+        )
+        .await
+    };
     let fetch_outcome = match fetch_outcome {
         Err(ManifestRunError::Unsupported(error)) if track.accumulator.segment_count() > 0 => {
             tracing::warn!(

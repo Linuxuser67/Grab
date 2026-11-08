@@ -1724,6 +1724,7 @@ fn push_playlist_items_page(
             // The GTK clicked handler is an `Fn` and may run repeatedly;
             // clone the shared collection-host state for each import future.
             let guarded_child_hosts = guarded_child_hosts.clone();
+            let playlist_group_id = playlist_group_id.clone();
             let nav_on_error = nav_on_error.clone();
             let picker_page_on_error = picker_page_on_error.clone();
             glib::spawn_future_local(async move {

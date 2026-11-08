@@ -485,9 +485,7 @@ pub(crate) struct RemovedSnapshot {
     /// Preserve the untrusted-handoff policy reference when Undo restores a row.
     pub public_only: bool,
     /// Keep a restored child in its original multi-item group.
-    pub group_id: u64,
-    /// Keep the original collection heading when a child is restored.
-    pub group_title: String,
+    pub group: Option<crate::download_store::DownloadGroup>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1662,13 +1660,7 @@ impl DownloadManager {
             dest_dir,
         );
         item.set_public_only(public_only);
-        if let (Some(group_id), Some(group_title)) = (
-            stored.group_id.filter(|id| *id > 0),
-            stored.group_title.as_deref().filter(|title| !title.trim().is_empty()),
-        ) {
-            item.set_group_id(group_id);
-            item.set_group_title(group_title);
-        }
+        item.set_group(stored.group.clone().filter(|group| group.is_valid()));
         // Resumed rows requeue; only settled rows keep their status.
         // Scheduled rows keep their status and timestamp; overdue ones queue immediately.
         let now = glib::DateTime::now_local()
@@ -1856,8 +1848,7 @@ impl DownloadManager {
             filename: name,
             progress,
             video_source,
-            group_id,
-            group_title,
+            group,
             ..
         } = stored;
         let Ok(url) = normalize_url(&raw_url) else {
@@ -1873,13 +1864,7 @@ impl DownloadManager {
             return;
         }
         let item = DownloadItem::new(self.claim_id_in(stored_id, existing), &url, &name, &dir);
-        if let (Some(group_id), Some(group_title)) = (
-            group_id.filter(|id| *id > 0),
-            group_title.filter(|title| !title.trim().is_empty()),
-        ) {
-            item.set_group_id(group_id);
-            item.set_group_title(group_title);
-        }
+        item.set_group(group.filter(|group| group.is_valid()));
         item.set_progress(progress.clamp(0.0, 1.0));
         item.set_status(DownloadStatus::Done);
         // Already trust-checked by the caller (must sit inside `dir`).
@@ -4371,8 +4356,7 @@ impl DownloadManager {
         });
         item.set_output_dir(snap.output_dir);
         item.set_public_only(snap.public_only);
-        item.set_group_id(snap.group_id);
-        item.set_group_title(snap.group_title);
+        item.set_group(snap.group);
         if let Some(st) = snap.segments {
             self.segment_state.borrow_mut().insert(item.id(), st);
         }
@@ -4639,8 +4623,7 @@ impl DownloadManager {
                 video_source: self.video_source(it.id()),
                 started: self.has_started(it.id()),
                 public_only: it.public_only(),
-                group_id: it.group_id(),
-                group_title: it.group_title(),
+                group: it.group(),
             })
             .collect()
     }
@@ -4900,12 +4883,7 @@ impl DownloadManager {
                             | crate::media_types::VideoSource::Manifest { .. }
                     )
                 });
-                let group_title = it.group_title();
-                let (group_id, group_title) = if it.group_id() > 0 && !group_title.is_empty() {
-                    (Some(it.group_id()), Some(group_title))
-                } else {
-                    (None, None)
-                };
+                let group = it.group().filter(|group| group.is_valid());
                 items.push(StoredItem {
                     id: Some(it.id()),
                     url: it.url().to_string(),
@@ -4932,8 +4910,7 @@ impl DownloadManager {
                     },
                     public_only: Some(it.public_only()),
                     gallery,
-                    group_id,
-                    group_title,
+                    group,
                 });
             }
         }

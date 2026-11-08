@@ -6150,10 +6150,7 @@ fn finishing_download_keeps_previous_row_for_same_url() {
     let directory = tempfile::tempdir().expect("create download directory");
     let dest_dir = directory.path().to_string_lossy().into_owned();
     let url = "https://example.com/same.iso";
-    let manager = DownloadManager::new(
-        gio::ListStore::new::<DownloadItem>(),
-        test_settings(),
-    );
+    let manager = DownloadManager::new(gio::ListStore::new::<DownloadItem>(), test_settings());
 
     let previous = DownloadItem::new(1, url, "previous.iso", &dest_dir);
     previous.set_status(DownloadStatus::Done);
@@ -6170,24 +6167,21 @@ fn finishing_download_keeps_previous_row_for_same_url() {
 
     let context = glib::MainContext::default();
     let deadline = std::time::Instant::now() + Duration::from_secs(5);
-    while manager
-        .pump_handles
-        .borrow()
-        .contains_key(&current.id())
+    while manager.pump_handles.borrow().contains_key(&current.id())
         && std::time::Instant::now() < deadline
     {
         context.iteration(false);
         std::thread::sleep(Duration::from_millis(1));
     }
     assert!(
-        !manager
-            .pump_handles
-            .borrow()
-            .contains_key(&current.id()),
+        !manager.pump_handles.borrow().contains_key(&current.id()),
         "finished download pump did not exit"
     );
     assert_eq!(manager.store().n_items(), 2);
-    assert_eq!(manager.find(previous.id()).unwrap().status(), DownloadStatus::Done);
+    assert_eq!(
+        manager.find(previous.id()).unwrap().status(),
+        DownloadStatus::Done
+    );
     assert_eq!(current.status(), DownloadStatus::Done);
     drain_sizing(&manager);
     let _ = std::fs::remove_file(&qf);

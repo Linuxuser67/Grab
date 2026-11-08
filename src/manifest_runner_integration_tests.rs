@@ -888,6 +888,295 @@ async fn live_hls_snapshots_append_only_new_media_sequences_and_resume() {
 }
 
 #[tokio::test]
+async fn llhls_live_capture_reuses_parts_when_complete_parent_segments_arrive() {
+    let root = TempRoot::new("llhls-parts");
+    let video_dir = root.path().join("video");
+    tokio::fs::create_dir_all(&video_dir)
+        .await
+        .expect("create LL-HLS video staging");
+
+    let initial_body = br#"#EXTM3U
+#EXT-X-VERSION:9
+#EXT-X-TARGETDURATION:2
+#EXT-X-MEDIA-SEQUENCE:10
+#EXT-X-MAP:URI="init.mp4"
+#EXT-X-SERVER-CONTROL:CAN-BLOCK-RELOAD=NO,PART-HOLD-BACK=1.5
+#EXT-X-PART-INF:PART-TARGET=0.5
+#EXT-X-PART:DURATION=0.5,URI="10.0.m4s",INDEPENDENT=YES
+#EXT-X-PART:DURATION=0.5,URI="10.1.m4s"
+#EXTINF:1.0,
+10.m4s
+#EXT-X-PART:DURATION=0.5,URI="11.0.m4s"
+"#;
+    let next_body = br#"#EXTM3U
+#EXT-X-VERSION:9
+#EXT-X-TARGETDURATION:2
+#EXT-X-MEDIA-SEQUENCE:10
+#EXT-X-MAP:URI="init.mp4"
+#EXT-X-SERVER-CONTROL:CAN-BLOCK-RELOAD=NO,PART-HOLD-BACK=1.5
+#EXT-X-PART-INF:PART-TARGET=0.5
+#EXTINF:1.0,
+10.m4s
+#EXTINF:0.5,
+11.m4s
+#EXTINF:0.5,
+12.m4s
+#EXT-X-ENDLIST
+"#;
+    let mut initial = crate::manifest::plan_hls_media_playlist(
+        "https://origin.example.test/live.m3u8",
+        initial_body,
+    )
+    .expect("plan initial LL-HLS parts");
+    let mut next = crate::manifest::plan_hls_media_playlist(
+        "https://origin.example.test/live.m3u8",
+        next_body,
+    )
+    .expect("plan parent-segment closure and next complete media segment");
+
+    assert_eq!(initial.resources.len(), 4);
+    assert_eq!(
+        next.resources
+            .iter()
+            .filter(|resource| resource.kind == HlsResourceKind::Segment)
+            .count(),
+        3,
+        "the remote snapshot describes two completed parents and one new media segment"
+    );
+
+    let files = HashMap::from([
+        ("/init.mp4".to_string(), b"init-section".to_vec()),
+        ("/10.0.m4s".to_string(), b"part-10-0".to_vec()),
+        ("/10.1.m4s".to_string(), b"part-10-1".to_vec()),
+        ("/11.0.m4s".to_string(), b"part-11-0".to_vec()),
+        ("/12.m4s".to_string(), b"segment-12".to_vec()),
+    ]);
+    let (fixture_base, server) = spawn_fixture_server(files, 5).await;
+    localize_live_plan_resources(&mut initial, &fixture_base);
+    localize_live_plan_resources(&mut next, &fixture_base);
+
+    let mut track = load_live_hls_track(&initial, &video_dir)
+        .await
+        .expect("initialize part-aware live track");
+    let client = fixture_client();
+    let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+    let downloaded = Arc::new(AtomicU64::new(0));
+    let (_stop_tx, mut abort) = tokio::sync::oneshot::channel();
+
+    assert_eq!(
+        apply_live_hls_snapshot(
+            &client,
+            &initial,
+            &mut track,
+            2,
+            &tx,
+            &downloaded,
+            &mut abort,
+            0,
+        )
+        .await
+        .expect("fetch and commit confirmed LL-HLS parts"),
+        LiveHlsSnapshotOutcome::Committed
+    );
+    assert_eq!(track.accumulator.segment_count(), 3);
+    let first_local = m3u8_rs::parse_media_playlist_res(
+        &tokio::fs::read(video_dir.join("local.m3u8"))
+            .await
+            .expect("read first LL-HLS local playlist"),
+    )
+    .expect("parse first LL-HLS local playlist");
+    assert_eq!(first_local.segments.len(), 3);
+
+    assert_eq!(
+        apply_live_hls_snapshot(
+            &client,
+            &next,
+            &mut track,
+            2,
+            &tx,
+            &downloaded,
+            &mut abort,
+            0,
+        )
+        .await
+        .expect("close existing parent segments without refetching them"),
+        LiveHlsSnapshotOutcome::Committed
+    );
+    wait_for_fixture_server(server).await;
+
+    assert_eq!(track.accumulator.segment_count(), 4);
+    assert!(track.ended, "the ENDLIST snapshot ends live capture");
+    assert!(track.next_poll_at.is_none());
+    let final_local = m3u8_rs::parse_media_playlist_res(
+        &tokio::fs::read(video_dir.join("local.m3u8"))
+            .await
+            .expect("read final LL-HLS local playlist"),
+    )
+    .expect("parse final LL-HLS local playlist");
+    assert_eq!(final_local.segments.len(), 4);
+    for (index, expected) in [
+        b"part-10-0".as_slice(),
+        b"part-10-1".as_slice(),
+        b"part-11-0".as_slice(),
+        b"segment-12".as_slice(),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        assert_eq!(
+            tokio::fs::read(video_dir.join(&final_local.segments[index].uri))
+                .await
+                .expect("read committed media unit"),
+            expected
+        );
+    }
+    assert_eq!(
+        downloaded.load(Ordering::Relaxed),
+        b"init-section".len() as u64
+            + b"part-10-0".len() as u64
+            + b"part-10-1".len() as u64
+            + b"part-11-0".len() as u64
+            + b"segment-12".len() as u64,
+        "each confirmed part and shared init section must be fetched once"
+    );
+}
+
+#[tokio::test]
+async fn llhls_mapless_parts_are_committed_only_after_mpegts_validation() {
+    let root = TempRoot::new("llhls-mapless-ts");
+    let video_dir = root.path().join("video");
+    tokio::fs::create_dir_all(&video_dir)
+        .await
+        .expect("create mapless LL-HLS staging");
+
+    let mut transport_stream = vec![0xff; 188 * 3];
+    for (index, packet) in transport_stream
+        .as_chunks_mut::<188>()
+        .0
+        .iter_mut()
+        .enumerate()
+    {
+        packet[0] = 0x47;
+        packet[1] = 0;
+        packet[2] = 0;
+        packet[3] = 0x10 | (index as u8 & 0x0f);
+    }
+
+    let body = br#"#EXTM3U
+#EXT-X-TARGETDURATION:2
+#EXT-X-MEDIA-SEQUENCE:5
+#EXT-X-SERVER-CONTROL:CAN-BLOCK-RELOAD=NO,PART-HOLD-BACK=1.5
+#EXT-X-PART-INF:PART-TARGET=0.5
+#EXT-X-PART:DURATION=0.5,URI="5.0.ts",INDEPENDENT=YES
+"#;
+    let mut plan = crate::manifest::plan_hls_media_playlist(
+        "https://origin.example.test/live.m3u8",
+        body,
+    )
+    .expect("plan mapless LL-HLS MPEG-TS part");
+    let mapless_parts = plan.ll_parts_without_init_map().collect::<Vec<_>>();
+    assert_eq!(mapless_parts.len(), 1);
+    assert!(mapless_parts[0].starts_with("segment-ll-00000000000000000005-part-000000-"));
+
+    let files = HashMap::from([("/5.0.ts".to_string(), transport_stream.clone())]);
+    let (fixture_base, server) = spawn_fixture_server(files, 1).await;
+    localize_live_plan_resources(&mut plan, &fixture_base);
+    let mut track = load_live_hls_track(&plan, &video_dir)
+        .await
+        .expect("initialize mapless LL-HLS track");
+    let client = fixture_client();
+    let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+    let downloaded = Arc::new(AtomicU64::new(0));
+    let (_stop_tx, mut abort) = tokio::sync::oneshot::channel();
+
+    assert_eq!(
+        apply_live_hls_snapshot(
+            &client,
+            &plan,
+            &mut track,
+            1,
+            &tx,
+            &downloaded,
+            &mut abort,
+            0,
+        )
+        .await
+        .expect("validate and commit mapless MPEG-TS part"),
+        LiveHlsSnapshotOutcome::Committed
+    );
+    wait_for_fixture_server(server).await;
+    assert_eq!(track.accumulator.segment_count(), 1);
+    let local = m3u8_rs::parse_media_playlist_res(
+        &tokio::fs::read(video_dir.join("local.m3u8"))
+            .await
+            .expect("read mapless local playlist"),
+    )
+    .expect("parse mapless local playlist");
+    assert!(local.segments[0].map.is_none());
+    assert_eq!(
+        tokio::fs::read(video_dir.join(&local.segments[0].uri))
+            .await
+            .expect("read committed mapless TS part"),
+        transport_stream
+    );
+    assert_eq!(downloaded.load(Ordering::Relaxed), 188 * 3);
+}
+
+#[tokio::test]
+async fn llhls_mapless_non_transport_stream_part_is_rejected_before_commit() {
+    let root = TempRoot::new("llhls-mapless-invalid");
+    let video_dir = root.path().join("video");
+    tokio::fs::create_dir_all(&video_dir)
+        .await
+        .expect("create invalid mapless LL-HLS staging");
+    let plan = crate::manifest::plan_hls_media_playlist(
+        "https://origin.example.test/live.m3u8",
+        br#"#EXTM3U
+#EXT-X-TARGETDURATION:2
+#EXT-X-MEDIA-SEQUENCE:6
+#EXT-X-SERVER-CONTROL:CAN-BLOCK-RELOAD=NO,PART-HOLD-BACK=1.5
+#EXT-X-PART-INF:PART-TARGET=0.5
+#EXT-X-PART:DURATION=0.5,URI="6.0.m4s",INDEPENDENT=YES
+"#,
+    )
+    .expect("plan mapless candidate part");
+    let (fixture_base, server) = spawn_fixture_server(
+        HashMap::from([("/6.0.m4s".to_string(), b"not an MPEG-TS fragment".to_vec())]),
+        1,
+    )
+    .await;
+    let mut plan = plan;
+    localize_live_plan_resources(&mut plan, &fixture_base);
+    let mut track = load_live_hls_track(&plan, &video_dir)
+        .await
+        .expect("initialize invalid mapless track");
+    let client = fixture_client();
+    let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+    let downloaded = Arc::new(AtomicU64::new(0));
+    let (_stop_tx, mut abort) = tokio::sync::oneshot::channel();
+
+    assert!(matches!(
+        apply_live_hls_snapshot(
+            &client,
+            &plan,
+            &mut track,
+            1,
+            &tx,
+            &downloaded,
+            &mut abort,
+            0,
+        )
+        .await,
+        Err(ManifestRunError::Unsupported(_))
+    ));
+    wait_for_fixture_server(server).await;
+    assert_eq!(track.accumulator.segment_count(), 0);
+    assert!(tokio::fs::symlink_metadata(video_dir.join("local.m3u8"))
+        .await
+        .is_err());
+}
+
+#[tokio::test]
 async fn live_hls_accumulated_playlist_finalizes_to_a_playable_mp4() {
     if !tools_available() {
         return;

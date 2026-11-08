@@ -361,6 +361,11 @@ struct LiveHlsTrack {
     snapshot_at: Instant,
     ended: bool,
     next_poll_at: Option<Instant>,
+    target_duration: u64,
+    part_target: Option<Duration>,
+    blocking_reload: Option<(u64, Option<u64>)>,
+    can_skip_until: Option<Duration>,
+    rendition_reports: Box<[crate::manifest::hls_ll::HlsRenditionReport]>,
     destination_part: Option<LiveHlsDestination>,
 }
 
@@ -410,6 +415,7 @@ enum ResourceFetchOutcome {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum LiveHlsSnapshotOutcome {
     Committed,
+    RetryScheduled,
     Stopped(crate::video::StopIntent),
     ContinuityLost,
 }

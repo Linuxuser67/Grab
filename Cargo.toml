@@ -20,6 +20,8 @@ gio = "0.22"
 url = "2"
 # HLS playlist parsing and local media-playlist serialization.
 m3u8-rs = "6.0.1"
+# Typed LL-HLS media-playlist model (parser only; Grab owns fetching and recording).
+broadcast-hls = "=0.4.0"
 # SAMPLE-AES preflight reassembles PES/Raw packets with the API also used by iori-ssa.
 # Post-decryption transport-stream validation uses the separate mpeg-ts parser.
 mpeg2ts = "=0.3.1"

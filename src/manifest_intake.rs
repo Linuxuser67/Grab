@@ -814,6 +814,66 @@ pub(crate) async fn lookup_hls_media(
         .map_err(|error| ManifestIntakeError::Unsupported(error.to_string()))
 }
 
+/// Poll one live HLS playlist snapshot. Blocking reloads use a single request:
+/// transient failures return to the live-capture state machine without retries.
+pub(crate) async fn lookup_hls_live_media(
+    client: &reqwest::Client,
+    raw_url: &str,
+    blocking_reload: Option<(u64, Option<u64>)>,
+    can_skip_until: Option<Duration>,
+) -> Result<HlsPlan, ManifestIntakeError> {
+    let requested_url = hls_live_reload_url(raw_url, blocking_reload, can_skip_until)?;
+    let (final_url, body, _) = fetch_bounded_manifest_once(
+        client,
+        &requested_url,
+        ManifestTransportPolicy::HttpsOnly,
+        MANIFEST_REQUEST_TIMEOUT,
+        ManifestFetchMode::Download,
+    )
+    .await?;
+    let final_url = strip_hls_blocking_reload_query(&final_url);
+    crate::manifest::plan_hls_media_playlist(final_url.as_str(), &body)
+        .map_err(|error| ManifestIntakeError::Unsupported(error.to_string()))
+}
+
+fn hls_live_reload_url(
+    raw_url: &str,
+    blocking_reload: Option<(u64, Option<u64>)>,
+    can_skip_until: Option<Duration>,
+) -> Result<Url, ManifestIntakeError> {
+    let mut requested_url = Url::parse(raw_url)
+        .map_err(|_| ManifestIntakeError::Failed(gettext("Invalid stream manifest URL")))?;
+    {
+        let mut query = requested_url.query_pairs_mut();
+        if let Some((media_sequence, part_index)) = blocking_reload {
+            query.append_pair("_HLS_msn", &media_sequence.to_string());
+            if let Some(part_index) = part_index {
+                query.append_pair("_HLS_part", &part_index.to_string());
+            }
+        }
+        if can_skip_until.is_some() {
+            query.append_pair("_HLS_skip", "YES");
+        }
+    }
+    Ok(requested_url)
+}
+
+fn strip_hls_blocking_reload_query(url: &Url) -> Url {
+    let retained = url
+        .query_pairs()
+        .filter(|(name, _)| {
+            !matches!(name.as_ref(), "_HLS_msn" | "_HLS_part" | "_HLS_skip")
+        })
+        .map(|(name, value)| (name.into_owned(), value.into_owned()))
+        .collect::<Vec<_>>();
+    let mut clean = url.clone();
+    clean.set_query(None);
+    if !retained.is_empty() {
+        clean.query_pairs_mut().extend_pairs(retained);
+    }
+    clean
+}
+
 async fn fetch_bounded_manifest(
     client: &reqwest::Client,
     requested_url: Url,
@@ -2423,5 +2483,50 @@ segment.ts
 
         assert!(handoff.matches_auth(ManifestClientAuth::Handoff));
         assert!(!handoff.matches_auth(ManifestClientAuth::Browser));
+    }
+}
+
+
+#[cfg(test)]
+mod hls_live_reload_url_tests {
+    use super::*;
+
+    #[test]
+    fn blocking_reload_without_an_open_part_omits_hls_part() {
+        let url = hls_live_reload_url(
+            "https://cdn.example.test/live.m3u8?token=secret",
+            Some((314, None)),
+            None,
+        )
+        .expect("build blocking reload URL");
+        let query = url.query_pairs().collect::<Vec<_>>();
+        assert!(query.iter().any(|(name, value)| name == "_HLS_msn" && value == "314"));
+        assert!(!query.iter().any(|(name, _)| name == "_HLS_part"));
+        assert!(!query.iter().any(|(name, _)| name == "_HLS_skip"));
+        assert!(query.iter().any(|(name, value)| name == "token" && value == "secret"));
+    }
+
+    #[test]
+    fn delta_reload_adds_skip_and_optional_part_parameters() {
+        let url = hls_live_reload_url(
+            "https://cdn.example.test/live.m3u8",
+            Some((315, Some(2))),
+            Some(Duration::from_secs(24)),
+        )
+        .expect("build delta blocking reload URL");
+        let query = url.query_pairs().collect::<Vec<_>>();
+        assert!(query.iter().any(|(name, value)| name == "_HLS_msn" && value == "315"));
+        assert!(query.iter().any(|(name, value)| name == "_HLS_part" && value == "2"));
+        assert!(query.iter().any(|(name, value)| name == "_HLS_skip" && value == "YES"));
+    }
+
+    #[test]
+    fn stripping_reload_parameters_preserves_signed_origin_query() {
+        let url = Url::parse(
+            "https://cdn.example.test/live.m3u8?token=secret&_HLS_msn=10&_HLS_part=1&_HLS_skip=YES",
+        )
+        .expect("fixture URL");
+        let clean = strip_hls_blocking_reload_query(&url);
+        assert_eq!(clean.query(), Some("token=secret"));
     }
 }

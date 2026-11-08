@@ -1506,9 +1506,13 @@ impl DownloadManager {
         let base_dir = this.resolve_dir(Some(&item.dest_dir()));
         let multi = pl.total > 1;
         let title = pl.title.clone();
+        let mut collection_group = None;
         // The local task must not keep a strong manager Rc pinned while the
         // directory worker is pending; upgrade again before touching queue state.
         drop(this);
+        if multi {
+            collection_group = crate::download_store::DownloadGroup::try_new(id, &title);
+        }
         let prepared = gio::spawn_blocking(move || {
             let dest_dir = if multi {
                 crate::file_names::collection_subdir(&base_dir, &title)
@@ -1590,22 +1594,20 @@ impl DownloadManager {
                 crate::video::default_video_filename(&entry.title, audio_only, remux.as_deref());
             // Live streams discovered inside a collection use the VOD path; each child
             // resolves its own page rather than inheriting the carrier's live-capture state.
-            if this
-                .enqueue_video_staged(
-                    &url,
-                    &dest_dir,
-                    Some(&name),
-                    crate::media_types::VideoChoices {
-                        quality: quality.clone(),
-                        audio_only,
-                        video_format_id: None,
-                        is_live: false,
-                        playlist_item_id: None,
-                    },
-                    &existing,
-                )
-                .is_ok()
-            {
+            if let Ok(child) = this.enqueue_video_staged(
+                &url,
+                &dest_dir,
+                Some(&name),
+                crate::media_types::VideoChoices {
+                    quality: quality.clone(),
+                    audio_only,
+                    video_format_id: None,
+                    is_live: false,
+                    playlist_item_id: None,
+                },
+                &existing,
+            ) {
+                child.set_group(collection_group.clone());
                 added += 1;
             }
         }

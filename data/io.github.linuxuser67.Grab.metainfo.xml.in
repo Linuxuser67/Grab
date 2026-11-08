@@ -50,6 +50,17 @@
     </screenshot>
   </screenshots>
   <releases>
+    <release version="6.5.0~beta.14" date="2026-11-08">
+      <description>
+        <ul>
+          <li>Gallery-dl add-card previews are cached for five minutes, so repeat link sends no longer wait on a re-probe.</li>
+          <li>Torrent downloads reject live session proxy changes and explain the restart.</li>
+          <li>UI: accessible labels for AdwToggleGroup filters and multi-file selection improvements.</li>
+          <li>Native manifest and media preflight robustness improvements.</li>
+          <li>Update dependencies to their latest stable releases.</li>
+        </ul>
+      </description>
+    </release>
     <release version="6.5.0~beta.13" date="2026-11-07">
       <description>
         <ul>

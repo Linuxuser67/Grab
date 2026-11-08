@@ -532,10 +532,7 @@ pub(super) async fn apply_live_hls_snapshot(
     Ok(LiveHlsSnapshotOutcome::Committed)
 }
 
-fn reload_target_is_ahead(
-    candidate: (u64, Option<u64>),
-    current: (u64, Option<u64>),
-) -> bool {
+fn reload_target_is_ahead(candidate: (u64, Option<u64>), current: (u64, Option<u64>)) -> bool {
     if candidate.0 != current.0 {
         return candidate.0 > current.0;
     }
@@ -556,9 +553,11 @@ fn apply_rendition_report(source: &LiveHlsTrack, peer: &mut LiveHlsTrack) -> boo
         return false;
     }
     let peer_identity = crate::manifest::resource_cache_key(&peer.playlist_url);
-    let Some(report) = source.rendition_reports.iter().find(|report| {
-        crate::manifest::resource_cache_key(&report.playlist_url) == peer_identity
-    }) else {
+    let Some(report) = source
+        .rendition_reports
+        .iter()
+        .find(|report| crate::manifest::resource_cache_key(&report.playlist_url) == peer_identity)
+    else {
         return false;
     };
     let Some(target) = report.next_reload() else {
@@ -573,9 +572,7 @@ fn apply_rendition_report(source: &LiveHlsTrack, peer: &mut LiveHlsTrack) -> boo
 
     let target_is_ahead = match peer.accumulator.last_ll_unit() {
         None => true,
-        Some(crate::manifest::hls_ll::HlsLiveUnitId::Segment(sequence)) => {
-            target.0 > *sequence
-        }
+        Some(crate::manifest::hls_ll::HlsLiveUnitId::Segment(sequence)) => target.0 > *sequence,
         Some(crate::manifest::hls_ll::HlsLiveUnitId::Part {
             media_sequence,
             part_index,
@@ -1286,10 +1283,7 @@ mod destination_part_tests {
         (bodies, bytes)
     }
 
-    fn live_track_from_plan(
-        plan: &HlsPlan,
-        accumulator: HlsLiveAccumulator,
-    ) -> LiveHlsTrack {
+    fn live_track_from_plan(plan: &HlsPlan, accumulator: HlsLiveAccumulator) -> LiveHlsTrack {
         LiveHlsTrack {
             playlist_url: plan.playlist_url.clone(),
             directory: PathBuf::new(),
@@ -1368,9 +1362,8 @@ mod destination_part_tests {
             .iter()
             .cloned()
             .map(|mut report| {
-                report.playlist_url =
-                    Url::parse("https://cdn.example.test/live/other.m3u8")
-                        .expect("unrelated report URL");
+                report.playlist_url = Url::parse("https://cdn.example.test/live/other.m3u8")
+                    .expect("unrelated report URL");
                 report
             })
             .collect::<Vec<_>>()
@@ -1409,8 +1402,7 @@ mod destination_part_tests {
         )
         .expect("peer LL-HLS playlist");
         let source_track = live_track_from_plan(&source, HlsLiveAccumulator::new());
-        let mut peer_track =
-            live_track_from_plan(&peer, committed_part_accumulator(&peer));
+        let mut peer_track = live_track_from_plan(&peer, committed_part_accumulator(&peer));
         peer_track.blocking_reload = Some((31, Some(5)));
         let deadline = peer_track.next_poll_at;
 
@@ -1447,8 +1439,7 @@ mod destination_part_tests {
         )
         .expect("peer playlist already ahead of report");
         let source_track = live_track_from_plan(&source, HlsLiveAccumulator::new());
-        let mut peer_track =
-            live_track_from_plan(&peer, committed_part_accumulator(&peer));
+        let mut peer_track = live_track_from_plan(&peer, committed_part_accumulator(&peer));
         let deadline = peer_track.next_poll_at;
         let blocking_reload = peer_track.blocking_reload;
 

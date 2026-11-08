@@ -10,20 +10,40 @@ use m3u8_rs::{Map as LocalMap, MediaSegment as LocalSegment};
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub(crate) enum HlsLiveUnitId {
     Segment(u64),
-    Part { media_sequence: u64, part_index: u32 },
+    Part {
+        media_sequence: u64,
+        part_index: u32,
+    },
 }
 
 impl HlsLiveUnitId {
     fn is_successor_of(&self, previous: &Self) -> bool {
         match (self, previous) {
             (Self::Segment(current), Self::Segment(previous))
-            | (Self::Part { media_sequence: current, part_index: 0 }, Self::Segment(previous))
-            | (Self::Segment(current), Self::Part { media_sequence: previous, .. })
-            | (Self::Part { media_sequence: current, part_index: 0 }, Self::Part { media_sequence: previous, .. })
-                if previous.checked_add(1) == Some(*current) =>
-            {
-                true
-            }
+            | (
+                Self::Part {
+                    media_sequence: current,
+                    part_index: 0,
+                },
+                Self::Segment(previous),
+            )
+            | (
+                Self::Segment(current),
+                Self::Part {
+                    media_sequence: previous,
+                    ..
+                },
+            )
+            | (
+                Self::Part {
+                    media_sequence: current,
+                    part_index: 0,
+                },
+                Self::Part {
+                    media_sequence: previous,
+                    ..
+                },
+            ) if previous.checked_add(1) == Some(*current) => true,
             (
                 Self::Part {
                     media_sequence: current_sequence,
@@ -41,9 +61,7 @@ impl HlsLiveUnitId {
     }
 
     pub(crate) fn from_staged_name(filename: &str) -> Option<Self> {
-        let stem = filename
-            .strip_prefix("segment-ll-")?
-            .strip_suffix(".bin")?;
+        let stem = filename.strip_prefix("segment-ll-")?.strip_suffix(".bin")?;
         let mut fields = stem.split('-');
         let media_sequence = fields.next()?.parse().ok()?;
         let id = match fields.next()? {
@@ -68,8 +86,7 @@ impl HlsLiveUnitId {
 pub(crate) fn validate_live_unit_ids(ids: &[HlsLiveUnitId]) -> bool {
     // A sliding live window may begin midway through a partial segment.
     // Validate continuity within the visible window, not the unseen prefix.
-    ids.windows(2)
-        .all(|pair| pair[1].is_successor_of(&pair[0]))
+    ids.windows(2).all(|pair| pair[1].is_successor_of(&pair[0]))
 }
 
 pub(crate) fn has_ll_hls_tags(body: &[u8]) -> bool {
@@ -92,8 +109,9 @@ pub(crate) fn plan_hls_media_playlist(
     }
     let text = std::str::from_utf8(body)
         .map_err(|error| ManifestError::Parse(format!("LL-HLS playlist is not UTF-8: {error}")))?;
-    let playlist = LlMediaPlaylist::parse(text)
-        .map_err(|error| ManifestError::Parse(format!("could not parse LL-HLS playlist: {error}")))?;
+    let playlist = LlMediaPlaylist::parse(text).map_err(|error| {
+        ManifestError::Parse(format!("could not parse LL-HLS playlist: {error}"))
+    })?;
     if has_unattached_discontinuity(body) {
         return Err(ManifestError::UnsupportedPlaylistFeature(
             "a trailing EXT-X-DISCONTINUITY cannot be represented on an open LL-HLS segment"
@@ -109,30 +127,35 @@ fn has_unattached_discontinuity(body: &[u8]) -> bool {
         .windows(EXTINF.len())
         .rposition(|window| window == EXTINF)
         .unwrap_or(0);
-    body[tail_start..].split(|byte| *byte == b'\n').any(|raw_line| {
-        let line = raw_line.strip_suffix(b"\r").unwrap_or(raw_line);
-        let start = line
-            .iter()
-            .position(|byte| !byte.is_ascii_whitespace())
-            .unwrap_or(line.len());
-        &line[start..] == b"#EXT-X-DISCONTINUITY"
-    })
+    body[tail_start..]
+        .split(|byte| *byte == b'\n')
+        .any(|raw_line| {
+            let line = raw_line.strip_suffix(b"\r").unwrap_or(raw_line);
+            let start = line
+                .iter()
+                .position(|byte| !byte.is_ascii_whitespace())
+                .unwrap_or(line.len());
+            &line[start..] == b"#EXT-X-DISCONTINUITY"
+        })
 }
 
-fn build_plan(
-    manifest_url: &str,
-    playlist: LlMediaPlaylist,
-) -> Result<HlsPlan, ManifestError> {
+fn build_plan(manifest_url: &str, playlist: LlMediaPlaylist) -> Result<HlsPlan, ManifestError> {
     let base_url = parse_manifest_url(manifest_url)?;
     let source_target_duration = u64::from(playlist.target_duration);
     if source_target_duration == 0 || playlist.iframes_only {
         return Err(ManifestError::UnsupportedPlaylist);
     }
-    let skipped_segments = playlist.skip.as_ref().map_or(0, |skip| skip.skipped_segments);
+    let skipped_segments = playlist
+        .skip
+        .as_ref()
+        .map_or(0, |skip| skip.skipped_segments);
     if let Some(skip) = playlist.skip.as_ref() {
         if low_latency_can_skip_until(&playlist).is_none()
             || !skip.recently_removed_daterange_ids.is_empty()
-            || skip.extra_attrs.iter().any(|(name, _)| name.starts_with("REQ-"))
+            || skip
+                .extra_attrs
+                .iter()
+                .any(|(name, _)| name.starts_with("REQ-"))
         {
             return Err(ManifestError::UnsupportedPlaylistFeature(
                 "#EXT-X-SKIP metadata cannot be reconstructed safely".to_string(),
@@ -156,9 +179,18 @@ fn build_plan(
         .low_latency
         .as_ref()
         .ok_or(ManifestError::UnsupportedPlaylist)?;
-    if low_latency.sc_extra_attrs.iter().any(|(name, _)| name.starts_with("REQ-"))
-        || low_latency.pi_extra_attrs.iter().any(|(name, _)| name.starts_with("REQ-"))
-        || low_latency.ph_extra_attrs.iter().any(|(name, _)| name.starts_with("REQ-"))
+    if low_latency
+        .sc_extra_attrs
+        .iter()
+        .any(|(name, _)| name.starts_with("REQ-"))
+        || low_latency
+            .pi_extra_attrs
+            .iter()
+            .any(|(name, _)| name.starts_with("REQ-"))
+        || low_latency
+            .ph_extra_attrs
+            .iter()
+            .any(|(name, _)| name.starts_with("REQ-"))
     {
         return Err(ManifestError::UnsupportedPlaylist);
     }
@@ -166,10 +198,7 @@ fn build_plan(
         .part_target
         .map(|target| {
             let seconds = target.get();
-            if !seconds.is_finite()
-                || seconds <= 0.0
-                || seconds >= source_target_duration as f64
-            {
+            if !seconds.is_finite() || seconds <= 0.0 || seconds >= source_target_duration as f64 {
                 return Err(ManifestError::InvalidDuration);
             }
             Duration::try_from_secs_f64(seconds).map_err(|_| ManifestError::InvalidDuration)
@@ -190,9 +219,7 @@ fn build_plan(
             .part_hold_back
             .ok_or(ManifestError::InvalidDuration)?
             .get();
-        if !part_hold_back.is_finite()
-            || part_hold_back < 3.0 * part_target.as_secs_f64()
-        {
+        if !part_hold_back.is_finite() || part_hold_back < 3.0 * part_target.as_secs_f64() {
             return Err(ManifestError::InvalidDuration);
         }
     }
@@ -202,9 +229,7 @@ fn build_plan(
             return Err(ManifestError::InvalidDuration);
         }
     }
-    if can_skip_until.is_some_and(|skip| {
-        skip.as_secs_f64() < 6.0 * source_target_duration as f64
-    }) {
+    if can_skip_until.is_some_and(|skip| skip.as_secs_f64() < 6.0 * source_target_duration as f64) {
         return Err(ManifestError::InvalidDuration);
     }
     if playlist.start.is_some() {
@@ -212,7 +237,10 @@ fn build_plan(
             "#EXT-X-START offsets cannot be preserved in a live recording".to_string(),
         ));
     }
-    let has_parts = playlist.segments.iter().any(|segment| !segment.parts.is_empty())
+    let has_parts = playlist
+        .segments
+        .iter()
+        .any(|segment| !segment.parts.is_empty())
         || playlist
             .open_segment
             .as_ref()
@@ -235,8 +263,7 @@ fn build_plan(
     }
 
     let mut resources = Vec::new();
-    let mut map_filenames: HashMap<(String, Option<ManifestByteRange>), String> =
-        HashMap::new();
+    let mut map_filenames: HashMap<(String, Option<ManifestByteRange>), String> = HashMap::new();
     let mut previous_range: Option<(String, u64)> = None;
     let mut active_map: Option<broadcast_hls::MapTag> = None;
     let mut local_segments = Vec::new();
@@ -303,19 +330,13 @@ fn build_plan(
             let part_index =
                 u32::try_from(part_index).map_err(|_| ManifestError::DurationOverflow)?;
             if local_segments.is_empty() {
-                first_part_independent =
-                    Some(part.independent || playlist.independent_segments);
+                first_part_independent = Some(part.independent || playlist.independent_segments);
             }
             validate_part(part)?;
             let duration = checked_duration(part.duration.get(), source_target_duration)?;
             let url = resolve_resource_url(&base_url, &part.uri)?;
             let range = plan_range(part.byte_range.as_ref(), &url, &mut previous_range)?;
-            let filename = ll_resource_filename(
-                media_sequence,
-                Some(part_index),
-                &url,
-                range,
-            );
+            let filename = ll_resource_filename(media_sequence, Some(part_index), &url, range);
             resources.push(HlsResource {
                 url,
                 range,
@@ -355,19 +376,13 @@ fn build_plan(
             let part_index =
                 u32::try_from(part_index).map_err(|_| ManifestError::DurationOverflow)?;
             if local_segments.is_empty() {
-                first_part_independent =
-                    Some(part.independent || playlist.independent_segments);
+                first_part_independent = Some(part.independent || playlist.independent_segments);
             }
             validate_part(part)?;
             let duration = checked_duration(part.duration.get(), source_target_duration)?;
             let url = resolve_resource_url(&base_url, &part.uri)?;
             let range = plan_range(part.byte_range.as_ref(), &url, &mut previous_range)?;
-            let filename = ll_resource_filename(
-                media_sequence,
-                Some(part_index),
-                &url,
-                range,
-            );
+            let filename = ll_resource_filename(media_sequence, Some(part_index), &url, range);
             resources.push(HlsResource {
                 url,
                 range,
@@ -429,8 +444,7 @@ fn build_plan(
     };
     local_playlist.version = Some(minimum_hls_playlist_version(&local_playlist));
 
-    let rendition_reports =
-        parse_rendition_reports(&base_url, &playlist.rendition_reports)?;
+    let rendition_reports = parse_rendition_reports(&base_url, &playlist.rendition_reports)?;
 
     Ok(HlsPlan {
         resources: resources.into_boxed_slice(),
@@ -474,7 +488,11 @@ fn parse_rendition_reports(
     reports
         .iter()
         .map(|report| {
-            if report.extra_attrs.iter().any(|(name, _)| name.starts_with("REQ-")) {
+            if report
+                .extra_attrs
+                .iter()
+                .any(|(name, _)| name.starts_with("REQ-"))
+            {
                 return Err(ManifestError::UnsupportedPlaylist);
             }
             Ok(HlsRenditionReport {
@@ -539,7 +557,11 @@ fn validate_part(part: &LlPartSpec) -> Result<(), ManifestError> {
             "#EXT-X-PART GAP resources cannot be fetched".to_string(),
         ));
     }
-    if part.extra_attrs.iter().any(|(name, _)| name.starts_with("REQ-")) {
+    if part
+        .extra_attrs
+        .iter()
+        .any(|(name, _)| name.starts_with("REQ-"))
+    {
         return Err(ManifestError::UnsupportedPlaylist);
     }
     Ok(())
@@ -599,7 +621,11 @@ fn plan_map(
     let Some(map) = map else {
         return Ok(None);
     };
-    if map.extra_attrs.iter().any(|(name, _)| name.starts_with("REQ-")) {
+    if map
+        .extra_attrs
+        .iter()
+        .any(|(name, _)| name.starts_with("REQ-"))
+    {
         return Err(ManifestError::UnsupportedPlaylist);
     }
     let url = resolve_resource_url(base_url, &map.uri)?;
@@ -684,7 +710,9 @@ pub(super) fn prepare_live_update(
     // Delta and sliding-window playlists may omit the MAP line that established
     // the current initialization section. Carry the last committed map forward
     // before deriving identities and local resource references.
-    let mut active_map = existing_segments.last().and_then(|segment| segment.map.clone());
+    let mut active_map = existing_segments
+        .last()
+        .and_then(|segment| segment.map.clone());
     let mut resolved_segments = Vec::with_capacity(snapshot.local_playlist.segments.len());
     for segment in &snapshot.local_playlist.segments {
         let mut resolved = segment.clone();
@@ -703,15 +731,12 @@ pub(super) fn prepare_live_update(
             is_completed_parent_alias(id, existing_ids, existing_segments, segment)
         })
         .collect::<Vec<_>>();
-    let first_overlap = ids
-        .iter()
-        .enumerate()
-        .find_map(|(index, id)| {
-            existing_positions
-                .contains_key(id)
-                .then_some(index)
-                .or_else(|| parent_aliases[index].map(|_| index))
-        });
+    let first_overlap = ids.iter().enumerate().find_map(|(index, id)| {
+        existing_positions
+            .contains_key(id)
+            .then_some(index)
+            .or_else(|| parent_aliases[index].map(|_| index))
+    });
 
     let mut saw_new = false;
     let mut last_existing_index = None;
@@ -846,9 +871,7 @@ fn is_completed_parent_alias(
     let mut first_part_discontinuity = None;
     let mut last_part_index = None;
     let mut expected_part_index = 0_u32;
-    for (index, (existing_id, segment)) in
-        existing_ids.iter().zip(existing_segments).enumerate()
-    {
+    for (index, (existing_id, segment)) in existing_ids.iter().zip(existing_segments).enumerate() {
         if let HlsLiveUnitId::Part {
             media_sequence,
             part_index,
@@ -906,8 +929,18 @@ mod tests {
         assert_eq!(plan.local_playlist.segments.len(), 3);
         assert_eq!(plan.ll_unit_ids.as_ref().map(|ids| ids.len()), Some(3));
         assert_eq!(plan.blocking_reload, Some((101, Some(1))));
-        assert!(!plan.resources.iter().any(|resource| resource.url.path().ends_with("100.m4s")));
-        assert!(!plan.resources.iter().any(|resource| resource.url.path().ends_with("101.1.m4s")));
+        assert!(
+            !plan
+                .resources
+                .iter()
+                .any(|resource| resource.url.path().ends_with("100.m4s"))
+        );
+        assert!(
+            !plan
+                .resources
+                .iter()
+                .any(|resource| resource.url.path().ends_with("101.1.m4s"))
+        );
     }
 
     #[test]
@@ -938,8 +971,7 @@ mod tests {
 #EXT-X-PART-INF:PART-TARGET=0.5
 #EXT-X-PART:DURATION=0.5,URI="5.0.ts",INDEPENDENT=YES
 "#;
-        let plan = plan_hls_media_playlist(BASE, body)
-            .expect("mapless partial playlist");
+        let plan = plan_hls_media_playlist(BASE, body).expect("mapless partial playlist");
         assert_eq!(plan.resources.len(), 1);
         assert_eq!(plan.resources[0].kind, HlsResourceKind::Segment);
         assert!(plan.local_playlist.segments[0].map.is_none());
@@ -964,8 +996,7 @@ mod tests {
 #EXTINF:0.5,
 21.m4s
 "#;
-        let plan = plan_hls_media_playlist(BASE, body)
-            .expect("two-segment partial playlist");
+        let plan = plan_hls_media_playlist(BASE, body).expect("two-segment partial playlist");
         assert_eq!(
             plan.resources
                 .iter()
@@ -974,13 +1005,20 @@ mod tests {
             1
         );
         assert_eq!(plan.local_playlist.segments.len(), 2);
-        assert!(plan.local_playlist.segments.iter().all(|segment| segment.map.is_some()));
+        assert!(
+            plan.local_playlist
+                .segments
+                .iter()
+                .all(|segment| segment.map.is_some())
+        );
     }
 
     #[test]
     fn rejects_delta_gap_ad_and_encrypted_part_playlists() {
         let prefix = "#EXTM3U\n#EXT-X-TARGETDURATION:2\n#EXT-X-MEDIA-SEQUENCE:7\n#EXT-X-MAP:URI=\"init.mp4\"\n#EXT-X-SERVER-CONTROL:CAN-BLOCK-RELOAD=NO,PART-HOLD-BACK=1.5\n#EXT-X-PART-INF:PART-TARGET=0.5\n";
-        let delta = format!("{prefix}#EXT-X-SKIP:SKIPPED-SEGMENTS=2\n#EXT-X-PART:DURATION=0.5,URI=\"7.0.m4s\"\n");
+        let delta = format!(
+            "{prefix}#EXT-X-SKIP:SKIPPED-SEGMENTS=2\n#EXT-X-PART:DURATION=0.5,URI=\"7.0.m4s\"\n"
+        );
         assert!(matches!(
             plan_hls_media_playlist(BASE, delta.as_bytes()),
             Err(ManifestError::UnsupportedPlaylistFeature(_))
@@ -990,12 +1028,16 @@ mod tests {
             plan_hls_media_playlist(BASE, gap.as_bytes()),
             Err(ManifestError::UnsupportedPlaylistFeature(_))
         ));
-        let ad = format!("{prefix}#EXT-X-DATERANGE:ID=\"ad\",CLASS=\"com.apple.hls.interstitial\",START-DATE=\"2026-01-01T00:00:00Z\"\n#EXT-X-PART:DURATION=0.5,URI=\"7.0.m4s\"\n");
+        let ad = format!(
+            "{prefix}#EXT-X-DATERANGE:ID=\"ad\",CLASS=\"com.apple.hls.interstitial\",START-DATE=\"2026-01-01T00:00:00Z\"\n#EXT-X-PART:DURATION=0.5,URI=\"7.0.m4s\"\n"
+        );
         assert!(matches!(
             plan_hls_media_playlist(BASE, ad.as_bytes()),
             Err(ManifestError::UnsupportedAdInsertion(_))
         ));
-        let encrypted = format!("{prefix}#EXT-X-KEY:METHOD=AES-128,URI=\"key.bin\"\n#EXT-X-PART:DURATION=0.5,URI=\"7.0.m4s\"\n");
+        let encrypted = format!(
+            "{prefix}#EXT-X-KEY:METHOD=AES-128,URI=\"key.bin\"\n#EXT-X-PART:DURATION=0.5,URI=\"7.0.m4s\"\n"
+        );
         assert_eq!(
             plan_hls_media_playlist(BASE, encrypted.as_bytes()).err(),
             Some(ManifestError::UnsupportedEncryption)
@@ -1059,13 +1101,14 @@ mod tests {
             1
         );
         assert!(next_update.resources.iter().any(|resource| {
-            resource.kind == HlsResourceKind::Segment
-                && resource.url.path().ends_with("/8.0.m4s")
+            resource.kind == HlsResourceKind::Segment && resource.url.path().ends_with("/8.0.m4s")
         }));
-        assert!(next_update
-            .resources
-            .iter()
-            .any(|resource| resource.kind == HlsResourceKind::InitMap));
+        assert!(
+            next_update
+                .resources
+                .iter()
+                .any(|resource| resource.kind == HlsResourceKind::InitMap)
+        );
         assert_eq!(
             next_update.ll_new_unit_ids,
             vec![HlsLiveUnitId::Part {
@@ -1090,8 +1133,7 @@ mod tests {
 #EXT-X-PART:DURATION=0.5,URI="7.0.m4s",INDEPENDENT=YES
 #EXT-X-PART:DURATION=0.5,URI="7.1.m4s"
 "#;
-        let initial_plan = plan_hls_media_playlist(BASE, initial)
-            .expect("initial LL-HLS playlist");
+        let initial_plan = plan_hls_media_playlist(BASE, initial).expect("initial LL-HLS playlist");
         let mut accumulator = HlsLiveAccumulator::new();
         let first_update = accumulator
             .prepare_update(&initial_plan)
@@ -1110,8 +1152,7 @@ mod tests {
 #EXT-X-PART:DURATION=0.5,URI="7.1.m4s"
 #EXT-X-PART:DURATION=0.5,URI="7.2.m4s"
 "#;
-        let next_plan = plan_hls_media_playlist(BASE, next)
-            .expect("overlapping part snapshot");
+        let next_plan = plan_hls_media_playlist(BASE, next).expect("overlapping part snapshot");
         let update = accumulator
             .prepare_update(&next_plan)
             .expect("prepare overlapping parts for missing-file repair");
@@ -1186,7 +1227,10 @@ mod tests {
         let initial_plan = plan_hls_media_playlist(BASE, initial)
             .expect("initial LL-HLS plan")
             .expect("LL-HLS detected");
-        assert_eq!(initial_plan.ll_unit_ids.as_ref().expect("unit ids")[0], HlsLiveUnitId::Segment(100));
+        assert_eq!(
+            initial_plan.ll_unit_ids.as_ref().expect("unit ids")[0],
+            HlsLiveUnitId::Segment(100)
+        );
         assert!(initial_plan.can_skip_until.is_some());
 
         let mut accumulator = HlsLiveAccumulator::new();
@@ -1262,17 +1306,22 @@ mod tests {
         assert_eq!(update.resources.len(), 1);
         assert!(update.resources[0].url.path().ends_with("/8.0.m4s"));
         assert_eq!(
-            update.new_segments[0].map.as_ref().map(|map| map.uri.as_str()),
-            Some(accumulator
-                .local_playlist
-                .as_ref()
-                .expect("committed playlist")
-                .segments[0]
+            update.new_segments[0]
                 .map
                 .as_ref()
-                .expect("committed map")
-                .uri
-                .as_str())
+                .map(|map| map.uri.as_str()),
+            Some(
+                accumulator
+                    .local_playlist
+                    .as_ref()
+                    .expect("committed playlist")
+                    .segments[0]
+                    .map
+                    .as_ref()
+                    .expect("committed map")
+                    .uri
+                    .as_str()
+            )
         );
     }
 
@@ -1325,8 +1374,7 @@ mod tests {
 #EXT-X-PART-INF:PART-TARGET=0.5
 #EXT-X-PART:DURATION=0.5,URI="7.0.m4s"
 "#;
-        let plan = plan_hls_media_playlist(BASE, body)
-            .expect("first-part plan");
+        let plan = plan_hls_media_playlist(BASE, body).expect("first-part plan");
         let accumulator = HlsLiveAccumulator::new();
         assert!(matches!(
             accumulator.prepare_update(&plan),
@@ -1344,9 +1392,11 @@ mod tests {
 20.ts
 #EXT-X-RENDITION-REPORT:URI="audio/track.m3u8",LAST-MSN=31,LAST-PART=2
 "#;
-        let plan = plan_hls_media_playlist(BASE, with_part)
-            .expect("rendition report plan");
-        let report = plan.rendition_reports.first().expect("one rendition report");
+        let plan = plan_hls_media_playlist(BASE, with_part).expect("rendition report plan");
+        let report = plan
+            .rendition_reports
+            .first()
+            .expect("one rendition report");
         assert_eq!(
             report.playlist_url.as_str(),
             "https://cdn.example.test/live/audio/track.m3u8"
@@ -1363,10 +1413,7 @@ mod tests {
 "#;
         let plan = plan_hls_media_playlist(BASE, without_part)
             .expect("rendition report without a partial segment");
-        assert_eq!(
-            plan.rendition_reports[0].next_reload(),
-            Some((32, None))
-        );
+        assert_eq!(plan.rendition_reports[0].next_reload(), Some((32, None)));
     }
 
     #[test]

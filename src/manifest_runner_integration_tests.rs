@@ -1069,11 +1069,9 @@ async fn llhls_mapless_parts_are_committed_only_after_mpegts_validation() {
 #EXT-X-PART-INF:PART-TARGET=0.5
 #EXT-X-PART:DURATION=0.5,URI="5.0.ts",INDEPENDENT=YES
 "#;
-    let mut plan = crate::manifest::plan_hls_media_playlist(
-        "https://origin.example.test/live.m3u8",
-        body,
-    )
-    .expect("plan mapless LL-HLS MPEG-TS part");
+    let mut plan =
+        crate::manifest::plan_hls_media_playlist("https://origin.example.test/live.m3u8", body)
+            .expect("plan mapless LL-HLS MPEG-TS part");
     let mapless_parts = plan.ll_parts_without_init_map().collect::<Vec<_>>();
     assert_eq!(mapless_parts.len(), 1);
     assert!(mapless_parts[0].starts_with("segment-ll-00000000000000000005-part-000000-"));
@@ -1171,9 +1169,11 @@ async fn llhls_mapless_non_transport_stream_part_is_rejected_before_commit() {
     ));
     wait_for_fixture_server(server).await;
     assert_eq!(track.accumulator.segment_count(), 0);
-    assert!(tokio::fs::symlink_metadata(video_dir.join("local.m3u8"))
-        .await
-        .is_err());
+    assert!(
+        tokio::fs::symlink_metadata(video_dir.join("local.m3u8"))
+            .await
+            .is_err()
+    );
 }
 
 #[tokio::test]

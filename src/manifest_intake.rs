@@ -861,9 +861,7 @@ fn hls_live_reload_url(
 fn strip_hls_blocking_reload_query(url: &Url) -> Url {
     let retained = url
         .query_pairs()
-        .filter(|(name, _)| {
-            !matches!(name.as_ref(), "_HLS_msn" | "_HLS_part" | "_HLS_skip")
-        })
+        .filter(|(name, _)| !matches!(name.as_ref(), "_HLS_msn" | "_HLS_part" | "_HLS_skip"))
         .map(|(name, value)| (name.into_owned(), value.into_owned()))
         .collect::<Vec<_>>();
     let mut clean = url.clone();
@@ -2486,7 +2484,6 @@ segment.ts
     }
 }
 
-
 #[cfg(test)]
 mod hls_live_reload_url_tests {
     use super::*;
@@ -2500,10 +2497,18 @@ mod hls_live_reload_url_tests {
         )
         .expect("build blocking reload URL");
         let query = url.query_pairs().collect::<Vec<_>>();
-        assert!(query.iter().any(|(name, value)| name == "_HLS_msn" && value == "314"));
+        assert!(
+            query
+                .iter()
+                .any(|(name, value)| name == "_HLS_msn" && value == "314")
+        );
         assert!(!query.iter().any(|(name, _)| name == "_HLS_part"));
         assert!(!query.iter().any(|(name, _)| name == "_HLS_skip"));
-        assert!(query.iter().any(|(name, value)| name == "token" && value == "secret"));
+        assert!(
+            query
+                .iter()
+                .any(|(name, value)| name == "token" && value == "secret")
+        );
     }
 
     #[test]
@@ -2515,9 +2520,21 @@ mod hls_live_reload_url_tests {
         )
         .expect("build delta blocking reload URL");
         let query = url.query_pairs().collect::<Vec<_>>();
-        assert!(query.iter().any(|(name, value)| name == "_HLS_msn" && value == "315"));
-        assert!(query.iter().any(|(name, value)| name == "_HLS_part" && value == "2"));
-        assert!(query.iter().any(|(name, value)| name == "_HLS_skip" && value == "YES"));
+        assert!(
+            query
+                .iter()
+                .any(|(name, value)| name == "_HLS_msn" && value == "315")
+        );
+        assert!(
+            query
+                .iter()
+                .any(|(name, value)| name == "_HLS_part" && value == "2")
+        );
+        assert!(
+            query
+                .iter()
+                .any(|(name, value)| name == "_HLS_skip" && value == "YES")
+        );
     }
 
     #[test]

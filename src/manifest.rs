@@ -2181,13 +2181,35 @@ media.mp4
 #EXT-X-PRELOAD-HINT:TYPE=PART,URI="100.1.m4s"
 #EXT-X-RENDITION-REPORT:URI="audio.m3u8",LAST-MSN=100,LAST-PART=0
 "#;
-        let plan = plan_hls_media_playlist(BASE_URL, partial)
-            .expect("part playlist should be accepted");
-        assert_eq!(plan.resources.len(), 2, "one init map and one confirmed part");
-        assert!(plan.resources.iter().any(|resource| resource.url.path().ends_with("100.0.m4s")));
-        assert!(!plan.resources.iter().any(|resource| resource.url.path().ends_with("100.m4s")));
-        assert!(!plan.resources.iter().any(|resource| resource.url.path().ends_with("100.1.m4s")));
-        assert!(plan.resources.iter().any(|resource| resource.kind == HlsResourceKind::InitMap));
+        let plan =
+            plan_hls_media_playlist(BASE_URL, partial).expect("part playlist should be accepted");
+        assert_eq!(
+            plan.resources.len(),
+            2,
+            "one init map and one confirmed part"
+        );
+        assert!(
+            plan.resources
+                .iter()
+                .any(|resource| resource.url.path().ends_with("100.0.m4s"))
+        );
+        assert!(
+            !plan
+                .resources
+                .iter()
+                .any(|resource| resource.url.path().ends_with("100.m4s"))
+        );
+        assert!(
+            !plan
+                .resources
+                .iter()
+                .any(|resource| resource.url.path().ends_with("100.1.m4s"))
+        );
+        assert!(
+            plan.resources
+                .iter()
+                .any(|resource| resource.kind == HlsResourceKind::InitMap)
+        );
     }
 
     #[test]
@@ -2228,7 +2250,11 @@ video.m3u8
             Some(hls_ll::HlsLiveUnitId::Segment(1006))
         );
         assert_eq!(plan.resources.len(), 1);
-        assert!(plan.resources[0].filename.starts_with("segment-ll-00000000000000001006-full-"));
+        assert!(
+            plan.resources[0]
+                .filename
+                .starts_with("segment-ll-00000000000000001006-full-")
+        );
         assert_eq!(plan.can_skip_until, Some(Duration::from_secs(24)));
     }
 

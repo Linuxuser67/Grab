@@ -697,6 +697,8 @@ async fn resolve_dash_xlinks(
     // same-origin XLink could redirect to a private host without passing
     // through Grab's guarded resolver. Do not follow any XLinks with a proxy.
     if proxy_configured || crate::subprocess_proxy::validate_proxy_compatibility().is_err() {
+        // Use Failed rather than Unsupported: Unsupported hands the URL to
+        // yt-dlp, which would repeat the same proxy-side DNS exposure.
         return Err(ManifestIntakeError::Failed(
             "DASH XLink fetching is disabled while an upstream proxy is configured because the proxy bypasses local destination-address checks"
                 .to_string(),

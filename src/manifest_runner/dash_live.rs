@@ -128,7 +128,9 @@ async fn load_dash_live_track_inner(
             "The saved dynamic DASH state belongs to a different representation".to_string(),
         ));
     }
-    state.representation_key.clone_from(&expected_representation_key);
+    state
+        .representation_key
+        .clone_from(&expected_representation_key);
     validate_dash_live_state(&state, expected_representation_key.as_str())?;
 
     let resource_names = state

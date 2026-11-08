@@ -71,26 +71,45 @@ fn sync_cookies_override_row(
     restart_row: &adw::ActionRow,
     settings: &gio::Settings,
 ) {
-    let value = settings.string(crate::settings::key::COOKIES_BROWSER);
-    let command = if crate::video_tools::in_flatpak()
-        && value != "none"
-        && crate::video_tools::browser_profile_dir(&value).is_none()
-    {
-        crate::video_tools::browser_override_command(&value)
-    } else {
-        None
-    };
-    match command {
-        Some(cmd) => {
-            row.set_subtitle(&cmd);
-            row.set_visible(true);
-            restart_row.set_visible(true);
+    let browser = settings.string(crate::settings::key::COOKIES_BROWSER).to_string();
+    let flatpak = crate::video_tools::in_flatpak();
+    let row = row.downgrade();
+    let restart_row = restart_row.downgrade();
+    let settings = settings.clone();
+
+    // Profile discovery scans browser directories and may read profiles.ini.
+    // Keep that filesystem work off the GTK thread.
+    let lookup = crate::runtime::tokio_rt().spawn_blocking(move || {
+        flatpak && browser != "none" && crate::video_tools::browser_profile_dir(&browser).is_none()
+    });
+    gtk4::glib::MainContext::default().spawn_local(async move {
+        let missing_profile = lookup.await.unwrap_or(false);
+        // Ignore stale results when the setting changed while the scan ran.
+        if settings.string(crate::settings::key::COOKIES_BROWSER).as_str()
+            != browser.as_str()
+        {
+            return;
         }
-        None => {
-            row.set_visible(false);
-            restart_row.set_visible(false);
+        let command = if missing_profile {
+            crate::video_tools::browser_override_command(&browser)
+        } else {
+            None
+        };
+        let (Some(row), Some(restart_row)) = (row.upgrade(), restart_row.upgrade()) else {
+            return;
+        };
+        match command {
+            Some(command) => {
+                row.set_subtitle(&command);
+                row.set_visible(true);
+                restart_row.set_visible(true);
+            }
+            None => {
+                row.set_visible(false);
+                restart_row.set_visible(false);
+            }
         }
-    }
+    });
 }
 
 /// Whether proxy mode selects manual setup; takes raw value for signal payload and getter.

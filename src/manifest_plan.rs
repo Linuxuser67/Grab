@@ -319,29 +319,28 @@ impl ManifestLookup {
         audio_key: Option<&ManifestAudioKey>,
         subtitle_key: Option<&ManifestSubtitleKey>,
     ) -> Option<ManifestSource> {
-        let kind = match &self.manifest {
-            NativeManifest::HlsMaster(master) => {
-                hls_variant_keys(&master.variants)
-                    .iter()
-                    .any(|key| key.as_deref() == Some(representation_key.as_str()))
-                    .then_some(())?;
-                ManifestKind::Hls
-            }
-            NativeManifest::HlsMedia(_) if representation_key.as_str() == "hls-media" => {
-                ManifestKind::Hls
-            }
-            NativeManifest::HlsMedia(_) => return None,
-            NativeManifest::Dash(dash) => {
-                if !dash
-                    .video_representations
-                    .iter()
-                    .any(|representation| representation.matches_key(representation_key.as_str()))
-                {
-                    return None;
+        let kind =
+            match &self.manifest {
+                NativeManifest::HlsMaster(master) => {
+                    hls_variant_keys(&master.variants)
+                        .iter()
+                        .any(|key| key.as_deref() == Some(representation_key.as_str()))
+                        .then_some(())?;
+                    ManifestKind::Hls
                 }
-                ManifestKind::Dash
-            }
-        };
+                NativeManifest::HlsMedia(_) if representation_key.as_str() == "hls-media" => {
+                    ManifestKind::Hls
+                }
+                NativeManifest::HlsMedia(_) => return None,
+                NativeManifest::Dash(dash) => {
+                    if !dash.video_representations.iter().any(|representation| {
+                        representation.matches_key(representation_key.as_str())
+                    }) {
+                        return None;
+                    }
+                    ManifestKind::Dash
+                }
+            };
         if let Some(selected) = audio_key {
             let valid = match &self.manifest {
                 NativeManifest::Dash(dash) => dash

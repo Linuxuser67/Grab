@@ -211,6 +211,7 @@ pub(super) async fn load_live_hls_track(
         directory: directory.to_path_buf(),
         accumulator,
         snapshot_at: Instant::now(),
+        last_full_resource_verification: Instant::now(),
         ended: false,
         next_poll_at: None,
         target_duration: plan.source_target_duration,
@@ -344,6 +345,41 @@ async fn fetched_hls_resource_bytes(
         })?;
     }
     Ok(total)
+}
+
+const LIVE_HLS_FULL_RESOURCE_VERIFY_INTERVAL: Duration = Duration::from_secs(60);
+
+async fn verify_live_hls_resource_files<'a>(
+    directory: &Path,
+    filenames: impl Iterator<Item = &'a str>,
+    has_committed_media: bool,
+) -> Result<(), ManifestRunError> {
+    for filename in filenames {
+        let path = directory.join(filename);
+        let metadata = match tokio::fs::symlink_metadata(&path).await {
+            Ok(metadata) => metadata,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                let message = if has_committed_media {
+                    "An LL-HLS resource referenced by the recording is missing"
+                } else {
+                    "An LL-HLS resource referenced by the local playlist is missing"
+                };
+                return Err(ManifestRunError::Unsupported(message.to_string()));
+            }
+            Err(error) => {
+                return Err(manifest_storage_error(
+                    "Could not verify an HLS staged resource",
+                    error,
+                ));
+            }
+        };
+        if !metadata.file_type().is_file() {
+            return Err(ManifestRunError::Unsupported(
+                "An LL-HLS resource referenced by the recording is not a regular file".to_string(),
+            ));
+        }
+    }
+    Ok(())
 }
 
 #[expect(
@@ -491,38 +527,42 @@ pub(super) async fn apply_live_hls_snapshot(
         .collect::<Vec<_>>();
     let added_resource_bytes =
         fetched_hls_resource_bytes(&track.directory, &newly_accounted_resources).await?;
-    for filename in track
-        .accumulator
-        .resource_names()
-        .chain(update.referenced_resource_names())
+    // The full staged set is verified on restore, periodically, and on ENDLIST.
+    // The steady-state poll path checks only the resources referenced by this snapshot.
+    let full_resource_verification_due = end_list
+        || track.last_full_resource_verification.elapsed()
+            >= LIVE_HLS_FULL_RESOURCE_VERIFY_INTERVAL;
+    let verification = if full_resource_verification_due {
+        verify_live_hls_resource_files(
+            &track.directory,
+            track
+                .accumulator
+                .resource_names()
+                .chain(update.referenced_resource_names()),
+            track.accumulator.segment_count() > 0,
+        )
+        .await
+    } else {
+        verify_live_hls_resource_files(
+            &track.directory,
+            update.referenced_resource_names(),
+            track.accumulator.segment_count() > 0,
+        )
+        .await
+    };
+    if let Err(ManifestRunError::Unsupported(error)) = &verification
+        && track.accumulator.segment_count() > 0
     {
-        let path = track.directory.join(filename);
-        let metadata = match tokio::fs::symlink_metadata(&path).await {
-            Ok(metadata) => metadata,
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-                if track.accumulator.segment_count() > 0 {
-                    return Ok(LiveHlsSnapshotOutcome::ContinuityLost);
-                }
-                return Err(ManifestRunError::Unsupported(
-                    "An LL-HLS resource referenced by the local playlist is missing".to_string(),
-                ));
-            }
-            Err(error) => {
-                return Err(manifest_storage_error(
-                    "Could not verify an HLS staged resource",
-                    error,
-                ));
-            }
-        };
-        if !metadata.file_type().is_file() {
-            if track.accumulator.segment_count() > 0 {
-                return Ok(LiveHlsSnapshotOutcome::ContinuityLost);
-            }
-            return Err(ManifestRunError::Unsupported(
-                "An LL-HLS resource referenced by the local playlist is not a regular file"
-                    .to_string(),
-            ));
-        }
+        tracing::warn!(
+            playlist = %diagnostic_url(&playlist_url),
+            error = %error,
+            "a staged live HLS resource became unavailable; preserving captured media"
+        );
+        return Ok(LiveHlsSnapshotOutcome::ContinuityLost);
+    }
+    verification?;
+    if full_resource_verification_due {
+        track.last_full_resource_verification = Instant::now();
     }
     for filename in plan.ll_parts_without_init_map() {
         if !super::is_mpegts_segment(&track.directory.join(filename)).await? {
@@ -1349,6 +1389,7 @@ mod destination_part_tests {
             directory: PathBuf::new(),
             accumulator,
             snapshot_at: Instant::now(),
+            last_full_resource_verification: Instant::now(),
             ended: false,
             next_poll_at: Some(Instant::now() + Duration::from_secs(30)),
             target_duration: plan.source_target_duration,
@@ -1560,6 +1601,7 @@ mod destination_part_tests {
             directory: video_dir.clone(),
             accumulator,
             snapshot_at: Instant::now(),
+            last_full_resource_verification: Instant::now(),
             ended: false,
             next_poll_at: None,
             target_duration: first_plan.source_target_duration,

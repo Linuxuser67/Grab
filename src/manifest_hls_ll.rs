@@ -83,6 +83,102 @@ impl HlsLiveUnitId {
     }
 }
 
+#[derive(Debug, Default)]
+pub(crate) struct HlsLiveIndex {
+    positions: HashMap<HlsLiveUnitId, usize>,
+    part_runs: HashMap<u64, HlsPartRun>,
+}
+
+#[derive(Debug)]
+struct HlsPartRun {
+    last_index: usize,
+    first_part_index: u32,
+    next_part_index: Option<u32>,
+    duration: f64,
+    first_discontinuity: bool,
+    map: Option<LocalMap>,
+    contiguous: bool,
+}
+
+impl HlsLiveIndex {
+    pub(crate) fn from_units(ids: &[HlsLiveUnitId], segments: &[LocalSegment]) -> Self {
+        let mut index = Self::default();
+        index.extend(ids, segments, 0);
+        index
+    }
+
+    pub(crate) fn extend(
+        &mut self,
+        ids: &[HlsLiveUnitId],
+        segments: &[LocalSegment],
+        first_index: usize,
+    ) {
+        for (offset, (id, segment)) in ids.iter().zip(segments).enumerate() {
+            let index = first_index + offset;
+            self.positions.insert(id.clone(), index);
+            let HlsLiveUnitId::Part {
+                media_sequence,
+                part_index,
+            } = id
+            else {
+                continue;
+            };
+
+            match self.part_runs.entry(*media_sequence) {
+                std::collections::hash_map::Entry::Vacant(entry) => {
+                    entry.insert(HlsPartRun {
+                        last_index: index,
+                        first_part_index: *part_index,
+                        next_part_index: part_index.checked_add(1),
+                        duration: f64::from(segment.duration),
+                        first_discontinuity: segment.discontinuity,
+                        map: segment.map.clone(),
+                        contiguous: *part_index == 0
+                            && segment.duration.is_finite()
+                            && segment.duration > 0.0,
+                    });
+                }
+                std::collections::hash_map::Entry::Occupied(mut entry) => {
+                    let run = entry.get_mut();
+                    if run.last_index.checked_add(1) != Some(index)
+                        || run.next_part_index != Some(*part_index)
+                        || run.map != segment.map
+                        || !segment.duration.is_finite()
+                        || segment.duration <= 0.0
+                    {
+                        run.contiguous = false;
+                    }
+                    run.last_index = index;
+                    run.next_part_index = part_index.checked_add(1);
+                    run.duration += f64::from(segment.duration);
+                }
+            }
+        }
+    }
+
+    pub(crate) fn position(&self, id: &HlsLiveUnitId) -> Option<usize> {
+        self.positions.get(id).copied()
+    }
+
+    pub(crate) fn completed_parent_alias(
+        &self,
+        id: &HlsLiveUnitId,
+        parent: &LocalSegment,
+    ) -> Option<usize> {
+        let HlsLiveUnitId::Segment(sequence) = id else {
+            return None;
+        };
+        let run = self.part_runs.get(sequence)?;
+        let duration_matches = (run.duration - f64::from(parent.duration)).abs() <= 0.02;
+        (run.contiguous
+            && run.first_part_index == 0
+            && run.first_discontinuity == parent.discontinuity
+            && run.map == parent.map
+            && duration_matches)
+            .then_some(run.last_index)
+    }
+}
+
 pub(crate) fn validate_live_unit_ids(ids: &[HlsLiveUnitId]) -> bool {
     // A sliding live window may begin midway through a partial segment.
     // Validate continuity within the visible window, not the unseen prefix.
@@ -218,7 +314,7 @@ fn build_plan(manifest_url: &str, playlist: LlMediaPlaylist) -> Result<HlsPlan, 
             .part_hold_back
             .ok_or(ManifestError::InvalidDuration)?
             .get();
-        if !part_hold_back.is_finite() || part_hold_back < 3.0 * part_target.as_secs_f64() {
+        if !part_hold_back.is_finite() || part_hold_back < 2.0 * part_target.as_secs_f64() {
             return Err(ManifestError::InvalidDuration);
         }
     }
@@ -323,37 +419,22 @@ fn build_plan(manifest_url: &str, playlist: LlMediaPlaylist) -> Result<HlsPlan, 
             Ok(total + duration)
         })?;
         if (parts_duration - parent_duration.as_secs_f64()).abs() > 0.02 {
-            return Err(ManifestError::LiveSequenceGap);
+            return Err(ManifestError::LivePartDurationMismatch);
         }
-        for (part_index, part) in segment.parts.iter().enumerate() {
-            let part_index =
-                u32::try_from(part_index).map_err(|_| ManifestError::DurationOverflow)?;
-            if local_segments.is_empty() {
-                first_part_independent = Some(part.independent || playlist.independent_segments);
-            }
-            validate_part(part)?;
-            let duration = checked_duration(part.duration.get(), source_target_duration)?;
-            let url = resolve_resource_url(&base_url, &part.uri)?;
-            let range = plan_range(part.byte_range.as_ref(), &url, &mut previous_range)?;
-            let filename = ll_resource_filename(media_sequence, Some(part_index), &url, range);
-            resources.push(HlsResource {
-                url,
-                range,
-                filename: filename.clone(),
-                kind: HlsResourceKind::Segment,
-            });
-            local_segments.push(LocalSegment {
-                uri: filename,
-                duration: duration.as_secs_f64() as f32,
-                discontinuity: segment.discontinuous && part_index == 0,
-                map: map.clone(),
-                ..Default::default()
-            });
-            unit_ids.push(HlsLiveUnitId::Part {
-                media_sequence,
-                part_index,
-            });
-        }
+        append_part_units(
+            &base_url,
+            media_sequence,
+            &segment.parts,
+            source_target_duration,
+            map,
+            segment.discontinuous,
+            playlist.independent_segments,
+            &mut first_part_independent,
+            &mut resources,
+            &mut previous_range,
+            &mut local_segments,
+            &mut unit_ids,
+        )?;
     }
 
     if let Some(open) = playlist.open_segment.as_ref() {
@@ -371,38 +452,24 @@ fn build_plan(manifest_url: &str, playlist: LlMediaPlaylist) -> Result<HlsPlan, 
             &mut resources,
             &mut map_filenames,
         )?;
-        for (part_index, part) in open.parts.iter().enumerate() {
-            let part_index =
-                u32::try_from(part_index).map_err(|_| ManifestError::DurationOverflow)?;
-            if local_segments.is_empty() {
-                first_part_independent = Some(part.independent || playlist.independent_segments);
-            }
-            validate_part(part)?;
-            let duration = checked_duration(part.duration.get(), source_target_duration)?;
-            let url = resolve_resource_url(&base_url, &part.uri)?;
-            let range = plan_range(part.byte_range.as_ref(), &url, &mut previous_range)?;
-            let filename = ll_resource_filename(media_sequence, Some(part_index), &url, range);
-            resources.push(HlsResource {
-                url,
-                range,
-                filename: filename.clone(),
-                kind: HlsResourceKind::Segment,
-            });
-            local_segments.push(LocalSegment {
-                uri: filename,
-                duration: duration.as_secs_f64() as f32,
-                map: map.clone(),
-                ..Default::default()
-            });
-            unit_ids.push(HlsLiveUnitId::Part {
-                media_sequence,
-                part_index,
-            });
-        }
+        append_part_units(
+            &base_url,
+            media_sequence,
+            &open.parts,
+            source_target_duration,
+            map,
+            false,
+            playlist.independent_segments,
+            &mut first_part_independent,
+            &mut resources,
+            &mut previous_range,
+            &mut local_segments,
+            &mut unit_ids,
+        )?;
     }
 
     if local_segments.is_empty()
-        || local_segments.len() > MAX_HLS_LIVE_SEGMENTS
+        || local_segments.len() > MAX_HLS_LIVE_UNITS
         || !validate_live_unit_ids(&unit_ids)
         || local_segments
             .iter()
@@ -478,6 +545,55 @@ impl HlsRenditionReport {
             None => Some((self.last_msn.checked_add(1)?, None)),
         }
     }
+}
+
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the shared planner carries URL, continuity, resource, and output state for both closed and open parts"
+)]
+fn append_part_units(
+    base_url: &Url,
+    media_sequence: u64,
+    parts: &[LlPartSpec],
+    source_target_duration: u64,
+    map: Option<LocalMap>,
+    discontinuity: bool,
+    independent_segments: bool,
+    first_part_independent: &mut Option<bool>,
+    resources: &mut Vec<HlsResource>,
+    previous_range: &mut Option<(String, u64)>,
+    local_segments: &mut Vec<LocalSegment>,
+    unit_ids: &mut Vec<HlsLiveUnitId>,
+) -> Result<(), ManifestError> {
+    for (index, part) in parts.iter().enumerate() {
+        let part_index = u32::try_from(index).map_err(|_| ManifestError::DurationOverflow)?;
+        if local_segments.is_empty() {
+            *first_part_independent = Some(part.independent || independent_segments);
+        }
+        validate_part(part)?;
+        let duration = checked_duration(part.duration.get(), source_target_duration)?;
+        let url = resolve_resource_url(base_url, &part.uri)?;
+        let range = plan_range(part.byte_range.as_ref(), &url, previous_range)?;
+        let filename = ll_resource_filename(media_sequence, Some(part_index), &url, range);
+        resources.push(HlsResource {
+            url,
+            range,
+            filename: filename.clone(),
+            kind: HlsResourceKind::Segment,
+        });
+        local_segments.push(LocalSegment {
+            uri: filename,
+            duration: duration.as_secs_f64() as f32,
+            discontinuity: discontinuity && part_index == 0,
+            map: map.clone(),
+            ..Default::default()
+        });
+        unit_ids.push(HlsLiveUnitId::Part {
+            media_sequence,
+            part_index,
+        });
+    }
+    Ok(())
 }
 
 fn parse_rendition_reports(
@@ -667,7 +783,7 @@ pub(super) fn prepare_live_update(
         .as_deref()
         .ok_or(ManifestError::UnsupportedPlaylist)?;
     if ids.len() != snapshot.local_playlist.segments.len() || !validate_live_unit_ids(ids) {
-        return Err(ManifestError::LiveSequenceGap);
+        return Err(ManifestError::LiveUnitIdentityInvalid);
     }
     if accumulator.local_playlist.is_none()
         && let Some(HlsLiveUnitId::Part { part_index, .. }) = ids.first()
@@ -679,20 +795,20 @@ pub(super) fn prepare_live_update(
         ));
     }
     if accumulator.local_playlist.is_some() && accumulator.ll_unit_ids.is_none() {
-        return Err(ManifestError::LiveSequenceGap);
+        return Err(ManifestError::LiveUnitIdentityInvalid);
     }
     if accumulator
         .target_duration
         .is_some_and(|target| target != snapshot.source_target_duration)
     {
-        return Err(ManifestError::LiveSequenceGap);
+        return Err(ManifestError::LiveTargetDurationChanged);
     }
     if accumulator
         .ll_unit_ids
         .as_ref()
         .is_some_and(|existing| existing.len() != accumulator.segment_identities.len())
     {
-        return Err(ManifestError::LiveSequenceGap);
+        return Err(ManifestError::LiveUnitIdentityInvalid);
     }
 
     let existing_ids = accumulator.ll_unit_ids.as_deref().unwrap_or_default();
@@ -700,11 +816,10 @@ pub(super) fn prepare_live_update(
         .local_playlist
         .as_ref()
         .map_or(&[][..], |playlist| playlist.segments.as_slice());
-    let existing_positions: HashMap<&HlsLiveUnitId, usize> = existing_ids
-        .iter()
-        .enumerate()
-        .map(|(index, id)| (id, index))
-        .collect();
+    let existing_index = accumulator.ll_index.as_ref();
+    if !existing_ids.is_empty() && existing_index.is_none() {
+        return Err(ManifestError::LiveUnitIdentityInvalid);
+    }
 
     // Delta and sliding-window playlists may omit the MAP line that established
     // the current initialization section. Carry the last committed map forward
@@ -727,12 +842,12 @@ pub(super) fn prepare_live_update(
         .iter()
         .zip(&resolved_segments)
         .map(|(id, segment)| {
-            is_completed_parent_alias(id, existing_ids, existing_segments, segment)
+            existing_index.and_then(|index| index.completed_parent_alias(id, segment))
         })
         .collect::<Vec<_>>();
     let first_overlap = ids.iter().enumerate().find_map(|(index, id)| {
-        existing_positions
-            .contains_key(id)
+        existing_index
+            .is_some_and(|existing| existing.position(id).is_some())
             .then_some(index)
             .or_else(|| parent_aliases[index].map(|_| index))
     });
@@ -766,17 +881,17 @@ pub(super) fn prepare_live_update(
         .map(|((id, segment), alias)| (id, segment, alias))
         .skip(first_index)
     {
-        if let Some(index) = existing_positions.get(id) {
-            if saw_new || last_existing_index.is_some_and(|previous| *index <= previous) {
-                return Err(ManifestError::LiveSequenceGap);
+        if let Some(index) = existing_index.and_then(|existing| existing.position(id)) {
+            if saw_new || last_existing_index.is_some_and(|previous| index <= previous) {
+                return Err(ManifestError::LiveUnitOrderChanged);
             }
-            if accumulator.segment_identities.get(*index) != Some(&hls_segment_identity(segment)) {
-                return Err(ManifestError::LiveSequenceGap);
+            if accumulator.segment_identities.get(index) != Some(&hls_segment_identity(segment)) {
+                return Err(ManifestError::LiveUnitIdentityChanged);
             }
-            last_existing_index = Some(*index);
+            last_existing_index = Some(index);
         } else if let Some(alias_end) = *parent_alias {
             if saw_new || last_existing_index.is_some_and(|previous| alias_end <= previous) {
-                return Err(ManifestError::LiveSequenceGap);
+                return Err(ManifestError::LiveUnitOrderChanged);
             }
             last_existing_index = Some(alias_end);
             // The complete parent URI is a replacement for the parts, not an
@@ -790,7 +905,7 @@ pub(super) fn prepare_live_update(
             if !existing_ids.is_empty()
                 && last_existing_index.is_some_and(|index| index + 1 != existing_ids.len())
             {
-                return Err(ManifestError::LiveSequenceGap);
+                return Err(ManifestError::LiveUnitOrderChanged);
             }
             if let Some(predecessor) = predecessor
                 && !id.is_successor_of(predecessor)
@@ -811,9 +926,9 @@ pub(super) fn prepare_live_update(
     }
 
     if existing_ids.is_empty() && new_segments.len() != ids.len() {
-        return Err(ManifestError::LiveSequenceGap);
+        return Err(ManifestError::LiveUnitIdentityInvalid);
     }
-    if existing_ids.len().saturating_add(new_segments.len()) > MAX_HLS_LIVE_SEGMENTS {
+    if existing_ids.len().saturating_add(new_segments.len()) > MAX_HLS_LIVE_UNITS {
         return Err(ManifestError::LiveCaptureLimit);
     }
 
@@ -853,51 +968,83 @@ pub(super) fn prepare_live_update(
     })
 }
 
-fn is_completed_parent_alias(
-    id: &HlsLiveUnitId,
-    existing_ids: &[HlsLiveUnitId],
-    existing_segments: &[LocalSegment],
-    parent: &LocalSegment,
-) -> Option<usize> {
-    let HlsLiveUnitId::Segment(sequence) = id else {
-        return None;
-    };
-    if existing_ids.len() != existing_segments.len() {
-        return None;
-    }
-
-    let mut part_duration = 0.0_f64;
-    let mut first_part_discontinuity = None;
-    let mut last_part_index = None;
-    let mut expected_part_index = 0_u32;
-    for (index, (existing_id, segment)) in existing_ids.iter().zip(existing_segments).enumerate() {
-        if let HlsLiveUnitId::Part {
-            media_sequence,
-            part_index,
-        } = existing_id
-            && media_sequence == sequence
-        {
-            if *part_index != expected_part_index || segment.map != parent.map {
-                return None;
-            }
-            first_part_discontinuity.get_or_insert(segment.discontinuity);
-            part_duration += f64::from(segment.duration);
-            expected_part_index = expected_part_index.checked_add(1)?;
-            last_part_index = Some(index);
-        }
-    }
-
-    let matches_parent = expected_part_index > 0
-        && first_part_discontinuity == Some(parent.discontinuity)
-        && (part_duration - f64::from(parent.duration)).abs() <= 0.02;
-    matches_parent.then_some(last_part_index).flatten()
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
 
     const BASE: &str = "https://cdn.example.test/live/index.m3u8";
+
+    #[test]
+    fn incremental_index_resolves_parent_alias_without_searching_older_sequences() {
+        let mut ids = Vec::new();
+        let mut segments = Vec::new();
+        for sequence in 1..=2_000 {
+            for part_index in 0..2 {
+                ids.push(HlsLiveUnitId::Part {
+                    media_sequence: sequence,
+                    part_index,
+                });
+                segments.push(LocalSegment {
+                    uri: format!("{sequence}-{part_index}.bin"),
+                    duration: 0.5,
+                    discontinuity: false,
+                    map: None,
+                    ..Default::default()
+                });
+            }
+        }
+        let index = HlsLiveIndex::from_units(&ids, &segments);
+        assert_eq!(
+            index.position(&HlsLiveUnitId::Part {
+                media_sequence: 1_999,
+                part_index: 1,
+            }),
+            Some(3_997)
+        );
+        let parent = LocalSegment {
+            uri: "parent.bin".to_string(),
+            duration: 1.0,
+            discontinuity: false,
+            map: None,
+            ..Default::default()
+        };
+        assert_eq!(
+            index.completed_parent_alias(&HlsLiveUnitId::Segment(1_999), &parent),
+            Some(3_997)
+        );
+        assert_eq!(
+            index.completed_parent_alias(&HlsLiveUnitId::Segment(2_000), &parent),
+            Some(3_999)
+        );
+    }
+
+    #[test]
+    fn accepts_the_mandatory_two_part_target_hold_back() {
+        let body = br#"#EXTM3U
+#EXT-X-TARGETDURATION:2
+#EXT-X-MEDIA-SEQUENCE:10
+#EXT-X-SERVER-CONTROL:CAN-BLOCK-RELOAD=NO,PART-HOLD-BACK=1.0
+#EXT-X-PART-INF:PART-TARGET=0.5
+#EXT-X-PART:DURATION=0.5,URI="10.0.m4s",INDEPENDENT=YES
+"#;
+        assert!(
+            plan_hls_media_playlist(BASE, body).is_ok(),
+            "the mandatory two-times Part Target floor is valid"
+        );
+        let below_floor = body
+            .windows(b"PART-HOLD-BACK=1.0".len())
+            .position(|window| window == b"PART-HOLD-BACK=1.0")
+            .map(|offset| {
+                let mut invalid = body.to_vec();
+                invalid.splice(
+                    offset..offset + b"PART-HOLD-BACK=1.0".len(),
+                    b"PART-HOLD-BACK=0.999".iter().copied(),
+                );
+                invalid
+            })
+            .expect("fixture contains PART-HOLD-BACK");
+        assert!(plan_hls_media_playlist(BASE, &below_floor).is_err());
+    }
 
     #[test]
     fn plans_parts_and_open_segment_without_fetching_preload_hint_or_parent() {

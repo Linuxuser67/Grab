@@ -78,12 +78,21 @@ This LL-HLS profile remains deliberately bounded. The first captured part must
 be independently decodable (or covered by EXT-X-INDEPENDENT-SEGMENTS).
 CMAF part capture without a known EXT-X-MAP, mapless parts that fail
 MPEG-TS validation, unsupported encryption (including all LL-HLS media-playlist
-EXT-X-KEY signalling in this phase), incomplete continuity, EXT-X-START, GAP,
-DEFINE, unknown required attributes, and ad/date-range markers remain on
-yt-dlp fallback. Mapless parts are accepted only when their fetched bytes pass
-the existing MPEG-TS validation path. Ad removal from LL-HLS is
-parked; this PR does not strip ad markers or schedule ad-marked media. DRM,
-license acquisition, and CDM support remain unplanned.
+EXT-X-KEY signalling), incomplete continuity, EXT-X-START, GAP, DEFINE,
+unknown required attributes, and ad/date-range markers remain on yt-dlp
+fallback. Mapless parts are accepted only when their fetched bytes pass the
+existing MPEG-TS validation path. Native LL-HLS does not strip ad markers or
+schedule ad-marked media. DRM, license acquisition, and CDM support remain
+unplanned.
+
+LL-HLS reconciliation keeps an incremental unit-position and per-media-sequence
+part-run index. Normal polls verify only resources in the current playlist
+snapshot; a full staged-resource integrity pass runs on restoration, every
+60 seconds during capture, and on an ENDLIST snapshot. The part-aware recording
+limit is 250,000 units, with the existing 32 MiB local-playlist serialization
+limit still applying. A delta update that no longer overlaps the committed tail
+is rejected and the already captured prefix is preserved; expired source media
+is never silently skipped.
 
 ## Native Low-Latency DASH supported profile
 

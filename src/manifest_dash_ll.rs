@@ -34,11 +34,15 @@ pub(super) fn validate_template_availability(
     Ok(())
 }
 
-pub(super) fn validate_availability_time_offset(
-    availability_time_offset: Duration,
-    shortest_segment: Duration,
+pub(super) fn validate_template_mime(
+    is_low_latency: bool,
+    mime_type: Option<&str>,
 ) -> Result<(), DashError> {
-    if availability_time_offset > shortest_segment {
+    if is_low_latency
+        && !mime_type.is_some_and(|mime| {
+            mime.eq_ignore_ascii_case("video/mp4") || mime.eq_ignore_ascii_case("audio/mp4")
+        })
+    {
         return Err(DashError::UnsupportedAddressing);
     }
 

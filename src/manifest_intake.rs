@@ -386,7 +386,7 @@ pub(crate) async fn lookup(
     let (auth, result) = tokio::time::timeout(MANIFEST_LOOKUP_BUDGET, async {
         let (client, auth) =
             client_for_manifest_with_policy(raw_url, cookies_browser, proxy).await?;
-        let lookup = lookup_preview_with_client(&client, raw_url)
+        let lookup = lookup_preview_with_client(&client, raw_url, proxy.is_some())
             .await
             .map_err(|error| error.to_string())?;
         Ok::<_, String>((auth, lookup))
@@ -492,12 +492,14 @@ async fn client_for_manifest_with_policy(
 pub(crate) async fn lookup_with_client(
     client: &reqwest::Client,
     raw_url: &str,
+    proxy_configured: bool,
 ) -> Result<Option<ManifestLookup>, ManifestIntakeError> {
     lookup_with_client_policy(
         client,
         raw_url,
         ManifestTransportPolicy::HttpsOnly,
         ManifestFetchMode::Download,
+        proxy_configured,
     )
     .await
 }
@@ -506,12 +508,14 @@ pub(crate) async fn lookup_with_client(
 pub(crate) async fn lookup_preview_with_client(
     client: &reqwest::Client,
     raw_url: &str,
+    proxy_configured: bool,
 ) -> Result<Option<ManifestLookup>, ManifestIntakeError> {
     lookup_with_client_policy(
         client,
         raw_url,
         ManifestTransportPolicy::HttpsOnly,
         ManifestFetchMode::Preview,
+        proxy_configured,
     )
     .await
 }
@@ -580,6 +584,7 @@ async fn lookup_with_client_policy(
     raw_url: &str,
     transport_policy: ManifestTransportPolicy,
     fetch_mode: ManifestFetchMode,
+    proxy_configured: bool,
 ) -> Result<Option<ManifestLookup>, ManifestIntakeError> {
     let requested_url = Url::parse(raw_url)
         .map_err(|_| ManifestIntakeError::Failed(gettext("Invalid stream manifest URL")))?;
@@ -628,7 +633,14 @@ async fn lookup_with_client_policy(
             }
         }
         crate::media_types::ManifestKind::Dash => {
-            let body = resolve_dash_xlinks(client, &final_url, &body, transport_policy).await?;
+            let body = resolve_dash_xlinks(
+                client,
+                &final_url,
+                &body,
+                transport_policy,
+                proxy_configured,
+            )
+            .await?;
             let body = std::str::from_utf8(&body).map_err(|error| {
                 ManifestIntakeError::Unsupported(format!(
                     "The DASH manifest is not valid UTF-8: {error}"
@@ -660,6 +672,7 @@ async fn lookup_with_http_fixture_client(
         raw_url,
         ManifestTransportPolicy::HttpFixture,
         ManifestFetchMode::Preview,
+        false,
     )
     .await
 }
@@ -670,6 +683,7 @@ async fn resolve_dash_xlinks(
     parent_url: &Url,
     body: &[u8],
     transport_policy: ManifestTransportPolicy,
+    proxy_configured: bool,
 ) -> Result<Vec<u8>, ManifestIntakeError> {
     let links = dash_xlink::find_onload_links(body).map_err(|error| {
         ManifestIntakeError::Unsupported(format!(
@@ -725,12 +739,14 @@ async fn resolve_dash_xlinks(
                     // A proxy resolves the destination on its own side, outside
                     // Grab's guarded DNS resolver. Do not let a remote MPD use an
                     // XLink hostname to reach private addresses through that proxy.
-                    crate::subprocess_proxy::validate_proxy_compatibility().map_err(|_| {
-                        ManifestIntakeError::Unsupported(
+                    if proxy_configured
+                        || crate::subprocess_proxy::validate_proxy_compatibility().is_err()
+                    {
+                        return Err(ManifestIntakeError::Unsupported(
                             "DASH XLink references cannot be followed while an upstream proxy is configured"
                                 .to_string(),
-                        )
-                    })?;
+                        ));
+                    }
                     if !crate::download_net::require_public_resolution(host) {
                         return Err(ManifestIntakeError::Unsupported(
                             "A DASH XLink target failed the public-host safety policy".to_string(),

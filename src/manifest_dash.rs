@@ -2056,7 +2056,7 @@ fn dynamic_segment_times(
             let total_count = total_count.min(
                 template
                     .end_number
-                    .map_or(u64::MAX, |end| end - number + 1),
+                    .map_or(u64::MAX, |end| end.saturating_sub(number).saturating_add(1)),
             );
             if total_count > MAX_SEGMENTS as u64 {
                 return Err(DashError::LimitExceeded);

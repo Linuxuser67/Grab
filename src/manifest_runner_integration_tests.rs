@@ -374,6 +374,117 @@ async fn read_fixture_request_path(socket: &mut tokio::net::TcpStream) -> String
         .to_string()
 }
 
+
+struct OrderedDashFixtureServer {
+    base_url: Url,
+    first_media_request: tokio::sync::oneshot::Receiver<String>,
+    release_first_media: tokio::sync::oneshot::Sender<()>,
+    task: tokio::task::JoinHandle<(Vec<String>, bool)>,
+}
+
+async fn spawn_ordered_dash_fixture_server(
+    files: HashMap<String, Vec<u8>>,
+    expected_requests: usize,
+) -> OrderedDashFixtureServer {
+    assert!(!files.is_empty(), "DASH fixture server requires media resources");
+    let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0))
+        .await
+        .expect("bind ordered DASH fixture server");
+    let address = listener
+        .local_addr()
+        .expect("read ordered DASH fixture server address");
+    let (first_media_tx, first_media_rx) = tokio::sync::oneshot::channel();
+    let (release_first_tx, release_first_rx) = tokio::sync::oneshot::channel();
+    let task = tokio::spawn(async move {
+        let mut requests = Vec::with_capacity(expected_requests);
+        let mut pending = std::collections::VecDeque::new();
+        let mut concurrent_request = false;
+        let mut first_media_tx = Some(first_media_tx);
+        let mut release_first_rx = Some(release_first_rx);
+
+        for _ in 0..expected_requests {
+            let (mut socket, request_path) = if let Some(request) = pending.pop_front() {
+                request
+            } else {
+                let (mut socket, _) = listener
+                    .accept()
+                    .await
+                    .expect("accept ordered DASH resource request");
+                let path = read_fixture_request_path(&mut socket).await;
+                (socket, path)
+            };
+            requests.push(request_path.clone());
+            let body = files
+                .get(&request_path)
+                .expect("DASH fixture request must name a known resource");
+            let headers = format!(
+                "HTTP/1.1 200 OK\\r\\nContent-Length: {}\\r\\nConnection: close\\r\\n\\r\\n",
+                body.len()
+            );
+            socket
+                .write_all(headers.as_bytes())
+                .await
+                .expect("write ordered DASH resource headers");
+
+            if request_path.starts_with("/seg-") && first_media_tx.is_some() {
+                if let Some(first_byte) = body.first() {
+                    socket
+                        .write_all(std::slice::from_ref(first_byte))
+                        .await
+                        .expect("write first byte of active DASH segment");
+                    socket.flush().await.expect("flush progressive DASH prefix");
+                }
+                first_media_tx
+                    .take()
+                    .expect("first media notification exists")
+                    .send(request_path)
+                    .expect("notify test about first LL-DASH media request");
+
+                // Detect any second connection while the first progressive response is open.
+                let deadline = tokio::time::Instant::now() + Duration::from_millis(200);
+                while tokio::time::Instant::now() < deadline {
+                    match tokio::time::timeout_at(deadline, listener.accept()).await {
+                        Ok(Ok((mut next, _))) => {
+                            concurrent_request = true;
+                            let next_path = read_fixture_request_path(&mut next).await;
+                            pending.push_back((next, next_path));
+                        }
+                        Ok(Err(error)) => panic!("accept concurrent DASH request: {error}"),
+                        Err(_) => break,
+                    }
+                }
+                release_first_rx
+                    .take()
+                    .expect("first media release receiver exists")
+                    .await
+                    .expect("test releases the progressive DASH response");
+                if body.len() > 1 {
+                    socket
+                        .write_all(&body[1..])
+                        .await
+                        .expect("write remaining progressive DASH bytes");
+                }
+            } else {
+                socket
+                    .write_all(body)
+                    .await
+                    .expect("write ordered DASH resource body");
+            }
+        }
+
+        (requests, concurrent_request)
+    });
+    let base_url =
+        Url::parse(&format!("http://{address}/")).expect("build ordered DASH fixture URL");
+
+    OrderedDashFixtureServer {
+        base_url,
+        first_media_request: first_media_rx,
+        release_first_media: release_first_tx,
+        task,
+    }
+}
+
 struct InterruptedResourceServer {
     base_url: Url,
     partial_sent: tokio::sync::oneshot::Receiver<()>,
@@ -1650,6 +1761,39 @@ fn dynamic_dash_fixture_plan(server_seconds: u64) -> DashRepresentationPlan {
         .expect("plan dynamic DASH fixture segments")
 }
 
+
+fn low_latency_dash_fixture_plan(server_seconds: u64) -> DashRepresentationPlan {
+    let body = r#"<?xml version="1.0"?>
+<MPD xmlns="urn:mpeg:dash:schema:mpd:2011"
+     type="dynamic"
+     availabilityStartTime="1970-01-01T00:00:00Z"
+     minimumUpdatePeriod="PT4S"
+     timeShiftBufferDepth="PT20S">
+  <Period start="PT0S">
+    <AdaptationSet contentType="video" mimeType="video/mp4">
+      <SegmentTemplate timescale="1" startNumber="1" duration="4"
+                       initialization="init.mp4"
+                       media="seg-$Number$.m4s"
+                       availabilityTimeOffset="4"
+                       availabilityTimeComplete="false"/>
+      <Representation id="v1" bandwidth="1000000" width="1280" height="720"/>
+    </AdaptationSet>
+  </Period>
+</MPD>"#;
+    let manifest = crate::manifest::dash::parse_dash_manifest_at(
+        "https://cdn.fixture.test/path/manifest.mpd",
+        body,
+        UNIX_EPOCH + Duration::from_secs(server_seconds),
+    )
+    .expect("parse low-latency DASH fixture MPD");
+    let representation = manifest
+        .video_representations
+        .first()
+        .expect("low-latency DASH video representation");
+    crate::manifest::dash::plan_dash_representation(&manifest, &representation.live_key)
+        .expect("plan low-latency DASH fixture resources")
+}
+
 #[tokio::test]
 async fn dynamic_dash_snapshot_resumes_overlapping_window_and_repairs_missing_segment() {
     let root = TempRoot::new("dynamic-dash-resume");
@@ -1805,6 +1949,334 @@ async fn dynamic_dash_snapshot_resumes_overlapping_window_and_repairs_missing_se
     assert!(
         !state_text.contains("https://"),
         "signed resource URLs must not be persisted in the live resume state"
+    );
+}
+
+
+#[tokio::test]
+async fn low_latency_dash_fetches_initialization_then_oldest_segments_with_one_request() {
+    let root = TempRoot::new("lldash-order");
+    let fixture_dir = root.path().join("fixture");
+    let video_dir = root.path().join("video");
+    std::fs::create_dir_all(&fixture_dir).expect("create LL-DASH fixture files");
+    tokio::fs::create_dir_all(&video_dir)
+        .await
+        .expect("create LL-DASH staging directory");
+
+    let mut plan = low_latency_dash_fixture_plan(120);
+    assert!(plan.low_latency);
+    assert_eq!(
+        plan.resources
+            .iter()
+            .filter_map(|resource| resource.segment_number)
+            .collect::<Vec<_>>(),
+        [26, 27, 28, 29, 30, 31]
+    );
+    for resource in &plan.resources {
+        let body = if resource.kind == DashResourceKind::Initialization {
+            b"initialization-resource".to_vec()
+        } else {
+            format!(
+                "complete-segment-{}",
+                resource.segment_number.expect("media segment number")
+            )
+            .into_bytes()
+        };
+        std::fs::write(fixture_dir.join(&resource.filename), body)
+            .expect("write LL-DASH fixture resource");
+    }
+
+    let original_urls = plan
+        .resources
+        .iter()
+        .map(|resource| resource.url.clone())
+        .collect::<Vec<_>>();
+    let files = fixture_files(&fixture_dir, &original_urls);
+    let OrderedDashFixtureServer {
+        base_url,
+        first_media_request,
+        release_first_media,
+        task: server,
+    } = spawn_ordered_dash_fixture_server(files, plan.resources.len()).await;
+    for resource in plan.resources.iter_mut() {
+        resource.url = loopback_resource_url(&base_url, &resource.url);
+    }
+
+    let representation_key = plan.representation.live_key.clone();
+    let (mut track, _) = load_dash_live_track(
+        &representation_key,
+        &video_dir,
+        Some(&plan),
+        "video-track.mp4",
+    )
+    .await
+    .expect("create LL-DASH live track state");
+    let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+    let downloaded = Arc::new(AtomicU64::new(0));
+    let (_stop_tx, mut abort) = tokio::sync::oneshot::channel();
+    let client = fixture_client();
+
+    let apply = tokio::spawn(async move {
+        let outcome = apply_dash_live_snapshot(
+            &client,
+            &plan,
+            &mut track,
+            8,
+            &tx,
+            &downloaded,
+            &mut abort,
+            0,
+        )
+        .await?;
+        Ok::<_, ManifestRunError>((outcome, track))
+    });
+    let first_request = tokio::time::timeout(FIXTURE_TIMEOUT, first_media_request)
+        .await
+        .expect("LL-DASH did not start the first media request")
+        .expect("LL-DASH request observer exited early");
+    assert_eq!(
+        first_request, "/seg-26.m4s",
+        "the oldest retained media segment is requested before the progressive tail"
+    );
+    release_first_media
+        .send(())
+        .expect("release the first progressive media response");
+
+    let (outcome, track) = tokio::time::timeout(FIXTURE_TIMEOUT, apply)
+        .await
+        .expect("LL-DASH snapshot did not finish")
+        .expect("LL-DASH snapshot task panicked")
+        .expect("apply LL-DASH snapshot");
+    let (requests, concurrent) = tokio::time::timeout(FIXTURE_TIMEOUT, server)
+        .await
+        .expect("ordered LL-DASH fixture server timed out")
+        .expect("ordered LL-DASH fixture server failed");
+    assert_eq!(outcome, DashLiveUpdateOutcome::Committed);
+    assert!(
+        !concurrent,
+        "LL-DASH must not open another request while the progressive response is active"
+    );
+    assert_eq!(
+        requests,
+        [
+            "/init.mp4",
+            "/seg-26.m4s",
+            "/seg-27.m4s",
+            "/seg-28.m4s",
+            "/seg-29.m4s",
+            "/seg-30.m4s",
+            "/seg-31.m4s",
+        ],
+        "initialization is followed by oldest-first media requests"
+    );
+    assert_eq!(
+        track.state.segments.iter().map(|segment| segment.number).collect::<Vec<_>>(),
+        [26, 27, 28, 29, 30, 31],
+        "the journal preserves presentation order"
+    );
+}
+
+#[tokio::test]
+async fn low_latency_dash_does_not_commit_interrupted_tail_and_refetches_on_resume() {
+    let root = TempRoot::new("lldash-interrupt");
+    let fixture_dir = root.path().join("fixture");
+    let video_dir = root.path().join("video");
+    std::fs::create_dir_all(&fixture_dir).expect("create LL-DASH fixture files");
+    tokio::fs::create_dir_all(&video_dir)
+        .await
+        .expect("create LL-DASH staging directory");
+
+    let mut initial = low_latency_dash_fixture_plan(120);
+    let mut refreshed = low_latency_dash_fixture_plan(120);
+    initial.resources = initial
+        .resources
+        .iter()
+        .filter(|resource| resource.segment_number != Some(31))
+        .cloned()
+        .collect::<Vec<_>>()
+        .into_boxed_slice();
+    for resource in &initial.resources {
+        let body = if resource.kind == DashResourceKind::Initialization {
+            b"initialization-resource".to_vec()
+        } else {
+            format!(
+                "complete-segment-{}",
+                resource.segment_number.expect("complete media segment number")
+            )
+            .into_bytes()
+        };
+        std::fs::write(fixture_dir.join(&resource.filename), body)
+            .expect("write complete LL-DASH backlog resource");
+    }
+
+    let original_urls = initial
+        .resources
+        .iter()
+        .map(|resource| resource.url.clone())
+        .collect::<Vec<_>>();
+    let (fixture_base, fixture_server) = spawn_fixture_server(
+        fixture_files(&fixture_dir, &original_urls),
+        initial.resources.len(),
+    )
+    .await;
+    for resource in initial.resources.iter_mut() {
+        resource.url = loopback_resource_url(&fixture_base, &resource.url);
+    }
+    for resource in refreshed.resources.iter_mut() {
+        if resource.segment_number != Some(31) {
+            resource.url = loopback_resource_url(&fixture_base, &resource.url);
+        }
+    }
+
+    let representation_key = initial.representation.live_key.clone();
+    let (mut track, _) = load_dash_live_track(
+        &representation_key,
+        &video_dir,
+        Some(&initial),
+        "video-track.mp4",
+    )
+    .await
+    .expect("create LL-DASH state before the progressive tail is captured");
+    let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+    let downloaded = Arc::new(AtomicU64::new(0));
+    let client = fixture_client();
+    let (_initial_stop_tx, mut initial_abort) = tokio::sync::oneshot::channel();
+    assert_eq!(
+        apply_dash_live_snapshot(
+            &client,
+            &initial,
+            &mut track,
+            8,
+            &tx,
+            &downloaded,
+            &mut initial_abort,
+            0,
+        )
+        .await
+        .expect("capture complete LL-DASH backlog"),
+        DashLiveUpdateOutcome::Committed
+    );
+    wait_for_fixture_server(fixture_server).await;
+    assert_eq!(track.state.segments.len(), 5);
+
+    let body = vec![0x5a; INTERRUPTED_RESOURCE_BYTES];
+    let InterruptedResourceServer {
+        base_url: slow_base_url,
+        partial_sent,
+        release_first,
+        task: slow_server,
+    } = spawn_interrupted_resource_server(body.clone(), INTERRUPTED_RESOURCE_PREFIX_BYTES).await;
+    let tail = refreshed
+        .resources
+        .iter_mut()
+        .find(|resource| resource.segment_number == Some(31))
+        .expect("refreshed MPD includes the progressive tail");
+    tail.url = slow_base_url
+        .join("seg-31.m4s")
+        .expect("build progressive tail URL");
+    let tail_filename = tail.filename.clone();
+    let resume_plan = refreshed.clone();
+
+    let (stop_tx, stop_rx) = tokio::sync::oneshot::channel();
+    let attempt = tokio::spawn(async move {
+        let mut abort = stop_rx;
+        let outcome = apply_dash_live_snapshot(
+            &client,
+            &refreshed,
+            &mut track,
+            8,
+            &tx,
+            &downloaded,
+            &mut abort,
+            0,
+        )
+        .await?;
+        Ok::<_, ManifestRunError>((outcome, track))
+    });
+
+    tokio::time::timeout(FIXTURE_TIMEOUT, partial_sent)
+        .await
+        .expect("progressive LL-DASH tail did not send its first chunk")
+        .expect("progressive tail server stopped before sending a chunk");
+    let partial_path = video_dir.join(format!("{tail_filename}.part"));
+    tokio::time::timeout(FIXTURE_TIMEOUT, async {
+        loop {
+            if tokio::fs::metadata(&partial_path)
+                .await
+                .is_ok_and(|metadata| metadata.len() >= INTERRUPTED_RESOURCE_PREFIX_BYTES as u64)
+            {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .expect("progressive tail bytes were not written to its .part file");
+
+    stop_tx
+        .send(crate::video::StopIntent::Pause)
+        .expect("pause the in-progress LL-DASH segment");
+    let (stopped, mut track) = tokio::time::timeout(FIXTURE_TIMEOUT, attempt)
+        .await
+        .expect("LL-DASH did not stop the in-progress resource")
+        .expect("LL-DASH stop task panicked")
+        .expect("stop interrupted LL-DASH snapshot");
+    assert_eq!(
+        stopped,
+        DashLiveUpdateOutcome::Stopped(crate::video::StopIntent::Pause)
+    );
+    assert_eq!(
+        track.state.segments.iter().map(|segment| segment.number).collect::<Vec<_>>(),
+        [26, 27, 28, 29, 30],
+        "the open segment must not enter the durable live journal"
+    );
+    assert!(
+        !track.state.segments.iter().any(|segment| segment.filename == tail_filename),
+        "an in-progress response must not be journal-committed"
+    );
+    assert!(
+        !video_dir.join(&tail_filename).exists(),
+        "an incomplete response must not be published under its final filename"
+    );
+    release_first
+        .send(())
+        .expect("release the cancelled progressive response");
+
+    let (_resume_stop_tx, mut resume_abort) = tokio::sync::oneshot::channel();
+    assert_eq!(
+        apply_dash_live_snapshot(
+            &client,
+            &resume_plan,
+            &mut track,
+            8,
+            &tx,
+            &downloaded,
+            &mut resume_abort,
+            0,
+        )
+        .await
+        .expect("resume the interrupted LL-DASH tail"),
+        DashLiveUpdateOutcome::Committed
+    );
+    let requests = tokio::time::timeout(FIXTURE_TIMEOUT, slow_server)
+        .await
+        .expect("progressive tail was not requested again")
+        .expect("progressive tail fixture server failed");
+    assert_eq!(
+        requests,
+        ["/seg-31.m4s", "/seg-31.m4s"],
+        "resume fetches the incomplete segment again from byte zero"
+    );
+    assert!(
+        track.state.segments.iter().any(|segment| segment.filename == tail_filename),
+        "the tail is committed only after the second response closes"
+    );
+    assert_eq!(track.state.segments.len(), 6);
+    assert_eq!(
+        tokio::fs::read(video_dir.join(tail_filename))
+            .await
+            .expect("read the resumed progressive tail"),
+        body
     );
 }
 

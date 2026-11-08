@@ -744,11 +744,22 @@ pub(super) async fn apply_dash_live_snapshot(
     }
 
     if !resources_to_fetch.is_empty() {
+        if plan.low_latency {
+            // LL-DASH advertises at most one in-progress segment. Request it first,
+            // then wait for its chunked HTTP response to close before opening older
+            // complete segments. The journal still records resources in timeline order.
+            resources_to_fetch.sort_by_key(|resource| {
+                (
+                    resource.kind == DashResourceKind::Segment,
+                    std::cmp::Reverse(resource.segment_number),
+                )
+            });
+        }
         match fetch_resources_with_stop(
             client,
             dash_resources_from(&resources_to_fetch),
             &track.directory,
-            connections,
+            if plan.low_latency { 1 } else { connections },
             tx,
             downloaded,
             abort,

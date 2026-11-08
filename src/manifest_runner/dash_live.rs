@@ -73,13 +73,13 @@ async fn load_dash_live_track_inner(
     track_filename: &'static str,
     destination_part: Option<DashLiveDestination>,
 ) -> Result<(DashLiveTrack, u64), ManifestRunError> {
-    if current_plan.is_some_and(|plan| plan.representation.live_key != representation_key) {
+    if current_plan.is_some_and(|plan| !plan.representation.matches_key(representation_key)) {
         return Err(ManifestRunError::Failed(
             "The refreshed DASH representation no longer matches the queued selection".to_string(),
         ));
     }
     let path = directory.join(DASH_LIVE_STATE_NAME);
-    let state = match tokio::fs::symlink_metadata(&path).await {
+    let mut state = match tokio::fs::symlink_metadata(&path).await {
         Ok(metadata) if metadata.file_type().is_symlink() || !metadata.is_file() => {
             return Err(ManifestRunError::Failed(
                 "The staged dynamic DASH state is not a regular file".to_string(),
@@ -116,7 +116,20 @@ async fn load_dash_live_track_inner(
             )));
         }
     };
-    validate_dash_live_state(&state, representation_key)?;
+    let previous_representation_key = state.representation_key.clone();
+    let expected_representation_key = current_plan
+        .map(|plan| plan.representation.live_key.as_str())
+        .unwrap_or(state.representation_key.as_str());
+    if current_plan.is_some()
+        && state.representation_key != representation_key
+        && state.representation_key != expected_representation_key
+    {
+        return Err(ManifestRunError::Failed(
+            "The saved dynamic DASH state belongs to a different representation".to_string(),
+        ));
+    }
+    state.representation_key = expected_representation_key.to_string();
+    validate_dash_live_state(&state, expected_representation_key)?;
 
     let resource_names = state
         .resource_names()
@@ -262,17 +275,19 @@ async fn load_dash_live_track_inner(
         ));
     }
 
-    Ok((
-        DashLiveTrack {
-            directory: directory.to_path_buf(),
-            state,
-            track_filename,
-            committed_resource_count,
-            committed_bytes,
-            destination_part,
-        },
-        retained_bytes,
-    ))
+    let track = DashLiveTrack {
+        directory: directory.to_path_buf(),
+        state,
+        track_filename,
+        committed_resource_count,
+        committed_bytes,
+        destination_part,
+    };
+    if track.state.representation_key != previous_representation_key {
+        write_dash_live_state(&track).await?;
+    }
+
+    Ok((track, retained_bytes))
 }
 
 /// Load a live DASH rendition while binding its output to the owned destination part.
@@ -745,13 +760,13 @@ pub(super) async fn apply_dash_live_snapshot(
 
     if !resources_to_fetch.is_empty() {
         if plan.low_latency {
-            // LL-DASH advertises at most one in-progress segment. Request it first,
-            // then wait for its chunked HTTP response to close before opening older
-            // complete segments. The journal still records resources in timeline order.
+            // Fetch complete media from the oldest retained segment toward the live edge.
+            // Any progressively delivered tail segments are therefore queued only after
+            // the backlog, so a chunked response cannot make older media expire in TSBD.
             resources_to_fetch.sort_by_key(|resource| {
                 (
                     resource.kind == DashResourceKind::Segment,
-                    std::cmp::Reverse(resource.segment_number),
+                    resource.segment_number.unwrap_or_default(),
                 )
             });
         }
@@ -850,6 +865,8 @@ pub(super) async fn run_live_dash_tracks(
         crate::manifest_destination::TrackKind::Video,
     )
     .await?;
+    // Upgrade policy-sensitive queue keys to the stable identity used by MPD refreshes.
+    let selected_video_key = video.state.representation_key.clone();
     let staging_dir = video_dir.parent().unwrap_or(video_dir);
     let mut audio_key = audio_key
         .map(str::to_string)
@@ -894,6 +911,9 @@ pub(super) async fn run_live_dash_tracks(
         }
         None => None,
     };
+    if let Some((track, _)) = audio.as_ref() {
+        audio_key = Some(track.state.representation_key.clone());
+    }
     macro_rules! finish_capture {
         ($outcome:expr) => {{
             let outcome = discard_unrecoverable_dash_capture_without_video(
@@ -1134,7 +1154,7 @@ pub(super) async fn run_live_dash_tracks(
             &ManifestSource {
                 url: source_url.to_string(),
                 kind: ManifestKind::Dash,
-                representation_key: ManifestRepresentationKey::from(representation_key),
+                representation_key: ManifestRepresentationKey::from(selected_video_key.as_str()),
                 audio_key: audio_key
                     .clone()
                     .map(crate::media_types::ManifestAudioKey::from),

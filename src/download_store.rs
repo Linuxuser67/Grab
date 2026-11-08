@@ -41,13 +41,13 @@ pub(crate) const QUEUE_VERSION: u32 = 4;
 /// One multi-item source collection shared by its child downloads.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub(crate) struct DownloadGroup {
-    pub(crate) id: u64,
-    pub(crate) title: String,
+    id: u64,
+    title: String,
 }
 
 impl DownloadGroup {
-    /// Construct a collection identity only when both of its required parts are valid.
-    pub(crate) fn new(id: u64, title: &str) -> Option<Self> {
+    /// Construct a collection identity only when both required parts are valid.
+    pub(crate) fn try_new(id: u64, title: &str) -> Option<Self> {
         if id == 0 || title.trim().is_empty() {
             return None;
         }
@@ -55,6 +55,14 @@ impl DownloadGroup {
             id,
             title: title.to_string(),
         })
+    }
+
+    pub(crate) fn id(&self) -> u64 {
+        self.id
+    }
+
+    pub(crate) fn title(&self) -> &str {
+        &self.title
     }
 
     pub(crate) fn is_valid(&self) -> bool {
@@ -178,10 +186,7 @@ mod group_metadata_tests {
 
         assert_eq!(
             item.group,
-            Some(super::DownloadGroup {
-                id: 41,
-                title: "Course playlist".to_string(),
-            })
+            super::DownloadGroup::try_new(41, "Course playlist")
         );
 
         let serialized = serde_json::to_value(item).expect("grouped queue item should serialize");

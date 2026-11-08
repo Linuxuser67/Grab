@@ -44,7 +44,7 @@ use crate::video_spawn::{
     ytdlp_command,
 };
 use crate::video_staging::{
-    ResumePlan, ResumeQuery, VideoManifest, clean_dest_parts, clean_staging, collect_sidecar,
+    ResumePlan, ResumeQuery, VideoManifest, clean_staging, collect_sidecar,
     dest_part_path, dir_file_names, discover_unified_output, ensure_staging_dir_in, is_grab_part,
     is_sparse_shell, is_ytdlp_fragment, manifest_path, read_manifest, release_remux_lease,
     reserve_remux_temp, resume_plan, sidecar_path_for, staging_root, stem_reserved_in,
@@ -5125,13 +5125,12 @@ fn a_live_capture_in_flight_keeps_its_destination_stem_reserved() {
         "an unrelated stem must still be claimable"
     );
 
-    // Once the finalizer has swept, the stem is free again -- which is the
-    // point of deferring: the reservation ends when the row really is gone.
-    crate::video::clean_dest_parts(&dest);
-    let names = dir_file_names(&dir);
+    // Unowned destination-side files are intentionally not swept by filename
+    // pattern: without an ownership record, cleanup cannot prove they belong
+    // to this capture. The active-looking file therefore remains reserved.
     assert!(
-        !stem_reserved_in(&names, "v"),
-        "the stem stayed reserved after the row's scratch was reclaimed"
+        stem_reserved_in(&names, "v"),
+        "an unowned part-like file must remain untouched"
     );
     let _ = std::fs::remove_dir_all(&dir);
 }

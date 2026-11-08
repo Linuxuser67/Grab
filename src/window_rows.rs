@@ -866,7 +866,7 @@ pub(crate) fn build_download_group_row(
         .build();
     menu_button.update_property(&[gtk4::accessible::Property::Label(&gettext("Group actions"))]);
     menu_button.set_menu_model(Some(&menu));
-    row.add_action(&menu_button);
+    row.add_suffix(&menu_button);
 
     DownloadGroupRow {
         row,

@@ -418,7 +418,7 @@ async fn spawn_ordered_dash_fixture_server(
                 .get(&request_path)
                 .expect("DASH fixture request must name a known resource");
             let headers = format!(
-                "HTTP/1.1 200 OK\\r\\nContent-Length: {}\\r\\nConnection: close\\r\\n\\r\\n",
+                "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
                 body.len()
             );
             socket
@@ -2022,7 +2022,14 @@ async fn low_latency_dash_fetches_initialization_then_oldest_segments_with_one_r
             )
             .into_bytes()
         };
-        std::fs::write(fixture_dir.join(&resource.filename), body)
+        let fixture_name = resource
+            .url
+            .path()
+            .rsplit('/')
+            .next()
+            .filter(|name| !name.is_empty())
+            .expect("LL-DASH fixture URL has a filename");
+        std::fs::write(fixture_dir.join(fixture_name), body)
             .expect("write LL-DASH fixture resource");
     }
 
@@ -2145,7 +2152,14 @@ async fn low_latency_dash_does_not_commit_interrupted_tail_and_refetches_on_resu
             )
             .into_bytes()
         };
-        std::fs::write(fixture_dir.join(&resource.filename), body)
+        let fixture_name = resource
+            .url
+            .path()
+            .rsplit('/')
+            .next()
+            .filter(|name| !name.is_empty())
+            .expect("LL-DASH fixture URL has a filename");
+        std::fs::write(fixture_dir.join(fixture_name), body)
             .expect("write complete LL-DASH backlog resource");
     }
 

@@ -245,10 +245,10 @@ fn playlist_group_metadata_restores_with_each_child() {
         "one.mp4",
         DownloadStatus::Paused,
     );
-    first.group = Some(crate::download_store::DownloadGroup {
-        id: 42,
-        title: "Course playlist".to_string(),
-    });
+    first.group = Some(
+        crate::download_store::DownloadGroup::try_new(42, "Course playlist")
+            .expect("valid playlist group"),
+    );
 
     let mut second = stored_row(
         "https://example.com/playlist/two",

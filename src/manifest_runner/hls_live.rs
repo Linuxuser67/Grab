@@ -386,7 +386,6 @@ async fn verify_live_hls_resource_files<'a>(
     clippy::too_many_arguments,
     reason = "one rendition update shares its client, cancellation, progress and aggregate byte-budget context"
 )]
-
 pub(super) async fn apply_live_hls_snapshot(
     client: &reqwest::Client,
     plan: &HlsPlan,
@@ -551,19 +550,17 @@ pub(super) async fn apply_live_hls_snapshot(
         )
         .await
     };
-    if let Err(ManifestRunError::Unsupported(error)) = &verification {
-        if track.accumulator.segment_count() > 0 {
-            tracing::warn!(
-                playlist = %diagnostic_url(&playlist_url),
-                error = %error,
-                "a staged live HLS resource became unavailable; preserving captured media"
-            );
-            return Ok(LiveHlsSnapshotOutcome::ContinuityLost);
-        }
+    if let Err(ManifestRunError::Unsupported(error)) = &verification
+        && track.accumulator.segment_count() > 0
+    {
+        tracing::warn!(
+            playlist = %diagnostic_url(&playlist_url),
+            error = %error,
+            "a staged live HLS resource became unavailable; preserving captured media"
+        );
+        return Ok(LiveHlsSnapshotOutcome::ContinuityLost);
     }
-    if let Err(error) = verification {
-        return Err(error);
-    }
+    verification?;
     if full_resource_verification_due {
         track.last_full_resource_verification = Instant::now();
     }

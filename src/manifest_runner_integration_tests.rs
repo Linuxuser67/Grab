@@ -1999,7 +1999,7 @@ async fn low_latency_dash_restores_legacy_policy_key_as_stable_identity() {
     .expect("restore a queue item carrying the previous LL-DASH key");
 
     assert_eq!(
-        track.state.representation_key,
+        track.state.representation_key.as_str(),
         stable_key,
         "restored live state is immediately migrated to the policy-independent key"
     );

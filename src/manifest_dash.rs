@@ -637,6 +637,15 @@ pub(crate) fn parse_dash_manifest_at(
                 )?;
                 if matches!(
                     &addressing,
+                    DashAddressing::Template(template) if !template.availability_time_complete
+                ) && !mime_type.as_deref().is_some_and(|mime| {
+                    mime.eq_ignore_ascii_case("video/mp4")
+                        || mime.eq_ignore_ascii_case("audio/mp4")
+                }) {
+                    return Err(DashError::UnsupportedAddressing);
+                }
+                if matches!(
+                    &addressing,
                     DashAddressing::Base(_) | DashAddressing::IndexedBase(_)
                 ) && !is_single_file_media_url(&representation_base, &manifest_url)
                 {
@@ -1761,6 +1770,9 @@ fn effective_template(
     } else {
         None
     };
+    if !availability_time_complete && initialization.is_none() {
+        return Err(DashError::UnsupportedAddressing);
+    }
 
     let timescale = timescale.unwrap_or(1);
     if timescale == 0 {
@@ -4979,6 +4991,7 @@ mod tests {
   <Period start="PT0S">
     <AdaptationSet contentType="video" mimeType="video/mp4">
       <SegmentTemplate duration="4" startNumber="1"
+                       initialization="video-init.mp4"
                        media="video-$Number$.m4s"
                        availabilityTimeOffset="3"
                        availabilityTimeComplete="false"/>
@@ -5051,7 +5064,9 @@ mod tests {
      minimumUpdatePeriod="PT1S">
   <Period start="PT0S">
     <AdaptationSet contentType="video" mimeType="video/mp4">
-      <SegmentTemplate duration="4" startNumber="1" media="video-$Number$.m4s"
+      <SegmentTemplate duration="4" startNumber="1"
+                       initialization="video-init.mp4"
+                       media="video-$Number$.m4s"
                        availabilityTimeOffset="3"/>
       <Representation id="v1">
         <SegmentTemplate availabilityTimeOffset="2"

@@ -255,11 +255,11 @@ fn assign_playlist_group(
         return previous_group_id;
     }
     let group_id = previous_group_id.unwrap_or(items.first()?.id());
-    let group = DownloadGroup::new(group_id, title)?;
+    let group = DownloadGroup::try_new(group_id, title)?;
     for item in items {
         item.set_group(Some(group.clone()));
     }
-    Some(group_id)
+    Some(group.id())
 }
 
 /// Item-count label for a probed collection, kind-aware ("3 stories"). The
@@ -4797,13 +4797,9 @@ mod tests {
         let group_id = assign_playlist_group(&[first.clone()], "Course playlist", None)
             .expect("first successful child establishes the group");
         assert_eq!(group_id, 10);
-        assert_eq!(
-            first.group(),
-            Some(DownloadGroup {
-                id: 10,
-                title: "Course playlist".to_string(),
-            })
-        );
+        let group = first.group().expect("first row belongs to a playlist group");
+        assert_eq!(group.id(), 10);
+        assert_eq!(group.title(), "Course playlist");
 
         let retained_id =
             assign_playlist_group(&[second.clone()], "Course playlist", Some(group_id))

@@ -15,6 +15,9 @@ mod sidx;
 #[path = "manifest_dash_ll.rs"]
 mod low_latency;
 #[cfg(test)]
+#[path = "manifest_dash_ll_tests.rs"]
+mod low_latency_tests;
+#[cfg(test)]
 pub(crate) use sidx::resolve_segment_base_index;
 pub(crate) use sidx::{
     DashSidxEntry, MAX_DASH_SIDX_SEGMENTS, dash_sidx_media_resource, parse_child_segment_index,
@@ -2707,9 +2710,6 @@ fn expand_list(
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[path = "manifest_dash_ll_tests.rs"]
-    mod low_latency;
 
     const BASE_URL: &str = "https://cdn.example.test/path/manifest.mpd";
     #[derive(Clone)]

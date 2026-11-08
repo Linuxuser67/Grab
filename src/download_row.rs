@@ -61,7 +61,7 @@ mod imp {
         #[property(get, set)]
         pub error_log: RefCell<String>,
         /// Optional multi-item source collection shared by this child row.
-        pub group: RefCell<Option<DownloadGroup>>,
+        pub(crate) group: RefCell<Option<DownloadGroup>>,
     }
 
     #[glib::object_subclass]

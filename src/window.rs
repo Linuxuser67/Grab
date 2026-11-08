@@ -819,6 +819,7 @@ pub fn build_window(
             }
             s.set_visible_child_name(if has_items { "list" } else { "empty" });
         })
+    };
 
     {
         let sync = Rc::clone(&sync);

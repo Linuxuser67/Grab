@@ -1970,8 +1970,26 @@ async fn low_latency_dash_restores_legacy_policy_key_as_stable_identity() {
         .to_string();
     let stable_key = plan.representation.live_key.clone();
     assert_ne!(legacy_key, stable_key);
+    let first_segment = plan
+        .resources
+        .iter()
+        .find(|resource| resource.kind == DashResourceKind::Segment)
+        .expect("legacy plan has a first media resource");
+    tokio::fs::write(video_dir.join(&first_segment.filename), b"legacy-captured-segment")
+        .await
+        .expect("write a resource from the legacy capture");
+    let mut legacy_state = DashLiveState::new(&legacy_key);
+    legacy_state.segments.push(DashLiveSegment {
+        number: first_segment.segment_number.expect("media segment number"),
+        filename: first_segment.filename.clone(),
+    });
+    let legacy_bytes =
+        serde_json::to_vec(&legacy_state).expect("serialize previous live DASH state");
+    tokio::fs::write(video_dir.join(DASH_LIVE_STATE_NAME), legacy_bytes)
+        .await
+        .expect("persist previous policy-sensitive representation key");
 
-    let (track, _) = load_dash_live_track(
+    let (track, retained_bytes) = load_dash_live_track(
         &legacy_key,
         &video_dir,
         Some(&plan),
@@ -1985,6 +2003,8 @@ async fn low_latency_dash_restores_legacy_policy_key_as_stable_identity() {
         stable_key,
         "restored live state is immediately migrated to the policy-independent key"
     );
+    assert!(retained_bytes > 0, "migration preserves prior captured bytes");
+    assert_eq!(track.state.segments.len(), 1, "migration preserves the segment journal");
     let saved = tokio::fs::read(video_dir.join(DASH_LIVE_STATE_NAME))
         .await
         .expect("read migrated live DASH state");

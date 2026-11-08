@@ -1770,7 +1770,7 @@ fn effective_template(
     } else {
         None
     };
-    if !availability_time_complete && initialization.is_none() {
+    if availability_time_complete == Some(false) && initialization.is_none() {
         return Err(DashError::UnsupportedAddressing);
     }
 

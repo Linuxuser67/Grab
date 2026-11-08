@@ -374,7 +374,6 @@ async fn read_fixture_request_path(socket: &mut tokio::net::TcpStream) -> String
         .to_string()
 }
 
-
 struct OrderedDashFixtureServer {
     base_url: Url,
     first_media_request: tokio::sync::oneshot::Receiver<String>,
@@ -386,7 +385,10 @@ async fn spawn_ordered_dash_fixture_server(
     files: HashMap<String, Vec<u8>>,
     expected_requests: usize,
 ) -> OrderedDashFixtureServer {
-    assert!(!files.is_empty(), "DASH fixture server requires media resources");
+    assert!(
+        !files.is_empty(),
+        "DASH fixture server requires media resources"
+    );
     let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0))
         .await
         .expect("bind ordered DASH fixture server");
@@ -1761,7 +1763,6 @@ fn dynamic_dash_fixture_plan(server_seconds: u64) -> DashRepresentationPlan {
         .expect("plan dynamic DASH fixture segments")
 }
 
-
 fn low_latency_dash_fixture_plan(server_seconds: u64) -> DashRepresentationPlan {
     let body = r#"<?xml version="1.0"?>
 <MPD xmlns="urn:mpeg:dash:schema:mpd:2011"
@@ -1952,8 +1953,6 @@ async fn dynamic_dash_snapshot_resumes_overlapping_window_and_repairs_missing_se
     );
 }
 
-
-
 #[tokio::test]
 async fn low_latency_dash_restores_legacy_policy_key_as_stable_identity() {
     let root = TempRoot::new("lldash-legacy-key");
@@ -1975,9 +1974,12 @@ async fn low_latency_dash_restores_legacy_policy_key_as_stable_identity() {
         .iter()
         .find(|resource| resource.kind == DashResourceKind::Segment)
         .expect("legacy plan has a first media resource");
-    tokio::fs::write(video_dir.join(&first_segment.filename), b"legacy-captured-segment")
-        .await
-        .expect("write a resource from the legacy capture");
+    tokio::fs::write(
+        video_dir.join(&first_segment.filename),
+        b"legacy-captured-segment",
+    )
+    .await
+    .expect("write a resource from the legacy capture");
     let mut legacy_state = DashLiveState::new(&legacy_key);
     legacy_state.segments.push(DashLiveSegment {
         number: first_segment.segment_number.expect("media segment number"),
@@ -1989,22 +1991,25 @@ async fn low_latency_dash_restores_legacy_policy_key_as_stable_identity() {
         .await
         .expect("persist previous policy-sensitive representation key");
 
-    let (track, retained_bytes) = load_dash_live_track(
-        &legacy_key,
-        &video_dir,
-        Some(&plan),
-        "video-track.mp4",
-    )
-    .await
-    .expect("restore a queue item carrying the previous LL-DASH key");
+    let (track, retained_bytes) =
+        load_dash_live_track(&legacy_key, &video_dir, Some(&plan), "video-track.mp4")
+            .await
+            .expect("restore a queue item carrying the previous LL-DASH key");
 
     assert_eq!(
         track.state.representation_key.as_str(),
         stable_key,
         "restored live state is immediately migrated to the policy-independent key"
     );
-    assert!(retained_bytes > 0, "migration preserves prior captured bytes");
-    assert_eq!(track.state.segments.len(), 1, "migration preserves the segment journal");
+    assert!(
+        retained_bytes > 0,
+        "migration preserves prior captured bytes"
+    );
+    assert_eq!(
+        track.state.segments.len(),
+        1,
+        "migration preserves the segment journal"
+    );
     let saved = tokio::fs::read(video_dir.join(DASH_LIVE_STATE_NAME))
         .await
         .expect("read migrated live DASH state");
@@ -2137,7 +2142,12 @@ async fn low_latency_dash_fetches_initialization_then_oldest_segments_with_one_r
         "initialization is followed by oldest-first media requests"
     );
     assert_eq!(
-        track.state.segments.iter().map(|segment| segment.number).collect::<Vec<_>>(),
+        track
+            .state
+            .segments
+            .iter()
+            .map(|segment| segment.number)
+            .collect::<Vec<_>>(),
         [26, 27, 28, 29, 30, 31],
         "the journal preserves presentation order"
     );
@@ -2168,7 +2178,9 @@ async fn low_latency_dash_does_not_commit_interrupted_tail_and_refetches_on_resu
         } else {
             format!(
                 "complete-segment-{}",
-                resource.segment_number.expect("complete media segment number")
+                resource
+                    .segment_number
+                    .expect("complete media segment number")
             )
             .into_bytes()
         };
@@ -2303,12 +2315,21 @@ async fn low_latency_dash_does_not_commit_interrupted_tail_and_refetches_on_resu
         DashLiveUpdateOutcome::Stopped(crate::video::StopIntent::Pause)
     );
     assert_eq!(
-        track.state.segments.iter().map(|segment| segment.number).collect::<Vec<_>>(),
+        track
+            .state
+            .segments
+            .iter()
+            .map(|segment| segment.number)
+            .collect::<Vec<_>>(),
         [26, 27, 28, 29, 30],
         "the open segment must not enter the durable live journal"
     );
     assert!(
-        !track.state.segments.iter().any(|segment| segment.filename == tail_filename),
+        !track
+            .state
+            .segments
+            .iter()
+            .any(|segment| segment.filename == tail_filename),
         "an in-progress response must not be journal-committed"
     );
     assert!(
@@ -2355,7 +2376,11 @@ async fn low_latency_dash_does_not_commit_interrupted_tail_and_refetches_on_resu
         "resume fetches the incomplete segment again from byte zero"
     );
     assert!(
-        track.state.segments.iter().any(|segment| segment.filename == tail_filename),
+        track
+            .state
+            .segments
+            .iter()
+            .any(|segment| segment.filename == tail_filename),
         "the tail is committed only after the second response closes"
     );
     assert_eq!(track.state.segments.len(), 6);

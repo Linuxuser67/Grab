@@ -3841,6 +3841,9 @@ impl DownloadManager {
     /// Pause the active rows in a group, then wake the scheduler once.
     pub fn pause_many(self: &Rc<Self>, ids: &[u64]) -> usize {
         let mut paused = 0;
+        // Live workers release their slot after observing Pause; only a stopped
+        // non-live engine can be replaced immediately by the scheduler.
+        let mut queue_kick = false;
 
         for &id in ids {
             if !self
@@ -3867,6 +3870,7 @@ impl DownloadManager {
             if !self.stop_engine(id, crate::video::StopIntent::Finish) {
                 continue;
             }
+            queue_kick = true;
             if let Some(item) = self.find(id) {
                 if crate::torrent::is_torrent(&item.url()) {
                     crate::torrent::pause_download(id);
@@ -3882,10 +3886,12 @@ impl DownloadManager {
             }
         }
 
-        if paused > 0 {
+        if paused > 0 || queue_kick {
             self.persist_queue();
             self.changed();
-            self.start_next();
+            if queue_kick {
+                self.start_next();
+            }
         }
         paused
     }

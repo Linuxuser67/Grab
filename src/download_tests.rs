@@ -2091,6 +2091,7 @@ fn unremove_restores_video_source() {
         video_source: manager.video_source(id),
         started: false,
         public_only: item.public_only(),
+        group: item.group(),
     };
     manager.remove(id);
     assert_eq!(manager.video_source(id), None);
@@ -3176,6 +3177,7 @@ fn unremove_restores_started_for_single_connection_partial() {
         video_source: manager.video_source(id),
         started: manager.has_started(id),
         public_only: item.public_only(),
+        group: item.group(),
     };
     manager.remove(id);
     assert!(
@@ -7193,6 +7195,7 @@ fn released_reservation_wakes_parked_unremoved_row() {
         }),
         started: false,
         public_only: false,
+        group: None,
     };
     let revived = manager.unremove(snap);
     let id = revived.id();
@@ -7273,6 +7276,7 @@ fn an_unremove_of_a_settled_row_stays_settled_while_reserved() {
         }),
         started: false,
         public_only: false,
+        group: None,
     };
     let revived = manager.unremove(snap);
     assert_eq!(

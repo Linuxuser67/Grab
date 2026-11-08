@@ -1,11 +1,12 @@
 //! Row object: `DownloadItem` GObject subclass, wrapper and accessors.
 
 use gtk4::glib;
+use gtk4::glib::subclass::types::ObjectSubclassIsExt;
 
 mod imp {
     use std::cell::{Cell, RefCell};
 
-    use crate::download_store::DownloadStatus;
+    use crate::download_store::{DownloadGroup, DownloadStatus};
     use gtk4::glib;
     use gtk4::glib::object::ObjectExt as _;
     use gtk4::glib::subclass::prelude::*;
@@ -58,12 +59,8 @@ mod imp {
         /// Full error log for the failure dialog; `detail` holds the summary.
         #[property(get, set)]
         pub error_log: RefCell<String>,
-        /// Stable parent identity for rows created by one multi-item intake; zero means ungrouped.
-        #[property(get, set)]
-        pub group_id: Cell<u64>,
-        /// Human-readable collection name displayed by the expandable group row.
-        #[property(get, set)]
-        pub group_title: RefCell<String>,
+        /// Optional multi-item source collection shared by this child row.
+        pub group: RefCell<Option<DownloadGroup>>,
     }
 
     #[glib::object_subclass]
@@ -81,6 +78,16 @@ glib::wrapper! {
 }
 
 impl DownloadItem {
+    /// The collection this child belongs to, if it was queued from a multi-item source.
+    pub(crate) fn group(&self) -> Option<DownloadGroup> {
+        self.imp().group.borrow().clone()
+    }
+
+    /// Set or clear this row's collection membership.
+    pub(crate) fn set_group(&self, group: Option<DownloadGroup>) {
+        *self.imp().group.borrow_mut() = group;
+    }
+
     /// Create a list item; prefer [`DownloadManager::enqueue`] which dedupes.
     pub fn new(id: u64, url: &str, filename: &str, dest_dir: &str) -> Self {
         glib::Object::builder()

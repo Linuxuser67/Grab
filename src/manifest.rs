@@ -69,6 +69,16 @@ pub(crate) enum ManifestError {
     Serialize,
     #[error("the live HLS recording reached a bounded capture limit")]
     LiveCaptureLimit,
+    #[error("LL-HLS parent duration does not match the accumulated part durations")]
+    LivePartDurationMismatch,
+    #[error("LL-HLS unit identities are missing or inconsistent")]
+    LiveUnitIdentityInvalid,
+    #[error("an overlapping LL-HLS unit changed its resource identity")]
+    LiveUnitIdentityChanged,
+    #[error("LL-HLS units changed their committed presentation order")]
+    LiveUnitOrderChanged,
+    #[error("the live HLS target duration changed during capture")]
+    LiveTargetDurationChanged,
     #[error("the live HLS playlist can no longer be continued without losing media")]
     LiveSequenceGap,
 }
@@ -463,8 +473,10 @@ impl HlsPlan {
     }
 }
 
-/// Bound the number of segments retained by one native live-HLS recording.
+/// Bound ordinary live-HLS media segments retained by one recording.
 pub(crate) const MAX_HLS_LIVE_SEGMENTS: usize = 100_000;
+/// LL-HLS parts are finer-grained than media segments, so give them a separate unit ceiling.
+pub(crate) const MAX_HLS_LIVE_UNITS: usize = 250_000;
 pub(crate) const MAX_HLS_LOCAL_PLAYLIST_BYTES: usize = 32 * 1024 * 1024;
 pub(crate) const MAX_HLS_LIVE_CAPTURE_BYTES: u64 = 1 << 40;
 
@@ -512,6 +524,7 @@ pub(crate) struct HlsLiveAccumulator {
     target_duration: Option<u64>,
     segment_identities: Vec<String>,
     ll_unit_ids: Option<Vec<hls_ll::HlsLiveUnitId>>,
+    ll_index: Option<hls_ll::HlsLiveIndex>,
     seen_resources: HashSet<String>,
     seen_key_resources: HashSet<String>,
     total_resource_bytes: u64,
@@ -569,7 +582,6 @@ impl HlsLiveAccumulator {
         if !playlist.end_list
             || playlist.playlist_type != Some(MediaPlaylistType::Vod)
             || playlist.segments.is_empty()
-            || playlist.segments.len() > MAX_HLS_LIVE_SEGMENTS
             || playlist.target_duration == 0
             || !playlist.unknown_tags.is_empty()
         {
@@ -662,6 +674,17 @@ impl HlsLiveAccumulator {
         } else {
             None
         };
+        let segment_limit = if contains_ll_units {
+            MAX_HLS_LIVE_UNITS
+        } else {
+            MAX_HLS_LIVE_SEGMENTS
+        };
+        if playlist.segments.len() > segment_limit {
+            return Err(ManifestError::LiveCaptureLimit);
+        }
+        let ll_index = ll_unit_ids.as_deref().map(|ids| {
+            hls_ll::HlsLiveIndex::from_units(ids, &playlist.segments)
+        });
 
         Ok(Self {
             local_playlist: Some(playlist),
@@ -670,6 +693,7 @@ impl HlsLiveAccumulator {
             target_duration: Some(target_duration),
             segment_identities,
             ll_unit_ids,
+            ll_index,
             seen_resources,
             seen_key_resources,
             total_resource_bytes: 0,
@@ -837,11 +861,16 @@ impl HlsLiveAccumulator {
             }
         };
 
+        let segment_limit = if update.ll_update || self.ll_unit_ids.is_some() {
+            MAX_HLS_LIVE_UNITS
+        } else {
+            MAX_HLS_LIVE_SEGMENTS
+        };
         if playlist
             .segments
             .len()
             .saturating_add(update.new_segments.len())
-            > MAX_HLS_LIVE_SEGMENTS
+            > segment_limit
         {
             return Err(ManifestError::LiveCaptureLimit);
         }
@@ -883,6 +912,14 @@ impl HlsLiveAccumulator {
         self.segment_identities
             .extend(update.new_segments.iter().map(hls_segment_identity));
         if update.ll_update {
+            let first_new_index = self.ll_unit_ids.as_ref().map_or(0, Vec::len);
+            self.ll_index
+                .get_or_insert_with(hls_ll::HlsLiveIndex::default)
+                .extend(
+                    &update.ll_new_unit_ids,
+                    &update.new_segments,
+                    first_new_index,
+                );
             self.ll_unit_ids
                 .get_or_insert_with(Vec::new)
                 .extend(update.ll_new_unit_ids);

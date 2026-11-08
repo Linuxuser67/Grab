@@ -782,7 +782,13 @@ async fn resolve_manifest_tracks(
             )
         })?
     } else {
-        match crate::manifest_intake::lookup_with_client(&client, &job.source.url, job.proxy.is_some()).await {
+        match crate::manifest_intake::lookup_with_client(
+            &client,
+            &job.source.url,
+            job.proxy.is_some(),
+        )
+        .await
+        {
             Ok(Some(lookup)) if lookup.kind() == job.source.kind => {
                 match resolve_tracks(&client, lookup, &job.source, &mut guarded_child_hosts).await {
                     Ok(tracks) => tracks,

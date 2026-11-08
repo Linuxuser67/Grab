@@ -4235,7 +4235,10 @@ impl DownloadManager {
 
     /// Reset one failed/cancelled row without persisting or waking the scheduler.
     fn requeue_failed_item(&self, item: &DownloadItem) -> bool {
-        if !matches!(item.status(), DownloadStatus::Failed | DownloadStatus::Cancelled) {
+        if !matches!(
+            item.status(),
+            DownloadStatus::Failed | DownloadStatus::Cancelled
+        ) {
             return false;
         }
         let id = item.id();

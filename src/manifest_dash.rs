@@ -11,6 +11,9 @@ use super::{MAX_MANIFEST_BYTES, ManifestByteRange};
 
 #[path = "manifest_dash_sidx.rs"]
 mod sidx;
+
+#[path = "manifest_dash_ll.rs"]
+mod low_latency;
 #[cfg(test)]
 pub(crate) use sidx::resolve_segment_base_index;
 pub(crate) use sidx::{
@@ -21,8 +24,6 @@ const MAX_REPRESENTATIONS: usize = 1_024;
 const MAX_SEGMENTS: usize = 100_000;
 const MIN_DYNAMIC_UPDATE_PERIOD: Duration = Duration::from_millis(500);
 const MAX_DYNAMIC_UPDATE_PERIOD: Duration = Duration::from_secs(300);
-// Bound how far ahead an untrusted MPD can make live segments appear available.
-const MAX_DASH_AVAILABILITY_OFFSET: Duration = Duration::from_secs(30);
 // DASH-IF's current HTTPS identifier, the HTTP identifier emitted by FFmpeg,
 // and the ISO trick-mode URN used by other DASH packagers.
 const DASH_TRICK_MODE_SCHEMES: [&str; 3] = [
@@ -1668,18 +1669,6 @@ fn effective_addressing(
     Ok(addressing)
 }
 
-fn parse_availability_time_offset(seconds: f64) -> Result<Duration, DashError> {
-    if !seconds.is_finite() || seconds < 0.0 {
-        return Err(DashError::UnsupportedAddressing);
-    }
-    let offset = Duration::try_from_secs_f64(seconds)
-        .map_err(|_| DashError::UnsupportedAddressing)?;
-    if offset > MAX_DASH_AVAILABILITY_OFFSET {
-        return Err(DashError::UnsupportedAddressing);
-    }
-    Ok(offset)
-}
-
 fn effective_template(
     levels: &[Option<&dash_mpd_core::SegmentTemplate>],
     period_duration: Duration,
@@ -1810,19 +1799,11 @@ fn effective_template(
     }
 
     let availability_time_offset = availability_time_offset
-        .map(parse_availability_time_offset)
+        .map(low_latency::parse_availability_time_offset)
         .transpose()?
         .unwrap_or_default();
     let availability_time_complete = availability_time_complete.unwrap_or(true);
-    if (!is_dynamic
-        && (!availability_time_offset.is_zero() || !availability_time_complete))
-        || (!availability_time_complete && availability_time_offset.is_zero())
-    {
-        return Err(DashError::UnsupportedAddressing);
-    }
-
-    // For the supported LL-DASH profile the offset may expose only the
-    // currently-produced segment, not segments whose media has not started.
+    // The bounded LL-DASH policy is isolated from the generic MPD model.
     let shortest_segment = match timeline.as_deref() {
         Some(entries) if !entries.is_empty() => entries
             .iter()
@@ -1837,9 +1818,12 @@ fn effective_template(
             timescale,
         )?,
     };
-    if availability_time_offset > shortest_segment {
-        return Err(DashError::UnsupportedAddressing);
-    }
+    low_latency::validate_template_availability(
+        is_dynamic,
+        availability_time_offset,
+        availability_time_complete,
+        shortest_segment,
+    )?;
 
     Ok(DashTemplate {
         media,
@@ -2723,6 +2707,9 @@ fn expand_list(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[path = "manifest_dash_ll_tests.rs"]
+    mod low_latency;
 
     const BASE_URL: &str = "https://cdn.example.test/path/manifest.mpd";
     #[derive(Clone)]
@@ -4979,177 +4966,6 @@ mod tests {
         assert_eq!(
             parse_dash_manifest_at(BASE_URL, &dynamic, dynamic_test_clock(120)).err(),
             Some(DashError::UnsupportedAddressing)
-        );
-    }
-
-    #[test]
-    fn dynamic_segment_template_uses_availability_offset_for_chunked_live_segment() {
-        let body = r#"<MPD xmlns="urn:mpeg:dash:schema:mpd:2011"
-     type="dynamic"
-     availabilityStartTime="1970-01-01T00:00:00Z"
-     minimumUpdatePeriod="PT1S">
-  <Period start="PT0S">
-    <AdaptationSet contentType="video" mimeType="video/mp4">
-      <SegmentTemplate duration="4" startNumber="1"
-                       initialization="video-init.mp4"
-                       media="video-$Number$.m4s"
-                       availabilityTimeOffset="3"
-                       availabilityTimeComplete="false"/>
-      <Representation id="v1"/>
-    </AdaptationSet>
-  </Period>
-</MPD>"#;
-        let manifest = parse_dash_manifest_at(
-            BASE_URL,
-            body,
-            SystemTime::UNIX_EPOCH + Duration::from_secs(6),
-        )
-        .expect("supported LL-DASH SegmentTemplate should parse");
-        let representation = &manifest.video_representations[0];
-        let plan = plan_dash_representation(&manifest, &representation.live_key)
-            .expect("LL-DASH representation should expand");
-
-        assert!(plan.low_latency);
-        assert_eq!(
-            plan.resources
-                .iter()
-                .filter_map(|resource| resource.segment_number)
-                .collect::<Vec<_>>(),
-            vec![1, 2],
-            "the current incomplete segment is available at now + ATO"
-        );
-    }
-
-    #[test]
-    fn dynamic_segment_template_without_availability_offset_keeps_complete_segment_window() {
-        let body = r#"<MPD xmlns="urn:mpeg:dash:schema:mpd:2011"
-     type="dynamic"
-     availabilityStartTime="1970-01-01T00:00:00Z"
-     minimumUpdatePeriod="PT1S">
-  <Period start="PT0S">
-    <AdaptationSet contentType="video" mimeType="video/mp4">
-      <SegmentTemplate duration="4" startNumber="1" media="video-$Number$.m4s"/>
-      <Representation id="v1"/>
-    </AdaptationSet>
-  </Period>
-</MPD>"#;
-        let manifest = parse_dash_manifest_at(
-            BASE_URL,
-            body,
-            SystemTime::UNIX_EPOCH + Duration::from_secs(6),
-        )
-        .expect("ordinary dynamic DASH should continue to parse");
-        let plan = plan_dash_representation(
-            &manifest,
-            &manifest.video_representations[0].live_key,
-        )
-        .expect("ordinary dynamic representation should expand");
-
-        assert!(!plan.low_latency);
-        assert_eq!(
-            plan.resources
-                .iter()
-                .filter_map(|resource| resource.segment_number)
-                .collect::<Vec<_>>(),
-            vec![1],
-            "ordinary dynamic DASH still waits for the nominal segment end"
-        );
-    }
-
-    #[test]
-    fn dynamic_segment_template_inherits_and_bounds_availability_attributes() {
-        let inherited = r#"<MPD xmlns="urn:mpeg:dash:schema:mpd:2011"
-     type="dynamic"
-     availabilityStartTime="1970-01-01T00:00:00Z"
-     minimumUpdatePeriod="PT1S">
-  <Period start="PT0S">
-    <AdaptationSet contentType="video" mimeType="video/mp4">
-      <SegmentTemplate duration="4" startNumber="1"
-                       initialization="video-init.mp4"
-                       media="video-$Number$.m4s"
-                       availabilityTimeOffset="3"/>
-      <Representation id="v1">
-        <SegmentTemplate availabilityTimeOffset="2"
-                         availabilityTimeComplete="false"/>
-      </Representation>
-    </AdaptationSet>
-  </Period>
-</MPD>"#;
-        let manifest = parse_dash_manifest_at(
-            BASE_URL,
-            inherited,
-            SystemTime::UNIX_EPOCH + Duration::from_secs(6),
-        )
-        .expect("representation-level values should override inherited template values");
-        let plan = plan_dash_representation(
-            &manifest,
-            &manifest.video_representations[0].live_key,
-        )
-        .expect("inherited LL-DASH representation should expand");
-        assert!(plan.low_latency);
-        assert_eq!(
-            plan.resources
-                .iter()
-                .filter_map(|resource| resource.segment_number)
-                .collect::<Vec<_>>(),
-            vec![1, 2],
-            "the child ATO of two seconds overrides the parent ATO of three seconds"
-        );
-
-        let no_offset = inherited.replace(
-            "availabilityTimeOffset=\"2\"",
-            "availabilityTimeOffset=\"0\"",
-        );
-        assert_eq!(
-            parse_dash_manifest_at(
-                BASE_URL,
-                &no_offset,
-                SystemTime::UNIX_EPOCH + Duration::from_secs(6),
-            )
-            .err(),
-            Some(DashError::UnsupportedAddressing),
-            "an incomplete segment must advertise a positive availability offset"
-        );
-
-        let excessive = inherited.replace(
-            "availabilityTimeOffset=\"2\"",
-            "availabilityTimeOffset=\"4.1\"",
-        );
-        assert_eq!(
-            parse_dash_manifest_at(
-                BASE_URL,
-                &excessive,
-                SystemTime::UNIX_EPOCH + Duration::from_secs(6),
-            )
-            .err(),
-            Some(DashError::UnsupportedAddressing),
-            "the availability offset must not exceed the shortest segment duration"
-        );
-
-        let non_finite = inherited.replace(
-            "availabilityTimeOffset=\"2\"",
-            "availabilityTimeOffset=\"INF\"",
-        );
-        assert!(
-            parse_dash_manifest_at(
-                BASE_URL,
-                &non_finite,
-                SystemTime::UNIX_EPOCH + Duration::from_secs(6),
-            )
-            .is_err(),
-            "unbounded availability offsets remain unsupported"
-        );
-
-        let missing_init = inherited.replace("initialization=\"video-init.mp4\"\n", "");
-        assert_eq!(
-            parse_dash_manifest_at(
-                BASE_URL,
-                &missing_init,
-                SystemTime::UNIX_EPOCH + Duration::from_secs(6),
-            )
-            .err(),
-            Some(DashError::UnsupportedAddressing),
-            "chunked CMAF segments require an initialization resource"
         );
     }
 

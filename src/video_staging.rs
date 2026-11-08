@@ -2888,4 +2888,21 @@ mod tests {
 
         let _ = std::fs::remove_dir_all(&dir);
     }
+    #[test]
+    fn destination_sweep_preserves_unowned_legacy_probe_names() {
+        let dir = unique_dir("legacy-probe-preserved");
+        std::fs::create_dir_all(&dir).expect("create destination directory");
+        let id = 8_000_101u64;
+        let info = dir.join(format!(".grab-info-{id}.json"));
+        let live = dir.join(format!(".grab-live-{id}.json"));
+        std::fs::write(&info, b"user-owned info").expect("write legacy info name");
+        std::fs::write(&live, b"user-owned live").expect("write legacy live name");
+
+        sweep_dest_staging(&dir, &std::collections::HashSet::new());
+
+        assert_eq!(std::fs::read(&info).expect("read preserved info"), b"user-owned info");
+        assert_eq!(std::fs::read(&live).expect("read preserved live"), b"user-owned live");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
 }

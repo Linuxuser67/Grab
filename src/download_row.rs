@@ -58,6 +58,12 @@ mod imp {
         /// Full error log for the failure dialog; `detail` holds the summary.
         #[property(get, set)]
         pub error_log: RefCell<String>,
+        /// Stable parent identity for rows created by one multi-item intake; zero means ungrouped.
+        #[property(get, set)]
+        pub group_id: Cell<u64>,
+        /// Human-readable collection name displayed by the expandable group row.
+        #[property(get, set)]
+        pub group_title: RefCell<String>,
     }
 
     #[glib::object_subclass]

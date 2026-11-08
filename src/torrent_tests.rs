@@ -609,8 +609,10 @@ fn magnet_metadata_is_cached_and_used_to_clean_unselected_files() {
     std::fs::write(folder.join("a.txt"), b"selected").expect("write selected file");
     std::fs::write(folder.join("sub/b.txt"), b"unselected").expect("write unselected file");
 
-    cleanup_unselected(&folder, &magnet, &[0]);
+    let selected_size =
+        cleanup_unselected_and_measure(&folder, &magnet, Some(&[0])).expect("measure output");
 
+    assert_eq!(selected_size, b"selected".len() as u64);
     assert_eq!(
         std::fs::read(folder.join("a.txt")).expect("selected file remains"),
         b"selected"

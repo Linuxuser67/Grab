@@ -765,6 +765,19 @@ pub(crate) fn cleanup_unselected(folder: &std::path::Path, url: &str, selected: 
     }
 }
 
+/// Remove unselected torrent files before measuring the final output size.
+/// `None` means the whole torrent was selected; the folder still needs sizing.
+pub(crate) fn cleanup_unselected_and_measure(
+    folder: &std::path::Path,
+    url: &str,
+    selected: Option<&[usize]>,
+) -> Option<u64> {
+    if let Some(selected) = selected {
+        cleanup_unselected(folder, url, selected);
+    }
+    crate::file_names::path_size(folder)
+}
+
 /// Deletion target for one unselected entry (never the display path: it is truncated/stripped and may name nothing on disk). Pure.
 pub(crate) fn deletion_target(
     folder: &std::path::Path,

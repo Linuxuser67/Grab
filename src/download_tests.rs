@@ -6178,6 +6178,31 @@ fn drop_finished_duplicates_keeps_active_and_newest() {
 }
 
 #[test]
+fn drop_finished_duplicates_retains_torrent_rows_for_same_magnet() {
+    let _lock = lock_queue_file();
+    let _qf = test_queue_file("history-dedup-torrent");
+    let manager = DownloadManager::new(
+        gio::ListStore::new::<DownloadItem>(),
+        test_settings(),
+    );
+    let magnet = "magnet:?xt=urn:btih:0123456789012345678901234567890123456789";
+    for (id, output_dir) in [(1u64, "/tmp/dl/movie"), (2, "/tmp/dl/movie (1)")] {
+        let item = DownloadItem::new(id, magnet, "movie.mkv", "/tmp/dl");
+        item.set_output_dir(output_dir);
+        item.set_status(DownloadStatus::Done);
+        manager.store().append(&item);
+    }
+
+    manager.drop_finished_duplicates(magnet, 2);
+
+    let retained: Vec<u64> = manager
+        .items()
+        .map(|item| item.id())
+        .collect();
+    assert_eq!(retained, vec![1, 2]);
+}
+
+#[test]
 fn enqueue_video_reserves_part_namespaced_stems() {
     // Foreign file under Grab's part namespace reserves the stem: intake dedupes onward.
     let (_q, _l) = test_locks();

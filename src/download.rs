@@ -1870,7 +1870,8 @@ impl DownloadManager {
         // pre-rename one, and folders sum contents. Paints "Finished" now,
         // refines with the measured size when it lands.
         self.set_finished_detail(&item, 0);
-        // Restored duplicates collapse too: the last Done row per URL wins.
+        // Restored non-torrent duplicates collapse too: the last Done row wins.
+        // A magnet can still represent multiple independently retained selections.
         self.drop_finished_duplicates(&url, item.id());
         // Keep the row's media identity: a restored video page must not fall
         // back to the generic file icon (same page-URL guard as
@@ -2644,21 +2645,22 @@ impl DownloadManager {
                                 done = true;
                                 break;
                             };
-                            // Size off the final path, measured off-thread (see
-                            // `set_finished_detail`): the engine measured the
-                            // pre-rename one. Paints the engine's size now,
-                            // refines with the measured size when it lands.
-                            this.set_finished_detail(&item, size);
+                            // Torrent stats report the complete metainfo size, including files
+                            // the user deselected. Their bytes are removed below, so measure the
+                            // output only after cleanup. Other engines' size remains authoritative.
+                            let cleanup_torrent = crate::torrent::is_torrent(&url);
+                            if cleanup_torrent {
+                                item.set_detail(gettext("Finished"));
+                            } else {
+                                // The engine measured the pre-rename path; the on-disk size
+                                // refines this after final-name adoption.
+                                this.set_finished_detail(&item, size);
+                            }
                             // Server-date stamping and torrent directory cleanup can perform filesystem
                             // metadata reads and recursive walks; snapshot plain inputs and defer them.
                             let mtime = this.server_mtime.borrow_mut().remove(&id);
                             let keep_server_date = this.settings.keep_server_date();
-                            // Finished is emitted only after seeding is disabled or its configured
-                            // limit is reached. At that point no peer needs boundary-piece bytes
-                            // in unselected files, so clean them for both modes.
-                            let cleanup_torrent = crate::torrent::is_torrent(&url);
-                            // Snapshot the filter before dropping its row-scoped state; the
-                            // filesystem cleanup runs later on a blocking worker.
+                            // Snapshot the filter before dropping its row-scoped state.
                             let cleanup_selection = cleanup_torrent
                                 .then(|| crate::torrent::get_selection(&url))
                                 .flatten();
@@ -2666,9 +2668,16 @@ impl DownloadManager {
                             let torrent_dest_dir = item.dest_dir().to_string();
                             let torrent_output_dir = item.output_dir().to_string();
                             let torrent_filename = item.filename().to_string();
+                            let torrent_sizing = Rc::clone(&this.sizing_inflight);
+                            if cleanup_torrent {
+                                torrent_sizing.set(torrent_sizing.get() + 1);
+                            }
+                            let weak_manager = Rc::downgrade(&this);
+                            let weak_item = item.downgrade();
                             item.set_progress(1.0);
                             item.set_status(DownloadStatus::Done);
-                            // One finished record per URL (Parabolic parity): re-downloads replace instead of stacking.
+                            // Non-torrent re-downloads replace their prior history row. Torrent
+                            // rows retain each completed selection, even when the magnet is shared.
                             this.drop_finished_duplicates(&url, id);
                             this.segment_state.borrow_mut().remove(&id);
                             this.torrent_pieces.borrow_mut().remove(&id);
@@ -2682,30 +2691,44 @@ impl DownloadManager {
                             if (keep_server_date && mtime.is_some()) || cleanup_torrent {
                                 let worker_url = url.clone();
                                 glib::spawn_future_local(async move {
-                                    let _ = gio::spawn_blocking(move || {
+                                    let measured_size = gio::spawn_blocking(move || {
                                         if keep_server_date
                                             && let Some(time) = mtime
                                             && let Ok(file) = std::fs::File::open(&finished_path)
                                         {
                                             let _ = file.set_modified(time);
                                         }
-                                        if let Some(selected) = cleanup_selection {
+                                        if cleanup_torrent {
                                             let folder = DownloadManager::torrent_folder_from_parts(
                                                 &torrent_dest_dir,
                                                 &worker_url,
                                                 &torrent_output_dir,
                                                 &torrent_filename,
                                             );
-                                            if folder.is_dir() {
-                                                crate::torrent::cleanup_unselected(
-                                                    &folder,
-                                                    &worker_url,
-                                                    &selected,
-                                                );
-                                            }
+                                            crate::torrent::cleanup_unselected_and_measure(
+                                                &folder,
+                                                &worker_url,
+                                                cleanup_selection.as_deref(),
+                                            )
+                                        } else {
+                                            None
                                         }
                                     })
                                     .await;
+                                    if cleanup_torrent {
+                                        torrent_sizing.set(torrent_sizing.get().saturating_sub(1));
+                                        if let (Ok(Some(size)), Some(manager), Some(item)) = (
+                                            measured_size,
+                                            weak_manager.upgrade(),
+                                            weak_item.upgrade(),
+                                        ) && manager.find(id).is_some()
+                                        {
+                                            item.set_detail(
+                                                gettext("Finished • {size}")
+                                                    .replace("{size}", &fmt_bytes(size)),
+                                            );
+                                        }
+                                    }
                                 });
                             }
                         }
@@ -4479,8 +4502,13 @@ impl DownloadManager {
             .collect()
     }
 
-    /// Drop finished rows for `url` other than `keep_id`: one finished record per URL (Parabolic parity). Store-only; callers persist.
+    /// Drop older non-torrent finished rows for the same URL. A magnet identifies
+    /// the torrent, not the selected file set, so completed torrent rows coexist.
+    /// Store-only; callers persist.
     pub(crate) fn drop_finished_duplicates(&self, url: &str, keep_id: u64) {
+        if crate::torrent::is_torrent(url) {
+            return;
+        }
         let Ok(key) = normalize_url(url) else {
             return;
         };

@@ -882,11 +882,8 @@ pub fn sweep_dest_staging(dest_dir: &Path, keep: &std::collections::HashSet<u64>
             }
             continue;
         }
-        // Old single-use probe JSONs: stale by definition after a restart.
-        if is_legacy_info_name(name_str) {
-            let _ = std::fs::remove_file(entry.path());
-            continue;
-        }
+        // Legacy destination-side probe names have no ownership marker.
+        // Leave them untouched: filename patterns alone cannot authorize deletion.
         // Find manifest files: .{id}.manifest.json (canonical) or legacy.
         let id = if let Some(id_str) = name_str
             .strip_prefix('.')
@@ -1041,15 +1038,6 @@ fn sweep_private_temps() {
             let _ = std::fs::remove_file(entry.path());
         }
     }
-}
-
-/// `.grab-info-{id}.json` / `.grab-live-{id}.json` (pre-runtime-dir names).
-fn is_legacy_info_name(name: &str) -> bool {
-    let rest = name
-        .strip_prefix(".grab-info-")
-        .or_else(|| name.strip_prefix(".grab-live-"));
-    rest.and_then(|s| s.strip_suffix(".json"))
-        .is_some_and(|id| !id.is_empty() && id.bytes().all(|b| b.is_ascii_digit()))
 }
 
 /// `info-{id}.json` / `live-{id}.json` in the private scratch root.
@@ -2898,6 +2886,28 @@ mod tests {
             "unowned files resembling legacy parts must survive row cleanup"
         );
 
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+    #[test]
+    fn destination_sweep_preserves_unowned_legacy_probe_names() {
+        let dir = unique_dir("legacy-probe-preserved");
+        std::fs::create_dir_all(&dir).expect("create destination directory");
+        let id = 8_000_101u64;
+        let info = dir.join(format!(".grab-info-{id}.json"));
+        let live = dir.join(format!(".grab-live-{id}.json"));
+        std::fs::write(&info, b"user-owned info").expect("write legacy info name");
+        std::fs::write(&live, b"user-owned live").expect("write legacy live name");
+
+        sweep_dest_staging(&dir, &std::collections::HashSet::new());
+
+        assert_eq!(
+            std::fs::read(&info).expect("read preserved info"),
+            b"user-owned info"
+        );
+        assert_eq!(
+            std::fs::read(&live).expect("read preserved live"),
+            b"user-owned live"
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

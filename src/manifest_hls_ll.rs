@@ -547,7 +547,6 @@ impl HlsRenditionReport {
     }
 }
 
-
 fn append_part_units(
     base_url: &Url,
     media_sequence: u64,

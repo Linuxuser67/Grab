@@ -70,6 +70,8 @@ pub(crate) struct DashRepresentation {
     pub(crate) key: String,
     /// Stable live key also recognized when a dynamic MPD becomes static.
     pub(crate) live_key: String,
+    /// Previous policy-sensitive key accepted while an existing capture is upgraded.
+    pub(crate) legacy_live_key: Option<String>,
     pub(crate) representation_id: Option<String>,
     pub(crate) bandwidth: Option<u64>,
     pub(crate) width: Option<u64>,
@@ -84,6 +86,14 @@ pub(crate) struct DashRepresentation {
     source: DashRepresentationSource,
     /// Additional period-local addressing sources in MPD presentation order.
     additional_sources: Vec<DashRepresentationSource>,
+}
+
+impl DashRepresentation {
+    pub(crate) fn matches_key(&self, key: &str) -> bool {
+        self.key == key
+            || self.live_key == key
+            || self.legacy_live_key.as_deref() == Some(key)
+    }
 }
 
 /// Timing model shared by all representations in a DASH presentation.
@@ -315,6 +325,12 @@ struct DashTemplate {
     /// Whether a media segment is complete when its adjusted availability begins.
     availability_time_complete: bool,
     period_duration: Duration,
+}
+
+impl DashTemplate {
+    fn is_low_latency(&self) -> bool {
+        !self.availability_time_complete
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -639,13 +655,11 @@ pub(crate) fn parse_dash_manifest_at(
                     addressing_duration,
                     is_dynamic,
                 )?;
-                if matches!(
-                    &addressing,
-                    DashAddressing::Template(template) if !template.availability_time_complete
-                ) && !mime_type.as_deref().is_some_and(|mime| {
-                    mime.eq_ignore_ascii_case("video/mp4") || mime.eq_ignore_ascii_case("audio/mp4")
-                }) {
-                    return Err(DashError::UnsupportedAddressing);
+                if let DashAddressing::Template(template) = &addressing {
+                    low_latency::validate_template_mime(
+                        template.is_low_latency(),
+                        mime_type.as_deref(),
+                    )?;
                 }
                 if matches!(
                     &addressing,
@@ -679,6 +693,9 @@ pub(crate) fn parse_dash_manifest_at(
                     addressing: &addressing,
                 };
                 let live_key = stable_live_representation_key(identity);
+                let legacy_live_key = is_dynamic
+                    .then(|| legacy_live_representation_key(identity))
+                    .filter(|legacy| legacy != &live_key);
                 let key = if is_dynamic {
                     live_key.clone()
                 } else {
@@ -688,6 +705,7 @@ pub(crate) fn parse_dash_manifest_at(
                 let choice = DashRepresentation {
                     key,
                     live_key,
+                    legacy_live_key,
                     representation_id,
                     bandwidth,
                     width,
@@ -965,16 +983,15 @@ pub(crate) fn plan_dash_representation(
         .iter()
         .chain(manifest.audio_representations.iter())
         .chain(manifest.subtitle_representations.iter())
-        .find(|candidate| {
-            candidate.key == representation_key || candidate.live_key == representation_key
-        })
+        .find(|candidate| candidate.matches_key(representation_key))
         .cloned()
         .ok_or(DashError::UnsupportedAddressing)?;
 
-    let live_selection = representation_key == representation.live_key;
+    let live_selection = representation_key == representation.live_key
+        || representation.legacy_live_key.as_deref() == Some(representation_key);
     let low_latency = matches!(
         &representation.source.addressing,
-        DashAddressing::Template(template) if !template.availability_time_complete
+        DashAddressing::Template(template) if template.is_low_latency()
     );
     let mut sources = Vec::with_capacity(1 + representation.additional_sources.len());
     sources.push(representation.source.clone());
@@ -1282,6 +1299,18 @@ fn stable_representation_key(identity: RepresentationIdentity<'_>) -> String {
 
 /// Stable representation identity excluding the changing live segment window.
 fn stable_live_representation_key(identity: RepresentationIdentity<'_>) -> String {
+    live_representation_key(identity, false)
+}
+
+/// Preserve the former policy-sensitive key for an in-progress capture being upgraded.
+fn legacy_live_representation_key(identity: RepresentationIdentity<'_>) -> String {
+    live_representation_key(identity, true)
+}
+
+fn live_representation_key(
+    identity: RepresentationIdentity<'_>,
+    include_availability_policy: bool,
+) -> String {
     let RepresentationIdentity {
         id,
         kind,
@@ -1315,9 +1344,10 @@ fn stable_live_representation_key(identity: RepresentationIdentity<'_>) -> Strin
             hasher.update(b"template");
             hasher.update(template.media.as_bytes());
             hash_optional_number(&mut hasher, Some(template.timescale));
-            // Preserve historical keys for ordinary live DASH while separating
-            // recordings whose adjusted availability or chunk-completion policy changes.
-            if !template.availability_time_offset.is_zero() || !template.availability_time_complete
+            // Availability policy is refreshable metadata, not representation identity.
+            if include_availability_policy
+                && (!template.availability_time_offset.is_zero()
+                    || !template.availability_time_complete)
             {
                 hasher.update(b"availability");
                 hasher.update(template.availability_time_offset.as_nanos().to_le_bytes());
@@ -1809,24 +1839,6 @@ fn effective_template(
         availability_time_offset,
         availability_time_complete,
     )?;
-    if !availability_time_offset.is_zero() {
-        let shortest_segment = match timeline.as_deref() {
-            Some(entries) => entries
-                .iter()
-                .try_fold(None, |shortest: Option<Duration>, entry| {
-                    let duration = ticks_to_duration(entry.duration, timescale)?;
-                    Ok::<_, DashError>(Some(
-                        shortest.map_or(duration, |current| current.min(duration)),
-                    ))
-                })?
-                .ok_or(DashError::InvalidSegment)?,
-            None => ticks_to_duration(
-                duration_ticks.ok_or(DashError::UnsupportedAddressing)?,
-                timescale,
-            )?,
-        };
-        low_latency::validate_availability_time_offset(availability_time_offset, shortest_segment)?;
-    }
 
     Ok(DashTemplate {
         media,

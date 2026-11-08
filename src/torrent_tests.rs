@@ -182,6 +182,32 @@ fn torrent_socks_url_accepts_only_socks() {
 }
 
 #[test]
+fn torrent_session_proxy_changes_require_restart() {
+    let direct = SessionNetworkConfig { socks_proxy: None };
+    let socks = SessionNetworkConfig {
+        socks_proxy: Some("socks5://127.0.0.1:9050".to_string()),
+    };
+    let other_socks = SessionNetworkConfig {
+        socks_proxy: Some("socks5://127.0.0.1:9051".to_string()),
+    };
+
+    assert!(direct.ensure_matches(&direct).is_ok());
+    assert!(socks.ensure_matches(&socks).is_ok());
+    assert!(matches!(
+        direct.ensure_matches(&socks),
+        Err(TorrentError::SessionProxyMismatch(_))
+    ));
+    assert!(matches!(
+        socks.ensure_matches(&direct),
+        Err(TorrentError::SessionProxyMismatch(_))
+    ));
+    assert!(matches!(
+        socks.ensure_matches(&other_socks),
+        Err(TorrentError::SessionProxyMismatch(_))
+    ));
+}
+
+#[test]
 fn torrent_net_plan_direct_passthrough() {
     let trackers = Some(vec![
         "udp://tracker.example:80".to_string(),

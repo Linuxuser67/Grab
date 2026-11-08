@@ -1273,7 +1273,6 @@ async fn prepare_live_hls_finalization(
 ) -> Result<LiveCapturePreparation, ManifestRunError> {
     let ManifestLiveHlsFinalization {
         client,
-        proxy_configured,
         source_url,
         dest_dir,
         destination,
@@ -1294,7 +1293,6 @@ async fn prepare_live_hls_finalization(
 
     let capture = run_live_hls_tracks(
         client,
-        proxy_configured,
         source_url,
         dest_dir,
         destination,
@@ -1589,7 +1587,6 @@ pub(crate) async fn run_manifest_download(
         };
         match prepare_live_hls_finalization(ManifestLiveHlsFinalization {
             client: &client,
-            proxy_configured: job.proxy.is_some(),
             source_url: &job.source.url,
             dest_dir: &dest_dir,
             destination: &job.dest,

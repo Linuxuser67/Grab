@@ -262,11 +262,18 @@ The native path now supports:
 - Bounded hierarchical SIDX when the index and media ranges are in the same
   media resource.
 
+The native path also supports unindexed single-file SegmentBase with an
+explicit Initialization child. The initialization may be a bounded range in the
+media resource or a separate HTTPS resource; an unbounded initialization that
+resolves to the same media URL is rejected to avoid downloading the whole file
+twice. Initialization resources are staged before the media resource and are
+included in representation identity.
+
 The following remain explicit yt-dlp fallbacks:
 - External RepresentationIndex hierarchies and external index resources without
   an explicit bounded range.
-- Separate initialization URLs, dynamic SegmentBase, and non-zero
-  `eptDelta`/`pbDelta`.
+- Dynamic SegmentBase and non-zero `eptDelta`/`pbDelta`.
+- BaseURL-level byte-range templates and WebM.
 
 `BaseURL@byteRange` remains unsupported. ISO/IEC 23009-1 Annex E defines it
 as an alternate byte-range URL template for regular GET requests when HTTP

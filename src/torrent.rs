@@ -1222,14 +1222,8 @@ pub(crate) fn blocklist_url_of(raw: &str) -> Result<Option<String>, TorrentError
 /// Live-apply the speed caps (peer limit has no live setter: creation + per-add only).
 pub(crate) fn apply_live_limits(download_bps: Option<u64>, upload_bps: Option<u64>) {
     if let Some(state) = SESSION.get() {
-        state
-            .session
-            .ratelimits
-            .set_download_bps(bps(download_bps));
-        state
-            .session
-            .ratelimits
-            .set_upload_bps(bps(upload_bps));
+        state.session.ratelimits.set_download_bps(bps(download_bps));
+        state.session.ratelimits.set_upload_bps(bps(upload_bps));
     }
 }
 

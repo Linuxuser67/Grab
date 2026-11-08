@@ -370,30 +370,6 @@ pub(crate) fn parse_dash_manifest(
     parse_dash_manifest_at(manifest_url, body, SystemTime::now())
 }
 
-/// Parse static period-continuous or bounded single-period dynamic DASH into selectable representations.
-///
-/// Dynamic support is limited to HTTPS SegmentTemplate presentations with a
-/// finite MPD update interval. The bounded LL-DASH profile also accepts
-/// SegmentTemplate availability offsets and chunked, incomplete media responses.
-/// Static SegmentBase supports
-/// either a single-file download or indexed byte-range resources described by a
-/// flat SIDX and an Initialization range. Single-file assets are still subject
-/// to the 1 GiB per-resource limit. Multiple static periods require explicit DASH-IF
-/// period-continuity signaling, stable adaptation/representation IDs, and contiguous timing.
-/// DRM, XLink, adaptation-set
-/// Subset/Preselection combinations, dynamic SegmentList, SegmentBase
-/// with an Initialization@sourceURL or non-zero presentation-time offset,
-/// hierarchical SIDX, BaseURL-level availability signalling, and WebM
-/// remain on yt-dlp fallback.
-///
-/// # Errors
-/// Returns an error when the MPD is malformed, exceeds the input limit, uses
-/// unsupported features, or contains no supported video representation.
-///
-/// The `server_now` argument is the availability clock derived from the HTTP Date header.
-/// SCTE-35 EventStream signaling can mark ad insertion intervals. Until the
-/// native planner can remove those intervals from every selected rendition,
-/// refuse the presentation rather than silently downloading the marked media.
 fn period_has_scte35_ad_signaling(period: &dash_mpd_core::Period) -> bool {
     fn is_scte35_scheme(scheme: &str) -> bool {
         scheme
@@ -420,6 +396,27 @@ fn period_has_scte35_ad_signaling(period: &dash_mpd_core::Period) -> bool {
         })
 }
 
+/// Parse static period-continuous or bounded single-period dynamic DASH into selectable representations.
+///
+/// Dynamic support is limited to HTTPS SegmentTemplate presentations with a
+/// finite MPD update interval. The bounded LL-DASH profile also accepts
+/// SegmentTemplate availability offsets and chunked, incomplete media responses.
+/// Static SegmentBase supports
+/// either a single-file download or indexed byte-range resources described by a
+/// flat SIDX and an Initialization range. Single-file assets are still subject
+/// to the 1 GiB per-resource limit. Multiple static periods require explicit DASH-IF
+/// period-continuity signaling, stable adaptation/representation IDs, and contiguous timing.
+/// DRM, XLink, adaptation-set
+/// Subset/Preselection combinations, dynamic SegmentList, SegmentBase
+/// with an Initialization@sourceURL or non-zero presentation-time offset,
+/// hierarchical SIDX, BaseURL-level availability signalling, and WebM
+/// remain on yt-dlp fallback.
+///
+/// # Errors
+/// Returns an error when the MPD is malformed, exceeds the input limit, uses
+/// unsupported features, or contains no supported video representation.
+///
+/// The `server_now` argument is the availability clock derived from the HTTP Date header.
 pub(crate) fn parse_dash_manifest_at(
     manifest_url: &str,
     body: &str,
@@ -5142,6 +5139,7 @@ mod tests {
             Some(DashError::Parse)
         );
     }
+
     #[test]
     fn rejects_scte35_ad_signaling_in_period_and_inband_event_streams() {
         let period_event = r#"<MPD xmlns="urn:mpeg:dash:schema:mpd:2011" type="static" mediaPresentationDuration="PT2S"><Period duration="PT2S"><EventStream schemeIdUri="urn:scte:scte35:2013:xml"><Event id="1" presentationTime="0" duration="2"/></EventStream><AdaptationSet contentType="video" mimeType="video/mp4"><SegmentTemplate media="v-$Number$.m4s" duration="2"/><Representation id="v1" bandwidth="500000"/></AdaptationSet></Period></MPD>"#;

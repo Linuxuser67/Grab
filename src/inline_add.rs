@@ -3597,7 +3597,9 @@ fn build_submit_handler(context: SubmitContext) -> SubmitHandler {
                                         lookup_scheduled.get(),
                                         move |directory| async move {
                                             if enqueue_manager.has_nonterminal_url(&enqueue_url) {
-                                                return Err(gettext("Torrent is already in the queue"));
+                                                return Err(gettext(
+                                                    "Torrent is already in the queue",
+                                                ));
                                             }
                                             crate::torrent::drop_selection(&enqueue_url);
                                             enqueue_manager

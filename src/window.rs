@@ -456,7 +456,7 @@ pub fn build_window(
     view_stack.add_titled_with_icon(
         &downloaded_page,
         Some("downloaded"),
-        &gettext("Downloaded"),
+        &gettext("Done"),
         "folder-download-symbolic",
     );
     all_page.append(&scroll);

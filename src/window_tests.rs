@@ -527,6 +527,13 @@ fn status_views_use_gnome_adaptive_view_switcher() {
                 Some(expected_icon),
                 "the {name} tab keeps its symbolic icon in both navigation layouts"
             );
+            if name == "downloaded" {
+                assert_eq!(
+                    view_stack.page(&child).title().as_deref(),
+                    Some(gettextrs::gettext("Done").as_str()),
+                    "the completed-download tab is labelled Done"
+                );
+            }
         }
 
         let scroll = find_widget_by_name(window.upcast_ref(), "download-list-scroll")

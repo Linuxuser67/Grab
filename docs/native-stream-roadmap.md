@@ -263,10 +263,11 @@ The native path now supports:
   media resource.
 
 The native path also supports unindexed single-file SegmentBase with an
-explicit Initialization child. The initialization must resolve to a separate HTTPS resource and may
-include a bounded byte range. In-file initialization ranges remain on fallback
-because the whole-file media resource would otherwise duplicate those bytes. Initialization resources are staged before the media resource and are
-included in representation identity.
+explicit Initialization child. The initialization must resolve to a separate
+HTTPS resource and may include a bounded byte range. In-file initialization
+ranges remain on fallback because the whole-file media resource would otherwise
+duplicate those bytes. Initialization resources are staged before the media
+resource and are included in representation identity.
 
 The following remain explicit yt-dlp fallbacks:
 - External RepresentationIndex hierarchies and external index resources without

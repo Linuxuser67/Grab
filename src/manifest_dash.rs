@@ -2714,12 +2714,8 @@ fn expand_base(representation: &DashRepresentation) -> Result<Vec<DashResource>,
         if initialization_url == media_url {
             return Err(DashError::UnsupportedAddressing);
         }
-        let filename = super::resource_filename(
-            "dash-init",
-            None,
-            &initialization_url,
-            *range,
-        );
+        let filename =
+            super::resource_filename("dash-init", None, &initialization_url, *range);
         resources.push(DashResource {
             url: initialization_url,
             range: *range,
@@ -5081,14 +5077,18 @@ mod tests {
     </AdaptationSet>
   </Period>
 </MPD>"#;
-        let manifest = parse_dash_manifest(BASE_URL, body).expect("bounded external init should parse");
+        let manifest =
+            parse_dash_manifest(BASE_URL, body).expect("bounded external init should parse");
         let plan = plan_dash_representation(&manifest, &manifest.video_representations[0].key)
             .expect("bounded external init should expand");
         assert_eq!(plan.resources.len(), 2);
         assert_eq!(plan.resources[0].kind, DashResourceKind::Initialization);
         assert_eq!(
             plan.resources[0].range,
-            Some(ManifestByteRange { offset: 20, length: 100 })
+            Some(ManifestByteRange {
+                offset: 20,
+                length: 100
+            })
         );
         assert_eq!(
             plan.resources[0].url.as_str(),
@@ -5107,7 +5107,8 @@ mod tests {
             let body = format!(
                 r#"<MPD xmlns="urn:mpeg:dash:schema:mpd:2011" type="static" mediaPresentationDuration="PT4S"><Period duration="PT4S"><AdaptationSet contentType="video" mimeType="video/mp4"><Representation id="v1"><BaseURL>video.mp4</BaseURL><SegmentBase>{initialization}</SegmentBase></Representation></AdaptationSet></Period></MPD>"#
             );
-            let manifest = parse_dash_manifest(BASE_URL, &body).expect("manifest metadata is valid");
+            let manifest =
+                parse_dash_manifest(BASE_URL, &body).expect("manifest metadata is valid");
             assert_eq!(
                 plan_dash_representation(&manifest, &manifest.video_representations[0].key).err(),
                 Some(DashError::UnsupportedAddressing),

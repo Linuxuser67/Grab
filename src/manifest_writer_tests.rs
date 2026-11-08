@@ -1078,3 +1078,90 @@ async fn streamed_destination_writer_resumes_without_staged_source_files() {
         .await
         .expect("remove HLS writer test directory");
 }
+
+#[tokio::test]
+async fn missing_appendable_checkpoint_preserves_existing_destination_part() {
+    let root = test_directory();
+    let staging = root.join("staging");
+    let track_directory = staging.join("video");
+    let destination = root.join("destination");
+    tokio::fs::create_dir_all(&track_directory)
+        .await
+        .expect("create track staging");
+    tokio::fs::create_dir_all(&destination)
+        .await
+        .expect("create destination");
+    let output = destination.join("recording.mp4");
+    crate::manifest_destination::ensure_plan(&staging, &output, 91, false, false)
+        .expect("create destination plan");
+    tokio::fs::write(track_directory.join("first.bin"), b"committed")
+        .await
+        .expect("write source resource");
+    let resources = vec!["first.bin".to_string()];
+    let (_stop_tx, mut abort) = stop_channel();
+
+    let (Some(mut writer), _) = OrderedTrackWriter::open_appendable_destination_part(
+        resources.clone(),
+        &track_directory,
+        &staging,
+        "video-track.mp4",
+        &output,
+        91,
+        crate::manifest_destination::TrackKind::Video,
+    )
+    .await
+    .expect("open appendable destination writer") else {
+        panic!("fresh destination writer must be active");
+    };
+    assert!(
+        writer
+            .append_next(&mut abort)
+            .await
+            .expect("append resource")
+    );
+    writer
+        .finish()
+        .await
+        .expect("flush committed destination prefix");
+
+    let part = crate::manifest_destination::part_path(
+        &staging,
+        &output,
+        91,
+        crate::manifest_destination::TrackKind::Video,
+    )
+    .expect("resolve destination part");
+    let before = tokio::fs::read(&part).await.expect("read committed part");
+    tokio::fs::remove_file(track_directory.join("video-track.mp4.checkpoint.json"))
+        .await
+        .expect("simulate missing checkpoint");
+    tokio::fs::remove_file(track_directory.join("video-track.mp4.resources"))
+        .await
+        .expect("simulate missing resource journal");
+
+    let reopened = OrderedTrackWriter::open_appendable_destination_part(
+        resources,
+        &track_directory,
+        &staging,
+        "video-track.mp4",
+        &output,
+        91,
+        crate::manifest_destination::TrackKind::Video,
+    )
+    .await;
+    assert!(
+        reopened.is_err(),
+        "a missing checkpoint must not reopen an existing appendable destination part as fresh"
+    );
+    assert_eq!(
+        tokio::fs::read(&part)
+            .await
+            .expect("re-read preserved part"),
+        before,
+        "committed destination bytes must remain unchanged"
+    );
+
+    tokio::fs::remove_dir_all(root)
+        .await
+        .expect("remove writer test directory");
+}

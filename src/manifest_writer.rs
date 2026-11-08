@@ -1242,6 +1242,31 @@ async fn load_checkpoint(
         }
     };
     let Some(_metadata) = checkpoint_metadata else {
+        // Appendable destination parts outlive their source segments. A missing
+        // checkpoint therefore cannot be interpreted as a fresh recording:
+        // doing so would reset the committed offset and truncate the only copy.
+        if allow_part_and_target {
+            for (path, description) in [
+                (journal_path, "resource journal"),
+                (part, "destination part"),
+                (target, "published destination"),
+            ] {
+                match tokio::fs::symlink_metadata(path).await {
+                    Ok(_) => {
+                        return Err(format!(
+                            "The manifest writer checkpoint is missing while its {description} still exists; existing data was preserved"
+                        ));
+                    }
+                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                    Err(error) => {
+                        return Err(format!(
+                            "Could not inspect {} while validating a missing checkpoint: {error}",
+                            path.display()
+                        ));
+                    }
+                }
+            }
+        }
         return Ok(CheckpointState::Fresh);
     };
 

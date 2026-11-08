@@ -1504,6 +1504,17 @@ async fn prepare_live_dash_finalization(
         capture.outcome,
         DashLiveCaptureOutcome::FinishVideoOnly | DashLiveCaptureOutcome::Unrecoverable
     ) {
+        // The shared finalizer skips audio when has_audio is false. Remove its
+        // owned destination part now, while the destination plan and inode
+        // ownership record are still available in XDG staging.
+        crate::manifest_destination::remove_owned_part_async(
+            staging.to_path_buf(),
+            dest_dir.to_path_buf(),
+            item_id,
+            crate::manifest_destination::TrackKind::Audio,
+        )
+        .await
+        .map_err(ManifestRunError::Failed)?;
         remove_regular_file_if_present(&audio_dir.join(DASH_LIVE_STATE_NAME))
             .await
             .map_err(ManifestRunError::Failed)?;

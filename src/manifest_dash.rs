@@ -1317,7 +1317,8 @@ fn stable_live_representation_key(identity: RepresentationIdentity<'_>) -> Strin
             hash_optional_number(&mut hasher, Some(template.timescale));
             // Preserve historical keys for ordinary live DASH while separating
             // recordings whose adjusted availability or chunk-completion policy changes.
-            if !template.availability_time_offset.is_zero() || !template.availability_time_complete {
+            if !template.availability_time_offset.is_zero() || !template.availability_time_complete
+            {
                 hasher.update(b"availability");
                 hasher.update(template.availability_time_offset.as_nanos().to_le_bytes());
                 hasher.update([u8::from(template.availability_time_complete)]);

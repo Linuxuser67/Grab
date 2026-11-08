@@ -1236,22 +1236,20 @@ mod tests {
             .expect("build fixture client");
         let parent = Url::parse(&format!("http://{address}/manifest.mpd")).expect("parent URL");
         let body = br#"<MPD xmlns="urn:mpeg:dash:schema:mpd:2011" xmlns:xlink="http://www.w3.org/1999/xlink"><Period xlink:href="period.xml" xlink:actuate="onLoad"/></MPD>"#;
-        let expanded =
-            resolve_dash_xlinks(
-                &client,
-                &parent,
-                body,
-                ManifestTransportPolicy::HttpFixture,
-                false,
-            )
-            .await
-                .expect("bounded Period XLink resolution");
+        let expanded = resolve_dash_xlinks(
+            &client,
+            &parent,
+            body,
+            ManifestTransportPolicy::HttpFixture,
+            false,
+        )
+        .await
+        .expect("bounded Period XLink resolution");
         server.await.expect("XLink fixture task");
         let expanded = std::str::from_utf8(&expanded).expect("expanded MPD is UTF-8");
         assert!(expanded.contains(r#"duration="PT2S""#));
         assert!(!expanded.contains("xlink:href"));
     }
-
 
     #[tokio::test(flavor = "current_thread")]
     async fn dash_xlink_fails_without_fallback_when_proxy_is_configured() {

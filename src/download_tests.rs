@@ -50,6 +50,31 @@ fn test_locks() -> (
     (lock_queue_file(), lock_main_loop())
 }
 
+/// Seed the manifest ownership record written by live/unified attempts.
+/// Discard cleanup must use this record rather than infer ownership by name.
+fn write_discard_manifest(
+    dest_dir: &std::path::Path,
+    id: u64,
+    staging_name: Option<String>,
+    staging_prefix: Option<String>,
+) {
+    let manifest = crate::video_staging::VideoManifest {
+        page_url: "https://example.test/video".to_string(),
+        quality: "1080p".to_string(),
+        video_format_id: None,
+        video_ext: "mp4".to_string(),
+        audio_format_id: String::new(),
+        audio_ext: String::new(),
+        final_bytes: None,
+        staging_name,
+        staging_prefix,
+        dest_dir: Some(dest_dir.to_path_buf()),
+    };
+    let path = crate::video_staging::manifest_path(dest_dir, id);
+    std::fs::create_dir_all(path.parent().expect("manifest parent")).unwrap();
+    std::fs::write(path, serde_json::to_vec(&manifest).unwrap()).unwrap();
+}
+
 struct FinalNameAfterMoveBarrier {
     entered: std::sync::mpsc::Receiver<()>,
     released: Arc<(std::sync::Mutex<bool>, std::sync::Condvar)>,
@@ -5271,8 +5296,18 @@ fn remove_tells_a_live_worker_to_discard_and_waits_for_it_to_stop() {
     std::fs::create_dir_all(&dest_dir).unwrap();
     // Visible staging: grab-<id>-* files in the dest dir (no legacy subfolder).
     std::fs::write(dest_dir.join(format!(".grab-{id}-manifest.json")), b"{}").unwrap();
-    let part = dest_dir.join(format!("v.live-{id}.mp4.part"));
+    let part = dest_dir.join("v.live.mp4.part");
     std::fs::write(&part, b"recorded").unwrap();
+    // The ownership record names this part and the row's ID-prefixed
+    // staging files; similarly named user files are not owned.
+    write_discard_manifest(
+        &dest_dir,
+        id,
+        Some("v.live.mp4".to_string()),
+        Some(format!("grab-{id}-")),
+    );
+    let foreign = dest_dir.join("v.video.notes");
+    std::fs::write(&foreign, b"user file").unwrap();
 
     let item = DownloadItem::new(
         id,
@@ -6648,6 +6683,7 @@ fn a_removal_claims_the_gate_before_the_worker_can_commit() {
         .insert(id, std::sync::Arc::clone(&gate));
     let part = dest_dir.join(format!("v.live-{id}.mp4.part"));
     std::fs::write(&part, b"recorded").unwrap();
+    write_discard_manifest(&dest_dir, id, Some(format!("v.live-{id}.mp4")), None);
 
     manager.remove(id);
 
@@ -7288,6 +7324,7 @@ fn shutdown_during_a_pending_discard_stops_the_worker_rather_than_detaching_it()
     std::fs::write(dest_dir.join(format!(".grab-{id}-manifest.json")), b"{}").unwrap();
     let part = dest_dir.join("v.video.mp4");
     std::fs::write(&part, b"recorded").unwrap();
+    write_discard_manifest(&dest_dir, id, Some("v.video.mp4".to_string()), None);
 
     // A worker that runs long and records that it was dropped.
     let dropped = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
@@ -7323,8 +7360,12 @@ fn shutdown_during_a_pending_discard_stops_the_worker_rather_than_detaching_it()
     );
     assert!(
         !part.exists(),
-        "shutdown never ran the finalizer's dest-parts sweep: aborting finalizers \
+        "shutdown never ran the finalizer's manifest-owned cleanup: aborting finalizers \
          instead of awaiting them would leave this behind"
+    );
+    assert!(
+        dest_dir.join("v.video.notes").exists(),
+        "cleanup removed a similarly named file without manifest ownership"
     );
     let _ = std::fs::remove_dir_all(&dest_dir);
 }

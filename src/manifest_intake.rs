@@ -9,7 +9,6 @@ use std::sync::{LazyLock, Mutex};
 use std::time::{Duration, Instant, SystemTime};
 
 use gettextrs::gettext;
-use sha2::{Digest, Sha256};
 use url::Url;
 
 #[cfg(test)]
@@ -96,7 +95,7 @@ fn manifest_preview_cache_key(
     let effective_browser =
         preview_cookie_browser(&url, cookies_browser, ManifestTransportPolicy::HttpsOnly);
     let handoff_cookie_hash = crate::extension_server::live_handoff_identity(raw_url)
-        .and_then(|(path, _)| handoff_cookie_hash(&path));
+        .and_then(|(path, _)| crate::extension_server::handoff_cookie_hash(&path));
 
     Some(ManifestPreviewCacheKey {
         url: url.to_string(),
@@ -104,16 +103,6 @@ fn manifest_preview_cache_key(
         handoff_cookie_hash,
         proxy: proxy.map(|resolved| resolved.cli_url.clone()),
     })
-}
-
-/// Hash a staged handoff jar by content so a fresh jar with the same cookies
-/// reuses the preview instead of missing on its new temporary path.
-fn handoff_cookie_hash(path: &std::path::Path) -> Option<[u8; 32]> {
-    let contents = std::fs::read(path).ok()?;
-    let digest = Sha256::digest(contents);
-    let mut hash = [0_u8; 32];
-    hash.copy_from_slice(&digest);
-    Some(hash)
 }
 
 fn manifest_preview_cache_get(key: &ManifestPreviewCacheKey) -> Option<ManifestLookup> {
@@ -1119,6 +1108,7 @@ async fn read_bounded_response_with_limit(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::extension_server::handoff_cookie_hash;
     use crate::manifest_plan::{
         hls_audio_rendition_key, hls_audio_rendition_keys, hls_variant_key, hls_variant_keys,
     };

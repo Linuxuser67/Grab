@@ -53,7 +53,7 @@ use hyper::server::conn::http1;
 use hyper_util::rt::{TokioIo, TokioTimer};
 use hyper_util::service::TowerToHyperService;
 use serde::Deserialize;
-use sha2::Sha256;
+use sha2::{Digest, Sha256};
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::io::Read as _;
 use std::net::{Ipv4Addr, SocketAddr};
@@ -640,6 +640,16 @@ fn write_handoff_cookies_with_count(url: &str, cookies: &[Cookie]) -> Option<(Pa
         return None;
     }
     Some((path, written))
+}
+
+/// Hash a staged handoff jar by content so a fresh jar with the same cookies
+/// reuses previews instead of missing on its new temporary path.
+pub(crate) fn handoff_cookie_hash(path: &Path) -> Option<[u8; 32]> {
+    let contents = std::fs::read(path).ok()?;
+    let digest = Sha256::digest(contents);
+    let mut hash = [0_u8; 32];
+    hash.copy_from_slice(&digest);
+    Some(hash)
 }
 
 /// Store a cookie file for a URL. Called by the extension handoff once the

@@ -2218,15 +2218,18 @@ async fn low_latency_dash_does_not_commit_interrupted_tail_and_refetches_on_resu
     let resume_plan = refreshed.clone();
 
     let (stop_tx, stop_rx) = tokio::sync::oneshot::channel();
+    let attempt_client = client.clone();
+    let attempt_tx = tx.clone();
+    let attempt_downloaded = Arc::clone(&downloaded);
     let attempt = tokio::spawn(async move {
         let mut abort = stop_rx;
         let outcome = apply_dash_live_snapshot(
-            &client,
+            &attempt_client,
             &refreshed,
             &mut track,
             8,
-            &tx,
-            &downloaded,
+            &attempt_tx,
+            &attempt_downloaded,
             &mut abort,
             0,
         )
@@ -2277,6 +2280,16 @@ async fn low_latency_dash_does_not_commit_interrupted_tail_and_refetches_on_resu
     assert!(
         !video_dir.join(&tail_filename).exists(),
         "an incomplete response must not be published under its final filename"
+    );
+    let saved_bytes = tokio::fs::read(video_dir.join(DASH_LIVE_STATE_NAME))
+        .await
+        .expect("read persisted state after interrupted tail");
+    let saved_state: DashLiveState =
+        serde_json::from_slice(&saved_bytes).expect("parse persisted state after interruption");
+    assert_eq!(
+        saved_state.segments.iter().map(|segment| segment.number).collect::<Vec<_>>(),
+        [26, 27, 28, 29, 30],
+        "the persisted journal must not include the incomplete tail"
     );
     release_first
         .send(())

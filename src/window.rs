@@ -720,14 +720,6 @@ pub fn build_window(
                 group.update(members, all_members);
                 group.row.set_visible(visible_groups.contains(key));
 
-                let target = match key.1 {
-                    2 => &l_downloaded,
-                    3 => &l_queued,
-                    _ => &l_active,
-                };
-                if group.row.parent().is_none() {
-                    target.append(&group.row);
-                }
             }
 
             for (key, group) in groups.borrow().iter() {
@@ -764,7 +756,12 @@ pub fn build_window(
                 if placements.borrow().get(&item.id()) != Some(&location) {
                     detach_download_row(&row);
                     if let Some(key) = group_key {
-                        if let Some(group) = groups.borrow().get(&key) {
+                        if let Some(group) = groups.borrow().get(&key).cloned() {
+                            // Insert the header where the first child appears in
+                            // queue order, not ahead of unrelated standalone rows.
+                            if group.row.parent().is_none() {
+                                target.append(&group.row);
+                            }
                             group.row.add_row(&row);
                         } else {
                             target.append(&row);

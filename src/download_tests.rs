@@ -265,10 +265,7 @@ fn playlist_group_metadata_restores_with_each_child() {
     };
     std::fs::write(&queue_file, serde_json::to_vec(&queue).unwrap()).unwrap();
 
-    let manager = DownloadManager::new(
-        gio::ListStore::new::<DownloadItem>(),
-        test_settings(),
-    );
+    let manager = DownloadManager::new(gio::ListStore::new::<DownloadItem>(), test_settings());
     manager.restore_queue();
 
     assert_eq!(manager.store().n_items(), 2);

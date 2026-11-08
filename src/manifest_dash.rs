@@ -44,6 +44,8 @@ pub(crate) enum DashError {
     Parse,
     #[error("DASH presentation uses an unsupported period layout")]
     UnsupportedPresentation,
+    #[error("DASH presentation contains SCTE-35 ad signaling that native download cannot safely remove")]
+    AdSignaling,
     #[error("DASH addressing or resource URL is unsupported")]
     UnsupportedAddressing,
     #[error("DASH segment description is invalid")]
@@ -389,6 +391,35 @@ pub(crate) fn parse_dash_manifest(
 /// unsupported features, or contains no supported video representation.
 ///
 /// The `server_now` argument is the availability clock derived from the HTTP Date header.
+/// SCTE-35 EventStream signaling can mark ad insertion intervals. Until the
+/// native planner can remove those intervals from every selected rendition,
+/// refuse the presentation rather than silently downloading the marked media.
+fn period_has_scte35_ad_signaling(period: &dash_mpd_core::Period) -> bool {
+    fn is_scte35_scheme(scheme: &str) -> bool {
+        scheme
+            .trim()
+            .to_ascii_lowercase()
+            .starts_with("urn:scte:scte35:")
+    }
+
+    period
+        .event_streams
+        .iter()
+        .any(|stream| is_scte35_scheme(&stream.schemeIdUri))
+        || period.adaptations.iter().any(|adaptation| {
+            adaptation
+                .InbandEventStream
+                .iter()
+                .any(|stream| is_scte35_scheme(&stream.schemeIdUri))
+                || adaptation.representations.iter().any(|representation| {
+                    representation
+                        .InbandEventStream
+                        .iter()
+                        .any(|stream| is_scte35_scheme(&stream.schemeIdUri))
+                })
+        })
+}
+
 pub(crate) fn parse_dash_manifest_at(
     manifest_url: &str,
     body: &str,
@@ -405,6 +436,9 @@ pub(crate) fn parse_dash_manifest_at(
     // does not restrict native download planning. ContentProtection remains
     // explicitly rejected below because it signals protected media.
     let mpd = dash_mpd_core::parse(body).map_err(|_| DashError::Parse)?;
+    if mpd.periods.iter().any(period_has_scte35_ad_signaling) {
+        return Err(DashError::AdSignaling);
+    }
     if dash_roles::has_nonzero_segment_list_presentation_time_offset(body.as_bytes())
         .ok_or(DashError::Parse)?
     {

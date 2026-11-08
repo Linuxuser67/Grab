@@ -88,6 +88,12 @@ pub(crate) struct StoredItem {
     /// `None` = not a gallery row or predates the field.
     #[serde(default)]
     pub(crate) gallery: Option<serde_json::Value>,
+    /// Shared identity for multi-row collection downloads; additive queue metadata.
+    #[serde(default)]
+    pub(crate) group_id: Option<u64>,
+    /// Collection title displayed above grouped child rows; additive queue metadata.
+    #[serde(default)]
+    pub(crate) group_title: Option<String>,
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -111,6 +117,8 @@ mod public_only_metadata_tests {
         }))
         .expect("legacy queue item should deserialize");
         assert_eq!(item.public_only, None);
+        assert_eq!(item.group_id, None);
+        assert_eq!(item.group_title, None);
     }
 
     #[test]
@@ -126,5 +134,31 @@ mod public_only_metadata_tests {
         assert_eq!(item.public_only, Some(true));
         let serialized = serde_json::to_value(item).expect("queue item should serialize");
         assert_eq!(serialized["public_only"], true);
+    }
+}
+
+
+#[cfg(test)]
+mod group_metadata_tests {
+    use super::StoredItem;
+
+    #[test]
+    fn collection_group_metadata_round_trips() {
+        let item: StoredItem = serde_json::from_value(serde_json::json!({
+            "url": "https://example.com/video/one",
+            "dest_dir": "/tmp/downloads",
+            "filename": "one.mp4",
+            "status": "queued",
+            "group_id": 41,
+            "group_title": "Course playlist"
+        }))
+        .expect("grouped queue item should deserialize");
+
+        assert_eq!(item.group_id, Some(41));
+        assert_eq!(item.group_title.as_deref(), Some("Course playlist"));
+
+        let serialized = serde_json::to_value(item).expect("grouped queue item should serialize");
+        assert_eq!(serialized["group_id"], 41);
+        assert_eq!(serialized["group_title"], "Course playlist");
     }
 }

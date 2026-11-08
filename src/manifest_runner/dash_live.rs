@@ -118,10 +118,10 @@ async fn load_dash_live_track_inner(
     };
     let previous_representation_key = state.representation_key.clone();
     let expected_representation_key = current_plan
-        .map(|plan| plan.representation.live_key.clone())
+        .map(|plan| ManifestRepresentationKey::from(plan.representation.live_key.as_str()))
         .unwrap_or_else(|| state.representation_key.clone());
     if current_plan.is_some()
-        && state.representation_key != representation_key
+        && state.representation_key.as_str() != representation_key
         && state.representation_key != expected_representation_key
     {
         return Err(ManifestRunError::Failed(
@@ -129,7 +129,7 @@ async fn load_dash_live_track_inner(
         ));
     }
     state.representation_key.clone_from(&expected_representation_key);
-    validate_dash_live_state(&state, &expected_representation_key)?;
+    validate_dash_live_state(&state, expected_representation_key.as_str())?;
 
     let resource_names = state
         .resource_names()
@@ -911,7 +911,7 @@ pub(super) async fn run_live_dash_tracks(
         None => None,
     };
     if let Some((track, _)) = audio.as_ref() {
-        audio_key = Some(track.state.representation_key.clone());
+        audio_key = Some(track.state.representation_key.as_str().to_string());
     }
     macro_rules! finish_capture {
         ($outcome:expr) => {{

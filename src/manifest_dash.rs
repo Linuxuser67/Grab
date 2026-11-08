@@ -643,8 +643,7 @@ pub(crate) fn parse_dash_manifest_at(
                     &addressing,
                     DashAddressing::Template(template) if !template.availability_time_complete
                 ) && !mime_type.as_deref().is_some_and(|mime| {
-                    mime.eq_ignore_ascii_case("video/mp4")
-                        || mime.eq_ignore_ascii_case("audio/mp4")
+                    mime.eq_ignore_ascii_case("video/mp4") || mime.eq_ignore_ascii_case("audio/mp4")
                 }) {
                     return Err(DashError::UnsupportedAddressing);
                 }
@@ -1318,9 +1317,7 @@ fn stable_live_representation_key(identity: RepresentationIdentity<'_>) -> Strin
             hash_optional_number(&mut hasher, Some(template.timescale));
             // Preserve historical keys for ordinary live DASH while separating
             // recordings whose adjusted availability or chunk-completion policy changes.
-            if !template.availability_time_offset.is_zero()
-                || !template.availability_time_complete
-            {
+            if !template.availability_time_offset.is_zero() || !template.availability_time_complete {
                 hasher.update(b"availability");
                 hasher.update(template.availability_time_offset.as_nanos().to_le_bytes());
                 hasher.update([u8::from(template.availability_time_complete)]);
@@ -1710,10 +1707,10 @@ fn effective_template(
         timescale = template.timescale.or(timescale);
         // Child SegmentTemplate attributes override inherited attributes.
         presentation_time_offset = template.presentationTimeOffset.or(presentation_time_offset);
-        availability_time_offset =
-            template.availabilityTimeOffset.or(availability_time_offset);
-        availability_time_complete =
-            template.availabilityTimeComplete.or(availability_time_complete);
+        availability_time_offset = template.availabilityTimeOffset.or(availability_time_offset);
+        availability_time_complete = template
+            .availabilityTimeComplete
+            .or(availability_time_complete);
 
         if let Some(duration) = template.duration {
             if !duration.is_finite()
@@ -1827,10 +1824,7 @@ fn effective_template(
                 timescale,
             )?,
         };
-        low_latency::validate_availability_time_offset(
-            availability_time_offset,
-            shortest_segment,
-        )?;
+        low_latency::validate_availability_time_offset(availability_time_offset, shortest_segment)?;
     }
 
     Ok(DashTemplate {

@@ -9,7 +9,7 @@ use gettextrs::{gettext, ngettext};
 use gtk4::prelude::*;
 use gtk4::{gio, glib};
 use libadwaita as adw;
-use std::cell::Cell;
+use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 
 // Process-wide guard against stacked failure dialogs: bulk failures must
@@ -741,6 +741,187 @@ fn show_failure_dialog(
     dialog
 }
 
+/// One playlist group in a status section. Child rows remain the existing
+/// DownloadItem rows; only their parent row and group-level actions are new.
+#[derive(Clone)]
+pub(crate) struct DownloadGroupRow {
+    pub(crate) row: adw::ExpanderRow,
+    members: Rc<RefCell<Vec<u64>>>,
+    pause: gio::SimpleAction,
+    resume: gio::SimpleAction,
+    cancel: gio::SimpleAction,
+    retry: gio::SimpleAction,
+    open_folder: gio::SimpleAction,
+}
+
+fn group_summary(items: &[DownloadItem]) -> String {
+    if items.is_empty() {
+        return String::new();
+    }
+
+    let mut parts = vec![ngettext_count("{n} item", "{n} items", items.len())];
+    for (status, singular, plural) in [
+        (
+            DownloadStatus::Downloading,
+            "{n} downloading",
+            "{n} downloading",
+        ),
+        (DownloadStatus::Paused, "{n} paused", "{n} paused"),
+        (DownloadStatus::Queued, "{n} queued", "{n} queued"),
+        (DownloadStatus::Scheduled, "{n} scheduled", "{n} scheduled"),
+        (DownloadStatus::Failed, "{n} failed", "{n} failed"),
+        (DownloadStatus::Cancelled, "{n} cancelled", "{n} cancelled"),
+        (DownloadStatus::Done, "{n} finished", "{n} finished"),
+    ] {
+        let count = items.iter().filter(|item| item.status() == status).count();
+        if count > 0 {
+            parts.push(ngettext_count(singular, plural, count));
+        }
+    }
+    parts.join(" · ")
+}
+
+pub(crate) fn build_download_group_row(
+    title: &str,
+    manager: &Rc<DownloadManager>,
+    toasts: &Rc<adw::ToastOverlay>,
+) -> DownloadGroupRow {
+    let row = adw::ExpanderRow::new();
+    // Playlist titles come from remote pages; do not interpret them as Pango markup.
+    row.set_use_markup(false);
+    row.set_title(title);
+    row.set_expanded(false);
+
+    let members = Rc::new(RefCell::new(Vec::new()));
+    let actions = gio::SimpleActionGroup::new();
+    let pause = gio::SimpleAction::new("pause", None);
+    let resume = gio::SimpleAction::new("resume", None);
+    let cancel = gio::SimpleAction::new("cancel", None);
+    let retry = gio::SimpleAction::new("retry-failed", None);
+    let open_folder = gio::SimpleAction::new("open-folder", None);
+
+    {
+        let ids = Rc::clone(&members);
+        let manager = Rc::clone(manager);
+        pause.connect_activate(move |_, _| {
+            let ids = ids.borrow().clone();
+            manager.pause_many(&ids);
+        });
+    }
+    {
+        let ids = Rc::clone(&members);
+        let manager = Rc::clone(manager);
+        resume.connect_activate(move |_, _| {
+            let ids = ids.borrow().clone();
+            manager.resume_many(&ids);
+        });
+    }
+    {
+        let ids = Rc::clone(&members);
+        let manager = Rc::clone(manager);
+        cancel.connect_activate(move |_, _| {
+            let ids = ids.borrow().clone();
+            manager.cancel_many(&ids);
+        });
+    }
+    {
+        let ids = Rc::clone(&members);
+        let manager = Rc::clone(manager);
+        let toasts = Rc::clone(toasts);
+        retry.connect_activate(move |_, _| {
+            let ids = ids.borrow().clone();
+            let count = manager.retry_many(&ids);
+            if count > 0 {
+                toasts.add_toast(adw::Toast::new(&ngettext_count(
+                    "Retrying {n} failed download",
+                    "Retrying {n} failed downloads",
+                    count,
+                )));
+            }
+        });
+    }
+    {
+        let ids = Rc::clone(&members);
+        let manager = Rc::clone(manager);
+        let toasts = Rc::clone(toasts);
+        open_folder.connect_activate(move |_, _| {
+            let ids = ids.borrow().clone();
+            if let Some(item) = ids.iter().find_map(|id| manager.find(*id)) {
+                launch_path(std::path::Path::new(&item.dest_dir()), &toasts, false);
+            }
+        });
+    }
+
+    for action in [&pause, &resume, &cancel, &retry, &open_folder] {
+        actions.add_action(action);
+    }
+    row.insert_action_group("group", Some(&actions));
+
+    let menu = gio::Menu::new();
+    menu.append(Some(&gettext("Pause All")), Some("group.pause"));
+    menu.append(Some(&gettext("Resume All")), Some("group.resume"));
+    menu.append(Some(&gettext("Cancel All")), Some("group.cancel"));
+    menu.append(Some(&gettext("Retry Failed")), Some("group.retry-failed"));
+    menu.append(
+        Some(&gettext("Open Collection Folder")),
+        Some("group.open-folder"),
+    );
+
+    let menu_button = gtk4::MenuButton::builder()
+        .icon_name("view-more-symbolic")
+        .tooltip_text(gettext("Group actions"))
+        .css_classes(["flat"])
+        .build();
+    menu_button.update_property(&[gtk4::accessible::Property::Label(&gettext("Group actions"))]);
+    menu_button.set_menu_model(Some(&menu));
+    row.add_suffix(&menu_button);
+
+    DownloadGroupRow {
+        row,
+        members,
+        pause,
+        resume,
+        cancel,
+        retry,
+        open_folder,
+    }
+}
+
+impl DownloadGroupRow {
+    pub(crate) fn update(&self, section_items: &[DownloadItem], group_items: &[DownloadItem]) {
+        *self.members.borrow_mut() = group_items.iter().map(DownloadItem::id).collect();
+        self.row.set_subtitle(&group_summary(section_items));
+
+        self.pause.set_enabled(group_items.iter().any(|item| {
+            matches!(
+                item.status(),
+                DownloadStatus::Downloading | DownloadStatus::Queued | DownloadStatus::Scheduled
+            )
+        }));
+        self.resume.set_enabled(
+            group_items
+                .iter()
+                .any(|item| item.status() == DownloadStatus::Paused),
+        );
+        self.cancel.set_enabled(group_items.iter().any(|item| {
+            matches!(
+                item.status(),
+                DownloadStatus::Downloading
+                    | DownloadStatus::Paused
+                    | DownloadStatus::Queued
+                    | DownloadStatus::Scheduled
+            )
+        }));
+        self.retry.set_enabled(group_items.iter().any(|item| {
+            matches!(
+                item.status(),
+                DownloadStatus::Failed | DownloadStatus::Cancelled
+            )
+        }));
+        self.open_folder.set_enabled(!group_items.is_empty());
+    }
+}
+
 pub(crate) fn build_row(
     item: &crate::download::DownloadItem,
     manager: &Rc<DownloadManager>,
@@ -1229,6 +1410,7 @@ pub(crate) fn build_row(
                 video_source: m.video_source(id),
                 started: m.has_started(id),
                 public_only: it.public_only(),
+                group: it.group(),
             };
             let name = snapshot.filename.clone();
             m.remove(id);
@@ -1374,4 +1556,56 @@ fn show_rename_dialog(
 
     name_row.grab_focus();
     dialog.present(anchor.root().as_ref());
+}
+
+#[cfg(test)]
+mod group_row_tests {
+    use super::*;
+
+    #[test]
+    #[ignore = "needs a display; run under Xvfb"]
+    fn expandable_playlist_group_row_updates_actions_and_children() {
+        gtk4::init().expect("gtk::init (run under Xvfb)");
+        // SAFETY: this UI test runs in its own process before constructing GSettings.
+        unsafe {
+            std::env::set_var("GSETTINGS_SCHEMA_DIR", env!("GRAB_SCHEMA_DIR"));
+            std::env::set_var("GSETTINGS_BACKEND", "memory");
+        }
+
+        let manager = DownloadManager::new(
+            gio::ListStore::new::<DownloadItem>(),
+            crate::settings::AppSettings::new(),
+        );
+        let toasts = Rc::new(adw::ToastOverlay::new());
+        let group = build_download_group_row("Course playlist", &manager, &toasts);
+
+        let first = DownloadItem::new(10, "https://example.com/one", "One.mp4", "/tmp");
+        first.set_status(DownloadStatus::Downloading);
+        let second = DownloadItem::new(11, "https://example.com/two", "Two.mp4", "/tmp");
+        second.set_status(DownloadStatus::Queued);
+
+        let first_row = gtk4::ListBoxRow::new();
+        let second_row = gtk4::ListBoxRow::new();
+        group.row.add_row(&first_row);
+        group.row.add_row(&second_row);
+        group.update(
+            std::slice::from_ref(&first),
+            &[first.clone(), second.clone()],
+        );
+
+        assert!(first_row.parent().is_some());
+        assert!(second_row.parent().is_some());
+        assert!(group.pause.is_enabled());
+        assert!(!group.resume.is_enabled());
+        assert!(group.cancel.is_enabled());
+        assert!(!group.retry.is_enabled());
+        assert!(group.open_folder.is_enabled());
+
+        second.set_status(DownloadStatus::Failed);
+        group.update(
+            std::slice::from_ref(&second),
+            &[first.clone(), second.clone()],
+        );
+        assert!(group.retry.is_enabled());
+    }
 }

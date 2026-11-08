@@ -230,7 +230,93 @@ fn stored_row(url: &str, dest_dir: &str, filename: &str, status: DownloadStatus)
         last_modified: None,
         public_only: None,
         gallery: None,
+        group: None,
     }
+}
+
+#[test]
+fn playlist_group_metadata_restores_with_each_child() {
+    let (_queue_lock, _main_loop_lock) = test_locks();
+    let queue_file = test_queue_file("playlist-group-restore");
+
+    let mut first = stored_row(
+        "https://example.com/playlist/one",
+        "/tmp/downloads/Course",
+        "one.mp4",
+        DownloadStatus::Paused,
+    );
+    first.group = Some(
+        crate::download_store::DownloadGroup::try_new(42, "Course playlist")
+            .expect("valid playlist group"),
+    );
+
+    let mut second = stored_row(
+        "https://example.com/playlist/two",
+        "/tmp/downloads/Course",
+        "two.mp4",
+        DownloadStatus::Paused,
+    );
+    second.group = first.group.clone();
+    let expected_group = first.group.clone();
+
+    let queue = StoredQueue {
+        version: QUEUE_VERSION,
+        items: vec![first, second],
+    };
+    std::fs::write(&queue_file, serde_json::to_vec(&queue).unwrap()).unwrap();
+
+    let manager = DownloadManager::new(gio::ListStore::new::<DownloadItem>(), test_settings());
+    manager.restore_queue();
+
+    assert_eq!(manager.store().n_items(), 2);
+    for index in 0..manager.store().n_items() {
+        let item = manager
+            .store()
+            .item(index)
+            .and_downcast::<DownloadItem>()
+            .unwrap();
+        assert_eq!(item.group(), expected_group.clone());
+        assert_eq!(item.status(), DownloadStatus::Paused);
+    }
+
+    let _ = std::fs::remove_file(&queue_file);
+}
+
+#[test]
+fn group_pause_parks_pending_children_and_preserves_scheduled_start() {
+    let (_queue_lock, _main_loop_lock) = test_locks();
+    let queue_file = test_queue_file("group-pause");
+    let settings = test_settings();
+    let manager = DownloadManager::new(gio::ListStore::new::<DownloadItem>(), settings);
+
+    let active = DownloadItem::new(1, "https://example.com/active", "active.mp4", "/tmp");
+    active.set_status(DownloadStatus::Downloading);
+    let queued = DownloadItem::new(2, "https://example.com/queued", "queued.mp4", "/tmp");
+    queued.set_status(DownloadStatus::Queued);
+    let scheduled = DownloadItem::new(3, "https://example.com/scheduled", "scheduled.mp4", "/tmp");
+    let scheduled_at = glib::DateTime::now_local()
+        .expect("local clock should be available")
+        .to_unix()
+        + 3600;
+    scheduled.set_scheduled_at(scheduled_at);
+    scheduled.set_status(DownloadStatus::Scheduled);
+
+    manager.store().append(&active);
+    manager.store().append(&queued);
+    manager.store().append(&scheduled);
+
+    assert_eq!(manager.pause_many(&[1, 2, 3]), 3);
+    for item in [&active, &queued, &scheduled] {
+        assert_eq!(item.status(), DownloadStatus::Paused);
+    }
+    assert_eq!(scheduled.scheduled_at(), scheduled_at);
+
+    assert_eq!(manager.resume_many(&[scheduled.id()]), 1);
+    assert_eq!(scheduled.status(), DownloadStatus::Scheduled);
+    assert_eq!(active.status(), DownloadStatus::Paused);
+    assert_eq!(queued.status(), DownloadStatus::Paused);
+
+    let _ = std::fs::remove_file(&queue_file);
 }
 
 fn test_queue_file(tag: &str) -> std::path::PathBuf {
@@ -852,6 +938,7 @@ fn overcap_queue_keeps_active_first() {
             last_modified: None,
             public_only: None,
             gallery: None,
+            group: None,
         },
         StoredItem {
             id: None,
@@ -870,6 +957,7 @@ fn overcap_queue_keeps_active_first() {
             last_modified: None,
             public_only: None,
             gallery: None,
+            group: None,
         },
     ];
     for i in 0..1000 {
@@ -890,6 +978,7 @@ fn overcap_queue_keeps_active_first() {
             last_modified: None,
             public_only: None,
             gallery: None,
+            group: None,
         });
     }
     let queue = StoredQueue {
@@ -1542,6 +1631,7 @@ fn a_fresh_row_never_lands_on_a_dest_side_leftover_staging_dir() {
             last_modified: None,
             public_only: None,
             gallery: None,
+            group: None,
         },
         StoredItem {
             id: None,
@@ -1560,6 +1650,7 @@ fn a_fresh_row_never_lands_on_a_dest_side_leftover_staging_dir() {
             last_modified: None,
             public_only: None,
             gallery: None,
+            group: None,
         },
     ];
     std::fs::write(
@@ -1826,6 +1917,7 @@ fn invalid_native_manifest_source_is_skipped_on_restore() {
         last_modified: None,
         public_only: None,
         gallery: None,
+        group: None,
     };
     std::fs::write(
         &queue_file,
@@ -1878,6 +1970,7 @@ fn mismatched_video_source_dropped_on_restore() {
             last_modified: None,
             public_only: None,
             gallery: None,
+            group: None,
         }],
     };
     std::fs::write(&qf, serde_json::to_string(&queue).unwrap()).unwrap();
@@ -1932,6 +2025,7 @@ fn done_video_keeps_page_source_on_restore() {
             last_modified: None,
             public_only: None,
             gallery: None,
+            group: None,
         }],
     };
     std::fs::write(&qf, serde_json::to_string(&queue).unwrap()).unwrap();
@@ -1997,6 +2091,7 @@ fn unremove_restores_video_source() {
         video_source: manager.video_source(id),
         started: false,
         public_only: item.public_only(),
+        group: item.group(),
     };
     manager.remove(id);
     assert_eq!(manager.video_source(id), None);
@@ -3082,6 +3177,7 @@ fn unremove_restores_started_for_single_connection_partial() {
         video_source: manager.video_source(id),
         started: manager.has_started(id),
         public_only: item.public_only(),
+        group: item.group(),
     };
     manager.remove(id);
     assert!(
@@ -3316,6 +3412,7 @@ fn queue_roundtrip_and_mapping() {
                 last_modified: None,
                 public_only: None,
                 gallery: None,
+                group: None,
             },
             StoredItem {
                 id: None,
@@ -3334,6 +3431,7 @@ fn queue_roundtrip_and_mapping() {
                 last_modified: None,
                 public_only: None,
                 gallery: None,
+                group: None,
             },
         ],
     };
@@ -3506,6 +3604,7 @@ fn batch_restore_hundred_done() {
             last_modified: None,
             public_only: None,
             gallery: None,
+            group: None,
         })
         .collect();
     let queue = StoredQueue {
@@ -3714,6 +3813,7 @@ fn restore_preserves_intent() {
         last_modified: None,
         public_only: None,
         gallery: None,
+        group: None,
     })
     .collect();
     let queue = StoredQueue {
@@ -4458,6 +4558,7 @@ fn killed_segmented_resume_starts_over() {
                 last_modified: None,
                 public_only: None,
                 gallery: None,
+                group: None,
             }],
         })
         .unwrap(),
@@ -7094,6 +7195,7 @@ fn released_reservation_wakes_parked_unremoved_row() {
         }),
         started: false,
         public_only: false,
+        group: None,
     };
     let revived = manager.unremove(snap);
     let id = revived.id();
@@ -7174,6 +7276,7 @@ fn an_unremove_of_a_settled_row_stays_settled_while_reserved() {
         }),
         started: false,
         public_only: false,
+        group: None,
     };
     let revived = manager.unremove(snap);
     assert_eq!(
@@ -8369,6 +8472,7 @@ fn gallery_stored_item(status: DownloadStatus, job: Option<serde_json::Value>) -
         last_modified: None,
         public_only: None,
         gallery: job,
+        group: None,
     }
 }
 

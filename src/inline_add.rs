@@ -20,6 +20,7 @@
 
 use crate::download::DownloadManager;
 use crate::download_row::DownloadItem;
+use crate::download_store::DownloadGroup;
 use crate::gallery_grid::GalleryGrid;
 use crate::window_rows::{
     apply_scheduled_at, default_name_for, picker_enter_confirms, picker_header,
@@ -240,6 +241,25 @@ fn inflight_suppresses(
     _probe_unlisted: bool,
 ) -> bool {
     marker.as_ref().is_some_and(|(_, g, _)| *g == generation)
+}
+
+/// Attach newly queued playlist children to the same collection group.
+/// `group_id` is retained by the picker after partial imports so a later retry
+/// adds children to the original group rather than creating another one.
+fn assign_playlist_group(
+    items: &[DownloadItem],
+    title: &str,
+    previous_group_id: Option<u64>,
+) -> Option<u64> {
+    if items.is_empty() {
+        return previous_group_id;
+    }
+    let group_id = previous_group_id.unwrap_or(items.first()?.id());
+    let group = DownloadGroup::try_new(group_id, title)?;
+    for item in items {
+        item.set_group(Some(group.clone()));
+    }
+    Some(group.id())
 }
 
 /// Item-count label for a probed collection, kind-aware ("3 stories"). The
@@ -1648,11 +1668,15 @@ fn push_playlist_items_page(
     // Otherwise repeatedly clicking Queue could reset the cap and eventually
     // register every host from a hostile playlist.
     let guarded_child_hosts = Rc::new(RefCell::new(std::collections::HashSet::new()));
+    // Keep one collection identity while a partial import remains on this
+    // picker, so retrying the remaining selection appends to the same group.
+    let playlist_group_id = Rc::new(Cell::new(None));
 
     {
         let nav_on_error = nav.clone();
         let picker_page_on_error = picker_page.clone();
         let guarded_child_hosts = guarded_child_hosts.clone();
+        let playlist_group_id = playlist_group_id.clone();
         let close_card = close_card.clone();
         let grid = grid.clone();
         let add_btn_click = add_btn.clone();
@@ -1688,6 +1712,9 @@ fn push_playlist_items_page(
             // only one entry is selected from a multi-entry playlist.
             let multi = playlist.total > 1;
             let title = playlist.title.clone();
+            // The directory worker consumes `title`; retain a separate copy
+            // for the collection metadata assigned after the async import.
+            let group_title = playlist.title.clone();
             // Disable the button while the import is in flight: a second
             // click would see the selection unchanged and enqueue duplicates.
             add_btn_guard.set_sensitive(false);
@@ -1701,6 +1728,8 @@ fn push_playlist_items_page(
             // The GTK clicked handler is an `Fn` and may run repeatedly;
             // clone the shared collection-host state for each import future.
             let guarded_child_hosts = guarded_child_hosts.clone();
+            let playlist_group_id = playlist_group_id.clone();
+            let group_title = group_title.clone();
             let nav_on_error = nav_on_error.clone();
             let picker_page_on_error = picker_page_on_error.clone();
             glib::spawn_future_local(async move {
@@ -1749,6 +1778,7 @@ fn push_playlist_items_page(
                 // highlights and non-story URLs return None and keep the tray.
                 let mut failed: Option<String> = None;
                 let mut skipped_by_host_limit = 0usize;
+                let mut queued_items = Vec::with_capacity(chosen.len());
                 for (i, item) in &chosen {
                     let item_page_url = crate::video_probe::story_segment_url(&page_url, &item.id)
                         .unwrap_or_else(|| item.page_url.clone());
@@ -1796,7 +1826,10 @@ fn push_playlist_items_page(
                         },
                         &existing,
                     ) {
-                        Ok(enqueued) => apply_scheduled_at(&enqueued, scheduled_at),
+                        Ok(enqueued) => {
+                            apply_scheduled_at(&enqueued, scheduled_at);
+                            queued_items.push(enqueued);
+                        }
                         Err(e) => {
                             failed = Some(e);
                             break;
@@ -1806,6 +1839,15 @@ fn push_playlist_items_page(
                     // them so a retry submits only the remainder (dedupe is by
                     // filename).
                     grid.unselect(*i);
+                }
+                if playlist.total > 1
+                    && let Some(group_id) = assign_playlist_group(
+                        &queued_items,
+                        &group_title,
+                        playlist_group_id.get(),
+                    )
+                {
+                    playlist_group_id.set(Some(group_id));
                 }
                 if let Some(e) = failed {
                     let message = if skipped_by_host_limit > 0 {
@@ -4750,6 +4792,30 @@ fn refresh_gallery_info(v: &VideoStep, title: &str) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn playlist_group_assignment_keeps_the_original_id_across_partial_imports() {
+        let first = DownloadItem::new(10, "https://example.com/one", "One.mp4", "/tmp");
+        let second = DownloadItem::new(11, "https://example.com/two", "Two.mp4", "/tmp");
+
+        let group_id = assign_playlist_group(std::slice::from_ref(&first), "Course playlist", None)
+            .expect("first successful child establishes the group");
+        assert_eq!(group_id, 10);
+        let group = first
+            .group()
+            .expect("first row belongs to a playlist group");
+        assert_eq!(group.id(), 10);
+        assert_eq!(group.title(), "Course playlist");
+
+        let retained_id = assign_playlist_group(
+            std::slice::from_ref(&second),
+            "Course playlist",
+            Some(group_id),
+        )
+        .expect("a later partial-import retry reuses the original group");
+        assert_eq!(retained_id, 10);
+        assert_eq!(second.group(), first.group());
+    }
 
     // This runs with the existing picker_grid Xvfb job. It exercises the
     // playlist and torrent picker pages and proves they wait for user input.

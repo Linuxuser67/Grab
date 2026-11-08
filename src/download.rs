@@ -484,6 +484,8 @@ pub(crate) struct RemovedSnapshot {
     pub started: bool,
     /// Preserve the untrusted-handoff policy reference when Undo restores a row.
     pub public_only: bool,
+    /// Keep a restored child in its original multi-item group.
+    pub group: Option<crate::download_store::DownloadGroup>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1504,6 +1506,11 @@ impl DownloadManager {
         let base_dir = this.resolve_dir(Some(&item.dest_dir()));
         let multi = pl.total > 1;
         let title = pl.title.clone();
+        let collection_group = if multi {
+            crate::download_store::DownloadGroup::try_new(id, &title)
+        } else {
+            None
+        };
         // The local task must not keep a strong manager Rc pinned while the
         // directory worker is pending; upgrade again before touching queue state.
         drop(this);
@@ -1588,22 +1595,20 @@ impl DownloadManager {
                 crate::video::default_video_filename(&entry.title, audio_only, remux.as_deref());
             // Live streams discovered inside a collection use the VOD path; each child
             // resolves its own page rather than inheriting the carrier's live-capture state.
-            if this
-                .enqueue_video_staged(
-                    &url,
-                    &dest_dir,
-                    Some(&name),
-                    crate::media_types::VideoChoices {
-                        quality: quality.clone(),
-                        audio_only,
-                        video_format_id: None,
-                        is_live: false,
-                        playlist_item_id: None,
-                    },
-                    &existing,
-                )
-                .is_ok()
-            {
+            if let Ok(child) = this.enqueue_video_staged(
+                &url,
+                &dest_dir,
+                Some(&name),
+                crate::media_types::VideoChoices {
+                    quality: quality.clone(),
+                    audio_only,
+                    video_format_id: None,
+                    is_live: false,
+                    playlist_item_id: None,
+                },
+                &existing,
+            ) {
+                child.set_group(collection_group.clone());
                 added += 1;
             }
         }
@@ -1658,6 +1663,7 @@ impl DownloadManager {
             dest_dir,
         );
         item.set_public_only(public_only);
+        item.set_group(stored.group.clone().filter(|group| group.is_valid()));
         // Resumed rows requeue; only settled rows keep their status.
         // Scheduled rows keep their status and timestamp; overdue ones queue immediately.
         let now = glib::DateTime::now_local()
@@ -1845,6 +1851,7 @@ impl DownloadManager {
             filename: name,
             progress,
             video_source,
+            group,
             ..
         } = stored;
         let Ok(url) = normalize_url(&raw_url) else {
@@ -1860,6 +1867,7 @@ impl DownloadManager {
             return;
         }
         let item = DownloadItem::new(self.claim_id_in(stored_id, existing), &url, &name, &dir);
+        item.set_group(group.filter(|group| group.is_valid()));
         item.set_progress(progress.clamp(0.0, 1.0));
         item.set_status(DownloadStatus::Done);
         // Already trust-checked by the caller (must sit inside `dir`).
@@ -3818,6 +3826,100 @@ impl DownloadManager {
         }
     }
 
+    /// Pause the active rows in a group, then wake the scheduler once.
+    pub fn pause_many(self: &Rc<Self>, ids: &[u64]) -> usize {
+        let mut paused = 0;
+        // Live workers release their slot after observing Pause; only a stopped
+        // non-live engine can be replaced immediately by the scheduler.
+        let mut queue_kick = false;
+
+        for &id in ids {
+            let Some(item) = self.find(id) else {
+                continue;
+            };
+            match item.status() {
+                DownloadStatus::Queued | DownloadStatus::Scheduled => {
+                    // Park pending children too, otherwise the scheduler would
+                    // start the next one as soon as an active sibling pauses.
+                    item.set_status(DownloadStatus::Paused);
+                    item.set_detail(gettext("Paused"));
+                    paused += 1;
+                    continue;
+                }
+                DownloadStatus::Downloading => {}
+                _ => continue,
+            }
+
+            if self.can_pause_live_capture(id) {
+                if !self.stop_video_worker(id, crate::video::StopIntent::Pause) {
+                    continue;
+                }
+                if let Some(item) = self.find(id)
+                    && item.status() == DownloadStatus::Downloading
+                {
+                    item.set_status(DownloadStatus::Paused);
+                    item.set_detail(gettext("Paused"));
+                    paused += 1;
+                }
+                continue;
+            }
+
+            if !self.stop_engine(id, crate::video::StopIntent::Finish) {
+                continue;
+            }
+            queue_kick = true;
+            if let Some(item) = self.find(id) {
+                if crate::torrent::is_torrent(&item.url()) {
+                    crate::torrent::pause_download(id);
+                }
+                if item.status() == DownloadStatus::Downloading {
+                    item.set_status(DownloadStatus::Paused);
+                    item.set_detail(
+                        gettext("Paused • {pct}%")
+                            .replace("{pct}", &((item.progress() * 100.0) as u64).to_string()),
+                    );
+                    paused += 1;
+                }
+            }
+        }
+
+        if paused > 0 || queue_kick {
+            self.persist_queue();
+            self.changed();
+            if queue_kick {
+                self.start_next();
+            }
+        }
+        paused
+    }
+
+    /// Resume all paused rows in a group, then wake the scheduler once.
+    pub fn resume_many(self: &Rc<Self>, ids: &[u64]) -> usize {
+        let mut resumed = 0;
+        let now = glib::DateTime::now_local()
+            .map(|dt| dt.to_unix())
+            .unwrap_or(0);
+        for &id in ids {
+            if let Some(item) = self.find(id)
+                && item.status() == DownloadStatus::Paused
+            {
+                let next_status = if item.scheduled_at() > now {
+                    DownloadStatus::Scheduled
+                } else {
+                    DownloadStatus::Queued
+                };
+                item.set_status(next_status);
+                resumed += 1;
+            }
+        }
+        if resumed > 0 {
+            self.persist_queue();
+            self.changed();
+            self.start_next();
+        }
+        resumed
+    }
+
     /// Rename a download: the list label plus the file on disk when already fetched. Only completed and queued rows qualify: mid-transfer the engine owns the path, and torrent rows map to session outputs.
     ///
     /// # Errors
@@ -3970,6 +4072,39 @@ impl DownloadManager {
         self.start_next();
     }
 
+    /// Cancel all unfinished rows in a group without starting another child
+    /// between per-row cancellations.
+    pub fn cancel_many(self: &Rc<Self>, ids: &[u64]) -> usize {
+        let mut cancelled = 0;
+        let mut partials = Vec::new();
+
+        for &id in ids {
+            let Some(item) = self.find(id) else {
+                continue;
+            };
+            if matches!(
+                item.status(),
+                DownloadStatus::Done | DownloadStatus::Failed | DownloadStatus::Cancelled
+            ) {
+                continue;
+            }
+            if let Some(path) = self.cancel_inner(id, false, Stop::Preserve) {
+                partials.push(path);
+            }
+            cancelled += 1;
+        }
+
+        for path in partials {
+            self.schedule_partial_cleanup(path);
+        }
+        if cancelled > 0 {
+            self.persist_queue();
+            self.changed();
+            self.start_next();
+        }
+        cancelled
+    }
+
     /// Reclaim a removed video row's scratch, but only once its worker has actually stopped. Removal cannot sweep inline: a worker mid-teardown can recreate what a sweep removed, so unlinking first just loses the race. Claiming the gate first makes deferring safe: only a worker this finalizer awaited may have committed an orphan `dest` file.
     /// Engine invariant: a finished file is never deleted. The `remove_file` below is the single exception — a commit that won the race against its row's discard, leaving an orphan no row can own.
     fn finish_discard(&self, id: u64, dest: std::path::PathBuf, gate: std::sync::Arc<AttemptGate>) {
@@ -4101,31 +4236,58 @@ impl DownloadManager {
         partial_to_remove
     }
 
+    /// Reset one failed/cancelled row without persisting or waking the scheduler.
+    fn requeue_failed_item(&self, item: &DownloadItem) -> bool {
+        if !matches!(
+            item.status(),
+            DownloadStatus::Failed | DownloadStatus::Cancelled
+        ) {
+            return false;
+        }
+        let id = item.id();
+        // A kept segment bitmap resumes where it left off, so leave the progress bar there.
+        if !self.segment_state.borrow().contains_key(&id) {
+            item.set_progress(0.0);
+        }
+        // Gallery downloads: gallery-dl skips existing files on retry
+        // (file-level resume). Reset the UI counter; the runner
+        // reports newly completed files via progress updates.
+        if item.is_gallery() {
+            item.set_gallery_files_done(0);
+            item.set_progress(0.0);
+        }
+        item.set_detail(String::new());
+        item.set_status(DownloadStatus::Queued);
+        true
+    }
+
     /// Re-queue a failed or cancelled download.
     pub fn retry(self: &Rc<Self>, id: u64) {
-        if let Some(item) = self.find(id) {
-            match item.status() {
-                DownloadStatus::Failed | DownloadStatus::Cancelled => {
-                    // A kept segment bitmap resumes where it left off, so leave the progress bar there.
-                    if !self.segment_state.borrow().contains_key(&id) {
-                        item.set_progress(0.0);
-                    }
-                    // Gallery downloads: gallery-dl skips existing files on retry
-                    // (file-level resume). Reset the UI counter; the runner
-                    // reports newly completed files via progress updates.
-                    if item.is_gallery() {
-                        item.set_gallery_files_done(0);
-                        item.set_progress(0.0);
-                    }
-                    item.set_detail(String::new());
-                    item.set_status(DownloadStatus::Queued);
-                    self.persist_queue();
-                    self.changed();
-                    self.start_next();
-                }
-                _ => {}
+        if let Some(item) = self.find(id)
+            && self.requeue_failed_item(&item)
+        {
+            self.persist_queue();
+            self.changed();
+            self.start_next();
+        }
+    }
+
+    /// Re-queue every failed/cancelled row in a group before one scheduler kick.
+    pub fn retry_many(self: &Rc<Self>, ids: &[u64]) -> usize {
+        let mut retried = 0;
+        for &id in ids {
+            if let Some(item) = self.find(id)
+                && self.requeue_failed_item(&item)
+            {
+                retried += 1;
             }
         }
+        if retried > 0 {
+            self.persist_queue();
+            self.changed();
+            self.start_next();
+        }
+        retried
     }
 
     /// Cancel and drop a row; restore with [`DownloadManager::unremove`]. The partial file is kept so Undo can resume.
@@ -4220,6 +4382,7 @@ impl DownloadManager {
         });
         item.set_output_dir(snap.output_dir);
         item.set_public_only(snap.public_only);
+        item.set_group(snap.group);
         if let Some(st) = snap.segments {
             self.segment_state.borrow_mut().insert(item.id(), st);
         }
@@ -4486,6 +4649,7 @@ impl DownloadManager {
                 video_source: self.video_source(it.id()),
                 started: self.has_started(it.id()),
                 public_only: it.public_only(),
+                group: it.group(),
             })
             .collect()
     }
@@ -4745,6 +4909,7 @@ impl DownloadManager {
                             | crate::media_types::VideoSource::Manifest { .. }
                     )
                 });
+                let group = it.group().filter(|group| group.is_valid());
                 items.push(StoredItem {
                     id: Some(it.id()),
                     url: it.url().to_string(),
@@ -4771,6 +4936,7 @@ impl DownloadManager {
                     },
                     public_only: Some(it.public_only()),
                     gallery,
+                    group,
                 });
             }
         }

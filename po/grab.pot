@@ -1449,3 +1449,73 @@ msgstr ""
 #: src/window_rows.rs:950
 msgid "_Rename"
 msgstr ""
+
+#: src/window_rows.rs:763
+msgid "{n} item"
+msgid_plural "{n} items"
+msgstr[0] ""
+msgstr[1] ""
+
+#: src/window_rows.rs:765
+msgid "{n} downloading"
+msgid_plural "{n} downloading"
+msgstr[0] ""
+msgstr[1] ""
+
+#: src/window_rows.rs:766
+msgid "{n} paused"
+msgid_plural "{n} paused"
+msgstr[0] ""
+msgstr[1] ""
+
+#: src/window_rows.rs:767
+msgid "{n} queued"
+msgid_plural "{n} queued"
+msgstr[0] ""
+msgstr[1] ""
+
+#: src/window_rows.rs:768
+msgid "{n} scheduled"
+msgid_plural "{n} scheduled"
+msgstr[0] ""
+msgstr[1] ""
+
+#: src/window_rows.rs:769
+msgid "{n} failed"
+msgid_plural "{n} failed"
+msgstr[0] ""
+msgstr[1] ""
+
+#: src/window_rows.rs:770
+msgid "{n} cancelled"
+msgid_plural "{n} cancelled"
+msgstr[0] ""
+msgstr[1] ""
+
+#: src/window_rows.rs:771
+msgid "{n} finished"
+msgid_plural "{n} finished"
+msgstr[0] ""
+msgstr[1] ""
+
+#: src/window_rows.rs:833
+msgid "Retrying {n} failed download"
+msgid_plural "Retrying {n} failed downloads"
+msgstr[0] ""
+msgstr[1] ""
+
+#: src/window_rows.rs:858
+msgid "Pause All"
+msgstr ""
+
+#: src/window_rows.rs:859
+msgid "Resume All"
+msgstr ""
+
+#: src/window_rows.rs:862
+msgid "Open Collection Folder"
+msgstr ""
+
+#: src/window_rows.rs:866 src/window_rows.rs:869
+msgid "Group actions"
+msgstr ""

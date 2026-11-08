@@ -359,6 +359,7 @@ struct LiveHlsTrack {
     directory: PathBuf,
     accumulator: HlsLiveAccumulator,
     snapshot_at: Instant,
+    last_full_resource_verification: Instant,
     ended: bool,
     next_poll_at: Option<Instant>,
     target_duration: u64,

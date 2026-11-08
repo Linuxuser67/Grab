@@ -88,7 +88,7 @@ unplanned.
 LL-HLS reconciliation keeps an incremental unit-position and per-media-sequence
 part-run index. Normal polls verify only resources in the current playlist
 snapshot; a full staged-resource integrity pass runs on restoration, every
-60 seconds during capture, and before finalization. The part-aware recording
+60 seconds during capture, and on an ENDLIST snapshot. The part-aware recording
 limit is 250,000 units, with the existing 32 MiB local-playlist serialization
 limit still applying. A delta update that no longer overlaps the committed tail
 is rejected and the already captured prefix is preserved; expired source media

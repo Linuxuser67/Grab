@@ -4798,7 +4798,7 @@ mod tests {
         let first = DownloadItem::new(10, "https://example.com/one", "One.mp4", "/tmp");
         let second = DownloadItem::new(11, "https://example.com/two", "Two.mp4", "/tmp");
 
-        let group_id = assign_playlist_group(&[first.clone()], "Course playlist", None)
+        let group_id = assign_playlist_group(std::slice::from_ref(&first), "Course playlist", None)
             .expect("first successful child establishes the group");
         assert_eq!(group_id, 10);
         let group = first
@@ -4808,7 +4808,11 @@ mod tests {
         assert_eq!(group.title(), "Course playlist");
 
         let retained_id =
-            assign_playlist_group(&[second.clone()], "Course playlist", Some(group_id))
+            assign_playlist_group(
+                std::slice::from_ref(&second),
+                "Course playlist",
+                Some(group_id),
+            )
                 .expect("a later partial-import retry reuses the original group");
         assert_eq!(retained_id, 10);
         assert_eq!(second.group(), first.group());

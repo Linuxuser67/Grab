@@ -504,7 +504,7 @@ pub(crate) fn download_plan(
                 Some(audio_key) => Some(
                     dash.audio_representations
                         .iter()
-                        .find(|track| track.key == audio_key || track.live_key == audio_key)
+                        .find(|track| track.matches_key(audio_key))
                         .ok_or_else(|| {
                             "The selected DASH audio representation is no longer available"
                                 .to_string()
@@ -537,7 +537,7 @@ pub(crate) fn download_plan(
                     let track = dash
                         .subtitle_representations
                         .iter()
-                        .find(|track| track.key == key || track.live_key == key)
+                        .find(|track| track.matches_key(key))
                         .ok_or_else(|| {
                             "The selected DASH subtitle representation is no longer available"
                                 .to_string()

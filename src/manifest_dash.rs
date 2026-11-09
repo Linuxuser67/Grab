@@ -3387,6 +3387,30 @@ mod tests {
     }
 
     #[test]
+    fn plans_static_segment_list_presentation_time_offset() {
+        let body = r#"<MPD xmlns="urn:mpeg:dash:schema:mpd:2011" type="static" mediaPresentationDuration="PT4S">
+  <Period start="PT2S" duration="PT2S">
+    <AdaptationSet contentType="video" mimeType="video/mp4">
+      <Representation id="v1">
+        <SegmentList timescale="1000" presentationTimeOffset="8100">
+          <SegmentURL media="segment.m4s"/>
+        </SegmentList>
+      </Representation>
+    </AdaptationSet>
+  </Period>
+</MPD>"#;
+        let manifest = parse_dash_manifest(BASE_URL, body).expect("static SegmentList PTO parses");
+        let representation = &manifest.video_representations[0];
+        let plan = plan_dash_representation(&manifest, &representation.key)
+            .expect("static SegmentList PTO is planned");
+        assert_eq!(
+            plan.input_timestamp_offset.ffmpeg_argument().as_deref(),
+            Some("-6.100000000")
+        );
+        assert_eq!(plan.resources.len(), 1);
+    }
+
+    #[test]
     fn plans_nonzero_segment_base_presentation_time_offset() {
         let body = r#"<?xml version="1.0"?>
 <MPD xmlns="urn:mpeg:dash:schema:mpd:2011" type="static" mediaPresentationDuration="PT4S">

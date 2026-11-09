@@ -1993,11 +1993,14 @@ segment-2.ts
 
     #[test]
     fn invalid_start_offsets_and_unknown_required_attributes_fall_back() {
-        let invalid_offset = b"#EXTM3U\n#EXT-X-TARGETDURATION:4\n#EXT-X-START:TIME-OFFSET=9999999999999999999999999999999999999999\n#EXTINF:4,\nsegment.ts\n#EXT-X-ENDLIST\n";
-        assert!(
-            plan_hls_media_playlist(BASE_URL, invalid_offset).is_err(),
-            "an unrepresentable EXT-X-START offset must remain on fallback"
+        let overflowing_offset = "9".repeat(400);
+        let invalid_offset = format!(
+            "#EXTM3U\n#EXT-X-TARGETDURATION:4\n#EXT-X-START:TIME-OFFSET={overflowing_offset}\n#EXTINF:4,\nsegment.ts\n#EXT-X-ENDLIST\n"
         );
+        assert!(matches!(
+            plan_hls_media_playlist(BASE_URL, invalid_offset.as_bytes()),
+            Err(ManifestError::InvalidDuration)
+        ));
 
         let required_attribute = b"#EXTM3U\n#EXT-X-TARGETDURATION:4\n#EXT-X-START:TIME-OFFSET=1.5,REQ-FOO=YES\n#EXTINF:4,\nsegment.ts\n#EXT-X-ENDLIST\n";
         assert!(matches!(

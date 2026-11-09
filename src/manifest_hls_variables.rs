@@ -515,6 +515,52 @@ video.m3u8
     }
 
     #[test]
+    fn imports_master_variables_before_ll_hls_planning() {
+        let parent = HlsVariableEnvironment {
+            values: [("folder".to_string(), "parts".to_string())].into(),
+        };
+        let body = br#"#EXTM3U
+#EXT-X-TARGETDURATION:2
+#EXT-X-MEDIA-SEQUENCE:7
+#EXT-X-SERVER-CONTROL:CAN-BLOCK-RELOAD=NO,PART-HOLD-BACK=1.5
+#EXT-X-PART-INF:PART-TARGET=0.5
+#EXT-X-DEFINE:IMPORT="folder"
+#EXT-X-PART:DURATION=0.5,URI="{$folder}/7.0.ts",INDEPENDENT=YES
+"#;
+        let plan = crate::manifest::plan_hls_media_playlist_with_parent_variables(
+            BASE,
+            body,
+            &parent,
+        )
+        .expect("LL-HLS child playlist can import parent variables");
+        assert_eq!(
+            plan.resources[0].url.as_str(),
+            "https://cdn.example.test/live/parts/7.0.ts"
+        );
+        assert_eq!(plan.inherited_variables.get("folder"), Some("parts"));
+    }
+
+    #[test]
+    fn rejects_duplicate_names_across_imports_and_local_definitions() {
+        let parent = HlsVariableEnvironment {
+            values: [("folder".to_string(), "parent".to_string())].into(),
+        };
+        let body = br#"#EXTM3U
+#EXT-X-VERSION:8
+#EXT-X-TARGETDURATION:4
+#EXT-X-DEFINE:IMPORT="folder"
+#EXT-X-DEFINE:NAME="folder",VALUE="child"
+#EXTINF:4,
+{$folder}/segment.ts
+#EXT-X-ENDLIST
+"#;
+        assert!(matches!(
+            expand_media_playlist_with_parent(BASE, body, &parent),
+            Err(ManifestError::UnsupportedPlaylistFeature(_))
+        ));
+    }
+
+    #[test]
     fn rejects_missing_and_ambiguous_query_parameters() {
         let body = br#"#EXTM3U
 #EXT-X-VERSION:8

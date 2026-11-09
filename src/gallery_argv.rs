@@ -316,7 +316,7 @@ pub struct GalleryFileState {
     pub progress: f64,
 }
 
-/// Inputs for a gallery download (one queue row per gallery).
+/// Inputs for one gallery-dl process and its expandable collection UI.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct GalleryJob {
     /// Manager id; skipped on serialize (restore assigns a fresh id via claim_id).

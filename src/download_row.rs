@@ -45,9 +45,16 @@ mod imp {
         /// Public-only network policy inherited from an untrusted browser handoff.
         #[property(get, set)]
         pub public_only: Cell<bool>,
-        /// True if this is a gallery download (image gallery via gallery-dl).
+        /// True if this is the queue owner for one gallery-dl process.
         #[property(get, set)]
         pub is_gallery: Cell<bool>,
+        /// Ephemeral read-only file row owned by a gallery collection process.
+        /// These rows are recreated from gallery-dl events after queue restore.
+        #[property(get, set)]
+        pub is_gallery_child: Cell<bool>,
+        /// Exact output path announced by gallery-dl; session-only identity.
+        #[property(get, set)]
+        pub gallery_file_path: RefCell<String>,
         /// Progress denominator for a gallery download (0 if unknown or not a gallery).
         #[property(get, set)]
         pub gallery_file_count: Cell<u32>,

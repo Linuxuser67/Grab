@@ -41,7 +41,7 @@ pub(crate) enum EngineMsg {
         path: String,
         size: u64,
     },
-    /// One entry failed; yt-dlp continues with remaining playlist entries.
+    /// One entry failed or did not produce a final output.
     PlaylistFileFailed {
         file_id: String,
         error: String,

@@ -3652,8 +3652,7 @@ video/variant.m3u8
             .find(|variant| variant.pathway_id == "clone-a")
             .expect("cloned video variant");
         assert_ne!(
-            cloned.video_rendition_group,
-            master.variants[0].video_rendition_group,
+            cloned.video_rendition_group, master.variants[0].video_rendition_group,
             "the video rendition group must be unique to its cloned Pathway"
         );
         assert_eq!(

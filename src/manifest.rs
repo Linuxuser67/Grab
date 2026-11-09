@@ -1490,7 +1490,7 @@ fn build_hls_plan(base_url: Url, mut playlist: MediaPlaylist) -> Result<HlsPlan,
             .media_sequence
             .checked_add(sequence_index)
             .ok_or(ManifestError::DurationOverflow)?;
-        // Use source positions for durable staging names. Ad removal must not
+        // Use source positions for durable staging names. Omitted segments must not
         // renumber the surviving resources in an EVENT/sequence-based playlist.
         let stable_live_identity = is_live
             || (playlist.playlist_type != Some(MediaPlaylistType::Vod)

@@ -891,9 +891,7 @@ impl DownloadGroupRow {
         let nonempty = !group_items.is_empty();
         let one_destination = group_items.first().is_some_and(|first| {
             let directory = first.dest_dir();
-            group_items
-                .iter()
-                .all(|item| item.dest_dir() == directory)
+            group_items.iter().all(|item| item.dest_dir() == directory)
         });
         self.open_folder_btn.set_visible(one_destination);
         self.open_folder_btn.set_sensitive(one_destination);
@@ -1591,12 +1589,7 @@ mod group_row_tests {
 
         // A collection spanning multiple download directories has no single
         // folder to open. Keep the collection-level removal action available.
-        let third = DownloadItem::new(
-            12,
-            "https://example.com/three",
-            "Three.mp4",
-            "/var/tmp",
-        );
+        let third = DownloadItem::new(12, "https://example.com/three", "Three.mp4", "/var/tmp");
         group.update(
             std::slice::from_ref(&third),
             &[first.clone(), second.clone(), third.clone()],

@@ -130,7 +130,7 @@ pub async fn run_video_playlist_download(
 #[derive(Default)]
 struct PlaylistStreamSummary {
     finished_ids: std::collections::HashSet<String>,
-    started_paths: std::collections::HashMap<String, String>,
+    total_size: u64,
 }
 
 async fn run_video_playlist_download_inner(
@@ -276,9 +276,6 @@ async fn run_video_playlist_download_inner(
                             error: gettext("yt-dlp moved to the next playlist entry before finalizing this file"),
                         }).ok();
                     }
-                    if !filename.is_empty() && filename != "NA" {
-                        summary.started_paths.insert(file_id.clone(), filename.clone());
-                    }
                     tx_reader.send(EngineMsg::PlaylistFileStarted {
                         file_id,
                         filename,
@@ -334,6 +331,7 @@ async fn run_video_playlist_download_inner(
                         continue;
                     }
                     summary.finished_ids.insert(file_id.clone());
+                    summary.total_size = summary.total_size.saturating_add(metadata.len());
                     if current_file.as_deref() == Some(file_id.as_str()) {
                         current_file = None;
                     }
@@ -441,12 +439,7 @@ async fn run_video_playlist_download_inner(
         )));
     }
 
-    let total_size = state.files.iter().filter(|file| {
-        file.status == crate::download_store::DownloadStatus::Done
-    }).filter_map(|file| {
-        summary.started_paths.get(&file.id).and_then(|path| std::fs::metadata(path).ok()).map(|m| m.len())
-    }).sum();
-    Ok(VideoOutcome::Finished(total_size))
+    Ok(VideoOutcome::Finished(summary.total_size))
 }
 
 fn phase_playlist(

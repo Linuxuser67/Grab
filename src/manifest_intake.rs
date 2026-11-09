@@ -1005,9 +1005,10 @@ fn apply_hls_pathway_clones(
             })
             .collect::<HashMap<_, _>>();
 
+        let base_variant_count = base_variants.len();
         let cloned_variants = base_variants
             .into_iter()
-            .filter_map(|mut variant| {
+            .map(|mut variant| {
                 let override_uri = variant
                     .stable_variant_id
                     .as_deref()
@@ -1027,7 +1028,7 @@ fn apply_hls_pathway_clones(
                 variant.pathway_id.clone_from(&pathway_clone.id);
                 Some(variant)
             })
-            .collect::<Vec<_>>();
+            .collect::<Option<Vec<_>>>();
 
         // A clone is atomic: if any advertised member cannot be represented
         // safely, do not publish a partial pathway with missing track choices.
@@ -1080,7 +1081,10 @@ fn apply_hls_pathway_clones(
             })
             .collect::<Option<Vec<_>>>();
 
-        if cloned_variants.is_empty()
+        let Some(cloned_variants) = cloned_variants else {
+            continue;
+        };
+        if cloned_variants.len() != base_variant_count
             || cloned_audio.is_none()
             || cloned_subtitles.is_none()
         {
@@ -3429,40 +3433,144 @@ video/b.m3u8
     }
 
     #[test]
-    fn parses_steering_priority_and_rejects_unimplemented_clones() {
+    fn parses_and_applies_content_steering_pathway_clones() {
         let json = br#"{
             "VERSION": 1,
             "TTL": 300,
-            "PATHWAY-PRIORITY": ["unavailable", "cdn-b", "cdn-a"],
-            "PATHWAY-CLONES": []
+            "PATHWAY-PRIORITY": ["clone-a", "cdn-b"],
+            "PATHWAY-CLONES": [{
+                "BASE-ID": "cdn-a",
+                "ID": "clone-a",
+                "URI-REPLACEMENT": {
+                    "HOST": "backup.example.test",
+                    "PARAMS": {"z": "last", "token": "rotated"},
+                    "PER-VARIANT-URIS": {
+                        "main": "https://video.example.test/override.m3u8"
+                    },
+                    "PER-RENDITION-URIS": {
+                        "audio-en": "https://audio.example.test/override.m3u8",
+                        "subs-en": "https://subs.example.test/override.m3u8"
+                    }
+                }
+            }]
         }"#;
+        let steering = parse_hls_steering_manifest(json).expect("valid clone manifest");
+        assert_eq!(steering.pathway_priority, ["clone-a", "cdn-b"]);
+        assert_eq!(steering.pathway_clones.len(), 1);
+
+        let mut master = master();
+        apply_hls_pathway_clones(&mut master, &steering.pathway_clones);
+        assert_eq!(master.variants.len(), 3);
+        assert_eq!(master.audio_renditions.len(), 3);
+        assert_eq!(master.subtitle_renditions.len(), 3);
+        validate_hls_content_steering_stable_ids(&master)
+            .expect("cloned pathways retain matching stable identities");
+
+        let cloned = master
+            .variants
+            .iter()
+            .find(|variant| variant.pathway_id == "clone-a")
+            .expect("cloned video variant");
+        assert_eq!(cloned.url.as_str(), "https://video.example.test/override.m3u8");
+        let cloned_audio = master
+            .audio_renditions
+            .iter()
+            .find(|rendition| rendition.group_id == cloned.audio_group.as_deref().unwrap())
+            .expect("cloned audio rendition");
         assert_eq!(
-            parse_hls_steering_manifest(json).expect("valid steering manifest"),
-            vec![
-                "unavailable".to_string(),
-                "cdn-b".to_string(),
-                "cdn-a".to_string()
-            ]
+            cloned_audio.url.as_ref().unwrap().as_str(),
+            "https://audio.example.test/override.m3u8"
         );
-        let clones = br#"{
+        let cloned_subtitles = master
+            .subtitle_renditions
+            .iter()
+            .find(|rendition| rendition.group_id == cloned.subtitles_group.as_deref().unwrap())
+            .expect("cloned subtitle rendition");
+        assert_eq!(
+            cloned_subtitles.url.as_str(),
+            "https://subs.example.test/override.m3u8"
+        );
+
+        select_hls_content_steering_pathway(&mut master, &steering.pathway_priority)
+            .expect("select cloned pathway");
+        assert_eq!(master.variants.len(), 1);
+        assert_eq!(master.variants[0].pathway_id, "clone-a");
+        assert_eq!(master.audio_renditions.len(), 1);
+        assert_eq!(master.subtitle_renditions.len(), 1);
+    }
+
+    #[test]
+    fn pathway_clone_applies_host_and_sorted_query_parameter_replacements() {
+        let source = Url::parse("https://origin.example.test/a.m3u8?token=old&keep=yes")
+            .unwrap();
+        let clone = HlsPathwayClone {
+            base_id: "origin".to_string(),
+            id: "backup".to_string(),
+            host: Some("backup.example.test".to_string()),
+            params: BTreeMap::from([
+                ("z".to_string(), "last".to_string()),
+                ("token".to_string(), "new value".to_string()),
+                ("a".to_string(), "first".to_string()),
+            ]),
+            per_variant_uris: HashMap::new(),
+            per_rendition_uris: HashMap::new(),
+        };
+        let replaced = replace_hls_pathway_uri(&source, &clone, None)
+            .expect("safe replacement URL");
+        assert_eq!(replaced.host_str(), Some("backup.example.test"));
+        let pairs = replaced.query_pairs().collect::<Vec<_>>();
+        assert_eq!(pairs[0], ("keep".into(), "yes".into()));
+        assert_eq!(pairs[1], ("a".into(), "first".into()));
+        assert_eq!(pairs[2], ("token".into(), "new value".into()));
+        assert_eq!(pairs[3], ("z".into(), "last".into()));
+    }
+
+    #[test]
+    fn ignores_unknown_clone_base_and_rejects_invalid_clone_shapes() {
+        let json = br#"{
             "VERSION": 1,
             "TTL": 300,
-            "PATHWAY-PRIORITY": ["cdn-b"],
-            "PATHWAY-CLONES": [{"ID": "clone", "BASE-ID": "cdn-b"}]
+            "PATHWAY-PRIORITY": ["missing", "cdn-a"],
+            "PATHWAY-CLONES": [{
+                "BASE-ID": "not-advertised",
+                "ID": "missing",
+                "URI-REPLACEMENT": {"HOST": "backup.example.test"}
+            }]
         }"#;
-        assert!(matches!(
-            parse_hls_steering_manifest(clones),
-            Err(ManifestIntakeError::Unsupported(_))
-        ));
-        let duplicate = br#"{
-            "VERSION": 1,
-            "TTL": 300,
-            "PATHWAY-PRIORITY": ["cdn-a", "cdn-a"]
-        }"#;
-        assert!(matches!(
-            parse_hls_steering_manifest(duplicate),
-            Err(ManifestIntakeError::Unsupported(_))
-        ));
+        let steering = parse_hls_steering_manifest(json).expect("valid clone with unknown base");
+        let mut master = master();
+        apply_hls_pathway_clones(&mut master, &steering.pathway_clones);
+        assert_eq!(master.variants.len(), 2);
+
+        for invalid in [
+            br#"{"VERSION":1,"TTL":1,"PATHWAY-PRIORITY":["a"],"PATHWAY-CLONES":[{"BASE-ID":"a","ID":"b","URI-REPLACEMENT":{"HOST":"backup.example.test:8443"}}]}"#.as_slice(),
+            br#"{"VERSION":1,"TTL":1,"PATHWAY-PRIORITY":["a"],"PATHWAY-CLONES":[{"BASE-ID":"a","ID":"b","URI-REPLACEMENT":{"PARAMS":{"_HLS_bad":"value"}}}]}"#.as_slice(),
+        ] {
+            assert!(matches!(
+                parse_hls_steering_manifest(invalid),
+                Err(ManifestIntakeError::Unsupported(_))
+            ));
+        }
+    }
+
+    #[test]
+    fn pathway_clone_does_not_publish_partial_pathway_for_unsafe_override() {
+        let clone = HlsPathwayClone {
+            base_id: "cdn-a".to_string(),
+            id: "bad-clone".to_string(),
+            host: None,
+            params: BTreeMap::new(),
+            per_variant_uris: HashMap::from([(
+                "main".to_string(),
+                "http://insecure.example.test/video.m3u8".to_string(),
+            )]),
+            per_rendition_uris: HashMap::new(),
+        };
+        let mut master = master();
+        apply_hls_pathway_clones(&mut master, &[clone]);
+        assert_eq!(master.variants.len(), 2);
+        assert_eq!(master.audio_renditions.len(), 2);
+        assert_eq!(master.subtitle_renditions.len(), 2);
     }
 
     #[test]

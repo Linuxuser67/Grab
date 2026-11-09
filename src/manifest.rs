@@ -116,10 +116,6 @@ fn reject_unsupported_hls_session_keys(
     Ok(())
 }
 
-fn reject_unsupported_hls_tags(tags: &[m3u8_rs::ExtTag]) -> Result<(), ManifestError> {
-    reject_unsupported_hls_tags_except(tags, &[])
-}
-
 fn reject_unsupported_hls_tags_except(
     tags: &[m3u8_rs::ExtTag],
     allowed: &[&str],
@@ -1603,7 +1599,18 @@ fn build_hls_plan(base_url: Url, mut playlist: MediaPlaylist) -> Result<HlsPlan,
     if playlist.segments.is_empty() {
         return Err(ManifestError::EmptyPlaylist);
     }
-    reject_unsupported_hls_tags(&playlist.unknown_tags)?;
+    // LL-HLS control metadata may accompany a complete-segment playlist.
+    // These advisory tags do not alter the complete resource plan; actual
+    // Partial Segments are routed through the dedicated LL-HLS planner.
+    reject_unsupported_hls_tags_except(
+        &playlist.unknown_tags,
+        &[
+            "X-SERVER-CONTROL",
+            "X-PART-INF",
+            "X-PRELOAD-HINT",
+            "X-RENDITION-REPORT",
+        ],
+    )?;
 
     let mut resources = Vec::with_capacity(playlist.segments.len());
     let mut map_filenames: HashMap<(String, Option<ManifestByteRange>), String> = HashMap::new();
@@ -1656,7 +1663,18 @@ fn build_hls_plan(base_url: Url, mut playlist: MediaPlaylist) -> Result<HlsPlan,
         if skip_gap_segment {
             segment.unknown_tags.retain(|tag| tag.tag != "X-GAP");
         }
-        reject_unsupported_hls_tags(&segment.unknown_tags)?;
+        // m3u8-rs associates leading LL-HLS control tags with the next
+        // Media Segment, so allow the same non-resource metadata here as at
+        // playlist level. All other unrecognized segment tags still fall back.
+        reject_unsupported_hls_tags_except(
+            &segment.unknown_tags,
+            &[
+                "X-SERVER-CONTROL",
+                "X-PART-INF",
+                "X-PRELOAD-HINT",
+                "X-RENDITION-REPORT",
+            ],
+        )?;
         segment.unknown_tags.retain(|tag| !is_benign_hls_tag(tag));
 
         // Preserve the first METHOD=NONE reset on the next kept program
@@ -2640,6 +2658,46 @@ video.m3u8
                 Some(ManifestError::UnsupportedPlaylist)
             );
         }
+    }
+
+    #[test]
+    fn encrypted_complete_segments_with_ll_control_tags_use_standard_hls_planner() {
+        let body = br#"#EXTM3U
+#EXT-X-TARGETDURATION:4
+#EXT-X-SERVER-CONTROL:CAN-BLOCK-RELOAD=YES
+#EXT-X-PART-INF:PART-TARGET=0.5
+#EXT-X-KEY:METHOD=AES-128,URI="key.bin"
+#EXTINF:4.0,
+segment.ts
+"#;
+        let plan = plan_hls_media_playlist(BASE_URL, body)
+            .expect("encrypted complete-segment LL-HLS playlist");
+        assert!(plan.is_live);
+        assert!(plan.ll_unit_ids.is_none());
+        assert_eq!(
+            plan.resources
+                .iter()
+                .filter(|resource| resource.kind == HlsResourceKind::Key)
+                .count(),
+            1
+        );
+        assert_eq!(
+            plan.resources
+                .iter()
+                .filter(|resource| resource.kind == HlsResourceKind::Segment)
+                .count(),
+            1
+        );
+        let local = m3u8_rs::parse_media_playlist_res(
+            &plan
+                .local_playlist_bytes()
+                .expect("serialize local playlist"),
+        )
+        .expect("parse local playlist");
+        assert_eq!(
+            local.segments[0].key.as_ref().map(|key| key.method.clone()),
+            Some(KeyMethod::AES128)
+        );
     }
 
     #[test]

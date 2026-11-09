@@ -185,6 +185,21 @@ pub(crate) fn validate_live_unit_ids(ids: &[HlsLiveUnitId]) -> bool {
     ids.windows(2).all(|pair| pair[1].is_successor_of(&pair[0]))
 }
 
+fn has_ll_hls_partial_segments(body: &[u8]) -> bool {
+    body.split(|byte| *byte == b'\n')
+        .any(|line| line.starts_with(b"#EXT-X-PART:"))
+}
+
+fn has_hls_media_key_tag(body: &[u8]) -> bool {
+    body.split(|byte| *byte == b'\n')
+        .any(|line| line.starts_with(b"#EXT-X-KEY:"))
+}
+
+fn has_ll_hls_delta_update(body: &[u8]) -> bool {
+    body.split(|byte| *byte == b'\n')
+        .any(|line| line.starts_with(b"#EXT-X-SKIP:"))
+}
+
 pub(crate) fn has_ll_hls_tags(body: &[u8]) -> bool {
     body.split(|byte| *byte == b'\n').any(|line| {
         line.starts_with(b"#EXT-X-SERVER-CONTROL:")
@@ -200,7 +215,15 @@ pub(crate) fn plan_hls_media_playlist(
     manifest_url: &str,
     body: &[u8],
 ) -> Result<Option<HlsPlan>, ManifestError> {
-    if !has_ll_hls_tags(body) {
+    let has_partial_segments = has_ll_hls_partial_segments(body);
+    let use_standard_encryption_planner =
+        !has_partial_segments && has_hls_media_key_tag(body) && !has_ll_hls_delta_update(body);
+    if !has_ll_hls_tags(body) || use_standard_encryption_planner {
+        // Keep complete-segment LL-HLS on the live planner unless it actually
+        // carries media encryption. Only complete encrypted segments are
+        // delegated to the ordinary HLS planner, which already owns key
+        // fetching, decryption metadata, and output encryption signaling.
+        // Partial segments and delta updates stay on the guarded LL-HLS path.
         return Ok(None);
     }
     let text = std::str::from_utf8(body)
@@ -1296,6 +1319,51 @@ mod tests {
             plan_hls_media_playlist(BASE, body),
             Err(ManifestError::UnsupportedPlaylistFeature(_))
         ));
+    }
+
+    #[test]
+    fn complete_encrypted_segments_are_delegated_to_the_standard_planner() {
+        let body = br#"#EXTM3U
+#EXT-X-TARGETDURATION:4
+#EXT-X-SERVER-CONTROL:CAN-BLOCK-RELOAD=YES
+#EXT-X-PART-INF:PART-TARGET=0.5
+#EXT-X-KEY:METHOD=AES-128,URI="key.bin"
+#EXTINF:4.0,
+segment.ts
+"#;
+        assert!(
+            super::plan_hls_media_playlist(BASE, body)
+                .expect("complete-segment LL-HLS playlist")
+                .is_none(),
+            "complete encrypted segments are handled by the standard HLS planner"
+        );
+    }
+
+    #[test]
+    fn preload_hint_without_partial_segments_is_not_downloaded_speculatively() {
+        let body = br#"#EXTM3U
+#EXT-X-TARGETDURATION:4
+#EXT-X-SERVER-CONTROL:CAN-BLOCK-RELOAD=YES
+#EXT-X-PRELOAD-HINT:TYPE=PART,URI="future.part"
+#EXTINF:4.0,
+segment.ts
+"#;
+        let plan = super::plan_hls_media_playlist(BASE, body)
+            .expect("full-segment live playlist with preload hint")
+            .expect("full-segment HLS plan");
+        assert!(plan.is_live);
+        assert!(
+            plan.ll_unit_ids
+                .as_ref()
+                .is_some_and(|unit_ids| unit_ids.len() == 1),
+            "the confirmed complete segment retains its live identity"
+        );
+        assert!(
+            plan.resources
+                .iter()
+                .all(|resource| !resource.url.path().ends_with("future.part")),
+            "preload hints are not committed until they appear as a confirmed part"
+        );
     }
 
     #[test]

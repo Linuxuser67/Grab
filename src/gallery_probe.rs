@@ -1698,10 +1698,10 @@ done
 
     #[test]
     fn gallery_dl_success_overrides_ytdlp_playlists_and_single_videos() {
-        let videos = vec![item("mp4"), item("webm")];
-        let single_video = vec![item("mp4")];
-        let images = vec![item("jpg"), item("png")];
-        let unknown = vec![item("zip"), item("opus")];
+        let videos = [item("mp4"), item("webm")];
+        let single_video = [item("mp4")];
+        let images = [item("jpg"), item("png")];
+        let unknown = [item("zip"), item("opus")];
 
         for items in [&videos[..], &single_video[..], &images[..], &unknown[..]] {
             assert_eq!(

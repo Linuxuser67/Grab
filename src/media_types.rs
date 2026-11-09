@@ -115,13 +115,54 @@ pub(crate) struct ManifestSource {
     pub(crate) subtitle_language: Option<String>,
 }
 
-/// Where a resource comes from; serialized into the queue file, stable across releases.
+/// One selected entry owned by a single yt-dlp playlist process.
+///
+/// The stable extractor ID is the identity; playlist positions are refreshed
+/// from a new extraction on every attempt so reordering never downloads a
+/// different entry by accident.
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct VideoPlaylistFile {
+    pub id: String,
+    pub title: String,
+    pub page_url: String,
+    #[serde(default = "queued_playlist_file")]
+    pub status: crate::download_store::DownloadStatus,
+    #[serde(default)]
+    pub progress: f64,
+    #[serde(default)]
+    pub path: Option<String>,
+}
+
+fn queued_playlist_file() -> crate::download_store::DownloadStatus {
+    crate::download_store::DownloadStatus::Queued
+}
+
+/// Persisted state for a collection downloaded by one yt-dlp process.
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct VideoPlaylistState {
+    pub title: String,
+    /// Dedicated output directory for this collection.
+    pub dest_dir: String,
+    /// Only entries selected by the user (or all entries for automatic Add).
+    pub files: Vec<VideoPlaylistFile>,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum VideoSource {
     /// Ordinary file for the plain HTTP engine.
     Direct,
     /// Direct HLS/DASH manifest with a durable selected video representation.
     Manifest { source: ManifestSource },
+    /// A multi-entry playlist owned by one yt-dlp process. Child rows are
+    /// read-only projections of `state.files`, never independent queue jobs.
+    Playlist {
+        page_url: String,
+        #[serde(default = "default_video_quality")]
+        quality: String,
+        #[serde(default)]
+        audio_only: bool,
+        state: VideoPlaylistState,
+    },
     /// Media behind a page needing yt-dlp; identity is the page URL, `media_url`/`expires_at` transient, quality/audio per-item choices.
     Page {
         page_url: String,

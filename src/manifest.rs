@@ -1806,6 +1806,9 @@ fn build_hls_plan(base_url: Url, mut playlist: MediaPlaylist) -> Result<HlsPlan,
     } else {
         playlist.target_duration = rounded_target_duration as u64;
     }
+    // EXT-X-START controls the player's initial playback position. Grab
+    // records the complete playlist, so do not pass this hint to FFmpeg.
+    playlist.start = None;
     playlist.version = Some(minimum_hls_playlist_version(&playlist));
     playlist.playlist_type = Some(MediaPlaylistType::Vod);
     playlist.end_list = true;
@@ -1938,6 +1941,44 @@ segment-2.ts
         let plan = plan_hls_media_playlist(BASE_URL, discontinuous)
             .expect("discontinuous HLS playlist should be accepted for FFmpeg");
         assert!(!plan.is_plain_mpegts_presentation());
+    }
+
+    #[test]
+    fn ignores_start_offset_for_complete_and_ordinary_live_recordings() {
+        for (playlist_type, end_list, start) in [
+            (
+                "#EXT-X-PLAYLIST-TYPE:VOD\n",
+                "#EXT-X-ENDLIST\n",
+                "#EXT-X-START:TIME-OFFSET=1.5\n",
+            ),
+            (
+                "#EXT-X-PLAYLIST-TYPE:EVENT\n",
+                "#EXT-X-ENDLIST\n",
+                "#EXT-X-START:TIME-OFFSET=-1.5,PRECISE=YES\n",
+            ),
+            (
+                "",
+                "",
+                "#EXT-X-START:TIME-OFFSET=-3.0,PRECISE=NO\n",
+            ),
+        ] {
+            let body = format!(
+                "#EXTM3U\n#EXT-X-TARGETDURATION:4\n{playlist_type}{start}#EXTINF:4,\nfirst.ts\n#EXTINF:4,\nsecond.ts\n{end_list}"
+            );
+            let plan = plan_hls_media_playlist(BASE_URL, body.as_bytes())
+                .expect("START is a playback hint, not a recording selection");
+            assert_eq!(plan.resources.len(), 2);
+            assert_eq!(plan.local_playlist.segments.len(), 2);
+            assert!(
+                plan.local_playlist.start.is_none(),
+                "the local recording playlist must not inherit EXT-X-START"
+            );
+            let local = plan.local_playlist_bytes().expect("serialized local playlist");
+            let local = m3u8_rs::parse_media_playlist_res(&local)
+                .expect("serialized playlist should parse");
+            assert!(local.start.is_none());
+            assert_eq!(local.segments.len(), 2);
+        }
     }
 
     #[test]

@@ -13,7 +13,7 @@ pub enum ProgressLine {
     Completed(String),
     /// File skipped (already exists): full path.
     Skipped(String),
-    /// Current file's percentage from gallery-dl's stderr progress indicator.
+    /// Current file's percentage from gallery-dl progress output.
     Progress(Option<u8>),
     /// Unrecognized line (log noise, warnings).
     Other(String),
@@ -39,8 +39,9 @@ pub fn parse_progress_line(line: &str) -> ProgressLine {
         return ProgressLine::Progress(Some(percent));
     }
 
-    // Skip lines: `# <path>`
-    if let Some(path) = line.strip_prefix("# ") {
+    // Skip lines have an explicit marker so merged diagnostic output cannot
+    // be mistaken for an already-existing gallery file.
+    if let Some(path) = line.strip_prefix("@SKIP:").filter(|path| !path.is_empty()) {
         return ProgressLine::Skipped(path.to_string());
     }
 
@@ -137,7 +138,7 @@ mod tests {
     #[test]
     fn parse_skipped() {
         assert_eq!(
-            parse_progress_line("# /tmp/dest/image.jpg\n"),
+            parse_progress_line("@SKIP:/tmp/dest/image.jpg\n"),
             ProgressLine::Skipped("/tmp/dest/image.jpg".to_string())
         );
     }

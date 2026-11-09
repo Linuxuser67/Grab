@@ -168,10 +168,7 @@ mod tests {
     #[test]
     fn feed_tracks_current_file_and_counts() {
         let mut p = GalleryProgress::new();
-        assert_eq!(
-            p.feed(parse_progress_line("@START:/a.jpg")),
-            None
-        );
+        assert_eq!(p.feed(parse_progress_line("@START:/a.jpg")), None);
         assert_eq!(p.current_file_path.as_deref(), Some("/a.jpg"));
         assert_eq!(p.feed(parse_progress_line("42%")), None);
         assert_eq!(p.current_file_percent, Some(42));

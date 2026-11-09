@@ -140,8 +140,8 @@ fn is_cacheable_static_manifest(lookup: &ManifestLookup) -> bool {
             plan.content_steering.is_none()
                 && !plan
                     .variants
-                .iter()
-                .any(|variant| crate::video_cache::has_rotating_auth_query(&variant.url))
+                    .iter()
+                    .any(|variant| crate::video_cache::has_rotating_auth_query(&variant.url))
                 && !plan
                     .audio_renditions
                     .iter()
@@ -598,9 +598,7 @@ fn validate_hls_content_steering_stable_ids(
                 "Content Steering requires stable IDs for every downloadable video rendition",
             )));
         }
-        if variant.video_rendition_group.is_some()
-            && variant.stable_video_rendition_id.is_none()
-        {
+        if variant.video_rendition_group.is_some() && variant.stable_video_rendition_id.is_none() {
             return Err(ManifestIntakeError::Unsupported(gettext(
                 "Content Steering requires stable IDs for alternate video renditions",
             )));
@@ -669,7 +667,11 @@ fn parse_hls_steering_manifest(body: &[u8]) -> Result<Vec<String>, ManifestIntak
             "The HLS Content Steering manifest has an unsupported VERSION".to_string(),
         ));
     }
-    if value.get("TTL").and_then(serde_json::Value::as_u64).is_none() {
+    if value
+        .get("TTL")
+        .and_then(serde_json::Value::as_u64)
+        .is_none()
+    {
         return Err(ManifestIntakeError::Unsupported(
             "The HLS Content Steering manifest has an invalid TTL".to_string(),
         ));
@@ -714,14 +716,12 @@ fn parse_hls_steering_manifest(body: &[u8]) -> Result<Vec<String>, ManifestIntak
         })?;
         if !crate::manifest::is_valid_hls_pathway_id(pathway_id) {
             return Err(ManifestIntakeError::Unsupported(
-                "The HLS Content Steering PATHWAY-PRIORITY list contains an invalid ID"
-                    .to_string(),
+                "The HLS Content Steering PATHWAY-PRIORITY list contains an invalid ID".to_string(),
             ));
         }
         if !seen.insert(pathway_id.to_string()) {
             return Err(ManifestIntakeError::Unsupported(
-                "The HLS Content Steering PATHWAY-PRIORITY list contains duplicate IDs"
-                    .to_string(),
+                "The HLS Content Steering PATHWAY-PRIORITY list contains duplicate IDs".to_string(),
             ));
         }
         pathway_ids.push(pathway_id.to_string());
@@ -741,10 +741,11 @@ fn hls_steering_request_url(
             "The HLS Content Steering SERVER-URI must not contain _HLS_pathway".to_string(),
         ));
     }
-    request_url.query_pairs_mut().append_pair(
-        "_HLS_pathway",
-        steering.initial_pathway_id.as_deref().unwrap_or(""),
-    );
+    if let Some(pathway_id) = steering.initial_pathway_id.as_deref() {
+        request_url
+            .query_pairs_mut()
+            .append_pair("_HLS_pathway", pathway_id);
+    }
     Ok(request_url)
 }
 
@@ -854,9 +855,15 @@ async fn apply_hls_content_steering(
         return Ok(master);
     };
     validate_hls_content_steering_stable_ids(&master)?;
-    let priority = match fetch_hls_steering_manifest(client, steering).await
-    {
-        Ok(body) => parse_hls_steering_manifest(&body)?,
+    let priority = match fetch_hls_steering_manifest(client, steering).await {
+        Ok(body) => match parse_hls_steering_manifest(&body) {
+            Ok(priority) => priority,
+            Err(_error) if steering.initial_pathway_id.is_some() => {
+                // Use the declared initial Pathway if the steering response is invalid.
+                Vec::new()
+            }
+            Err(error) => return Err(error),
+        },
         Err(_error) if steering.initial_pathway_id.is_some() => {
             // Use the declared initial Pathway if the guarded steering fetch fails.
             Vec::new()

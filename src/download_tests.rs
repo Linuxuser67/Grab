@@ -9641,6 +9641,50 @@ fn remove_many_removes_each_existing_member_once() {
 }
 
 #[test]
+fn unremove_many_reports_partial_failures_with_one_refresh() {
+    let (_q, _l) = test_locks();
+    let _qf = test_queue_file("unremove-many-partial");
+    let manager = DownloadManager::new(gio::ListStore::new::<DownloadItem>(), test_settings());
+    let directory = tempfile::tempdir().expect("create Undo destination");
+    let missing_directory = directory.path().join("missing");
+    let changes = Rc::new(Cell::new(0));
+    let changed = Rc::clone(&changes);
+    manager.set_on_change(move || changed.set(changed.get() + 1));
+
+    let snapshots = [
+        ("one.mp4", directory.path().to_string_lossy().into_owned()),
+        ("two.mp4", missing_directory.to_string_lossy().into_owned()),
+        ("three.mp4", missing_directory.to_string_lossy().into_owned()),
+    ]
+    .into_iter()
+    .map(|(filename, dest_dir)| RemovedSnapshot {
+        url: format!("https://example.test/{filename}"),
+        dest_dir,
+        filename: filename.to_string(),
+        status: DownloadStatus::Done,
+        progress: 1.0,
+        detail: "Finished".to_string(),
+        output_dir: String::new(),
+        segments: None,
+        video_source: None,
+        started: false,
+        public_only: false,
+        group: None,
+    })
+    .collect::<Vec<_>>();
+
+    let error = glib::MainContext::default()
+        .block_on(manager.unremove_many_async(snapshots))
+        .expect_err("missing destinations should be reported");
+    assert!(
+        error.contains("Restored 1 of 3 downloads; 2 could not be restored."),
+        "the error should aggregate all failed members into one summary: {error}"
+    );
+    assert_eq!(manager.store().n_items(), 1);
+    assert_eq!(changes.get(), 1, "partial restore must still refresh once");
+}
+
+#[test]
 fn unremove_many_restores_collection_members_with_one_queue_refresh() {
     let (_q, _l) = test_locks();
     let _qf = test_queue_file("unremove-many");

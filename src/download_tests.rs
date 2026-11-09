@@ -8418,7 +8418,139 @@ fn gallery_job_fixture() -> crate::gallery_argv::GalleryJob {
         cookies_browser: "none".to_string(),
         speed_limit: None,
         range: None,
+        file_rows: Vec::new(),
     }
+}
+
+#[test]
+fn gallery_file_rows_are_persisted_with_owner_and_rehydrated() {
+    let (_queue, _main) = test_locks();
+    let _queue_file = test_queue_file("gallery-per-file-rows");
+    let manager = DownloadManager::new(gio::ListStore::new::<DownloadItem>(), test_settings());
+    let root = tempfile::tempdir().expect("gallery root");
+    let output_dir = root.path().join("Gallery");
+    std::fs::create_dir_all(&output_dir).expect("gallery output directory");
+    let page_url = "https://example.com/gallery";
+    let id = 950_000 + std::process::id() as u64;
+    let mut job = gallery_job_fixture();
+    job.item_id = id;
+    job.page_url = page_url.to_string();
+    job.title = "Gallery".to_string();
+    job.dest_dir = output_dir.clone();
+
+    let owner = DownloadItem::new(
+        id,
+        page_url,
+        "Gallery",
+        &root.path().to_string_lossy(),
+    );
+    owner.set_is_gallery(true);
+    owner.set_group(crate::download_store::DownloadGroup::try_new(id, "Gallery"));
+    owner.set_status(DownloadStatus::Paused);
+    manager.gallery_jobs.borrow_mut().insert(id, job);
+    manager.store.append(&owner);
+
+    let first_path = output_dir.join("one.jpg").to_string_lossy().into_owned();
+    let second_path = output_dir.join("two.mp4").to_string_lossy().into_owned();
+    manager.upsert_gallery_file_row(
+        &owner,
+        &first_path,
+        DownloadStatus::Downloading,
+        0.42,
+        "42%",
+    );
+    manager.upsert_gallery_file_row(
+        &owner,
+        &second_path,
+        DownloadStatus::Done,
+        1.0,
+        "Finished",
+    );
+    // A malicious or stale output event must not create a child outside the
+    // gallery's dedicated output folder.
+    manager.upsert_gallery_file_row(
+        &owner,
+        "/tmp/outside.jpg",
+        DownloadStatus::Done,
+        1.0,
+        "Finished",
+    );
+
+    let children = manager
+        .items()
+        .filter(|item| item.is_gallery_child())
+        .collect::<Vec<_>>();
+    assert_eq!(children.len(), 2);
+    assert!(
+        children.iter().any(|item| {
+            item.gallery_file_path() == first_path
+                && item.status() == DownloadStatus::Downloading
+                && (item.progress() - 0.42).abs() < 1e-9
+        })
+    );
+    assert!(
+        children.iter().any(|item| {
+            item.gallery_file_path() == second_path
+                && item.status() == DownloadStatus::Done
+                && (item.progress() - 1.0).abs() < f64::EPSILON
+        })
+    );
+
+    let queue = manager
+        .snapshot_queue_inner(true)
+        .expect("force queue snapshot");
+    assert_eq!(queue.items.len(), 1, "only the process owner is persisted");
+    let saved_job: crate::gallery_argv::GalleryJob = serde_json::from_value(
+        queue.items[0]
+            .gallery
+            .clone()
+            .expect("gallery job payload"),
+    )
+    .expect("deserialize persisted gallery state");
+    assert_eq!(saved_job.file_rows.len(), 2);
+    assert!(saved_job.file_rows.iter().any(|file| {
+        file.path == first_path
+            && file.status == DownloadStatus::Downloading
+            && (file.progress - 0.42).abs() < 1e-9
+    }));
+
+    // Simulate a fresh queue model: child rows are reconstructed from the
+    // persisted GalleryJob without becoming independently scheduled jobs.
+    let restored = DownloadManager::new(gio::ListStore::new::<DownloadItem>(), test_settings());
+    let restored_owner = DownloadItem::new(
+        id + 1,
+        page_url,
+        "Gallery",
+        &root.path().to_string_lossy(),
+    );
+    restored_owner.set_is_gallery(true);
+    restored_owner.set_group(crate::download_store::DownloadGroup::try_new(id + 1, "Gallery"));
+    restored_owner.set_status(DownloadStatus::Paused);
+    let mut restored_job = saved_job;
+    restored_job.item_id = id + 1;
+    restored.gallery_jobs.borrow_mut().insert(id + 1, restored_job.clone());
+    restored.store.append(&restored_owner);
+    restored.restore_gallery_file_rows(&restored_owner, &restored_job.file_rows);
+    let restored_children = restored
+        .items()
+        .filter(|item| item.is_gallery_child())
+        .collect::<Vec<_>>();
+    assert_eq!(restored_children.len(), 2);
+    assert!(
+        restored_children.iter().any(|item| {
+            item.gallery_file_path() == second_path && item.status() == DownloadStatus::Done
+        })
+    );
+    assert!(
+        restored_children.iter().any(|item| {
+            item.gallery_file_path() == first_path && item.status() == DownloadStatus::Paused
+        })
+    );
+    assert!(
+        restored_children.iter().all(|item| {
+            item.group().is_some_and(|group| group.id() == restored_owner.id())
+        })
+    );
 }
 
 fn gallery_stored_item(status: DownloadStatus, job: Option<serde_json::Value>) -> StoredItem {

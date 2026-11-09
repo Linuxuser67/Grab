@@ -208,12 +208,6 @@ pub(crate) fn plan_hls_media_playlist(
     let playlist = LlMediaPlaylist::parse(text).map_err(|error| {
         ManifestError::Parse(format!("could not parse LL-HLS playlist: {error}"))
     })?;
-    if has_unattached_discontinuity(body) {
-        return Err(ManifestError::UnsupportedPlaylistFeature(
-            "a trailing EXT-X-DISCONTINUITY cannot be represented on an open LL-HLS segment"
-                .to_string(),
-        ));
-    }
     build_plan(manifest_url, playlist).map(Some)
 }
 
@@ -456,7 +450,7 @@ fn build_plan(manifest_url: &str, playlist: LlMediaPlaylist) -> Result<HlsPlan, 
             &open.parts,
             source_target_duration,
             map,
-            false,
+            open.discontinuous,
             playlist.independent_segments,
             &mut first_part_independent,
             &mut resources,

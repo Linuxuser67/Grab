@@ -116,10 +116,6 @@ fn reject_unsupported_hls_session_keys(
     Ok(())
 }
 
-fn reject_unsupported_hls_tags(tags: &[m3u8_rs::ExtTag]) -> Result<(), ManifestError> {
-    reject_unsupported_hls_tags_except(tags, &[])
-}
-
 fn reject_unsupported_hls_tags_except(
     tags: &[m3u8_rs::ExtTag],
     allowed: &[&str],

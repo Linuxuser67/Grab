@@ -1512,7 +1512,7 @@ fn build_hls_plan(base_url: Url, mut playlist: MediaPlaylist) -> Result<HlsPlan,
                 .retain(|tag| !hls_ads::is_ad_marker_tag(tag));
         }
         if skip_gap_segment {
-            segment.unknown_tags.retain(|tag| tag.tag != "GAP");
+            segment.unknown_tags.retain(|tag| tag.tag != "X-GAP");
         }
         reject_unsupported_hls_tags(&segment.unknown_tags)?;
         segment.unknown_tags.retain(|tag| !is_benign_hls_tag(tag));

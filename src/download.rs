@@ -3784,6 +3784,241 @@ impl DownloadManager {
         }
     }
 
+    /// Update persisted file state and its passive row for a parent-owned yt-dlp playlist.
+    fn upsert_video_playlist_file_row(
+        &self,
+        owner: &DownloadItem,
+        file_id: &str,
+        status: DownloadStatus,
+        progress: f64,
+        detail: &str,
+        path: Option<&str>,
+    ) {
+        let (file, dest_dir, title, audio_only) = {
+            let mut sources = self.video_sources.borrow_mut();
+            let Some(crate::media_types::VideoSource::Playlist {
+                audio_only, state, ..
+            }) = sources.get_mut(&owner.id())
+            else {
+                return;
+            };
+            let Some(file) = state.files.iter_mut().find(|file| file.id == file_id) else {
+                tracing::warn!(
+                    owner_id = owner.id(),
+                    file_id,
+                    "ignoring yt-dlp playlist event for an unknown entry"
+                );
+                return;
+            };
+            file.status = status;
+            file.progress = progress.clamp(0.0, 1.0);
+            if let Some(path) = path.filter(|path| !path.is_empty()) {
+                file.path = Some(path.to_string());
+            }
+            (
+                file.clone(),
+                state.dest_dir.clone(),
+                state.title.clone(),
+                *audio_only,
+            )
+        };
+
+        let group = owner.group().filter(|group| group.is_valid()).or_else(|| {
+            crate::download_store::DownloadGroup::try_new(owner.id(), &title)
+        });
+        let filename = file
+            .path
+            .as_deref()
+            .and_then(|path| std::path::Path::new(path).file_name())
+            .and_then(|name| name.to_str())
+            .map(str::to_string)
+            .unwrap_or_else(|| {
+                let remux = crate::video_prefs::remux_video_active(&self.settings.remux_video());
+                crate::video::default_video_filename(&file.title, audio_only, remux.as_deref())
+            });
+        let progress = file.progress;
+
+        if let Some(existing) = self.items().find(|candidate| {
+            candidate.is_collection_child()
+                && candidate.group().is_some_and(|group| group.id() == owner.id())
+                && candidate.collection_file_id() == file_id
+        }) {
+            existing.set_filename(filename);
+            existing.set_gallery_file_path(file.path.unwrap_or_default());
+            existing.set_progress(progress);
+            existing.set_detail(detail.to_string());
+            existing.set_status(status);
+            self.refresh_video_playlist_summary(owner);
+            return;
+        }
+
+        let child = DownloadItem::new(
+            self.alloc_id(),
+            &file.page_url,
+            &filename,
+            &dest_dir,
+        );
+        child.set_is_collection_child(true);
+        child.set_collection_file_id(file_id);
+        child.set_gallery_file_path(file.path.unwrap_or_default());
+        child.set_group(group);
+        child.set_progress(progress);
+        child.set_detail(detail.to_string());
+        child.set_status(status);
+        self.store.append(&child);
+        self.refresh_video_playlist_summary(owner);
+    }
+
+    /// Rebuild passive child projections from persisted owner state after restore or Undo.
+    fn restore_video_playlist_file_rows(
+        &self,
+        owner: &DownloadItem,
+        files: &[crate::media_types::VideoPlaylistFile],
+    ) {
+        for file in files {
+            let status = match (owner.status(), file.status) {
+                (DownloadStatus::Done, _) => DownloadStatus::Done,
+                (DownloadStatus::Failed, DownloadStatus::Downloading) => DownloadStatus::Failed,
+                (DownloadStatus::Cancelled, DownloadStatus::Downloading) => {
+                    DownloadStatus::Cancelled
+                }
+                (DownloadStatus::Paused, DownloadStatus::Downloading) => DownloadStatus::Paused,
+                (DownloadStatus::Queued, DownloadStatus::Downloading) => DownloadStatus::Queued,
+                (_, status) => status,
+            };
+            let detail = match status {
+                DownloadStatus::Queued => gettext("Waiting in collection"),
+                DownloadStatus::Downloading => gettext("Downloading"),
+                DownloadStatus::Paused => gettext("Paused"),
+                DownloadStatus::Done => gettext("Finished"),
+                DownloadStatus::Failed => gettext("Failed"),
+                DownloadStatus::Cancelled => gettext("Cancelled"),
+                DownloadStatus::Scheduled => gettext("Scheduled"),
+            };
+            self.upsert_video_playlist_file_row(
+                owner,
+                &file.id,
+                status,
+                file.progress,
+                &detail,
+                file.path.as_deref(),
+            );
+        }
+        self.refresh_video_playlist_summary(owner);
+    }
+
+    /// Reset unfinished files for a collection retry; completed entries stay Done.
+    fn prepare_video_playlist_file_rows_for_attempt(&self, owner: &DownloadItem) {
+        let updates = {
+            let mut sources = self.video_sources.borrow_mut();
+            let Some(crate::media_types::VideoSource::Playlist { state, .. }) =
+                sources.get_mut(&owner.id())
+            else {
+                return;
+            };
+            state
+                .files
+                .iter_mut()
+                .filter(|file| file.status != DownloadStatus::Done)
+                .map(|file| {
+                    file.status = DownloadStatus::Queued;
+                    file.progress = 0.0;
+                    file.id.clone()
+                })
+                .collect::<Vec<_>>()
+        };
+        for file_id in updates {
+            if let Some(child) = self.items().find(|item| {
+                item.is_collection_child()
+                    && item.group().is_some_and(|group| group.id() == owner.id())
+                    && item.collection_file_id() == file_id
+            }) {
+                child.set_progress(0.0);
+                child.set_detail(gettext("Waiting in collection"));
+                child.set_status(DownloadStatus::Queued);
+            }
+        }
+        self.refresh_video_playlist_summary(owner);
+    }
+
+    /// Settle active playlist children when the one owning process pauses, fails, or is cancelled.
+    fn finish_video_playlist_file_rows(&self, owner_id: u64, status: DownloadStatus) {
+        let changed_ids = {
+            let mut sources = self.video_sources.borrow_mut();
+            let Some(crate::media_types::VideoSource::Playlist { state, .. }) =
+                sources.get_mut(&owner_id)
+            else {
+                return;
+            };
+            state
+                .files
+                .iter_mut()
+                .filter(|file| file.status == DownloadStatus::Downloading)
+                .map(|file| {
+                    file.status = status;
+                    if status == DownloadStatus::Done {
+                        file.progress = 1.0;
+                    }
+                    file.id.clone()
+                })
+                .collect::<Vec<_>>()
+        };
+        for file_id in changed_ids {
+            if let Some(child) = self.items().find(|item| {
+                item.is_collection_child()
+                    && item.group().is_some_and(|group| group.id() == owner_id)
+                    && item.collection_file_id() == file_id
+            }) {
+                if status == DownloadStatus::Done {
+                    child.set_progress(1.0);
+                    child.set_detail(gettext("Finished"));
+                } else {
+                    child.set_detail(match status {
+                        DownloadStatus::Paused => gettext("Paused"),
+                        DownloadStatus::Cancelled => gettext("Cancelled"),
+                        _ => gettext("Failed"),
+                    });
+                }
+                child.set_status(status);
+            }
+        }
+        if let Some(owner) = self.find(owner_id) {
+            self.refresh_video_playlist_summary(&owner);
+        }
+    }
+
+    fn refresh_video_playlist_summary(&self, owner: &DownloadItem) {
+        let Some(crate::media_types::VideoSource::Playlist { state, .. }) =
+            self.video_sources.borrow().get(&owner.id()).cloned()
+        else {
+            return;
+        };
+        let total = state.files.len();
+        let done = state
+            .files
+            .iter()
+            .filter(|file| file.status == DownloadStatus::Done)
+            .count();
+        let fraction = if total == 0 {
+            0.0
+        } else {
+            state
+                .files
+                .iter()
+                .map(|file| file.progress.clamp(0.0, 1.0))
+                .sum::<f64>()
+                / total as f64
+        };
+        owner.set_gallery_file_count(total.min(u32::MAX as usize) as u32);
+        owner.set_gallery_files_done(done.min(u32::MAX as usize) as u32);
+        owner.set_progress(fraction.clamp(0.0, 1.0));
+        owner.set_detail(
+            gettext("Playlist • {done}/{total} files")
+                .replace("{done}", &done.to_string())
+                .replace("{total}", &total.to_string()),
+        );
+    }
+
     /// Spawn one gallery-dl process for the collection owner.
     /// Progress and file lifecycle events are bridged to the GTK main thread;
     /// the handle owns collection-wide pause, cancel and concurrency control.

@@ -3697,6 +3697,118 @@ impl DownloadManager {
         self.pump(item, id, generation, rx);
     }
 
+    /// Spawn the one yt-dlp process owned by a playlist collection. The
+    /// parent owns the scheduler slot and pause/cancel/retry; child rows are
+    /// only progress projections updated by its queue pump.
+    fn spawn_video_playlist(self: &Rc<Self>, item: DownloadItem) {
+        let id = item.id();
+        let (page_url, quality, audio_only, state) = match self.video_source(id) {
+            Some(crate::media_types::VideoSource::Playlist {
+                page_url,
+                quality,
+                audio_only,
+                state,
+            }) => (page_url, quality, audio_only, state),
+            _ => {
+                item.set_detail(gettext("Could not prepare playlist source"));
+                item.set_status(DownloadStatus::Failed);
+                self.changed();
+                self.start_next();
+                return;
+            }
+        };
+        let opts = DownloadOptions::from_settings(&self.settings);
+        let proxy = match opts.proxy_config() {
+            Ok(proxy) => proxy,
+            Err(error) => {
+                item.set_detail(error);
+                item.set_status(DownloadStatus::Failed);
+                self.changed();
+                self.start_next();
+                return;
+            }
+        };
+
+        self.prepare_video_playlist_file_rows_for_attempt(&item);
+        let generation = self.epoch.borrow().get(&id).copied().unwrap_or(0) + 1;
+        self.epoch.borrow_mut().insert(id, generation);
+        let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+        let (abort_tx, abort_rx) = tokio::sync::oneshot::channel::<crate::video::StopIntent>();
+        let gate = AttemptGate::new();
+        self.gates.borrow_mut().insert(id, gate.clone());
+        self.video_abort.borrow_mut().insert(id, abort_tx);
+        self.live_rows.borrow_mut().remove(&id);
+
+        let job = crate::video::VideoJob {
+            item_id: id,
+            page_url: page_url.clone(),
+            playlist_item_id: None,
+            quality,
+            audio_only,
+            dest: item.file_path(),
+            speed_limit: parse_rate(opts.limit_rate.as_str()),
+            keep_server_date: self.settings.keep_server_date(),
+            video_format_id: None,
+            is_live: false,
+            live_from_start: false,
+            newest_codecs: self.settings.video_codec_newest(),
+            cookies_browser: self.settings.cookies_browser(),
+            subtitles: if audio_only {
+                None
+            } else {
+                crate::video_prefs::subtitle_lang_active(&self.settings.subtitle_language())
+            },
+            embed_subs: self.settings.embed_subs(),
+            sponsorblock_remove: self.settings.sponsorblock_remove(),
+            sponsorblock_mark: self.settings.sponsorblock_mark(),
+            remux_video: if audio_only {
+                None
+            } else {
+                crate::video_prefs::remux_video_active(&self.settings.remux_video())
+            },
+            embed_chapters: self.settings.embed_chapters(),
+            proxy,
+            info_json: None,
+        };
+        let handle = tokio_rt().spawn(async move {
+            let worker_tx = tx.clone();
+            match crate::video_runner::run_video_playlist_download(
+                job,
+                state,
+                &gate,
+                abort_rx,
+                worker_tx,
+            )
+            .await
+            {
+                Ok(crate::video::VideoOutcome::Finished(size)) => {
+                    tx.send(EngineMsg::Finished { size }).ok();
+                }
+                Ok(crate::video::VideoOutcome::Aborted) => {}
+                Ok(crate::video::VideoOutcome::Expand(_)) => {
+                    tx.send(EngineMsg::Failed(
+                        gettext("A playlist collection unexpectedly resolved to another collection"),
+                    ))
+                    .ok();
+                }
+                Err(error) => {
+                    tracing::warn!(
+                        item_id = id,
+                        error = %error,
+                        "yt-dlp playlist collection failed"
+                    );
+                    tx.send(EngineMsg::Failed(error.to_string())).ok();
+                }
+            }
+        });
+
+        self.running.borrow_mut().insert(id, handle);
+        item.set_status(DownloadStatus::Downloading);
+        item.set_detail(gettext("Resolving playlist…"));
+        self.changed();
+        self.pump(item, id, generation, rx);
+    }
+
     /// Spawn one native HLS/DASH attempt through the shared queue pump.
     fn spawn_manifest(
         self: &Rc<Self>,

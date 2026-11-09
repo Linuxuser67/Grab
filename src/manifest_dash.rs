@@ -2131,7 +2131,7 @@ fn expand_dynamic_list(
         super::resource_filename("dash-live-init", None, &initialization_url, *range);
     let mut resources = Vec::with_capacity(list.segments.len().saturating_add(1));
     resources.push(DashResource {
-        url: initialization_url,
+        url: initialization_url.clone(),
         range: *range,
         filename: initialization_filename,
         kind: DashResourceKind::Initialization,

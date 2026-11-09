@@ -9611,3 +9611,35 @@ fn deleting_native_manifest_download_preserves_replaced_parts_and_metadata() {
         "the original part ownership record must remain"
     );
 }
+
+#[test]
+fn playlist_staged_import_does_not_duplicate_identical_entry() {
+    let (_q, _l) = test_locks();
+    let _qf = test_queue_file("playlist-dedupe");
+    let settings = test_settings();
+    let manager = DownloadManager::new(gio::ListStore::new::<DownloadItem>(), settings);
+    let dest = "/tmp".to_string();
+    let choices = crate::media_types::VideoChoices {
+        quality: "best".to_string(),
+        audio_only: false,
+        video_format_id: None,
+        is_live: false,
+        playlist_item_id: Some("a".to_string()),
+    };
+    let first = manager.enqueue_video_staged(
+        "https://example.com/album",
+        &dest,
+        Some("one.mp4"),
+        choices.clone(),
+        &[],
+    );
+    assert!(first.is_ok(), "first staged enqueue should succeed");
+    let second = manager.enqueue_video_staged(
+        "https://example.com/album",
+        &dest,
+        Some("two.mp4"),
+        choices.clone(),
+        &[],
+    );
+    assert!(second.is_err(), "a duplicate playlist entry must be rejected");
+}

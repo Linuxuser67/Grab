@@ -163,6 +163,9 @@ async fn run_video_download_inner(
     if resuming {
         job.info_json = None;
     }
+    if job.playlist_item_id.is_some() {
+        job.info_json = None;
+    }
     if let Some(json) = job.info_json.as_ref() {
         match crate::video_probe::parse_single_video(json.clone()) {
             Ok(v) => {

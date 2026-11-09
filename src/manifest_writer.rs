@@ -398,6 +398,11 @@ impl OrderedTrackWriter {
         )
         .await?;
 
+        // A destination part is user-visible and outlives the source files.
+        // Persist its zero-length checkpoint before creating/opening it so a
+        // pause or crash before the first committed resource remains resumable.
+        let fresh_destination_part =
+            destination_part.is_some() && matches!(&checkpoint_state, CheckpointState::Fresh);
         let (next_resource_index, committed_offset, committed_resources, migration_source) =
             match checkpoint_state {
                 CheckpointState::AlreadyComplete {
@@ -444,6 +449,24 @@ impl OrderedTrackWriter {
                     Some(target.clone()),
                 ),
             };
+        if fresh_destination_part {
+            persist_checkpoint(
+                &checkpoint_path,
+                directory,
+                &WriterCheckpoint {
+                    version: CHECKPOINT_VERSION,
+                    plan_fingerprint: if append_only {
+                        plan_fingerprint(&resources[..0])?
+                    } else {
+                        fingerprint.clone()
+                    },
+                    next_resource_index: 0,
+                    committed_offset: 0,
+                    append_only,
+                },
+            )
+            .await?;
+        }
         if checkpoint_policy == CheckpointPolicy::RetainAfterPublish {
             remove_committed_source_files(&resources, directory, &committed_resources).await?;
         }

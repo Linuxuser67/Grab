@@ -51,7 +51,11 @@ pub struct GalleryProgressUpdate {
     pub files_done: u32,
     /// Percentage reported for the current file, when its size is known.
     pub current_file_percent: Option<u8>,
-    /// Last completed file path (gallery-dl doesn't name the in-progress file).
+    /// Full path announced by gallery-dl's start event, if a file is active.
+    pub current_file_path: Option<String>,
+    /// The stdout file event that caused this update. Progress-only updates use None.
+    pub event: Option<ProgressLine>,
+    /// Last completed file path for the aggregate gallery detail.
     pub last_completed_file: Option<String>,
 }
 
@@ -266,18 +270,22 @@ pub async fn run_gallery_download_with_proxy(
                         let parsed = parse_progress_line(&line);
                         let meaningful = matches!(
                             parsed,
-                            ProgressLine::Completed(_) | ProgressLine::Skipped(_)
+                            ProgressLine::Started(_)
+                                | ProgressLine::Completed(_)
+                                | ProgressLine::Skipped(_)
                         );
                         if let ProgressLine::Completed(path) = &parsed {
                             last_completed = Some(path.clone());
                         }
-                        if let Some(path) = progress.feed(parsed) {
+                        if let Some(path) = progress.feed(parsed.clone()) {
                             files.push(PathBuf::from(path));
                         }
                         if meaningful {
                             on_progress(GalleryProgressUpdate {
                                 files_done: progress.files_done(),
                                 current_file_percent: progress.current_file_percent,
+                                current_file_path: progress.current_file_path.clone(),
+                                event: Some(parsed),
                                 last_completed_file: last_completed.clone(),
                             });
                         }
@@ -297,6 +305,8 @@ pub async fn run_gallery_download_with_proxy(
                         on_progress(GalleryProgressUpdate {
                             files_done: progress.files_done(),
                             current_file_percent: progress.current_file_percent,
+                            current_file_path: progress.current_file_path.clone(),
+                            event: None,
                             last_completed_file: last_completed.clone(),
                         });
                     }

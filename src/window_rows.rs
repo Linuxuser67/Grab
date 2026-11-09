@@ -828,10 +828,8 @@ pub(crate) fn build_download_group_row(
                 .find_map(|id| manager.find(*id).and_then(|item| item.group()))
                 .map(|group| group.id())
                 .filter(|id| manager.find(*id).is_some_and(|item| item.is_gallery()));
-            let removal_ids = gallery_owner_id.map_or_else(
-                || ids.clone(),
-                |owner_id| vec![owner_id],
-            );
+            let removal_ids =
+                gallery_owner_id.map_or_else(|| ids.clone(), |owner_id| vec![owner_id]);
             let snapshots = removal_ids
                 .iter()
                 .filter_map(|id| {

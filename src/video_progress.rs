@@ -50,6 +50,88 @@ pub(crate) fn parse_ytdlp_template(line: &str) -> Option<YtProgress> {
     })
 }
 
+/// One tagged per-file event from the parent-owned yt-dlp playlist runner.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum YtdlpPlaylistEvent {
+    Started {
+        file_id: String,
+        playlist_index: usize,
+        filename: String,
+    },
+    Progress {
+        file_id: String,
+        playlist_index: usize,
+        downloaded: Option<u64>,
+        total: Option<u64>,
+    },
+    Finished {
+        file_id: String,
+        playlist_index: usize,
+        path: String,
+    },
+}
+
+/// Parse one tagged playlist event. File paths are the final, unsplit field:
+/// a semicolon in a legitimate filename must not change event identity.
+pub(crate) fn parse_ytdlp_playlist_event(line: &str) -> Option<YtdlpPlaylistEvent> {
+    let line = line.trim_end_matches(['\r', '\n']);
+    let parse_index = |raw: &str| raw.parse::<usize>().ok();
+    let parse_bytes = |raw: Option<&str>| {
+        raw.filter(|value| *value != "NA")
+            .and_then(|value| value.parse::<u64>().ok())
+    };
+
+    if let Some(rest) = line.strip_prefix("[GrabPlaylistStart];") {
+        let mut fields = rest.splitn(3, ';');
+        let file_id = fields.next()?.to_string();
+        let playlist_index = parse_index(fields.next()?)?;
+        let filename = fields.next()?.to_string();
+        if file_id.is_empty() {
+            return None;
+        }
+        return Some(YtdlpPlaylistEvent::Started {
+            file_id,
+            playlist_index,
+            filename,
+        });
+    }
+
+    if let Some(rest) = line.strip_prefix("[GrabPlaylistDone];") {
+        let mut fields = rest.splitn(3, ';');
+        let file_id = fields.next()?.to_string();
+        let playlist_index = parse_index(fields.next()?)?;
+        let path = fields.next()?.to_string();
+        if file_id.is_empty() || path.is_empty() {
+            return None;
+        }
+        return Some(YtdlpPlaylistEvent::Finished {
+            file_id,
+            playlist_index,
+            path,
+        });
+    }
+
+    if let Some(rest) = line.strip_prefix("[GrabPlaylist];") {
+        let mut fields = rest.splitn(6, ';');
+        let file_id = fields.next()?.to_string();
+        let playlist_index = parse_index(fields.next()?)?;
+        let status = fields.next()?;
+        if file_id.is_empty() || status == "error" {
+            return None;
+        }
+        let downloaded = parse_bytes(fields.next());
+        let total = parse_bytes(fields.next()).or_else(|| parse_bytes(fields.next()));
+        return Some(YtdlpPlaylistEvent::Progress {
+            file_id,
+            playlist_index,
+            downloaded,
+            total,
+        });
+    }
+
+    None
+}
+
 /// Whether a `--newline` line announces a merge/extract phase.
 pub(crate) fn is_ytdlp_merge_line(line: &str) -> bool {
     line.starts_with("[Merger]") || line.starts_with("[ExtractAudio]")
@@ -248,4 +330,42 @@ pub(crate) fn last_error_line(output: &str, fallback: &str) -> String {
             }
         })
         .unwrap_or_else(|| last_log_line(output, fallback))
+}
+
+#[cfg(test)]
+mod playlist_event_tests {
+    use super::{YtdlpPlaylistEvent, parse_ytdlp_playlist_event};
+
+    #[test]
+    fn parses_tagged_playlist_file_events() {
+        assert_eq!(
+            parse_ytdlp_playlist_event("[GrabPlaylistStart];abc123;4;/tmp/004 - title.mp4"),
+            Some(YtdlpPlaylistEvent::Started {
+                file_id: "abc123".to_string(),
+                playlist_index: 4,
+                filename: "/tmp/004 - title.mp4".to_string(),
+            })
+        );
+        assert_eq!(
+            parse_ytdlp_playlist_event("[GrabPlaylist];abc123;4;downloading;512;1024;NA"),
+            Some(YtdlpPlaylistEvent::Progress {
+                file_id: "abc123".to_string(),
+                playlist_index: 4,
+                downloaded: Some(512),
+                total: Some(1024),
+            })
+        );
+        assert_eq!(
+            parse_ytdlp_playlist_event("[GrabPlaylistDone];abc123;4;/tmp/a;final.mp4"),
+            Some(YtdlpPlaylistEvent::Finished {
+                file_id: "abc123".to_string(),
+                playlist_index: 4,
+                path: "/tmp/a;final.mp4".to_string(),
+            })
+        );
+        assert_eq!(
+            parse_ytdlp_playlist_event("[GrabPlaylist];abc123;4;error;NA;NA;NA"),
+            None
+        );
+    }
 }

@@ -9,6 +9,30 @@ pub(crate) struct ValidatorInfo {
     pub(crate) last_modified: Option<String>,
 }
 
+/// Per-entry events from a parent-owned yt-dlp playlist process.
+/// Boxed as one envelope so the hot engine channel retains its established
+/// size budget even when event payloads carry filenames or error strings.
+pub(crate) enum PlaylistFileEvent {
+    Started {
+        file_id: String,
+        filename: String,
+    },
+    Progress {
+        file_id: String,
+        downloaded: u64,
+        total: Option<u64>,
+    },
+    Finished {
+        file_id: String,
+        path: String,
+        size: u64,
+    },
+    Failed {
+        file_id: String,
+        error: String,
+    },
+}
+
 pub(crate) enum EngineMsg {
     Progress {
         downloaded: u64,
@@ -24,6 +48,8 @@ pub(crate) enum EngineMsg {
     /// Boxed: this variant is rare but would otherwise inflate every message
     /// on this hot channel (progress ticks) to the largest variant's size.
     ExpandPlaylist(Box<crate::media_types::PlaylistInfo>),
+    /// One per-file event from an owning yt-dlp playlist.
+    PlaylistFile(Box<PlaylistFileEvent>),
     Failed(String),
     /// Native manifest rejected the presentation or resource protocol; the pump switches to yt-dlp.
     ManifestFallback(String),

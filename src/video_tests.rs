@@ -1184,10 +1184,16 @@ fn parse_playlist_reads_flat_entries() {
     // Null, empty and unusable-URL entries are dropped.
     assert_eq!(pl.items.len(), 2);
     assert_eq!(&*pl.items[0].title, "First");
-    assert_eq!(pl.items[0].page_url, "https://www.youtube.com/watch?v=a1");
-    // Empty title falls back to id.
+    assert_eq!(
+        pl.items[0].page_url.as_ref(),
+        "https://www.youtube.com/watch?v=a1"
+    );
+    assert_eq!(pl.items[0].playlist_index, 1);
+    // Empty title falls back to id. Its original index survives the invalid
+    // and null entries omitted from the visible list.
     assert_eq!(&*pl.items[1].title, "b2");
-    assert_eq!(pl.items[1].page_url, "https://example.com/v/b2");
+    assert_eq!(pl.items[1].page_url.as_ref(), "https://example.com/v/b2");
+    assert_eq!(pl.items[1].playlist_index, 3);
 }
 
 #[test]
@@ -1337,7 +1343,10 @@ fn retarget_story_items_points_entries_at_tray() {
     retarget_story_items(story_url, &mut pl);
     assert_eq!(pl.items.len(), 2);
     for item in &pl.items {
-        assert_eq!(item.page_url, "https://www.instagram.com/stories/someuser/");
+        assert_eq!(
+            item.page_url.as_ref(),
+            "https://www.instagram.com/stories/someuser/"
+        );
     }
 }
 
@@ -1357,7 +1366,7 @@ fn retarget_story_items_leaves_highlights_alone() {
     .expect("playlist");
     assert_eq!(pl.kind, PlaylistKind::Highlights);
     retarget_story_items(hl_url, &mut pl);
-    assert_eq!(pl.items[0].page_url, hl_url);
+    assert_eq!(pl.items[0].page_url.as_ref(), hl_url);
 }
 
 #[test]
@@ -1374,7 +1383,10 @@ fn retarget_story_items_leaves_plain_playlists_alone() {
     )
     .expect("playlist");
     retarget_story_items(url, &mut pl);
-    assert_eq!(pl.items[0].page_url, "https://www.youtube.com/watch?v=a1");
+    assert_eq!(
+        pl.items[0].page_url.as_ref(),
+        "https://www.youtube.com/watch?v=a1"
+    );
 }
 
 // ── picked playlist entry ──────────────────────────────────────────
@@ -1452,7 +1464,10 @@ fn parse_playlist_prefers_webpage_url() {
     let pl =
         parse_playlist_json(&value, "https://www.youtube.com/playlist?list=PL1").expect("playlist");
     assert_eq!(pl.items.len(), 1);
-    assert_eq!(pl.items[0].page_url, "https://www.youtube.com/watch?v=a1");
+    assert_eq!(
+        pl.items[0].page_url.as_ref(),
+        "https://www.youtube.com/watch?v=a1"
+    );
 }
 
 #[test]
@@ -1487,6 +1502,7 @@ fn probe_result_helpers_cover_both_variants() {
         id: "a1".into(),
         title: "First".into(),
         page_url: "https://www.youtube.com/watch?v=a1".into(),
+        playlist_index: 1,
     }]
     .into_boxed_slice();
     let list = ProbeResult::Playlist(PlaylistInfo {
@@ -3509,6 +3525,41 @@ fn hls_selection_ignores_extractor_order() {
 }
 
 // ── binary part downloads ────────────────────────────────────────────
+
+#[test]
+fn playlist_download_argv_uses_original_selected_indices_and_tagged_events() {
+    let job = direct_test_job();
+    let argv = crate::video_argv::playlist_download_argv(
+        &job,
+        "bv*[height<=720]+ba/b",
+        true,
+        "mp4",
+        std::path::Path::new("/usr/bin/ffmpeg"),
+        std::path::Path::new("/tmp/grab-playlist"),
+        &[0, 2, 6],
+    );
+
+    fn value_after<'a>(args: &'a [String], flag: &str) -> Option<&'a str> {
+        args.iter()
+            .position(|arg| arg == flag)
+            .and_then(|index| args.get(index + 1))
+            .map(String::as_str)
+    }
+    assert!(argv.iter().any(|arg| arg == "--yes-playlist"));
+    assert!(argv.iter().any(|arg| arg == "--ignore-errors"));
+    assert_eq!(value_after(&argv, "--playlist-items"), Some("1,3,7"));
+    assert!(!argv.iter().any(|arg| arg == "--no-playlist"));
+    assert_eq!(
+        value_after(&argv, "--progress-template"),
+        Some(crate::video_argv::YTDLP_PLAYLIST_PROGRESS_TEMPLATE)
+    );
+    assert!(argv.iter().any(|arg| {
+        arg == "before_dl:[GrabPlaylistStart];%(id)s;%(playlist_index)s;%(filename)s"
+    }));
+    assert!(argv.iter().any(|arg| {
+        arg == "after_move:[GrabPlaylistDone];%(id)s;%(playlist_index)s;%(filepath)s"
+    }));
+}
 
 fn direct_test_job() -> VideoJob {
     VideoJob {
@@ -6841,7 +6892,8 @@ fn expand_child_target_routes_entries() {
         PlaylistItem {
             id: id.into(),
             title: "t".into(),
-            page_url: page_url.to_string(),
+            page_url: page_url.into(),
+            playlist_index: 1,
         }
     }
     let tray = "https://www.instagram.com/stories/someuser/";
@@ -6948,7 +7000,7 @@ fn fetch_video_page_returns_playlist_for_expansion() {
         Ok(FetchedVideo::Playlist(pl)) => {
             assert_eq!(pl.items.len(), 1);
             assert_eq!(
-                pl.items[0].page_url,
+                pl.items[0].page_url.as_ref(),
                 "https://www.instagram.com/stories/x/1/"
             );
         }

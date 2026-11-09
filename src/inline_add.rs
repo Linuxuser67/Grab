@@ -20,6 +20,7 @@
 
 use crate::download::DownloadManager;
 use crate::download_row::DownloadItem;
+#[cfg(test)]
 use crate::download_store::DownloadGroup;
 use crate::gallery_grid::GalleryGrid;
 use crate::window_rows::{
@@ -246,6 +247,7 @@ fn inflight_suppresses(
 /// Attach newly queued playlist children to the same collection group.
 /// `group_id` is retained by the picker after partial imports so a later retry
 /// adds children to the original group rather than creating another one.
+#[cfg(test)]
 fn assign_playlist_group(
     items: &[DownloadItem],
     title: &str,
@@ -1669,15 +1671,12 @@ fn push_playlist_items_page(
     // Otherwise repeatedly clicking Queue could reset the cap and eventually
     // register every host from a hostile playlist.
     let guarded_child_hosts = Rc::new(RefCell::new(std::collections::HashSet::new()));
-    // Keep one collection identity while a partial import remains on this
-    // picker, so retrying the remaining selection appends to the same group.
-    let playlist_group_id = Rc::new(Cell::new(None));
 
     {
         let nav_on_error = nav.clone();
         let picker_page_on_error = picker_page.clone();
         let guarded_child_hosts = guarded_child_hosts.clone();
-        let playlist_group_id = playlist_group_id.clone();
+
         let close_card = close_card.clone();
         let grid = grid.clone();
         let add_btn_click = add_btn.clone();
@@ -1729,7 +1728,6 @@ fn push_playlist_items_page(
             // The GTK clicked handler is an `Fn` and may run repeatedly;
             // clone the shared collection-host state for each import future.
             let guarded_child_hosts = guarded_child_hosts.clone();
-            let playlist_group_id = playlist_group_id.clone();
             let group_title = group_title.clone();
             let nav_on_error = nav_on_error.clone();
             let picker_page_on_error = picker_page_on_error.clone();
@@ -1739,7 +1737,8 @@ fn push_playlist_items_page(
                         nav_on_error.push(&picker_page_on_error);
                     }
                 };
-                // One blocking call for subdir creation + readdir.
+                // Create one titled output folder per playlist. The listing
+                // runs off GTK because downloads may live on network mounts.
                 let (dir, existing) = match gio::spawn_blocking(move || {
                     let dir = if multi {
                         crate::file_names::collection_subdir(&base_dir, &title)
@@ -1769,20 +1768,20 @@ fn push_playlist_items_page(
                         return;
                     }
                 };
-                // One persist for the whole import, not one per row. Taken
-                // after the await: holding it across the readdir would suppress
-                // every other persist/UI refresh/scheduler kick in the app.
+
+                // Keep the import atomic: the one owner and all its passive
+                // children enter the queue together, then the scheduler sees
+                // one playlist job, not one job per selected file.
                 let _batch = manager.batch_guard();
-                // Story segments are addressable as their own pages: queue those so each row
-                // re-resolves its own segment instead of the tray (tray + format ids would
-                // download the first segment once per row). Attempted unconditionally:
-                // highlights and non-story URLs return None and keep the tray.
                 let mut failed: Option<String> = None;
                 let mut skipped_by_host_limit = 0usize;
-                let mut queued_items = Vec::with_capacity(chosen.len());
-                for (i, item) in &chosen {
-                    let item_page_url = crate::video_probe::story_segment_url(&page_url, &item.id)
-                        .unwrap_or_else(|| item.page_url.clone());
+                let mut accepted_indices = Vec::with_capacity(chosen.len());
+                let mut playlist_files = Vec::with_capacity(chosen.len());
+
+                for (i, entry) in &chosen {
+                    let item_page_url =
+                        crate::video_probe::story_segment_url(&page_url, &entry.id)
+                            .unwrap_or_else(|| entry.page_url.to_string());
                     let inheritance = {
                         let mut seen_hosts = guarded_child_hosts.borrow_mut();
                         crate::download_net::inherit_public_resolution_for_collection(
@@ -1795,9 +1794,6 @@ fn push_playlist_items_page(
                         Ok(()) => {}
                         Err(crate::download_net::CollectionHostError::TooManyDistinctHosts) => {
                             skipped_by_host_limit += 1;
-                            // Keep the process-wide policy bounded across retries.
-                            // Leave the row selected so the user can deselect it
-                            // after reading the explanation below the picker.
                             continue;
                         }
                         Err(crate::download_net::CollectionHostError::UnsafeDestination) => {
@@ -1807,53 +1803,49 @@ fn push_playlist_items_page(
                             break;
                         }
                     }
-                    let settings = manager.settings();
-                    let name = default_name_for(settings, &item.title, audio_only);
-                    match manager.enqueue_video_staged(
-                        &item_page_url,
-                        &dir,
-                        Some(&name),
-                        crate::media_types::VideoChoices {
-                            quality: manager.settings().video_quality(),
-                            audio_only,
-                            video_format_id: None,
-                            // Live streams queued from a playlist take the VOD
-                            // path; the worker re-resolves each item page anyway.
-                            is_live: false,
-                            // Remember the picked entry as fallback: story rows normally carry
-                            // segment pages and never need it, but highlights — and anything
-                            // unparseable at pick time — re-resolve the tray by this id.
-                            playlist_item_id: Some(item.id.to_string()),
-                        },
-                        &existing,
-                    ) {
-                        Ok(enqueued) => {
-                            apply_scheduled_at(&enqueued, scheduled_at);
-                            queued_items.push(enqueued);
-                        }
-                        Err(e) => {
-                            failed = Some(e);
-                            break;
+
+                    if multi {
+                        playlist_files.push(crate::media_types::VideoPlaylistFile {
+                            id: entry.id.to_string(),
+                            title: entry.title.to_string(),
+                            page_url: item_page_url,
+                            status: crate::download_store::DownloadStatus::Queued,
+                            progress: 0.0,
+                            path: None,
+                        });
+                        accepted_indices.push(*i);
+                    } else {
+                        let settings = manager.settings();
+                        let name = default_name_for(settings, &entry.title, audio_only);
+                        match manager.enqueue_video_staged(
+                            &item_page_url,
+                            &dir,
+                            Some(&name),
+                            crate::media_types::VideoChoices {
+                                quality: manager.settings().video_quality(),
+                                audio_only,
+                                video_format_id: None,
+                                is_live: false,
+                                playlist_item_id: Some(entry.id.to_string()),
+                            },
+                            &existing,
+                        ) {
+                            Ok(enqueued) => {
+                                apply_scheduled_at(&enqueued, scheduled_at);
+                                accepted_indices.push(*i);
+                            }
+                            Err(error) => {
+                                failed = Some(error);
+                                break;
+                            }
                         }
                     }
-                    // Rows already queued stay queued on a partial failure: unselect
-                    // them so a retry submits only the remainder (dedupe is by
-                    // filename).
-                    grid.unselect(*i);
                 }
-                if playlist.total > 1
-                    && let Some(group_id) = assign_playlist_group(
-                        &queued_items,
-                        &group_title,
-                        playlist_group_id.get(),
-                    )
-                {
-                    playlist_group_id.set(Some(group_id));
-                }
-                if let Some(e) = failed {
+
+                if let Some(error) = failed {
                     let message = if skipped_by_host_limit > 0 {
                         format!(
-                            "{e} {}",
+                            "{error} {}",
                             ngettext(
                                 "{n} item was also skipped because the collection exceeded the limit of {limit} distinct hosts.",
                                 "{n} items were also skipped because the collection exceeded the limit of {limit} distinct hosts.",
@@ -1867,7 +1859,7 @@ fn push_playlist_items_page(
                             )
                         )
                     } else {
-                        e
+                        error
                     };
                     error_caption.set_text(&message);
                     error_caption.set_visible(true);
@@ -1875,6 +1867,33 @@ fn push_playlist_items_page(
                     reveal_picker_on_error();
                     return;
                 }
+
+                if multi && !playlist_files.is_empty() {
+                    match manager.enqueue_video_playlist_staged(
+                        &page_url,
+                        &group_title,
+                        &dir,
+                        playlist_files,
+                        manager.settings().video_quality(),
+                        audio_only,
+                    ) {
+                        Ok(owner) => {
+                            apply_scheduled_at(&owner, scheduled_at);
+                        }
+                        Err(error) => {
+                            error_caption.set_text(&error);
+                            error_caption.set_visible(true);
+                            add_btn.set_sensitive(true);
+                            reveal_picker_on_error();
+                            return;
+                        }
+                    }
+                }
+
+                for index in accepted_indices {
+                    grid.unselect(index);
+                }
+
                 if skipped_by_host_limit > 0 {
                     error_caption.set_text(
                         &ngettext(
@@ -1894,6 +1913,7 @@ fn push_playlist_items_page(
                     reveal_picker_on_error();
                     return;
                 }
+
                 // Complete success collapses the whole New Download card; a partial failure stays
                 // on the picker so the remaining rows (unchecked above) can be retried.
                 close_card();
@@ -4863,6 +4883,7 @@ mod tests {
                     id: "one".into(),
                     title: "First item".into(),
                     page_url: "https://example.com/one".into(),
+                    playlist_index: 1,
                 }]
                 .into_boxed_slice(),
             },

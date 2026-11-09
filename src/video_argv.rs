@@ -282,6 +282,83 @@ pub(crate) fn unified_download_argv(
     args
 }
 
+/// Machine-readable per-file progress for an owning yt-dlp playlist process.
+pub(crate) const YTDLP_PLAYLIST_PROGRESS_TEMPLATE: &str = "download:[GrabPlaylist];%(info.id)s;%(info.playlist_index)s;%(progress.status)s;%(progress.downloaded_bytes)s;%(progress.total_bytes)s;%(progress.total_bytes_estimate)s";
+
+/// Output template for a collection. The extractor ID disambiguates duplicate
+/// titles and keeps filenames stable if the playlist is reordered between
+/// retries. Only the directory is escaped: the remaining percent fields are
+/// intentional yt-dlp template expressions.
+pub(crate) fn playlist_output_template(dest_dir: &Path) -> String {
+    let directory = dest_dir.to_string_lossy().replace('%', "%%");
+    format!("{directory}/%(title).120s [%(id)s].%(ext)s")
+}
+
+/// yt-dlp argv for one parent-owned playlist process. A single invocation
+/// receives the selected 1-based playlist indices and emits tagged per-file
+/// lifecycle events plus byte progress.
+pub(crate) fn playlist_download_argv(
+    job: &VideoJob,
+    spec: &str,
+    merging: bool,
+    merge_ext: &str,
+    ffmpeg_bin: &Path,
+    dest_dir: &Path,
+    playlist_indices: &[usize],
+) -> Vec<String> {
+    let mut args = unified_download_argv(
+        job,
+        spec,
+        merging,
+        merge_ext,
+        ffmpeg_bin,
+        Path::new("playlist-placeholder.%(ext)s"),
+        None,
+    );
+    let Some(scope_at) = args.iter().position(|arg| arg == "--no-playlist") else {
+        return args;
+    };
+    let indices = playlist_indices
+        .iter()
+        .map(|index| (index + 1).to_string())
+        .collect::<Vec<_>>()
+        .join(",");
+    args.splice(
+        scope_at..=scope_at,
+        [
+            "--yes-playlist".to_string(),
+            "--ignore-errors".to_string(),
+            "--playlist-items".to_string(),
+            indices,
+        ],
+    );
+
+    if let Some(output_at) = args.iter().position(|arg| arg == "-o")
+        && let Some(output) = args.get_mut(output_at + 1)
+    {
+        *output = playlist_output_template(dest_dir);
+    }
+    if let Some(progress_at) = args.iter().position(|arg| arg == "--progress-template")
+        && let Some(progress) = args.get_mut(progress_at + 1)
+    {
+        *progress = YTDLP_PLAYLIST_PROGRESS_TEMPLATE.to_string();
+    }
+    if let Some(print_at) = args.iter().position(|arg| arg == "after_move:filepath") {
+        args[print_at] =
+            "after_move:[GrabPlaylistDone];%(id)s;%(playlist_index)s;%(filepath)s".to_string();
+    }
+    if let Some(separator) = args.iter().position(|arg| arg == "--") {
+        args.splice(
+            separator..separator,
+            [
+                "--print".to_string(),
+                "before_dl:[GrabPlaylistStart];%(id)s;%(playlist_index)s;%(filename)s".to_string(),
+            ],
+        );
+    }
+    args
+}
+
 /// yt-dlp `-f` spec for one HLS attempt over the page URL (muxed files win over lower splits).
 pub(crate) fn hls_format_spec(quality: &str, _pinned: Option<&str>) -> String {
     // The VOD HLS attempt intentionally uses yt-dlp's normal selector: HLS

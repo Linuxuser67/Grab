@@ -122,12 +122,11 @@ fn to_cached_playlist(key: &str, info: &PlaylistInfo) -> Option<Playlist> {
     let entries = info
         .items
         .iter()
-        .enumerate()
-        .map(|(position, item)| PlaylistEntry {
+        .map(|item| PlaylistEntry {
             id: item.id.to_string(),
             title: item.title.to_string(),
-            url: item.page_url.clone(),
-            index: Some(position + 1),
+            url: item.page_url.to_string(),
+            index: Some(item.playlist_index as usize),
             duration: None,
             thumbnail: None,
             uploader: None,
@@ -180,7 +179,8 @@ fn from_cached_playlist(key: &str, playlist: Playlist) -> Option<PlaylistInfo> {
     let items = playlist
         .entries
         .into_iter()
-        .map(|entry| {
+        .enumerate()
+        .map(|(position, entry)| {
             let parsed_url = url::Url::parse(&entry.url).ok()?;
             if entry.id.is_empty()
                 || entry.title.trim().is_empty()
@@ -189,10 +189,18 @@ fn from_cached_playlist(key: &str, playlist: Playlist) -> Option<PlaylistInfo> {
             {
                 return None;
             }
+            let playlist_index = entry
+                .index
+                .and_then(|index| u32::try_from(index).ok())
+                .filter(|index| *index > 0)
+                .unwrap_or_else(|| {
+                    (position.saturating_add(1)).min(u32::MAX as usize) as u32
+                });
             Some(crate::media_types::PlaylistItem {
                 id: entry.id.into_boxed_str(),
                 title: entry.title.into_boxed_str(),
-                page_url: entry.url,
+                page_url: entry.url.into_boxed_str(),
+                playlist_index,
             })
         })
         .collect::<Option<Vec<_>>>()?;
@@ -267,12 +275,14 @@ mod tests {
                 PlaylistItem {
                     id: "first".into(),
                     title: "First item".into(),
-                    page_url: "https://example.test/first".to_string(),
+                    page_url: "https://example.test/first".into(),
+                    playlist_index: 1,
                 },
                 PlaylistItem {
                     id: "second".into(),
                     title: "Second item".into(),
-                    page_url: "https://example.test/second".to_string(),
+                    page_url: "https://example.test/second".into(),
+                    playlist_index: 2,
                 },
             ]
             .into_boxed_slice(),
@@ -346,11 +356,11 @@ mod tests {
     #[test]
     fn rotating_or_non_http_item_urls_are_not_cached() {
         let mut info = playlist();
-        info.items[0].page_url = "https://cdn.example/item?signature=rotating".to_string();
+        info.items[0].page_url = "https://cdn.example/item?signature=rotating".into();
         assert!(to_cached_playlist("key", &info).is_none());
 
         let mut info = playlist();
-        info.items[0].page_url = "ftp://example.test/item".to_string();
+        info.items[0].page_url = "ftp://example.test/item".into();
         assert!(to_cached_playlist("key", &info).is_none());
     }
 

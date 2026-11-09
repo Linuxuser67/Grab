@@ -117,9 +117,16 @@ fn reject_unsupported_hls_session_keys(
 }
 
 fn reject_unsupported_hls_tags(tags: &[m3u8_rs::ExtTag]) -> Result<(), ManifestError> {
+    reject_unsupported_hls_tags_except(tags, &[])
+}
+
+fn reject_unsupported_hls_tags_except(
+    tags: &[m3u8_rs::ExtTag],
+    allowed: &[&str],
+) -> Result<(), ManifestError> {
     let mut rejected: Vec<&str> = tags
         .iter()
-        .filter(|tag| !is_benign_hls_tag(tag))
+        .filter(|tag| !is_benign_hls_tag(tag) && !allowed.contains(&tag.tag.as_str()))
         .map(|tag| tag.tag.as_str())
         .collect();
     if rejected.is_empty() {
@@ -310,6 +317,8 @@ pub(crate) struct HlsVariant {
     pub(crate) stable_video_rendition_id: Option<String>,
     /// Apple HLS STABLE-VARIANT-ID, when the origin provides one.
     pub(crate) stable_variant_id: Option<String>,
+    /// HLS Content Steering Pathway; absent wire attributes belong to ".".
+    pub(crate) pathway_id: String,
 }
 
 /// An alternate audio rendition advertised by an HLS master playlist.
@@ -335,6 +344,13 @@ pub(crate) struct HlsSubtitleRendition {
     pub(crate) stable_rendition_id: Option<String>,
 }
 
+/// A Content Steering declaration resolved against the master playlist URL.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct HlsContentSteering {
+    pub(crate) server_url: Url,
+    pub(crate) initial_pathway_id: Option<String>,
+}
+
 /// Master-playlist choices in manifest order; no variant is silently selected.
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) struct HlsMasterPlan {
@@ -343,6 +359,7 @@ pub(crate) struct HlsMasterPlan {
     pub(crate) subtitle_renditions: Box<[HlsSubtitleRendition]>,
     /// Variables defined by this multivariant playlist for explicit child IMPORT.
     pub(crate) inherited_variables: Box<[(String, String)]>,
+    pub(crate) content_steering: Option<HlsContentSteering>,
 }
 
 /// Validated HLS media playlist, ordered resources, and local FFmpeg input.
@@ -1119,6 +1136,61 @@ fn hls_segment_identity(segment: &m3u8_rs::MediaSegment) -> String {
     )
 }
 
+/// A Pathway ID is a non-empty ASCII token from the Content Steering alphabet.
+pub(crate) fn is_valid_hls_pathway_id(value: &str) -> bool {
+    !value.is_empty()
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'-' | b'_'))
+}
+
+fn parse_hls_content_steering(
+    base_url: &Url,
+    body: &[u8],
+) -> Result<Option<HlsContentSteering>, ManifestError> {
+    let tag_count = body
+        .split(|byte| *byte == b'\n')
+        .map(|line| line.strip_suffix(b"\r").unwrap_or(line))
+        .filter(|line| line.starts_with(b"#EXT-X-CONTENT-STEERING:"))
+        .count();
+    if tag_count == 0 {
+        return Ok(None);
+    }
+    if tag_count != 1 {
+        return Err(ManifestError::UnsupportedPlaylist);
+    }
+
+    let text = std::str::from_utf8(body)
+        .map_err(|error| ManifestError::Parse(format!("HLS playlist is not UTF-8: {error}")))?;
+    let parsed = broadcast_hls::MasterPlaylist::parse(text).map_err(|error| {
+        ManifestError::Parse(format!(
+            "could not parse HLS Content Steering declaration: {error}"
+        ))
+    })?;
+    let steering = parsed
+        .content_steering
+        .ok_or(ManifestError::UnsupportedPlaylist)?;
+    if steering
+        .extra_attrs
+        .iter()
+        .any(|(name, _)| name.starts_with("REQ-"))
+    {
+        return Err(ManifestError::UnsupportedPlaylist);
+    }
+    if steering
+        .pathway_id
+        .as_deref()
+        .is_some_and(|pathway_id| !is_valid_hls_pathway_id(pathway_id))
+    {
+        return Err(ManifestError::UnsupportedPlaylist);
+    }
+    let server_url = resolve_resource_url(base_url, &steering.server_uri)?;
+    Ok(Some(HlsContentSteering {
+        server_url,
+        initial_pathway_id: steering.pathway_id,
+    }))
+}
+
 /// Parse an HLS master playlist into user-selectable video and audio choices.
 ///
 /// Variant order is preserved. I-frame-only entries are excluded because they
@@ -1162,10 +1234,20 @@ pub(crate) fn parse_hls_master_playlist(
         return Err(ManifestError::ExpectedMasterPlaylist);
     };
 
+    let content_steering = parse_hls_content_steering(&base_url, body)?;
     // Session keys are optional preloading hints, not media-key substitutes.
     // Never fetch them; the selected media playlist's EXT-X-KEY remains authoritative.
     reject_unsupported_hls_session_keys(&master.session_key)?;
-    reject_unsupported_hls_tags(&master.unknown_tags)?;
+    // This typed tag is accepted only after its URI, initial Pathway ID and
+    // required extension attributes have been validated above.
+    reject_unsupported_hls_tags_except(
+        &master.unknown_tags,
+        if content_steering.is_some() {
+            &["X-CONTENT-STEERING"]
+        } else {
+            &[]
+        },
+    )?;
 
     let video_renditions = master
         .alternatives
@@ -1191,6 +1273,15 @@ pub(crate) fn parse_hls_master_playlist(
                 .and_then(|attributes| attributes.get("STABLE-VARIANT-ID"))
                 .map(|value| value.as_str().to_string())
                 .filter(|value| !value.is_empty());
+            let pathway_id = variant
+                .other_attributes
+                .as_ref()
+                .and_then(|attributes| attributes.get("PATHWAY-ID"))
+                .map(|value| value.as_str().to_string())
+                .unwrap_or_else(|| ".".to_string());
+            if !is_valid_hls_pathway_id(&pathway_id) {
+                return Err(ManifestError::UnsupportedPlaylist);
+            }
             let Some(group_id) = variant.video.as_deref() else {
                 return Ok(vec![HlsVariant {
                     url: variant_url,
@@ -1207,6 +1298,7 @@ pub(crate) fn parse_hls_master_playlist(
                     video_rendition_name: None,
                     stable_video_rendition_id: None,
                     stable_variant_id,
+                    pathway_id,
                 }]);
             };
 
@@ -1271,6 +1363,7 @@ pub(crate) fn parse_hls_master_playlist(
                     video_rendition_name: Some(rendition.name.clone()),
                     stable_video_rendition_id,
                     stable_variant_id: stable_variant_id.clone(),
+                    pathway_id: pathway_id.clone(),
                 });
             }
             Ok(choices)
@@ -1363,6 +1456,7 @@ pub(crate) fn parse_hls_master_playlist(
         audio_renditions: audio_renditions.into_boxed_slice(),
         subtitle_renditions: subtitle_renditions.into_boxed_slice(),
         inherited_variables,
+        content_steering,
     })
 }
 
@@ -3228,20 +3322,53 @@ one.ts
     }
 
     #[test]
-    fn rejects_content_steering_and_expands_media_playlist_variables() {
+    fn parses_content_steering_and_expands_media_playlist_variables() {
         let body = br#"#EXTM3U
-#EXT-X-CONTENT-STEERING:SERVER-URI="steering.json",PATHWAY-ID="default"
+#EXT-X-CONTENT-STEERING:SERVER-URI="steering.json",PATHWAY-ID="cdn-a"
+#EXT-X-STREAM-INF:BANDWIDTH=1000000,PATHWAY-ID="cdn-a"
+video/a.m3u8
+#EXT-X-STREAM-INF:BANDWIDTH=2000000
+video/default.m3u8
+"#;
+        let master = parse_hls_master_playlist(BASE_URL, body)
+            .expect("typed Content Steering declaration should be accepted");
+        let steering = master.content_steering.expect("steering declaration");
+        assert_eq!(
+            steering.server_url.as_str(),
+            "https://cdn.example.test/path/steering.json"
+        );
+        assert_eq!(steering.initial_pathway_id.as_deref(), Some("cdn-a"));
+        assert_eq!(master.variants[0].pathway_id, "cdn-a");
+        assert_eq!(master.variants[1].pathway_id, ".");
+
+        let duplicate = br#"#EXTM3U
+#EXT-X-CONTENT-STEERING:SERVER-URI="one.json"
+#EXT-X-CONTENT-STEERING:SERVER-URI="two.json"
 #EXT-X-STREAM-INF:BANDWIDTH=1000000
 video.m3u8
 "#;
-        assert_eq!(
-            parse_hls_master_playlist(BASE_URL, body).err(),
-            Some(ManifestError::UnsupportedPlaylistFeature(
-                "#EXT-X-CONTENT-STEERING".to_string(),
-            ))
-        );
+        assert!(matches!(
+            parse_hls_master_playlist(BASE_URL, duplicate),
+            Err(ManifestError::UnsupportedPlaylist)
+        ));
 
-        let media = b"#EXTM3U\n#EXT-X-TARGETDURATION:2\n#EXT-X-DEFINE:NAME=\"path\",VALUE=\"video\"\n#EXTINF:2,\n{$path}/one.ts\n#EXT-X-ENDLIST\n";
+        let invalid_pathway = br#"#EXTM3U
+#EXT-X-CONTENT-STEERING:SERVER-URI="steering.json",PATHWAY-ID="bad/path"
+#EXT-X-STREAM-INF:BANDWIDTH=1000000
+video.m3u8
+"#;
+        assert!(matches!(
+            parse_hls_master_playlist(BASE_URL, invalid_pathway),
+            Err(ManifestError::UnsupportedPlaylist)
+        ));
+
+        let media = br#"#EXTM3U
+#EXT-X-TARGETDURATION:2
+#EXT-X-DEFINE:NAME="path",VALUE="video"
+#EXTINF:2,
+{$path}/one.ts
+#EXT-X-ENDLIST
+"#;
         let plan = plan_hls_media_playlist(BASE_URL, media)
             .expect("declared media-playlist variables should be expanded");
         assert_eq!(

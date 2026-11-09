@@ -29,6 +29,7 @@ const MANIFEST_LOOKUP_BUDGET: Duration = Duration::from_secs(10);
 const MAX_MANIFEST_ATTEMPTS: u32 = 3;
 const MAX_PREVIEW_MANIFEST_ATTEMPTS: u32 = 2;
 const MANIFEST_RETRY_BASE_DELAY: Duration = Duration::from_millis(250);
+const MAX_HLS_STEERING_MANIFEST_BYTES: usize = 256 * 1024;
 
 // Preview metadata is short-lived: HLS/DASH source manifests can change, and
 // signed child URLs may expire. Dynamic presentations are never cached.
@@ -136,10 +137,11 @@ fn is_cacheable_static_manifest(lookup: &ManifestLookup) -> bool {
         // media playlist is still fetched at download time, so live windows are
         // never reused here. Signed child URLs are excluded.
         crate::manifest_types::NativeManifest::HlsMaster(plan) => {
-            !plan
-                .variants
-                .iter()
-                .any(|variant| crate::video_cache::has_rotating_auth_query(&variant.url))
+            plan.content_steering.is_none()
+                && !plan
+                    .variants
+                    .iter()
+                    .any(|variant| crate::video_cache::has_rotating_auth_query(&variant.url))
                 && !plan
                     .audio_renditions
                     .iter()
@@ -579,6 +581,299 @@ fn validate_hls_stable_track_ids(master: &HlsMasterPlan) -> Result<(), ManifestI
     Ok(())
 }
 
+#[derive(Debug, Default, PartialEq, Eq)]
+struct PathwayStableTrackIds {
+    variants: HashSet<(Option<String>, Option<String>)>,
+    audio: HashSet<String>,
+    subtitles: HashSet<String>,
+}
+
+fn validate_hls_content_steering_stable_ids(
+    master: &crate::manifest::HlsMasterPlan,
+) -> Result<(), ManifestIntakeError> {
+    let mut by_pathway = HashMap::<String, PathwayStableTrackIds>::new();
+    for variant in &master.variants {
+        if variant.stable_variant_id.is_none() && variant.stable_video_rendition_id.is_none() {
+            return Err(ManifestIntakeError::Unsupported(gettext(
+                "Content Steering requires stable IDs for every downloadable video rendition",
+            )));
+        }
+        if variant.video_rendition_group.is_some() && variant.stable_video_rendition_id.is_none() {
+            return Err(ManifestIntakeError::Unsupported(gettext(
+                "Content Steering requires stable IDs for alternate video renditions",
+            )));
+        }
+        let identity = by_pathway.entry(variant.pathway_id.clone()).or_default();
+        identity.variants.insert((
+            variant.stable_variant_id.clone(),
+            variant.stable_video_rendition_id.clone(),
+        ));
+        if let Some(group_id) = variant.audio_group.as_deref() {
+            for rendition in master
+                .audio_renditions
+                .iter()
+                .filter(|rendition| rendition.group_id == group_id && rendition.url.is_some())
+            {
+                let stable_id = rendition.stable_rendition_id.as_ref().ok_or_else(|| {
+                    ManifestIntakeError::Unsupported(gettext(
+                        "Content Steering requires stable IDs for external audio renditions",
+                    ))
+                })?;
+                identity.audio.insert(stable_id.clone());
+            }
+        }
+        if let Some(group_id) = variant.subtitles_group.as_deref() {
+            for rendition in master
+                .subtitle_renditions
+                .iter()
+                .filter(|rendition| rendition.group_id == group_id)
+            {
+                let stable_id = rendition.stable_rendition_id.as_ref().ok_or_else(|| {
+                    ManifestIntakeError::Unsupported(gettext(
+                        "Content Steering requires stable IDs for subtitle renditions",
+                    ))
+                })?;
+                identity.subtitles.insert(stable_id.clone());
+            }
+        }
+    }
+    let mut pathways = by_pathway.values();
+    let expected = pathways.next().ok_or_else(|| {
+        ManifestIntakeError::Unsupported(gettext(
+            "Content Steering master playlist has no downloadable Pathways",
+        ))
+    })?;
+    if pathways.any(|identity| identity != expected) {
+        return Err(ManifestIntakeError::Unsupported(gettext(
+            "Content Steering Pathways do not advertise matching stable rendition identities",
+        )));
+    }
+    Ok(())
+}
+
+fn parse_hls_steering_manifest(body: &[u8]) -> Result<Vec<String>, ManifestIntakeError> {
+    if body.len() > MAX_HLS_STEERING_MANIFEST_BYTES {
+        return Err(ManifestIntakeError::Unsupported(
+            "The HLS Content Steering manifest exceeds its byte limit".to_string(),
+        ));
+    }
+    let value: serde_json::Value = serde_json::from_slice(body).map_err(|error| {
+        ManifestIntakeError::Unsupported(format!(
+            "The HLS Content Steering manifest is not valid JSON: {error}"
+        ))
+    })?;
+    if value.get("VERSION").and_then(serde_json::Value::as_u64) != Some(1) {
+        return Err(ManifestIntakeError::Unsupported(
+            "The HLS Content Steering manifest has an unsupported VERSION".to_string(),
+        ));
+    }
+    if value
+        .get("TTL")
+        .and_then(serde_json::Value::as_u64)
+        .is_none()
+    {
+        return Err(ManifestIntakeError::Unsupported(
+            "The HLS Content Steering manifest has an invalid TTL".to_string(),
+        ));
+    }
+    if value
+        .get("RELOAD-URI")
+        .is_some_and(|reload| reload.as_str().is_none())
+    {
+        return Err(ManifestIntakeError::Unsupported(
+            "The HLS Content Steering RELOAD-URI is invalid".to_string(),
+        ));
+    }
+    if let Some(clones) = value.get("PATHWAY-CLONES") {
+        let clones = clones.as_array().ok_or_else(|| {
+            ManifestIntakeError::Unsupported(
+                "The HLS Content Steering PATHWAY-CLONES member is invalid".to_string(),
+            )
+        })?;
+        if !clones.is_empty() {
+            return Err(ManifestIntakeError::Unsupported(
+                "HLS Content Steering PATHWAY-CLONES are not supported yet".to_string(),
+            ));
+        }
+    }
+    let priority = value
+        .get("PATHWAY-PRIORITY")
+        .and_then(serde_json::Value::as_array)
+        .filter(|priority| !priority.is_empty())
+        .ok_or_else(|| {
+            ManifestIntakeError::Unsupported(
+                "The HLS Content Steering PATHWAY-PRIORITY list is missing or empty".to_string(),
+            )
+        })?;
+    let mut seen = HashSet::with_capacity(priority.len());
+    let mut pathway_ids = Vec::with_capacity(priority.len());
+    for item in priority {
+        let pathway_id = item.as_str().ok_or_else(|| {
+            ManifestIntakeError::Unsupported(
+                "The HLS Content Steering PATHWAY-PRIORITY list contains a non-string ID"
+                    .to_string(),
+            )
+        })?;
+        if !crate::manifest::is_valid_hls_pathway_id(pathway_id) {
+            return Err(ManifestIntakeError::Unsupported(
+                "The HLS Content Steering PATHWAY-PRIORITY list contains an invalid ID".to_string(),
+            ));
+        }
+        if !seen.insert(pathway_id.to_string()) {
+            return Err(ManifestIntakeError::Unsupported(
+                "The HLS Content Steering PATHWAY-PRIORITY list contains duplicate IDs".to_string(),
+            ));
+        }
+        pathway_ids.push(pathway_id.to_string());
+    }
+    Ok(pathway_ids)
+}
+
+fn hls_steering_request_url(
+    steering: &crate::manifest::HlsContentSteering,
+) -> Result<Url, ManifestIntakeError> {
+    let mut request_url = steering.server_url.clone();
+    if request_url
+        .query_pairs()
+        .any(|(name, _)| name == "_HLS_pathway")
+    {
+        return Err(ManifestIntakeError::Unsupported(
+            "The HLS Content Steering SERVER-URI must not contain _HLS_pathway".to_string(),
+        ));
+    }
+    if let Some(pathway_id) = steering.initial_pathway_id.as_deref() {
+        request_url
+            .query_pairs_mut()
+            .append_pair("_HLS_pathway", pathway_id);
+    }
+    Ok(request_url)
+}
+
+async fn fetch_hls_steering_manifest(
+    client: &reqwest::Client,
+    steering: &crate::manifest::HlsContentSteering,
+) -> Result<Vec<u8>, ManifestIntakeError> {
+    let request_url = hls_steering_request_url(steering)?;
+    let (_, body, _) = fetch_bounded_manifest(client, request_url).await?;
+    if body.len() > MAX_HLS_STEERING_MANIFEST_BYTES {
+        return Err(ManifestIntakeError::Unsupported(
+            "The HLS Content Steering manifest exceeds its byte limit".to_string(),
+        ));
+    }
+    Ok(body)
+}
+
+fn filter_hls_master_to_pathway(
+    master: &mut crate::manifest::HlsMasterPlan,
+    pathway_id: &str,
+) -> Result<(), ManifestIntakeError> {
+    if !master
+        .variants
+        .iter()
+        .any(|variant| variant.pathway_id == pathway_id)
+    {
+        return Err(ManifestIntakeError::Unsupported(format!(
+            "The selected HLS Content Steering Pathway {pathway_id:?} is not present in the master playlist"
+        )));
+    }
+    let selected_variants = master
+        .variants
+        .iter()
+        .filter(|variant| variant.pathway_id == pathway_id)
+        .cloned()
+        .collect::<Vec<_>>();
+    let audio_groups = selected_variants
+        .iter()
+        .filter_map(|variant| variant.audio_group.clone())
+        .collect::<HashSet<_>>();
+    let subtitle_groups = selected_variants
+        .iter()
+        .filter_map(|variant| variant.subtitles_group.clone())
+        .collect::<HashSet<_>>();
+    master.variants = selected_variants.into_boxed_slice();
+    master.audio_renditions = master
+        .audio_renditions
+        .iter()
+        .filter(|rendition| audio_groups.contains(rendition.group_id.as_str()))
+        .cloned()
+        .collect::<Vec<_>>()
+        .into_boxed_slice();
+    master.subtitle_renditions = master
+        .subtitle_renditions
+        .iter()
+        .filter(|rendition| subtitle_groups.contains(rendition.group_id.as_str()))
+        .cloned()
+        .collect::<Vec<_>>()
+        .into_boxed_slice();
+    Ok(())
+}
+
+fn select_hls_content_steering_pathway(
+    master: &mut crate::manifest::HlsMasterPlan,
+    priority: &[String],
+) -> Result<(), ManifestIntakeError> {
+    let available = master
+        .variants
+        .iter()
+        .map(|variant| variant.pathway_id.as_str())
+        .collect::<HashSet<_>>();
+    if let Some(initial) = master
+        .content_steering
+        .as_ref()
+        .and_then(|steering| steering.initial_pathway_id.as_deref())
+        && !available.contains(initial)
+    {
+        return Err(ManifestIntakeError::Unsupported(
+            "The HLS Content Steering initial PATHWAY-ID is not present in the master playlist"
+                .to_string(),
+        ));
+    }
+    let selected = priority
+        .iter()
+        .find(|pathway_id| available.contains(pathway_id.as_str()))
+        .cloned()
+        .or_else(|| {
+            master
+                .content_steering
+                .as_ref()
+                .and_then(|steering| steering.initial_pathway_id.clone())
+        })
+        .ok_or_else(|| {
+            ManifestIntakeError::Unsupported(
+                "No HLS Content Steering priority Pathway is available in the master playlist"
+                    .to_string(),
+            )
+        })?;
+    filter_hls_master_to_pathway(master, &selected)
+}
+
+async fn apply_hls_content_steering(
+    client: &reqwest::Client,
+    mut master: crate::manifest::HlsMasterPlan,
+) -> Result<crate::manifest::HlsMasterPlan, ManifestIntakeError> {
+    let Some(steering) = master.content_steering.as_ref() else {
+        return Ok(master);
+    };
+    validate_hls_content_steering_stable_ids(&master)?;
+    let priority = match fetch_hls_steering_manifest(client, steering).await {
+        Ok(body) => match parse_hls_steering_manifest(&body) {
+            Ok(priority) => priority,
+            Err(_error) if steering.initial_pathway_id.is_some() => {
+                // Use the declared initial Pathway if the steering response is invalid.
+                Vec::new()
+            }
+            Err(error) => return Err(error),
+        },
+        Err(_error) if steering.initial_pathway_id.is_some() => {
+            // Use the declared initial Pathway if the guarded steering fetch fails.
+            Vec::new()
+        }
+        Err(error) => return Err(error),
+    };
+    select_hls_content_steering_pathway(&mut master, &priority)?;
+    Ok(master)
+}
+
 async fn lookup_with_client_policy(
     client: &reqwest::Client,
     raw_url: &str,
@@ -613,6 +908,7 @@ async fn lookup_with_client_policy(
         crate::media_types::ManifestKind::Hls => {
             match crate::manifest::parse_hls_master_playlist(final_url.as_str(), &body) {
                 Ok(master) => {
+                    let master = apply_hls_content_steering(client, master).await?;
                     validate_hls_stable_track_ids(&master)?;
                     NativeManifest::HlsMaster(master)
                 }
@@ -1986,6 +2282,7 @@ video/es.m3u8
             video_rendition_name: None,
             stable_video_rendition_id: None,
             stable_variant_id: Some(stable_id.to_string()),
+            pathway_id: ".".to_string(),
         };
         let original = variant(
             "https://cdn.example.test/video/old.m3u8?sig=old",
@@ -2031,6 +2328,7 @@ video/es.m3u8
             video_rendition_name: None,
             stable_video_rendition_id: None,
             stable_variant_id: None,
+            pathway_id: ".".to_string(),
         };
         let original = variant(
             "https://video.twimg.com/amplify_video/6/pl/avc1/854x480/abc.m3u8",
@@ -2107,6 +2405,7 @@ video/es.m3u8
             video_rendition_name: Some("Main".to_string()),
             stable_video_rendition_id: None,
             stable_variant_id: None,
+            pathway_id: ".".to_string(),
         };
         let first = variant("/video/first.m3u8", "audio-en");
         let other_variant = variant("/video/second.m3u8", "audio-en");
@@ -2132,6 +2431,7 @@ video/es.m3u8
             video_rendition_name: None,
             stable_video_rendition_id: None,
             stable_variant_id: Some("variant-1080".to_string()),
+            pathway_id: ".".to_string(),
         };
         let original = variant("https://cdn.example.test/video/old.m3u8?sig=old");
         let refreshed = variant("https://cdn.example.test/video/new.m3u8?sig=new");
@@ -2676,5 +2976,153 @@ mod hls_live_reload_url_tests {
         .expect("fixture URL");
         let clean = strip_hls_blocking_reload_query(&url);
         assert_eq!(clean.query(), Some("token=secret"));
+    }
+}
+#[cfg(test)]
+mod content_steering_tests {
+    use super::*;
+
+    const MASTER_URL: &str = "https://cdn.example.test/master.m3u8";
+
+    fn master() -> crate::manifest::HlsMasterPlan {
+        crate::manifest::parse_hls_master_playlist(
+            MASTER_URL,
+            br#"#EXTM3U
+#EXT-X-CONTENT-STEERING:SERVER-URI="steering.json",PATHWAY-ID="cdn-a"
+#EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID="audio-a",NAME="English",URI="audio/a.m3u8",STABLE-RENDITION-ID="audio-en"
+#EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID="audio-b",NAME="English",URI="audio/b.m3u8",STABLE-RENDITION-ID="audio-en"
+#EXT-X-MEDIA:TYPE=SUBTITLES,GROUP-ID="subs-a",NAME="English",URI="subs/a.m3u8",STABLE-RENDITION-ID="subs-en"
+#EXT-X-MEDIA:TYPE=SUBTITLES,GROUP-ID="subs-b",NAME="English",URI="subs/b.m3u8",STABLE-RENDITION-ID="subs-en"
+#EXT-X-STREAM-INF:BANDWIDTH=1200000,AUDIO="audio-a",SUBTITLES="subs-a",STABLE-VARIANT-ID="main",PATHWAY-ID="cdn-a"
+video/a.m3u8
+#EXT-X-STREAM-INF:BANDWIDTH=1200000,AUDIO="audio-b",SUBTITLES="subs-b",STABLE-VARIANT-ID="main",PATHWAY-ID="cdn-b"
+video/b.m3u8
+"#,
+        )
+        .expect("valid Content Steering master")
+    }
+
+    #[test]
+    fn steering_request_url_preserves_existing_query_and_adds_current_pathway() {
+        let steering = crate::manifest::HlsContentSteering {
+            server_url: Url::parse("https://steering.example.test/path/list.json?signature=abc123")
+                .expect("valid steering URL"),
+            initial_pathway_id: Some("cdn-a".to_string()),
+        };
+        let url = hls_steering_request_url(&steering).expect("build steering request URL");
+        let pairs = url.query_pairs().collect::<Vec<_>>();
+        assert!(
+            pairs
+                .iter()
+                .any(|(name, value)| name == "signature" && value == "abc123")
+        );
+        assert!(
+            pairs
+                .iter()
+                .any(|(name, value)| name == "_HLS_pathway" && value == "cdn-a")
+        );
+    }
+
+    #[test]
+    fn steering_request_url_rejects_preexisting_reserved_pathway_query() {
+        let steering = crate::manifest::HlsContentSteering {
+            server_url: Url::parse(
+                "https://steering.example.test/path/list.json?_HLS_pathway=other",
+            )
+            .expect("valid steering URL"),
+            initial_pathway_id: Some("cdn-a".to_string()),
+        };
+        assert!(matches!(
+            hls_steering_request_url(&steering),
+            Err(ManifestIntakeError::Unsupported(_))
+        ));
+    }
+
+    #[test]
+    fn parses_steering_priority_and_rejects_unimplemented_clones() {
+        let json = br#"{
+            "VERSION": 1,
+            "TTL": 300,
+            "PATHWAY-PRIORITY": ["unavailable", "cdn-b", "cdn-a"],
+            "PATHWAY-CLONES": []
+        }"#;
+        assert_eq!(
+            parse_hls_steering_manifest(json).expect("valid steering manifest"),
+            vec![
+                "unavailable".to_string(),
+                "cdn-b".to_string(),
+                "cdn-a".to_string()
+            ]
+        );
+        let clones = br#"{
+            "VERSION": 1,
+            "TTL": 300,
+            "PATHWAY-PRIORITY": ["cdn-b"],
+            "PATHWAY-CLONES": [{"ID": "clone", "BASE-ID": "cdn-b"}]
+        }"#;
+        assert!(matches!(
+            parse_hls_steering_manifest(clones),
+            Err(ManifestIntakeError::Unsupported(_))
+        ));
+        let duplicate = br#"{
+            "VERSION": 1,
+            "TTL": 300,
+            "PATHWAY-PRIORITY": ["cdn-a", "cdn-a"]
+        }"#;
+        assert!(matches!(
+            parse_hls_steering_manifest(duplicate),
+            Err(ManifestIntakeError::Unsupported(_))
+        ));
+    }
+
+    #[test]
+    fn selects_priority_pathway_and_filters_its_audio_and_subtitle_groups() {
+        let mut master = master();
+        validate_hls_content_steering_stable_ids(&master)
+            .expect("all direct pathways have matching stable track identities");
+        select_hls_content_steering_pathway(
+            &mut master,
+            &["unavailable".to_string(), "cdn-b".to_string()],
+        )
+        .expect("select the first available priority pathway");
+        assert_eq!(master.variants.len(), 1);
+        assert_eq!(master.variants[0].pathway_id, "cdn-b");
+        assert!(master.variants[0].url.path().ends_with("/video/b.m3u8"));
+        assert_eq!(master.audio_renditions.len(), 1);
+        assert!(
+            master.audio_renditions[0]
+                .url
+                .as_ref()
+                .expect("audio URI")
+                .path()
+                .ends_with("/audio/b.m3u8")
+        );
+        assert_eq!(master.subtitle_renditions.len(), 1);
+        assert!(
+            master.subtitle_renditions[0]
+                .url
+                .path()
+                .ends_with("/subs/b.m3u8")
+        );
+    }
+
+    #[test]
+    fn uses_initial_pathway_when_no_direct_priority_path_is_available() {
+        let mut master = master();
+        select_hls_content_steering_pathway(&mut master, &["unknown".to_string()])
+            .expect("use the initial pathway while no direct priority path is available");
+        assert_eq!(master.variants.len(), 1);
+        assert_eq!(master.variants[0].pathway_id, "cdn-a");
+        assert!(master.variants[0].url.path().ends_with("/video/a.m3u8"));
+    }
+
+    #[test]
+    fn refuses_pathways_without_matching_stable_track_sets() {
+        let mut master = master();
+        master.variants[1].stable_variant_id = Some("different-variant".to_string());
+        assert!(matches!(
+            validate_hls_content_steering_stable_ids(&master),
+            Err(ManifestIntakeError::Unsupported(_))
+        ));
     }
 }

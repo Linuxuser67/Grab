@@ -2001,6 +2001,9 @@ fn effective_list(
                 .collect::<Result<Vec<_>, DashError>>()
         })
         .transpose()?;
+    if is_dynamic && initialization.is_none() {
+        return Err(DashError::UnsupportedAddressing);
+    }
     if is_dynamic
         && !timeline.as_ref().is_some_and(|entries| {
             entries.len() == segment_urls.len()
@@ -4540,6 +4543,34 @@ mod tests {
             .filter_map(|resource| resource.segment_number)
             .collect::<Vec<_>>();
         assert_eq!(numbers, vec![56, 57, 58, 59, 60]);
+    }
+
+    #[test]
+    fn dynamic_segment_list_rejects_nondefault_start_number() {
+        let body = r#"<MPD xmlns="urn:mpeg:dash:schema:mpd:2011" type="dynamic" availabilityStartTime="1970-01-01T00:00:00Z" minimumUpdatePeriod="PT2S" timeShiftBufferDepth="PT10S"><Period><AdaptationSet contentType="video" mimeType="video/mp4"><SegmentList startNumber="2" timescale="1"><Initialization sourceURL="init.mp4"/><SegmentTimeline><S t="0" d="2"/></SegmentTimeline><SegmentURL media="seg-0.m4s"/></SegmentList><Representation id="v1" bandwidth="1000000"/></AdaptationSet></Period></MPD>"#;
+        assert_eq!(
+            parse_dash_manifest_at(
+                BASE_URL,
+                body,
+                SystemTime::UNIX_EPOCH + Duration::from_secs(120)
+            )
+            .err(),
+            Some(DashError::UnsupportedAddressing)
+        );
+    }
+
+    #[test]
+    fn dynamic_segment_list_requires_initialization() {
+        let body = r#"<MPD xmlns="urn:mpeg:dash:schema:mpd:2011" type="dynamic" availabilityStartTime="1970-01-01T00:00:00Z" minimumUpdatePeriod="PT2S" timeShiftBufferDepth="PT10S"><Period><AdaptationSet contentType="video" mimeType="video/mp4"><SegmentList timescale="1"><SegmentTimeline><S t="0" d="2"/></SegmentTimeline><SegmentURL media="seg-0.m4s"/></SegmentList><Representation id="v1" bandwidth="1000000"/></AdaptationSet></Period></MPD>"#;
+        assert_eq!(
+            parse_dash_manifest_at(
+                BASE_URL,
+                body,
+                SystemTime::UNIX_EPOCH + Duration::from_secs(120)
+            )
+            .err(),
+            Some(DashError::UnsupportedAddressing)
+        );
     }
 
     #[test]

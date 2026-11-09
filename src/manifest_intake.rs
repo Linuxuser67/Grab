@@ -857,9 +857,8 @@ async fn apply_hls_content_steering(
     let priority = match fetch_hls_steering_manifest(client, steering).await
     {
         Ok(body) => parse_hls_steering_manifest(&body)?,
-        Err(error) if steering.initial_pathway_id.is_some() => {
+        Err(_error) if steering.initial_pathway_id.is_some() => {
             // Use the declared initial Pathway if the guarded steering fetch fails.
-            let _ = error;
             Vec::new()
         }
         Err(error) => return Err(error),

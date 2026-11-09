@@ -5869,9 +5869,9 @@ impl DownloadManager {
         }
         let mut items = Vec::new();
         for it in self.items() {
-            // Gallery children are UI projections of one persisted gallery job.
-            // They are reconstructed from gallery-dl start/skip/complete events.
-            if it.is_gallery_child() {
+            // Collection children are passive UI projections of one
+            // persisted owner job (gallery-dl or yt-dlp playlist).
+            if it.is_collection_child() {
                 continue;
             }
             // Cancelled rows carry no intent: never persisted.

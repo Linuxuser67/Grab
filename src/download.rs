@@ -651,9 +651,9 @@ fn video_source_matches_url(source: &crate::media_types::VideoSource, url: &str)
             crate::manifest_intake::valid_source(source)
                 && normalize_url(&source.url).is_ok_and(|manifest_url| manifest_url == url)
         }
-        crate::media_types::VideoSource::Playlist { page_url, state, .. } => {
-            !state.files.is_empty() && normalize_url(page_url).is_ok_and(|page| page == url)
-        }
+        crate::media_types::VideoSource::Playlist {
+            page_url, state, ..
+        } => !state.files.is_empty() && normalize_url(page_url).is_ok_and(|page| page == url),
         crate::media_types::VideoSource::Direct => false,
     }
 }
@@ -1480,10 +1480,7 @@ impl DownloadManager {
     ) -> Result<DownloadItem, String> {
         let url = normalize_url(page_url)?;
         let output_dir = std::path::Path::new(dest_dir);
-        if !output_dir.is_absolute()
-            || !output_dir.is_dir()
-            || output_dir.file_name().is_none()
-        {
+        if !output_dir.is_absolute() || !output_dir.is_dir() || output_dir.file_name().is_none() {
             return Err(gettext("The playlist destination folder is invalid"));
         }
         let parent_dir = output_dir
@@ -1536,12 +1533,7 @@ impl DownloadManager {
             dest_dir: dest_dir.to_string(),
             files,
         };
-        let item = DownloadItem::new(
-            id,
-            &url,
-            filename,
-            &parent_dir.to_string_lossy(),
-        );
+        let item = DownloadItem::new(id, &url, filename, &parent_dir.to_string_lossy());
         item.set_public_only(
             url::Url::parse(&url)
                 .ok()
@@ -3807,11 +3799,7 @@ impl DownloadManager {
         let handle = tokio_rt().spawn(async move {
             let worker_tx = tx.clone();
             match crate::video_runner::run_video_playlist_download(
-                job,
-                state,
-                &gate,
-                abort_rx,
-                worker_tx,
+                job, state, &gate, abort_rx, worker_tx,
             )
             .await
             {
@@ -3820,9 +3808,9 @@ impl DownloadManager {
                 }
                 Ok(crate::video::VideoOutcome::Aborted) => {}
                 Ok(crate::video::VideoOutcome::Expand(_)) => {
-                    tx.send(EngineMsg::Failed(
-                        gettext("A playlist collection unexpectedly resolved to another collection"),
-                    ))
+                    tx.send(EngineMsg::Failed(gettext(
+                        "A playlist collection unexpectedly resolved to another collection",
+                    )))
                     .ok();
                 }
                 Err(error) => {
@@ -4180,9 +4168,10 @@ impl DownloadManager {
             )
         };
 
-        let group = owner.group().filter(|group| group.is_valid()).or_else(|| {
-            crate::download_store::DownloadGroup::try_new(owner.id(), &title)
-        });
+        let group = owner
+            .group()
+            .filter(|group| group.is_valid())
+            .or_else(|| crate::download_store::DownloadGroup::try_new(owner.id(), &title));
         let filename = file
             .path
             .as_deref()
@@ -4197,7 +4186,9 @@ impl DownloadManager {
 
         if let Some(existing) = self.items().find(|candidate| {
             candidate.is_collection_child()
-                && candidate.group().is_some_and(|group| group.id() == owner.id())
+                && candidate
+                    .group()
+                    .is_some_and(|group| group.id() == owner.id())
                 && candidate.collection_file_id() == file_id
         }) {
             existing.set_filename(filename);
@@ -4209,12 +4200,7 @@ impl DownloadManager {
             return;
         }
 
-        let child = DownloadItem::new(
-            self.alloc_id(),
-            &file.page_url,
-            &filename,
-            &dest_dir,
-        );
+        let child = DownloadItem::new(self.alloc_id(), &file.page_url, &filename, &dest_dir);
         child.set_is_collection_child(true);
         child.set_collection_file_id(file_id);
         child.set_gallery_file_path(file.path.unwrap_or_default());
@@ -5123,8 +5109,7 @@ impl DownloadManager {
             let children = self
                 .items()
                 .filter(|item| {
-                    item.is_collection_child()
-                        && item.group().is_some_and(|group| group.id() == id)
+                    item.is_collection_child() && item.group().is_some_and(|group| group.id() == id)
                 })
                 .map(|item| item.id())
                 .collect::<Vec<_>>();
@@ -5318,7 +5303,10 @@ impl DownloadManager {
         if let Some(src) = snap.video_source {
             if let crate::media_types::VideoSource::Playlist { state, .. } = &src {
                 item.set_is_collection_owner(true);
-                item.set_group(crate::download_store::DownloadGroup::try_new(id, &state.title));
+                item.set_group(crate::download_store::DownloadGroup::try_new(
+                    id,
+                    &state.title,
+                ));
                 item.set_gallery_url(item.url());
                 item.set_gallery_file_count(state.files.len().min(u32::MAX as usize) as u32);
                 item.set_gallery_files_done(
@@ -5527,7 +5515,9 @@ impl DownloadManager {
             |m, id| {
                 let owner = m.find(id);
                 let gallery_owner = owner.as_ref().is_some_and(|item| item.is_gallery());
-                let playlist_owner = owner.as_ref().is_some_and(|item| item.is_collection_owner());
+                let playlist_owner = owner
+                    .as_ref()
+                    .is_some_and(|item| item.is_collection_owner());
                 if let Some(path) = m.cancel_inner(id, false, Stop::Preserve) {
                     partials_to_remove.push(path);
                 }

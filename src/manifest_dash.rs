@@ -247,7 +247,7 @@ fn source_timestamp_offset(
         DashAddressing::Template(template) => {
             (template.timescale, template.presentation_time_offset)
         }
-        DashAddressing::List(list) => (list.timescale, 0),
+        DashAddressing::List(list) => (list.timescale, list.presentation_time_offset),
         DashAddressing::Base(base) => (base.timescale, base.presentation_time_offset),
         DashAddressing::IndexedBase(index) => {
             (index.timescale.unwrap_or(1), index.presentation_time_offset)
@@ -356,6 +356,7 @@ enum DashInitialization {
 struct DashList {
     initialization: Option<DashInitialization>,
     timescale: u64,
+    presentation_time_offset: u64,
     segments: Box<[DashListSegment]>,
 }
 
@@ -442,12 +443,6 @@ pub(crate) fn parse_dash_manifest_at(
     if mpd.periods.iter().any(period_has_scte35_ad_signaling) {
         return Err(DashError::AdSignaling);
     }
-    if dash_roles::has_nonzero_segment_list_presentation_time_offset(body.as_bytes())
-        .ok_or(DashError::Parse)?
-    {
-        return Err(DashError::UnsupportedAddressing);
-    }
-
     let mut presentation = match mpd.mpdtype.as_deref() {
         None | Some("static") => {
             if mpd.minimumUpdatePeriod.is_some()
@@ -495,8 +490,10 @@ pub(crate) fn parse_dash_manifest_at(
 
     let is_dynamic = matches!(presentation, DashPresentation::Dynamic(_));
     if is_dynamic
-        && (dash_roles::has_nondefault_segment_list_start_number(body.as_bytes())
+        && (dash_roles::has_nonzero_segment_list_presentation_time_offset(body.as_bytes())
             .ok_or(DashError::Parse)?
+            || dash_roles::has_nondefault_segment_list_start_number(body.as_bytes())
+                .ok_or(DashError::Parse)?
             || dash_roles::has_unsupported_segment_list_timing_attributes(body.as_bytes())
                 .ok_or(DashError::Parse)?)
     {
@@ -697,6 +694,11 @@ pub(crate) fn parse_dash_manifest_at(
                     representation,
                     addressing_duration,
                     is_dynamic,
+                    adaptation_metadata
+                        .get(representation_index)
+                        .ok_or(DashError::Parse)?
+                        .segment_list_presentation_time_offset
+                        .unwrap_or(0),
                 )?;
                 if let DashAddressing::Template(template) = &addressing {
                     low_latency::validate_template_mime(
@@ -1609,6 +1611,7 @@ fn effective_addressing(
     representation: &dash_mpd_core::Representation,
     period_duration: Duration,
     is_dynamic: bool,
+    segment_list_presentation_time_offset: u64,
 ) -> Result<DashAddressing, DashError> {
     if representation.representation_index.is_some() {
         // The supported profile requires RepresentationIndex to be nested in
@@ -1762,7 +1765,8 @@ fn effective_addressing(
             {
                 return Err(DashError::UnsupportedAddressing);
             }
-            effective_list(&lists, is_dynamic).map(DashAddressing::List)?
+            effective_list(&lists, is_dynamic, segment_list_presentation_time_offset)
+                .map(DashAddressing::List)?
         }
         _ => return Err(DashError::UnsupportedAddressing),
     };
@@ -1936,6 +1940,7 @@ fn effective_template(
 fn effective_list(
     levels: &[Option<&dash_mpd_core::SegmentList>],
     is_dynamic: bool,
+    presentation_time_offset: u64,
 ) -> Result<DashList, DashError> {
     let mut initialization = None;
     let mut segment_urls = None;
@@ -2082,6 +2087,7 @@ fn effective_list(
     Ok(DashList {
         initialization,
         timescale,
+        presentation_time_offset,
         segments: segments.into_boxed_slice(),
     })
 }

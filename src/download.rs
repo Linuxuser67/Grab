@@ -1776,10 +1776,13 @@ impl DownloadManager {
         let file_count = job.file_count.unwrap_or(0);
         item.set_gallery_file_count(file_count);
         // Restore the completion counter used by the gallery progress bar.
-        let files_done = if stored.status == DownloadStatus::Done {
+        let files_done = if job.file_rows.is_empty() && stored.status == DownloadStatus::Done {
             file_count
         } else {
-            0
+            job.file_rows
+                .iter()
+                .filter(|file| file.status == DownloadStatus::Done)
+                .count() as u32
         };
         item.set_gallery_files_done(files_done);
         item.set_gallery_url(url.clone());
@@ -3938,7 +3941,10 @@ impl DownloadManager {
                                 update.current_file_percent
                                     .map(|percent| f64::from(percent) / 100.0)
                                     .unwrap_or(0.0),
-                                &file_progress.trim_start_matches(" · "),
+                                &update
+                                    .current_file_percent
+                                    .map(|percent| format!("{percent}%"))
+                                    .unwrap_or_else(|| gettext("Downloading")),
                             );
                         }
 
@@ -3965,6 +3971,11 @@ impl DownloadManager {
                             ));
                         }
                         this.changed();
+                        // Persist file identity/status transitions, not every
+                        // high-frequency byte-progress update.
+                        if update.event.is_some() {
+                            this.persist_queue();
+                        }
                     }
                     GalleryMsg::Finished(result) => {
                         // Remove from running registry.

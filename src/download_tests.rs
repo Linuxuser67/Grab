@@ -9646,15 +9646,16 @@ fn unremove_many_reports_partial_failures_with_one_refresh() {
     let _qf = test_queue_file("unremove-many-partial");
     let manager = DownloadManager::new(gio::ListStore::new::<DownloadItem>(), test_settings());
     let directory = tempfile::tempdir().expect("create Undo destination");
-    let missing_directory = directory.path().join("missing");
+    let not_directory = directory.path().join("not-a-directory");
+    std::fs::write(&not_directory, b"not a directory").expect("create invalid destination");
     let changes = Rc::new(Cell::new(0));
     let changed = Rc::clone(&changes);
     manager.set_on_change(move || changed.set(changed.get() + 1));
 
     let snapshots = [
         ("one.mp4", directory.path().to_string_lossy().into_owned()),
-        ("two.mp4", missing_directory.to_string_lossy().into_owned()),
-        ("three.mp4", missing_directory.to_string_lossy().into_owned()),
+        ("two.mp4", not_directory.to_string_lossy().into_owned()),
+        ("three.mp4", not_directory.to_string_lossy().into_owned()),
     ]
     .into_iter()
     .map(|(filename, dest_dir)| RemovedSnapshot {

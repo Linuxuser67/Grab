@@ -784,11 +784,11 @@ fn filter_hls_master_to_pathway(
         .collect::<Vec<_>>();
     let audio_groups = selected_variants
         .iter()
-        .filter_map(|variant| variant.audio_group.as_deref())
+        .filter_map(|variant| variant.audio_group.clone())
         .collect::<HashSet<_>>();
     let subtitle_groups = selected_variants
         .iter()
-        .filter_map(|variant| variant.subtitles_group.as_deref())
+        .filter_map(|variant| variant.subtitles_group.clone())
         .collect::<HashSet<_>>();
     master.variants = selected_variants.into_boxed_slice();
     master.audio_renditions = master
@@ -832,11 +832,12 @@ fn select_hls_content_steering_pathway(
     let selected = priority
         .iter()
         .find(|pathway_id| available.contains(pathway_id.as_str()))
+        .cloned()
         .or_else(|| {
             master
                 .content_steering
                 .as_ref()
-                .and_then(|steering| steering.initial_pathway_id.as_ref())
+                .and_then(|steering| steering.initial_pathway_id.clone())
         })
         .ok_or_else(|| {
             ManifestIntakeError::Unsupported(
@@ -844,7 +845,7 @@ fn select_hls_content_steering_pathway(
                     .to_string(),
             )
         })?;
-    filter_hls_master_to_pathway(master, selected)
+    filter_hls_master_to_pathway(master, &selected)
 }
 
 async fn apply_hls_content_steering(

@@ -1171,27 +1171,23 @@ pub(crate) fn parse_hls_master_playlist(
                 .and_then(|attributes| attributes.get("STABLE-VARIANT-ID"))
                 .map(|value| value.as_str().to_string())
                 .filter(|value| !value.is_empty());
-            let make_variant = |url: Url,
-                                video_rendition_group: Option<String>,
-                                video_variant_path: Option<String>,
-                                video_rendition_name: Option<String>,
-                                stable_video_rendition_id: Option<String>| {
-                HlsVariant {
-                    url,
+            let Some(group_id) = variant.video.as_deref() else {
+                return Ok(vec![HlsVariant {
+                    url: variant_url,
                     bandwidth: variant.bandwidth,
                     average_bandwidth: variant.average_bandwidth,
                     width,
                     height,
-                    codecs: variant.codecs.clone(),
+                    codecs: variant.codecs,
                     frame_rate: variant.frame_rate,
-                    audio_group: variant.audio.clone(),
-                    subtitles_group: variant.subtitles.clone(),
-                    video_rendition_group,
-                    video_variant_path,
-                    video_rendition_name,
-                    stable_video_rendition_id,
-                    stable_variant_id: stable_variant_id.clone(),
-                }
+                    audio_group: variant.audio,
+                    subtitles_group: variant.subtitles,
+                    video_rendition_group: None,
+                    video_variant_path: None,
+                    video_rendition_name: None,
+                    stable_video_rendition_id: None,
+                    stable_variant_id,
+                }]);
             };
 
             let Some(group_id) = variant.video.as_deref() else {
@@ -1235,13 +1231,22 @@ pub(crate) fn parse_hls_master_playlist(
                     .and_then(|attributes| attributes.get("STABLE-RENDITION-ID"))
                     .map(|value| value.as_str().to_string())
                     .filter(|value| !value.is_empty());
-                choices.push(make_variant(
+                choices.push(HlsVariant {
                     url,
-                    Some(group_id.to_string()),
-                    Some(variant_url.path().to_string()),
-                    Some(rendition.name.clone()),
+                    bandwidth: variant.bandwidth,
+                    average_bandwidth: variant.average_bandwidth,
+                    width,
+                    height,
+                    codecs: variant.codecs.clone(),
+                    frame_rate: variant.frame_rate,
+                    audio_group: variant.audio.clone(),
+                    subtitles_group: variant.subtitles.clone(),
+                    video_rendition_group: Some(group_id.to_string()),
+                    video_variant_path: Some(variant_url.path().to_string()),
+                    video_rendition_name: Some(rendition.name.clone()),
                     stable_video_rendition_id,
-                ));
+                    stable_variant_id: stable_variant_id.clone(),
+                });
             }
             Ok(choices)
         })
@@ -2112,7 +2117,10 @@ video/combined.m3u8
         let master = parse_hls_master_playlist(BASE_URL, body)
             .expect("valid VIDEO rendition group should be selectable");
         assert_eq!(master.variants.len(), 2);
-        assert_eq!(master.variants[0].video_rendition_name.as_deref(), Some("Main"));
+        assert_eq!(
+            master.variants[0].video_rendition_name.as_deref(),
+            Some("Main")
+        );
         assert_eq!(
             master.variants[0].url.as_str(),
             "https://cdn.example.test/path/video/combined.m3u8"

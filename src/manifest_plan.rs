@@ -72,9 +72,7 @@ impl ManifestLookup {
                     let key = key?;
                     let quality = join_label_parts(
                         resolution_label(variant.width, variant.height),
-                        bitrate_label(Some(
-                            variant.average_bandwidth.unwrap_or(variant.bandwidth),
-                        )),
+                        bitrate_label(Some(variant.average_bandwidth.unwrap_or(variant.bandwidth))),
                         codec_label(variant.codecs.as_deref()),
                     );
                     let label = variant
@@ -648,8 +646,16 @@ fn hls_variant_content_key(variant: &HlsVariant) -> String {
                     .to_bits()
                     .to_le_bytes(),
                 variant.codecs.as_deref().unwrap_or_default().as_bytes(),
-                variant.audio_group.as_deref().unwrap_or_default().as_bytes(),
-                variant.subtitles_group.as_deref().unwrap_or_default().as_bytes(),
+                variant
+                    .audio_group
+                    .as_deref()
+                    .unwrap_or_default()
+                    .as_bytes(),
+                variant
+                    .subtitles_group
+                    .as_deref()
+                    .unwrap_or_default()
+                    .as_bytes(),
             ],
         );
     }
@@ -862,7 +868,11 @@ pub(crate) fn hls_variant_key(variant: &HlsVariant) -> Option<String> {
             return Some(derived_hls_track_key(
                 "hls-variant-",
                 b"variant-video-rendition",
-                &[variant_id.as_bytes(), group_id.as_bytes(), rendition_id.as_bytes()],
+                &[
+                    variant_id.as_bytes(),
+                    group_id.as_bytes(),
+                    rendition_id.as_bytes(),
+                ],
             ));
         }
         return Some(hls_variant_content_key(variant));
@@ -981,7 +991,9 @@ video/combined.m3u8
         let choices = lookup.choices();
         assert_eq!(choices.len(), 2);
         assert!(
-            choices.iter().any(|choice| choice.label.starts_with("Camera B")),
+            choices
+                .iter()
+                .any(|choice| choice.label.starts_with("Camera B")),
             "the quality picker labels the selected camera angle"
         );
         let audio = lookup.audio_choices(&selected_key);

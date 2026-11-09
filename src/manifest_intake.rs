@@ -2083,8 +2083,7 @@ video/es.m3u8
     #[test]
     fn hls_video_rendition_content_keys_include_parent_variant_and_audio_group() {
         let variant = |parent_path: &str, audio_group: &str| HlsVariant {
-            url: Url::parse("https://cdn.example.test/angles/main.m3u8")
-                .expect("valid angle URL"),
+            url: Url::parse("https://cdn.example.test/angles/main.m3u8").expect("valid angle URL"),
             bandwidth: 2_000_000,
             average_bandwidth: Some(1_800_000),
             width: Some(1920),

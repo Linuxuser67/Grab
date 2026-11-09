@@ -3217,12 +3217,14 @@ fn expand_playlist_rows_use_titled_subfolder() {
             crate::media_types::PlaylistItem {
                 id: "a".into(),
                 title: "First".into(),
-                page_url: "https://www.youtube.com/watch?v=aaa".to_string(),
+                page_url: "https://www.youtube.com/watch?v=aaa".into(),
+                playlist_index: 1,
             },
             crate::media_types::PlaylistItem {
                 id: "b".into(),
                 title: "Second".into(),
-                page_url: "https://www.youtube.com/watch?v=bbb".to_string(),
+                page_url: "https://www.youtube.com/watch?v=bbb".into(),
+                playlist_index: 2,
             },
         ]
         .into_boxed_slice(),

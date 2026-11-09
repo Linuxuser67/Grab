@@ -401,9 +401,7 @@ async fn run_video_playlist_download_inner(
                             .send(EngineMsg::PlaylistFile(Box::new(
                                 PlaylistFileEvent::Failed {
                                     file_id: file_id.clone(),
-                                    error: gettext(
-                                        "yt-dlp output escaped the collection folder",
-                                    ),
+                                    error: gettext("yt-dlp output escaped the collection folder"),
                                 },
                             )))
                             .ok();

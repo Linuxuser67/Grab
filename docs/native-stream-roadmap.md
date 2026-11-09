@@ -124,10 +124,13 @@ order regardless of fetch order. A stopped or interrupted in-progress
 response is not treated as committed media; a later resume starts that segment
 request again. Native transfers still have no automatic retries.
 
-BaseURL-level availability signalling, static LL-DASH, SegmentBase,
-SegmentList, dynamic multi-Period MPDs, missing initialization resources,
-resource windows that exceed the planner limits, non-MP4 tracks, DRM, and
-unsupported addressing remain on yt-dlp fallback. Unknown or conflicting presentation
+BaseURL-level finite availability offsets are summed across MPD, Period,
+AdaptationSet, and Representation URL levels for dynamic SegmentTemplate
+presentations. Negative/infinite offsets, BaseURL-level incomplete-segment
+signalling, static offsets, static LL-DASH, SegmentBase, SegmentList, dynamic
+multi-Period MPDs, missing initialization resources, resource windows that
+exceed the planner limits, non-MP4 tracks, DRM, and unsupported addressing
+remain on yt-dlp fallback. Unknown or conflicting presentation
 semantics are not silently stripped.
 
 ## Phases

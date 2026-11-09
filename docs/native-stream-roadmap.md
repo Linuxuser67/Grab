@@ -47,9 +47,11 @@ date-time ranges can be mapped unambiguously to individual media segments.
 
 This is a deliberately bounded profile, not a claim of support for every HLS
 extension. Unknown parser tags and unsupported resource-affecting extensions
-fall back to yt-dlp. This includes alternate VIDEO rendition groups, GAP,
-DEFINE, CONTENT-STEERING, unsupported encryption schemes, and extensions with
-unmet REQ-prefixed attributes. I-frame-only media playlists, non-identity
+fall back to yt-dlp. This includes alternate VIDEO rendition groups, GAP, master-playlist variables and
+media-playlist IMPORT declarations, CONTENT-STEERING, unsupported encryption
+schemes, and extensions with unmet REQ-prefixed attributes. Media-playlist
+NAME/VALUE and QUERYPARAM variable substitution is supported for ordinary HLS
+and LL-HLS. I-frame-only media playlists, non-identity
 session-key formats, non-identity media-key formats, SAMPLE-AES over
 fragmented MP4/CBCS, and unsupported encryption remain on fallback. AES-128
 and supported SAMPLE-AES keys in ordinary HLS continue to use the existing
@@ -78,7 +80,7 @@ This LL-HLS profile remains deliberately bounded. The first captured part must
 be independently decodable (or covered by EXT-X-INDEPENDENT-SEGMENTS).
 CMAF part capture without a known EXT-X-MAP, mapless parts that fail
 MPEG-TS validation, unsupported encryption (including all LL-HLS media-playlist
-EXT-X-KEY signalling), incomplete continuity, EXT-X-START, GAP, DEFINE,
+EXT-X-KEY signalling), incomplete continuity, EXT-X-START, GAP, master-playlist variables and IMPORT declarations,
 unknown required attributes, and ad/date-range markers remain on yt-dlp
 fallback. Mapless parts are accepted only when their fetched bytes pass the
 existing MPEG-TS validation path. Native LL-HLS does not strip ad markers or

@@ -259,7 +259,7 @@ fn build_plan(manifest_url: &str, playlist: LlMediaPlaylist) -> Result<HlsPlan, 
     }
     if !playlist.defines.is_empty() {
         return Err(ManifestError::UnsupportedPlaylistFeature(
-            "#EXT-X-DEFINE variable substitution is not supported".to_string(),
+            "#EXT-X-DEFINE variables must be expanded before LL-HLS planning".to_string(),
         ));
     }
     if matches!(

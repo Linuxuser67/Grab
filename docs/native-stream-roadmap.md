@@ -124,10 +124,10 @@ order regardless of fetch order. A stopped or interrupted in-progress
 response is not treated as committed media; a later resume starts that segment
 request again. Native transfers still have no automatic retries.
 
-BaseURL-level availability signalling, static LL-DASH, SegmentBase, static
-SegmentList extensions beyond the existing explicit-resource profile, and
-dynamic SegmentList presentations outside the bounded profile remain on yt-dlp
-fallback. Dynamic SegmentList is limited to a single MP4 Period with a separate
+BaseURL-level availability signalling, static LL-DASH, SegmentBase, and static
+SegmentList extensions beyond the existing explicit-resource profile remain on
+yt-dlp fallback. Static SegmentList presentationTimeOffset is applied to the
+track timestamp mapping; dynamic SegmentList PTO remains on fallback. Dynamic SegmentList is limited to a single MP4 Period with a separate
 initialization resource, a zero-origin explicit SegmentTimeline containing one
 entry per SegmentURL, default startNumber, contiguous equal-duration segments,
 and a bounded live window. Sliding lists with non-default startNumber, implicit
@@ -242,10 +242,10 @@ converted using each representation's timescale and Period start, then applied
 to that track's FFmpeg input with `-itsoffset`. Video and audio are offset
 independently; a non-zero Period start with zero PTO is handled by the same
 mapping. Zero-origin tracks omit the FFmpeg option and retain the existing
-finalization argument sequence. Dynamic non-zero PTO and non-zero
-`SegmentList@presentationTimeOffset` remain on yt-dlp fallback. Existing
-single-Period dynamic Period-start handling is unchanged and does not receive
-the new static mux offsets.
+finalization argument sequence. Static `SegmentList@presentationTimeOffset`
+uses the same per-track mapping. Dynamic non-zero PTO remains on yt-dlp
+fallback. Existing single-Period dynamic Period-start handling is unchanged
+and does not receive the new static mux offsets.
 
 Multi-Period template sources must produce one identical effective timestamp
 offset across all Periods; otherwise the planner rejects the presentation.
@@ -254,7 +254,7 @@ the selected subtitle track cannot be mapped without a separate timestamp
 transformation.
 
 Acceptance covers per-representation video/audio offsets, Period-start
-mapping, SegmentBase PTO, zero-origin behavior, SegmentList fallback, and
+mapping, SegmentBase and static SegmentList PTO, zero-origin behavior, and
 FFmpeg/ffprobe validation that independently offset video and audio start within
 one video frame.
 

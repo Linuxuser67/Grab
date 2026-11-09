@@ -22,6 +22,8 @@ pub(super) const DASH_ROLE_SCHEME: &str = "urn:mpeg:dash:role:2011";
 pub(super) struct RepresentationRoleMetadata {
     pub(super) id: Option<String>,
     pub(super) is_main: bool,
+    /// Effective inherited SegmentList presentation-time offset.
+    pub(super) segment_list_presentation_time_offset: Option<u64>,
 }
 
 /// Representation metadata for one Period, grouped by AdaptationSet.
@@ -29,6 +31,14 @@ pub(super) type PeriodRepresentationMetadata = Vec<Vec<RepresentationRoleMetadat
 
 /// Representation metadata grouped in MPD Period source order.
 pub(super) type RepresentationMetadata = Vec<PeriodRepresentationMetadata>;
+
+#[derive(Default)]
+struct MetadataState {
+    representation_count: usize,
+    adaptation_count: usize,
+    period_list_pto: Option<u64>,
+    adaptation_list_pto: Option<u64>,
+}
 
 #[derive(Clone, Copy)]
 enum Element {
@@ -51,8 +61,7 @@ pub(super) fn representation_metadata(
     let mut buffer = Vec::new();
     let mut stack = Vec::new();
     let mut periods: RepresentationMetadata = Vec::new();
-    let mut representation_count = 0_usize;
-    let mut adaptation_count = 0_usize;
+    let mut state = MetadataState::default();
 
     loop {
         let (namespace, event) = reader.read_resolved_event_into(&mut buffer).ok()?;
@@ -63,8 +72,7 @@ pub(super) fn representation_metadata(
                 &mut stack,
                 &mut periods,
                 max_representations,
-                &mut representation_count,
-                &mut adaptation_count,
+                &mut state,
             )?,
             Event::Empty(start) => {
                 push_element(
@@ -73,8 +81,7 @@ pub(super) fn representation_metadata(
                     &mut stack,
                     &mut periods,
                     max_representations,
-                    &mut representation_count,
-                    &mut adaptation_count,
+                    &mut state,
                 )?;
                 stack.pop()?;
             }
@@ -100,8 +107,7 @@ fn push_element(
     stack: &mut Vec<Element>,
     periods: &mut RepresentationMetadata,
     max_representations: usize,
-    representation_count: &mut usize,
-    adaptation_count: &mut usize,
+    state: &mut MetadataState,
 ) -> Option<()> {
     if stack.len() >= MAX_ELEMENT_DEPTH {
         return None;
@@ -120,19 +126,22 @@ fn push_element(
                 return None;
             }
             periods.push(Vec::new());
+            state.period_list_pto = None;
+            state.adaptation_list_pto = None;
             Element::Period
         }
         (Some(Element::Period), "AdaptationSet", true) => {
-            *adaptation_count = (*adaptation_count).checked_add(1)?;
-            if *adaptation_count > max_representations {
+            state.adaptation_count = state.adaptation_count.checked_add(1)?;
+            if state.adaptation_count > max_representations {
                 return None;
             }
             periods.last_mut()?.push(Vec::new());
+            state.adaptation_list_pto = state.period_list_pto;
             Element::AdaptationSet
         }
         (Some(Element::AdaptationSet), "Representation", true) => {
-            *representation_count = (*representation_count).checked_add(1)?;
-            if *representation_count > max_representations {
+            state.representation_count = state.representation_count.checked_add(1)?;
+            if state.representation_count > max_representations {
                 return None;
             }
             periods
@@ -141,6 +150,7 @@ fn push_element(
                 .push(RepresentationRoleMetadata {
                     id: representation_id(start)?,
                     is_main: false,
+                    segment_list_presentation_time_offset: state.adaptation_list_pto,
                 });
             Element::Representation
         }
@@ -150,10 +160,44 @@ fn push_element(
             }
             Element::Other
         }
+        (Some(Element::Period), "SegmentList", true) => {
+            if let Some(offset) = segment_list_presentation_time_offset(start)? {
+                state.period_list_pto = Some(offset);
+            }
+            Element::Other
+        }
+        (Some(Element::AdaptationSet), "SegmentList", true) => {
+            if let Some(offset) = segment_list_presentation_time_offset(start)? {
+                state.adaptation_list_pto = Some(offset);
+            }
+            Element::Other
+        }
+        (Some(Element::Representation), "SegmentList", true) => {
+            if let Some(offset) = segment_list_presentation_time_offset(start)? {
+                periods
+                    .last_mut()?
+                    .last_mut()?
+                    .last_mut()?
+                    .segment_list_presentation_time_offset = Some(offset);
+            }
+            Element::Other
+        }
         _ => Element::Other,
     };
     stack.push(element);
     Some(())
+}
+
+fn segment_list_presentation_time_offset(start: &BytesStart<'_>) -> Option<Option<u64>> {
+    let mut offset = None;
+    for attribute in start.attributes() {
+        let attribute = attribute.ok()?;
+        if attribute.key.as_ref() == "presentationTimeOffset" {
+            let value = attribute.normalized_value(XmlVersion::Implicit1_0).ok()?;
+            offset = Some(value.parse::<u64>().ok()?);
+        }
+    }
+    Some(offset)
 }
 
 fn representation_id(start: &BytesStart<'_>) -> Option<Option<String>> {
@@ -474,6 +518,38 @@ mod tests {
         assert_eq!(
             super::has_nondefault_segment_list_start_number(nondefault_number),
             Some(true)
+        );
+    }
+
+    #[test]
+    fn maps_inherited_segment_list_presentation_time_offsets_to_representations() {
+        let body = br#"<MPD xmlns="urn:mpeg:dash:schema:mpd:2011">
+  <Period>
+    <SegmentList presentationTimeOffset="10"/>
+    <AdaptationSet>
+      <SegmentList presentationTimeOffset="20"/>
+      <Representation id="inherited"/>
+      <Representation id="overridden">
+        <SegmentList presentationTimeOffset="30"/>
+      </Representation>
+    </AdaptationSet>
+    <AdaptationSet>
+      <Representation id="period-inherited"/>
+    </AdaptationSet>
+  </Period>
+</MPD>"#;
+        let metadata = representation_metadata(body, 3).expect("valid representation metadata");
+        assert_eq!(
+            metadata[0][0][0].segment_list_presentation_time_offset,
+            Some(20)
+        );
+        assert_eq!(
+            metadata[0][0][1].segment_list_presentation_time_offset,
+            Some(30)
+        );
+        assert_eq!(
+            metadata[0][1][0].segment_list_presentation_time_offset,
+            Some(10)
         );
     }
 

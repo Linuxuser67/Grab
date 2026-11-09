@@ -4094,39 +4094,6 @@ impl DownloadManager {
         self.start_next();
     }
 
-    /// Cancel all unfinished rows in a group without starting another child
-    /// between per-row cancellations.
-    pub fn cancel_many(self: &Rc<Self>, ids: &[u64]) -> usize {
-        let mut cancelled = 0;
-        let mut partials = Vec::new();
-
-        for &id in ids {
-            let Some(item) = self.find(id) else {
-                continue;
-            };
-            if matches!(
-                item.status(),
-                DownloadStatus::Done | DownloadStatus::Failed | DownloadStatus::Cancelled
-            ) {
-                continue;
-            }
-            if let Some(path) = self.cancel_inner(id, false, Stop::Preserve) {
-                partials.push(path);
-            }
-            cancelled += 1;
-        }
-
-        for path in partials {
-            self.schedule_partial_cleanup(path);
-        }
-        if cancelled > 0 {
-            self.persist_queue();
-            self.changed();
-            self.start_next();
-        }
-        cancelled
-    }
-
     /// Reclaim a removed video row's scratch, but only once its worker has actually stopped. Removal cannot sweep inline: a worker mid-teardown can recreate what a sweep removed, so unlinking first just loses the race. Claiming the gate first makes deferring safe: only a worker this finalizer awaited may have committed an orphan `dest` file.
     /// Engine invariant: a finished file is never deleted. The `remove_file` below is the single exception — a commit that won the race against its row's discard, leaving an orphan no row can own.
     fn finish_discard(&self, id: u64, dest: std::path::PathBuf, gate: std::sync::Arc<AttemptGate>) {
@@ -4292,24 +4259,6 @@ impl DownloadManager {
             self.changed();
             self.start_next();
         }
-    }
-
-    /// Re-queue every failed/cancelled row in a group before one scheduler kick.
-    pub fn retry_many(self: &Rc<Self>, ids: &[u64]) -> usize {
-        let mut retried = 0;
-        for &id in ids {
-            if let Some(item) = self.find(id)
-                && self.requeue_failed_item(&item)
-            {
-                retried += 1;
-            }
-        }
-        if retried > 0 {
-            self.persist_queue();
-            self.changed();
-            self.start_next();
-        }
-        retried
     }
 
     /// Remove every row in a collection from the list with one queue update.

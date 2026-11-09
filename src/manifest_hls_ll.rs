@@ -327,6 +327,7 @@ fn build_plan(manifest_url: &str, playlist: LlMediaPlaylist) -> Result<HlsPlan, 
     if can_skip_until.is_some_and(|skip| skip.as_secs_f64() < 6.0 * source_target_duration as f64) {
         return Err(ManifestError::InvalidDuration);
     }
+    validate_start_point(&playlist)?;
     // EXT-X-START is a playback-position hint, not a resource-selection
     // directive. A recording retains every unit in the advertised live window.
     let has_parts = playlist
@@ -660,6 +661,26 @@ fn validate_playlist_tags(playlist: &LlMediaPlaylist) -> Result<(), ManifestErro
         return Err(ManifestError::UnsupportedPlaylistFeature(
             tag.split(':').next().unwrap_or(tag).to_string(),
         ));
+    }
+    Ok(())
+}
+
+/// EXT-X-START is a playback preference, not a media-resource selection
+/// instruction. Grab captures the entire advertised live window and writes a
+/// new VOD playlist, so the source-only preference is intentionally omitted.
+fn validate_start_point(playlist: &LlMediaPlaylist) -> Result<(), ManifestError> {
+    let Some(start) = playlist.start.as_ref() else {
+        return Ok(());
+    };
+    if !start.time_offset.get().is_finite() {
+        return Err(ManifestError::InvalidDuration);
+    }
+    if start
+        .extra_attrs
+        .iter()
+        .any(|(name, _)| name.starts_with("REQ-"))
+    {
+        return Err(ManifestError::UnsupportedPlaylist);
     }
     Ok(())
 }
@@ -1111,6 +1132,23 @@ mod tests {
                 .iter()
                 .any(|resource| resource.url.path().ends_with("101.1.m4s"))
         );
+    }
+
+    #[test]
+    fn ext_x_start_required_attributes_remain_unsupported() {
+        let body = br#"#EXTM3U
+#EXT-X-TARGETDURATION:2
+#EXT-X-MEDIA-SEQUENCE:7
+#EXT-X-MAP:URI="init.mp4"
+#EXT-X-SERVER-CONTROL:CAN-BLOCK-RELOAD=NO,PART-HOLD-BACK=1.0
+#EXT-X-PART-INF:PART-TARGET=0.5
+#EXT-X-START:TIME-OFFSET=1.0,REQ-FOO="bar"
+#EXT-X-PART:DURATION=0.5,URI="7.0.m4s",INDEPENDENT=YES
+"#;
+        assert!(matches!(
+            plan_hls_media_playlist(BASE, body),
+            Err(ManifestError::UnsupportedPlaylist)
+        ));
     }
 
     #[test]

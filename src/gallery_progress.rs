@@ -173,12 +173,12 @@ mod tests {
         assert_eq!(p.feed(parse_progress_line("42%")), None);
         assert_eq!(p.current_file_percent, Some(42));
         assert_eq!(
-            p.feed(parse_progress_line("/a.jpg")),
+            p.feed(parse_progress_line("@DONE:/a.jpg")),
             Some("/a.jpg".to_string())
         );
         assert_eq!(p.current_file_path, None);
         assert_eq!(p.current_file_percent, None);
-        assert_eq!(p.feed(parse_progress_line("# /b.jpg")), None);
+        assert_eq!(p.feed(parse_progress_line("@SKIP:/b.jpg")), None);
         assert_eq!(p.files_completed, 1);
         assert_eq!(p.files_skipped, 1);
         assert_eq!(p.files_done(), 2);

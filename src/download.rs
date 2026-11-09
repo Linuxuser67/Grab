@@ -3568,12 +3568,16 @@ impl DownloadManager {
         progress: f64,
         detail: &str,
     ) {
-        let Some(job) = self.gallery_jobs.borrow().get(&owner.id()).cloned() else {
+        let Some(output_dir) = self
+            .gallery_jobs
+            .borrow()
+            .get(&owner.id())
+            .map(|job| job.dest_dir.clone())
+        else {
             return;
         };
-        let output_dir = job.dest_dir.as_path();
         let output_path = std::path::Path::new(path);
-        let Some(relative) = output_path.strip_prefix(output_dir).ok().filter(|relative| {
+        let Some(relative) = output_path.strip_prefix(&output_dir).ok().filter(|relative| {
             !relative.as_os_str().is_empty()
                 && relative.components().all(|component| {
                     matches!(component, std::path::Component::Normal(_))
@@ -3588,14 +3592,35 @@ impl DownloadManager {
         };
         let filename = relative.to_string_lossy().into_owned();
         let Some(group) = owner.group().filter(|group| group.is_valid()) else {
-            tracing::warn!(gallery_id = owner.id(), "gallery file event has no collection identity");
+            tracing::warn!(
+                gallery_id = owner.id(),
+                "gallery file event has no collection identity"
+            );
             return;
         };
+        let progress = progress.clamp(0.0, 1.0);
+
+        // Keep the child projection in the single persisted GalleryJob. Its
+        // row itself is transient and is omitted from StoredQueue.
+        if let Some(job) = self.gallery_jobs.borrow_mut().get_mut(&owner.id()) {
+            if let Some(state) = job.file_rows.iter_mut().find(|state| state.path == path) {
+                state.status = status;
+                state.progress = progress;
+            } else {
+                job.file_rows.push(crate::gallery_argv::GalleryFileState {
+                    path: path.to_string(),
+                    status,
+                    progress,
+                });
+            }
+        } else {
+            return;
+        }
 
         if let Some(existing) = self.items().find(|candidate| {
             candidate.is_gallery_child() && candidate.gallery_file_path() == path
         }) {
-            existing.set_progress(progress.clamp(0.0, 1.0));
+            existing.set_progress(progress);
             existing.set_detail(detail.to_string());
             existing.set_status(status);
             self.changed();
@@ -3606,12 +3631,12 @@ impl DownloadManager {
             self.alloc_id(),
             &owner.url(),
             &filename,
-            &job.dest_dir.to_string_lossy(),
+            &output_dir.to_string_lossy(),
         );
         child.set_is_gallery_child(true);
         child.set_gallery_file_path(path.to_string());
         child.set_group(Some(group));
-        child.set_progress(progress.clamp(0.0, 1.0));
+        child.set_progress(progress);
         child.set_detail(detail.to_string());
         child.set_status(status);
         // Child rows describe the one gallery-dl process; they are not
@@ -3620,9 +3645,73 @@ impl DownloadManager {
         self.changed();
     }
 
-    /// Resolve any file left active when the shared gallery-dl process exits.
+    /// Recreate child projections from the GalleryJob payload after queue
+    /// restore or Undo. A previously active file is queued/paused with its
+    /// owner and will receive a fresh start event if gallery-dl resumes it.
+    fn restore_gallery_file_rows(
+        &self,
+        owner: &DownloadItem,
+        file_rows: &[crate::gallery_argv::GalleryFileState],
+    ) {
+        for state in file_rows {
+            let status = match (owner.status(), state.status) {
+                (DownloadStatus::Queued, DownloadStatus::Downloading) => DownloadStatus::Queued,
+                (DownloadStatus::Paused, DownloadStatus::Downloading) => DownloadStatus::Paused,
+                (_, status) => status,
+            };
+            let detail = match status {
+                DownloadStatus::Queued => gettext("Queued"),
+                DownloadStatus::Downloading => gettext("Downloading"),
+                DownloadStatus::Paused => gettext("Paused"),
+                DownloadStatus::Done => gettext("Finished"),
+                DownloadStatus::Failed => gettext("Gallery file failed"),
+                DownloadStatus::Cancelled => gettext("Cancelled"),
+                DownloadStatus::Scheduled => gettext("Scheduled"),
+            };
+            self.upsert_gallery_file_row(owner, &state.path, status, state.progress, &detail);
+        }
+    }
+
+    /// Re-queue transient child rows when a paused/failed gallery owner restarts.
+    fn prepare_gallery_file_rows_for_attempt(&self, owner_id: u64) {
+        let children = self
+            .items()
+            .filter(|item| {
+                item.is_gallery_child()
+                    && item.group().is_some_and(|group| group.id() == owner_id)
+                    && matches!(
+                        item.status(),
+                        DownloadStatus::Paused | DownloadStatus::Failed | DownloadStatus::Cancelled
+                    )
+            })
+            .collect::<Vec<_>>();
+        for child in children {
+            child.set_status(DownloadStatus::Queued);
+            child.set_progress(0.0);
+            child.set_detail(gettext("Queued"));
+            let path = child.gallery_file_path();
+            if let Some(state) = self
+                .gallery_jobs
+                .borrow_mut()
+                .get_mut(&owner_id)
+                .and_then(|job| job.file_rows.iter_mut().find(|state| state.path == path))
+            {
+                state.status = DownloadStatus::Queued;
+                state.progress = 0.0;
+            }
+        }
+        if self.items().any(|item| {
+            item.is_gallery_child()
+                && item.group().is_some_and(|group| group.id() == owner_id)
+        }) {
+            self.changed();
+        }
+    }
+
+    /// Resolve files left active when the shared gallery-dl process pauses,
+    /// cancels, succeeds, or fails.
     fn finish_gallery_file_rows(&self, owner_id: u64, status: DownloadStatus) {
-        let ids = self
+        let children = self
             .items()
             .filter(|item| {
                 item.is_gallery_child()
@@ -3630,27 +3719,40 @@ impl DownloadManager {
                     && item.status() == DownloadStatus::Downloading
             })
             .collect::<Vec<_>>();
-        for item in ids {
-            match status {
-                DownloadStatus::Done => {
-                    item.set_progress(1.0);
-                    item.set_detail(gettext("Finished"));
-                }
-                DownloadStatus::Paused => item.set_detail(gettext("Paused")),
-                DownloadStatus::Cancelled => item.set_detail(gettext("Cancelled")),
-                _ => item.set_detail(gettext("Gallery file failed")),
+        let mut updated_paths = Vec::new();
+        for item in children {
+            if status == DownloadStatus::Done {
+                item.set_progress(1.0);
+                item.set_detail(gettext("Finished"));
+            } else {
+                let detail = match status {
+                    DownloadStatus::Paused => gettext("Paused"),
+                    DownloadStatus::Cancelled => gettext("Cancelled"),
+                    _ => gettext("Gallery file failed"),
+                };
+                item.set_detail(detail);
             }
             item.set_status(status);
+            updated_paths.push((item.gallery_file_path(), item.progress()));
         }
-        if !self.items().all(|item| {
-            !(item.is_gallery_child()
-                && item.group().is_some_and(|group| group.id() == owner_id))
+        if let Some(job) = self.gallery_jobs.borrow_mut().get_mut(&owner_id) {
+            for (path, progress) in updated_paths {
+                if let Some(state) = job.file_rows.iter_mut().find(|state| state.path == path) {
+                    state.status = status;
+                    state.progress = progress;
+                }
+            }
+        }
+        if self.items().any(|item| {
+            item.is_gallery_child()
+                && item.group().is_some_and(|group| group.id() == owner_id)
         }) {
             self.changed();
         }
     }
 
     fn spawn_gallery(self: &Rc<Self>, item: DownloadItem) {
+        self.prepare_gallery_file_rows_for_attempt(item.id());
         item.set_status(DownloadStatus::Downloading);
         // Clear previous error log on (re)start.
         item.set_error_log(String::new());

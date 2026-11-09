@@ -1675,7 +1675,7 @@ fn push_playlist_items_page(
         let nav_on_error = nav.clone();
         let picker_page_on_error = picker_page.clone();
         let guarded_child_hosts = guarded_child_hosts.clone();
-        
+
         let close_card = close_card.clone();
         let grid = grid.clone();
         let add_btn_click = add_btn.clone();

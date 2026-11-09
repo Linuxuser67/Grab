@@ -1508,7 +1508,6 @@ fn resolve_base_url(
     let Some(value) = values.next() else {
         if candidates.iter().any(|candidate| {
             candidate.byte_range.is_some()
-                || candidate.availability_time_offset.is_some()
                 || candidate.availability_time_complete == Some(false)
                 || candidate.timeShiftBufferDepth.is_some()
         }) {
@@ -1520,9 +1519,6 @@ fn resolve_base_url(
     if values.next().is_some()
         || candidates.iter().any(|candidate| {
             candidate.byte_range.is_some()
-                || candidate
-                    .availability_time_offset
-                    .is_some_and(|offset| offset != 0.0)
                 || candidate.availability_time_complete == Some(false)
                 || candidate.timeShiftBufferDepth.is_some()
         })
@@ -4362,7 +4358,6 @@ mod tests {
     }
 
     #[test]
-    #[test]
     fn dynamic_dash_sums_finite_base_url_availability_offsets() {
         let body = r#"<?xml version="1.0"?>
 <MPD xmlns="urn:mpeg:dash:schema:mpd:2011"
@@ -4434,6 +4429,7 @@ mod tests {
         );
     }
 
+    #[test]
     fn dynamic_dash_requires_bounded_update_metadata_and_rejects_segment_list() {
         let missing_ast = r#"<MPD xmlns="urn:mpeg:dash:schema:mpd:2011" type="dynamic" minimumUpdatePeriod="PT4S"><Period><AdaptationSet contentType="video" mimeType="video/mp4"><SegmentTemplate duration="4" media="s-$Number$.m4s"/><Representation id="v1"/></AdaptationSet></Period></MPD>"#;
         let missing_update = r#"<MPD xmlns="urn:mpeg:dash:schema:mpd:2011" type="dynamic" availabilityStartTime="1970-01-01T00:00:00Z"><Period><AdaptationSet contentType="video" mimeType="video/mp4"><SegmentTemplate duration="4" media="s-$Number$.m4s"/><Representation id="v1"/></AdaptationSet></Period></MPD>"#;

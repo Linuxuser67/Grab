@@ -23,6 +23,9 @@ pub(crate) mod hls_ll;
 #[path = "manifest_hls_ads.rs"]
 mod hls_ads;
 
+#[path = "manifest_hls_daterange.rs"]
+mod hls_daterange;
+
 #[path = "manifest_hls_variables.rs"]
 mod hls_variables;
 
@@ -1431,6 +1434,7 @@ pub(crate) fn plan_hls_media_playlist(
     if let Some(plan) = hls_ll::plan_hls_media_playlist(manifest_url, body)? {
         return Ok(plan);
     }
+    hls_daterange::validate_tag_layout(body)?;
     let playlist = parse_hls_media_playlist(body)?;
     build_hls_plan(base_url, playlist)
 }
@@ -1504,6 +1508,7 @@ fn build_hls_plan(base_url: Url, mut playlist: MediaPlaylist) -> Result<HlsPlan,
             segment
                 .unknown_tags
                 .retain(|tag| !hls_ads::is_ad_marker_tag(tag));
+            segment.daterange = None;
         }
         reject_unsupported_hls_tags(&segment.unknown_tags)?;
         segment.unknown_tags.retain(|tag| !is_benign_hls_tag(tag));

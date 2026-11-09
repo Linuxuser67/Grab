@@ -483,22 +483,24 @@ mod tests {
 
         assert_eq!(result.files, vec![first.clone()]);
         assert_eq!(result.skipped, 1);
+        let first_path = first.to_string_lossy().into_owned();
+        let second_path = second.to_string_lossy().into_owned();
         let updates = updates.lock().expect("progress updates lock");
         assert!(updates.iter().any(|update| {
             matches!(
-                update.event,
-                Some(ProgressLine::Started(ref path)) if path == first.to_string_lossy().as_ref()
-            ) && update.current_file_path.as_deref() == Some(first.to_string_lossy().as_ref())
+                update.event.as_ref(),
+                Some(ProgressLine::Started(path)) if path == &first_path
+            ) && update.current_file_path.as_deref() == Some(first_path.as_str())
         }));
         assert!(updates.iter().any(|update| {
             update.event.is_none()
-                && update.current_file_path.as_deref() == Some(first.to_string_lossy().as_ref())
+                && update.current_file_path.as_deref() == Some(first_path.as_str())
                 && update.current_file_percent == Some(50)
         }));
         assert!(updates.iter().any(|update| {
             matches!(
-                update.event,
-                Some(ProgressLine::Skipped(ref path)) if path == second.to_string_lossy().as_ref()
+                update.event.as_ref(),
+                Some(ProgressLine::Skipped(path)) if path == &second_path
             )
         }));
 

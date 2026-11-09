@@ -1163,7 +1163,9 @@ fn parse_hls_content_steering(
     let text = std::str::from_utf8(body)
         .map_err(|error| ManifestError::Parse(format!("HLS playlist is not UTF-8: {error}")))?;
     let parsed = broadcast_hls::MasterPlaylist::parse(text).map_err(|error| {
-        ManifestError::Parse(format!("could not parse HLS Content Steering declaration: {error}"))
+        ManifestError::Parse(format!(
+            "could not parse HLS Content Steering declaration: {error}"
+        ))
     })?;
     let steering = parsed
         .content_steering

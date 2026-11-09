@@ -9639,3 +9639,92 @@ fn remove_many_removes_each_existing_member_once() {
     assert!(manager.find(first_id).is_none());
     assert!(manager.find(second_id).is_none());
 }
+
+#[test]
+fn unremove_many_reports_partial_failures_with_one_refresh() {
+    let (_q, _l) = test_locks();
+    let _qf = test_queue_file("unremove-many-partial");
+    let manager = DownloadManager::new(gio::ListStore::new::<DownloadItem>(), test_settings());
+    let directory = tempfile::tempdir().expect("create Undo destination");
+    let not_directory = directory.path().join("not-a-directory");
+    std::fs::write(&not_directory, b"not a directory").expect("create invalid destination");
+    let changes = Rc::new(Cell::new(0));
+    let changed = Rc::clone(&changes);
+    manager.set_on_change(move || changed.set(changed.get() + 1));
+
+    let snapshots = [
+        ("one.mp4", directory.path().to_string_lossy().into_owned()),
+        ("two.mp4", not_directory.to_string_lossy().into_owned()),
+        ("three.mp4", not_directory.to_string_lossy().into_owned()),
+    ]
+    .into_iter()
+    .map(|(filename, dest_dir)| RemovedSnapshot {
+        url: format!("https://example.test/{filename}"),
+        dest_dir,
+        filename: filename.to_string(),
+        status: DownloadStatus::Done,
+        progress: 1.0,
+        detail: "Finished".to_string(),
+        output_dir: String::new(),
+        segments: None,
+        video_source: None,
+        started: false,
+        public_only: false,
+        group: None,
+    })
+    .collect::<Vec<_>>();
+
+    let error = glib::MainContext::default()
+        .block_on(manager.unremove_many_async(snapshots))
+        .expect_err("missing destinations should be reported");
+    assert!(
+        error.contains("Restored 1 of 3 downloads; 2 could not be restored."),
+        "the error should aggregate all failed members into one summary: {error}"
+    );
+    assert_eq!(manager.store().n_items(), 1);
+    assert_eq!(changes.get(), 1, "partial restore must still refresh once");
+}
+
+#[test]
+fn unremove_many_restores_collection_members_with_one_queue_refresh() {
+    let (_q, _l) = test_locks();
+    let _qf = test_queue_file("unremove-many");
+    let manager = DownloadManager::new(gio::ListStore::new::<DownloadItem>(), test_settings());
+    let directory = tempfile::tempdir().expect("create Undo destination");
+    let group = crate::download_store::DownloadGroup::try_new(821, "Restored collection")
+        .expect("valid collection group");
+    let changes = Rc::new(Cell::new(0));
+    let changed = Rc::clone(&changes);
+    manager.set_on_change(move || changed.set(changed.get() + 1));
+
+    let snapshots = ["one.mp4", "two.mp4"]
+        .into_iter()
+        .map(|filename| RemovedSnapshot {
+            url: format!("https://example.test/{filename}"),
+            dest_dir: directory.path().to_string_lossy().into_owned(),
+            filename: filename.to_string(),
+            status: DownloadStatus::Done,
+            progress: 1.0,
+            detail: "Finished".to_string(),
+            output_dir: String::new(),
+            segments: None,
+            video_source: None,
+            started: false,
+            public_only: false,
+            group: Some(group.clone()),
+        })
+        .collect::<Vec<_>>();
+
+    let restored = glib::MainContext::default()
+        .block_on(manager.unremove_many_async(snapshots))
+        .expect("restore every member");
+    assert_eq!(restored, 2);
+    assert_eq!(manager.store().n_items(), 2);
+    assert_eq!(changes.get(), 1, "one batch must refresh the queue once");
+    assert!(
+        manager
+            .items()
+            .all(|item| item.group() == Some(group.clone())),
+        "every restored child must retain its collection identity"
+    );
+}

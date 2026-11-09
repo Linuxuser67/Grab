@@ -4185,7 +4185,9 @@ impl DownloadManager {
         removed
     }
 
-    /// Cancel and drop a row; restore with [`DownloadManager::unremove`]. The partial file is kept so Undo can resume.
+    /// Remove a row from the queue. Non-video partials remain available to Undo;
+    /// page-video and native-manifest staging is discarded after its worker stops,
+    /// so Undo re-resolves or restarts those attempts from the beginning.
     pub fn remove(self: &Rc<Self>, id: u64) {
         self.remove_inner(id);
         self.persist_queue();
@@ -4242,8 +4244,66 @@ impl DownloadManager {
         self.started.borrow().contains(&id)
     }
 
-    /// Re-insert a previously removed download (Undo) after listing its
-    /// destination off GTK.
+    /// Restore a group of removed rows after listing each distinct destination
+    /// directory off GTK. One batch keeps persistence, UI refresh and scheduling
+    /// to one update, while failures are collected for a single user-facing toast.
+    pub(crate) async fn unremove_many_async(
+        self: &Rc<Self>,
+        snapshots: Vec<RemovedSnapshot>,
+    ) -> Result<usize, String> {
+        let total = snapshots.len();
+        if total == 0 {
+            return Ok(0);
+        }
+
+        let directories = snapshots
+            .iter()
+            .map(|snapshot| snapshot.dest_dir.clone())
+            .collect::<HashSet<_>>();
+        let listings = gio::spawn_blocking(move || {
+            directories
+                .into_iter()
+                .map(|directory| {
+                    let result =
+                        crate::video_staging::try_dir_file_names(std::path::Path::new(&directory))
+                            .map_err(|error| error.to_string());
+                    (directory, result)
+                })
+                .collect::<HashMap<_, _>>()
+        })
+        .await
+        .map_err(|error| format!("Could not inspect Undo destinations: {error:?}"))?;
+
+        let _batch = self.batch_guard();
+        let mut restored = 0;
+        let mut failures = Vec::new();
+        for snapshot in snapshots {
+            match listings.get(&snapshot.dest_dir) {
+                Some(Ok(existing)) => {
+                    self.unremove_with_listing(snapshot, existing);
+                    restored += 1;
+                }
+                Some(Err(error)) => failures.push((snapshot.filename, error.clone())),
+                None => failures.push((
+                    snapshot.filename,
+                    "destination listing was not available".to_string(),
+                )),
+            }
+        }
+
+        if failures.is_empty() {
+            Ok(restored)
+        } else {
+            let (filename, error) = &failures[0];
+            Err(format!(
+                "Restored {restored} of {total} downloads; {} could not be restored. First failure for {filename}: {error}",
+                failures.len()
+            ))
+        }
+    }
+
+    /// Re-insert one previously removed download (Undo) after listing its
+    /// destination off GTK. Collection actions use the batched entry point.
     pub(crate) async fn unremove_async(
         self: &Rc<Self>,
         snap: RemovedSnapshot,
@@ -4258,7 +4318,7 @@ impl DownloadManager {
         Ok(self.unremove_with_listing(snap, &existing))
     }
 
-    /// Synchronous Undo for tests; production callers use [`Self::unremove_async`].
+    /// Synchronous Undo for tests; production single-row callers use `unremove_async`.
     #[cfg(test)]
     pub fn unremove(self: &Rc<Self>, snap: RemovedSnapshot) -> DownloadItem {
         let existing = crate::video_staging::dir_file_names(std::path::Path::new(&snap.dest_dir));

@@ -173,21 +173,21 @@ fn push_element(
         }
         (Some(Element::Period), "SegmentList", true) => {
             if let Some(offset) = segment_list_presentation_time_offset(start)? {
-                *period_list_pto = Some(offset);
+                *period_list_pto = offset;
             }
             Element::Other
         }
         (Some(Element::AdaptationSet), "SegmentList", true) => {
             if let Some(offset) = segment_list_presentation_time_offset(start)? {
-                *adaptation_list_pto = Some(offset);
+                *adaptation_list_pto = offset;
             }
             Element::Other
         }
         (Some(Element::Representation), "SegmentList", true) => {
             if let Some(offset) = segment_list_presentation_time_offset(start)? {
-                *representation_list_pto = Some(offset);
+                *representation_list_pto = offset;
                 periods.last_mut()?.last_mut()?.last_mut()?
-                    .segment_list_presentation_time_offset = Some(offset);
+                    .segment_list_presentation_time_offset = offset;
             }
             Element::Other
         }

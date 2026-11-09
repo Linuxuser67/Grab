@@ -1464,7 +1464,7 @@ fn parse_playlist_prefers_webpage_url() {
     let pl =
         parse_playlist_json(&value, "https://www.youtube.com/playlist?list=PL1").expect("playlist");
     assert_eq!(pl.items.len(), 1);
-    assert_eq!(pl.items[0].page_url, "https://www.youtube.com/watch?v=a1");
+    assert_eq!(pl.items[0].page_url.as_ref(), "https://www.youtube.com/watch?v=a1");
 }
 
 #[test]

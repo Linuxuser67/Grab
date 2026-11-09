@@ -463,6 +463,12 @@ fn parse_playlist_item(
     let id = json_str(entry, "id")
         .map(str::to_string)
         .unwrap_or_else(|| format!("item-{}", position + 1));
+    let playlist_index = entry
+        .get("playlist_index")
+        .and_then(serde_json::Value::as_u64)
+        .and_then(|index| u32::try_from(index).ok())
+        .filter(|index| *index > 0)
+        .unwrap_or_else(|| (position.saturating_add(1)).min(u32::MAX as usize) as u32);
     let title = ["title", "fulltitle", "alt_title"]
         .iter()
         .find_map(|key| {
@@ -482,7 +488,8 @@ fn parse_playlist_item(
     Some(crate::media_types::PlaylistItem {
         id: id.into_boxed_str(),
         title: title.into_boxed_str(),
-        page_url: page_url.to_string(),
+        page_url: page_url.into(),
+        playlist_index,
     })
 }
 
@@ -538,7 +545,7 @@ pub(crate) fn retarget_story_items(url: &str, playlist: &mut crate::media_types:
         return;
     };
     for item in &mut playlist.items {
-        item.page_url = tray.clone();
+        item.page_url = tray.clone().into_boxed_str();
     }
 }
 

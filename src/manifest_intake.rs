@@ -4177,7 +4177,9 @@ video/variant.m3u8
                 None,
                 HashMap::from([(
                     steering_host.to_string(),
-                    vec!["127.0.0.1:0".parse().expect("private DNS answer")],
+                    vec![format!("127.0.0.1:{}", address.port())
+                        .parse()
+                        .expect("private DNS answer")],
                 )]),
             )
             .expect("build guarded client with private DNS override");

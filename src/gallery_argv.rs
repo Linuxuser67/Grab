@@ -432,11 +432,35 @@ mod tests {
             .expect("custom output mode must be configured");
         let mode: serde_json::Value =
             serde_json::from_str(mode).expect("custom output mode must be valid JSON");
-        assert_eq!(mode["start"], "@START:{}\\n");
+        assert_eq!(mode["start"], "@START:{}\n");
         assert_eq!(mode["success"], "{}\n");
         assert_eq!(mode["skip"], "# {}\n");
         assert_eq!(mode["progress"], "?\n");
         assert_eq!(mode["progress-total"], "{3}%\n");
+    }
+
+    #[test]
+    fn older_gallery_job_payloads_default_to_no_file_rows() {
+        let job = GalleryJob {
+            item_id: 41,
+            page_url: "https://example.com/gallery".to_string(),
+            title: "Gallery".to_string(),
+            file_count: Some(2),
+            dest_dir: PathBuf::from("/tmp/gallery"),
+            filter: GalleryFilter::All,
+            cookies_browser: "none".to_string(),
+            speed_limit: None,
+            range: None,
+            file_rows: Vec::new(),
+        };
+        let mut payload = serde_json::to_value(job).expect("serialize gallery job");
+        payload
+            .as_object_mut()
+            .expect("gallery object")
+            .remove("file_rows");
+        let restored: GalleryJob =
+            serde_json::from_value(payload).expect("old gallery job remains readable");
+        assert!(restored.file_rows.is_empty());
     }
 
     #[test]

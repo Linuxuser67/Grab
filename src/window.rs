@@ -636,16 +636,37 @@ pub fn build_window(
                 })
                 .collect::<Vec<_>>();
 
-            // A gallery owner is a persisted process row, not a visible child.
-            // Its transient file rows share its group ID and form the collection UI.
-            let gallery_owner_ids = items
+            // Collection owners are the only persisted/scheduled rows.
+            // Their file rows are passive projections grouped under the
+            // owner's status section, regardless of each child's own state.
+            let collection_owner_ids = items
                 .iter()
-                .filter(|item| item.is_gallery_child())
+                .filter(|item| item.is_collection_child())
                 .filter_map(|item| item.group().map(|group| group.id()))
                 .collect::<HashSet<_>>();
+            let collection_owners = items
+                .iter()
+                .filter(|item| item.is_gallery() || item.is_collection_owner())
+                .map(|item| (item.id(), item.clone()))
+                .collect::<HashMap<_, _>>();
+            let effective_status = |item: &crate::download::DownloadItem| {
+                if item.is_collection_child() {
+                    item.group()
+                        .and_then(|group| collection_owners.get(&group.id()))
+                        .map_or(item.status(), |owner| owner.status())
+                } else {
+                    item.status()
+                }
+            };
+            let effective_bucket = |item: &crate::download::DownloadItem| {
+                section_bucket(effective_status(item))
+            };
+
             let mut group_sizes = HashMap::<u64, usize>::new();
             for item in &items {
-                if item.is_gallery() && gallery_owner_ids.contains(&item.id()) {
+                if (item.is_gallery() || item.is_collection_owner())
+                    && collection_owner_ids.contains(&item.id())
+                {
                     continue;
                 }
                 if let Some(group) = item.group().filter(|group| group.is_valid()) {
@@ -653,12 +674,14 @@ pub fn build_window(
                 }
             }
             let is_group_member = |item: &crate::download::DownloadItem, group_id: u64| {
-                item.is_gallery_child()
+                item.is_collection_child()
                     || group_sizes.get(&group_id).is_some_and(|count| *count > 1)
             };
             let mut all_groups = HashMap::<u64, Vec<crate::download::DownloadItem>>::new();
             for item in &items {
-                if item.is_gallery() && gallery_owner_ids.contains(&item.id()) {
+                if (item.is_gallery() || item.is_collection_owner())
+                    && collection_owner_ids.contains(&item.id())
+                {
                     continue;
                 }
                 if let Some(group) = item
@@ -674,29 +697,49 @@ pub fn build_window(
             let mut ordered_groups = Vec::new();
             let mut seen_groups = HashSet::new();
             let mut visible_groups = HashSet::new();
+            let mut counted_collections = HashSet::new();
             let mut n_active = 0;
             let mut n_queued = 0;
             let mut n_downloaded = 0;
 
             for item in &items {
-                // Once child rows exist, the gallery owner is represented by
-                // their collection header. Keep its queue row hidden.
-                if item.is_gallery() && gallery_owner_ids.contains(&item.id()) {
+                // Represent an owner with one expandable collection header,
+                // never a second ordinary download row.
+                if (item.is_gallery() || item.is_collection_owner())
+                    && collection_owner_ids.contains(&item.id())
+                {
                     continue;
                 }
                 present.insert(item.id());
-                let bucket = section_bucket(item.status());
+                let bucket = effective_bucket(item);
+                let status = effective_status(item);
                 let group_key = item
                     .group()
                     .filter(|group| group.is_valid() && is_group_member(item, group.id()))
                     .map(|group| (group.id(), bucket));
 
-                let mut shown = sel == 0 || status_filter_bucket(item.status()) == sel;
+                let mut shown = sel == 0 || status_filter_bucket(status) == sel;
                 if shown && !q.is_empty() && !item.filename().to_lowercase().contains(q.as_str()) {
                     shown = false;
                 }
                 if shown {
-                    if is_done(item) {
+                    if item.is_collection_child() {
+                        if let Some(group) = item.group()
+                            && counted_collections.insert(group.id())
+                        {
+                            if status == crate::download_store::DownloadStatus::Done {
+                                n_downloaded += 1;
+                            } else if matches!(
+                                status,
+                                crate::download_store::DownloadStatus::Queued
+                                    | crate::download_store::DownloadStatus::Scheduled
+                            ) {
+                                n_queued += 1;
+                            } else {
+                                n_active += 1;
+                            }
+                        }
+                    } else if is_done(item) {
                         n_downloaded += 1;
                     } else if is_queued(item) {
                         n_queued += 1;
@@ -716,8 +759,9 @@ pub fn build_window(
                 }
             }
 
-            // Create the parent before attaching its child rows. Group rows are
-            // separate per status section so the existing queue views stay intact.
+            // Build each collection header in exactly one status section.
+            // Child statuses stay visible inside it; the owner determines
+            // where the collection appears globally.
             for key in &ordered_groups {
                 let Some(members) = grouped.get(key) else {
                     continue;
@@ -749,10 +793,13 @@ pub fn build_window(
             }
 
             for item in &items {
-                if item.is_gallery() && gallery_owner_ids.contains(&item.id()) {
+                if (item.is_gallery() || item.is_collection_owner())
+                    && collection_owner_ids.contains(&item.id())
+                {
                     continue;
                 }
-                let bucket = section_bucket(item.status());
+                let bucket = effective_bucket(item);
+                let status = effective_status(item);
                 let target = match bucket {
                     2 => &l_downloaded,
                     3 => &l_queued,
@@ -779,8 +826,6 @@ pub fn build_window(
                     detach_download_row(&row);
                     if let Some(key) = group_key {
                         if let Some(group) = groups.borrow().get(&key).cloned() {
-                            // Insert the header where the first child appears in
-                            // queue order, not ahead of unrelated standalone rows.
                             if group.row.parent().is_none() {
                                 target.append(&group.row);
                             }
@@ -794,7 +839,7 @@ pub fn build_window(
                     placements.borrow_mut().insert(item.id(), location);
                 }
 
-                let mut shown = sel == 0 || status_filter_bucket(item.status()) == sel;
+                let mut shown = sel == 0 || status_filter_bucket(status) == sel;
                 if shown && !q.is_empty() && !item.filename().to_lowercase().contains(q.as_str()) {
                     shown = false;
                 }

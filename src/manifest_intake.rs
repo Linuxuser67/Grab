@@ -838,7 +838,12 @@ fn select_hls_content_steering_pathway(
                 .as_ref()
                 .and_then(|steering| steering.initial_pathway_id.clone())
         })
-        .or_else(|| master.variants.first().map(|variant| variant.pathway_id.clone()))
+        .or_else(|| {
+            master
+                .variants
+                .first()
+                .map(|variant| variant.pathway_id.clone())
+        })
         .ok_or_else(|| {
             ManifestIntakeError::Unsupported(
                 "HLS Content Steering master playlist has no downloadable Pathway".to_string(),
@@ -868,7 +873,7 @@ async fn apply_hls_content_steering(
             // A failed steering fetch must not prevent a download when the
             // master playlist already advertises usable Pathways.
             Vec::new()
-        },
+        }
     };
     select_hls_content_steering_pathway(&mut master, &priority)?;
     Ok(master)

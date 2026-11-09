@@ -1,8 +1,8 @@
 //! Parse gallery-dl file events and per-file progress records.
 //!
-//! Custom output mode emits a flushed start event and completion/skip paths to
-//! stdout, while byte progress is emitted to stderr. The runner merges both
-//! streams into one per-file update sequence.
+//! Grab tags start/completion/skip paths and merges gallery-dl stdout and
+//! stderr into one ordered stream, so percentages stay attached to the file
+//! whose transfer produced them.
 
 /// A parsed file event or progress record from gallery-dl.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -44,9 +44,10 @@ pub fn parse_progress_line(line: &str) -> ProgressLine {
         return ProgressLine::Skipped(path.to_string());
     }
 
-    // Success lines: bare path (non-empty, looks like a path)
-    if !line.trim().is_empty() && line.contains('/') {
-        return ProgressLine::Completed(line.to_string());
+    // Success lines are tagged so merged stderr log lines containing paths
+    // can never be mistaken for completed downloads.
+    if let Some(path) = line.strip_prefix("@DONE:").filter(|path| !path.is_empty()) {
+        return ProgressLine::Completed(path.to_string());
     }
 
     ProgressLine::Other(line.to_string())
@@ -128,7 +129,7 @@ mod tests {
     #[test]
     fn parse_completed() {
         assert_eq!(
-            parse_progress_line("/tmp/dest/image.jpg\n"),
+            parse_progress_line("@DONE:/tmp/dest/image.jpg\n"),
             ProgressLine::Completed("/tmp/dest/image.jpg".to_string())
         );
     }
@@ -156,6 +157,10 @@ mod tests {
         assert_eq!(
             parse_progress_line("some log noise\n"),
             ProgressLine::Other("some log noise".to_string())
+        );
+        assert_eq!(
+            parse_progress_line("warning: saved /tmp/image.jpg"),
+            ProgressLine::Other("warning: saved /tmp/image.jpg".to_string())
         );
     }
 

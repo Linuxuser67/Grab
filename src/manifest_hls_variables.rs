@@ -360,12 +360,9 @@ mod tests {
 #EXT-X-STREAM-INF:BANDWIDTH=1000000,AUDIO="audio"
 {$root}/video/main.m3u8
 "#;
-        let expanded = expand_master_playlist(
-            "https://cdn.example.test/master.m3u8",
-            body,
-        )
-        .expect("master variables should expand")
-        .expect("master contains DEFINE tags");
+        let expanded = expand_master_playlist("https://cdn.example.test/master.m3u8", body)
+            .expect("master variables should expand")
+            .expect("master contains DEFINE tags");
         let text = String::from_utf8(expanded).expect("expanded master is UTF-8");
         assert!(!text.contains("#EXT-X-DEFINE:"));
         assert!(text.contains("streams/v1/video/main.m3u8"));

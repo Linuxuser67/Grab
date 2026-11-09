@@ -978,11 +978,7 @@ fn replace_hls_pathway_uri(
         return None;
     }
     let host = uri.host_str()?;
-    if !source
-        .host_str()
-        .is_some_and(|source_host| source_host.eq_ignore_ascii_case(host))
-        && !crate::download_net::require_public_resolution(host)
-    {
+    if !crate::download_net::is_public_destination_host(host) {
         return None;
     }
     Some(uri)
@@ -1034,6 +1030,10 @@ fn apply_hls_pathway_clones(
             .iter()
             .filter_map(|variant| variant.subtitles_group.as_deref())
             .collect::<HashSet<_>>();
+        let video_groups = base_variants
+            .iter()
+            .filter_map(|variant| variant.video_rendition_group.as_deref())
+            .collect::<HashSet<_>>();
         let mut used_audio_groups = master
             .audio_renditions
             .iter()
@@ -1059,6 +1059,20 @@ fn apply_hls_pathway_clones(
                 (
                     (*group).to_string(),
                     unique_cloned_group_id(&pathway_clone.id, group, &mut used_subtitle_groups),
+                )
+            })
+            .collect::<HashMap<_, _>>();
+        let mut used_video_groups = master
+            .variants
+            .iter()
+            .filter_map(|variant| variant.video_rendition_group.clone())
+            .collect::<HashSet<_>>();
+        let video_group_map = video_groups
+            .iter()
+            .map(|group| {
+                (
+                    (*group).to_string(),
+                    unique_cloned_group_id(&pathway_clone.id, group, &mut used_video_groups),
                 )
             })
             .collect::<HashMap<_, _>>();
@@ -1106,6 +1120,9 @@ fn apply_hls_pathway_clones(
                 }
                 if let Some(group) = variant.subtitles_group.as_mut() {
                     *group = subtitle_group_map.get(group)?.clone();
+                }
+                if let Some(group) = variant.video_rendition_group.as_mut() {
+                    *group = video_group_map.get(group)?.clone();
                 }
                 variant.pathway_id.clone_from(&pathway_clone.id);
                 Some(variant)

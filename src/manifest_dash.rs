@@ -1978,12 +1978,18 @@ fn effective_list(
     if timescale == 0 {
         return Err(DashError::InvalidSegment);
     }
-    let timeline = is_dynamic.then_some(timeline).flatten()
+    let timeline = is_dynamic
+        .then_some(timeline)
+        .flatten()
         .map(|entries| {
             entries
                 .iter()
                 .map(|entry| {
-                    if entry.d == 0 || entry.r.is_some_and(|repeat| repeat != 0) || entry.n.is_some() || entry.k.is_some() {
+                    if entry.d == 0
+                        || entry.r.is_some_and(|repeat| repeat != 0)
+                        || entry.n.is_some()
+                        || entry.k.is_some()
+                    {
                         return Err(DashError::UnsupportedAddressing);
                     }
                     Ok(DashTimelineEntry {

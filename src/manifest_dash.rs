@@ -4509,8 +4509,8 @@ mod tests {
     fn dynamic_segment_list_uses_explicit_timeline_times_as_stable_sequence_ids() {
         let mut urls = String::new();
         let mut timeline = String::new();
-        for index in 0..10_u64 {
-            let time = 100 + index * 2;
+        for index in 0..60_u64 {
+            let time = index * 2;
             urls.push_str(&format!(r#"<SegmentURL media="seg-{time}.m4s"/>"#));
             timeline.push_str(&format!(r#"<S t="{time}" d="2"/>"#));
         }

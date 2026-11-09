@@ -3949,4 +3949,231 @@ video/variant.m3u8
             Err(ManifestIntakeError::Unsupported(_))
         ));
     }
+    async fn steering_fixture_response(
+        status: u16,
+        body: Vec<u8>,
+        check_for_retry: bool,
+    ) -> (Url, tokio::task::JoinHandle<(String, bool)>) {
+        use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+
+        let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0))
+            .await
+            .expect("bind steering fixture");
+        let address = listener.local_addr().expect("fixture address");
+        let url = Url::parse(&format!("http://{address}/steering.json"))
+            .expect("fixture steering URL");
+        let server = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.expect("accept steering request");
+            let mut request = Vec::new();
+            loop {
+                let mut chunk = [0_u8; 1024];
+                let read = stream.read(&mut chunk).await.expect("read request");
+                assert_ne!(read, 0, "request ended before HTTP headers");
+                request.extend_from_slice(&chunk[..read]);
+                if request.windows(4).any(|window| window == b"\r\n\r\n") {
+                    break;
+                }
+                assert!(request.len() < 16 * 1024, "request headers stay bounded");
+            }
+            let request = String::from_utf8(request).expect("request is UTF-8");
+            let reason = match status {
+                200 => "OK",
+                503 => "Service Unavailable",
+                _ => "Fixture",
+            };
+            let headers = format!(
+                "HTTP/1.1 {status} {reason}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                body.len()
+            );
+            // A bounded reader may reject an oversized Content-Length without
+            // consuming the body, so a peer closing early is expected there.
+            let _ = stream.write_all(headers.as_bytes()).await;
+            let _ = stream.write_all(&body).await;
+
+            let second_request = if check_for_retry {
+                tokio::time::timeout(Duration::from_millis(100), listener.accept())
+                    .await
+                    .is_ok()
+            } else {
+                false
+            };
+            (request, second_request)
+        });
+        (url, server)
+    }
+
+    fn set_steering_url(master: &mut crate::manifest::HlsMasterPlan, url: Url) {
+        master
+            .content_steering
+            .as_mut()
+            .expect("steering declaration")
+            .server_url = url;
+    }
+
+    fn steering_test_client() -> reqwest::Client {
+        reqwest::Client::builder()
+            .no_proxy()
+            .build()
+            .expect("build test HTTP client")
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn content_steering_fetch_selects_priority_from_network_response() {
+        let body = br#"{"VERSION":1,"TTL":300,"PATHWAY-PRIORITY":["cdn-b"]}"#.to_vec();
+        let (steering_url, server) = steering_fixture_response(200, body, false).await;
+        let master_url = steering_url.join("/master.m3u8").expect("master URL");
+        let mut master = master();
+        set_steering_url(&mut master, steering_url);
+        let selected = apply_hls_content_steering(
+            &steering_test_client(),
+            &master_url,
+            master,
+            ManifestTransportPolicy::HttpFixture,
+            ManifestFetchMode::Preview,
+            false,
+        )
+        .await
+        .expect("network steering response should be applied");
+        let (request, _) = server.await.expect("steering fixture task");
+        assert!(request.starts_with("GET /steering.json?_HLS_pathway=cdn-a "));
+        assert_eq!(selected.variants.len(), 1);
+        assert_eq!(selected.variants[0].pathway_id, "cdn-b");
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn malformed_steering_network_response_falls_back_to_initial_pathway() {
+        let (steering_url, server) =
+            steering_fixture_response(200, b"not-json".to_vec(), false).await;
+        let master_url = steering_url.join("/master.m3u8").expect("master URL");
+        let mut master = master();
+        set_steering_url(&mut master, steering_url);
+        let selected = apply_hls_content_steering(
+            &steering_test_client(),
+            &master_url,
+            master,
+            ManifestTransportPolicy::HttpFixture,
+            ManifestFetchMode::Preview,
+            false,
+        )
+        .await
+        .expect("invalid optional steering response should fall back");
+        server.await.expect("steering fixture task");
+        assert_eq!(selected.variants.len(), 1);
+        assert_eq!(selected.variants[0].pathway_id, "cdn-a");
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn preview_steering_server_error_is_not_retried() {
+        let (steering_url, server) =
+            steering_fixture_response(503, Vec::new(), true).await;
+        let master_url = steering_url.join("/master.m3u8").expect("master URL");
+        let mut master = master();
+        set_steering_url(&mut master, steering_url);
+        let selected = apply_hls_content_steering(
+            &steering_test_client(),
+            &master_url,
+            master,
+            ManifestTransportPolicy::HttpFixture,
+            ManifestFetchMode::Preview,
+            false,
+        )
+        .await
+        .expect("failed optional steering request should fall back");
+        let (request, second_request) = server.await.expect("steering fixture task");
+        assert!(request.starts_with("GET /steering.json"));
+        assert!(!second_request, "preview must not retry an HTTP 503");
+        assert_eq!(selected.variants[0].pathway_id, "cdn-a");
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn oversized_steering_response_is_rejected_by_streaming_reader() {
+        let (steering_url, server) = steering_fixture_response(
+            200,
+            vec![b'x'; MAX_HLS_STEERING_MANIFEST_BYTES + 1],
+            false,
+        )
+        .await;
+        let master_url = steering_url.join("/master.m3u8").expect("master URL");
+        let steering = crate::manifest::HlsContentSteering {
+            server_url: steering_url,
+            initial_pathway_id: Some("cdn-a".to_string()),
+        };
+        let error = fetch_hls_steering_manifest(
+            &steering_test_client(),
+            &master_url,
+            &steering,
+            ManifestTransportPolicy::HttpFixture,
+            ManifestFetchMode::Preview,
+            false,
+        )
+        .await
+        .expect_err("oversized response must be rejected before full buffering");
+        server.await.expect("steering fixture task");
+        assert!(error.to_string().contains("byte limit"));
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn private_cross_origin_steering_server_is_rejected_before_connect() {
+        let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0))
+            .await
+            .expect("bind private destination sentinel");
+        let address = listener.local_addr().expect("sentinel address");
+        let master_url =
+            Url::parse("http://master.example.test/master.m3u8").expect("master URL");
+        let steering = crate::manifest::HlsContentSteering {
+            server_url: Url::parse(&format!("http://{address}/steering.json"))
+                .expect("private steering URL"),
+            initial_pathway_id: Some("cdn-a".to_string()),
+        };
+        let error = fetch_hls_steering_manifest(
+            &steering_test_client(),
+            &master_url,
+            &steering,
+            ManifestTransportPolicy::HttpFixture,
+            ManifestFetchMode::Preview,
+            false,
+        )
+        .await
+        .expect_err("private cross-origin SERVER-URI must be rejected");
+        assert!(error.to_string().contains("public-host safety policy"));
+        assert!(
+            tokio::time::timeout(Duration::from_millis(50), listener.accept())
+                .await
+                .is_err(),
+            "the private listener must not receive a request"
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn steering_fetch_is_skipped_when_upstream_proxy_is_configured() {
+        let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0))
+            .await
+            .expect("bind proxy sentinel");
+        let address = listener.local_addr().expect("sentinel address");
+        let master_url = Url::parse(&format!("http://{address}/master.m3u8"))
+            .expect("master URL");
+        let steering = crate::manifest::HlsContentSteering {
+            server_url: Url::parse(&format!("http://{address}/steering.json"))
+                .expect("steering URL"),
+            initial_pathway_id: Some("cdn-a".to_string()),
+        };
+        let error = fetch_hls_steering_manifest(
+            &steering_test_client(),
+            &master_url,
+            &steering,
+            ManifestTransportPolicy::HttpFixture,
+            ManifestFetchMode::Preview,
+            true,
+        )
+        .await
+        .expect_err("proxy-backed steering must be skipped");
+        assert!(error.to_string().contains("upstream proxy"));
+        assert!(
+            tokio::time::timeout(Duration::from_millis(50), listener.accept())
+                .await
+                .is_err(),
+            "proxy policy must reject before issuing a request"
+        );
+    }
+
 }

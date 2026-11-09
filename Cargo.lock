@@ -3758,6 +3758,17 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "94143f37725109f92c262ed2cf5e59bce7498c01bcc1502d7b9afe439a4e9f49"
 
 [[package]]
+name = "scte35-splice"
+version = "4.0.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a49b42b5c75e867313b41eae0cbc250eaf8dc6c13db874583ad6bba5b527eef4"
+dependencies = [
+ "base64",
+ "broadcast-common",
+ "thiserror 2.0.21",
+]
+
+[[package]]
 name = "security-framework"
 version = "3.7.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3785,17 +3796,6 @@ name = "semver"
 version = "1.0.28"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "8a7852d02fc848982e0c167ef163aaff9cd91dc640ba85e263cb1ce46fae51cd"
-
-[[package]]
-name = "scte35-splice"
-version = "4.0.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "a49b42b5c75e867313b41eae0cbc250eaf8dc6c13db874583ad6bba5b527eef4"
-dependencies = [
- "base64",
- "broadcast-common",
- "thiserror 2.0.21",
-]
 
 [[package]]
 name = "serde"

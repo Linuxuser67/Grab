@@ -607,7 +607,7 @@ pub(crate) fn expand_child_target(
     if let Some(segment) = story_segment_url(parent_url, &item.id) {
         return Some(segment);
     }
-    let page = item.page_url.as_str();
+    let page = item.page_url.as_ref();
     if !is_http_url(page) || page == parent_url || page == playlist_url {
         return None;
     }

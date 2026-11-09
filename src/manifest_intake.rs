@@ -3974,8 +3974,8 @@ video/variant.m3u8
             .await
             .expect("bind steering fixture");
         let address = listener.local_addr().expect("fixture address");
-        let url = Url::parse(&format!("http://{address}/steering.json"))
-            .expect("fixture steering URL");
+        let url =
+            Url::parse(&format!("http://{address}/steering.json")).expect("fixture steering URL");
         let server = tokio::spawn(async move {
             let (mut stream, _) = listener.accept().await.expect("accept steering request");
             let mut request = Vec::new();
@@ -4078,8 +4078,7 @@ video/variant.m3u8
 
     #[tokio::test(flavor = "current_thread")]
     async fn preview_steering_server_error_is_not_retried() {
-        let (steering_url, server) =
-            steering_fixture_response(503, Vec::new(), true).await;
+        let (steering_url, server) = steering_fixture_response(503, Vec::new(), true).await;
         let master_url = steering_url.join("/master.m3u8").expect("master URL");
         let mut master = master();
         set_steering_url(&mut master, steering_url);
@@ -4101,12 +4100,9 @@ video/variant.m3u8
 
     #[tokio::test(flavor = "current_thread")]
     async fn oversized_steering_response_is_rejected_by_streaming_reader() {
-        let (steering_url, server) = steering_fixture_response(
-            200,
-            vec![b'x'; MAX_HLS_STEERING_MANIFEST_BYTES + 1],
-            false,
-        )
-        .await;
+        let (steering_url, server) =
+            steering_fixture_response(200, vec![b'x'; MAX_HLS_STEERING_MANIFEST_BYTES + 1], false)
+                .await;
         let master_url = steering_url.join("/master.m3u8").expect("master URL");
         let steering = crate::manifest::HlsContentSteering {
             server_url: steering_url,
@@ -4132,8 +4128,7 @@ video/variant.m3u8
             .await
             .expect("bind private destination sentinel");
         let address = listener.local_addr().expect("sentinel address");
-        let master_url =
-            Url::parse("http://master.example.test/master.m3u8").expect("master URL");
+        let master_url = Url::parse("http://master.example.test/master.m3u8").expect("master URL");
         let steering = crate::manifest::HlsContentSteering {
             server_url: Url::parse(&format!("http://{address}/steering.json"))
                 .expect("private steering URL"),
@@ -4171,16 +4166,17 @@ video/variant.m3u8
             address.port()
         ))
         .expect("steering URL");
-        let master_url =
-            Url::parse("http://master.example.test/master.m3u8").expect("master URL");
+        let master_url = Url::parse("http://master.example.test/master.m3u8").expect("master URL");
         let (client, dns_override_hits) =
             crate::download_net::http_client_for_with_dns_overrides_for_test(
                 None,
                 HashMap::from([(
                     steering_host.to_string(),
-                    vec![format!("127.0.0.1:{}", address.port())
-                        .parse()
-                        .expect("private DNS answer")],
+                    vec![
+                        format!("127.0.0.1:{}", address.port())
+                            .parse()
+                            .expect("private DNS answer"),
+                    ],
                 )]),
             )
             .expect("build guarded client with private DNS override");
@@ -4218,8 +4214,7 @@ video/variant.m3u8
             .await
             .expect("bind proxy sentinel");
         let address = listener.local_addr().expect("sentinel address");
-        let master_url = Url::parse(&format!("http://{address}/master.m3u8"))
-            .expect("master URL");
+        let master_url = Url::parse(&format!("http://{address}/master.m3u8")).expect("master URL");
         let steering = crate::manifest::HlsContentSteering {
             server_url: Url::parse(&format!("http://{address}/steering.json"))
                 .expect("steering URL"),

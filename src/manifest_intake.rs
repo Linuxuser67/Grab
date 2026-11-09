@@ -31,6 +31,7 @@ const MAX_PREVIEW_MANIFEST_ATTEMPTS: u32 = 2;
 const MANIFEST_RETRY_BASE_DELAY: Duration = Duration::from_millis(250);
 
 const MAX_HLS_STEERING_MANIFEST_BYTES: usize = 256 * 1024;
+const MAX_HLS_STEERING_PATHWAY_CLONES: usize = 16;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct HlsPathwayClone {
@@ -737,17 +738,21 @@ fn parse_hls_steering_manifest(body: &[u8]) -> Result<HlsSteeringManifest, Manif
     let clones = value
         .get("PATHWAY-CLONES")
         .map(|value| {
-            value.as_array().ok_or_else(|| {
+            let clones = value.as_array().ok_or_else(|| {
                 ManifestIntakeError::Unsupported(
                     "The HLS Content Steering PATHWAY-CLONES member is invalid".to_string(),
                 )
-            })
+            })?;
+            if clones.is_empty() || clones.len() > MAX_HLS_STEERING_PATHWAY_CLONES {
+                return Err(ManifestIntakeError::Unsupported(
+                    "The HLS Content Steering PATHWAY-CLONES count is outside its supported limit"
+                        .to_string(),
+                ));
+            }
+            clones.iter().map(parse_hls_pathway_clone).collect()
         })
         .transpose()?
-        .into_iter()
-        .flatten()
-        .map(parse_hls_pathway_clone)
-        .collect::<Result<Vec<_>, _>>()?;
+        .unwrap_or_default();
     let mut clone_ids = HashSet::with_capacity(clones.len());
     for clone in &clones {
         if !clone_ids.insert(clone.id.clone()) {

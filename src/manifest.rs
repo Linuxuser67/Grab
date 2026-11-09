@@ -23,6 +23,9 @@ pub(crate) mod hls_ll;
 #[path = "manifest_hls_ads.rs"]
 mod hls_ads;
 
+#[path = "manifest_hls_variables.rs"]
+mod hls_variables;
+
 #[path = "manifest_dash_roles.rs"]
 mod dash_roles;
 
@@ -1341,6 +1344,8 @@ pub(crate) fn plan_hls_media_playlist(
             "playlist exceeds its supported size limit".to_string(),
         ));
     }
+    let expanded_body = hls_variables::expand_media_playlist(manifest_url, body)?;
+    let body = expanded_body.as_deref().unwrap_or(body);
     let base_url = parse_manifest_url(manifest_url)?;
     if base_url
         .query_pairs()
@@ -2956,7 +2961,7 @@ one.ts
     }
 
     #[test]
-    fn rejects_uri_affecting_hls_extensions_until_they_are_supported() {
+    fn rejects_content_steering_and_expands_media_playlist_variables() {
         let body = br#"#EXTM3U
 #EXT-X-CONTENT-STEERING:SERVER-URI="steering.json",PATHWAY-ID="default"
 #EXT-X-STREAM-INF:BANDWIDTH=1000000
@@ -2970,11 +2975,11 @@ video.m3u8
         );
 
         let media = b"#EXTM3U\n#EXT-X-TARGETDURATION:2\n#EXT-X-DEFINE:NAME=\"path\",VALUE=\"video\"\n#EXTINF:2,\n{$path}/one.ts\n#EXT-X-ENDLIST\n";
+        let plan = plan_hls_media_playlist(BASE_URL, media)
+            .expect("declared media-playlist variables should be expanded");
         assert_eq!(
-            plan_hls_media_playlist(BASE_URL, media).err(),
-            Some(ManifestError::UnsupportedPlaylistFeature(
-                "#EXT-X-DEFINE".to_string(),
-            ))
+            plan.resources[0].url.as_str(),
+            "https://cdn.example.test/path/video/one.ts"
         );
     }
 

@@ -768,7 +768,6 @@ program.ts
     fn resource_affecting_and_unrecognized_tags_still_fall_back() {
         for tag in [
             "#EXT-X-GAP",
-            "#EXT-X-DEFINE:NAME=\"asset\",VALUE=\"other.m3u8\"",
             "#EXT-X-CONTENT-STEERING:SERVER-URI=\"steering.json\"",
             "#EXT-X-AD-UNKNOWN:URI=\"other.m3u8\"",
         ] {

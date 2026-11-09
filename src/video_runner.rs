@@ -7,15 +7,16 @@ use crate::runtime::lock_recover;
 use crate::video_argv::{
     VideoJob, apply_proxy_env, container_truth_name, dash_merge_argv, fallback_to_live_edge,
     hls_download_argv, live_capture_argv, live_from_start_unsupported, live_remux_argv,
-    merge_output_ext, playlist_download_argv, playlist_scope_args, proxy_cli_args, unified_download_argv,
-    unified_format_spec, unified_output_template, unified_staging_prefix, write_manifest,
+    merge_output_ext, playlist_download_argv, playlist_scope_args, proxy_cli_args,
+    unified_download_argv, unified_format_spec, unified_output_template, unified_staging_prefix,
+    write_manifest,
 };
 use crate::video_plan::{StreamPlan, plan_streams};
 use crate::video_probe::page_host;
 use crate::video_progress::{
-    HlsProgress, PROGRESS_GRANULARITY, is_ytdlp_merge_line, last_error_line, last_log_line,
-    parse_ytdlp_after_move, parse_ytdlp_playlist_event, parse_ytdlp_template, trace_format_lines,
-    YtdlpPlaylistEvent,
+    HlsProgress, PROGRESS_GRANULARITY, YtdlpPlaylistEvent, is_ytdlp_merge_line, last_error_line,
+    last_log_line, parse_ytdlp_after_move, parse_ytdlp_playlist_event, parse_ytdlp_template,
+    trace_format_lines,
 };
 use crate::video_quality::default_video_filename;
 use crate::video_spawn::{
@@ -186,7 +187,11 @@ async fn run_video_playlist_download_inner(
     let mut guarded_child_hosts = std::collections::HashSet::new();
     let mut selected_indices = Vec::new();
     let mut missing_ids = Vec::new();
-    for file in state.files.iter().filter(|file| file.status != crate::download_store::DownloadStatus::Done) {
+    for file in state
+        .files
+        .iter()
+        .filter(|file| file.status != crate::download_store::DownloadStatus::Done)
+    {
         let Some((index, current)) = current_playlist
             .items
             .iter()
@@ -206,13 +211,17 @@ async fn run_video_playlist_download_inner(
                 tx.send(EngineMsg::PlaylistFileFailed {
                     file_id: file.id.clone(),
                     error: gettext("The collection exceeded the limit of distinct download hosts"),
-                }).ok();
+                })
+                .ok();
             }
             Err(crate::download_net::CollectionHostError::UnsafeDestination) => {
                 tx.send(EngineMsg::PlaylistFileFailed {
                     file_id: file.id.clone(),
-                    error: gettext("The playlist entry could not be verified as a public destination"),
-                }).ok();
+                    error: gettext(
+                        "The playlist entry could not be verified as a public destination",
+                    ),
+                })
+                .ok();
             }
         }
     }
@@ -220,14 +229,21 @@ async fn run_video_playlist_download_inner(
         tx.send(EngineMsg::PlaylistFileFailed {
             file_id,
             error: gettext("This playlist entry is no longer available"),
-        }).ok();
+        })
+        .ok();
     }
 
     if selected_indices.is_empty() {
-        if state.files.iter().all(|file| file.status == crate::download_store::DownloadStatus::Done) {
+        if state
+            .files
+            .iter()
+            .all(|file| file.status == crate::download_store::DownloadStatus::Done)
+        {
             return Ok(VideoOutcome::Finished(0));
         }
-        return Err(VideoError::fetch(gettext("No selected playlist entries are still available")));
+        return Err(VideoError::fetch(gettext(
+            "No selected playlist entries are still available",
+        )));
     }
 
     let (spec, merging) = unified_format_spec(None, "", &job.quality, job.audio_only);
@@ -267,7 +283,9 @@ async fn run_video_playlist_download_inner(
                 merging_reader.store(true, std::sync::atomic::Ordering::SeqCst);
             }
             match parse_ytdlp_playlist_event(&line) {
-                Some(YtdlpPlaylistEvent::Started { file_id, filename, .. }) => {
+                Some(YtdlpPlaylistEvent::Started {
+                    file_id, filename, ..
+                }) => {
                     if let Some(previous) = current_file.replace(file_id.clone())
                         && !summary.finished_ids.contains(&previous)
                     {
@@ -276,10 +294,9 @@ async fn run_video_playlist_download_inner(
                             error: gettext("yt-dlp moved to the next playlist entry before finalizing this file"),
                         }).ok();
                     }
-                    tx_reader.send(EngineMsg::PlaylistFileStarted {
-                        file_id,
-                        filename,
-                    }).ok();
+                    tx_reader
+                        .send(EngineMsg::PlaylistFileStarted { file_id, filename })
+                        .ok();
                 }
                 Some(YtdlpPlaylistEvent::Progress {
                     file_id,
@@ -288,11 +305,13 @@ async fn run_video_playlist_download_inner(
                     ..
                 }) => {
                     if let Some(downloaded) = downloaded {
-                        tx_reader.send(EngineMsg::PlaylistFileProgress {
-                            file_id,
-                            downloaded,
-                            total,
-                        }).ok();
+                        tx_reader
+                            .send(EngineMsg::PlaylistFileProgress {
+                                file_id,
+                                downloaded,
+                                total,
+                            })
+                            .ok();
                     }
                 }
                 Some(YtdlpPlaylistEvent::Finished { file_id, path, .. }) => {
@@ -310,24 +329,30 @@ async fn run_video_playlist_download_inner(
                     let metadata = match tokio::fs::metadata(&canonical).await {
                         Ok(metadata) if metadata.is_file() => metadata,
                         _ => {
-                            tx_reader.send(EngineMsg::PlaylistFileFailed {
-                                file_id: file_id.clone(),
-                                error: gettext("yt-dlp did not produce a regular output file"),
-                            }).ok();
+                            tx_reader
+                                .send(EngineMsg::PlaylistFileFailed {
+                                    file_id: file_id.clone(),
+                                    error: gettext("yt-dlp did not produce a regular output file"),
+                                })
+                                .ok();
                             continue;
                         }
                     };
-                    let contained = canonical.strip_prefix(&expected_root).is_ok_and(|relative| {
-                        !relative.as_os_str().is_empty()
-                            && relative.components().all(|component| {
-                                matches!(component, std::path::Component::Normal(_))
-                            })
-                    });
+                    let contained = canonical
+                        .strip_prefix(&expected_root)
+                        .is_ok_and(|relative| {
+                            !relative.as_os_str().is_empty()
+                                && relative.components().all(|component| {
+                                    matches!(component, std::path::Component::Normal(_))
+                                })
+                        });
                     if !contained {
-                        tx_reader.send(EngineMsg::PlaylistFileFailed {
-                            file_id: file_id.clone(),
-                            error: gettext("yt-dlp output escaped the collection folder"),
-                        }).ok();
+                        tx_reader
+                            .send(EngineMsg::PlaylistFileFailed {
+                                file_id: file_id.clone(),
+                                error: gettext("yt-dlp output escaped the collection folder"),
+                            })
+                            .ok();
                         continue;
                     }
                     summary.finished_ids.insert(file_id.clone());
@@ -335,11 +360,13 @@ async fn run_video_playlist_download_inner(
                     if current_file.as_deref() == Some(file_id.as_str()) {
                         current_file = None;
                     }
-                    tx_reader.send(EngineMsg::PlaylistFileFinished {
-                        file_id,
-                        path: canonical.to_string_lossy().into_owned(),
-                        size: metadata.len(),
-                    }).ok();
+                    tx_reader
+                        .send(EngineMsg::PlaylistFileFinished {
+                            file_id,
+                            path: canonical.to_string_lossy().into_owned(),
+                            size: metadata.len(),
+                        })
+                        .ok();
                 }
                 None => {
                     if !line.trim().is_empty() {
@@ -352,10 +379,12 @@ async fn run_video_playlist_download_inner(
         if let Some(file_id) = current_file
             && !summary.finished_ids.contains(&file_id)
         {
-            tx_reader.send(EngineMsg::PlaylistFileFailed {
-                file_id,
-                error: gettext("yt-dlp exited before finalizing this playlist entry"),
-            }).ok();
+            tx_reader
+                .send(EngineMsg::PlaylistFileFailed {
+                    file_id,
+                    error: gettext("yt-dlp exited before finalizing this playlist entry"),
+                })
+                .ok();
         }
         summary
     });
@@ -422,10 +451,14 @@ async fn run_video_playlist_download_inner(
     // A crash can occur after a file is moved but before its event is read.
     // A fresh --print event is authoritative; otherwise an unreported output
     // is left retryable rather than silently treating a partial as complete.
-    let unresolved = state.files.iter().filter(|file| {
-        file.status != crate::download_store::DownloadStatus::Done
-            && !summary.finished_ids.contains(&file.id)
-    }).count();
+    let unresolved = state
+        .files
+        .iter()
+        .filter(|file| {
+            file.status != crate::download_store::DownloadStatus::Done
+                && !summary.finished_ids.contains(&file.id)
+        })
+        .count();
 
     if !status.success() {
         return Err(VideoError::part_failed(last_error_line(

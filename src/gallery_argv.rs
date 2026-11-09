@@ -89,8 +89,8 @@ impl GalleryFilter {
 /// - `extractor.cookies-update=false`: don't mutate Grab's staged cookies
 /// - `downloader.http.progress=0.5`: emit per-file progress to stderr
 /// - `output.progress=false`: disable multi-URL progress indicator
-/// - custom `output.mode`: keep success/skip paths line-oriented on stdout and
-///   emit a parseable percentage (or `?` when size is unknown) on stderr
+/// - custom `output.mode`: emit tagged start/success/skip paths and
+///   parseable per-file progress; the runner merges both streams in order
 ///
 /// Build a gallery-dl `--range` spec from 0-based selected indices.
 /// gallery-dl uses 1-based indices; consecutive runs compress to `a-b`.
@@ -194,7 +194,7 @@ pub fn download_argv_with_proxy(
         "-o".to_string(),
         // All three path templates are required by gallery-dl's CustomOutput.
         // Omitting one triggers AttributeError in output.py _make_func.
-        r##"output.mode={"start":"","success":"{}\n","skip":"# {}\n","progress":"?\n","progress-total":"{3}%\n"}"##.to_string(),
+        r##"output.mode={"start":"@START:{}\n","success":"@DONE:{}\n","skip":"@SKIP:{}\n","progress":"?\n","progress-total":"{3}%\n"}"##.to_string(),
     ];
     if let Some(cookies) = cookies_file {
         argv.push("-C".to_string());
@@ -306,7 +306,17 @@ pub fn resolve_tool() -> Result<PathBuf, String> {
     crate::gallery_tools::resolve_gallerydl().map_err(|e| e.to_string())
 }
 
-/// Inputs for a gallery download (one queue row per gallery).
+/// Persisted UI state for one file handled by a gallery-dl process.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct GalleryFileState {
+    /// Exact output path announced by gallery-dl.
+    pub path: String,
+    pub status: crate::download_store::DownloadStatus,
+    #[serde(default)]
+    pub progress: f64,
+}
+
+/// Inputs for one gallery-dl process and its expandable collection UI.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct GalleryJob {
     /// Manager id; skipped on serialize (restore assigns a fresh id via claim_id).
@@ -330,6 +340,10 @@ pub struct GalleryJob {
     /// just threads it through to the argv.
     #[serde(default)]
     pub range: Option<String>,
+    /// File rows are projected into the collection UI and persist with the
+    /// single gallery owner, not as independently scheduled queue entries.
+    #[serde(default)]
+    pub file_rows: Vec<GalleryFileState>,
 }
 
 #[cfg(test)]
@@ -418,11 +432,35 @@ mod tests {
             .expect("custom output mode must be configured");
         let mode: serde_json::Value =
             serde_json::from_str(mode).expect("custom output mode must be valid JSON");
-        assert_eq!(mode["start"], "");
-        assert_eq!(mode["success"], "{}\n");
-        assert_eq!(mode["skip"], "# {}\n");
+        assert_eq!(mode["start"], "@START:{}\n");
+        assert_eq!(mode["success"], "@DONE:{}\n");
+        assert_eq!(mode["skip"], "@SKIP:{}\n");
         assert_eq!(mode["progress"], "?\n");
         assert_eq!(mode["progress-total"], "{3}%\n");
+    }
+
+    #[test]
+    fn older_gallery_job_payloads_default_to_no_file_rows() {
+        let job = GalleryJob {
+            item_id: 41,
+            page_url: "https://example.com/gallery".to_string(),
+            title: "Gallery".to_string(),
+            file_count: Some(2),
+            dest_dir: PathBuf::from("/tmp/gallery"),
+            filter: GalleryFilter::All,
+            cookies_browser: "none".to_string(),
+            speed_limit: None,
+            range: None,
+            file_rows: Vec::new(),
+        };
+        let mut payload = serde_json::to_value(job).expect("serialize gallery job");
+        payload
+            .as_object_mut()
+            .expect("gallery object")
+            .remove("file_rows");
+        let restored: GalleryJob =
+            serde_json::from_value(payload).expect("old gallery job remains readable");
+        assert!(restored.file_rows.is_empty());
     }
 
     #[test]

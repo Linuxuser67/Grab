@@ -1,18 +1,17 @@
 //! gallery-dl download runner: spawn, parse progress, collect results.
 //!
 //! Spawns gallery-dl with the argv from [`gallery_argv`](crate::gallery_argv),
-//! feeds stdout lines through [`gallery_progress`](crate::gallery_progress),
+//! feeds the merged child output stream through [`gallery_progress`](crate::gallery_progress),
 //! and reports via callbacks. Cancellation: drop the future; the child is
 //! killed via ProcessGroupGuard.
 
 use std::path::{Path, PathBuf};
-use tokio::io::{AsyncBufReadExt, AsyncReadExt, BufReader};
+use tokio::io::{AsyncReadExt, BufReader};
 use tokio::process::Command;
 
 use crate::gallery_argv::{GalleryJob, download_argv_with_proxy};
 use crate::gallery_progress::{GalleryProgress, ProgressLine, parse_progress_line};
 use crate::gallery_tools::GalleryError;
-use crate::runtime::lock_recover;
 use crate::video_spawn::ProcessGroupGuard;
 
 /// Outcome of a gallery download.
@@ -51,7 +50,11 @@ pub struct GalleryProgressUpdate {
     pub files_done: u32,
     /// Percentage reported for the current file, when its size is known.
     pub current_file_percent: Option<u8>,
-    /// Last completed file path (gallery-dl doesn't name the in-progress file).
+    /// Full path announced by gallery-dl's start event, if a file is active.
+    pub current_file_path: Option<String>,
+    /// The stdout file event that caused this update. Progress-only updates use None.
+    pub event: Option<ProgressLine>,
+    /// Last completed file path for the aggregate gallery detail.
     pub last_completed_file: Option<String>,
 }
 
@@ -151,15 +154,21 @@ pub async fn run_gallery_download_with_proxy(
         None
     };
 
-    let mut cmd = Command::new(&argv[0]);
+    // gallery-dl writes file lifecycle markers to stdout and byte progress
+    // to stderr. Merge both streams in the child so the runner observes their
+    // write order; separate pipes can deliver a fast file's final percentage
+    // after its completion event and misattribute it to the next file.
+    //
+    // Arguments stay positional: the URL, cookie path and proxy flags are not
+    // interpolated into the shell script or subject to shell expansion.
+    let mut cmd = Command::new("/bin/sh");
     crate::video_spawn::prepend_user_lib_to_path(&mut cmd);
-    cmd.args(&argv[1..]);
+    cmd.arg("-c").arg("exec \"$@\" 2>&1").arg("grab-gallery-dl");
+    cmd.args(&argv);
     crate::video_spawn::apply_configured_proxy_env(&mut cmd, proxy);
     crate::video_spawn::apply_guarded_proxy_env(&mut cmd, guarded_proxy.as_deref());
-    // Pipe stdout for file events and stderr for progress plus failure context.
-    // Both streams are drained concurrently so gallery-dl cannot block.
     cmd.stdout(std::process::Stdio::piped());
-    cmd.stderr(std::process::Stdio::piped());
+    cmd.stderr(std::process::Stdio::null());
     // Own process group + kill-on-drop: cancel/abort/shutdown drops this
     // future, and only a group kill reaches gallery-dl's grandchildren too
     // (mirrors ytdlp_command; a bare killpg on the raw pid is an ESRCH
@@ -182,129 +191,93 @@ pub async fn run_gallery_download_with_proxy(
     let stdout = child
         .stdout
         .take()
-        .ok_or_else(|| GalleryError::runtime("gallery-dl stdout not piped"))?;
-    let stderr = child
-        .stderr
-        .take()
-        .ok_or_else(|| GalleryError::runtime("gallery-dl stderr not piped"))?;
+        .ok_or_else(|| GalleryError::runtime("gallery-dl output not piped"))?;
 
-    // gallery-dl writes its progress indicator to stderr using carriage
-    // returns. Parse those records separately while retaining ordinary logs.
-    let stderr_lines = std::sync::Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
-    let stderr_lines_clone = stderr_lines.clone();
-    let (file_progress_tx, mut file_progress_rx) =
-        tokio::sync::mpsc::unbounded_channel::<Option<u8>>();
-    let drain_handle = tokio::spawn(async move {
-        const MAX_STDERR_RECORD_BYTES: usize = 64 * 1024;
-        let mut reader = BufReader::new(stderr);
-        let mut line_buf = Vec::new();
-        let mut chunk = [0; 4096];
-        let mut discard_line = false;
-
-        let record_line = |line: String| {
-            crate::backend_debug::echo_line(&line);
-            let mut lines = lock_recover(&stderr_lines_clone);
-            lines.push(line);
-            if lines.len() > 20 {
-                lines.remove(0);
-            }
-        };
-
-        loop {
-            let read = match reader.read(&mut chunk).await {
-                Ok(0) | Err(_) => break,
-                Ok(read) => read,
-            };
-            for &byte in &chunk[..read] {
-                if matches!(byte, b'\r' | b'\n') {
-                    if !discard_line && !line_buf.is_empty() {
-                        let line = String::from_utf8_lossy(&line_buf).into_owned();
-                        if let ProgressLine::Progress(percent) = parse_progress_line(&line) {
-                            let _ = file_progress_tx.send(percent);
-                        } else {
-                            record_line(line);
-                        }
-                    }
-                    line_buf.clear();
-                    discard_line = false;
-                } else if !discard_line {
-                    if line_buf.len() >= MAX_STDERR_RECORD_BYTES {
-                        line_buf.clear();
-                        discard_line = true;
-                    } else {
-                        line_buf.push(byte);
-                    }
-                }
-            }
-        }
-        if !discard_line && !line_buf.is_empty() {
-            let line = String::from_utf8_lossy(&line_buf).into_owned();
-            if let ProgressLine::Progress(percent) = parse_progress_line(&line) {
-                let _ = file_progress_tx.send(percent);
-            } else {
-                record_line(line);
-            }
-        }
-    });
-
-    let mut lines = BufReader::new(stdout).lines();
+    // stdout and stderr were redirected onto the same child pipe above.
+    // Parse all events in that single ordered stream rather than trying to
+    // reconstruct ordering between independently scheduled readers.
+    const MAX_OUTPUT_RECORD_BYTES: usize = 64 * 1024;
+    let mut reader = BufReader::new(stdout);
+    let mut line_buf = Vec::new();
+    let mut chunk = [0; 4096];
+    let mut discard_line = false;
+    let mut diagnostic_lines = Vec::<String>::new();
 
     let mut progress = GalleryProgress::new();
     let mut files = Vec::new();
-    // Last completed file path (gallery-dl doesn't name the file in progress lines).
     let mut last_completed: Option<String> = None;
-    let mut stdout_done = false;
-    let mut stderr_progress_done = false;
 
-    while !stdout_done || !stderr_progress_done {
-        tokio::select! {
-            // Process file events before progress from the separate stderr pipe.
-            biased;
-            line = lines.next_line(), if !stdout_done => {
-                match line {
-                    Ok(Some(line)) => {
-                        let parsed = parse_progress_line(&line);
-                        let meaningful = matches!(
-                            parsed,
-                            ProgressLine::Completed(_) | ProgressLine::Skipped(_)
-                        );
-                        if let ProgressLine::Completed(path) = &parsed {
-                            last_completed = Some(path.clone());
-                        }
-                        if let Some(path) = progress.feed(parsed) {
-                            files.push(PathBuf::from(path));
-                        }
-                        if meaningful {
-                            on_progress(GalleryProgressUpdate {
-                                files_done: progress.files_done(),
-                                current_file_percent: progress.current_file_percent,
-                                last_completed_file: last_completed.clone(),
-                            });
-                        }
-                    }
-                    Ok(None) => stdout_done = true,
-                    Err(error) => {
-                        return Err(GalleryError::runtime(format!(
-                            "couldn't read gallery-dl output: {error}"
-                        )));
+    let mut process_line = |line: String| {
+        let parsed = parse_progress_line(&line);
+        match parsed {
+            ProgressLine::Progress(percent) => {
+                let _ = progress.feed(ProgressLine::Progress(percent));
+                on_progress(GalleryProgressUpdate {
+                    files_done: progress.files_done(),
+                    current_file_percent: progress.current_file_percent,
+                    current_file_path: progress.current_file_path.clone(),
+                    event: None,
+                    last_completed_file: last_completed.clone(),
+                });
+            }
+            ProgressLine::Other(line) => {
+                if !line.is_empty() {
+                    crate::backend_debug::echo_line(&line);
+                    diagnostic_lines.push(line);
+                    if diagnostic_lines.len() > 20 {
+                        diagnostic_lines.remove(0);
                     }
                 }
             }
-            file_progress = file_progress_rx.recv(), if !stderr_progress_done => {
-                match file_progress {
-                    Some(percent) => {
-                        let _ = progress.feed(ProgressLine::Progress(percent));
-                        on_progress(GalleryProgressUpdate {
-                            files_done: progress.files_done(),
-                            current_file_percent: progress.current_file_percent,
-                            last_completed_file: last_completed.clone(),
-                        });
-                    }
-                    None => stderr_progress_done = true,
+            event => {
+                if let ProgressLine::Completed(path) = &event {
+                    last_completed = Some(path.clone());
+                }
+                if let Some(path) = progress.feed(event.clone()) {
+                    files.push(PathBuf::from(path));
+                }
+                on_progress(GalleryProgressUpdate {
+                    files_done: progress.files_done(),
+                    current_file_percent: progress.current_file_percent,
+                    current_file_path: progress.current_file_path.clone(),
+                    event: Some(event),
+                    last_completed_file: last_completed.clone(),
+                });
+            }
+        }
+    };
+
+    loop {
+        let read = reader.read(&mut chunk).await.map_err(|error| {
+            GalleryError::runtime(format!("couldn't read gallery-dl output: {error}"))
+        })?;
+        if read == 0 {
+            break;
+        }
+
+        for &byte in &chunk[..read] {
+            if matches!(byte, b'\r' | b'\n') {
+                if !discard_line && !line_buf.is_empty() {
+                    let line = String::from_utf8_lossy(&line_buf).into_owned();
+                    process_line(line);
+                }
+                line_buf.clear();
+                discard_line = false;
+            } else if !discard_line {
+                if line_buf.len() >= MAX_OUTPUT_RECORD_BYTES {
+                    line_buf.clear();
+                    discard_line = true;
+                } else {
+                    line_buf.push(byte);
                 }
             }
         }
     }
+    if !discard_line && !line_buf.is_empty() {
+        process_line(String::from_utf8_lossy(&line_buf).into_owned());
+    }
+    // Release the closure's mutable borrows before reading the final counters.
+    drop(process_line);
 
     let status = child
         .wait()
@@ -313,23 +286,9 @@ pub async fn run_gallery_download_with_proxy(
     // Reaped: disarm so Drop can't reach a recycled PGID (guard contract).
     guard.disarm();
 
-    // The child has exited, so the stderr pipe ordinarily hits EOF quickly;
-    // awaiting the drain guarantees the ring buffer holds the complete tail.
-    // A descendant may have inherited the pipe, though, so the wait is
-    // bounded: the tail is diagnostic only, so on a timeout abort the drain
-    // and continue rather than hanging the job — same bound class as the
-    // streamed stderr drain in the probe.
-    let drain_abort = drain_handle.abort_handle();
-    if tokio::time::timeout(std::time::Duration::from_secs(30), drain_handle)
-        .await
-        .is_err()
-    {
-        drain_abort.abort();
-    }
-
     if !status.success() {
         let code = status.code();
-        let stderr_tail = lock_recover(&stderr_lines).join("\n");
+        let stderr_tail = diagnostic_lines.join("\n");
         // Log a redacted tail (gallery-dl failure lines embed media URLs with
         // signed query tokens; the journal gets no query strings). The
         // user-facing message keeps the full tail (the dialog scrolls).
@@ -428,6 +387,96 @@ mod tests {
 
     #[cfg(unix)]
     #[tokio::test]
+    async fn runner_preserves_order_of_start_progress_and_completion_events() {
+        use std::os::unix::fs::PermissionsExt as _;
+        use std::sync::{Arc, Mutex};
+
+        let dir = std::env::temp_dir().join(format!(
+            "grab-runner-per-file-progress-{}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&dir).expect("create runner fixture directory");
+        let tool = dir.join("fake-gallery-dl.sh");
+        let first = dir.join("one.jpg");
+        let second = dir.join("two.jpg");
+        let script = format!(
+            "#!/bin/sh\nprintf '%s\\n' '@START:{}'\nprintf '50%%\\n' >&2\nprintf '%s\\n' '@DONE:{}'\nprintf '@SKIP:%s\\n' '{}'\n",
+            first.display(),
+            first.display(),
+            second.display(),
+        );
+        std::fs::write(&tool, script).expect("write fake gallery-dl");
+        std::fs::set_permissions(&tool, std::fs::Permissions::from_mode(0o755))
+            .expect("make fake gallery-dl executable");
+
+        let job = GalleryJob {
+            item_id: 7,
+            page_url: "https://example.com/gallery".to_string(),
+            title: "Gallery".to_string(),
+            file_count: Some(2),
+            dest_dir: dir.clone(),
+            filter: GalleryFilter::All,
+            cookies_browser: "none".to_string(),
+            speed_limit: None,
+            range: None,
+            file_rows: Vec::new(),
+        };
+        let updates = Arc::new(Mutex::new(Vec::<GalleryProgressUpdate>::new()));
+        let captured = Arc::clone(&updates);
+        let result = run_gallery_download(&job, &tool, None, None, move |update| {
+            captured.lock().expect("progress updates lock").push(update);
+        })
+        .await
+        .expect("fixture gallery download");
+
+        assert_eq!(result.files, vec![first.clone()]);
+        assert_eq!(result.skipped, 1);
+        let first_path = first.to_string_lossy().into_owned();
+        let second_path = second.to_string_lossy().into_owned();
+        let updates = updates.lock().expect("progress updates lock");
+        assert!(updates.iter().any(|update| {
+            matches!(
+                update.event.as_ref(),
+                Some(ProgressLine::Started(path)) if path == &first_path
+            ) && update.current_file_path.as_deref() == Some(first_path.as_str())
+        }));
+        assert!(updates.iter().any(|update| {
+            update.event.is_none()
+                && update.current_file_path.as_deref() == Some(first_path.as_str())
+                && update.current_file_percent == Some(50)
+        }));
+        assert!(updates.iter().any(|update| {
+            matches!(
+                update.event.as_ref(),
+                Some(ProgressLine::Skipped(path)) if path == &second_path
+            )
+        }));
+
+        let started_at = updates
+            .iter()
+            .position(|update| matches!(update.event, Some(ProgressLine::Started(_))))
+            .expect("start event");
+        let progress_at = updates
+            .iter()
+            .position(|update| update.event.is_none() && update.current_file_percent == Some(50))
+            .expect("per-file progress event");
+        let completed_at = updates
+            .iter()
+            .position(|update| matches!(update.event, Some(ProgressLine::Completed(_))))
+            .expect("completion event");
+        let skipped_at = updates
+            .iter()
+            .position(|update| matches!(update.event, Some(ProgressLine::Skipped(_))))
+            .expect("skip event");
+        assert!(started_at < progress_at);
+        assert!(progress_at < completed_at);
+        assert!(completed_at < skipped_at);
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
     async fn cancel_kills_the_download_process_group() {
         // run_gallery_download must own a process group: dropping the future
         // (cancel/abort/shutdown) kills the child and everything it spawned —
@@ -460,6 +509,7 @@ mod tests {
             cookies_browser: "none".to_string(),
             speed_limit: None,
             range: None,
+            file_rows: Vec::new(),
         };
         let task =
             tokio::spawn(
@@ -534,6 +584,7 @@ mod tests {
             cookies_browser: "none".to_string(),
             speed_limit: None,
             range: None,
+            file_rows: Vec::new(),
         };
         let json = serde_json::to_string(&job).unwrap();
         // item_id skipped on serialize.

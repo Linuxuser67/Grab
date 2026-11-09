@@ -636,17 +636,35 @@ pub fn build_window(
                 })
                 .collect::<Vec<_>>();
 
+            // A gallery owner is a persisted process row, not a visible child.
+            // Its transient file rows share its group ID and form the collection UI.
+            let gallery_owner_ids = items
+                .iter()
+                .filter(|item| item.is_gallery_child())
+                .filter_map(|item| item.group().map(|group| group.id()))
+                .collect::<HashSet<_>>();
             let mut group_sizes = HashMap::<u64, usize>::new();
             for item in &items {
+                if item.is_gallery() && gallery_owner_ids.contains(&item.id()) {
+                    continue;
+                }
                 if let Some(group) = item.group().filter(|group| group.is_valid()) {
                     *group_sizes.entry(group.id()).or_default() += 1;
                 }
             }
+            let is_group_member = |item: &crate::download::DownloadItem, group_id: u64| {
+                item.is_gallery_child()
+                    || group_sizes.get(&group_id).is_some_and(|count| *count > 1)
+            };
             let mut all_groups = HashMap::<u64, Vec<crate::download::DownloadItem>>::new();
             for item in &items {
-                if let Some(group) = item.group().filter(|group| {
-                    group.is_valid() && group_sizes.get(&group.id()).is_some_and(|count| *count > 1)
-                }) {
+                if item.is_gallery() && gallery_owner_ids.contains(&item.id()) {
+                    continue;
+                }
+                if let Some(group) = item
+                    .group()
+                    .filter(|group| group.is_valid() && is_group_member(item, group.id()))
+                {
                     all_groups.entry(group.id()).or_default().push(item.clone());
                 }
             }
@@ -661,14 +679,16 @@ pub fn build_window(
             let mut n_downloaded = 0;
 
             for item in &items {
+                // Once child rows exist, the gallery owner is represented by
+                // their collection header. Keep its queue row hidden.
+                if item.is_gallery() && gallery_owner_ids.contains(&item.id()) {
+                    continue;
+                }
                 present.insert(item.id());
                 let bucket = section_bucket(item.status());
                 let group_key = item
                     .group()
-                    .filter(|group| {
-                        group.is_valid()
-                            && group_sizes.get(&group.id()).is_some_and(|count| *count > 1)
-                    })
+                    .filter(|group| group.is_valid() && is_group_member(item, group.id()))
                     .map(|group| (group.id(), bucket));
 
                 let mut shown = sel == 0 || status_filter_bucket(item.status()) == sel;
@@ -729,6 +749,9 @@ pub fn build_window(
             }
 
             for item in &items {
+                if item.is_gallery() && gallery_owner_ids.contains(&item.id()) {
+                    continue;
+                }
                 let bucket = section_bucket(item.status());
                 let target = match bucket {
                     2 => &l_downloaded,
@@ -737,10 +760,7 @@ pub fn build_window(
                 };
                 let group_key = item
                     .group()
-                    .filter(|group| {
-                        group.is_valid()
-                            && group_sizes.get(&group.id()).is_some_and(|count| *count > 1)
-                    })
+                    .filter(|group| group.is_valid() && is_group_member(item, group.id()))
                     .map(|group| (group.id(), bucket));
                 let location = RowPlacement {
                     section: bucket,

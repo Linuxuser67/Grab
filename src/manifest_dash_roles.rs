@@ -166,13 +166,13 @@ fn push_element(
         }
         (Some(Element::Period), "SegmentList", true) => {
             if let Some(offset) = segment_list_presentation_time_offset(start)? {
-                *period_list_pto = offset;
+                *period_list_pto = Some(offset);
             }
             Element::Other
         }
         (Some(Element::AdaptationSet), "SegmentList", true) => {
             if let Some(offset) = segment_list_presentation_time_offset(start)? {
-                *adaptation_list_pto = offset;
+                *adaptation_list_pto = Some(offset);
             }
             Element::Other
         }
@@ -182,7 +182,7 @@ fn push_element(
                     .last_mut()?
                     .last_mut()?
                     .last_mut()?
-                    .segment_list_presentation_time_offset = offset;
+                    .segment_list_presentation_time_offset = Some(offset);
             }
             Element::Other
         }

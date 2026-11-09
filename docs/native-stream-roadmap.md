@@ -138,7 +138,7 @@ Support a static single-period MP4 representation with an in-file
 `SegmentBase@indexRange`, `Initialization@range`, and bounded SIDX hierarchy.
 Fetch each bounded index range, decode SIDX with the existing `mp4box`
 dependency, and translate direct and nested references into ordered Grab
-byte-range resources. Separate initialization URLs, dynamic SegmentBase, malformed or out-of-file
+byte-range resources. Separate initialization URLs on indexed SegmentBase, dynamic SegmentBase, malformed or out-of-file
 references, and hierarchies exceeding the explicit depth/node/size limits remain
 on yt-dlp fallback.
 

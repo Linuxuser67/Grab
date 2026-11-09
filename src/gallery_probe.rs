@@ -118,7 +118,8 @@ pub fn route(
     gallery_items: Option<&[GalleryItem]>,
     host_sticky: Option<StickyMode>,
 ) -> ProbeOutcome {
-    // Sticky preference wins when both modes are viable; otherwise the table decides.
+    // An explicit Video preference can override an image-bearing gallery
+    // only when yt-dlp has a playable result.
     let (has_video, has_images) = gallery_items
         .map(|items| {
             let mut video = false;
@@ -156,9 +157,9 @@ pub fn route(
     }
 }
 
-/// Preserve yt-dlp's playlist picker when it recognizes a collection:
-/// its entries carry stable item IDs and page URLs. For collections yt-dlp
-/// does not recognize as playlists, prefer gallery-dl when it lists media.
+/// Prefer gallery-dl for image-bearing collections, even when yt-dlp also
+/// recognizes a playlist. Preserve yt-dlp's stable item URLs and IDs for
+/// video-only playlists; use gallery-dl for other collections it can list.
 pub(crate) fn route_for_collection(
     ytdlp_video: bool,
     ytdlp_playlist_entries: usize,
@@ -195,17 +196,11 @@ pub(crate) fn route_for_collection(
         };
     }
 
-    // Either backend can confirm multiple entries. The gallery-dl preview is
-    // capped, so one supported preview item is enough when yt-dlp found a list.
-    let multi_entry =
-        ytdlp_playlist_entries > 1 || gallery_items.is_some_and(|items| items.len() > 1);
-    if multi_entry {
-        if has_video {
-            return ProbeOutcome::VideoGalleryDl;
-        }
-        if has_images {
-            return ProbeOutcome::Gallery;
-        }
+    // Video-only gallery-dl collections can use its collection downloader
+    // when the listing confirms more than one entry.
+    let multi_entry = gallery_items.is_some_and(|items| items.len() > 1);
+    if multi_entry && has_video {
+        return ProbeOutcome::VideoGalleryDl;
     }
 
     // gallery-dl may return a single file whose extension is outside our
@@ -1764,7 +1759,7 @@ done
     }
 
     #[test]
-    fn ytdlp_playlists_keep_their_picker_when_gallerydl_also_lists_items() {
+    fn video_only_ytdlp_playlists_keep_their_picker() {
         let videos = vec![item("mp4"), item("webm")];
         let ytdlp_playlist = ProbeOutcome::VideoYtDlp {
             gallery_toggle: false,

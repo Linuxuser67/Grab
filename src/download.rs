@@ -5910,6 +5910,7 @@ impl DownloadManager {
                         source,
                         crate::media_types::VideoSource::Page { .. }
                             | crate::media_types::VideoSource::Manifest { .. }
+                            | crate::media_types::VideoSource::Playlist { .. }
                     )
                 });
                 let group = it.group().filter(|group| group.is_valid());

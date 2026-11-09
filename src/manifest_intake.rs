@@ -805,10 +805,7 @@ fn parse_hls_pathway_clone(
             let has_explicit_port = host
                 .strip_prefix('[')
                 .and_then(|value| value.split_once(']'))
-                .map_or_else(
-                    || host.contains(':'),
-                    |(_, suffix)| suffix.starts_with(':'),
-                );
+                .map_or_else(|| host.contains(':'), |(_, suffix)| suffix.starts_with(':'));
             if has_explicit_port
                 || probe.host_str().is_none()
                 || probe.port().is_some()

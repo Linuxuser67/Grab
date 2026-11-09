@@ -208,16 +208,11 @@ pub(crate) fn plan_hls_media_playlist(
     let playlist = LlMediaPlaylist::parse(text).map_err(|error| {
         ManifestError::Parse(format!("could not parse LL-HLS playlist: {error}"))
     })?;
-    if has_unattached_discontinuity(body) {
-        return Err(ManifestError::UnsupportedPlaylistFeature(
-            "a trailing EXT-X-DISCONTINUITY cannot be represented on an open LL-HLS segment"
-                .to_string(),
-        ));
-    }
-    build_plan(manifest_url, playlist).map(Some)
+    let open_segment_discontinuity = has_trailing_open_discontinuity(body);
+    build_plan(manifest_url, playlist, open_segment_discontinuity).map(Some)
 }
 
-fn has_unattached_discontinuity(body: &[u8]) -> bool {
+fn has_trailing_open_discontinuity(body: &[u8]) -> bool {
     const EXTINF: &[u8] = b"#EXTINF:";
     let tail_start = body
         .windows(EXTINF.len())
@@ -235,7 +230,11 @@ fn has_unattached_discontinuity(body: &[u8]) -> bool {
         })
 }
 
-fn build_plan(manifest_url: &str, playlist: LlMediaPlaylist) -> Result<HlsPlan, ManifestError> {
+fn build_plan(
+    manifest_url: &str,
+    playlist: LlMediaPlaylist,
+    open_segment_discontinuity: bool,
+) -> Result<HlsPlan, ManifestError> {
     let base_url = parse_manifest_url(manifest_url)?;
     let source_target_duration = u64::from(playlist.target_duration);
     if source_target_duration == 0 || playlist.iframes_only {
@@ -367,19 +366,34 @@ fn build_plan(manifest_url: &str, playlist: LlMediaPlaylist) -> Result<HlsPlan, 
         .checked_add(skipped_segments)
         .ok_or(ManifestError::DurationOverflow)?;
 
+    let mut pending_discontinuity = false;
     for (segment_index, segment) in playlist.segments.iter().enumerate() {
         let offset = u64::try_from(segment_index).map_err(|_| ManifestError::DurationOverflow)?;
         let media_sequence = first_visible_sequence
             .checked_add(offset)
             .ok_or(ManifestError::DurationOverflow)?;
-        if segment.gap {
-            return Err(ManifestError::UnsupportedPlaylistFeature(
-                "#EXT-X-GAP segments cannot be captured contiguously".to_string(),
-            ));
-        }
         if let Some(map) = segment.map.as_ref() {
             active_map = Some(map.clone());
         }
+        if segment.gap {
+            // A completed presentation can omit a declared gap while retaining
+            // the source sequence and timestamp progression. A live snapshot
+            // needs a persistent gap unit in the recovery journal, which the
+            // current writer cannot represent safely.
+            if !playlist.endlist || !segment.parts.is_empty() {
+                return Err(ManifestError::UnsupportedPlaylistFeature(
+                    "#EXT-X-GAP in a live or partial LL-HLS segment cannot be reconciled safely"
+                        .to_string(),
+                ));
+            }
+            let _duration = checked_duration(segment.duration.get(), source_target_duration)?;
+            let url = resolve_resource_url(&base_url, &segment.uri)?;
+            let _range = plan_range(segment.byte_range.as_ref(), &url, &mut previous_range)?;
+            pending_discontinuity |= segment.discontinuous;
+            continue;
+        }
+        let discontinuity = segment.discontinuous || pending_discontinuity;
+        pending_discontinuity = false;
         let map = plan_map(
             &base_url,
             active_map.as_ref(),
@@ -400,7 +414,7 @@ fn build_plan(manifest_url: &str, playlist: LlMediaPlaylist) -> Result<HlsPlan, 
             local_segments.push(LocalSegment {
                 uri: filename,
                 duration: duration.as_secs_f64() as f32,
-                discontinuity: segment.discontinuous,
+                discontinuity,
                 map,
                 ..Default::default()
             });
@@ -425,7 +439,7 @@ fn build_plan(manifest_url: &str, playlist: LlMediaPlaylist) -> Result<HlsPlan, 
             &segment.parts,
             source_target_duration,
             map,
-            segment.discontinuous,
+            discontinuity,
             playlist.independent_segments,
             &mut first_part_independent,
             &mut resources,
@@ -450,13 +464,14 @@ fn build_plan(manifest_url: &str, playlist: LlMediaPlaylist) -> Result<HlsPlan, 
             &mut resources,
             &mut map_filenames,
         )?;
+        let discontinuity = open_segment_discontinuity;
         append_part_units(
             &base_url,
             media_sequence,
             &open.parts,
             source_target_duration,
             map,
-            false,
+            discontinuity,
             playlist.independent_segments,
             &mut first_part_independent,
             &mut resources,
@@ -468,7 +483,7 @@ fn build_plan(manifest_url: &str, playlist: LlMediaPlaylist) -> Result<HlsPlan, 
 
     if local_segments.is_empty()
         || local_segments.len() > MAX_HLS_LIVE_UNITS
-        || !validate_live_unit_ids(&unit_ids)
+        || (!playlist.endlist && !validate_live_unit_ids(&unit_ids))
         || local_segments
             .iter()
             .any(|segment| !segment.duration.is_finite() || segment.duration <= 0.0)
@@ -1152,7 +1167,7 @@ mod tests {
     }
 
     #[test]
-    fn trailing_discontinuity_before_open_parts_falls_back() {
+    fn discontinuity_before_open_parts_is_attached_to_the_first_part() {
         let body = br#"#EXTM3U
 #EXT-X-TARGETDURATION:2
 #EXT-X-MEDIA-SEQUENCE:20
@@ -1164,10 +1179,15 @@ mod tests {
 #EXT-X-DISCONTINUITY
 #EXT-X-PART:DURATION=0.5,URI="21.0.m4s",INDEPENDENT=YES
 "#;
-        assert!(matches!(
-            plan_hls_media_playlist(BASE, body),
-            Err(ManifestError::UnsupportedPlaylistFeature(_))
-        ));
+        let plan = plan_hls_media_playlist(BASE, body)
+            .expect("open parts after a discontinuity should be planned")
+            .expect("LL-HLS detected");
+        assert_eq!(plan.local_playlist.segments.len(), 2);
+        assert!(!plan.local_playlist.segments[0].discontinuity);
+        assert!(
+            plan.local_playlist.segments[1].discontinuity,
+            "the first open part carries the pending discontinuity"
+        );
     }
 
     #[test]
@@ -1223,6 +1243,59 @@ mod tests {
                 .iter()
                 .all(|segment| segment.map.is_some())
         );
+    }
+
+    #[test]
+    fn completed_ll_hls_playlist_omits_gap_and_carries_its_discontinuity() {
+        let body = br#"#EXTM3U
+#EXT-X-TARGETDURATION:2
+#EXT-X-MEDIA-SEQUENCE:7
+#EXT-X-SERVER-CONTROL:CAN-BLOCK-RELOAD=NO,PART-HOLD-BACK=1.5
+#EXT-X-PART-INF:PART-TARGET=0.5
+#EXTINF:1.0,
+7.m4s
+#EXT-X-DISCONTINUITY
+#EXT-X-GAP
+#EXTINF:1.0,
+8.m4s
+#EXTINF:1.0,
+9.m4s
+#EXT-X-ENDLIST
+"#;
+        let plan = plan_hls_media_playlist(BASE, body)
+            .expect("completed LL-HLS playlist with a declared gap")
+            .expect("LL-HLS detected");
+        let segments = plan
+            .resources
+            .iter()
+            .filter(|resource| resource.kind == HlsResourceKind::Segment)
+            .collect::<Vec<_>>();
+        assert_eq!(segments.len(), 2);
+        assert!(segments[0].url.path().ends_with("/7.m4s"));
+        assert!(segments[1].url.path().ends_with("/9.m4s"));
+        assert_eq!(plan.local_playlist.segments.len(), 2);
+        assert!(!plan.local_playlist.segments[0].discontinuity);
+        assert!(plan.local_playlist.segments[1].discontinuity);
+        assert_eq!(plan.ll_unit_ids.as_ref().map(|ids| ids.len()), Some(2));
+    }
+
+    #[test]
+    fn live_ll_hls_parent_gap_still_falls_back() {
+        let body = br#"#EXTM3U
+#EXT-X-TARGETDURATION:2
+#EXT-X-MEDIA-SEQUENCE:7
+#EXT-X-SERVER-CONTROL:CAN-BLOCK-RELOAD=NO,PART-HOLD-BACK=1.5
+#EXT-X-PART-INF:PART-TARGET=0.5
+#EXTINF:1.0,
+7.m4s
+#EXT-X-GAP
+#EXTINF:1.0,
+8.m4s
+"#;
+        assert!(matches!(
+            plan_hls_media_playlist(BASE, body),
+            Err(ManifestError::UnsupportedPlaylistFeature(_))
+        ));
     }
 
     #[test]

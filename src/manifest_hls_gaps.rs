@@ -108,6 +108,32 @@ mod tests {
     }
 
     #[test]
+    fn method_none_key_reset_inside_a_gap_is_preserved_for_the_next_kept_segment() {
+        let body = b"#EXTM3U\n#EXT-X-TARGETDURATION:4\n#EXT-X-PLAYLIST-TYPE:VOD\n#EXT-X-KEY:METHOD=AES-128,URI=\"keys/encrypted.key\"\n#EXTINF:4,\nencrypted.ts\n#EXT-X-GAP\n#EXT-X-KEY:METHOD=NONE\n#EXTINF:4,\nunavailable.ts\n#EXTINF:4,\nclear.ts\n#EXT-X-ENDLIST\n";
+        let plan = plan_hls_media_playlist(BASE_URL, body)
+            .expect("METHOD=NONE inside a gap should carry forward");
+
+        assert!(
+            !plan
+                .resources
+                .iter()
+                .any(|resource| resource.kind == HlsResourceKind::Key
+                    && resource.url.path().ends_with("encrypted.key"))
+        );
+        let local_bytes = plan.local_playlist_bytes().expect("local playlist");
+        let local = m3u8_rs::parse_media_playlist_res(&local_bytes)
+            .expect("parse local playlist");
+        assert_eq!(local.segments.len(), 2);
+        assert_eq!(
+            local.segments[1]
+                .key
+                .as_ref()
+                .map(|key| key.method),
+            Some(m3u8_rs::KeyMethod::None)
+        );
+    }
+
+    #[test]
     fn live_playlists_with_gap_markers_fall_back() {
         let body =
             b"#EXTM3U\n#EXT-X-TARGETDURATION:4\n#EXTINF:4,\nfirst.ts\n#EXT-X-GAP\n#EXTINF:4,\nunavailable.ts\n";

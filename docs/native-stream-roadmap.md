@@ -41,7 +41,7 @@ are not fetched, surviving resource names retain their source segment indices,
 and implicit byte-range offsets advance across removed source segments.
 `METHOD=NONE` resets are preserved when their original boundary is inside an
 omitted ad. Live playlists with ad markers, ad intervals containing a
-discontinuity, playlists using `EXT-X-START`, ambiguous or incomplete cues,
+discontinuity, ambiguous or incomplete cues,
 and all `EXT-X-DATERANGE` playlists remain on yt-dlp fallback until
 date-time ranges can be mapped unambiguously to individual media segments.
 
@@ -51,8 +51,13 @@ fall back to yt-dlp. This includes VIDEO groups with unmatched variant
 references or more than one URI-less member, CONTENT-STEERING, unsupported
 encryption schemes, and extensions with unmet REQ-prefixed attributes.
 Complete static VOD/EVENT playlists may omit well-formed EXT-X-GAP
-segments from the local resource plan; live/LL-HLS gaps remain on fallback. Media-playlist NAME/VALUE and QUERYPARAM variable
-substitution is supported for ordinary HLS and LL-HLS. Master-playlist
+segments from the local resource plan; live/LL-HLS gaps remain on fallback.
+For ordinary HLS, `EXT-X-START` is ignored during recording: all listed
+segments are retained and the playback hint is omitted from the local playlist.
+Ad-marked playlists that also use `EXT-X-START` remain on fallback because
+omitting tagged segments would invalidate the source playback hint.
+Media-playlist NAME/VALUE and QUERYPARAM variable substitution is supported
+for ordinary HLS and LL-HLS. Master-playlist
 NAME/VALUE and QUERYPARAM variables are expanded in variant and rendition
 URIs. Child media playlists may import explicitly named parent variables with
 EXT-X-DEFINE:IMPORT; the selected variable scope is carried through video,

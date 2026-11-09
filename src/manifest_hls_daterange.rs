@@ -45,6 +45,18 @@ struct SpliceSignalIdentity {
     unique_program_id: u16,
 }
 
+fn is_ad_daterange_class(value: &str) -> bool {
+    value
+        .split(|character: char| !character.is_ascii_alphanumeric())
+        .any(|token| {
+            matches!(
+                token.to_ascii_lowercase().as_str(),
+                "ad" | "ads" | "advert" | "advertisement" | "commercial" | "interstitial"
+                    | "splice" | "avail"
+            )
+        })
+}
+
 /// Detect DATERANGE tags that m3u8-rs would overwrite before parsing.
 pub(super) fn validate_tag_layout(body: &[u8]) -> Result<(), ManifestError> {
     let Ok(text) = std::str::from_utf8(body) else {
@@ -87,13 +99,36 @@ pub(super) fn plan_ad_removal(
         };
         let out_signal = attribute(date_range, "SCTE35-OUT");
         let in_signal = attribute(date_range, "SCTE35-IN");
-        if out_signal.is_none() && in_signal.is_none() {
-            continue;
+        let has_other_scte35_signal = date_range
+            .other_attributes
+            .as_ref()
+            .is_some_and(|attributes| {
+                attributes
+                    .keys()
+                    .any(|key| key.starts_with("SCTE35-") && key != "SCTE35-OUT" && key != "SCTE35-IN")
+            });
+        if has_other_scte35_signal {
+            return Err(unsupported(
+                "DATERANGE carries an unsupported SCTE-35 attribute",
+            ));
         }
-        has_splice_signal = true;
         if date_range.id.trim().is_empty() {
             return Err(unsupported("DATERANGE ID is empty"));
         }
+        if out_signal.is_none() && in_signal.is_none() {
+            if date_range
+                .class
+                .as_deref()
+                .is_some_and(is_ad_daterange_class)
+                || is_ad_daterange_class(&date_range.id)
+            {
+                return Err(unsupported(
+                    "ad-like DATERANGE metadata has no supported SCTE35-OUT/IN pair",
+                ));
+            }
+            continue;
+        }
+        has_splice_signal = true;
 
         if date_range.end_on_next
             || date_range
@@ -109,9 +144,9 @@ pub(super) fn plan_ad_removal(
             .other_attributes
             .as_ref()
             .is_some_and(|attributes| {
-                attributes
-                    .keys()
-                    .any(|key| key != "SCTE35-OUT" && key != "SCTE35-IN")
+                attributes.keys().any(|key| {
+                    key != "SCTE35-OUT" && key != "SCTE35-IN"
+                })
             })
         {
             return Err(unsupported(
@@ -146,21 +181,19 @@ pub(super) fn plan_ad_removal(
             }
             range.class = Some(class.clone());
         }
-        if in_signal.is_some() {
-            if let Some(end_date) = date_range.end_date.as_ref() {
-                merge_same(
-                    &mut range.end_micros,
-                    end_date.timestamp_micros(),
-                    "END-DATE",
-                )?;
-            }
-            if let Some(duration) = date_range.duration {
-                merge_same(
-                    &mut range.actual_duration_micros,
-                    seconds_to_micros(duration)?,
-                    "DURATION",
-                )?;
-            }
+        if let Some(end_date) = date_range.end_date.as_ref() {
+            merge_same(
+                &mut range.end_micros,
+                end_date.timestamp_micros(),
+                "END-DATE",
+            )?;
+        }
+        if let Some(duration) = date_range.duration {
+            merge_same(
+                &mut range.actual_duration_micros,
+                seconds_to_micros(duration)?,
+                "DURATION",
+            )?;
         }
         if let Some(planned_duration) = date_range.planned_duration {
             // Validate the hint, but never use it to infer the actual ad end.

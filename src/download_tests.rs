@@ -9648,7 +9648,7 @@ fn playlist_staged_import_does_not_duplicate_identical_entry() {
 }
 
 #[test]
-fn remove_many_removes_existing_members_once_and_persists_an_empty_queue() {
+fn remove_many_removes_each_existing_member_once() {
     let (_q, _l) = test_locks();
     let _qf = test_queue_file("remove-many");
     let manager = DownloadManager::new(gio::ListStore::new::<DownloadItem>(), test_settings());

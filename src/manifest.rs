@@ -46,6 +46,8 @@ pub(crate) enum ManifestError {
     InvalidAudioGroup,
     #[error("HLS variant references an invalid subtitle rendition group")]
     InvalidSubtitleGroup,
+    #[error("HLS variant references an invalid video rendition group")]
+    InvalidVideoGroup,
     #[error("unsupported HLS playlist type")]
     UnsupportedPlaylist,
     #[error("unsupported HLS playlist feature: {0}")]
@@ -296,6 +298,11 @@ pub(crate) struct HlsVariant {
     pub(crate) frame_rate: Option<f64>,
     pub(crate) audio_group: Option<String>,
     pub(crate) subtitles_group: Option<String>,
+    /// Group and display name when this choice selects an EXT-X-MEDIA VIDEO rendition.
+    pub(crate) video_rendition_group: Option<String>,
+    pub(crate) video_rendition_name: Option<String>,
+    /// Apple HLS STABLE-RENDITION-ID for the selected VIDEO rendition.
+    pub(crate) stable_video_rendition_id: Option<String>,
     /// Apple HLS STABLE-VARIANT-ID, when the origin provides one.
     pub(crate) stable_variant_id: Option<String>,
 }
@@ -1136,22 +1143,13 @@ pub(crate) fn parse_hls_master_playlist(
     // Session keys are optional preloading hints, not media-key substitutes.
     // Never fetch them; the selected media playlist's EXT-X-KEY remains authoritative.
     reject_unsupported_hls_session_keys(&master.session_key)?;
-    // Alternate VIDEO groups are separate selectable renditions. The native
-    // HLS picker models variant playlists, audio, and subtitles, not video
-    // angles, so do not silently select the variant URI and omit its group.
-    if master
-        .variants
-        .iter()
-        .any(|variant| variant.video.is_some())
-        || master
-            .alternatives
-            .iter()
-            .any(|alternative| alternative.media_type == AlternativeMediaType::Video)
-    {
-        return Err(ManifestError::UnsupportedPlaylist);
-    }
     reject_unsupported_hls_tags(&master.unknown_tags)?;
 
+    let video_renditions = master
+        .alternatives
+        .iter()
+        .filter(|alternative| alternative.media_type == AlternativeMediaType::Video)
+        .collect::<Vec<_>>();
     let variants = master
         .variants
         .into_iter()
@@ -1160,30 +1158,92 @@ pub(crate) fn parse_hls_master_playlist(
             if variant.uri.is_empty() {
                 return Err(ManifestError::UnsupportedPlaylist);
             }
-            let url = resolve_resource_url(&base_url, &variant.uri)?;
+            let variant_url = resolve_resource_url(&base_url, &variant.uri)?;
             let (width, height) = variant
                 .resolution
                 .map(|resolution| (Some(resolution.width), Some(resolution.height)))
                 .unwrap_or((None, None));
-            Ok(HlsVariant {
-                url,
-                bandwidth: variant.bandwidth,
-                average_bandwidth: variant.average_bandwidth,
-                width,
-                height,
-                codecs: variant.codecs,
-                frame_rate: variant.frame_rate,
-                audio_group: variant.audio,
-                subtitles_group: variant.subtitles,
-                stable_variant_id: variant
+            let stable_variant_id = variant
+                .other_attributes
+                .as_ref()
+                .and_then(|attributes| attributes.get("STABLE-VARIANT-ID"))
+                .map(|value| value.as_str().to_string())
+                .filter(|value| !value.is_empty());
+            let make_variant = |url: Url,
+                                video_rendition_group: Option<String>,
+                                video_rendition_name: Option<String>,
+                                stable_video_rendition_id: Option<String>| {
+                HlsVariant {
+                    url,
+                    bandwidth: variant.bandwidth,
+                    average_bandwidth: variant.average_bandwidth,
+                    width,
+                    height,
+                    codecs: variant.codecs.clone(),
+                    frame_rate: variant.frame_rate,
+                    audio_group: variant.audio.clone(),
+                    subtitles_group: variant.subtitles.clone(),
+                    video_rendition_group,
+                    video_rendition_name,
+                    stable_video_rendition_id,
+                    stable_variant_id: stable_variant_id.clone(),
+                }
+            };
+
+            let Some(group_id) = variant.video.as_deref() else {
+                return Ok(vec![make_variant(variant_url, None, None, None)]);
+            };
+            if group_id.trim().is_empty() {
+                return Err(ManifestError::InvalidVideoGroup);
+            }
+            let group_renditions = video_renditions
+                .iter()
+                .copied()
+                .filter(|rendition| rendition.group_id == group_id)
+                .collect::<Vec<_>>();
+            if group_renditions.is_empty() {
+                return Err(ManifestError::InvalidVideoGroup);
+            }
+
+            // RFC 8216 permits one URI-less VIDEO rendition to be carried by
+            // the EXT-X-STREAM-INF playlist itself. Multiple URI-less members
+            // would all resolve to the same playlist and cannot be selected
+            // independently, so keep that ambiguous group on fallback.
+            let mut embedded_rendition_seen = false;
+            let mut choices = Vec::with_capacity(group_renditions.len());
+            for rendition in group_renditions {
+                if rendition.name.trim().is_empty() {
+                    return Err(ManifestError::InvalidVideoGroup);
+                }
+                let url = match rendition.uri.as_deref() {
+                    Some(uri) => resolve_resource_url(&base_url, uri)?,
+                    None => {
+                        if embedded_rendition_seen {
+                            return Err(ManifestError::InvalidVideoGroup);
+                        }
+                        embedded_rendition_seen = true;
+                        variant_url.clone()
+                    }
+                };
+                let stable_video_rendition_id = rendition
                     .other_attributes
                     .as_ref()
-                    .and_then(|attributes| attributes.get("STABLE-VARIANT-ID"))
+                    .and_then(|attributes| attributes.get("STABLE-RENDITION-ID"))
                     .map(|value| value.as_str().to_string())
-                    .filter(|value| !value.is_empty()),
-            })
+                    .filter(|value| !value.is_empty());
+                choices.push(make_variant(
+                    url,
+                    Some(group_id.to_string()),
+                    Some(rendition.name.clone()),
+                    stable_video_rendition_id,
+                ));
+            }
+            Ok(choices)
         })
-        .collect::<Result<Vec<_>, ManifestError>>()?;
+        .collect::<Result<Vec<_>, ManifestError>>()?
+        .into_iter()
+        .flatten()
+        .collect::<Vec<_>>();
 
     if variants.is_empty() {
         return Err(ManifestError::NoVideoVariants);
@@ -2037,16 +2097,56 @@ one.ts
     }
 
     #[test]
-    fn alternate_video_renditions_fall_back() {
+    fn alternate_video_renditions_become_independent_video_choices() {
         let body = br#"#EXTM3U
-#EXT-X-MEDIA:TYPE=VIDEO,GROUP-ID="angles",NAME="Main",URI="video/main.m3u8"
-#EXT-X-STREAM-INF:BANDWIDTH=1000000,VIDEO="angles"
+#EXT-X-MEDIA:TYPE=VIDEO,GROUP-ID="angles",NAME="Main",STABLE-RENDITION-ID="main"
+#EXT-X-MEDIA:TYPE=VIDEO,GROUP-ID="angles",NAME="Camera B",URI="angles/camera-b.m3u8",STABLE-RENDITION-ID="camera-b"
+#EXT-X-STREAM-INF:BANDWIDTH=2000000,RESOLUTION=1920x1080,VIDEO="angles",STABLE-VARIANT-ID="variant-1080"
 video/combined.m3u8
 "#;
+        let master = parse_hls_master_playlist(BASE_URL, body)
+            .expect("valid VIDEO rendition group should be selectable");
+        assert_eq!(master.variants.len(), 2);
+        assert_eq!(master.variants[0].video_rendition_name.as_deref(), Some("Main"));
         assert_eq!(
-            parse_hls_master_playlist(BASE_URL, body).err(),
-            Some(ManifestError::UnsupportedPlaylist)
+            master.variants[0].url.as_str(),
+            "https://cdn.example.test/path/video/combined.m3u8"
         );
+        assert_eq!(
+            master.variants[1].video_rendition_name.as_deref(),
+            Some("Camera B")
+        );
+        assert_eq!(
+            master.variants[1].url.as_str(),
+            "https://cdn.example.test/path/angles/camera-b.m3u8"
+        );
+        assert!(
+            master.variants.iter().all(|variant| {
+                variant.video_rendition_group.as_deref() == Some("angles")
+                    && variant.height == Some(1080)
+            }),
+            "all angles retain the source variant's quality metadata"
+        );
+    }
+
+    #[test]
+    fn malformed_or_ambiguous_video_groups_fall_back() {
+        let unmatched = br#"#EXTM3U
+#EXT-X-STREAM-INF:BANDWIDTH=1000000,VIDEO="missing"
+video.m3u8
+"#;
+        let ambiguous_embedded = br#"#EXTM3U
+#EXT-X-MEDIA:TYPE=VIDEO,GROUP-ID="angles",NAME="Main"
+#EXT-X-MEDIA:TYPE=VIDEO,GROUP-ID="angles",NAME="Camera B"
+#EXT-X-STREAM-INF:BANDWIDTH=1000000,VIDEO="angles"
+video.m3u8
+"#;
+        for body in [unmatched.as_slice(), ambiguous_embedded.as_slice()] {
+            assert_eq!(
+                parse_hls_master_playlist(BASE_URL, body).err(),
+                Some(ManifestError::InvalidVideoGroup)
+            );
+        }
     }
 
     #[test]

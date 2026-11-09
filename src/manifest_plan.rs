@@ -70,15 +70,21 @@ impl ManifestLookup {
                 .zip(hls_variant_keys(&master.variants))
                 .filter_map(|(variant, key)| {
                     let key = key?;
+                    let quality = join_label_parts(
+                        resolution_label(variant.width, variant.height),
+                        bitrate_label(Some(
+                            variant.average_bandwidth.unwrap_or(variant.bandwidth),
+                        )),
+                        codec_label(variant.codecs.as_deref()),
+                    );
+                    let label = variant
+                        .video_rendition_name
+                        .as_deref()
+                        .map(|name| format!("{} · {quality}", short_label(name)))
+                        .unwrap_or(quality);
                     Some(ManifestChoice {
                         key: key.into(),
-                        label: join_label_parts(
-                            resolution_label(variant.width, variant.height),
-                            bitrate_label(Some(
-                                variant.average_bandwidth.unwrap_or(variant.bandwidth),
-                            )),
-                            codec_label(variant.codecs.as_deref()),
-                        ),
+                        label,
                         height: variant.height,
                         bandwidth: Some(variant.average_bandwidth.unwrap_or(variant.bandwidth)),
                     })
@@ -610,6 +616,40 @@ fn derived_hls_track_key(prefix: &str, track_kind: &[u8], fields: &[&[u8]]) -> S
 /// but kept for the same `Option` plumbing as Apple IDs.
 #[must_use]
 fn hls_variant_content_key(variant: &HlsVariant) -> String {
+    if let Some(group_id) = variant.video_rendition_group.as_deref() {
+        let variant_identity = variant
+            .stable_variant_id
+            .as_deref()
+            .unwrap_or_else(|| variant.url.path());
+        let rendition_identity = variant
+            .stable_video_rendition_id
+            .as_deref()
+            .or(variant.video_rendition_name.as_deref())
+            .unwrap_or_default();
+        let rendition_path = if variant.stable_video_rendition_id.is_some() {
+            &b""[..]
+        } else {
+            variant.url.path().as_bytes()
+        };
+        return derived_hls_track_key(
+            "hls-variant-",
+            b"variant-video-rendition",
+            &[
+                variant_identity.as_bytes(),
+                group_id.as_bytes(),
+                rendition_identity.as_bytes(),
+                rendition_path,
+                &variant.width.unwrap_or_default().to_le_bytes(),
+                &variant.height.unwrap_or_default().to_le_bytes(),
+                &variant
+                    .frame_rate
+                    .unwrap_or_default()
+                    .to_bits()
+                    .to_le_bytes(),
+                variant.codecs.as_deref().unwrap_or_default().as_bytes(),
+            ],
+        );
+    }
     derived_hls_track_key(
         "hls-variant-",
         b"variant",
@@ -811,6 +851,19 @@ fn hls_audio_rendition_label(rendition: &HlsAudioRendition) -> String {
 
 #[must_use]
 pub(crate) fn hls_variant_key(variant: &HlsVariant) -> Option<String> {
+    if let Some(group_id) = variant.video_rendition_group.as_deref() {
+        if let (Some(variant_id), Some(rendition_id)) = (
+            variant.stable_variant_id.as_deref(),
+            variant.stable_video_rendition_id.as_deref(),
+        ) {
+            return Some(derived_hls_track_key(
+                "hls-variant-",
+                b"variant-video-rendition",
+                &[variant_id.as_bytes(), group_id.as_bytes(), rendition_id.as_bytes()],
+            ));
+        }
+        return Some(hls_variant_content_key(variant));
+    }
     Some(
         variant
             .stable_variant_id
@@ -891,6 +944,61 @@ mod tests {
         assert_eq!(
             ManifestLookup::preferred_subtitle_choice_index(&choices, None),
             None
+        );
+    }
+
+    #[test]
+    fn hls_video_rendition_selection_resolves_the_selected_angle() {
+        let body = br#"#EXTM3U
+#EXT-X-MEDIA:TYPE=VIDEO,GROUP-ID="angles",NAME="Main",URI="video/main.m3u8",STABLE-RENDITION-ID="main"
+#EXT-X-MEDIA:TYPE=VIDEO,GROUP-ID="angles",NAME="Camera B",URI="video/camera-b.m3u8",STABLE-RENDITION-ID="camera-b"
+#EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID="audio",NAME="English",LANGUAGE="en",DEFAULT=YES,URI="audio/en.m3u8"
+#EXT-X-STREAM-INF:BANDWIDTH=2000000,RESOLUTION=1920x1080,VIDEO="angles",AUDIO="audio",STABLE-VARIANT-ID="variant-1080"
+video/combined.m3u8
+"#;
+        let master = crate::manifest::parse_hls_master_playlist(
+            "https://cdn.example.test/master.m3u8",
+            body,
+        )
+        .expect("master playlist with alternate video angles");
+        let selected_key = master
+            .variants
+            .iter()
+            .zip(hls_variant_keys(&master.variants))
+            .find_map(|(variant, key)| {
+                (variant.video_rendition_name.as_deref() == Some("Camera B"))
+                    .then(|| key.map(ManifestRepresentationKey::from))
+                    .flatten()
+            })
+            .expect("Camera B has a stable selection key");
+        let lookup = ManifestLookup {
+            source_url: "https://cdn.example.test/master.m3u8".to_string(),
+            manifest: NativeManifest::HlsMaster(master),
+        };
+        let choices = lookup.choices();
+        assert_eq!(choices.len(), 2);
+        assert!(
+            choices.iter().any(|choice| choice.label.starts_with("Camera B")),
+            "the quality picker labels the selected camera angle"
+        );
+        let audio = lookup.audio_choices(&selected_key);
+        assert_eq!(audio.len(), 1);
+        assert_eq!(audio[0].label, "en · English · Default");
+
+        let source = lookup
+            .selected_source(&selected_key, Some(&audio[0].key), None)
+            .expect("the selected VIDEO rendition and audio track are valid");
+        let plan = download_plan(lookup, &source).expect("selected angle download plan");
+        let ManifestDownloadPlan::HlsMaster(plan) = plan else {
+            panic!("expected an HLS master download plan");
+        };
+        assert_eq!(
+            plan.video_url.as_str(),
+            "https://cdn.example.test/video/camera-b.m3u8"
+        );
+        assert_eq!(
+            plan.audio_url.expect("associated audio playlist").as_str(),
+            "https://cdn.example.test/audio/en.m3u8"
         );
     }
 

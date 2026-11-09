@@ -208,6 +208,7 @@ pub(super) async fn load_live_hls_track(
 
     Ok(LiveHlsTrack {
         playlist_url: plan.playlist_url.clone(),
+        inherited_variables: plan.inherited_variables.clone(),
         directory: directory.to_path_buf(),
         accumulator,
         snapshot_at: Instant::now(),
@@ -860,6 +861,7 @@ async fn poll_live_hls_track(
             track.playlist_url.as_str(),
             track.blocking_reload,
             track.can_skip_until,
+            &track.inherited_variables,
         ) => result,
     };
     let plan = match result {
@@ -1386,6 +1388,7 @@ mod destination_part_tests {
     fn live_track_from_plan(plan: &HlsPlan, accumulator: HlsLiveAccumulator) -> LiveHlsTrack {
         LiveHlsTrack {
             playlist_url: plan.playlist_url.clone(),
+            inherited_variables: plan.inherited_variables.clone(),
             directory: PathBuf::new(),
             accumulator,
             snapshot_at: Instant::now(),
@@ -1598,6 +1601,7 @@ mod destination_part_tests {
         };
         let mut track = LiveHlsTrack {
             playlist_url: first_plan.playlist_url.clone(),
+            inherited_variables: first_plan.inherited_variables.clone(),
             directory: video_dir.clone(),
             accumulator,
             snapshot_at: Instant::now(),

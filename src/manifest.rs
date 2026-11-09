@@ -341,6 +341,8 @@ pub(crate) struct HlsMasterPlan {
     pub(crate) variants: Box<[HlsVariant]>,
     pub(crate) audio_renditions: Box<[HlsAudioRendition]>,
     pub(crate) subtitle_renditions: Box<[HlsSubtitleRendition]>,
+    /// Variables defined by this multivariant playlist for explicit child IMPORT.
+    pub(crate) inherited_variables: Box<[(String, String)]>,
 }
 
 /// Validated HLS media playlist, ordered resources, and local FFmpeg input.
@@ -357,6 +359,8 @@ pub(crate) struct HlsPlan {
     pub(crate) blocking_reload: Option<(u64, Option<u64>)>,
     pub(crate) ll_first_part_independent: Option<bool>,
     pub(crate) rendition_reports: Box<[hls_ll::HlsRenditionReport]>,
+    /// Parent multivariant variables available to subsequent live playlist reloads.
+    pub(crate) inherited_variables: Box<[(String, String)]>,
     local_playlist: MediaPlaylist,
 }
 
@@ -408,6 +412,7 @@ impl HlsPlan {
             blocking_reload: None,
             ll_first_part_independent: None,
             rendition_reports: Vec::new().into_boxed_slice(),
+            inherited_variables: Vec::new().into_boxed_slice(),
             local_playlist,
         })
     }
@@ -1147,7 +1152,8 @@ pub(crate) fn parse_hls_master_playlist(
         return Err(ManifestError::ExpectedMasterPlaylist);
     }
 
-    let expanded_body = hls_variables::expand_master_playlist(manifest_url, body)?;
+    let (expanded_body, inherited_variables) =
+        hls_variables::expand_master_playlist_with_variables(manifest_url, body)?;
     let expanded = expanded_body.as_deref().unwrap_or(body);
     let playlist =
         m3u8_rs::parse_playlist_res(expanded).map_err(|error| hls_parse_error(expanded, error))?;
@@ -1356,6 +1362,7 @@ pub(crate) fn parse_hls_master_playlist(
         variants: variants.into_boxed_slice(),
         audio_renditions: audio_renditions.into_boxed_slice(),
         subtitle_renditions: subtitle_renditions.into_boxed_slice(),
+        inherited_variables,
     })
 }
 
@@ -1428,12 +1435,22 @@ pub(crate) fn plan_hls_media_playlist(
     manifest_url: &str,
     body: &[u8],
 ) -> Result<HlsPlan, ManifestError> {
+    plan_hls_media_playlist_with_variables(manifest_url, body, &[])
+}
+
+/// Plan a child media playlist with the variable scope of its parent multivariant playlist.
+pub(crate) fn plan_hls_media_playlist_with_variables(
+    manifest_url: &str,
+    body: &[u8],
+    inherited_variables: &[(String, String)],
+) -> Result<HlsPlan, ManifestError> {
     if body.len() > MAX_MANIFEST_BYTES {
         return Err(ManifestError::Parse(
             "playlist exceeds its supported size limit".to_string(),
         ));
     }
-    let expanded_body = hls_variables::expand_media_playlist(manifest_url, body)?;
+    let expanded_body =
+        hls_variables::expand_media_playlist_with_imports(manifest_url, body, inherited_variables)?;
     let body = expanded_body.as_deref().unwrap_or(body);
     let base_url = parse_manifest_url(manifest_url)?;
     if base_url
@@ -1442,11 +1459,14 @@ pub(crate) fn plan_hls_media_playlist(
     {
         return Err(ManifestError::UnsupportedPlaylist);
     }
-    if let Some(plan) = hls_ll::plan_hls_media_playlist(manifest_url, body)? {
+    if let Some(mut plan) = hls_ll::plan_hls_media_playlist(manifest_url, body)? {
+        plan.inherited_variables = inherited_variables.to_vec().into_boxed_slice();
         return Ok(plan);
     }
     let playlist = parse_hls_media_playlist(body)?;
-    build_hls_plan(base_url, playlist)
+    let mut plan = build_hls_plan(base_url, playlist)?;
+    plan.inherited_variables = inherited_variables.to_vec().into_boxed_slice();
+    Ok(plan)
 }
 
 fn build_hls_plan(base_url: Url, mut playlist: MediaPlaylist) -> Result<HlsPlan, ManifestError> {
@@ -1802,6 +1822,7 @@ fn build_hls_plan(base_url: Url, mut playlist: MediaPlaylist) -> Result<HlsPlan,
         blocking_reload: None,
         ll_first_part_independent: None,
         rendition_reports: Vec::new().into_boxed_slice(),
+        inherited_variables: Vec::new().into_boxed_slice(),
         local_playlist: playlist,
     })
 }

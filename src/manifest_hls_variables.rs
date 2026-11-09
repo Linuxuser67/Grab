@@ -14,9 +14,20 @@ use super::{MAX_MANIFEST_BYTES, ManifestError};
 
 const MAX_VARIABLES: usize = 128;
 
+type ExpandedMasterPlaylist = (Option<Vec<u8>>, Box<[(String, String)]>);
+
+#[cfg(test)]
 pub(super) fn expand_media_playlist(
     manifest_url: &str,
     body: &[u8],
+) -> Result<Option<Vec<u8>>, ManifestError> {
+    expand_media_playlist_with_imports(manifest_url, body, &[])
+}
+
+pub(super) fn expand_media_playlist_with_imports(
+    manifest_url: &str,
+    body: &[u8],
+    inherited_variables: &[(String, String)],
 ) -> Result<Option<Vec<u8>>, ManifestError> {
     let has_definitions = body
         .windows(b"#EXT-X-DEFINE:".len())
@@ -43,6 +54,7 @@ pub(super) fn expand_media_playlist(
 
     let playlist_url = Url::parse(manifest_url).map_err(|_| ManifestError::InvalidManifestUrl)?;
     let mut variables = HashMap::with_capacity(parsed.defines.len());
+    let mut total_variable_bytes = 0_usize;
     for definition in parsed.defines {
         let (name, value) = match definition {
             Define::Name {
@@ -76,16 +88,34 @@ pub(super) fn expand_media_playlist(
                 }
                 (name, value)
             }
-            Define::Import { .. } => {
-                return Err(unsupported(
-                    "media-playlist IMPORT requires parent multivariant variables",
-                ));
+            Define::Import { name, extra_attrs } => {
+                if !extra_attrs.is_empty() {
+                    return Err(unsupported(
+                        "EXT-X-DEFINE IMPORT has unsupported required attributes",
+                    ));
+                }
+                let value = inherited_variables
+                    .iter()
+                    .find_map(|(parent_name, value)| (parent_name == &name).then_some(value))
+                    .cloned()
+                    .ok_or_else(|| {
+                        unsupported(
+                            "IMPORT variable is not defined by the parent multivariant playlist",
+                        )
+                    })?;
+                (name, value)
             }
             _ => return Err(unsupported("unsupported EXT-X-DEFINE declaration")),
         };
         validate_value(&value)?;
-        if value.len() > MAX_MANIFEST_BYTES {
-            return Err(unsupported("HLS variable exceeds its supported size limit"));
+        total_variable_bytes = total_variable_bytes
+            .checked_add(name.len())
+            .and_then(|total| total.checked_add(value.len()))
+            .ok_or_else(|| unsupported("aggregate HLS variable size overflow"))?;
+        if total_variable_bytes > MAX_MANIFEST_BYTES {
+            return Err(unsupported(
+                "aggregate HLS variable values exceed their supported size limit",
+            ));
         }
         if variables.insert(name, value).is_some() {
             return Err(unsupported("duplicate EXT-X-DEFINE variable"));
@@ -215,10 +245,18 @@ fn contains_master_variable_reference(text: &str) -> bool {
     })
 }
 
+#[cfg(test)]
 pub(super) fn expand_master_playlist(
     manifest_url: &str,
     body: &[u8],
 ) -> Result<Option<Vec<u8>>, ManifestError> {
+    expand_master_playlist_with_variables(manifest_url, body).map(|(body, _)| body)
+}
+
+pub(super) fn expand_master_playlist_with_variables(
+    manifest_url: &str,
+    body: &[u8],
+) -> Result<ExpandedMasterPlaylist, ManifestError> {
     let text = std::str::from_utf8(body)
         .map_err(|error| ManifestError::Parse(format!("HLS playlist is not UTF-8: {error}")))?;
     let definitions = text
@@ -231,7 +269,7 @@ pub(super) fn expand_master_playlist(
                 "variable reference has no EXT-X-DEFINE declaration",
             ))
         } else {
-            Ok(None)
+            Ok((None, Vec::new().into_boxed_slice()))
         };
     }
     if definitions.len() > MAX_VARIABLES {
@@ -342,7 +380,12 @@ pub(super) fn expand_master_playlist(
             "master-playlist variable reference was not expanded",
         ));
     }
-    Ok(Some(expanded.into_bytes()))
+    let mut inherited_variables = variables.into_iter().collect::<Vec<_>>();
+    inherited_variables.sort_unstable_by(|left, right| left.0.cmp(&right.0));
+    Ok((
+        Some(expanded.into_bytes()),
+        inherited_variables.into_boxed_slice(),
+    ))
 }
 
 #[cfg(test)]
@@ -561,6 +604,198 @@ https://{$host}/segment.ts?token={$token}
             plan.resources[0].url.as_str(),
             "https://cdn.example.test/live/parts/7.0.ts"
         );
+    }
+
+    #[test]
+    fn imports_explicit_master_variables_before_child_local_definitions() {
+        let master = br#"#EXTM3U
+#EXT-X-DEFINE:QUERYPARAM="token"
+#EXT-X-DEFINE:NAME="root",VALUE="media/{$token}"
+#EXT-X-STREAM-INF:BANDWIDTH=1000000
+video.m3u8
+"#;
+        let (expanded_master, inherited) = expand_master_playlist_with_variables(
+            "https://cdn.example.test/master.m3u8?token=signed-value",
+            master,
+        )
+        .expect("master variables should expand");
+        assert!(expanded_master.is_some());
+        assert_eq!(
+            inherited.as_ref(),
+            &[
+                ("root".to_string(), "media/signed-value".to_string()),
+                ("token".to_string(), "signed-value".to_string()),
+            ]
+        );
+
+        let child = br#"#EXTM3U
+#EXT-X-TARGETDURATION:4
+#EXT-X-DEFINE:IMPORT="root"
+#EXT-X-DEFINE:NAME="segment",VALUE="{$root}/part"
+#EXTINF:4,
+{$segment}.ts
+#EXT-X-ENDLIST
+"#;
+        let expanded = expand_media_playlist_with_imports(
+            "https://cdn.example.test/child/index.m3u8",
+            child,
+            &inherited,
+        )
+        .expect("child IMPORT should resolve")
+        .expect("child declares variables");
+        let expanded = String::from_utf8(expanded).expect("expanded playlist is UTF-8");
+        assert!(!expanded.contains("#EXT-X-DEFINE:"));
+        assert!(expanded.contains("media/signed-value/part.ts"));
+
+        let plan = crate::manifest::plan_hls_media_playlist_with_variables(
+            "https://cdn.example.test/child/index.m3u8",
+            child,
+            &inherited,
+        )
+        .expect("child playlist should plan with inherited variables");
+        assert_eq!(
+            plan.resources[0].url.as_str(),
+            "https://cdn.example.test/child/media/signed-value/part.ts"
+        );
+        assert_eq!(plan.inherited_variables.as_ref(), inherited.as_ref());
+    }
+
+    #[test]
+    fn master_import_scope_survives_selected_video_audio_and_subtitle_planning() {
+        let body = br#"#EXTM3U
+#EXT-X-DEFINE:NAME="root",VALUE="media"
+#EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID="audio",NAME="English",LANGUAGE="en",DEFAULT=YES,URI="{$root}/audio.m3u8",STABLE-RENDITION-ID="audio-en"
+#EXT-X-MEDIA:TYPE=SUBTITLES,GROUP-ID="subs",NAME="English",LANGUAGE="en",DEFAULT=YES,URI="{$root}/subs.m3u8",STABLE-RENDITION-ID="subs-en"
+#EXT-X-STREAM-INF:BANDWIDTH=1000000,AUDIO="audio",SUBTITLES="subs",STABLE-VARIANT-ID="video-main"
+{$root}/video.m3u8
+"#;
+        let master = crate::manifest::parse_hls_master_playlist(
+            "https://cdn.example.test/master.m3u8",
+            body,
+        )
+        .expect("master with variable-backed rendition URLs");
+        assert_eq!(
+            master.inherited_variables.as_ref(),
+            &[("root".to_string(), "media".to_string())]
+        );
+
+        let video_key = crate::media_types::ManifestRepresentationKey::from(
+            crate::manifest_plan::hls_variant_keys(&master.variants)[0]
+                .as_deref()
+                .expect("master video key"),
+        );
+        let audio_key = crate::media_types::ManifestAudioKey::from(
+            crate::manifest_plan::hls_audio_rendition_keys(&master.audio_renditions)[0]
+                .as_deref()
+                .expect("master audio key"),
+        );
+        let subtitle_key = crate::media_types::ManifestSubtitleKey::from(
+            crate::manifest_plan::hls_subtitle_rendition_keys(&master.subtitle_renditions)[0]
+                .as_deref()
+                .expect("master subtitle key"),
+        );
+        let lookup = crate::manifest_types::ManifestLookup {
+            source_url: "https://cdn.example.test/master.m3u8".to_string(),
+            manifest: crate::manifest_types::NativeManifest::HlsMaster(master),
+        };
+        let source = lookup
+            .selected_source(&video_key, Some(&audio_key), Some(&subtitle_key))
+            .expect("all three rendition selections are associated with the variant");
+        let plan = crate::manifest_plan::download_plan(lookup, &source)
+            .expect("selected master download plan");
+        let crate::manifest_plan::ManifestDownloadPlan::HlsMaster(plan) = plan else {
+            panic!("expected selected HLS master plan");
+        };
+        assert_eq!(
+            plan.inherited_variables.as_ref(),
+            &[("root".to_string(), "media".to_string())]
+        );
+        assert_eq!(
+            plan.video_url.as_str(),
+            "https://cdn.example.test/media/video.m3u8"
+        );
+        assert_eq!(
+            plan.audio_url.as_ref().map(Url::as_str),
+            Some("https://cdn.example.test/media/audio.m3u8")
+        );
+        assert_eq!(
+            plan.subtitle_url.as_ref().map(Url::as_str),
+            Some("https://cdn.example.test/media/subs.m3u8")
+        );
+    }
+
+    #[test]
+    fn imported_variables_are_expanded_before_low_latency_planning_and_retained_for_reload() {
+        let inherited = [("root".to_string(), "parts".to_string())];
+        let body = br#"#EXTM3U
+#EXT-X-VERSION:9
+#EXT-X-TARGETDURATION:2
+#EXT-X-SERVER-CONTROL:CAN-BLOCK-RELOAD=NO,PART-HOLD-BACK=1.0
+#EXT-X-PART-INF:PART-TARGET=0.5
+#EXT-X-DEFINE:IMPORT="root"
+#EXT-X-PART:DURATION=0.5,URI="{$root}/7.0.ts",INDEPENDENT=YES
+"#;
+        let plan = crate::manifest::plan_hls_media_playlist_with_variables(BASE, body, &inherited)
+            .expect("LL-HLS child playlist should resolve its imported URI");
+        assert!(plan.is_live);
+        assert_eq!(
+            plan.resources[0].url.as_str(),
+            "https://cdn.example.test/live/parts/7.0.ts"
+        );
+        assert_eq!(plan.inherited_variables.as_ref(), inherited.as_slice());
+        assert_eq!(
+            plan.ll_unit_ids.as_deref().map(|ids| ids.len()),
+            Some(1),
+            "the part remains represented as a live unit after expansion"
+        );
+    }
+
+    #[test]
+    fn imported_variables_must_exist_and_must_not_be_redeclared_or_extended() {
+        let child = br#"#EXTM3U
+#EXT-X-TARGETDURATION:4
+#EXT-X-DEFINE:IMPORT="missing"
+#EXTINF:4,
+{$missing}.ts
+#EXT-X-ENDLIST
+"#;
+        assert!(matches!(
+            expand_media_playlist_with_imports(BASE, child, &[]),
+            Err(ManifestError::UnsupportedPlaylistFeature(_))
+        ));
+
+        let duplicate = br#"#EXTM3U
+#EXT-X-TARGETDURATION:4
+#EXT-X-DEFINE:IMPORT="token"
+#EXT-X-DEFINE:NAME="token",VALUE="shadow"
+#EXTINF:4,
+{$token}.ts
+#EXT-X-ENDLIST
+"#;
+        assert!(matches!(
+            expand_media_playlist_with_imports(
+                BASE,
+                duplicate,
+                &[("token".into(), "parent".into())]
+            ),
+            Err(ManifestError::UnsupportedPlaylistFeature(_))
+        ));
+
+        let required_attribute = br#"#EXTM3U
+#EXT-X-TARGETDURATION:4
+#EXT-X-DEFINE:IMPORT="token",REQ-FOO="bar"
+#EXTINF:4,
+{$token}.ts
+#EXT-X-ENDLIST
+"#;
+        assert!(matches!(
+            expand_media_playlist_with_imports(
+                BASE,
+                required_attribute,
+                &[("token".into(), "parent".into())]
+            ),
+            Err(ManifestError::UnsupportedPlaylistFeature(_))
+        ));
     }
 
     #[test]

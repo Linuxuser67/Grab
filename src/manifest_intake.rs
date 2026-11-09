@@ -835,16 +835,21 @@ async fn resolve_dash_xlinks(
     )
 }
 
-/// Fetch and parse an HLS child media playlist using the caller's guarded client.
-pub(crate) async fn lookup_hls_media(
+/// Fetch and parse an HLS child media playlist with explicit parent variable imports.
+pub(crate) async fn lookup_hls_media_with_variables(
     client: &reqwest::Client,
     raw_url: &str,
+    inherited_variables: &[(String, String)],
 ) -> Result<HlsPlan, ManifestIntakeError> {
     let requested_url = Url::parse(raw_url)
         .map_err(|_| ManifestIntakeError::Failed(gettext("Invalid stream manifest URL")))?;
     let (final_url, body, _) = fetch_bounded_manifest(client, requested_url).await?;
-    crate::manifest::plan_hls_media_playlist(final_url.as_str(), &body)
-        .map_err(|error| ManifestIntakeError::Unsupported(error.to_string()))
+    crate::manifest::plan_hls_media_playlist_with_variables(
+        final_url.as_str(),
+        &body,
+        inherited_variables,
+    )
+    .map_err(|error| ManifestIntakeError::Unsupported(error.to_string()))
 }
 
 /// Poll one live HLS playlist snapshot. Blocking reloads use a single request:
@@ -854,6 +859,7 @@ pub(crate) async fn lookup_hls_live_media(
     raw_url: &str,
     blocking_reload: Option<(u64, Option<u64>)>,
     can_skip_until: Option<Duration>,
+    inherited_variables: &[(String, String)],
 ) -> Result<HlsPlan, ManifestIntakeError> {
     let requested_url = hls_live_reload_url(raw_url, blocking_reload, can_skip_until)?;
     let (final_url, body, _) = fetch_bounded_manifest_once(
@@ -865,8 +871,12 @@ pub(crate) async fn lookup_hls_live_media(
     )
     .await?;
     let final_url = strip_hls_blocking_reload_query(&final_url);
-    crate::manifest::plan_hls_media_playlist(final_url.as_str(), &body)
-        .map_err(|error| ManifestIntakeError::Unsupported(error.to_string()))
+    crate::manifest::plan_hls_media_playlist_with_variables(
+        final_url.as_str(),
+        &body,
+        inherited_variables,
+    )
+    .map_err(|error| ManifestIntakeError::Unsupported(error.to_string()))
 }
 
 fn hls_live_reload_url(

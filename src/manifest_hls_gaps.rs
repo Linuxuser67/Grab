@@ -113,22 +113,28 @@ mod tests {
         let plan = plan_hls_media_playlist(BASE_URL, body)
             .expect("METHOD=NONE inside a gap should carry forward");
 
-        assert!(
-            !plan
-                .resources
-                .iter()
-                .any(|resource| resource.kind == HlsResourceKind::Key
-                    && resource.url.path().ends_with("encrypted.key"))
-        );
+        let keys = plan
+            .resources
+            .iter()
+            .filter(|resource| resource.kind == HlsResourceKind::Key)
+            .collect::<Vec<_>>();
+        assert_eq!(keys.len(), 1, "the earlier encrypted segment still needs its key");
         let local_bytes = plan.local_playlist_bytes().expect("local playlist");
         let local = m3u8_rs::parse_media_playlist_res(&local_bytes)
             .expect("parse local playlist");
         assert_eq!(local.segments.len(), 2);
         assert_eq!(
+            local.segments[0]
+                .key
+                .as_ref()
+                .map(|key| key.method.clone()),
+            Some(m3u8_rs::KeyMethod::AES128)
+        );
+        assert_eq!(
             local.segments[1]
                 .key
                 .as_ref()
-                .map(|key| key.method),
+                .map(|key| key.method.clone()),
             Some(m3u8_rs::KeyMethod::None)
         );
     }

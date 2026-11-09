@@ -633,10 +633,3 @@ segment-{$token}.ts
     }
 }
 
-
-/// Expand RFC 8216bis variables in an HLS multivariant playlist.
-///
-/// Only NAME/VALUE and QUERYPARAM definitions are accepted here. IMPORT is
-/// meaningful only in a child media playlist and needs parent context to be
-/// propagated through the selected-track handoff; until that is implemented,
-/// it remains an explicit fallback.

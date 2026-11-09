@@ -747,18 +747,8 @@ fn show_failure_dialog(
 pub(crate) struct DownloadGroupRow {
     pub(crate) row: adw::ExpanderRow,
     members: Rc<RefCell<Vec<u64>>>,
-    pause: gio::SimpleAction,
-    resume: gio::SimpleAction,
-    cancel: gio::SimpleAction,
-    retry: gio::SimpleAction,
-    open_folder: gio::SimpleAction,
-    remove: gio::SimpleAction,
-    pub(crate) pause_btn: gtk4::Button,
-    pub(crate) resume_btn: gtk4::Button,
-    pub(crate) cancel_btn: gtk4::Button,
-    pub(crate) retry_btn: gtk4::Button,
-    pub(crate) open_folder_btn: gtk4::Button,
-    pub(crate) remove_btn: gtk4::Button,
+    open_folder_btn: gtk4::Button,
+    remove_btn: gtk4::Button,
 }
 
 fn group_summary(items: &[DownloadItem]) -> String {
@@ -800,58 +790,12 @@ pub(crate) fn build_download_group_row(
     row.set_expanded(false);
 
     let members = Rc::new(RefCell::new(Vec::new()));
-    let actions = gio::SimpleActionGroup::new();
-    let pause = gio::SimpleAction::new("pause", None);
-    let resume = gio::SimpleAction::new("resume", None);
-    let cancel = gio::SimpleAction::new("cancel", None);
-    let retry = gio::SimpleAction::new("retry-failed", None);
-    let open_folder = gio::SimpleAction::new("open-folder", None);
-
-    {
-        let ids = Rc::clone(&members);
-        let manager = Rc::clone(manager);
-        pause.connect_activate(move |_, _| {
-            let ids = ids.borrow().clone();
-            manager.pause_many(&ids);
-        });
-    }
-    {
-        let ids = Rc::clone(&members);
-        let manager = Rc::clone(manager);
-        resume.connect_activate(move |_, _| {
-            let ids = ids.borrow().clone();
-            manager.resume_many(&ids);
-        });
-    }
-    {
-        let ids = Rc::clone(&members);
-        let manager = Rc::clone(manager);
-        cancel.connect_activate(move |_, _| {
-            let ids = ids.borrow().clone();
-            manager.cancel_many(&ids);
-        });
-    }
+    let open_folder_btn = icon_button("folder-open-symbolic", &gettext("Open Collection Folder"));
     {
         let ids = Rc::clone(&members);
         let manager = Rc::clone(manager);
         let toasts = Rc::clone(toasts);
-        retry.connect_activate(move |_, _| {
-            let ids = ids.borrow().clone();
-            let count = manager.retry_many(&ids);
-            if count > 0 {
-                toasts.add_toast(adw::Toast::new(&ngettext_count(
-                    "Retrying {n} failed download",
-                    "Retrying {n} failed downloads",
-                    count,
-                )));
-            }
-        });
-    }
-    {
-        let ids = Rc::clone(&members);
-        let manager = Rc::clone(manager);
-        let toasts = Rc::clone(toasts);
-        open_folder.connect_activate(move |_, _| {
+        open_folder_btn.connect_clicked(move |_| {
             let ids = ids.borrow().clone();
             if let Some(item) = ids.iter().find_map(|id| manager.find(*id)) {
                 launch_path(std::path::Path::new(&item.dest_dir()), &toasts, false);
@@ -859,64 +803,73 @@ pub(crate) fn build_download_group_row(
         });
     }
 
-    for action in [&pause, &resume, &cancel, &retry, &open_folder] {
-        actions.add_action(action);
-    }
-    row.insert_action_group("group", Some(&actions));
-
-    // Collection-level remove: the same semantics as a single row's "remove
-    // from list", applied to every child.
-    let remove = gio::SimpleAction::new("remove", None);
+    let remove_btn = icon_button("list-remove-symbolic", &gettext("Remove from List"));
     {
         let ids = Rc::clone(&members);
         let manager = Rc::clone(manager);
-        remove.connect_activate(move |_, _| {
+        let toasts = Rc::clone(toasts);
+        remove_btn.connect_clicked(move |_| {
             let ids = ids.borrow().clone();
-            manager.remove_many(&ids);
+            let snapshots = ids
+                .iter()
+                .filter_map(|id| {
+                    let item = manager.find(*id)?;
+                    Some(RemovedSnapshot {
+                        url: item.url().to_string(),
+                        dest_dir: item.dest_dir().to_string(),
+                        filename: item.filename().to_string(),
+                        status: item.status(),
+                        progress: item.progress(),
+                        detail: item.detail().to_string(),
+                        output_dir: item.output_dir().to_string(),
+                        segments: manager.segments_of(*id),
+                        video_source: manager.video_source(*id),
+                        started: manager.has_started(*id),
+                        public_only: item.public_only(),
+                        group: item.group(),
+                    })
+                })
+                .collect::<Vec<_>>();
+            if snapshots.is_empty() {
+                return;
+            }
+
+            let count = snapshots.len();
+            let removed = manager.remove_many(&ids);
+            if removed == 0 {
+                return;
+            }
+
+            let toast = adw::Toast::new(&ngettext_count(
+                "Removed {n} item",
+                "Removed {n} items",
+                count,
+            ));
+            toast.set_button_label(Some(&gettext("Undo")));
+            let manager = Rc::clone(&manager);
+            let undo_toasts = Rc::clone(&toasts);
+            toast.connect_button_clicked(move |_| {
+                let snapshots = snapshots.clone();
+                let manager = Rc::clone(&manager);
+                let toasts = Rc::clone(&undo_toasts);
+                glib::spawn_future_local(async move {
+                    for snapshot in snapshots {
+                        if let Err(error) = manager.unremove_async(snapshot).await {
+                            toasts.add_toast(adw::Toast::new(&error));
+                        }
+                    }
+                });
+            });
+            toasts.add_toast(toast);
         });
     }
-    actions.add_action(&remove);
 
-    // Group actions mirror the single-row icon buttons instead of an overflow
-    // menu. They are shown only when at least one child needs them.
-    let pause_btn = icon_button("media-playback-pause-symbolic", &gettext("Pause All"));
-    let resume_btn = icon_button("media-playback-start-symbolic", &gettext("Resume All"));
-    let cancel_btn = icon_button("process-stop-symbolic", &gettext("Cancel All"));
-    let retry_btn = icon_button("view-refresh-symbolic", &gettext("Retry Failed"));
-    let open_folder_btn = icon_button("folder-open-symbolic", &gettext("Open Collection Folder"));
-    let remove_btn = icon_button("list-remove-symbolic", &gettext("Remove from List"));
-    for (button, action) in [
-        (&pause_btn, &pause),
-        (&resume_btn, &resume),
-        (&cancel_btn, &cancel),
-        (&retry_btn, &retry),
-        (&open_folder_btn, &open_folder),
-        (&remove_btn, &remove),
-    ] {
-        let action = action.clone();
-        button.connect_clicked(move |_| action.activate(None));
-    }
-
-    row.add_suffix(&pause_btn);
-    row.add_suffix(&resume_btn);
-    row.add_suffix(&cancel_btn);
-    row.add_suffix(&retry_btn);
     row.add_suffix(&open_folder_btn);
     row.add_suffix(&remove_btn);
 
     DownloadGroupRow {
         row,
         members,
-        pause,
-        resume,
-        cancel,
-        retry,
-        open_folder,
-        remove,
-        pause_btn,
-        resume_btn,
-        cancel_btn,
-        retry_btn,
         open_folder_btn,
         remove_btn,
     }
@@ -927,49 +880,10 @@ impl DownloadGroupRow {
         *self.members.borrow_mut() = group_items.iter().map(DownloadItem::id).collect();
         self.row.set_subtitle(&group_summary(section_items));
 
-        let has_paused = group_items
-            .iter()
-            .any(|item| item.status() == DownloadStatus::Paused);
-        let has_pausable = group_items.iter().any(|item| {
-            matches!(
-                item.status(),
-                DownloadStatus::Downloading | DownloadStatus::Queued | DownloadStatus::Scheduled
-            )
-        });
-        let has_active = group_items.iter().any(|item| {
-            matches!(
-                item.status(),
-                DownloadStatus::Downloading
-                    | DownloadStatus::Paused
-                    | DownloadStatus::Queued
-                    | DownloadStatus::Scheduled
-            )
-        });
-        let has_failed = group_items.iter().any(|item| {
-            matches!(
-                item.status(),
-                DownloadStatus::Failed | DownloadStatus::Cancelled
-            )
-        });
         let nonempty = !group_items.is_empty();
-
-        self.pause.set_enabled(has_pausable);
-        self.resume.set_enabled(has_paused);
-        self.cancel.set_enabled(has_active);
-        self.retry.set_enabled(has_failed);
-        self.open_folder.set_enabled(nonempty);
-        self.remove.set_enabled(nonempty);
-
-        for (button, visible, enabled) in [
-            (&self.pause_btn, has_pausable, has_pausable),
-            (&self.resume_btn, has_paused, has_paused),
-            (&self.cancel_btn, has_active, has_active),
-            (&self.retry_btn, has_failed, has_failed),
-            (&self.open_folder_btn, nonempty, nonempty),
-            (&self.remove_btn, nonempty, nonempty),
-        ] {
-            button.set_visible(visible);
-            button.set_sensitive(enabled);
+        for button in [&self.open_folder_btn, &self.remove_btn] {
+            button.set_visible(nonempty);
+            button.set_sensitive(nonempty);
         }
     }
 }
@@ -1616,7 +1530,7 @@ mod group_row_tests {
 
     #[test]
     #[ignore = "needs a display; run under Xvfb"]
-    fn expandable_playlist_group_row_updates_actions_and_children() {
+    fn expandable_playlist_group_row_exposes_only_remove_and_open_folder() {
         gtk4::init().expect("gtk::init (run under Xvfb)");
         // SAFETY: this UI test runs in its own process before constructing GSettings.
         unsafe {
@@ -1647,17 +1561,22 @@ mod group_row_tests {
 
         assert!(first_row.parent().is_some());
         assert!(second_row.parent().is_some());
-        assert!(group.pause.is_enabled());
-        assert!(!group.resume.is_enabled());
-        assert!(group.cancel.is_enabled());
-        assert!(!group.retry.is_enabled());
-        assert!(group.open_folder.is_enabled());
+        assert!(group.open_folder_btn.is_visible());
+        assert!(group.open_folder_btn.is_sensitive());
+        assert!(group.remove_btn.is_visible());
+        assert!(group.remove_btn.is_sensitive());
 
+        // Group-level actions are independent of each child's status.
         second.set_status(DownloadStatus::Failed);
         group.update(
             std::slice::from_ref(&second),
             &[first.clone(), second.clone()],
         );
-        assert!(group.retry.is_enabled());
+        assert!(group.open_folder_btn.is_sensitive());
+        assert!(group.remove_btn.is_sensitive());
+
+        group.update(&[], &[]);
+        assert!(!group.open_folder_btn.is_visible());
+        assert!(!group.remove_btn.is_visible());
     }
 }

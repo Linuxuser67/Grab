@@ -3848,100 +3848,6 @@ impl DownloadManager {
         }
     }
 
-    /// Pause the active rows in a group, then wake the scheduler once.
-    pub fn pause_many(self: &Rc<Self>, ids: &[u64]) -> usize {
-        let mut paused = 0;
-        // Live workers release their slot after observing Pause; only a stopped
-        // non-live engine can be replaced immediately by the scheduler.
-        let mut queue_kick = false;
-
-        for &id in ids {
-            let Some(item) = self.find(id) else {
-                continue;
-            };
-            match item.status() {
-                DownloadStatus::Queued | DownloadStatus::Scheduled => {
-                    // Park pending children too, otherwise the scheduler would
-                    // start the next one as soon as an active sibling pauses.
-                    item.set_status(DownloadStatus::Paused);
-                    item.set_detail(gettext("Paused"));
-                    paused += 1;
-                    continue;
-                }
-                DownloadStatus::Downloading => {}
-                _ => continue,
-            }
-
-            if self.can_pause_live_capture(id) {
-                if !self.stop_video_worker(id, crate::video::StopIntent::Pause) {
-                    continue;
-                }
-                if let Some(item) = self.find(id)
-                    && item.status() == DownloadStatus::Downloading
-                {
-                    item.set_status(DownloadStatus::Paused);
-                    item.set_detail(gettext("Paused"));
-                    paused += 1;
-                }
-                continue;
-            }
-
-            if !self.stop_engine(id, crate::video::StopIntent::Finish) {
-                continue;
-            }
-            queue_kick = true;
-            if let Some(item) = self.find(id) {
-                if crate::torrent::is_torrent(&item.url()) {
-                    crate::torrent::pause_download(id);
-                }
-                if item.status() == DownloadStatus::Downloading {
-                    item.set_status(DownloadStatus::Paused);
-                    item.set_detail(
-                        gettext("Paused • {pct}%")
-                            .replace("{pct}", &((item.progress() * 100.0) as u64).to_string()),
-                    );
-                    paused += 1;
-                }
-            }
-        }
-
-        if paused > 0 || queue_kick {
-            self.persist_queue();
-            self.changed();
-            if queue_kick {
-                self.start_next();
-            }
-        }
-        paused
-    }
-
-    /// Resume all paused rows in a group, then wake the scheduler once.
-    pub fn resume_many(self: &Rc<Self>, ids: &[u64]) -> usize {
-        let mut resumed = 0;
-        let now = glib::DateTime::now_local()
-            .map(|dt| dt.to_unix())
-            .unwrap_or(0);
-        for &id in ids {
-            if let Some(item) = self.find(id)
-                && item.status() == DownloadStatus::Paused
-            {
-                let next_status = if item.scheduled_at() > now {
-                    DownloadStatus::Scheduled
-                } else {
-                    DownloadStatus::Queued
-                };
-                item.set_status(next_status);
-                resumed += 1;
-            }
-        }
-        if resumed > 0 {
-            self.persist_queue();
-            self.changed();
-            self.start_next();
-        }
-        resumed
-    }
-
     /// Rename a download: the list label plus the file on disk when already fetched. Only completed and queued rows qualify: mid-transfer the engine owns the path, and torrent rows map to session outputs.
     ///
     /// # Errors
@@ -4092,39 +3998,6 @@ impl DownloadManager {
         self.persist_queue();
         self.changed();
         self.start_next();
-    }
-
-    /// Cancel all unfinished rows in a group without starting another child
-    /// between per-row cancellations.
-    pub fn cancel_many(self: &Rc<Self>, ids: &[u64]) -> usize {
-        let mut cancelled = 0;
-        let mut partials = Vec::new();
-
-        for &id in ids {
-            let Some(item) = self.find(id) else {
-                continue;
-            };
-            if matches!(
-                item.status(),
-                DownloadStatus::Done | DownloadStatus::Failed | DownloadStatus::Cancelled
-            ) {
-                continue;
-            }
-            if let Some(path) = self.cancel_inner(id, false, Stop::Preserve) {
-                partials.push(path);
-            }
-            cancelled += 1;
-        }
-
-        for path in partials {
-            self.schedule_partial_cleanup(path);
-        }
-        if cancelled > 0 {
-            self.persist_queue();
-            self.changed();
-            self.start_next();
-        }
-        cancelled
     }
 
     /// Reclaim a removed video row's scratch, but only once its worker has actually stopped. Removal cannot sweep inline: a worker mid-teardown can recreate what a sweep removed, so unlinking first just loses the race. Claiming the gate first makes deferring safe: only a worker this finalizer awaited may have committed an orphan `dest` file.
@@ -4294,39 +4167,35 @@ impl DownloadManager {
         }
     }
 
-    /// Re-queue every failed/cancelled row in a group before one scheduler kick.
-    pub fn retry_many(self: &Rc<Self>, ids: &[u64]) -> usize {
-        let mut retried = 0;
-        for &id in ids {
-            if let Some(item) = self.find(id)
-                && self.requeue_failed_item(&item)
-            {
-                retried += 1;
-            }
-        }
-        if retried > 0 {
-            self.persist_queue();
-            self.changed();
-            self.start_next();
-        }
-        retried
-    }
-
-    /// Remove every row in a collection from the list.
+    /// Remove every row in a collection from the list with one queue update.
     pub fn remove_many(self: &Rc<Self>, ids: &[u64]) -> usize {
         let mut removed = 0;
         for &id in ids {
             if self.find(id).is_none() {
                 continue;
             }
-            self.remove(id);
+            self.remove_inner(id);
             removed += 1;
+        }
+        if removed > 0 {
+            self.persist_queue();
+            self.changed();
+            self.start_next();
         }
         removed
     }
 
     /// Cancel and drop a row; restore with [`DownloadManager::unremove`]. The partial file is kept so Undo can resume.
     pub fn remove(self: &Rc<Self>, id: u64) {
+        self.remove_inner(id);
+        self.persist_queue();
+        self.changed();
+        self.start_next();
+    }
+
+    /// Remove one row without publishing an intermediate queue state. Bulk
+    /// collection removal calls this for every member, then persists once.
+    fn remove_inner(self: &Rc<Self>, id: u64) {
         let _ = self.cancel_inner(id, true, Stop::Discard);
         self.epoch.borrow_mut().remove(&id);
         self.started.borrow_mut().remove(&id);
@@ -4360,9 +4229,6 @@ impl DownloadManager {
         if let Some(item) = released {
             Self::release_public_policy(&item);
         }
-        self.persist_queue();
-        self.changed();
-        self.start_next();
     }
 
     /// Segment bitmap snapshot for Undo: cloned before [`DownloadManager::remove`] drops the row's live bitmap.

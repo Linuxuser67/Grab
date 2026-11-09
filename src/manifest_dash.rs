@@ -686,29 +686,35 @@ pub(crate) fn parse_dash_manifest_at(
                     addressing_duration,
                     is_dynamic,
                 )?;
-                if let DashAddressing::Template(template) = &mut addressing {
-                    let base_url_offset = effective_base_url_availability_offset(
-                        [
-                            mpd.base_url.as_slice(),
-                            period.BaseURL.as_slice(),
-                            adaptation.BaseURL.as_slice(),
-                            representation.BaseURL.as_slice(),
-                        ],
-                        is_dynamic,
-                    )?;
-                    template.availability_time_offset = template
-                        .availability_time_offset
-                        .checked_add(base_url_offset)
-                        .ok_or(DashError::UnsupportedAddressing)?;
-                    low_latency::validate_template_availability(
-                        is_dynamic,
-                        template.availability_time_offset,
-                        template.availability_time_complete,
-                    )?;
-                    low_latency::validate_template_mime(
-                        template.is_low_latency(),
-                        mime_type.as_deref(),
-                    )?;
+                let base_url_offset = effective_base_url_availability_offset(
+                    [
+                        mpd.base_url.as_slice(),
+                        period.BaseURL.as_slice(),
+                        adaptation.BaseURL.as_slice(),
+                        representation.BaseURL.as_slice(),
+                    ],
+                    is_dynamic,
+                )?;
+                match &mut addressing {
+                    DashAddressing::Template(template) => {
+                        template.availability_time_offset = template
+                            .availability_time_offset
+                            .checked_add(base_url_offset)
+                            .ok_or(DashError::UnsupportedAddressing)?;
+                        low_latency::validate_template_availability(
+                            is_dynamic,
+                            template.availability_time_offset,
+                            template.availability_time_complete,
+                        )?;
+                        low_latency::validate_template_mime(
+                            template.is_low_latency(),
+                            mime_type.as_deref(),
+                        )?;
+                    }
+                    _ if !base_url_offset.is_zero() => {
+                        return Err(DashError::UnsupportedAddressing);
+                    }
+                    _ => {}
                 }
                 if matches!(
                     &addressing,

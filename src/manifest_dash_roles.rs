@@ -478,6 +478,38 @@ mod tests {
     }
 
     #[test]
+    fn maps_inherited_segment_list_presentation_time_offsets_to_representations() {
+        let body = br#"<MPD xmlns="urn:mpeg:dash:schema:mpd:2011">
+  <Period>
+    <SegmentList presentationTimeOffset="10"/>
+    <AdaptationSet>
+      <SegmentList presentationTimeOffset="20"/>
+      <Representation id="inherited"/>
+      <Representation id="overridden">
+        <SegmentList presentationTimeOffset="30"/>
+      </Representation>
+    </AdaptationSet>
+    <AdaptationSet>
+      <Representation id="period-inherited"/>
+    </AdaptationSet>
+  </Period>
+</MPD>"#;
+        let metadata = representation_metadata(body, 3).expect("valid representation metadata");
+        assert_eq!(
+            metadata[0][0][0].segment_list_presentation_time_offset,
+            Some(20)
+        );
+        assert_eq!(
+            metadata[0][0][1].segment_list_presentation_time_offset,
+            Some(30)
+        );
+        assert_eq!(
+            metadata[0][1][0].segment_list_presentation_time_offset,
+            Some(10)
+        );
+    }
+
+    #[test]
     fn detects_nonzero_segment_list_presentation_time_offsets() {
         let nonzero = br#"<MPD xmlns="urn:mpeg:dash:schema:mpd:2011"><Period><AdaptationSet><SegmentList presentationTimeOffset="9000"/></AdaptationSet></Period></MPD>"#;
         assert_eq!(

@@ -291,7 +291,7 @@ pub(crate) const YTDLP_PLAYLIST_PROGRESS_TEMPLATE: &str = "[GrabPlaylist];%(info
 /// are intentional yt-dlp template expressions.
 pub(crate) fn playlist_output_template(dest_dir: &Path) -> String {
     let directory = dest_dir.to_string_lossy().replace('%', "%%");
-    format!("{directory}/%(playlist_index)05d - %(title).120s [%(id)s].%(ext)s")
+    format!("{directory}/%(title).120s [%(id)s].%(ext)s")
 }
 
 /// yt-dlp argv for one parent-owned playlist process. A single invocation
@@ -306,7 +306,15 @@ pub(crate) fn playlist_download_argv(
     dest_dir: &Path,
     playlist_indices: &[usize],
 ) -> Vec<String> {
-    let mut args = unified_download_argv(job, spec, merging, merge_ext, ffmpeg_bin, Path::new("%(ext)s"), None);
+    let mut args = unified_download_argv(
+        job,
+        spec,
+        merging,
+        merge_ext,
+        ffmpeg_bin,
+        Path::new("playlist-placeholder.%(ext)s"),
+        None,
+    );
     let Some(scope_at) = args.iter().position(|arg| arg == "--no-playlist") else {
         return args;
     };

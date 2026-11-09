@@ -1192,10 +1192,7 @@ fn parse_playlist_reads_flat_entries() {
     // Empty title falls back to id. Its original index survives the invalid
     // and null entries omitted from the visible list.
     assert_eq!(&*pl.items[1].title, "b2");
-    assert_eq!(
-        pl.items[1].page_url.as_ref(),
-        "https://example.com/v/b2"
-    );
+    assert_eq!(pl.items[1].page_url.as_ref(), "https://example.com/v/b2");
     assert_eq!(pl.items[1].playlist_index, 3);
 }
 
@@ -1386,7 +1383,7 @@ fn retarget_story_items_leaves_plain_playlists_alone() {
     )
     .expect("playlist");
     retarget_story_items(url, &mut pl);
-    assert_eq!(pl.items[0].page_url, "https://www.youtube.com/watch?v=a1");
+    assert_eq!(pl.items[0].page_url.as_ref(), "https://www.youtube.com/watch?v=a1");
 }
 
 // ── picked playlist entry ──────────────────────────────────────────

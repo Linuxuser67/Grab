@@ -802,7 +802,8 @@ fn parse_hls_pathway_clone(
                 .filter(|host| !host.is_empty())
                 .ok_or_else(invalid)?;
             let probe = Url::parse(&format!("https://{host}/")).map_err(|_| invalid())?;
-            if probe.host_str().is_none()
+            if host.contains(':')
+                || probe.host_str().is_none()
                 || probe.port().is_some()
                 || !probe.username().is_empty()
                 || probe.password().is_some()
@@ -3707,6 +3708,7 @@ video/variant.m3u8
             br#"{"VERSION":1,"TTL":1,"PATHWAY-PRIORITY":["a","a"]}"#.as_slice(),
             br#"{"VERSION":1,"TTL":1,"PATHWAY-PRIORITY":["a"],"PATHWAY-CLONES":[]}"#.as_slice(),
             br#"{"VERSION":1,"TTL":1,"PATHWAY-PRIORITY":["a"],"PATHWAY-CLONES":[{"BASE-ID":"a","ID":"b","URI-REPLACEMENT":{"HOST":"backup.example.test:8443"}}]}"#.as_slice(),
+            br#"{"VERSION":1,"TTL":1,"PATHWAY-PRIORITY":["a"],"PATHWAY-CLONES":[{"BASE-ID":"a","ID":"b","URI-REPLACEMENT":{"HOST":"backup.example.test:443"}}]}"#.as_slice(),
             br#"{"VERSION":1,"TTL":1,"PATHWAY-PRIORITY":["a"],"PATHWAY-CLONES":[{"BASE-ID":"a","ID":"b","URI-REPLACEMENT":{"PARAMS":{"_HLS_bad":"value"}}}]}"#.as_slice(),
             br#"{"VERSION":1,"TTL":1,"PATHWAY-PRIORITY":["a"],"PATHWAY-CLONES":[{"BASE-ID":"a","ID":"b","URI-REPLACEMENT":{"PARAMS":{"token":"bad&value"}}}]}"#.as_slice(),
         ] {

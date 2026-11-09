@@ -1479,6 +1479,7 @@ fn build_hls_plan(base_url: Url, mut playlist: MediaPlaylist) -> Result<HlsPlan,
     let mut total_duration = Duration::ZERO;
     let mut maximum_segment_duration = 0.0_f64;
     let mut pending_method_none_reset = false;
+    let mut pending_discontinuity = false;
 
     let ad_removal = hls_ads::plan_ad_removal(&playlist, is_live)?;
     let gap_removal = hls_gaps::plan_gap_removal(&playlist, is_live)?;
@@ -1572,6 +1573,9 @@ fn build_hls_plan(base_url: Url, mut playlist: MediaPlaylist) -> Result<HlsPlan,
         }
 
         if skip_segment {
+            // A discontinuity attached to an omitted segment still separates
+            // the next retained segment from the previous retained segment.
+            pending_discontinuity |= segment.discontinuity;
             // Omitted resources are not fetched, so do not apply the native
             // same-origin guard to their URLs. Preserve byte-range continuation
             // only when the source URL and range can be parsed safely.
@@ -1596,6 +1600,11 @@ fn build_hls_plan(base_url: Url, mut playlist: MediaPlaylist) -> Result<HlsPlan,
                 _ => None,
             };
             continue;
+        }
+
+        if pending_discontinuity {
+            segment.discontinuity = true;
+            pending_discontinuity = false;
         }
 
         let segment_url = resolve_resource_url(&base_url, &segment.uri)?;

@@ -4883,6 +4883,7 @@ mod tests {
                     id: "one".into(),
                     title: "First item".into(),
                     page_url: "https://example.com/one".into(),
+                    playlist_index: 1,
                 }]
                 .into_boxed_slice(),
             },

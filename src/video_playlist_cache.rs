@@ -298,10 +298,16 @@ mod tests {
         assert_eq!(restored.total, 2);
         assert_eq!(restored.items[0].id.as_ref(), "first");
         assert_eq!(restored.items[0].title.as_ref(), "First item");
-        assert_eq!(restored.items[0].page_url.as_ref(), "https://example.test/first");
+        assert_eq!(
+            restored.items[0].page_url.as_ref(),
+            "https://example.test/first"
+        );
         assert_eq!(restored.items[1].id.as_ref(), "second");
         assert_eq!(restored.items[1].title.as_ref(), "Second item");
-        assert_eq!(restored.items[1].page_url.as_ref(), "https://example.test/second");
+        assert_eq!(
+            restored.items[1].page_url.as_ref(),
+            "https://example.test/second"
+        );
         assert_eq!(restored.items[1].playlist_index, 7);
     }
 

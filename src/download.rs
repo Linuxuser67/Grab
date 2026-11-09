@@ -1848,6 +1848,7 @@ impl DownloadManager {
                 .borrow_mut()
                 .insert(item.id(), st.clone());
         }
+        let mut playlist_file_rows = None;
         if let Some(src) = video_source {
             let source_matches = video_source_matches_url(src, &url);
             if source_matches {
@@ -1856,8 +1857,29 @@ impl DownloadManager {
                     crate::media_types::VideoSource::Page {
                         audio_only: true,
                         ..
+                    } | crate::media_types::VideoSource::Playlist {
+                        audio_only: true,
+                        ..
                     }
                 );
+                if let crate::media_types::VideoSource::Playlist { state, .. } = src {
+                    item.set_is_collection_owner(true);
+                    item.set_group(
+                        crate::download_store::DownloadGroup::try_new(item.id(), &state.title)
+                            .or_else(|| stored.group.clone().filter(|group| group.is_valid())),
+                    );
+                    item.set_gallery_url(url.clone());
+                    item.set_gallery_file_count(state.files.len().min(u32::MAX as usize) as u32);
+                    item.set_gallery_files_done(
+                        state
+                            .files
+                            .iter()
+                            .filter(|file| file.status == DownloadStatus::Done)
+                            .count()
+                            .min(u32::MAX as usize) as u32,
+                    );
+                    playlist_file_rows = Some(state.files.clone());
+                }
                 item.set_detail(pending_resolve_detail(audio_only));
                 self.video_sources
                     .borrow_mut()
@@ -1872,7 +1894,13 @@ impl DownloadManager {
         if stored.started.unwrap_or(true) {
             self.started.borrow_mut().insert(item.id());
         }
-        Ok(self.insert(item))
+        let batch = self.batch_guard();
+        let item = self.insert(item);
+        if let Some(files) = playlist_file_rows.as_deref() {
+            self.restore_video_playlist_file_rows(&item, files);
+        }
+        drop(batch);
+        Ok(item)
     }
 
     fn restore_existing_gallery_with_listing(

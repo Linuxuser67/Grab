@@ -1190,9 +1190,6 @@ pub(crate) fn parse_hls_master_playlist(
                 }]);
             };
 
-            let Some(group_id) = variant.video.as_deref() else {
-                return Ok(vec![make_variant(variant_url, None, None, None, None)]);
-            };
             if group_id.trim().is_empty() {
                 return Err(ManifestError::InvalidVideoGroup);
             }
@@ -1210,13 +1207,15 @@ pub(crate) fn parse_hls_master_playlist(
             // would all resolve to the same playlist and cannot be selected
             // independently, so keep that ambiguous group on fallback.
             let mut embedded_rendition_seen = false;
+            let mut stable_rendition_ids = HashSet::new();
             let mut choices = Vec::with_capacity(group_renditions.len());
             for rendition in group_renditions {
                 if rendition.name.trim().is_empty() {
                     return Err(ManifestError::InvalidVideoGroup);
                 }
                 let url = match rendition.uri.as_deref() {
-                    Some(uri) => resolve_resource_url(&base_url, uri)?,
+                    Some(uri) if !uri.is_empty() => resolve_resource_url(&base_url, uri)?,
+                    Some(_) => return Err(ManifestError::InvalidVideoGroup),
                     None => {
                         if embedded_rendition_seen {
                             return Err(ManifestError::InvalidVideoGroup);
@@ -1231,6 +1230,12 @@ pub(crate) fn parse_hls_master_playlist(
                     .and_then(|attributes| attributes.get("STABLE-RENDITION-ID"))
                     .map(|value| value.as_str().to_string())
                     .filter(|value| !value.is_empty());
+                if stable_video_rendition_id
+                    .as_ref()
+                    .is_some_and(|id| !stable_rendition_ids.insert(id.clone()))
+                {
+                    return Err(ManifestError::InvalidVideoGroup);
+                }
                 choices.push(HlsVariant {
                     url,
                     bandwidth: variant.bandwidth,
@@ -2139,6 +2144,33 @@ video/combined.m3u8
                     && variant.height == Some(1080)
             }),
             "all angles retain the source variant's quality metadata"
+        );
+    }
+
+    #[test]
+    fn duplicate_stable_video_rendition_ids_fall_back() {
+        let body = br#"#EXTM3U
+#EXT-X-MEDIA:TYPE=VIDEO,GROUP-ID="angles",NAME="Main",URI="main.m3u8",STABLE-RENDITION-ID="same"
+#EXT-X-MEDIA:TYPE=VIDEO,GROUP-ID="angles",NAME="Camera B",URI="camera-b.m3u8",STABLE-RENDITION-ID="same"
+#EXT-X-STREAM-INF:BANDWIDTH=1000000,VIDEO="angles"
+video.m3u8
+"#;
+        assert_eq!(
+            parse_hls_master_playlist(BASE_URL, body).err(),
+            Some(ManifestError::InvalidVideoGroup)
+        );
+    }
+
+    #[test]
+    fn empty_video_rendition_uri_falls_back() {
+        let body = br#"#EXTM3U
+#EXT-X-MEDIA:TYPE=VIDEO,GROUP-ID="angles",NAME="Camera B",URI="",STABLE-RENDITION-ID="camera-b"
+#EXT-X-STREAM-INF:BANDWIDTH=1000000,VIDEO="angles"
+video.m3u8
+"#;
+        assert_eq!(
+            parse_hls_master_playlist(BASE_URL, body).err(),
+            Some(ManifestError::InvalidVideoGroup)
         );
     }
 

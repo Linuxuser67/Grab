@@ -22,6 +22,8 @@ pub(super) const DASH_ROLE_SCHEME: &str = "urn:mpeg:dash:role:2011";
 pub(super) struct RepresentationRoleMetadata {
     pub(super) id: Option<String>,
     pub(super) is_main: bool,
+    /// Effective inherited SegmentList presentation-time offset.
+    pub(super) segment_list_presentation_time_offset: Option<u64>,
 }
 
 /// Representation metadata for one Period, grouped by AdaptationSet.
@@ -53,6 +55,9 @@ pub(super) fn representation_metadata(
     let mut periods: RepresentationMetadata = Vec::new();
     let mut representation_count = 0_usize;
     let mut adaptation_count = 0_usize;
+    let mut period_list_pto = None;
+    let mut adaptation_list_pto = None;
+    let mut representation_list_pto = None;
 
     loop {
         let (namespace, event) = reader.read_resolved_event_into(&mut buffer).ok()?;
@@ -65,6 +70,9 @@ pub(super) fn representation_metadata(
                 max_representations,
                 &mut representation_count,
                 &mut adaptation_count,
+                &mut period_list_pto,
+                &mut adaptation_list_pto,
+                &mut representation_list_pto,
             )?,
             Event::Empty(start) => {
                 push_element(
@@ -75,6 +83,9 @@ pub(super) fn representation_metadata(
                     max_representations,
                     &mut representation_count,
                     &mut adaptation_count,
+                    &mut period_list_pto,
+                    &mut adaptation_list_pto,
+                    &mut representation_list_pto,
                 )?;
                 stack.pop()?;
             }
@@ -102,6 +113,9 @@ fn push_element(
     max_representations: usize,
     representation_count: &mut usize,
     adaptation_count: &mut usize,
+    period_list_pto: &mut Option<u64>,
+    adaptation_list_pto: &mut Option<u64>,
+    representation_list_pto: &mut Option<u64>,
 ) -> Option<()> {
     if stack.len() >= MAX_ELEMENT_DEPTH {
         return None;
@@ -120,6 +134,9 @@ fn push_element(
                 return None;
             }
             periods.push(Vec::new());
+            *period_list_pto = None;
+            *adaptation_list_pto = None;
+            *representation_list_pto = None;
             Element::Period
         }
         (Some(Element::Period), "AdaptationSet", true) => {
@@ -128,6 +145,8 @@ fn push_element(
                 return None;
             }
             periods.last_mut()?.push(Vec::new());
+            *adaptation_list_pto = *period_list_pto;
+            *representation_list_pto = None;
             Element::AdaptationSet
         }
         (Some(Element::AdaptationSet), "Representation", true) => {
@@ -141,7 +160,9 @@ fn push_element(
                 .push(RepresentationRoleMetadata {
                     id: representation_id(start)?,
                     is_main: false,
+                    segment_list_presentation_time_offset: *adaptation_list_pto,
                 });
+            *representation_list_pto = *adaptation_list_pto;
             Element::Representation
         }
         (Some(Element::Representation), "Role", true) => {
@@ -150,10 +171,42 @@ fn push_element(
             }
             Element::Other
         }
+        (Some(Element::Period), "SegmentList", true) => {
+            if let Some(offset) = segment_list_presentation_time_offset(start)? {
+                *period_list_pto = Some(offset);
+            }
+            Element::Other
+        }
+        (Some(Element::AdaptationSet), "SegmentList", true) => {
+            if let Some(offset) = segment_list_presentation_time_offset(start)? {
+                *adaptation_list_pto = Some(offset);
+            }
+            Element::Other
+        }
+        (Some(Element::Representation), "SegmentList", true) => {
+            if let Some(offset) = segment_list_presentation_time_offset(start)? {
+                *representation_list_pto = Some(offset);
+                periods.last_mut()?.last_mut()?.last_mut()?
+                    .segment_list_presentation_time_offset = Some(offset);
+            }
+            Element::Other
+        }
         _ => Element::Other,
     };
     stack.push(element);
     Some(())
+}
+
+fn segment_list_presentation_time_offset(start: &BytesStart<'_>) -> Option<Option<u64>> {
+    let mut offset = None;
+    for attribute in start.attributes() {
+        let attribute = attribute.ok()?;
+        if attribute.key.as_ref() == "presentationTimeOffset" {
+            let value = attribute.normalized_value(XmlVersion::Implicit1_0).ok()?;
+            offset = Some(value.parse::<u64>().ok()?);
+        }
+    }
+    Some(offset)
 }
 
 fn representation_id(start: &BytesStart<'_>) -> Option<Option<String>> {

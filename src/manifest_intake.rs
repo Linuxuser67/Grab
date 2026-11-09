@@ -874,6 +874,26 @@ fn is_valid_hls_query_component(value: &str, allow_empty: bool) -> bool {
     true
 }
 
+fn decode_hls_query_component(value: &str) -> Option<String> {
+    let input = value.as_bytes();
+    let mut decoded = Vec::with_capacity(input.len());
+    let mut index = 0;
+    while index < input.len() {
+        if input[index] == b'%' {
+            let high = *input.get(index + 1)?;
+            let low = *input.get(index + 2)?;
+            let high = (high as char).to_digit(16)?;
+            let low = (low as char).to_digit(16)?;
+            decoded.push(u8::try_from(high * 16 + low).ok()?);
+            index += 3;
+        } else {
+            decoded.push(input[index]);
+            index += 1;
+        }
+    }
+    String::from_utf8(decoded).ok()
+}
+
 fn append_hls_pathway_params(uri: &mut Url, params: &BTreeMap<String, String>) {
     if params.is_empty() {
         return;
@@ -881,18 +901,19 @@ fn append_hls_pathway_params(uri: &mut Url, params: &BTreeMap<String, String>) {
 
     let mut retained = uri
         .query()
-        .unwrap_or_default()
-        .split('&')
-        .filter(|pair| {
-            let name = pair.split_once('=').map_or(*pair, |(name, _)| name);
-            let decoded_name = url::form_urlencoded::parse(format!("{name}=").as_bytes())
-                .next()
-                .map(|(name, _)| name.into_owned());
-            !decoded_name.is_some_and(|name| params.contains_key(&name))
+        .filter(|query| !query.is_empty())
+        .map(|query| {
+            query
+                .split('&')
+                .filter(|pair| {
+                    let name = pair.split_once('=').map_or(*pair, |(name, _)| name);
+                    !decode_hls_query_component(name)
+                        .is_some_and(|name| params.contains_key(&name))
+                })
+                .map(str::to_string)
+                .collect::<Vec<_>>()
         })
-        .filter(|pair| !pair.is_empty())
-        .map(str::to_string)
-        .collect::<Vec<_>>();
+        .unwrap_or_default();
     retained.extend(
         params
             .iter()
@@ -3526,6 +3547,23 @@ video/b.m3u8
     }
 
     #[test]
+    fn query_parameter_replacement_decodes_names_without_form_plus_semantics() {
+        let source = Url::parse("https://origin.example.test/a.m3u8?token%2Bkey=old&keep=yes")
+            .unwrap();
+        let clone = HlsPathwayClone {
+            base_id: "origin".to_string(),
+            id: "backup".to_string(),
+            host: None,
+            params: BTreeMap::from([("token%2Bkey".to_string(), "new%2Fvalue".to_string())]),
+            per_variant_uris: HashMap::new(),
+            per_rendition_uris: HashMap::new(),
+        };
+        let replaced =
+            replace_hls_pathway_uri(&source, &clone, None).expect("safe replacement URL");
+        assert_eq!(replaced.query(), Some("keep=yes&token%2Bkey=new%2Fvalue"));
+    }
+
+    #[test]
     fn pathway_clone_applies_host_and_sorted_query_parameter_replacements() {
         let source = Url::parse("https://origin.example.test/a.m3u8?token=old&keep=yes").unwrap();
         let clone = HlsPathwayClone {
@@ -3571,6 +3609,7 @@ video/b.m3u8
             br#"{"VERSION":1,"TTL":1,"PATHWAY-PRIORITY":["a"],"PATHWAY-CLONES":[]}"#.as_slice(),
             br#"{"VERSION":1,"TTL":1,"PATHWAY-PRIORITY":["a"],"PATHWAY-CLONES":[{"BASE-ID":"a","ID":"b","URI-REPLACEMENT":{"HOST":"backup.example.test:8443"}}]}"#.as_slice(),
             br#"{"VERSION":1,"TTL":1,"PATHWAY-PRIORITY":["a"],"PATHWAY-CLONES":[{"BASE-ID":"a","ID":"b","URI-REPLACEMENT":{"PARAMS":{"_HLS_bad":"value"}}}]}"#.as_slice(),
+            br#"{"VERSION":1,"TTL":1,"PATHWAY-PRIORITY":["a"],"PATHWAY-CLONES":[{"BASE-ID":"a","ID":"b","URI-REPLACEMENT":{"PARAMS":{"token":"bad&value"}}}]}"#.as_slice(),
         ] {
             assert!(matches!(
                 parse_hls_steering_manifest(invalid),

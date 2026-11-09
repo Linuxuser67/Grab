@@ -2091,6 +2091,9 @@ fn expand_dynamic_list(
     let Some(DashInitialization::Resource { url, range }) = &list.initialization else {
         return Err(DashError::UnsupportedAddressing);
     };
+    if url.is_none() && range.is_none() {
+        return Err(DashError::UnsupportedAddressing);
+    }
     let clock = dynamic
         .server_now
         .min(dynamic.availability_end_time.unwrap_or(dynamic.server_now));

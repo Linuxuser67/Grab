@@ -4487,6 +4487,19 @@
     {
         "type": "archive",
         "archive-type": "tar-gzip",
+        "url": "https://static.crates.io/crates/scte35-splice/scte35-splice-4.0.0.crate",
+        "sha256": "a49b42b5c75e867313b41eae0cbc250eaf8dc6c13db874583ad6bba5b527eef4",
+        "dest": "cargo/scte35-splice-4.0.0"
+    },
+    {
+        "type": "inline",
+        "contents": "{\"package\":\"a49b42b5c75e867313b41eae0cbc250eaf8dc6c13db874583ad6bba5b527eef4\",\"files\":{}}",
+        "dest": "cargo/scte35-splice-4.0.0",
+        "dest-filename": ".cargo-checksum.json"
+    },
+    {
+        "type": "archive",
+        "archive-type": "tar-gzip",
         "url": "https://static.crates.io/crates/security-framework/security-framework-3.7.0.crate",
         "sha256": "b7f4bc775c73d9a02cde8bf7b2ec4c9d12743edf609006c7facc23998404cd1d",
         "dest": "cargo/security-framework-3.7.0"
@@ -4521,19 +4534,6 @@
         "type": "inline",
         "contents": "{\"package\": \"8a7852d02fc848982e0c167ef163aaff9cd91dc640ba85e263cb1ce46fae51cd\", \"files\": {}}",
         "dest": "cargo/semver-1.0.28",
-        "dest-filename": ".cargo-checksum.json"
-    },
-    {
-        "type": "archive",
-        "archive-type": "tar-gzip",
-        "url": "https://static.crates.io/crates/scte35-splice/scte35-splice-4.0.0.crate",
-        "sha256": "a49b42b5c75e867313b41eae0cbc250eaf8dc6c13db874583ad6bba5b527eef4",
-        "dest": "cargo/scte35-splice-4.0.0"
-    },
-    {
-        "type": "inline",
-        "contents": "{\"package\":\"a49b42b5c75e867313b41eae0cbc250eaf8dc6c13db874583ad6bba5b527eef4\",\"files\":{}}",
-        "dest": "cargo/scte35-splice-4.0.0",
         "dest-filename": ".cargo-checksum.json"
     },
     {

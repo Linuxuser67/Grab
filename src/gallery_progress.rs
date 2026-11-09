@@ -1,11 +1,14 @@
 //! Parse gallery-dl file events and per-file progress records.
 //!
-//! The custom output mode keeps completed/skipped paths on stdout and sends
-//! percentage records to stderr. Both streams feed this pure line parser.
+//! Custom output mode emits a flushed start event and completion/skip paths to
+//! stdout, while byte progress is emitted to stderr. The runner merges both
+//! streams into one per-file update sequence.
 
 /// A parsed file event or progress record from gallery-dl.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ProgressLine {
+    /// A file has started downloading.
+    Started(String),
     /// File completed: full path to the downloaded file.
     Completed(String),
     /// File skipped (already exists): full path.
@@ -19,6 +22,10 @@ pub enum ProgressLine {
 /// Parse one stdout file event or stderr progress record from gallery-dl.
 pub fn parse_progress_line(line: &str) -> ProgressLine {
     let line = line.strip_suffix('\n').unwrap_or(line);
+
+    if let Some(path) = line.strip_prefix("@START:").filter(|path| !path.is_empty()) {
+        return ProgressLine::Started(path.to_string());
+    }
 
     let trimmed = line.trim();
     if trimmed == "?" {
@@ -58,12 +65,13 @@ pub fn progress_fraction(
     Some(((f64::from(files_done) + current) / f64::from(total_files)).min(1.0))
 }
 
-/// Aggregate file completion and the current file's percentage.
+/// Aggregate file completion and the current file's percentage/path.
 #[derive(Debug, Default)]
 pub struct GalleryProgress {
     pub files_completed: u32,
     pub files_skipped: u32,
     pub current_file_percent: Option<u8>,
+    pub current_file_path: Option<String>,
 }
 
 impl GalleryProgress {
@@ -79,13 +87,20 @@ impl GalleryProgress {
     /// Feed a parsed line; returns the completed file path if a file finished.
     pub fn feed(&mut self, line: ProgressLine) -> Option<String> {
         match line {
+            ProgressLine::Started(path) => {
+                self.current_file_path = Some(path);
+                self.current_file_percent = None;
+                None
+            }
             ProgressLine::Completed(path) => {
                 self.files_completed = self.files_completed.saturating_add(1);
+                self.current_file_path = None;
                 self.current_file_percent = None;
                 Some(path)
             }
             ProgressLine::Skipped(_) => {
                 self.files_skipped = self.files_skipped.saturating_add(1);
+                self.current_file_path = None;
                 self.current_file_percent = None;
                 None
             }
@@ -101,6 +116,14 @@ impl GalleryProgress {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn parse_started() {
+        assert_eq!(
+            parse_progress_line("@START:/tmp/dest/image.jpg"),
+            ProgressLine::Started("/tmp/dest/image.jpg".to_string())
+        );
+    }
 
     #[test]
     fn parse_completed() {
@@ -137,14 +160,22 @@ mod tests {
     }
 
     #[test]
-    fn feed_counts() {
+    fn feed_tracks_current_file_and_counts() {
         let mut p = GalleryProgress::new();
         assert_eq!(
-            p.feed(parse_progress_line("/a.jpg\n")),
+            p.feed(parse_progress_line("@START:/a.jpg")),
+            None
+        );
+        assert_eq!(p.current_file_path.as_deref(), Some("/a.jpg"));
+        assert_eq!(p.feed(parse_progress_line("42%")), None);
+        assert_eq!(p.current_file_percent, Some(42));
+        assert_eq!(
+            p.feed(parse_progress_line("/a.jpg")),
             Some("/a.jpg".to_string())
         );
-        assert_eq!(p.feed(parse_progress_line("# /b.jpg\n")), None);
-        assert_eq!(p.feed(parse_progress_line("noise\n")), None);
+        assert_eq!(p.current_file_path, None);
+        assert_eq!(p.current_file_percent, None);
+        assert_eq!(p.feed(parse_progress_line("# /b.jpg")), None);
         assert_eq!(p.files_completed, 1);
         assert_eq!(p.files_skipped, 1);
         assert_eq!(p.files_done(), 2);
@@ -174,22 +205,30 @@ mod tests {
     }
 
     #[test]
-    fn progress_is_reset_when_a_file_finishes_or_is_skipped() {
+    fn start_resets_previous_file_percentage() {
         let mut progress = GalleryProgress::new();
-        assert_eq!(progress.feed(ProgressLine::Progress(Some(67))), None);
-        assert_eq!(progress.current_file_percent, Some(67));
-
+        progress.feed(ProgressLine::Progress(Some(67)));
         assert_eq!(
-            progress.feed(ProgressLine::Completed("/a.jpg".to_string())),
-            Some("/a.jpg".to_string())
-        );
-        assert_eq!(progress.current_file_percent, None);
-
-        assert_eq!(progress.feed(ProgressLine::Progress(Some(25))), None);
-        assert_eq!(
-            progress.feed(ProgressLine::Skipped("/b.jpg".to_string())),
+            progress.feed(ProgressLine::Started("/next.jpg".to_string())),
             None
         );
+        assert_eq!(progress.current_file_percent, None);
+        assert_eq!(progress.current_file_path.as_deref(), Some("/next.jpg"));
+    }
+
+    #[test]
+    fn completion_and_skip_clear_current_file() {
+        let mut progress = GalleryProgress::new();
+        progress.feed(ProgressLine::Started("/a.jpg".to_string()));
+        progress.feed(ProgressLine::Progress(Some(25)));
+        progress.feed(ProgressLine::Completed("/a.jpg".to_string()));
+        assert_eq!(progress.current_file_path, None);
+        assert_eq!(progress.current_file_percent, None);
+
+        progress.feed(ProgressLine::Started("/b.jpg".to_string()));
+        progress.feed(ProgressLine::Progress(Some(50)));
+        progress.feed(ProgressLine::Skipped("/b.jpg".to_string()));
+        assert_eq!(progress.current_file_path, None);
         assert_eq!(progress.current_file_percent, None);
         assert_eq!(progress.files_done(), 2);
     }

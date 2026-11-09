@@ -5107,15 +5107,14 @@ mod tests {
             );
             match parse_dash_manifest(BASE_URL, &body) {
                 Ok(manifest) => assert_eq!(
-                    plan_dash_representation(
-                        &manifest,
-                        &manifest.video_representations[0].key
-                    )
-                    .err(),
+                    plan_dash_representation(&manifest, &manifest.video_representations[0].key)
+                        .err(),
                     Some(DashError::UnsupportedAddressing),
                     "{initialization}"
                 ),
-                Err(error) => assert_eq!(error, DashError::UnsupportedAddressing, "{initialization}"),
+                Err(error) => {
+                    assert_eq!(error, DashError::UnsupportedAddressing, "{initialization}");
+                }
             }
         }
     }

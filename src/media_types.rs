@@ -147,7 +147,7 @@ pub struct VideoPlaylistState {
     pub files: Vec<VideoPlaylistFile>,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub enum VideoSource {
     /// Ordinary file for the plain HTTP engine.
     Direct,

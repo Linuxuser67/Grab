@@ -493,6 +493,12 @@ pub(crate) fn parse_dash_manifest_at(
     };
 
     let is_dynamic = matches!(presentation, DashPresentation::Dynamic(_));
+    if is_dynamic
+        && dash_roles::has_nondefault_segment_list_start_number(body.as_bytes())
+            .ok_or(DashError::Parse)?
+    {
+        return Err(DashError::UnsupportedAddressing);
+    }
     if !mpd.PatchLocation.is_empty()
         || mpd.periods.is_empty()
         || mpd.periods.len() > dash_roles::MAX_PERIODS
@@ -1992,6 +1998,7 @@ fn effective_list(
     if is_dynamic
         && !timeline.as_ref().is_some_and(|entries| {
             entries.len() == segment_urls.len()
+                && entries.first().is_some_and(|entry| entry.start == Some(0))
                 && entries.iter().all(|entry| entry.start.is_some())
         })
     {

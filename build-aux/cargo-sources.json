@@ -4526,6 +4526,19 @@
     {
         "type": "archive",
         "archive-type": "tar-gzip",
+        "url": "https://static.crates.io/crates/scte35-splice/scte35-splice-4.0.0.crate",
+        "sha256": "a49b42b5c75e867313b41eae0cbc250eaf8dc6c13db874583ad6bba5b527eef4",
+        "dest": "cargo/scte35-splice-4.0.0"
+    },
+    {
+        "type": "inline",
+        "contents": "{\"package\":\"a49b42b5c75e867313b41eae0cbc250eaf8dc6c13db874583ad6bba5b527eef4\",\"files\":{}}",
+        "dest": "cargo/scte35-splice-4.0.0",
+        "dest-filename": ".cargo-checksum.json"
+    },
+    {
+        "type": "archive",
+        "archive-type": "tar-gzip",
         "url": "https://static.crates.io/crates/serde/serde-1.0.229.crate",
         "sha256": "4148590afebada386688f18773da617792bf2ef03ffc1e4cbd2b1d45b023e0ba",
         "dest": "cargo/serde-1.0.229"

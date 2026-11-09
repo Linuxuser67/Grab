@@ -24,6 +24,8 @@ pub(super) struct RepresentationRoleMetadata {
     pub(super) is_main: bool,
     /// Effective inherited SegmentList presentation-time offset.
     pub(super) segment_list_presentation_time_offset: Option<u64>,
+    /// Effective inherited SegmentList availability-time offset.
+    pub(super) segment_list_availability_time_offset: Option<String>,
 }
 
 /// Representation metadata for one Period, grouped by AdaptationSet.
@@ -38,6 +40,8 @@ struct MetadataState {
     adaptation_count: usize,
     period_list_pto: Option<u64>,
     adaptation_list_pto: Option<u64>,
+    period_list_ato: Option<String>,
+    adaptation_list_ato: Option<String>,
 }
 
 #[derive(Clone, Copy)]
@@ -128,6 +132,8 @@ fn push_element(
             periods.push(Vec::new());
             state.period_list_pto = None;
             state.adaptation_list_pto = None;
+            state.period_list_ato = None;
+            state.adaptation_list_ato = None;
             Element::Period
         }
         (Some(Element::Period), "AdaptationSet", true) => {
@@ -137,6 +143,7 @@ fn push_element(
             }
             periods.last_mut()?.push(Vec::new());
             state.adaptation_list_pto = state.period_list_pto;
+            state.adaptation_list_ato = state.period_list_ato.clone();
             Element::AdaptationSet
         }
         (Some(Element::AdaptationSet), "Representation", true) => {
@@ -151,6 +158,7 @@ fn push_element(
                     id: representation_id(start)?,
                     is_main: false,
                     segment_list_presentation_time_offset: state.adaptation_list_pto,
+                    segment_list_availability_time_offset: state.adaptation_list_ato.clone(),
                 });
             Element::Representation
         }
@@ -164,21 +172,27 @@ fn push_element(
             if let Some(offset) = segment_list_presentation_time_offset(start)? {
                 state.period_list_pto = Some(offset);
             }
+            if let Some(offset) = segment_list_availability_time_offset(start)? {
+                state.period_list_ato = Some(offset);
+            }
             Element::Other
         }
         (Some(Element::AdaptationSet), "SegmentList", true) => {
             if let Some(offset) = segment_list_presentation_time_offset(start)? {
                 state.adaptation_list_pto = Some(offset);
             }
+            if let Some(offset) = segment_list_availability_time_offset(start)? {
+                state.adaptation_list_ato = Some(offset);
+            }
             Element::Other
         }
         (Some(Element::Representation), "SegmentList", true) => {
+            let metadata = periods.last_mut()?.last_mut()?.last_mut()?;
             if let Some(offset) = segment_list_presentation_time_offset(start)? {
-                periods
-                    .last_mut()?
-                    .last_mut()?
-                    .last_mut()?
-                    .segment_list_presentation_time_offset = Some(offset);
+                metadata.segment_list_presentation_time_offset = Some(offset);
+            }
+            if let Some(offset) = segment_list_availability_time_offset(start)? {
+                metadata.segment_list_availability_time_offset = Some(offset);
             }
             Element::Other
         }
@@ -195,6 +209,18 @@ fn segment_list_presentation_time_offset(start: &BytesStart<'_>) -> Option<Optio
         if attribute.key.as_ref() == "presentationTimeOffset" {
             let value = attribute.normalized_value(XmlVersion::Implicit1_0).ok()?;
             offset = Some(value.parse::<u64>().ok()?);
+        }
+    }
+    Some(offset)
+}
+
+fn segment_list_availability_time_offset(start: &BytesStart<'_>) -> Option<Option<String>> {
+    let mut offset = None;
+    for attribute in start.attributes() {
+        let attribute = attribute.ok()?;
+        if attribute.key.as_ref() == "availabilityTimeOffset" {
+            let value = attribute.normalized_value(XmlVersion::Implicit1_0).ok()?;
+            offset = Some(value.into_owned());
         }
     }
     Some(offset)
@@ -332,7 +358,6 @@ pub(super) fn has_unsupported_segment_list_timing_attributes(body: &[u8]) -> Opt
                 let attribute = attribute.ok()?;
                 let key = attribute.key.as_ref();
                 if key == "duration"
-                    || key == "availabilityTimeOffset"
                     || key == "availabilityTimeComplete"
                     || key == "eptDelta"
                     || key == "pbDelta"
@@ -487,7 +512,6 @@ mod tests {
         let supported = br#"<MPD xmlns="urn:mpeg:dash:schema:mpd:2011"><Period><AdaptationSet><SegmentList timescale="1000"/></AdaptationSet></Period></MPD>"#;
         for attribute in [
             r#"duration="2""#,
-            r#"availabilityTimeOffset="1""#,
             r#"availabilityTimeComplete="false""#,
             r#"eptDelta="1""#,
             r#"pbDelta="1""#,
@@ -503,6 +527,11 @@ mod tests {
         }
         assert_eq!(
             super::has_unsupported_segment_list_timing_attributes(supported),
+            Some(false)
+        );
+        let finite_availability_offset = br#"<MPD xmlns="urn:mpeg:dash:schema:mpd:2011"><Period><AdaptationSet><SegmentList availabilityTimeOffset="1"/></AdaptationSet></Period></MPD>"#;
+        assert_eq!(
+            super::has_unsupported_segment_list_timing_attributes(finite_availability_offset),
             Some(false)
         );
     }
@@ -522,15 +551,15 @@ mod tests {
     }
 
     #[test]
-    fn maps_inherited_segment_list_presentation_time_offsets_to_representations() {
+    fn maps_inherited_segment_list_timing_offsets_to_representations() {
         let body = br#"<MPD xmlns="urn:mpeg:dash:schema:mpd:2011">
   <Period>
-    <SegmentList presentationTimeOffset="10"/>
+    <SegmentList presentationTimeOffset="10" availabilityTimeOffset="1"/>
     <AdaptationSet>
-      <SegmentList presentationTimeOffset="20"/>
+      <SegmentList presentationTimeOffset="20" availabilityTimeOffset="2"/>
       <Representation id="inherited"/>
       <Representation id="overridden">
-        <SegmentList presentationTimeOffset="30"/>
+        <SegmentList presentationTimeOffset="30" availabilityTimeOffset="3"/>
       </Representation>
     </AdaptationSet>
     <AdaptationSet>
@@ -550,6 +579,24 @@ mod tests {
         assert_eq!(
             metadata[0][1][0].segment_list_presentation_time_offset,
             Some(10)
+        );
+        assert_eq!(
+            metadata[0][0][0]
+                .segment_list_availability_time_offset
+                .as_deref(),
+            Some("2")
+        );
+        assert_eq!(
+            metadata[0][0][1]
+                .segment_list_availability_time_offset
+                .as_deref(),
+            Some("3")
+        );
+        assert_eq!(
+            metadata[0][1][0]
+                .segment_list_availability_time_offset
+                .as_deref(),
+            Some("1")
         );
     }
 

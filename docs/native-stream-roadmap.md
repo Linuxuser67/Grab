@@ -124,13 +124,18 @@ order regardless of fetch order. A stopped or interrupted in-progress
 response is not treated as committed media; a later resume starts that segment
 request again. Native transfers still have no automatic retries.
 
-BaseURL-level availability signalling, static LL-DASH, SegmentBase, and static
-SegmentList extensions beyond the existing explicit-resource profile remain on
-yt-dlp fallback. Static SegmentList presentationTimeOffset is applied to the
-track timestamp mapping; dynamic SegmentList PTO remains on fallback. Dynamic SegmentList is limited to a single MP4 Period with a separate
-initialization resource, a zero-origin explicit SegmentTimeline containing one
-entry per SegmentURL, default startNumber, contiguous equal-duration segments,
-and a bounded live window. Sliding lists with non-default startNumber, implicit
+Finite BaseURL availabilityTimeOffset values are summed across MPD,
+Period, AdaptationSet, and Representation levels for dynamic SegmentTemplate
+and the bounded dynamic SegmentList profile. Negative/infinite offsets, static
+offsets, BaseURL availabilityTimeComplete=false, and unsupported BaseURL
+metadata remain on yt-dlp fallback. Static LL-DASH, SegmentBase, and static
+SegmentList extensions beyond the existing explicit-resource profile also
+remain on fallback. Static SegmentList presentationTimeOffset is applied to the
+track timestamp mapping; dynamic SegmentList PTO remains on fallback. Dynamic
+SegmentList is limited to a single MP4 Period with a separate initialization
+resource, a zero-origin explicit SegmentTimeline containing one entry per
+SegmentURL, default startNumber, contiguous equal-duration segments, and a
+bounded live window. Sliding lists with non-default startNumber, implicit
 timeline times, repeats, gaps, variable durations, missing initialization, or
 non-MP4 tracks remain on fallback. Dynamic multi-Period MPDs, resource windows
 that exceed the planner limits, DRM, and unsupported addressing also remain on
@@ -293,10 +298,14 @@ changed resources across MPD refreshes.
 
 Sliding lists with non-default startNumber, implicit timeline times, repeats,
 gaps, variable durations, duration-mode addressing, non-zero
-presentationTimeOffset, availabilityTimeOffset/availabilityTimeComplete,
+presentationTimeOffset, SegmentList-level availabilityTimeComplete,
 eptDelta/pbDelta, missing initialization, non-MP4 tracks, and other unsupported
-SegmentList addressing remain on yt-dlp fallback. No automatic native transfer
-retries are introduced.
+SegmentList addressing remain on yt-dlp fallback. Finite SegmentList-level
+availabilityTimeOffset values use normal inheritance, with a lower-level value
+overriding its parent. Finite BaseURL-level availabilityTimeOffset values are
+summed across MPD, Period, AdaptationSet, and Representation levels; the two
+effective offsets are added for the bounded dynamic profile. No automatic
+native transfer retries are introduced.
 
 Acceptance covers explicit timeline mapping, time-shift window selection,
 stable sequence identity, initialization identity, and conservative rejection

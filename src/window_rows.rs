@@ -1479,6 +1479,7 @@ pub(crate) fn build_row(
                 started: m.has_started(id),
                 public_only: it.public_only(),
                 group: it.group(),
+                gallery_job: m.gallery_job(id),
             };
             let name = snapshot.filename.clone();
             m.remove(id);

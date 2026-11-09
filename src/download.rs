@@ -1803,11 +1803,12 @@ impl DownloadManager {
         // spawn_gallery reads gallery_jobs synchronously.
         let file_rows = job.file_rows.clone();
         self.gallery_jobs.borrow_mut().insert(id, job);
-        self.restore_gallery_file_rows(&item, &file_rows);
         if stored.started.unwrap_or(true) {
             self.started.borrow_mut().insert(id);
         }
-        Ok(self.insert(item))
+        let item = self.insert(item);
+        self.restore_gallery_file_rows(&item, &file_rows);
+        Ok(item)
     }
 
     /// Claim one reference on a host's public-only policy for this row.
@@ -3626,7 +3627,6 @@ impl DownloadManager {
             existing.set_progress(progress);
             existing.set_detail(detail.to_string());
             existing.set_status(status);
-            self.changed();
             return;
         }
 
@@ -3645,7 +3645,6 @@ impl DownloadManager {
         // Child rows describe the one gallery-dl process; they are not
         // independently scheduled or persisted as separate download jobs.
         self.store.append(&child);
-        self.changed();
     }
 
     /// Recreate child projections from the GalleryJob payload after queue
@@ -3680,6 +3679,9 @@ impl DownloadManager {
                 DownloadStatus::Scheduled => gettext("Scheduled"),
             };
             self.upsert_gallery_file_row(owner, &state.path, status, state.progress, &detail);
+        }
+        if !file_rows.is_empty() {
+            self.changed();
         }
     }
 
@@ -4643,21 +4645,24 @@ impl DownloadManager {
         });
         item.set_output_dir(snap.output_dir);
         item.set_public_only(snap.public_only);
+        let mut gallery_file_rows = None;
         if let Some(mut job) = snap.gallery_job {
             job.item_id = id;
             item.set_is_gallery(true);
             item.set_gallery_file_count(job.file_count.unwrap_or(0));
-            item.set_gallery_files_done(job.file_rows.iter().filter(|file| {
-                matches!(file.status, DownloadStatus::Done)
-            }).count() as u32);
+            item.set_gallery_files_done(
+                job.file_rows
+                    .iter()
+                    .filter(|file| file.status == DownloadStatus::Done)
+                    .count() as u32,
+            );
             item.set_gallery_url(job.page_url.clone());
             item.set_group(
                 crate::download_store::DownloadGroup::try_new(id, &job.title)
                     .or_else(|| crate::download_store::DownloadGroup::try_new(id, &snap.filename)),
             );
-            let file_rows = job.file_rows.clone();
+            gallery_file_rows = Some(job.file_rows.clone());
             self.gallery_jobs.borrow_mut().insert(id, job);
-            self.restore_gallery_file_rows(&item, &file_rows);
         } else {
             item.set_group(snap.group);
         }
@@ -4683,9 +4688,15 @@ impl DownloadManager {
             self.store.append(&item);
             self.persist_queue();
             self.changed();
+            if let Some(file_rows) = gallery_file_rows.as_deref() {
+                self.restore_gallery_file_rows(&item, file_rows);
+            }
             return item;
         }
-        self.insert(item.clone());
+        let item = self.insert(item);
+        if let Some(file_rows) = gallery_file_rows.as_deref() {
+            self.restore_gallery_file_rows(&item, file_rows);
+        }
         item
     }
 

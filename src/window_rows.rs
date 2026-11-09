@@ -849,6 +849,7 @@ pub(crate) fn build_download_group_row(
                         started: manager.has_started(*id),
                         public_only: item.public_only(),
                         group: item.group(),
+                        gallery_job: manager.gallery_job(*id),
                     })
                 })
                 .collect::<Vec<_>>();

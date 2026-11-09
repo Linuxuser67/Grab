@@ -124,14 +124,18 @@ order regardless of fetch order. A stopped or interrupted in-progress
 response is not treated as committed media; a later resume starts that segment
 request again. Native transfers still have no automatic retries.
 
-BaseURL-level finite availability offsets are summed across MPD, Period,
-AdaptationSet, and Representation URL levels for dynamic SegmentTemplate
-presentations. Negative/infinite offsets, BaseURL-level incomplete-segment
-signalling, static offsets, static LL-DASH, SegmentBase, SegmentList, dynamic
-multi-Period MPDs, missing initialization resources, resource windows that
-exceed the planner limits, non-MP4 tracks, DRM, and unsupported addressing
-remain on yt-dlp fallback. Unknown or conflicting presentation
-semantics are not silently stripped.
+BaseURL-level availability signalling, static LL-DASH, SegmentBase, static
+SegmentList extensions beyond the existing explicit-resource profile, and
+dynamic SegmentList presentations outside the bounded profile remain on yt-dlp
+fallback. Dynamic SegmentList is limited to a single MP4 Period with a separate
+initialization resource, a zero-origin explicit SegmentTimeline containing one
+entry per SegmentURL, default startNumber, contiguous equal-duration segments,
+and a bounded live window. Sliding lists with non-default startNumber, implicit
+timeline times, repeats, gaps, variable durations, missing initialization, or
+non-MP4 tracks remain on fallback. Dynamic multi-Period MPDs, resource windows
+that exceed the planner limits, DRM, and unsupported addressing also remain on
+yt-dlp fallback. Unknown or conflicting presentation semantics are not silently
+stripped.
 
 ## Phases
 
@@ -141,7 +145,7 @@ Support a static single-period MP4 representation with an in-file
 `SegmentBase@indexRange`, `Initialization@range`, and bounded SIDX hierarchy.
 Fetch each bounded index range, decode SIDX with the existing `mp4box`
 dependency, and translate direct and nested references into ordered Grab
-byte-range resources. Dynamic SegmentBase, malformed or out-of-file
+byte-range resources. Separate initialization URLs, dynamic SegmentBase, malformed or out-of-file
 references, and hierarchies exceeding the explicit depth/node/size limits remain
 on yt-dlp fallback.
 
@@ -265,18 +269,11 @@ The native path now supports:
 - Bounded hierarchical SIDX when the index and media ranges are in the same
   media resource.
 
-The native path also supports unindexed single-file SegmentBase with an
-explicit Initialization child. The initialization must resolve to a separate
-HTTPS resource and may include a bounded byte range. In-file initialization
-ranges remain on fallback because the whole-file media resource would otherwise
-duplicate those bytes. Initialization resources are staged before the media
-resource and are included in representation identity.
-
 The following remain explicit yt-dlp fallbacks:
 - External RepresentationIndex hierarchies and external index resources without
   an explicit bounded range.
-- Dynamic SegmentBase and non-zero `eptDelta`/`pbDelta`.
-- BaseURL-level byte-range templates and WebM.
+- Separate initialization URLs, dynamic SegmentBase, and non-zero
+  `eptDelta`/`pbDelta`.
 
 `BaseURL@byteRange` remains unsupported. ISO/IEC 23009-1 Annex E defines it
 as an alternate byte-range URL template for regular GET requests when HTTP
@@ -284,4 +281,24 @@ partial GET is unavailable or not honored. Grab deliberately does not retry a
 failed native resource request or add an alternate request path, so this
 fallback-only optimization is not implemented. Ordinary DASH byte ranges
 continue to use Grab's strict HTTP Range and Content-Range validation.
+
+### 7. Dynamic DASH SegmentList — implemented bounded profile
+
+Dynamic SegmentList is supported only for a single MP4 Period with a separate
+initialization resource, a zero-origin explicit SegmentTimeline containing one
+entry per SegmentURL, default startNumber, contiguous equal-duration segments,
+and a bounded live window. Segment sequence numbers are derived from the
+zero-origin timeline, allowing the existing live journal to detect missing or
+changed resources across MPD refreshes.
+
+Sliding lists with non-default startNumber, implicit timeline times, repeats,
+gaps, variable durations, duration-mode addressing, non-zero
+presentationTimeOffset, availabilityTimeOffset/availabilityTimeComplete,
+eptDelta/pbDelta, missing initialization, non-MP4 tracks, and other unsupported
+SegmentList addressing remain on yt-dlp fallback. No automatic native transfer
+retries are introduced.
+
+Acceptance covers explicit timeline mapping, time-shift window selection,
+stable sequence identity, initialization identity, and conservative rejection
+of ambiguous or unsupported timeline forms.
 

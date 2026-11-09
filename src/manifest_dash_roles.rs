@@ -250,6 +250,106 @@ pub(super) fn has_nonzero_segment_list_presentation_time_offset(body: &[u8]) -> 
     }
 }
 
+/// Reject SegmentList timing attributes not interpreted by the bounded live planner.
+pub(super) fn has_unsupported_segment_list_timing_attributes(body: &[u8]) -> Option<bool> {
+    let mut reader = NsReader::from_reader(body);
+    let mut buffer = Vec::new();
+    let mut depth = 0_usize;
+    let mut unsupported = false;
+
+    loop {
+        let (namespace, event) = reader.read_resolved_event_into(&mut buffer).ok()?;
+        let start = match &event {
+            Event::Start(start) => {
+                depth = depth.checked_add(1)?;
+                if depth > MAX_ELEMENT_DEPTH {
+                    return None;
+                }
+                Some(start)
+            }
+            Event::Empty(start) => Some(start),
+            Event::End(_) => {
+                depth = depth.checked_sub(1)?;
+                None
+            }
+            Event::Eof => return (depth == 0).then_some(unsupported),
+            _ => None,
+        };
+
+        if let Some(start) = start
+            && matches!(
+                &namespace,
+                ResolveResult::Bound(namespace)
+                    if namespace.into_inner() == DASH_MPD_NAMESPACE
+            )
+            && start.name().local_name().as_ref() == "SegmentList"
+        {
+            for attribute in start.attributes() {
+                let attribute = attribute.ok()?;
+                let key = attribute.key.as_ref();
+                if key == "duration"
+                    || key == "availabilityTimeOffset"
+                    || key == "availabilityTimeComplete"
+                    || key == "eptDelta"
+                    || key == "pbDelta"
+                {
+                    unsupported = true;
+                }
+            }
+        }
+
+        buffer.clear();
+    }
+}
+
+/// Detect SegmentList startNumber values that cannot be represented by the typed MPD model.
+pub(super) fn has_nondefault_segment_list_start_number(body: &[u8]) -> Option<bool> {
+    let mut reader = NsReader::from_reader(body);
+    let mut buffer = Vec::new();
+    let mut depth = 0_usize;
+    let mut nondefault = false;
+
+    loop {
+        let (namespace, event) = reader.read_resolved_event_into(&mut buffer).ok()?;
+        let start = match &event {
+            Event::Start(start) => {
+                depth = depth.checked_add(1)?;
+                if depth > MAX_ELEMENT_DEPTH {
+                    return None;
+                }
+                Some(start)
+            }
+            Event::Empty(start) => Some(start),
+            Event::End(_) => {
+                depth = depth.checked_sub(1)?;
+                None
+            }
+            Event::Eof => return (depth == 0).then_some(nondefault),
+            _ => None,
+        };
+
+        if let Some(start) = start
+            && matches!(
+                &namespace,
+                ResolveResult::Bound(namespace)
+                    if namespace.into_inner() == DASH_MPD_NAMESPACE
+            )
+            && start.name().local_name().as_ref() == "SegmentList"
+        {
+            for attribute in start.attributes() {
+                let attribute = attribute.ok()?;
+                if attribute.key.as_ref() == "startNumber" {
+                    let value = attribute.normalized_value(XmlVersion::Implicit1_0).ok()?;
+                    let number = value.parse::<u64>().ok()?;
+                    nondefault |= number != 1;
+                }
+            }
+        }
+
+        buffer.clear();
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::representation_metadata;
@@ -336,6 +436,45 @@ mod tests {
             representation_metadata(body, 1).expect("foreign attributes do not invalidate the MPD");
         assert_eq!(metadata[0][0][0].id.as_deref(), Some("main"));
         assert!(!metadata[0][0][0].is_main);
+    }
+
+    #[test]
+    fn detects_unsupported_segment_list_timing_attributes() {
+        let supported = br#"<MPD xmlns="urn:mpeg:dash:schema:mpd:2011"><Period><AdaptationSet><SegmentList timescale="1000"/></AdaptationSet></Period></MPD>"#;
+        for attribute in [
+            r#"duration="2""#,
+            r#"availabilityTimeOffset="1""#,
+            r#"availabilityTimeComplete="false""#,
+            r#"eptDelta="1""#,
+            r#"pbDelta="1""#,
+        ] {
+            let body = format!(
+                r#"<MPD xmlns="urn:mpeg:dash:schema:mpd:2011"><Period><AdaptationSet><SegmentList {attribute}/></AdaptationSet></Period></MPD>"#
+            );
+            assert_eq!(
+                super::has_unsupported_segment_list_timing_attributes(body.as_bytes()),
+                Some(true),
+                "{attribute}"
+            );
+        }
+        assert_eq!(
+            super::has_unsupported_segment_list_timing_attributes(supported),
+            Some(false)
+        );
+    }
+
+    #[test]
+    fn detects_nondefault_segment_list_start_numbers() {
+        let default_number = br#"<MPD xmlns="urn:mpeg:dash:schema:mpd:2011"><Period><AdaptationSet><SegmentList startNumber="1"/></AdaptationSet></Period></MPD>"#;
+        let nondefault_number = br#"<mpd:MPD xmlns:mpd="urn:mpeg:dash:schema:mpd:2011"><mpd:Period><mpd:AdaptationSet><mpd:SegmentList startNumber="42"/></mpd:AdaptationSet></mpd:Period></mpd:MPD>"#;
+        assert_eq!(
+            super::has_nondefault_segment_list_start_number(default_number),
+            Some(false)
+        );
+        assert_eq!(
+            super::has_nondefault_segment_list_start_number(nondefault_number),
+            Some(true)
+        );
     }
 
     #[test]

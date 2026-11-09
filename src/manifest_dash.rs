@@ -2148,6 +2148,14 @@ fn expand_dynamic_list(
             continue;
         }
         let url = resolve_resource(&representation.source.base_url, &segment.media)?;
+        if url == initialization_url {
+            let (Some(initialization_range), Some(segment_range)) = (*range, segment.range) else {
+                return Err(DashError::UnsupportedAddressing);
+            };
+            if ranges_overlap(initialization_range, segment_range)? {
+                return Err(DashError::InvalidSegment);
+            }
+        }
         let filename = super::resource_filename("dash-live-segment", None, &url, segment.range);
         let number = time
             .checked_div(segment_duration)

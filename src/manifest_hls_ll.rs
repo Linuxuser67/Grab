@@ -441,13 +441,17 @@ fn build_plan(manifest_url: &str, playlist: LlMediaPlaylist) -> Result<HlsPlan, 
             &mut resources,
             &mut map_filenames,
         )?;
+        let discontinuity = open
+            .pre_tags
+            .iter()
+            .any(|tag| tag == "#EXT-X-DISCONTINUITY");
         append_part_units(
             &base_url,
             media_sequence,
             &open.parts,
             source_target_duration,
             map,
-            open.discontinuous,
+            discontinuity,
             playlist.independent_segments,
             &mut first_part_independent,
             &mut resources,

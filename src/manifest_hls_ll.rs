@@ -327,11 +327,7 @@ fn build_plan(manifest_url: &str, playlist: LlMediaPlaylist) -> Result<HlsPlan, 
     if can_skip_until.is_some_and(|skip| skip.as_secs_f64() < 6.0 * source_target_duration as f64) {
         return Err(ManifestError::InvalidDuration);
     }
-    if playlist.start.is_some() {
-        return Err(ManifestError::UnsupportedPlaylistFeature(
-            "#EXT-X-START offsets cannot be preserved in a live recording".to_string(),
-        ));
-    }
+    validate_start_point(&playlist)?;
     let has_parts = playlist
         .segments
         .iter()
@@ -663,6 +659,22 @@ fn validate_playlist_tags(playlist: &LlMediaPlaylist) -> Result<(), ManifestErro
         return Err(ManifestError::UnsupportedPlaylistFeature(
             tag.split(':').next().unwrap_or(tag).to_string(),
         ));
+    }
+    Ok(())
+}
+
+/// EXT-X-START is a playback preference, not a media-resource selection
+/// instruction. Grab captures the entire advertised live window and writes a
+/// new VOD playlist, so the source-only preference is intentionally omitted.
+fn validate_start_point(playlist: &LlMediaPlaylist) -> Result<(), ManifestError> {
+    let Some(start) = playlist.start.as_ref() else {
+        return Ok(());
+    };
+    if !start.time_offset.get().is_finite() {
+        return Err(ManifestError::InvalidDuration);
+    }
+    if start.extra_attrs.iter().any(|(name, _)| name.starts_with("REQ-")) {
+        return Err(ManifestError::UnsupportedPlaylist);
     }
     Ok(())
 }
@@ -1088,6 +1100,84 @@ mod tests {
                 .iter()
                 .any(|resource| resource.url.path().ends_with("101.1.m4s"))
         );
+    }
+
+    #[test]
+    fn accepts_ext_x_start_as_a_playback_hint_without_trimming_ll_capture() {
+        let complete = br#"#EXTM3U
+#EXT-X-TARGETDURATION:2
+#EXT-X-MEDIA-SEQUENCE:40
+#EXT-X-MAP:URI="init.mp4"
+#EXT-X-SERVER-CONTROL:CAN-BLOCK-RELOAD=NO,PART-HOLD-BACK=1.0
+#EXT-X-PART-INF:PART-TARGET=0.5
+#EXT-X-START:TIME-OFFSET=1.5,PRECISE=YES
+#EXT-X-PART:DURATION=0.5,URI="40.0.m4s",INDEPENDENT=YES
+#EXT-X-PART:DURATION=0.5,URI="40.1.m4s"
+#EXTINF:1.0,
+40.m4s
+#EXT-X-ENDLIST
+"#;
+        let plan = plan_hls_media_playlist(BASE, complete)
+            .expect("complete LL-HLS playlist with EXT-X-START")
+            .expect("LL-HLS detected");
+        assert_eq!(plan.resources.len(), 3);
+        assert_eq!(plan.local_playlist.segments.len(), 2);
+        assert_eq!(
+            plan.ll_unit_ids.as_deref().expect("live unit IDs"),
+            &[
+                HlsLiveUnitId::Part {
+                    media_sequence: 40,
+                    part_index: 0,
+                },
+                HlsLiveUnitId::Part {
+                    media_sequence: 40,
+                    part_index: 1,
+                },
+            ]
+        );
+        assert!(plan.local_playlist.start.is_none());
+        assert!(
+            plan.resources
+                .iter()
+                .any(|resource| resource.url.path().ends_with("/40.0.m4s"))
+        );
+        assert!(
+            plan.resources
+                .iter()
+                .any(|resource| resource.url.path().ends_with("/40.1.m4s"))
+        );
+
+        let live = br#"#EXTM3U
+#EXT-X-TARGETDURATION:2
+#EXT-X-MEDIA-SEQUENCE:41
+#EXT-X-SERVER-CONTROL:CAN-BLOCK-RELOAD=NO,PART-HOLD-BACK=1.0
+#EXT-X-PART-INF:PART-TARGET=0.5
+#EXT-X-START:TIME-OFFSET=-3.0,PRECISE=NO
+#EXT-X-PART:DURATION=0.5,URI="41.0.m4s",INDEPENDENT=YES
+"#;
+        let live_plan = plan_hls_media_playlist(BASE, live)
+            .expect("live LL-HLS playlist with a negative EXT-X-START offset")
+            .expect("LL-HLS detected");
+        assert!(live_plan.is_live);
+        assert_eq!(live_plan.resources.len(), 1);
+        assert!(live_plan.local_playlist.start.is_none());
+    }
+
+    #[test]
+    fn ext_x_start_required_attributes_remain_unsupported() {
+        let body = br#"#EXTM3U
+#EXT-X-TARGETDURATION:2
+#EXT-X-MEDIA-SEQUENCE:7
+#EXT-X-MAP:URI="init.mp4"
+#EXT-X-SERVER-CONTROL:CAN-BLOCK-RELOAD=NO,PART-HOLD-BACK=1.0
+#EXT-X-PART-INF:PART-TARGET=0.5
+#EXT-X-START:TIME-OFFSET=1.0,REQ-FOO="bar"
+#EXT-X-PART:DURATION=0.5,URI="7.0.m4s",INDEPENDENT=YES
+"#;
+        assert!(matches!(
+            plan_hls_media_playlist(BASE, body),
+            Err(ManifestError::UnsupportedPlaylist)
+        ));
     }
 
     #[test]

@@ -312,6 +312,8 @@ pub(crate) struct HlsVariant {
     pub(crate) video_rendition_group: Option<String>,
     /// Original EXT-X-STREAM-INF playlist path, kept separate from the selected angle URL.
     pub(crate) video_variant_path: Option<String>,
+    /// Original EXT-X-STREAM-INF URL, retained for Content Steering replacements.
+    pub(crate) video_variant_url: Option<Url>,
     pub(crate) video_rendition_name: Option<String>,
     /// Apple HLS STABLE-RENDITION-ID for the selected VIDEO rendition.
     pub(crate) stable_video_rendition_id: Option<String>,
@@ -1295,6 +1297,7 @@ pub(crate) fn parse_hls_master_playlist(
                     subtitles_group: variant.subtitles,
                     video_rendition_group: None,
                     video_variant_path: None,
+                    video_variant_url: None,
                     video_rendition_name: None,
                     stable_video_rendition_id: None,
                     stable_variant_id,
@@ -1360,6 +1363,7 @@ pub(crate) fn parse_hls_master_playlist(
                     subtitles_group: variant.subtitles.clone(),
                     video_rendition_group: Some(group_id.to_string()),
                     video_variant_path: Some(variant_url.path().to_string()),
+                    video_variant_url: Some(variant_url.clone()),
                     video_rendition_name: Some(rendition.name.clone()),
                     stable_video_rendition_id,
                     stable_variant_id: stable_variant_id.clone(),

@@ -1367,6 +1367,7 @@ impl DownloadManager {
         }
         let item = DownloadItem::new(self.alloc_id_for_in(&existing), &url, &unique_title, &dir);
         item.set_is_gallery(true);
+        item.set_group(crate::download_store::DownloadGroup::try_new(item.id(), &job.title));
         item.set_gallery_file_count(job.file_count.unwrap_or(0));
         item.set_gallery_files_done(0);
         item.set_gallery_url(url.clone());
@@ -3546,6 +3547,97 @@ impl DownloadManager {
     /// Runs on the tokio runtime (the runner needs tokio::process); progress
     /// is bridged to the glib main thread via a channel. The handle is
     /// registered in `running` for cancel/concurrency/shutdown.
+    /// Create or refresh a transient read-only child row for one file in a
+    /// gallery collection. The path must remain inside gallery-dl's assigned
+    /// output directory; extractor-controlled paths are never accepted as
+    /// arbitrary queue destinations.
+    fn upsert_gallery_file_row(
+        &self,
+        owner: &DownloadItem,
+        path: &str,
+        status: DownloadStatus,
+        progress: f64,
+        detail: &str,
+    ) {
+        let Some(job) = self.gallery_jobs.borrow().get(&owner.id()).cloned() else {
+            return;
+        };
+        let output_dir = job.dest_dir.as_path();
+        let output_path = std::path::Path::new(path);
+        let Some(relative) = output_path.strip_prefix(output_dir).ok().filter(|relative| {
+            !relative.as_os_str().is_empty()
+                && relative.components().all(|component| {
+                    matches!(component, std::path::Component::Normal(_))
+                })
+        }) else {
+            tracing::warn!(
+                path = %path,
+                output_dir = %output_dir.display(),
+                "ignoring gallery-dl file event outside its assigned destination"
+            );
+            return;
+        };
+        let filename = relative.to_string_lossy().into_owned();
+        let Some(group) = owner.group().filter(|group| group.is_valid()) else {
+            tracing::warn!(gallery_id = owner.id(), "gallery file event has no collection identity");
+            return;
+        };
+
+        if let Some(existing) = self.items().find(|candidate| {
+            candidate.is_gallery_child() && candidate.gallery_file_path() == path
+        }) {
+            existing.set_progress(progress.clamp(0.0, 1.0));
+            existing.set_detail(detail.to_string());
+            existing.set_status(status);
+            self.changed();
+            return;
+        }
+
+        let child = DownloadItem::new(
+            self.alloc_id(),
+            &owner.url(),
+            &filename,
+            &job.dest_dir.to_string_lossy(),
+        );
+        child.set_is_gallery_child(true);
+        child.set_gallery_file_path(path.to_string());
+        child.set_group(Some(group));
+        child.set_progress(progress.clamp(0.0, 1.0));
+        child.set_detail(detail.to_string());
+        child.set_status(status);
+        // Child rows describe the one gallery-dl process; they are not
+        // independently scheduled or persisted as separate download jobs.
+        self.store.append(&child);
+        self.changed();
+    }
+
+    /// Resolve any file left active when the shared gallery-dl process exits.
+    fn finish_gallery_file_rows(&self, owner_id: u64, status: DownloadStatus) {
+        let ids = self
+            .items()
+            .filter(|item| {
+                item.is_gallery_child()
+                    && item.group().is_some_and(|group| group.id() == owner_id)
+                    && item.status() == DownloadStatus::Downloading
+            })
+            .collect::<Vec<_>>();
+        for item in ids {
+            if status == DownloadStatus::Done {
+                item.set_progress(1.0);
+                item.set_detail(gettext("Finished"));
+            } else {
+                item.set_detail(gettext("Gallery file failed"));
+            }
+            item.set_status(status);
+        }
+        if !self.items().all(|item| {
+            !(item.is_gallery_child()
+                && item.group().is_some_and(|group| group.id() == owner_id))
+        }) {
+            self.changed();
+        }
+    }
+
     fn spawn_gallery(self: &Rc<Self>, item: DownloadItem) {
         item.set_status(DownloadStatus::Downloading);
         // Clear previous error log on (re)start.
@@ -3685,7 +3777,54 @@ impl DownloadManager {
                             .map(|percent| format!(" · {percent}%"))
                             .unwrap_or_default();
                         item_c.set_gallery_files_done(done);
-                        // Show the last completed filename if available.
+
+                        // The collection UI is backed by transient child rows
+                        // keyed by the exact output path announced by gallery-dl.
+                        match update.event.as_ref() {
+                            Some(crate::gallery_progress::ProgressLine::Started(path)) => {
+                                this.upsert_gallery_file_row(
+                                    &item_c,
+                                    path,
+                                    DownloadStatus::Downloading,
+                                    0.0,
+                                    &gettext("Downloading"),
+                                );
+                            }
+                            Some(crate::gallery_progress::ProgressLine::Completed(path)) => {
+                                this.upsert_gallery_file_row(
+                                    &item_c,
+                                    path,
+                                    DownloadStatus::Done,
+                                    1.0,
+                                    &gettext("Finished"),
+                                );
+                            }
+                            Some(crate::gallery_progress::ProgressLine::Skipped(path)) => {
+                                this.upsert_gallery_file_row(
+                                    &item_c,
+                                    path,
+                                    DownloadStatus::Done,
+                                    1.0,
+                                    &gettext("Already exists"),
+                                );
+                            }
+                            _ => {}
+                        }
+                        if update.event.is_none()
+                            && let Some(path) = update.current_file_path.as_deref()
+                        {
+                            this.upsert_gallery_file_row(
+                                &item_c,
+                                path,
+                                DownloadStatus::Downloading,
+                                update.current_file_percent
+                                    .map(|percent| f64::from(percent) / 100.0)
+                                    .unwrap_or(0.0),
+                                &file_progress.trim_start_matches(" · "),
+                            );
+                        }
+
+                        // Show the last completed filename in the owner detail.
                         let file_part = update
                             .last_completed_file
                             .as_ref()
@@ -3702,10 +3841,6 @@ impl DownloadManager {
                                 "Gallery \u{2022} {done}/{total} files{file_progress}{file_part}"
                             ));
                         } else {
-                            // Unknown or inconsistent file totals cannot produce
-                            // a meaningful aggregate fraction; keep the bar
-                            // indeterminate while still showing the current
-                            // file's percentage when gallery-dl reports it.
                             item_c.set_progress(0.0);
                             item_c.set_detail(format!(
                                 "Gallery \u{2022} {done} files{file_progress}{file_part}"
@@ -3735,8 +3870,10 @@ impl DownloadManager {
                                 // Failed so it's retryable via retry_failed().
                                 // Clean success is Done.
                                 if r.exit_code.is_some() {
+                                    this.finish_gallery_file_rows(item_c.id(), DownloadStatus::Failed);
                                     item_c.set_status(DownloadStatus::Failed);
                                 } else {
+                                    this.finish_gallery_file_rows(item_c.id(), DownloadStatus::Done);
                                     item_c.set_status(DownloadStatus::Done);
                                 }
                                 tracing::info!(
@@ -3752,6 +3889,7 @@ impl DownloadManager {
                                 let summary = e.lines().next().unwrap_or(&e).trim();
                                 item_c.set_detail(format!("Gallery failed: {summary}"));
                                 item_c.set_error_log(e.clone());
+                                this.finish_gallery_file_rows(item_c.id(), DownloadStatus::Failed);
                                 item_c.set_status(DownloadStatus::Failed);
                                 tracing::error!(error = %e, "gallery download failed");
                             }
@@ -4832,6 +4970,11 @@ impl DownloadManager {
         }
         let mut items = Vec::new();
         for it in self.items() {
+            // Gallery children are UI projections of one persisted gallery job.
+            // They are reconstructed from gallery-dl start/skip/complete events.
+            if it.is_gallery_child() {
+                continue;
+            }
             // Cancelled rows carry no intent: never persisted.
             if it.status() != DownloadStatus::Cancelled {
                 // Gallery rows need their job to restore; a missing job is a

@@ -802,7 +802,14 @@ fn parse_hls_pathway_clone(
                 .filter(|host| !host.is_empty())
                 .ok_or_else(invalid)?;
             let probe = Url::parse(&format!("https://{host}/")).map_err(|_| invalid())?;
-            if host.contains(':')
+            let has_explicit_port = host
+                .strip_prefix('[')
+                .and_then(|value| value.split_once(']'))
+                .map_or_else(
+                    || host.contains(':'),
+                    |(_, suffix)| suffix.starts_with(':'),
+                );
+            if has_explicit_port
                 || probe.host_str().is_none()
                 || probe.port().is_some()
                 || !probe.username().is_empty()
@@ -3668,6 +3675,22 @@ video/variant.m3u8
     }
 
     #[test]
+    fn pathway_clone_accepts_bracketed_ipv6_host_without_port() {
+        let source = Url::parse("https://origin.example.test/a.m3u8").unwrap();
+        let clone = HlsPathwayClone {
+            base_id: "origin".to_string(),
+            id: "ipv6".to_string(),
+            host: Some("[2001:4860:4860::8888]".to_string()),
+            params: BTreeMap::new(),
+            per_variant_uris: HashMap::new(),
+            per_rendition_uris: HashMap::new(),
+        };
+        let replaced = replace_hls_pathway_uri(&source, &clone, None)
+            .expect("public IPv6 literal should be accepted");
+        assert_eq!(replaced.host_str(), Some("[2001:4860:4860::8888]"));
+    }
+
+    #[test]
     fn pathway_clone_applies_host_and_sorted_query_parameter_replacements() {
         let source = Url::parse("https://origin.example.test/a.m3u8?token=old&keep=yes").unwrap();
         let clone = HlsPathwayClone {
@@ -3713,6 +3736,7 @@ video/variant.m3u8
             br#"{"VERSION":1,"TTL":1,"PATHWAY-PRIORITY":["a"],"PATHWAY-CLONES":[]}"#.as_slice(),
             br#"{"VERSION":1,"TTL":1,"PATHWAY-PRIORITY":["a"],"PATHWAY-CLONES":[{"BASE-ID":"a","ID":"b","URI-REPLACEMENT":{"HOST":"backup.example.test:8443"}}]}"#.as_slice(),
             br#"{"VERSION":1,"TTL":1,"PATHWAY-PRIORITY":["a"],"PATHWAY-CLONES":[{"BASE-ID":"a","ID":"b","URI-REPLACEMENT":{"HOST":"backup.example.test:443"}}]}"#.as_slice(),
+            br#"{"VERSION":1,"TTL":1,"PATHWAY-PRIORITY":["a"],"PATHWAY-CLONES":[{"BASE-ID":"a","ID":"b","URI-REPLACEMENT":{"HOST":"[2001:4860:4860::8888]:443"}}]}"#.as_slice(),
             br#"{"VERSION":1,"TTL":1,"PATHWAY-PRIORITY":["a"],"PATHWAY-CLONES":[{"BASE-ID":"a","ID":"b","URI-REPLACEMENT":{"PARAMS":{"_HLS_bad":"value"}}}]}"#.as_slice(),
             br#"{"VERSION":1,"TTL":1,"PATHWAY-PRIORITY":["a"],"PATHWAY-CLONES":[{"BASE-ID":"a","ID":"b","URI-REPLACEMENT":{"PARAMS":{"token":"bad&value"}}}]}"#.as_slice(),
         ] {

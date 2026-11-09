@@ -1967,7 +1967,9 @@ impl DownloadManager {
                 .items()
                 // A discard still tearing down owns its destination: the row stays Queued until the reservation clears.
                 .find(|it| {
-                    it.status() == DownloadStatus::Queued && !self.dest_reserved(&it.file_path())
+                    !it.is_gallery_child()
+                        && it.status() == DownloadStatus::Queued
+                        && !self.dest_reserved(&it.file_path())
                 });
             match next {
                 Some(item) => {
@@ -4834,8 +4836,12 @@ impl DownloadManager {
                 )
             },
             |m, id| {
+                let gallery_owner = m.find(id).is_some_and(|item| item.is_gallery());
                 if let Some(path) = m.cancel_inner(id, false, Stop::Preserve) {
                     partials_to_remove.push(path);
+                }
+                if gallery_owner {
+                    m.finish_gallery_file_rows(id, DownloadStatus::Cancelled);
                 }
             },
         );
@@ -4864,12 +4870,13 @@ impl DownloadManager {
     /// Drop every finished row (files stay on disk). Still-seeding torrents leave the session first. Returns the cleared count.
     pub fn clear_finished(self: &Rc<Self>) -> usize {
         let before = self.store.n_items();
+        let visible_finished = self.finished_count();
         self.for_matching(
             |s| matches!(s, DownloadStatus::Done),
             |m, id| m.drop_finished_row(id),
         );
-        let n = (before - self.store.n_items()) as usize;
-        if n > 0 {
+        let removed_rows = (before - self.store.n_items()) as usize;
+        if removed_rows > 0 {
             // Same hygiene as a restart: drop archives and selections no remaining row references.
             let referenced: std::collections::HashSet<String> = self
                 .items()
@@ -4881,20 +4888,37 @@ impl DownloadManager {
             self.persist_queue();
             self.changed();
         }
-        n
+        visible_finished
     }
 
     /// Finished rows (for the clear-finished confirm and toast counts).
     pub fn finished_count(&self) -> usize {
         self.items()
-            .filter(|it| it.status() == DownloadStatus::Done)
+            .filter(|item| {
+                if item.status() != DownloadStatus::Done {
+                    return false;
+                }
+                if item.is_gallery_child() {
+                    return item
+                        .group()
+                        .and_then(|group| self.find(group.id()))
+                        .is_some_and(|owner| owner.status() == DownloadStatus::Done);
+                }
+                if item.is_gallery() {
+                    return !self.items().any(|child| {
+                        child.is_gallery_child()
+                            && child.group().is_some_and(|group| group.id() == item.id())
+                    });
+                }
+                true
+            })
             .count()
     }
 
     /// Snapshots of every finished row, in list order, for Clear Finished's Undo.
     pub fn finished_snapshots(&self) -> Vec<RemovedSnapshot> {
         self.items()
-            .filter(|it| it.status() == DownloadStatus::Done)
+            .filter(|it| it.status() == DownloadStatus::Done && !it.is_gallery_child())
             .map(|it| RemovedSnapshot {
                 url: it.url().to_string(),
                 dest_dir: it.dest_dir().to_string(),
@@ -4908,12 +4932,30 @@ impl DownloadManager {
                 started: self.has_started(it.id()),
                 public_only: it.public_only(),
                 group: it.group(),
+                gallery_job: self.gallery_job(it.id()),
             })
             .collect()
     }
 
     /// Drop one finished row: files stay on disk. Unlike `remove` there is nothing to cancel, snapshot or clean.
     fn drop_finished_row(&self, id: u64) {
+        if let Some(item) = self.find(id)
+            && item.is_gallery()
+        {
+            let children = self
+                .items()
+                .filter(|child| {
+                    child.is_gallery_child()
+                        && child.group().is_some_and(|group| group.id() == id)
+                })
+                .map(|child| child.id())
+                .collect::<Vec<_>>();
+            for child_id in children {
+                if let Some(position) = self.position_of(child_id) {
+                    self.store.remove(position);
+                }
+            }
+        }
         if let Some(item) = self.find(id)
             && crate::torrent::is_torrent(&item.url())
         {
@@ -4938,7 +4980,7 @@ impl DownloadManager {
     ) {
         let ids: Vec<u64> = self
             .items()
-            .filter(|it| matches(it.status()))
+            .filter(|it| !it.is_gallery_child() && matches(it.status()))
             .map(|it| it.id())
             .collect();
         for id in ids {
@@ -4965,10 +5007,11 @@ impl DownloadManager {
     pub fn active_count(&self) -> usize {
         self.items()
             .filter(|it| {
-                matches!(
-                    it.status(),
-                    DownloadStatus::Queued | DownloadStatus::Downloading | DownloadStatus::Paused
-                )
+                !it.is_gallery_child()
+                    && matches!(
+                        it.status(),
+                        DownloadStatus::Queued | DownloadStatus::Downloading | DownloadStatus::Paused
+                    )
             })
             .count()
     }
@@ -4989,7 +5032,8 @@ impl DownloadManager {
     }
 
     fn any_status(&self, pred: impl Fn(DownloadStatus) -> bool) -> bool {
-        self.items().any(|it| pred(it.status()))
+        self.items()
+            .any(|it| !it.is_gallery_child() && pred(it.status()))
     }
 
     fn queue_file() -> std::path::PathBuf {

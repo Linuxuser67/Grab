@@ -390,8 +390,14 @@ mod tests {
     fn detects_nondefault_segment_list_start_numbers() {
         let default_number = br#"<MPD xmlns="urn:mpeg:dash:schema:mpd:2011"><Period><AdaptationSet><SegmentList startNumber="1"/></AdaptationSet></Period></MPD>"#;
         let nondefault_number = br#"<mpd:MPD xmlns:mpd="urn:mpeg:dash:schema:mpd:2011"><mpd:Period><mpd:AdaptationSet><mpd:SegmentList startNumber="42"/></mpd:AdaptationSet></mpd:Period></mpd:MPD>"#;
-        assert_eq!(super::has_nondefault_segment_list_start_number(default_number), Some(false));
-        assert_eq!(super::has_nondefault_segment_list_start_number(nondefault_number), Some(true));
+        assert_eq!(
+            super::has_nondefault_segment_list_start_number(default_number),
+            Some(false)
+        );
+        assert_eq!(
+            super::has_nondefault_segment_list_start_number(nondefault_number),
+            Some(true)
+        );
     }
 
     #[test]

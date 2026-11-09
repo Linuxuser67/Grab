@@ -2046,7 +2046,9 @@ fn effective_list(
         for segment in &segments {
             let start = segment.time.ok_or(DashError::UnsupportedAddressing)?;
             let duration = segment.duration.ok_or(DashError::UnsupportedAddressing)?;
-            let end = start.checked_add(duration).ok_or(DashError::InvalidSegment)?;
+            let end = start
+                .checked_add(duration)
+                .ok_or(DashError::InvalidSegment)?;
             if previous_end.is_some_and(|previous| start != previous) {
                 return Err(DashError::UnsupportedAddressing);
             }
@@ -2109,10 +2111,9 @@ fn expand_dynamic_list(
     }
     let segment_duration = segment_duration.ok_or(DashError::UnsupportedAddressing)?;
     let window_depth = dynamic.time_shift_buffer_depth.unwrap_or(
-        dynamic.minimum_update_period.saturating_add(ticks_to_duration(
-            segment_duration,
-            list.timescale,
-        )?),
+        dynamic
+            .minimum_update_period
+            .saturating_add(ticks_to_duration(segment_duration, list.timescale)?),
     );
     let elapsed_ticks = duration_to_ticks(elapsed, list.timescale)?;
     let window_start_ticks =
@@ -2137,13 +2138,14 @@ fn expand_dynamic_list(
     for segment in &list.segments {
         let time = segment.time.ok_or(DashError::UnsupportedAddressing)?;
         let duration = segment.duration.ok_or(DashError::UnsupportedAddressing)?;
-        let end = time.checked_add(duration).ok_or(DashError::InvalidSegment)?;
+        let end = time
+            .checked_add(duration)
+            .ok_or(DashError::InvalidSegment)?;
         if end > elapsed_ticks || end <= window_start_ticks {
             continue;
         }
         let url = resolve_resource(&representation.source.base_url, &segment.media)?;
-        let filename =
-            super::resource_filename("dash-live-segment", None, &url, segment.range);
+        let filename = super::resource_filename("dash-live-segment", None, &url, segment.range);
         let number = time
             .checked_div(segment_duration)
             .and_then(|index| index.checked_add(1))
@@ -4542,10 +4544,7 @@ mod tests {
 
     #[test]
     fn dynamic_segment_list_rejects_implicit_timeline_times_and_repeat_runs() {
-        for timeline in [
-            r#"<S d="2"/>"#,
-            r#"<S t="100" d="2" r="1"/>"#,
-        ] {
+        for timeline in [r#"<S d="2"/>"#, r#"<S t="100" d="2" r="1"/>"#] {
             let body = format!(
                 r#"<MPD xmlns="urn:mpeg:dash:schema:mpd:2011" type="dynamic" availabilityStartTime="1970-01-01T00:00:00Z" minimumUpdatePeriod="PT2S" timeShiftBufferDepth="PT10S"><Period><AdaptationSet contentType="video" mimeType="video/mp4"><SegmentList timescale="1"><Initialization sourceURL="init.mp4"/><SegmentTimeline>{timeline}</SegmentTimeline><SegmentURL media="seg-100.m4s"/><SegmentURL media="seg-102.m4s"/></SegmentList><Representation id="v1" bandwidth="1000000"/></AdaptationSet></Period></MPD>"#
             );

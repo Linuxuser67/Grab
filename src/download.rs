@@ -842,8 +842,7 @@ impl DownloadManager {
             self.items()
                 .filter(|item| {
                     item.status() == DownloadStatus::Queued
-                        && !(item.is_gallery()
-                            && gallery_owners_with_rows.contains(&item.id()))
+                        && !(item.is_gallery() && gallery_owners_with_rows.contains(&item.id()))
                 })
                 .count(),
         );
@@ -1379,8 +1378,9 @@ impl DownloadManager {
         let item = DownloadItem::new(self.alloc_id_for_in(&existing), &url, &unique_title, &dir);
         item.set_is_gallery(true);
         item.set_group(
-            crate::download_store::DownloadGroup::try_new(item.id(), &job.title)
-                .or_else(|| crate::download_store::DownloadGroup::try_new(item.id(), &unique_title)),
+            crate::download_store::DownloadGroup::try_new(item.id(), &job.title).or_else(|| {
+                crate::download_store::DownloadGroup::try_new(item.id(), &unique_title)
+            }),
         );
         item.set_gallery_file_count(job.file_count.unwrap_or(0));
         item.set_gallery_files_done(0);
@@ -3590,12 +3590,16 @@ impl DownloadManager {
             return;
         };
         let output_path = std::path::Path::new(path);
-        let Some(relative) = output_path.strip_prefix(&output_dir).ok().filter(|relative| {
-            !relative.as_os_str().is_empty()
-                && relative.components().all(|component| {
-                    matches!(component, std::path::Component::Normal(_))
-                })
-        }) else {
+        let Some(relative) = output_path
+            .strip_prefix(&output_dir)
+            .ok()
+            .filter(|relative| {
+                !relative.as_os_str().is_empty()
+                    && relative
+                        .components()
+                        .all(|component| matches!(component, std::path::Component::Normal(_)))
+            })
+        else {
             tracing::warn!(
                 path = %path,
                 output_dir = %output_dir.display(),
@@ -3630,9 +3634,10 @@ impl DownloadManager {
             return;
         }
 
-        if let Some(existing) = self.items().find(|candidate| {
-            candidate.is_gallery_child() && candidate.gallery_file_path() == path
-        }) {
+        if let Some(existing) = self
+            .items()
+            .find(|candidate| candidate.is_gallery_child() && candidate.gallery_file_path() == path)
+        {
             existing.set_progress(progress);
             existing.set_detail(detail.to_string());
             existing.set_status(status);
@@ -3675,14 +3680,12 @@ impl DownloadManager {
                     DownloadStatus::Cancelled,
                     DownloadStatus::Queued | DownloadStatus::Paused | DownloadStatus::Downloading,
                 ) => DownloadStatus::Cancelled,
-                (
-                    DownloadStatus::Paused,
-                    DownloadStatus::Queued | DownloadStatus::Downloading,
-                ) => DownloadStatus::Paused,
-                (
-                    DownloadStatus::Queued,
-                    DownloadStatus::Downloading | DownloadStatus::Paused,
-                ) => DownloadStatus::Queued,
+                (DownloadStatus::Paused, DownloadStatus::Queued | DownloadStatus::Downloading) => {
+                    DownloadStatus::Paused
+                }
+                (DownloadStatus::Queued, DownloadStatus::Downloading | DownloadStatus::Paused) => {
+                    DownloadStatus::Queued
+                }
                 (_, status) => status,
             };
             let detail = match status {
@@ -3730,8 +3733,7 @@ impl DownloadManager {
             }
         }
         if self.items().any(|item| {
-            item.is_gallery_child()
-                && item.group().is_some_and(|group| group.id() == owner_id)
+            item.is_gallery_child() && item.group().is_some_and(|group| group.id() == owner_id)
         }) {
             self.changed();
         }
@@ -3773,8 +3775,7 @@ impl DownloadManager {
             }
         }
         if self.items().any(|item| {
-            item.is_gallery_child()
-                && item.group().is_some_and(|group| group.id() == owner_id)
+            item.is_gallery_child() && item.group().is_some_and(|group| group.id() == owner_id)
         }) {
             self.changed();
         }
@@ -3963,7 +3964,8 @@ impl DownloadManager {
                                 &item_c,
                                 path,
                                 DownloadStatus::Downloading,
-                                update.current_file_percent
+                                update
+                                    .current_file_percent
                                     .map(|percent| f64::from(percent) / 100.0)
                                     .unwrap_or(0.0),
                                 &update
@@ -4024,10 +4026,16 @@ impl DownloadManager {
                                 // Failed so it's retryable via retry_failed().
                                 // Clean success is Done.
                                 if r.exit_code.is_some() {
-                                    this.finish_gallery_file_rows(item_c.id(), DownloadStatus::Failed);
+                                    this.finish_gallery_file_rows(
+                                        item_c.id(),
+                                        DownloadStatus::Failed,
+                                    );
                                     item_c.set_status(DownloadStatus::Failed);
                                 } else {
-                                    this.finish_gallery_file_rows(item_c.id(), DownloadStatus::Done);
+                                    this.finish_gallery_file_rows(
+                                        item_c.id(),
+                                        DownloadStatus::Done,
+                                    );
                                     item_c.set_status(DownloadStatus::Done);
                                 }
                                 tracing::info!(
@@ -4501,8 +4509,7 @@ impl DownloadManager {
             let children = self
                 .items()
                 .filter(|item| {
-                    item.is_gallery_child()
-                        && item.group().is_some_and(|group| group.id() == id)
+                    item.is_gallery_child() && item.group().is_some_and(|group| group.id() == id)
                 })
                 .map(|item| item.id())
                 .collect::<Vec<_>>();
@@ -4990,8 +4997,7 @@ impl DownloadManager {
             let children = self
                 .items()
                 .filter(|child| {
-                    child.is_gallery_child()
-                        && child.group().is_some_and(|group| group.id() == id)
+                    child.is_gallery_child() && child.group().is_some_and(|group| group.id() == id)
                 })
                 .map(|child| child.id())
                 .collect::<Vec<_>>();
@@ -5055,7 +5061,9 @@ impl DownloadManager {
                 !it.is_gallery_child()
                     && matches!(
                         it.status(),
-                        DownloadStatus::Queued | DownloadStatus::Downloading | DownloadStatus::Paused
+                        DownloadStatus::Queued
+                            | DownloadStatus::Downloading
+                            | DownloadStatus::Paused
                     )
             })
             .count()

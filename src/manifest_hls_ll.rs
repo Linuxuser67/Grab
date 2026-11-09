@@ -216,9 +216,8 @@ pub(crate) fn plan_hls_media_playlist(
     body: &[u8],
 ) -> Result<Option<HlsPlan>, ManifestError> {
     let has_partial_segments = has_ll_hls_partial_segments(body);
-    let use_standard_encryption_planner = !has_partial_segments
-        && has_hls_media_key_tag(body)
-        && !has_ll_hls_delta_update(body);
+    let use_standard_encryption_planner =
+        !has_partial_segments && has_hls_media_key_tag(body) && !has_ll_hls_delta_update(body);
     if !has_ll_hls_tags(body) || use_standard_encryption_planner {
         // Keep complete-segment LL-HLS on the live planner unless it actually
         // carries media encryption. Only complete encrypted segments are

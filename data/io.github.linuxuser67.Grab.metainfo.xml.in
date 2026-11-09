@@ -50,6 +50,14 @@
     </screenshot>
   </screenshots>
   <releases>
+    <release version="6.5.0~beta.15" date="2026-11-09">
+      <description>
+        <ul>
+          <li>Playlist collection rows now use conditional action icons like normal download rows, with a collection-level remove-from-list action.</li>
+          <li>Playlist imports reject duplicate entries, fixing the same video downloading twice under concurrent downloads.</li>
+        </ul>
+      </description>
+    </release>
     <release version="6.5.0~beta.13" date="2026-11-07">
       <description>
         <ul>

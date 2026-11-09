@@ -1079,7 +1079,6 @@ async fn streamed_destination_writer_resumes_without_staged_source_files() {
         .expect("remove HLS writer test directory");
 }
 
-
 #[tokio::test]
 async fn appendable_destination_writer_persists_empty_checkpoint_before_pause() {
     let root = test_directory();
@@ -1131,7 +1130,10 @@ async fn appendable_destination_writer_persists_empty_checkpoint_before_pause() 
     let part = crate::manifest_destination::part_path(&staging, &output, 79, track)
         .expect("resolve empty destination part");
     assert_eq!(
-        tokio::fs::metadata(&part).await.expect("inspect empty part").len(),
+        tokio::fs::metadata(&part)
+            .await
+            .expect("inspect empty part")
+            .len(),
         0
     );
 
@@ -1139,7 +1141,10 @@ async fn appendable_destination_writer_persists_empty_checkpoint_before_pause() 
         .send(crate::video::StopIntent::Pause)
         .expect("queue pause before the first resource commit");
     assert!(matches!(
-        writer.append_next_outcome(&mut abort).await.expect("pause first append"),
+        writer
+            .append_next_outcome(&mut abort)
+            .await
+            .expect("pause first append"),
         AppendNextOutcome::Stopped(crate::video::StopIntent::Pause)
     ));
     drop(writer);
@@ -1161,11 +1166,16 @@ async fn appendable_destination_writer_persists_empty_checkpoint_before_pause() 
     };
     assert_eq!(committed, 0);
     assert_eq!(resumed.next_resource_index(), 0);
-    assert!(resumed
-        .append_next(&mut finish_abort)
+    assert!(
+        resumed
+            .append_next(&mut finish_abort)
+            .await
+            .expect("append first resource after resume")
+    );
+    resumed
+        .finish()
         .await
-        .expect("append first resource after resume"));
-    resumed.finish().await.expect("flush resumed destination part");
+        .expect("flush resumed destination part");
     assert_eq!(
         tokio::fs::read(&part).await.expect("read resumed part"),
         b"first"

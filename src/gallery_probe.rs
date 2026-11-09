@@ -140,16 +140,18 @@ pub(crate) fn route_for_collection(
     _host_sticky: Option<StickyMode>,
 ) -> ProbeOutcome {
     if gallery_items.is_some_and(|items| !items.is_empty()) {
-        return ProbeOutcome::Gallery;
+        return route(ytdlp_video, gallery_items, _host_sticky);
     }
 
-    if ytdlp_video || ytdlp_playlist_entries > 0 {
-        ProbeOutcome::VideoYtDlp {
+    // A recognized yt-dlp playlist remains available when gallery-dl did
+    // not return files, even if its metadata count is the only video signal.
+    if ytdlp_playlist_entries > 0 {
+        return ProbeOutcome::VideoYtDlp {
             gallery_toggle: false,
-        }
-    } else {
-        ProbeOutcome::None
+        };
     }
+
+    route(ytdlp_video, gallery_items, _host_sticky)
 }
 
 /// Whether a probe error should be surfaced to the user instead of falling

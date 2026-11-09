@@ -5269,7 +5269,8 @@ impl DownloadManager {
                         cookies_browser: "none".to_string(),
                         speed_limit: None,
                         range: None,
-                    })
+                    
+                        file_rows: Vec::new(),})
                 } else {
                     None
                 }

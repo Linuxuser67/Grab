@@ -673,7 +673,11 @@ fn validate_start_point(playlist: &LlMediaPlaylist) -> Result<(), ManifestError>
     if !start.time_offset.get().is_finite() {
         return Err(ManifestError::InvalidDuration);
     }
-    if start.extra_attrs.iter().any(|(name, _)| name.starts_with("REQ-")) {
+    if start
+        .extra_attrs
+        .iter()
+        .any(|(name, _)| name.starts_with("REQ-"))
+    {
         return Err(ManifestError::UnsupportedPlaylist);
     }
     Ok(())

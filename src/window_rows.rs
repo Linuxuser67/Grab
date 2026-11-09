@@ -820,16 +820,20 @@ pub(crate) fn build_download_group_row(
         let toasts = Rc::clone(toasts);
         remove_btn.connect_clicked(move |_| {
             let ids = ids.borrow().clone();
-            // Gallery child rows are projections of one process owner. Remove
-            // and Undo the owner as a single gallery job; its children are
-            // reconstructed from gallery-dl events after Undo.
-            let gallery_owner_id = ids
+            // Collection child rows are projections of one process owner.
+            // Remove and Undo the owner as one job; child rows are reconstructed
+            // from its persisted state after Undo.
+            let collection_owner_id = ids
                 .iter()
                 .find_map(|id| manager.find(*id).and_then(|item| item.group()))
                 .map(|group| group.id())
-                .filter(|id| manager.find(*id).is_some_and(|item| item.is_gallery()));
+                .filter(|id| {
+                    manager.find(*id).is_some_and(|item| {
+                        item.is_gallery() || item.is_collection_owner()
+                    })
+                });
             let removal_ids =
-                gallery_owner_id.map_or_else(|| ids.clone(), |owner_id| vec![owner_id]);
+                collection_owner_id.map_or_else(|| ids.clone(), |owner_id| vec![owner_id]);
             let snapshots = removal_ids
                 .iter()
                 .filter_map(|id| {
@@ -911,10 +915,10 @@ impl DownloadGroupRow {
     }
 }
 
-/// A gallery file is a read-only projection of one shared gallery-dl
+/// A collection file is a read-only projection of one shared downloader
 /// process. It intentionally has no per-file process controls: pause/cancel
 /// semantics belong to the parent collection job.
-fn build_gallery_file_row(item: &crate::download::DownloadItem) -> gtk4::ListBoxRow {
+fn build_collection_file_row(item: &crate::download::DownloadItem) -> gtk4::ListBoxRow {
     let outer = gtk4::Box::new(gtk4::Orientation::Vertical, 3);
     outer.set_margin_top(5);
     outer.set_margin_bottom(5);
@@ -987,8 +991,8 @@ pub(crate) fn build_row(
     manager: &Rc<DownloadManager>,
     toasts: &Rc<adw::ToastOverlay>,
 ) -> gtk4::ListBoxRow {
-    if item.is_gallery_child() {
-        return build_gallery_file_row(item);
+    if item.is_collection_child() {
+        return build_collection_file_row(item);
     }
     let outer = gtk4::Box::new(gtk4::Orientation::Vertical, 6);
     outer.set_margin_top(12);
@@ -1010,10 +1014,15 @@ pub(crate) fn build_row(
             ),
         matches!(
             source,
-            Some(crate::media_types::VideoSource::Page {
-                audio_only: true,
-                ..
-            })
+            Some(
+                crate::media_types::VideoSource::Page {
+                    audio_only: true,
+                    ..
+                } | crate::media_types::VideoSource::Playlist {
+                    audio_only: true,
+                    ..
+                }
+            )
         ),
         crate::torrent::is_torrent(&item.url()),
         matches!(
@@ -1021,6 +1030,7 @@ pub(crate) fn build_row(
             Some(
                 crate::media_types::VideoSource::Page { .. }
                     | crate::media_types::VideoSource::Manifest { .. }
+                    | crate::media_types::VideoSource::Playlist { .. }
             )
         ),
         item.is_gallery(),

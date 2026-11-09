@@ -3523,11 +3523,19 @@ video/b.m3u8
         let replaced = replace_hls_pathway_uri(&source, &clone, None)
             .expect("safe replacement URL");
         assert_eq!(replaced.host_str(), Some("backup.example.test"));
-        let pairs = replaced.query_pairs().collect::<Vec<_>>();
-        assert_eq!(pairs[0], ("keep".into(), "yes".into()));
-        assert_eq!(pairs[1], ("a".into(), "first".into()));
-        assert_eq!(pairs[2], ("token".into(), "new value".into()));
-        assert_eq!(pairs[3], ("z".into(), "last".into()));
+        let pairs = replaced
+            .query_pairs()
+            .map(|(name, value)| (name.into_owned(), value.into_owned()))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            pairs,
+            [
+                ("keep".to_string(), "yes".to_string()),
+                ("a".to_string(), "first".to_string()),
+                ("token".to_string(), "new value".to_string()),
+                ("z".to_string(), "last".to_string()),
+            ]
+        );
     }
 
     #[test]
@@ -3548,6 +3556,8 @@ video/b.m3u8
         assert_eq!(master.variants.len(), 2);
 
         for invalid in [
+            br#"{"VERSION":1,"TTL":1,"PATHWAY-PRIORITY":["a","a"]}"#.as_slice(),
+            br#"{"VERSION":1,"TTL":1,"PATHWAY-PRIORITY":["a"],"PATHWAY-CLONES":[]}"#.as_slice(),
             br#"{"VERSION":1,"TTL":1,"PATHWAY-PRIORITY":["a"],"PATHWAY-CLONES":[{"BASE-ID":"a","ID":"b","URI-REPLACEMENT":{"HOST":"backup.example.test:8443"}}]}"#.as_slice(),
             br#"{"VERSION":1,"TTL":1,"PATHWAY-PRIORITY":["a"],"PATHWAY-CLONES":[{"BASE-ID":"a","ID":"b","URI-REPLACEMENT":{"PARAMS":{"_HLS_bad":"value"}}}]}"#.as_slice(),
         ] {

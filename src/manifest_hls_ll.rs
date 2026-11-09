@@ -525,6 +525,7 @@ fn build_plan(manifest_url: &str, playlist: LlMediaPlaylist) -> Result<HlsPlan, 
         blocking_reload,
         ll_first_part_independent: first_part_independent,
         rendition_reports,
+        inherited_variables: crate::manifest::hls_variables::HlsVariableEnvironment::default(),
     })
 }
 

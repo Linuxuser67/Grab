@@ -840,11 +840,29 @@ pub(crate) async fn lookup_hls_media(
     client: &reqwest::Client,
     raw_url: &str,
 ) -> Result<HlsPlan, ManifestIntakeError> {
+    lookup_hls_media_with_variables(
+        client,
+        raw_url,
+        &crate::manifest::hls_variables::HlsVariableEnvironment::default(),
+    )
+    .await
+}
+
+/// Fetch and parse a child playlist using variables explicitly imported from its parent master.
+pub(crate) async fn lookup_hls_media_with_variables(
+    client: &reqwest::Client,
+    raw_url: &str,
+    parent_variables: &crate::manifest::hls_variables::HlsVariableEnvironment,
+) -> Result<HlsPlan, ManifestIntakeError> {
     let requested_url = Url::parse(raw_url)
         .map_err(|_| ManifestIntakeError::Failed(gettext("Invalid stream manifest URL")))?;
     let (final_url, body, _) = fetch_bounded_manifest(client, requested_url).await?;
-    crate::manifest::plan_hls_media_playlist(final_url.as_str(), &body)
-        .map_err(|error| ManifestIntakeError::Unsupported(error.to_string()))
+    crate::manifest::plan_hls_media_playlist_with_parent_variables(
+        final_url.as_str(),
+        &body,
+        parent_variables,
+    )
+    .map_err(|error| ManifestIntakeError::Unsupported(error.to_string()))
 }
 
 /// Poll one live HLS playlist snapshot. Blocking reloads use a single request:
@@ -854,6 +872,7 @@ pub(crate) async fn lookup_hls_live_media(
     raw_url: &str,
     blocking_reload: Option<(u64, Option<u64>)>,
     can_skip_until: Option<Duration>,
+    parent_variables: &crate::manifest::hls_variables::HlsVariableEnvironment,
 ) -> Result<HlsPlan, ManifestIntakeError> {
     let requested_url = hls_live_reload_url(raw_url, blocking_reload, can_skip_until)?;
     let (final_url, body, _) = fetch_bounded_manifest_once(
@@ -865,8 +884,12 @@ pub(crate) async fn lookup_hls_live_media(
     )
     .await?;
     let final_url = strip_hls_blocking_reload_query(&final_url);
-    crate::manifest::plan_hls_media_playlist(final_url.as_str(), &body)
-        .map_err(|error| ManifestIntakeError::Unsupported(error.to_string()))
+    crate::manifest::plan_hls_media_playlist_with_parent_variables(
+        final_url.as_str(),
+        &body,
+        parent_variables,
+    )
+    .map_err(|error| ManifestIntakeError::Unsupported(error.to_string()))
 }
 
 fn hls_live_reload_url(

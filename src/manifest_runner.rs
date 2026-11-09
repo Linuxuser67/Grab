@@ -366,6 +366,7 @@ struct LiveHlsTrack {
     part_target: Option<Duration>,
     blocking_reload: Option<(u64, Option<u64>)>,
     can_skip_until: Option<Duration>,
+    inherited_variables: crate::manifest::hls_variables::HlsVariableEnvironment,
     rendition_reports: Box<[crate::manifest::hls_ll::HlsRenditionReport]>,
     destination_part: Option<LiveHlsDestination>,
 }
@@ -2095,19 +2096,29 @@ async fn resolve_tracks(
                 audio_url,
                 subtitle_url,
                 subtitle_language,
+                variables,
             } = *plan;
             guard_manifest_child_url(&source.url, &video_url, guarded_child_hosts)?;
             if let Some(audio_url) = audio_url.as_ref() {
                 guard_manifest_child_url(&source.url, audio_url, guarded_child_hosts)?;
             }
-            let video =
-                crate::manifest_intake::lookup_hls_media(client, video_url.as_str()).await?;
+            let video = crate::manifest_intake::lookup_hls_media_with_variables(
+                client,
+                video_url.as_str(),
+                &variables,
+            )
+            .await?;
             guard_hls_resources(&source.url, &video, guarded_child_hosts)?;
             let subtitle = match subtitle_url {
                 Some(url) => {
                     guard_manifest_child_url(&source.url, &url, guarded_child_hosts)?;
                     let plan =
-                        crate::manifest_intake::lookup_hls_media(client, url.as_str()).await?;
+                        crate::manifest_intake::lookup_hls_media_with_variables(
+                        client,
+                        url.as_str(),
+                        &variables,
+                    )
+                    .await?;
                     if plan.is_live {
                         return Err(ManifestRunError::Unsupported(
                             "Native live HLS subtitle renditions are not supported yet".to_string(),
@@ -2121,7 +2132,12 @@ async fn resolve_tracks(
             let audio = match audio_url {
                 Some(url) => {
                     let plan =
-                        crate::manifest_intake::lookup_hls_media(client, url.as_str()).await?;
+                        crate::manifest_intake::lookup_hls_media_with_variables(
+                        client,
+                        url.as_str(),
+                        &variables,
+                    )
+                    .await?;
                     guard_hls_resources(&source.url, &plan, guarded_child_hosts)?;
                     Some(plan)
                 }

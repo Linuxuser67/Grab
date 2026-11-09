@@ -218,6 +218,7 @@ pub(super) async fn load_live_hls_track(
         part_target: plan.part_target,
         blocking_reload: plan.blocking_reload,
         can_skip_until: plan.can_skip_until,
+        inherited_variables: plan.inherited_variables.clone(),
         rendition_reports: plan.rendition_reports.clone(),
         destination_part: None,
     })
@@ -860,6 +861,7 @@ async fn poll_live_hls_track(
             track.playlist_url.as_str(),
             track.blocking_reload,
             track.can_skip_until,
+            &track.inherited_variables,
         ) => result,
     };
     let plan = match result {
@@ -1396,6 +1398,7 @@ mod destination_part_tests {
             part_target: plan.part_target,
             blocking_reload: plan.blocking_reload,
             can_skip_until: plan.can_skip_until,
+            inherited_variables: plan.inherited_variables.clone(),
             rendition_reports: plan.rendition_reports.clone(),
             destination_part: None,
         }

@@ -24,7 +24,7 @@ pub(crate) mod hls_ll;
 mod hls_ads;
 
 #[path = "manifest_hls_variables.rs"]
-mod hls_variables;
+pub(crate) mod hls_variables;
 
 #[path = "manifest_dash_roles.rs"]
 mod dash_roles;
@@ -338,6 +338,7 @@ pub(crate) struct HlsMasterPlan {
     pub(crate) variants: Box<[HlsVariant]>,
     pub(crate) audio_renditions: Box<[HlsAudioRendition]>,
     pub(crate) subtitle_renditions: Box<[HlsSubtitleRendition]>,
+    pub(crate) variables: hls_variables::HlsVariableEnvironment,
 }
 
 /// Validated HLS media playlist, ordered resources, and local FFmpeg input.
@@ -354,6 +355,8 @@ pub(crate) struct HlsPlan {
     pub(crate) blocking_reload: Option<(u64, Option<u64>)>,
     pub(crate) ll_first_part_independent: Option<bool>,
     pub(crate) rendition_reports: Box<[hls_ll::HlsRenditionReport]>,
+    /// Parent multivariant variables required by IMPORT on future live reloads.
+    pub(crate) inherited_variables: hls_variables::HlsVariableEnvironment,
     local_playlist: MediaPlaylist,
 }
 
@@ -405,6 +408,7 @@ impl HlsPlan {
             blocking_reload: None,
             ll_first_part_independent: None,
             rendition_reports: Vec::new().into_boxed_slice(),
+            inherited_variables: hls_variables::HlsVariableEnvironment::default(),
             local_playlist,
         })
     }
@@ -1128,6 +1132,9 @@ pub(crate) fn parse_hls_master_playlist(
             "playlist exceeds its supported size limit".to_string(),
         ));
     }
+    let (expanded_body, variables) =
+        hls_variables::expand_master_playlist(manifest_url, body)?;
+    let body = expanded_body.as_deref().unwrap_or(body);
     let base_url = parse_manifest_url(manifest_url)?;
     if base_url
         .query_pairs()
@@ -1342,6 +1349,7 @@ pub(crate) fn parse_hls_master_playlist(
         variants: variants.into_boxed_slice(),
         audio_renditions: audio_renditions.into_boxed_slice(),
         subtitle_renditions: subtitle_renditions.into_boxed_slice(),
+        variables,
     })
 }
 
@@ -1414,12 +1422,26 @@ pub(crate) fn plan_hls_media_playlist(
     manifest_url: &str,
     body: &[u8],
 ) -> Result<HlsPlan, ManifestError> {
+    plan_hls_media_playlist_with_parent_variables(
+        manifest_url,
+        body,
+        &hls_variables::HlsVariableEnvironment::default(),
+    )
+}
+
+/// Plan a child media playlist using the explicitly imported variables from its parent master.
+pub(crate) fn plan_hls_media_playlist_with_parent_variables(
+    manifest_url: &str,
+    body: &[u8],
+    parent_variables: &hls_variables::HlsVariableEnvironment,
+) -> Result<HlsPlan, ManifestError> {
     if body.len() > MAX_MANIFEST_BYTES {
         return Err(ManifestError::Parse(
             "playlist exceeds its supported size limit".to_string(),
         ));
     }
-    let expanded_body = hls_variables::expand_media_playlist(manifest_url, body)?;
+    let expanded_body =
+        hls_variables::expand_media_playlist_with_parent(manifest_url, body, parent_variables)?;
     let body = expanded_body.as_deref().unwrap_or(body);
     let base_url = parse_manifest_url(manifest_url)?;
     if base_url
@@ -1428,11 +1450,14 @@ pub(crate) fn plan_hls_media_playlist(
     {
         return Err(ManifestError::UnsupportedPlaylist);
     }
-    if let Some(plan) = hls_ll::plan_hls_media_playlist(manifest_url, body)? {
-        return Ok(plan);
-    }
-    let playlist = parse_hls_media_playlist(body)?;
-    build_hls_plan(base_url, playlist)
+    let mut plan = if let Some(plan) = hls_ll::plan_hls_media_playlist(manifest_url, body)? {
+        plan
+    } else {
+        let playlist = parse_hls_media_playlist(body)?;
+        build_hls_plan(base_url, playlist)?
+    };
+    plan.inherited_variables = parent_variables.clone();
+    Ok(plan)
 }
 
 fn build_hls_plan(base_url: Url, mut playlist: MediaPlaylist) -> Result<HlsPlan, ManifestError> {
@@ -1768,6 +1793,7 @@ fn build_hls_plan(base_url: Url, mut playlist: MediaPlaylist) -> Result<HlsPlan,
         blocking_reload: None,
         ll_first_part_independent: None,
         rendition_reports: Vec::new().into_boxed_slice(),
+        inherited_variables: hls_variables::HlsVariableEnvironment::default(),
         local_playlist: playlist,
     })
 }

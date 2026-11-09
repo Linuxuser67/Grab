@@ -22,6 +22,7 @@ pub(crate) struct HlsMasterDownloadPlan {
     pub(crate) audio_url: Option<Url>,
     pub(crate) subtitle_url: Option<Url>,
     pub(crate) subtitle_language: Option<String>,
+    pub(crate) variables: crate::manifest::hls_variables::HlsVariableEnvironment,
 }
 
 #[derive(Debug)]
@@ -494,6 +495,7 @@ pub(crate) fn download_plan(
                                 .flatten()
                             })
                     }),
+                    variables: master.variables.clone(),
                 },
             )))
         }

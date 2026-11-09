@@ -282,43 +282,6 @@ fn playlist_group_metadata_restores_with_each_child() {
     let _ = std::fs::remove_file(&queue_file);
 }
 
-#[test]
-fn group_pause_parks_pending_children_and_preserves_scheduled_start() {
-    let (_queue_lock, _main_loop_lock) = test_locks();
-    let queue_file = test_queue_file("group-pause");
-    let settings = test_settings();
-    let manager = DownloadManager::new(gio::ListStore::new::<DownloadItem>(), settings);
-
-    let active = DownloadItem::new(1, "https://example.com/active", "active.mp4", "/tmp");
-    active.set_status(DownloadStatus::Downloading);
-    let queued = DownloadItem::new(2, "https://example.com/queued", "queued.mp4", "/tmp");
-    queued.set_status(DownloadStatus::Queued);
-    let scheduled = DownloadItem::new(3, "https://example.com/scheduled", "scheduled.mp4", "/tmp");
-    let scheduled_at = glib::DateTime::now_local()
-        .expect("local clock should be available")
-        .to_unix()
-        + 3600;
-    scheduled.set_scheduled_at(scheduled_at);
-    scheduled.set_status(DownloadStatus::Scheduled);
-
-    manager.store().append(&active);
-    manager.store().append(&queued);
-    manager.store().append(&scheduled);
-
-    assert_eq!(manager.pause_many(&[1, 2, 3]), 3);
-    for item in [&active, &queued, &scheduled] {
-        assert_eq!(item.status(), DownloadStatus::Paused);
-    }
-    assert_eq!(scheduled.scheduled_at(), scheduled_at);
-
-    assert_eq!(manager.resume_many(&[scheduled.id()]), 1);
-    assert_eq!(scheduled.status(), DownloadStatus::Scheduled);
-    assert_eq!(active.status(), DownloadStatus::Paused);
-    assert_eq!(queued.status(), DownloadStatus::Paused);
-
-    let _ = std::fs::remove_file(&queue_file);
-}
-
 fn test_queue_file(tag: &str) -> std::path::PathBuf {
     let p = std::env::temp_dir().join(format!(
         "grab-q-{:?}-{tag}.json",

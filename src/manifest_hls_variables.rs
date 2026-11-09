@@ -629,4 +629,3 @@ segment-{$token}.ts
         );
     }
 }
-

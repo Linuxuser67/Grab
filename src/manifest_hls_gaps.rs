@@ -21,10 +21,7 @@ pub(super) fn plan_gap_removal(
 ) -> Result<GapRemovalPlan, ManifestError> {
     let mut segments = vec![false; playlist.segments.len()];
     for (index, segment) in playlist.segments.iter().enumerate() {
-        let mut gap_tags = segment
-            .unknown_tags
-            .iter()
-            .filter(|tag| tag.tag == "X-GAP");
+        let mut gap_tags = segment.unknown_tags.iter().filter(|tag| tag.tag == "X-GAP");
         let Some(gap_tag) = gap_tags.next() else {
             continue;
         };
@@ -82,8 +79,8 @@ mod tests {
         let local_bytes = plan.local_playlist_bytes().expect("local playlist");
         let local_text = String::from_utf8(local_bytes).expect("local playlist is UTF-8");
         assert!(!local_text.contains("#EXT-X-GAP"));
-        let local = m3u8_rs::parse_media_playlist_res(local_text.as_bytes())
-            .expect("parse local playlist");
+        let local =
+            m3u8_rs::parse_media_playlist_res(local_text.as_bytes()).expect("parse local playlist");
         assert_eq!(local.segments.len(), 2);
         assert!(
             local.segments.iter().all(|segment| !segment.discontinuity),
@@ -98,8 +95,7 @@ mod tests {
             .expect("discontinuity across a gap should be retained");
 
         let local_bytes = plan.local_playlist_bytes().expect("local playlist");
-        let local = m3u8_rs::parse_media_playlist_res(&local_bytes)
-            .expect("parse local playlist");
+        let local = m3u8_rs::parse_media_playlist_res(&local_bytes).expect("parse local playlist");
         assert_eq!(local.segments.len(), 2);
         assert!(!local.segments[0].discontinuity);
         assert!(
@@ -135,23 +131,21 @@ mod tests {
             .iter()
             .filter(|resource| resource.kind == HlsResourceKind::Key)
             .collect::<Vec<_>>();
-        assert_eq!(keys.len(), 1, "the earlier encrypted segment still needs its key");
+        assert_eq!(
+            keys.len(),
+            1,
+            "the earlier encrypted segment still needs its key"
+        );
         let local_bytes = plan.local_playlist_bytes().expect("local playlist");
         let local = m3u8_rs::parse_media_playlist_res(&local_bytes)
             .expect("parse local playlist");
         assert_eq!(local.segments.len(), 2);
         assert_eq!(
-            local.segments[0]
-                .key
-                .as_ref()
-                .map(|key| key.method.clone()),
+            local.segments[0].key.as_ref().map(|key| key.method.clone()),
             Some(m3u8_rs::KeyMethod::AES128)
         );
         assert_eq!(
-            local.segments[1]
-                .key
-                .as_ref()
-                .map(|key| key.method.clone()),
+            local.segments[1].key.as_ref().map(|key| key.method.clone()),
             Some(m3u8_rs::KeyMethod::None)
         );
     }

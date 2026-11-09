@@ -495,8 +495,10 @@ pub(crate) fn parse_dash_manifest_at(
 
     let is_dynamic = matches!(presentation, DashPresentation::Dynamic(_));
     if is_dynamic
-        && dash_roles::has_nondefault_segment_list_start_number(body.as_bytes())
+        && (dash_roles::has_nondefault_segment_list_start_number(body.as_bytes())
             .ok_or(DashError::Parse)?
+            || dash_roles::has_unsupported_segment_list_timing_attributes(body.as_bytes())
+                .ok_or(DashError::Parse)?)
     {
         return Err(DashError::UnsupportedAddressing);
     }

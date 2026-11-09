@@ -18,32 +18,59 @@ pub(super) fn expand_media_playlist(
     manifest_url: &str,
     body: &[u8],
 ) -> Result<Option<Vec<u8>>, ManifestError> {
-    let has_definitions = body
-        .windows(b"#EXT-X-DEFINE:".len())
-        .any(|window| window == b"#EXT-X-DEFINE:");
-    let text = std::str::from_utf8(body)
-        .map_err(|error| ManifestError::Parse(format!("HLS playlist is not UTF-8: {error}")))?;
-    if !has_definitions {
-        return if contains_variable_reference(text) {
-            Err(unsupported(
-                "variable reference has no EXT-X-DEFINE declaration",
-            ))
-        } else {
-            Ok(None)
-        };
-    }
+    let Some(text) = playlist_text_with_variables(body)? else {
+        return Ok(None);
+    };
     let parsed = MediaPlaylist::parse(text).map_err(|error| {
         ManifestError::Parse(format!(
-            "could not parse HLS variable declarations: {error}"
+            "could not parse HLS media-playlist variable declarations: {error}"
         ))
     })?;
-    if parsed.defines.len() > MAX_VARIABLES {
+    expand_with_definitions(manifest_url, text, parsed.defines)
+}
+
+pub(super) fn expand_master_playlist(
+    manifest_url: &str,
+    body: &[u8],
+) -> Result<Option<Vec<u8>>, ManifestError> {
+    let Some(text) = playlist_text_with_variables(body)? else {
+        return Ok(None);
+    };
+    let parsed = broadcast_hls::MasterPlaylist::parse(text).map_err(|error| {
+        ManifestError::Parse(format!(
+            "could not parse HLS master-playlist variable declarations: {error}"
+        ))
+    })?;
+    expand_with_definitions(manifest_url, text, parsed.defines)
+}
+
+fn playlist_text_with_variables(body: &[u8]) -> Result<Option<&str>, ManifestError> {
+    let has_definitions = body
+        .split(|byte| *byte == b'\n')
+        .any(|line| line.starts_with(b"#EXT-X-DEFINE:"));
+    if !has_definitions && !body.windows(b"{$".len()).any(|window| window == b"{$") {
+        return Ok(None);
+    }
+    let text = std::str::from_utf8(body)
+        .map_err(|error| ManifestError::Parse(format!("HLS playlist is not UTF-8: {error}")))?;
+    if !has_definitions && !contains_variable_reference(text) {
+        return Ok(None);
+    }
+    Ok(Some(text))
+}
+
+fn expand_with_definitions(
+    manifest_url: &str,
+    text: &str,
+    definitions: Vec<Define>,
+) -> Result<Option<Vec<u8>>, ManifestError> {
+    if definitions.len() > MAX_VARIABLES {
         return Err(unsupported("playlist has too many variable declarations"));
     }
 
     let playlist_url = Url::parse(manifest_url).map_err(|_| ManifestError::InvalidManifestUrl)?;
-    let mut variables = HashMap::with_capacity(parsed.defines.len());
-    for definition in parsed.defines {
+    let mut variables = HashMap::with_capacity(definitions.len());
+    for definition in definitions {
         let (name, value) = match definition {
             Define::Name {
                 name,
@@ -78,7 +105,7 @@ pub(super) fn expand_media_playlist(
             }
             Define::Import { .. } => {
                 return Err(unsupported(
-                    "media-playlist IMPORT requires parent multivariant variables",
+                    "EXT-X-DEFINE IMPORT requires parent multivariant variables",
                 ));
             }
             _ => return Err(unsupported("unsupported EXT-X-DEFINE declaration")),

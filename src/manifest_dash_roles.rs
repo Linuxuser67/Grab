@@ -57,7 +57,6 @@ pub(super) fn representation_metadata(
     let mut adaptation_count = 0_usize;
     let mut period_list_pto = None;
     let mut adaptation_list_pto = None;
-    let mut representation_list_pto = None;
 
     loop {
         let (namespace, event) = reader.read_resolved_event_into(&mut buffer).ok()?;
@@ -72,7 +71,6 @@ pub(super) fn representation_metadata(
                 &mut adaptation_count,
                 &mut period_list_pto,
                 &mut adaptation_list_pto,
-                &mut representation_list_pto,
             )?,
             Event::Empty(start) => {
                 push_element(
@@ -85,8 +83,7 @@ pub(super) fn representation_metadata(
                     &mut adaptation_count,
                     &mut period_list_pto,
                     &mut adaptation_list_pto,
-                    &mut representation_list_pto,
-                )?;
+                    )?;
                 stack.pop()?;
             }
             Event::End(_) => {
@@ -115,7 +112,6 @@ fn push_element(
     adaptation_count: &mut usize,
     period_list_pto: &mut Option<u64>,
     adaptation_list_pto: &mut Option<u64>,
-    representation_list_pto: &mut Option<u64>,
 ) -> Option<()> {
     if stack.len() >= MAX_ELEMENT_DEPTH {
         return None;
@@ -136,7 +132,6 @@ fn push_element(
             periods.push(Vec::new());
             *period_list_pto = None;
             *adaptation_list_pto = None;
-            *representation_list_pto = None;
             Element::Period
         }
         (Some(Element::Period), "AdaptationSet", true) => {
@@ -146,7 +141,6 @@ fn push_element(
             }
             periods.last_mut()?.push(Vec::new());
             *adaptation_list_pto = *period_list_pto;
-            *representation_list_pto = None;
             Element::AdaptationSet
         }
         (Some(Element::AdaptationSet), "Representation", true) => {
@@ -162,7 +156,6 @@ fn push_element(
                     is_main: false,
                     segment_list_presentation_time_offset: *adaptation_list_pto,
                 });
-            *representation_list_pto = *adaptation_list_pto;
             Element::Representation
         }
         (Some(Element::Representation), "Role", true) => {
@@ -185,7 +178,6 @@ fn push_element(
         }
         (Some(Element::Representation), "SegmentList", true) => {
             if let Some(offset) = segment_list_presentation_time_offset(start)? {
-                *representation_list_pto = offset;
                 periods
                     .last_mut()?
                     .last_mut()?

@@ -471,8 +471,8 @@ mod tests {
             cookies_browser: "none".to_string(),
             speed_limit: None,
             range: None,
-        
-            file_rows: Vec::new(),};
+            file_rows: Vec::new(),
+        };
         let task =
             tokio::spawn(
                 async move { run_gallery_download(&job, &tool, None, None, |_| {}).await },
@@ -546,8 +546,8 @@ mod tests {
             cookies_browser: "none".to_string(),
             speed_limit: None,
             range: None,
-        
-            file_rows: Vec::new(),};
+            file_rows: Vec::new(),
+        };
         let json = serde_json::to_string(&job).unwrap();
         // item_id skipped on serialize.
         assert!(!json.contains("item_id"));

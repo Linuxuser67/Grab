@@ -821,9 +821,12 @@ fn parse_hls_pathway_clone(
         .map(|value| {
             let object = value.as_object().ok_or_else(invalid)?;
             let mut params = BTreeMap::new();
+            let mut decoded_names = HashSet::with_capacity(object.len());
             for (name, value) in object {
                 let value = value.as_str().ok_or_else(invalid)?;
-                if name.starts_with("_HLS_")
+                let decoded_name = decode_hls_query_component(name).ok_or_else(invalid)?;
+                if decoded_name.starts_with("_HLS_")
+                    || !decoded_names.insert(decoded_name)
                     || !is_valid_hls_query_component(name, false)
                     || !is_valid_hls_query_component(value, true)
                 {
@@ -899,6 +902,10 @@ fn append_hls_pathway_params(uri: &mut Url, params: &BTreeMap<String, String>) {
         return;
     }
 
+    let replaced_names = params
+        .keys()
+        .filter_map(|name| decode_hls_query_component(name))
+        .collect::<HashSet<_>>();
     let mut retained = uri
         .query()
         .filter(|query| !query.is_empty())
@@ -908,7 +915,7 @@ fn append_hls_pathway_params(uri: &mut Url, params: &BTreeMap<String, String>) {
                 .filter(|pair| {
                     let name = pair.split_once('=').map_or(*pair, |(name, _)| name);
                     !decode_hls_query_component(name)
-                        .is_some_and(|name| params.contains_key(&name))
+                        .is_some_and(|name| replaced_names.contains(&name))
                 })
                 .map(str::to_string)
                 .collect::<Vec<_>>()

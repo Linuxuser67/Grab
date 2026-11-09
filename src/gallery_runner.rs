@@ -192,8 +192,9 @@ pub async fn run_gallery_download_with_proxy(
         .take()
         .ok_or_else(|| GalleryError::runtime("gallery-dl stderr not piped"))?;
 
-    // gallery-dl writes its progress indicator to stderr using carriage
-    // returns. Parse those records separately while retaining ordinary logs.
+    // gallery-dl emits tagged file-start/success/skip events on stdout and
+    // byte progress on stderr. Parse both streams and attach each percentage
+    // to the last flushed start-path event.
     let stderr_lines = std::sync::Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
     let stderr_lines_clone = stderr_lines.clone();
     let (file_progress_tx, mut file_progress_rx) =

@@ -24,6 +24,28 @@ pub(crate) enum EngineMsg {
     /// Boxed: this variant is rare but would otherwise inflate every message
     /// on this hot channel (progress ticks) to the largest variant's size.
     ExpandPlaylist(Box<crate::media_types::PlaylistInfo>),
+    /// One entry in a parent-owned yt-dlp playlist has entered its download.
+    PlaylistFileStarted {
+        file_id: String,
+        filename: String,
+    },
+    /// Byte progress for one entry in a parent-owned yt-dlp playlist.
+    PlaylistFileProgress {
+        file_id: String,
+        downloaded: u64,
+        total: Option<u64>,
+    },
+    /// One entry completed and yt-dlp moved it to its final path.
+    PlaylistFileFinished {
+        file_id: String,
+        path: String,
+        size: u64,
+    },
+    /// One entry failed; yt-dlp continues with remaining playlist entries.
+    PlaylistFileFailed {
+        file_id: String,
+        error: String,
+    },
     Failed(String),
     /// Native manifest rejected the presentation or resource protocol; the pump switches to yt-dlp.
     ManifestFallback(String),

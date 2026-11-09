@@ -1757,8 +1757,7 @@ fn effective_addressing(
                 .or(adaptation.mimeType.as_deref());
             if is_dynamic
                 && !mime_type.is_some_and(|mime| {
-                    mime.eq_ignore_ascii_case("video/mp4")
-                        || mime.eq_ignore_ascii_case("audio/mp4")
+                    mime.eq_ignore_ascii_case("video/mp4") || mime.eq_ignore_ascii_case("audio/mp4")
                 })
             {
                 return Err(DashError::UnsupportedAddressing);
@@ -4617,7 +4616,11 @@ mod tests {
 
     #[test]
     fn dynamic_segment_list_requires_an_explicit_initialization_url() {
-        for initialization in ["", r#"<Initialization/>"#, r#"<Initialization range="0-99"/>"#] {
+        for initialization in [
+            "",
+            r#"<Initialization/>"#,
+            r#"<Initialization range="0-99"/>"#,
+        ] {
             let body = format!(
                 r#"<MPD xmlns="urn:mpeg:dash:schema:mpd:2011" type="dynamic" availabilityStartTime="1970-01-01T00:00:00Z" minimumUpdatePeriod="PT2S" timeShiftBufferDepth="PT10S"><Period><AdaptationSet contentType="video" mimeType="video/mp4"><SegmentList timescale="1">{initialization}<SegmentTimeline><S t="0" d="2"/></SegmentTimeline><SegmentURL media="seg-0.m4s"/></SegmentList><Representation id="v1" bandwidth="1000000"/></AdaptationSet></Period></MPD>"#
             );

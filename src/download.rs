@@ -1369,7 +1369,10 @@ impl DownloadManager {
         }
         let item = DownloadItem::new(self.alloc_id_for_in(&existing), &url, &unique_title, &dir);
         item.set_is_gallery(true);
-        item.set_group(crate::download_store::DownloadGroup::try_new(item.id(), &job.title));
+        item.set_group(
+            crate::download_store::DownloadGroup::try_new(item.id(), &job.title)
+                .or_else(|| crate::download_store::DownloadGroup::try_new(item.id(), &unique_title)),
+        );
         item.set_gallery_file_count(job.file_count.unwrap_or(0));
         item.set_gallery_files_done(0);
         item.set_gallery_url(url.clone());
@@ -1767,11 +1770,8 @@ impl DownloadManager {
         item.set_public_only(public_only);
         item.set_is_gallery(true);
         item.set_group(
-            stored
-                .group
-                .clone()
-                .filter(|group| group.is_valid())
-                .or_else(|| crate::download_store::DownloadGroup::try_new(id, &job.title)),
+            crate::download_store::DownloadGroup::try_new(id, &job.title)
+                .or_else(|| crate::download_store::DownloadGroup::try_new(id, &title)),
         );
         let file_count = job.file_count.unwrap_or(0);
         item.set_gallery_file_count(file_count);
@@ -1798,7 +1798,9 @@ impl DownloadManager {
         });
         // Insert the job BEFORE self.insert: insert → start_next →
         // spawn_gallery reads gallery_jobs synchronously.
+        let file_rows = job.file_rows.clone();
         self.gallery_jobs.borrow_mut().insert(id, job);
+        self.restore_gallery_file_rows(&item, &file_rows);
         if stored.started.unwrap_or(true) {
             self.started.borrow_mut().insert(id);
         }
@@ -4625,10 +4627,17 @@ impl DownloadManager {
             job.item_id = id;
             item.set_is_gallery(true);
             item.set_gallery_file_count(job.file_count.unwrap_or(0));
-            item.set_gallery_files_done(0);
+            item.set_gallery_files_done(job.file_rows.iter().filter(|file| {
+                matches!(file.status, DownloadStatus::Done)
+            }).count() as u32);
             item.set_gallery_url(job.page_url.clone());
-            item.set_group(crate::download_store::DownloadGroup::try_new(id, &job.title));
+            item.set_group(
+                crate::download_store::DownloadGroup::try_new(id, &job.title)
+                    .or_else(|| crate::download_store::DownloadGroup::try_new(id, &snap.filename)),
+            );
+            let file_rows = job.file_rows.clone();
             self.gallery_jobs.borrow_mut().insert(id, job);
+            self.restore_gallery_file_rows(&item, &file_rows);
         } else {
             item.set_group(snap.group);
         }

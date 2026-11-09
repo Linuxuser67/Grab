@@ -1212,6 +1212,18 @@ fn apply_hls_pathway_clones(
     }
 }
 
+fn hls_steering_fetch_limits(fetch_mode: ManifestFetchMode) -> (Duration, u32) {
+    match fetch_mode {
+        ManifestFetchMode::Preview => (
+            MANIFEST_PREVIEW_REQUEST_TIMEOUT,
+            MAX_PREVIEW_MANIFEST_ATTEMPTS,
+        ),
+        // Native download steering does not retry: a failed optional steering
+        // request falls back to the master's advertised Pathways.
+        ManifestFetchMode::Download => (MANIFEST_REQUEST_TIMEOUT, 1),
+    }
+}
+
 fn hls_steering_request_url(
     steering: &crate::manifest::HlsContentSteering,
 ) -> Result<Url, ManifestIntakeError> {
@@ -1270,15 +1282,7 @@ async fn fetch_hls_steering_manifest(
         }
     }
 
-    let (request_timeout, max_attempts) = match fetch_mode {
-        ManifestFetchMode::Preview => (
-            MANIFEST_PREVIEW_REQUEST_TIMEOUT,
-            MAX_PREVIEW_MANIFEST_ATTEMPTS,
-        ),
-        // Native download steering does not retry: a failed optional steering
-        // request falls back to the master playlist's advertised Pathways.
-        ManifestFetchMode::Download => (MANIFEST_REQUEST_TIMEOUT, 1),
-    };
+    let (request_timeout, max_attempts) = hls_steering_fetch_limits(fetch_mode);
     let (_, body, _) = fetch_bounded_manifest_with_limits_and_size(
         client,
         request_url,
@@ -3943,6 +3947,21 @@ video/variant.m3u8
             Err(ManifestIntakeError::Unsupported(_))
         ));
     }
+    #[test]
+    fn steering_fetch_limits_follow_preview_and_no_download_retry_policy() {
+        assert_eq!(
+            hls_steering_fetch_limits(ManifestFetchMode::Preview),
+            (
+                MANIFEST_PREVIEW_REQUEST_TIMEOUT,
+                MAX_PREVIEW_MANIFEST_ATTEMPTS
+            )
+        );
+        assert_eq!(
+            hls_steering_fetch_limits(ManifestFetchMode::Download),
+            (MANIFEST_REQUEST_TIMEOUT, 1)
+        );
+    }
+
     async fn steering_fixture_response(
         status: u16,
         body: Vec<u8>,
@@ -4136,6 +4155,58 @@ video/variant.m3u8
                 .is_err(),
             "the private listener must not receive a request"
         );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn cross_origin_steering_dns_rebinding_to_private_ip_is_blocked() {
+        let _policy = crate::download_net::isolate_untrusted_handoff_policy_for_test();
+        let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0))
+            .await
+            .expect("bind private DNS sentinel");
+        let address = listener.local_addr().expect("sentinel address");
+        let steering_host = "steering.example.test";
+        let steering_url = Url::parse(&format!(
+            "http://{steering_host}:{}/steering.json",
+            address.port()
+        ))
+        .expect("steering URL");
+        let master_url =
+            Url::parse("http://master.example.test/master.m3u8").expect("master URL");
+        let (client, dns_override_hits) =
+            crate::download_net::http_client_for_with_dns_overrides_for_test(
+                None,
+                HashMap::from([(
+                    steering_host.to_string(),
+                    vec!["127.0.0.1:0".parse().expect("private DNS answer")],
+                )]),
+            )
+            .expect("build guarded client with private DNS override");
+        let steering = crate::manifest::HlsContentSteering {
+            server_url: steering_url,
+            initial_pathway_id: Some("cdn-a".to_string()),
+        };
+
+        let error = fetch_hls_steering_manifest(
+            &client,
+            &master_url,
+            &steering,
+            ManifestTransportPolicy::HttpFixture,
+            ManifestFetchMode::Preview,
+            false,
+        )
+        .await
+        .expect_err("a public-looking steering host resolving privately must fail closed");
+        assert!(
+            dns_override_hits.load(std::sync::atomic::Ordering::Relaxed),
+            "the guarded resolver must inspect the steering host's DNS answer"
+        );
+        assert!(
+            tokio::time::timeout(Duration::from_millis(50), listener.accept())
+                .await
+                .is_err(),
+            "the private DNS answer must never receive the steering request"
+        );
+        assert!(!error.to_string().is_empty());
     }
 
     #[tokio::test(flavor = "current_thread")]

@@ -163,9 +163,7 @@ pub async fn run_gallery_download_with_proxy(
     // interpolated into the shell script or subject to shell expansion.
     let mut cmd = Command::new("/bin/sh");
     crate::video_spawn::prepend_user_lib_to_path(&mut cmd);
-    cmd.arg("-c")
-        .arg("exec \"$@\" 2>&1")
-        .arg("grab-gallery-dl");
+    cmd.arg("-c").arg("exec \"$@\" 2>&1").arg("grab-gallery-dl");
     cmd.args(&argv);
     crate::video_spawn::apply_configured_proxy_env(&mut cmd, proxy);
     crate::video_spawn::apply_guarded_proxy_env(&mut cmd, guarded_proxy.as_deref());
@@ -250,12 +248,9 @@ pub async fn run_gallery_download_with_proxy(
     };
 
     loop {
-        let read = reader
-            .read(&mut chunk)
-            .await
-            .map_err(|error| GalleryError::runtime(format!(
-                "couldn't read gallery-dl output: {error}"
-            )))?;
+        let read = reader.read(&mut chunk).await.map_err(|error| {
+            GalleryError::runtime(format!("couldn't read gallery-dl output: {error}"))
+        })?;
         if read == 0 {
             break;
         }
@@ -456,7 +451,6 @@ mod tests {
                 Some(ProgressLine::Skipped(path)) if path == &second_path
             )
         }));
-
 
         let started_at = updates
             .iter()

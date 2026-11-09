@@ -3101,14 +3101,12 @@ video.m3u8
     }
 
     #[test]
-    fn rejects_gapped_segments() {
+    fn rejects_playlist_with_only_gapped_segments() {
         let gap_body =
             b"#EXTM3U\n#EXT-X-TARGETDURATION:2\n#EXTINF:2,\n#EXT-X-GAP\none.ts\n#EXT-X-ENDLIST\n";
         assert_eq!(
             plan_hls_media_playlist(BASE_URL, gap_body).err(),
-            Some(ManifestError::UnsupportedPlaylistFeature(
-                "#EXT-X-GAP".to_string(),
-            ))
+            Some(ManifestError::EmptyPlaylist)
         );
     }
 

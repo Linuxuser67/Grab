@@ -213,13 +213,15 @@ impl PlaylistKind {
 }
 
 /// One collection entry; picker needs identity + label, rows re-resolve item pages at download time.
-/// `page_url` stays `String`: story retargeting rewrites it after construction.
 #[derive(Clone, Debug)]
 pub struct PlaylistItem {
     pub id: Box<str>,
     pub title: Box<str>,
     /// Canonical per-item page URL — the identity queued and persisted.
-    pub page_url: String,
+    pub page_url: Box<str>,
+    /// Original 1-based playlist position from yt-dlp, retained even when
+    /// invalid entries are filtered out of the visible picker list.
+    pub playlist_index: u32,
 }
 
 /// Probed collection: picker lists items, queue gets one row per choice.

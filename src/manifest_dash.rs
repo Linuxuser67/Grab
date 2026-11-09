@@ -4614,6 +4614,39 @@ mod tests {
     }
 
     #[test]
+    fn dynamic_segment_list_rejects_duplicate_or_overlapping_resources() {
+        for (initialization, segments) in [
+            (
+                r#"<Initialization sourceURL="init.mp4"/>"#,
+                r#"<SegmentURL media="same.m4s"/><SegmentURL media="same.m4s"/>"#,
+            ),
+            (
+                r#"<Initialization sourceURL="init.mp4"/>"#,
+                r#"<SegmentURL media="same.m4s" mediaRange="0-99"/><SegmentURL media="same.m4s" mediaRange="50-149"/>"#,
+            ),
+            (
+                r#"<Initialization sourceURL="same.m4s" range="0-99"/>"#,
+                r#"<SegmentURL media="same.m4s" mediaRange="50-149"/><SegmentURL media="other.m4s"/>"#,
+            ),
+        ] {
+            let body = format!(
+                r#"<MPD xmlns="urn:mpeg:dash:schema:mpd:2011" type="dynamic" availabilityStartTime="1970-01-01T00:00:00Z" minimumUpdatePeriod="PT2S" timeShiftBufferDepth="PT10S"><Period><AdaptationSet contentType="video" mimeType="video/mp4"><SegmentList timescale="1">{initialization}<SegmentTimeline><S t="0" d="2"/><S t="2" d="2"/></SegmentTimeline>{segments}</SegmentList><Representation id="v1" bandwidth="1000000"/></AdaptationSet></Period></MPD>"#
+            );
+            let manifest = parse_dash_manifest_at(
+                BASE_URL,
+                &body,
+                SystemTime::UNIX_EPOCH + Duration::from_secs(120),
+            )
+            .expect("valid addressing should parse before resource expansion");
+            let representation = &manifest.video_representations[0];
+            assert_eq!(
+                plan_dash_representation(&manifest, &representation.live_key).err(),
+                Some(DashError::InvalidSegment)
+            );
+        }
+    }
+
+    #[test]
     fn dynamic_segment_list_rejects_implicit_timeline_times_and_repeat_runs() {
         for timeline in [r#"<S d="2"/>"#, r#"<S t="100" d="2" r="1"/>"#] {
             let body = format!(

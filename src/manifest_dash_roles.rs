@@ -287,11 +287,11 @@ pub(super) fn has_unsupported_segment_list_timing_attributes(body: &[u8]) -> Opt
             for attribute in start.attributes() {
                 let attribute = attribute.ok()?;
                 let key = attribute.key.as_ref();
-                if key == b"duration"
-                    || key == b"availabilityTimeOffset"
-                    || key == b"availabilityTimeComplete"
-                    || key == b"eptDelta"
-                    || key == b"pbDelta"
+                if key == "duration"
+                    || key == "availabilityTimeOffset"
+                    || key == "availabilityTimeComplete"
+                    || key == "eptDelta"
+                    || key == "pbDelta"
                 {
                     unsupported = true;
                 }

@@ -23,6 +23,9 @@ pub(crate) mod hls_ll;
 #[path = "manifest_hls_ads.rs"]
 mod hls_ads;
 
+#[path = "manifest_hls_gaps.rs"]
+mod hls_gaps;
+
 #[path = "manifest_hls_variables.rs"]
 mod hls_variables;
 
@@ -1478,6 +1481,7 @@ fn build_hls_plan(base_url: Url, mut playlist: MediaPlaylist) -> Result<HlsPlan,
     let mut pending_method_none_reset = false;
 
     let ad_removal = hls_ads::plan_ad_removal(&playlist, is_live)?;
+    let gap_removal = hls_gaps::plan_gap_removal(&playlist, is_live)?;
 
     for (index, segment) in playlist.segments.iter_mut().enumerate() {
         let sequence_index = u64::try_from(index).map_err(|_| ManifestError::DurationOverflow)?;
@@ -1497,6 +1501,8 @@ fn build_hls_plan(base_url: Url, mut playlist: MediaPlaylist) -> Result<HlsPlan,
         };
         let disposition = ad_removal.segments[index];
         let skip_ad_segment = disposition == hls_ads::AdSegmentDisposition::Remove;
+        let skip_gap_segment = gap_removal.segments[index];
+        let skip_segment = skip_ad_segment || skip_gap_segment;
         if segment.unknown_tags.iter().any(|tag| tag.tag == "X-KEY") {
             return Err(ManifestError::UnsupportedEncryption);
         }
@@ -1504,6 +1510,9 @@ fn build_hls_plan(base_url: Url, mut playlist: MediaPlaylist) -> Result<HlsPlan,
             segment
                 .unknown_tags
                 .retain(|tag| !hls_ads::is_ad_marker_tag(tag));
+        }
+        if skip_gap_segment {
+            segment.unknown_tags.retain(|tag| tag.tag != "GAP");
         }
         reject_unsupported_hls_tags(&segment.unknown_tags)?;
         segment.unknown_tags.retain(|tag| !is_benign_hls_tag(tag));
@@ -1513,13 +1522,13 @@ fn build_hls_plan(base_url: Url, mut playlist: MediaPlaylist) -> Result<HlsPlan,
         if let Some(key) = segment.key.take() {
             if key.method == KeyMethod::None {
                 if !method_none_active {
-                    if skip_ad_segment {
+                    if skip_segment {
                         pending_method_none_reset = true;
                     } else {
                         segment.key = Some(key);
                         pending_method_none_reset = false;
                     }
-                } else if pending_method_none_reset && !skip_ad_segment {
+                } else if pending_method_none_reset && !skip_segment {
                     segment.key = Some(key);
                     pending_method_none_reset = false;
                 }
@@ -1533,7 +1542,7 @@ fn build_hls_plan(base_url: Url, mut playlist: MediaPlaylist) -> Result<HlsPlan,
             }
         } else {
             segment.key = active_key.clone();
-            if !skip_ad_segment && pending_method_none_reset {
+            if !skip_segment && pending_method_none_reset {
                 segment.key = Some(m3u8_rs::Key {
                     method: KeyMethod::None,
                     uri: None,
@@ -1562,10 +1571,10 @@ fn build_hls_plan(base_url: Url, mut playlist: MediaPlaylist) -> Result<HlsPlan,
             return Err(ManifestError::InvalidDuration);
         }
 
-        if skip_ad_segment {
-            // Ad resources are not fetched, so do not apply the native
-            // same-origin guard to their URLs. Preserve range continuation
-            // only when their URL and byte range can be parsed safely.
+        if skip_segment {
+            // Omitted resources are not fetched, so do not apply the native
+            // same-origin guard to their URLs. Preserve byte-range continuation
+            // only when the source URL and range can be parsed safely.
             previous_segment_range = match segment.byte_range.as_ref() {
                 Some(byte_range) if byte_range.length > 0 => {
                     let resource_url = base_url
@@ -1723,8 +1732,13 @@ fn build_hls_plan(base_url: Url, mut playlist: MediaPlaylist) -> Result<HlsPlan,
     }
 
     let mut retained_segments = Vec::with_capacity(playlist.segments.len());
-    for (segment, disposition) in playlist.segments.into_iter().zip(ad_removal.segments) {
-        if disposition != hls_ads::AdSegmentDisposition::Remove {
+    for (index, (segment, disposition)) in playlist
+        .segments
+        .into_iter()
+        .zip(ad_removal.segments)
+        .enumerate()
+    {
+        if disposition != hls_ads::AdSegmentDisposition::Remove && !gap_removal.segments[index] {
             retained_segments.push(segment);
         }
     }

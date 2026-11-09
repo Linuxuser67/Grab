@@ -193,9 +193,7 @@ fn from_cached_playlist(key: &str, playlist: Playlist) -> Option<PlaylistInfo> {
                 .index
                 .and_then(|index| u32::try_from(index).ok())
                 .filter(|index| *index > 0)
-                .unwrap_or_else(|| {
-                    (position.saturating_add(1)).min(u32::MAX as usize) as u32
-                });
+                .unwrap_or_else(|| (position.saturating_add(1)).min(u32::MAX as usize) as u32);
             Some(crate::media_types::PlaylistItem {
                 id: entry.id.into_boxed_str(),
                 title: entry.title.into_boxed_str(),

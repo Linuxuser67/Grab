@@ -4238,5 +4238,4 @@ video/variant.m3u8
             "proxy policy must reject before issuing a request"
         );
     }
-
 }

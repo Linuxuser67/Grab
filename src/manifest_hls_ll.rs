@@ -1316,12 +1316,10 @@ mod tests {
 #EXT-X-KEY:METHOD=AES-128,URI="key.bin"
 #EXTINF:4.0,
 segment.ts
-#EXT-X-ENDLIST
 "#;
-        let plan = plan_hls_media_playlist(BASE, body)
-            .expect("complete-segment LL-HLS playlist")
-            .expect("HLS plan is present");
-        assert!(!plan.is_live);
+        let plan = super::plan_hls_media_playlist(BASE, body)
+            .expect("complete-segment LL-HLS playlist");
+        assert!(plan.is_live);
         assert!(plan.ll_unit_ids.is_none());
         assert_eq!(
             plan.resources
@@ -1356,9 +1354,8 @@ segment.ts
 #EXTINF:4.0,
 segment.ts
 "#;
-        let plan = plan_hls_media_playlist(BASE, body)
-            .expect("full-segment live playlist with preload hint")
-            .expect("HLS plan is present");
+        let plan = super::plan_hls_media_playlist(BASE, body)
+            .expect("full-segment live playlist with preload hint");
         assert!(plan.is_live);
         assert!(plan.ll_unit_ids.is_none());
         assert!(

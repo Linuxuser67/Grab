@@ -452,7 +452,7 @@ mod tests {
         let first = dir.join("one.jpg");
         let second = dir.join("two.jpg");
         let script = format!(
-            "#!/bin/sh\nprintf '%s\\n' '@START:{}'\nprintf '50%%\\n' >&2\nprintf '%s\\n' '{}'\nprintf '# %s\\n' '{}'\n",
+            "#!/bin/sh\nprintf '%s\\n' '@START:{}'\nprintf '50%%\\n' >&2\nsleep 0.1\nprintf '%s\\n' '{}'\nprintf '# %s\\n' '{}'\n",
             first.display(),
             first.display(),
             second.display(),

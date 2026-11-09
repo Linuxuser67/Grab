@@ -651,6 +651,9 @@ fn video_source_matches_url(source: &crate::media_types::VideoSource, url: &str)
             crate::manifest_intake::valid_source(source)
                 && normalize_url(&source.url).is_ok_and(|manifest_url| manifest_url == url)
         }
+        crate::media_types::VideoSource::Playlist { page_url, state, .. } => {
+            !state.files.is_empty() && normalize_url(page_url).is_ok_and(|page| page == url)
+        }
         crate::media_types::VideoSource::Direct => false,
     }
 }

@@ -3005,20 +3005,22 @@ video/b.m3u8
     #[test]
     fn steering_request_url_preserves_existing_query_and_adds_current_pathway() {
         let steering = crate::manifest::HlsContentSteering {
-            server_url: Url::parse(
-                "https://steering.example.test/path/list.json?signature=abc123",
-            )
-            .expect("valid steering URL"),
+            server_url: Url::parse("https://steering.example.test/path/list.json?signature=abc123")
+                .expect("valid steering URL"),
             initial_pathway_id: Some("cdn-a".to_string()),
         };
         let url = hls_steering_request_url(&steering).expect("build steering request URL");
         let pairs = url.query_pairs().collect::<Vec<_>>();
-        assert!(pairs
-            .iter()
-            .any(|(name, value)| name == "signature" && value == "abc123"));
-        assert!(pairs
-            .iter()
-            .any(|(name, value)| name == "_HLS_pathway" && value == "cdn-a"));
+        assert!(
+            pairs
+                .iter()
+                .any(|(name, value)| name == "signature" && value == "abc123")
+        );
+        assert!(
+            pairs
+                .iter()
+                .any(|(name, value)| name == "_HLS_pathway" && value == "cdn-a")
+        );
     }
 
     #[test]
@@ -3087,14 +3089,21 @@ video/b.m3u8
         assert_eq!(master.variants[0].pathway_id, "cdn-b");
         assert!(master.variants[0].url.path().ends_with("/video/b.m3u8"));
         assert_eq!(master.audio_renditions.len(), 1);
-        assert!(master.audio_renditions[0]
-            .url
-            .as_ref()
-            .expect("audio URI")
-            .path()
-            .ends_with("/audio/b.m3u8"));
+        assert!(
+            master.audio_renditions[0]
+                .url
+                .as_ref()
+                .expect("audio URI")
+                .path()
+                .ends_with("/audio/b.m3u8")
+        );
         assert_eq!(master.subtitle_renditions.len(), 1);
-        assert!(master.subtitle_renditions[0].url.path().ends_with("/subs/b.m3u8"));
+        assert!(
+            master.subtitle_renditions[0]
+                .url
+                .path()
+                .ends_with("/subs/b.m3u8")
+        );
     }
 
     #[test]
@@ -3117,4 +3126,3 @@ video/b.m3u8
         ));
     }
 }
-

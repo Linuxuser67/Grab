@@ -23,6 +23,9 @@ m3u8-rs = "6.0.1"
 # Typed LL-HLS media-playlist model. Keep this exact pin until a deliberate
 # parser upgrade has reviewed the new untrusted-input behavior against fixtures.
 broadcast-hls = "=0.4.0"
+# Parse and CRC-check SCTE-35 splice_info_section values in HLS DATERANGE ads.
+broadcast-common = { version = "=10.0.0", default-features = false }
+scte35-splice = { version = "=4.0.0", default-features = false, features = ["std"] }
 # SAMPLE-AES preflight reassembles PES/Raw packets with the API also used by iori-ssa.
 # Post-decryption transport-stream validation uses the separate mpeg-ts parser.
 mpeg2ts = "=0.3.1"

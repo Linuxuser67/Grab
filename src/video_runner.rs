@@ -323,7 +323,9 @@ async fn run_video_playlist_download_inner(
                             .send(EngineMsg::PlaylistFile(Box::new(
                                 PlaylistFileEvent::Failed {
                                     file_id: previous,
-                                    error: gettext("yt-dlp moved to the next playlist entry before finalizing this file"),
+                                    error: gettext(
+                                        "yt-dlp moved to the next playlist entry before finalizing this file",
+                                    ),
                                 },
                             )))
                             .ok();
@@ -361,7 +363,9 @@ async fn run_video_playlist_download_inner(
                                 .send(EngineMsg::PlaylistFile(Box::new(
                                     PlaylistFileEvent::Failed {
                                         file_id: file_id.clone(),
-                                        error: format!("yt-dlp reported a file that could not be inspected: {error}"),
+                                        error: format!(
+                                            "yt-dlp reported a file that could not be inspected: {error}"
+                                        ),
                                     },
                                 )))
                                 .ok();
@@ -397,7 +401,9 @@ async fn run_video_playlist_download_inner(
                             .send(EngineMsg::PlaylistFile(Box::new(
                                 PlaylistFileEvent::Failed {
                                     file_id: file_id.clone(),
-                                    error: gettext("yt-dlp output escaped the collection folder"),
+                                    error: gettext(
+                                        "yt-dlp output escaped the collection folder",
+                                    ),
                                 },
                             )))
                             .ok();

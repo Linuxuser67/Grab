@@ -1317,8 +1317,9 @@ mod tests {
 #EXTINF:4.0,
 segment.ts
 "#;
-        let plan =
-            super::plan_hls_media_playlist(BASE, body).expect("complete-segment LL-HLS playlist");
+        let plan = super::plan_hls_media_playlist(BASE, body)
+            .expect("complete-segment LL-HLS playlist")
+            .expect("complete-segment HLS plan");
         assert!(plan.is_live);
         assert!(plan.ll_unit_ids.is_none());
         assert_eq!(
@@ -1357,7 +1358,8 @@ segment.ts
 segment.ts
 "#;
         let plan = super::plan_hls_media_playlist(BASE, body)
-            .expect("full-segment live playlist with preload hint");
+            .expect("full-segment live playlist with preload hint")
+            .expect("full-segment HLS plan");
         assert!(plan.is_live);
         assert!(plan.ll_unit_ids.is_none());
         assert!(

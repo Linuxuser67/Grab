@@ -797,9 +797,19 @@ pub(crate) fn build_download_group_row(
         let toasts = Rc::clone(toasts);
         open_folder_btn.connect_clicked(move |_| {
             let ids = ids.borrow().clone();
-            if let Some(item) = ids.iter().find_map(|id| manager.find(*id)) {
-                launch_path(std::path::Path::new(&item.dest_dir()), &toasts, false);
+            let mut directories = ids
+                .iter()
+                .filter_map(|id| manager.find(*id).map(|item| item.dest_dir()));
+            let Some(directory) = directories.next() else {
+                return;
+            };
+            if directories.any(|candidate| candidate != directory) {
+                toasts.add_toast(adw::Toast::new(&gettext(
+                    "This collection uses more than one destination folder",
+                )));
+                return;
             }
+            launch_path(std::path::Path::new(&directory), &toasts, false);
         });
     }
 
@@ -853,10 +863,8 @@ pub(crate) fn build_download_group_row(
                 let manager = Rc::clone(&manager);
                 let toasts = Rc::clone(&undo_toasts);
                 glib::spawn_future_local(async move {
-                    for snapshot in snapshots {
-                        if let Err(error) = manager.unremove_async(snapshot).await {
-                            toasts.add_toast(adw::Toast::new(&error));
-                        }
+                    if let Err(error) = manager.unremove_many_async(snapshots).await {
+                        toasts.add_toast(adw::Toast::new(&error));
                     }
                 });
             });
@@ -881,10 +889,16 @@ impl DownloadGroupRow {
         self.row.set_subtitle(&group_summary(section_items));
 
         let nonempty = !group_items.is_empty();
-        for button in [&self.open_folder_btn, &self.remove_btn] {
-            button.set_visible(nonempty);
-            button.set_sensitive(nonempty);
-        }
+        let one_destination = group_items.first().is_some_and(|first| {
+            let directory = first.dest_dir();
+            group_items
+                .iter()
+                .all(|item| item.dest_dir() == directory)
+        });
+        self.open_folder_btn.set_visible(one_destination);
+        self.open_folder_btn.set_sensitive(one_destination);
+        self.remove_btn.set_visible(nonempty);
+        self.remove_btn.set_sensitive(nonempty);
     }
 }
 

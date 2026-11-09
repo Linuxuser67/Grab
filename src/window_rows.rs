@@ -941,9 +941,6 @@ fn build_gallery_file_row(item: &crate::download::DownloadItem) -> gtk4::ListBox
     let progress = gtk4::ProgressBar::new();
     progress.set_show_text(false);
     progress.set_fraction(item.progress().clamp(0.0, 1.0));
-    progress.update_property(&[gtk4::accessible::Property::Label(&gettext(
-        "Gallery file progress",
-    ))]);
     let detail = gtk4::Label::builder()
         .label(item.detail())
         .halign(gtk4::Align::Start)

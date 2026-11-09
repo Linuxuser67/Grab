@@ -92,6 +92,23 @@ mod tests {
     }
 
     #[test]
+    fn discontinuity_on_a_skipped_gap_is_carried_to_the_next_kept_segment() {
+        let body = b"#EXTM3U\n#EXT-X-TARGETDURATION:4\n#EXT-X-PLAYLIST-TYPE:VOD\n#EXTINF:4,\nfirst.ts\n#EXT-X-DISCONTINUITY\n#EXT-X-GAP\n#EXTINF:4,\nunavailable.ts\n#EXTINF:4,\nlast.ts\n#EXT-X-ENDLIST\n";
+        let plan = plan_hls_media_playlist(BASE_URL, body)
+            .expect("discontinuity across a gap should be retained");
+
+        let local_bytes = plan.local_playlist_bytes().expect("local playlist");
+        let local = m3u8_rs::parse_media_playlist_res(&local_bytes)
+            .expect("parse local playlist");
+        assert_eq!(local.segments.len(), 2);
+        assert!(!local.segments[0].discontinuity);
+        assert!(
+            local.segments[1].discontinuity,
+            "the discontinuity before the omitted segment still applies to the next retained segment"
+        );
+    }
+
+    #[test]
     fn implicit_byte_ranges_continue_across_a_skipped_gap() {
         let body = b"#EXTM3U\n#EXT-X-TARGETDURATION:4\n#EXT-X-PLAYLIST-TYPE:VOD\n#EXTINF:4,\n#EXT-X-BYTERANGE:4@0\nmedia.mp4\n#EXT-X-GAP\n#EXTINF:4,\n#EXT-X-BYTERANGE:4\nmedia.mp4\n#EXTINF:4,\n#EXT-X-BYTERANGE:4\nmedia.mp4\n#EXT-X-ENDLIST\n";
         let plan = plan_hls_media_playlist(BASE_URL, body)

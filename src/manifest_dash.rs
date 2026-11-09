@@ -1,5 +1,6 @@
 //! Static DASH parsing and period-aware segment resource planning.
 
+use std::collections::{HashMap, HashSet};
 use std::time::{Duration, SystemTime};
 
 use sha2::{Digest, Sha256};
@@ -2145,16 +2146,29 @@ fn expand_dynamic_list(
         segment_number: None,
     });
 
+    let mut whole_resources = HashSet::new();
+    let mut ranged_resources: HashMap<String, Vec<ManifestByteRange>> = HashMap::new();
     for segment in &list.segments {
         let time = segment.time.ok_or(DashError::UnsupportedAddressing)?;
         let duration = segment.duration.ok_or(DashError::UnsupportedAddressing)?;
         let end = time
             .checked_add(duration)
             .ok_or(DashError::InvalidSegment)?;
-        if end > elapsed_ticks || end <= window_start_ticks {
-            continue;
-        }
         let url = resolve_resource(&representation.source.base_url, &segment.media)?;
+        let url_key = url.as_str().to_owned();
+        if let Some(segment_range) = segment.range {
+            if whole_resources.contains(&url_key) {
+                return Err(DashError::InvalidSegment);
+            }
+            ranged_resources
+                .entry(url_key.clone())
+                .or_default()
+                .push(segment_range);
+        } else if !whole_resources.insert(url_key.clone())
+            || ranged_resources.contains_key(&url_key)
+        {
+            return Err(DashError::InvalidSegment);
+        }
         if url == initialization_url {
             let (Some(initialization_range), Some(segment_range)) = (*range, segment.range) else {
                 return Err(DashError::UnsupportedAddressing);
@@ -2162,6 +2176,9 @@ fn expand_dynamic_list(
             if ranges_overlap(initialization_range, segment_range)? {
                 return Err(DashError::InvalidSegment);
             }
+        }
+        if end > elapsed_ticks || end <= window_start_ticks {
+            continue;
         }
         let filename = super::resource_filename("dash-live-segment", None, &url, segment.range);
         let number = time
@@ -2175,6 +2192,14 @@ fn expand_dynamic_list(
             kind: DashResourceKind::Segment,
             segment_number: Some(number),
         });
+    }
+    for ranges in ranged_resources.values_mut() {
+        ranges.sort_unstable_by_key(|range| range.offset);
+        for pair in ranges.windows(2) {
+            if ranges_overlap(pair[0], pair[1])? {
+                return Err(DashError::InvalidSegment);
+            }
+        }
     }
 
     if resources.len() == 1 {

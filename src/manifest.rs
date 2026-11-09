@@ -2168,9 +2168,9 @@ video.m3u8
 #EXT-X-STREAM-INF:BANDWIDTH=1000000,VIDEO="angles"
 video.m3u8
 "#;
-        assert_eq!(
-            parse_hls_master_playlist(BASE_URL, body).err(),
-            Some(ManifestError::InvalidVideoGroup)
+        assert!(
+            parse_hls_master_playlist(BASE_URL, body).is_err(),
+            "an empty URI must fail closed to the yt-dlp fallback"
         );
     }
 

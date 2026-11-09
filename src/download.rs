@@ -5284,6 +5284,7 @@ impl DownloadManager {
         item.set_output_dir(snap.output_dir);
         item.set_public_only(snap.public_only);
         let mut gallery_file_rows = None;
+        let mut playlist_file_rows = None;
         if let Some(mut job) = snap.gallery_job {
             job.item_id = id;
             item.set_is_gallery(true);
@@ -5315,6 +5316,21 @@ impl DownloadManager {
         }
         // Re-stage before insert (see `enqueue_video`): the persist carries it and `start_next` dispatches on it.
         if let Some(src) = snap.video_source {
+            if let crate::media_types::VideoSource::Playlist { state, .. } = &src {
+                item.set_is_collection_owner(true);
+                item.set_group(crate::download_store::DownloadGroup::try_new(id, &state.title));
+                item.set_gallery_url(item.url());
+                item.set_gallery_file_count(state.files.len().min(u32::MAX as usize) as u32);
+                item.set_gallery_files_done(
+                    state
+                        .files
+                        .iter()
+                        .filter(|file| file.status == DownloadStatus::Done)
+                        .count()
+                        .min(u32::MAX as usize) as u32,
+                );
+                playlist_file_rows = Some(state.files.clone());
+            }
             self.video_sources.borrow_mut().insert(item.id(), src);
         }
         // Undo bypasses intake dedupe, so consult the reservation: a discard still
@@ -5329,11 +5345,17 @@ impl DownloadManager {
             if let Some(file_rows) = gallery_file_rows.as_deref() {
                 self.restore_gallery_file_rows(&item, file_rows);
             }
+            if let Some(files) = playlist_file_rows.as_deref() {
+                self.restore_video_playlist_file_rows(&item, files);
+            }
             return item;
         }
         let item = self.insert(item);
         if let Some(file_rows) = gallery_file_rows.as_deref() {
             self.restore_gallery_file_rows(&item, file_rows);
+        }
+        if let Some(files) = playlist_file_rows.as_deref() {
+            self.restore_video_playlist_file_rows(&item, files);
         }
         item
     }

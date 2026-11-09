@@ -190,6 +190,16 @@ fn has_ll_hls_partial_segments(body: &[u8]) -> bool {
         .any(|line| line.starts_with(b"#EXT-X-PART:"))
 }
 
+fn has_hls_media_key_tag(body: &[u8]) -> bool {
+    body.split(|byte| *byte == b'\n')
+        .any(|line| line.starts_with(b"#EXT-X-KEY:"))
+}
+
+fn has_ll_hls_delta_update(body: &[u8]) -> bool {
+    body.split(|byte| *byte == b'\n')
+        .any(|line| line.starts_with(b"#EXT-X-SKIP:"))
+}
+
 pub(crate) fn has_ll_hls_tags(body: &[u8]) -> bool {
     body.split(|byte| *byte == b'\n').any(|line| {
         line.starts_with(b"#EXT-X-SERVER-CONTROL:")
@@ -205,11 +215,16 @@ pub(crate) fn plan_hls_media_playlist(
     manifest_url: &str,
     body: &[u8],
 ) -> Result<Option<HlsPlan>, ManifestError> {
-    if !has_ll_hls_tags(body) || !has_ll_hls_partial_segments(body) {
-        // A playlist may carry LL-HLS control metadata while publishing only
-        // complete Media Segments. The ordinary planner handles these without
-        // partial-unit journaling and can retain its established encryption
-        // support. Encrypted partial segments remain on the guarded fallback.
+    let has_partial_segments = has_ll_hls_partial_segments(body);
+    let use_standard_encryption_planner = !has_partial_segments
+        && has_hls_media_key_tag(body)
+        && !has_ll_hls_delta_update(body);
+    if !has_ll_hls_tags(body) || use_standard_encryption_planner {
+        // Keep complete-segment LL-HLS on the live planner unless it actually
+        // carries media encryption. Only complete encrypted segments are
+        // delegated to the ordinary HLS planner, which already owns key
+        // fetching, decryption metadata, and output encryption signaling.
+        // Partial segments and delta updates stay on the guarded LL-HLS path.
         return Ok(None);
     }
     let text = std::str::from_utf8(body)
@@ -1308,7 +1323,7 @@ mod tests {
     }
 
     #[test]
-    fn complete_segments_with_ll_control_tags_use_standard_encryption_planner() {
+    fn complete_encrypted_segments_are_delegated_to_the_standard_planner() {
         let body = br#"#EXTM3U
 #EXT-X-TARGETDURATION:4
 #EXT-X-SERVER-CONTROL:CAN-BLOCK-RELOAD=YES
@@ -1317,37 +1332,11 @@ mod tests {
 #EXTINF:4.0,
 segment.ts
 "#;
-        let plan = super::plan_hls_media_playlist(BASE, body)
-            .expect("complete-segment LL-HLS playlist")
-            .expect("complete-segment HLS plan");
-        assert!(plan.is_live);
-        assert!(plan.ll_unit_ids.is_none());
-        assert_eq!(
-            plan.resources
-                .iter()
-                .filter(|resource| resource.kind == HlsResourceKind::Key)
-                .count(),
-            1
-        );
-        assert_eq!(
-            plan.resources
-                .iter()
-                .filter(|resource| resource.kind == HlsResourceKind::Segment)
-                .count(),
-            1
-        );
-        let playlist = m3u8_rs::parse_media_playlist_res(
-            &plan
-                .local_playlist_bytes()
-                .expect("serialize local playlist"),
-        )
-        .expect("parse local playlist");
-        assert_eq!(
-            playlist.segments[0]
-                .key
-                .as_ref()
-                .map(|key| key.method.clone()),
-            Some(KeyMethod::AES128)
+        assert!(
+            super::plan_hls_media_playlist(BASE, body)
+                .expect("complete-segment LL-HLS playlist")
+                .is_none(),
+            "complete encrypted segments are handled by the standard HLS planner"
         );
     }
 

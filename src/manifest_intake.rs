@@ -729,10 +729,9 @@ fn parse_hls_steering_manifest(body: &[u8]) -> Result<Vec<String>, ManifestIntak
     Ok(pathway_ids)
 }
 
-async fn fetch_hls_steering_manifest(
-    client: &reqwest::Client,
+fn hls_steering_request_url(
     steering: &crate::manifest::HlsContentSteering,
-) -> Result<Vec<u8>, ManifestIntakeError> {
+) -> Result<Url, ManifestIntakeError> {
     let mut request_url = steering.server_url.clone();
     if request_url
         .query_pairs()
@@ -746,6 +745,14 @@ async fn fetch_hls_steering_manifest(
         "_HLS_pathway",
         steering.initial_pathway_id.as_deref().unwrap_or(""),
     );
+    Ok(request_url)
+}
+
+async fn fetch_hls_steering_manifest(
+    client: &reqwest::Client,
+    steering: &crate::manifest::HlsContentSteering,
+) -> Result<Vec<u8>, ManifestIntakeError> {
+    let request_url = hls_steering_request_url(steering)?;
     let (_, body, _) = fetch_bounded_manifest(client, request_url).await?;
     if body.len() > MAX_HLS_STEERING_MANIFEST_BYTES {
         return Err(ManifestIntakeError::Unsupported(
@@ -2987,6 +2994,40 @@ video/b.m3u8
 "#,
         )
         .expect("valid Content Steering master")
+    }
+
+    #[test]
+    fn steering_request_url_preserves_existing_query_and_adds_current_pathway() {
+        let steering = crate::manifest::HlsContentSteering {
+            server_url: Url::parse(
+                "https://steering.example.test/path/list.json?signature=abc123",
+            )
+            .expect("valid steering URL"),
+            initial_pathway_id: Some("cdn-a".to_string()),
+        };
+        let url = hls_steering_request_url(&steering).expect("build steering request URL");
+        let pairs = url.query_pairs().collect::<Vec<_>>();
+        assert!(pairs
+            .iter()
+            .any(|(name, value)| name == "signature" && value == "abc123"));
+        assert!(pairs
+            .iter()
+            .any(|(name, value)| name == "_HLS_pathway" && value == "cdn-a"));
+    }
+
+    #[test]
+    fn steering_request_url_rejects_preexisting_reserved_pathway_query() {
+        let steering = crate::manifest::HlsContentSteering {
+            server_url: Url::parse(
+                "https://steering.example.test/path/list.json?_HLS_pathway=other",
+            )
+            .expect("valid steering URL"),
+            initial_pathway_id: Some("cdn-a".to_string()),
+        };
+        assert!(matches!(
+            hls_steering_request_url(&steering),
+            Err(ManifestIntakeError::Unsupported(_))
+        ));
     }
 
     #[test]

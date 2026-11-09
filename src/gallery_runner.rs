@@ -439,6 +439,74 @@ mod tests {
 
     #[cfg(unix)]
     #[tokio::test]
+    async fn runner_attaches_stderr_progress_to_the_started_file_path() {
+        use std::os::unix::fs::PermissionsExt as _;
+        use std::sync::{Arc, Mutex};
+
+        let dir = std::env::temp_dir().join(format!(
+            "grab-runner-per-file-progress-{}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&dir).expect("create runner fixture directory");
+        let tool = dir.join("fake-gallery-dl.sh");
+        let first = dir.join("one.jpg");
+        let second = dir.join("two.jpg");
+        let script = format!(
+            "#!/bin/sh\nprintf '%s\\n' '@START:{}'\nprintf '50%%\\n' >&2\nprintf '%s\\n' '{}'\nprintf '# %s\\n' '{}'\n",
+            first.display(),
+            first.display(),
+            second.display(),
+        );
+        std::fs::write(&tool, script).expect("write fake gallery-dl");
+        std::fs::set_permissions(&tool, std::fs::Permissions::from_mode(0o755))
+            .expect("make fake gallery-dl executable");
+
+        let job = GalleryJob {
+            item_id: 7,
+            page_url: "https://example.com/gallery".to_string(),
+            title: "Gallery".to_string(),
+            file_count: Some(2),
+            dest_dir: dir.clone(),
+            filter: GalleryFilter::All,
+            cookies_browser: "none".to_string(),
+            speed_limit: None,
+            range: None,
+            file_rows: Vec::new(),
+        };
+        let updates = Arc::new(Mutex::new(Vec::<GalleryProgressUpdate>::new()));
+        let captured = Arc::clone(&updates);
+        let result = run_gallery_download(&job, &tool, None, None, move |update| {
+            captured.lock().expect("progress updates lock").push(update);
+        })
+        .await
+        .expect("fixture gallery download");
+
+        assert_eq!(result.files, vec![first.clone()]);
+        assert_eq!(result.skipped, 1);
+        let updates = updates.lock().expect("progress updates lock");
+        assert!(updates.iter().any(|update| {
+            matches!(
+                update.event,
+                Some(ProgressLine::Started(ref path)) if path == first.to_string_lossy().as_ref()
+            ) && update.current_file_path.as_deref() == Some(first.to_string_lossy().as_ref())
+        }));
+        assert!(updates.iter().any(|update| {
+            update.event.is_none()
+                && update.current_file_path.as_deref() == Some(first.to_string_lossy().as_ref())
+                && update.current_file_percent == Some(50)
+        }));
+        assert!(updates.iter().any(|update| {
+            matches!(
+                update.event,
+                Some(ProgressLine::Skipped(ref path)) if path == second.to_string_lossy().as_ref()
+            )
+        }));
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
     async fn cancel_kills_the_download_process_group() {
         // run_gallery_download must own a process group: dropping the future
         // (cancel/abort/shutdown) kills the child and everything it spawned —

@@ -752,6 +752,13 @@ pub(crate) struct DownloadGroupRow {
     cancel: gio::SimpleAction,
     retry: gio::SimpleAction,
     open_folder: gio::SimpleAction,
+    remove: gio::SimpleAction,
+    pub(crate) pause_btn: gtk4::Button,
+    pub(crate) resume_btn: gtk4::Button,
+    pub(crate) cancel_btn: gtk4::Button,
+    pub(crate) retry_btn: gtk4::Button,
+    pub(crate) open_folder_btn: gtk4::Button,
+    pub(crate) remove_btn: gtk4::Button,
 }
 
 fn group_summary(items: &[DownloadItem]) -> String {
@@ -857,24 +864,45 @@ pub(crate) fn build_download_group_row(
     }
     row.insert_action_group("group", Some(&actions));
 
-    let menu = gio::Menu::new();
-    menu.append(Some(&gettext("Pause All")), Some("group.pause"));
-    menu.append(Some(&gettext("Resume All")), Some("group.resume"));
-    menu.append(Some(&gettext("Cancel All")), Some("group.cancel"));
-    menu.append(Some(&gettext("Retry Failed")), Some("group.retry-failed"));
-    menu.append(
-        Some(&gettext("Open Collection Folder")),
-        Some("group.open-folder"),
-    );
+    // Collection-level remove: the same semantics as a single row's "remove
+    // from list", applied to every child.
+    let remove = gio::SimpleAction::new("remove", None);
+    {
+        let ids = Rc::clone(&members);
+        let manager = Rc::clone(manager);
+        remove.connect_activate(move |_, _| {
+            let ids = ids.borrow().clone();
+            manager.remove_many(&ids);
+        });
+    }
+    actions.add_action(&remove);
 
-    let menu_button = gtk4::MenuButton::builder()
-        .icon_name("view-more-symbolic")
-        .tooltip_text(gettext("Group actions"))
-        .css_classes(["flat"])
-        .build();
-    menu_button.update_property(&[gtk4::accessible::Property::Label(&gettext("Group actions"))]);
-    menu_button.set_menu_model(Some(&menu));
-    row.add_suffix(&menu_button);
+    // Group actions mirror the single-row icon buttons instead of an overflow
+    // menu. They are shown only when at least one child needs them.
+    let pause_btn = icon_button("media-playback-pause-symbolic", &gettext("Pause All"));
+    let resume_btn = icon_button("media-playback-start-symbolic", &gettext("Resume All"));
+    let cancel_btn = icon_button("process-stop-symbolic", &gettext("Cancel All"));
+    let retry_btn = icon_button("view-refresh-symbolic", &gettext("Retry Failed"));
+    let open_folder_btn = icon_button("folder-open-symbolic", &gettext("Open Collection Folder"));
+    let remove_btn = icon_button("list-remove-symbolic", &gettext("Remove from List"));
+    for (button, action) in [
+        (&pause_btn, &pause),
+        (&resume_btn, &resume),
+        (&cancel_btn, &cancel),
+        (&retry_btn, &retry),
+        (&open_folder_btn, &open_folder),
+        (&remove_btn, &remove),
+    ] {
+        let action = action.clone();
+        button.connect_clicked(move |_| action.activate(None));
+    }
+
+    row.add_suffix(&pause_btn);
+    row.add_suffix(&resume_btn);
+    row.add_suffix(&cancel_btn);
+    row.add_suffix(&retry_btn);
+    row.add_suffix(&open_folder_btn);
+    row.add_suffix(&remove_btn);
 
     DownloadGroupRow {
         row,
@@ -884,6 +912,13 @@ pub(crate) fn build_download_group_row(
         cancel,
         retry,
         open_folder,
+        remove,
+        pause_btn,
+        resume_btn,
+        cancel_btn,
+        retry_btn,
+        open_folder_btn,
+        remove_btn,
     }
 }
 
@@ -892,18 +927,16 @@ impl DownloadGroupRow {
         *self.members.borrow_mut() = group_items.iter().map(DownloadItem::id).collect();
         self.row.set_subtitle(&group_summary(section_items));
 
-        self.pause.set_enabled(group_items.iter().any(|item| {
+        let has_paused = group_items
+            .iter()
+            .any(|item| item.status() == DownloadStatus::Paused);
+        let has_pausable = group_items.iter().any(|item| {
             matches!(
                 item.status(),
                 DownloadStatus::Downloading | DownloadStatus::Queued | DownloadStatus::Scheduled
             )
-        }));
-        self.resume.set_enabled(
-            group_items
-                .iter()
-                .any(|item| item.status() == DownloadStatus::Paused),
-        );
-        self.cancel.set_enabled(group_items.iter().any(|item| {
+        });
+        let has_active = group_items.iter().any(|item| {
             matches!(
                 item.status(),
                 DownloadStatus::Downloading
@@ -911,14 +944,33 @@ impl DownloadGroupRow {
                     | DownloadStatus::Queued
                     | DownloadStatus::Scheduled
             )
-        }));
-        self.retry.set_enabled(group_items.iter().any(|item| {
+        });
+        let has_failed = group_items.iter().any(|item| {
             matches!(
                 item.status(),
                 DownloadStatus::Failed | DownloadStatus::Cancelled
             )
-        }));
-        self.open_folder.set_enabled(!group_items.is_empty());
+        });
+        let nonempty = !group_items.is_empty();
+
+        self.pause.set_enabled(has_pausable);
+        self.resume.set_enabled(has_paused);
+        self.cancel.set_enabled(has_active);
+        self.retry.set_enabled(has_failed);
+        self.open_folder.set_enabled(nonempty);
+        self.remove.set_enabled(nonempty);
+
+        for (button, visible, enabled) in [
+            (&self.pause_btn, has_pausable, has_pausable),
+            (&self.resume_btn, has_paused, has_paused),
+            (&self.cancel_btn, has_active, has_active),
+            (&self.retry_btn, has_failed, has_failed),
+            (&self.open_folder_btn, nonempty, nonempty),
+            (&self.remove_btn, nonempty, nonempty),
+        ] {
+            button.set_visible(visible);
+            button.set_sensitive(enabled);
+        }
     }
 }
 

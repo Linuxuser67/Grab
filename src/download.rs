@@ -1393,6 +1393,28 @@ impl DownloadManager {
         existing: &[String],
     ) -> Result<DownloadItem, String> {
         let url = normalize_url(page_url)?;
+        // Treat (page URL, playlist entry id) as an identity: playlist children
+        // share the collection URL, so URL alone would block every sibling.
+        // This stops the same import from queuing an item that a non-terminal
+        // row already owes, e.g. when an import runs twice.
+        let incoming_pid = choices.playlist_item_id.clone();
+        if self.items().any(|it| {
+            it.status() != DownloadStatus::Done
+                && it.url() == url
+                && self
+                    .video_sources
+                    .borrow()
+                    .get(&it.id())
+                    .and_then(|src| match src {
+                        crate::media_types::VideoSource::Page {
+                            playlist_item_id, ..
+                        } => playlist_item_id.clone(),
+                        _ => None,
+                    })
+                    == incoming_pid
+        }) {
+            return Err(gettext("This item is already in the list"));
+        }
         let name = self.finalize_filename(
             &filename
                 .filter(|s| sane_filename(s))
@@ -4288,6 +4310,19 @@ impl DownloadManager {
             self.start_next();
         }
         retried
+    }
+
+    /// Remove every row in a collection from the list.
+    pub fn remove_many(self: &Rc<Self>, ids: &[u64]) -> usize {
+        let mut removed = 0;
+        for &id in ids {
+            if self.find(id).is_none() {
+                continue;
+            }
+            self.remove(id);
+            removed += 1;
+        }
+        removed
     }
 
     /// Cancel and drop a row; restore with [`DownloadManager::unremove`]. The partial file is kept so Undo can resume.

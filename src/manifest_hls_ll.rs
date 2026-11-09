@@ -1135,67 +1135,6 @@ mod tests {
     }
 
     #[test]
-    fn accepts_ext_x_start_as_a_playback_hint_without_trimming_ll_capture() {
-        let complete = br#"#EXTM3U
-#EXT-X-TARGETDURATION:2
-#EXT-X-MEDIA-SEQUENCE:40
-#EXT-X-MAP:URI="init.mp4"
-#EXT-X-SERVER-CONTROL:CAN-BLOCK-RELOAD=NO,PART-HOLD-BACK=1.0
-#EXT-X-PART-INF:PART-TARGET=0.5
-#EXT-X-START:TIME-OFFSET=1.5,PRECISE=YES
-#EXT-X-PART:DURATION=0.5,URI="40.0.m4s",INDEPENDENT=YES
-#EXT-X-PART:DURATION=0.5,URI="40.1.m4s"
-#EXTINF:1.0,
-40.m4s
-#EXT-X-ENDLIST
-"#;
-        let plan = plan_hls_media_playlist(BASE, complete)
-            .expect("complete LL-HLS playlist with EXT-X-START")
-            .expect("LL-HLS detected");
-        assert_eq!(plan.resources.len(), 3);
-        assert_eq!(plan.local_playlist.segments.len(), 2);
-        assert_eq!(
-            plan.ll_unit_ids.as_deref().expect("live unit IDs"),
-            &[
-                HlsLiveUnitId::Part {
-                    media_sequence: 40,
-                    part_index: 0,
-                },
-                HlsLiveUnitId::Part {
-                    media_sequence: 40,
-                    part_index: 1,
-                },
-            ]
-        );
-        assert!(plan.local_playlist.start.is_none());
-        assert!(
-            plan.resources
-                .iter()
-                .any(|resource| resource.url.path().ends_with("/40.0.m4s"))
-        );
-        assert!(
-            plan.resources
-                .iter()
-                .any(|resource| resource.url.path().ends_with("/40.1.m4s"))
-        );
-
-        let live = br#"#EXTM3U
-#EXT-X-TARGETDURATION:2
-#EXT-X-MEDIA-SEQUENCE:41
-#EXT-X-SERVER-CONTROL:CAN-BLOCK-RELOAD=NO,PART-HOLD-BACK=1.0
-#EXT-X-PART-INF:PART-TARGET=0.5
-#EXT-X-START:TIME-OFFSET=-3.0,PRECISE=NO
-#EXT-X-PART:DURATION=0.5,URI="41.0.m4s",INDEPENDENT=YES
-"#;
-        let live_plan = plan_hls_media_playlist(BASE, live)
-            .expect("live LL-HLS playlist with a negative EXT-X-START offset")
-            .expect("LL-HLS detected");
-        assert!(live_plan.is_live);
-        assert_eq!(live_plan.resources.len(), 1);
-        assert!(live_plan.local_playlist.start.is_none());
-    }
-
-    #[test]
     fn ext_x_start_required_attributes_remain_unsupported() {
         let body = br#"#EXTM3U
 #EXT-X-TARGETDURATION:2

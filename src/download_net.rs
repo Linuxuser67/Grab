@@ -488,21 +488,30 @@ fn host_key(host: &str) -> String {
 /// Register a hostname or public IP literal for public-only resolution.
 /// Private/local destinations are rejected here and must be handled only
 /// through the explicit-confirmation path.
-pub(crate) fn require_public_resolution(host: &str) -> bool {
+/// Whether a hostname or IP literal is eligible for public-only resolution,
+/// without mutating the process-wide resolver policy.
+pub(crate) fn is_public_destination_host(host: &str) -> bool {
     let key = host_key(host);
     if key.is_empty() {
         return false;
     }
-    // Private literals/local names are allowed only through the separate
-    // explicit-confirmation path. Public IP literals are also recorded: the
-    // literal itself cannot rebind, but the extractor may follow links to other
-    // hosts and its whole request tree still needs the guarded proxy.
     match key.parse::<IpAddr>() {
-        Ok(ip) if is_private_ip(ip) => return false,
-        Ok(_) => {}
-        Err(_) if is_local_or_private_host(&key) => return false,
-        Err(_) => {}
+        Ok(ip) => !is_private_ip(ip),
+        Err(_) => !is_local_or_private_host(&key),
     }
+}
+
+/// Register a hostname or public IP literal for public-only resolution.
+/// Private/local destinations are rejected here and must be handled only
+/// through the separate explicit-confirmation path.
+pub(crate) fn require_public_resolution(host: &str) -> bool {
+    let key = host_key(host);
+    if !is_public_destination_host(host) {
+        return false;
+    }
+    // Public IP literals are also recorded: the literal itself cannot rebind,
+    // but the extractor may follow links to other hosts and its whole request
+    // tree still needs the guarded proxy.
     let mut hosts = lock_recover(UNTRUSTED_HANDOFF_HOSTS.get_or_init(Default::default));
     if policy_matches(&hosts, &key) {
         return true;
@@ -1010,6 +1019,26 @@ mod tests {
         assert!(require_public_dns_filter(&policy, "redirect-only.example"));
         assert!(requires_public_dns_filter("redirect-only.example", &policy));
         assert!(!is_untrusted_handoff_host("redirect-only.example"));
+    }
+
+    #[test]
+    fn public_destination_check_is_pure_and_rejects_local_hosts() {
+        let _test_lock = lock_untrusted_handoff_policy_for_test();
+        let cache = UNTRUSTED_HANDOFF_HOSTS.get_or_init(Default::default);
+        let previous = {
+            let mut hosts = lock_recover(cache);
+            std::mem::take(&mut *hosts)
+        };
+        assert!(is_public_destination_host("cdn.example.test"));
+        assert!(is_public_destination_host("8.8.8.8"));
+        for host in ["127.0.0.1", "[::1]", "localhost", "printer.local", "nas", ""] {
+            assert!(!is_public_destination_host(host), "must reject {host}");
+        }
+        assert!(
+            lock_recover(cache).is_empty(),
+            "pure validation must not register hosts"
+        );
+        *lock_recover(cache) = previous;
     }
 
     #[test]

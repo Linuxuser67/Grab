@@ -9162,6 +9162,7 @@ fn test_gallery_job(dest_dir: std::path::PathBuf) -> crate::gallery_argv::Galler
         cookies_browser: "none".to_string(),
         speed_limit: None,
         range: None,
+        file_rows: Vec::new(),
     }
 }
 

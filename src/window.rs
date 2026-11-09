@@ -658,9 +658,8 @@ pub fn build_window(
                     item.status()
                 }
             };
-            let effective_bucket = |item: &crate::download::DownloadItem| {
-                section_bucket(effective_status(item))
-            };
+            let effective_bucket =
+                |item: &crate::download::DownloadItem| section_bucket(effective_status(item));
 
             let mut group_sizes = HashMap::<u64, usize>::new();
             for item in &items {

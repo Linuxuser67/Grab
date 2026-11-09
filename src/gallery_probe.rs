@@ -90,11 +90,9 @@ pub fn url_is_direct_media(url: &str) -> bool {
 /// Where the New Download card should land after both probes complete.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ProbeOutcome {
-    /// yt-dlp found video. Gallery toggle iff gallery-dl also found images.
+    /// yt-dlp fallback when gallery-dl did not return any files.
     VideoYtDlp { gallery_toggle: bool },
-    /// yt-dlp found nothing; gallery-dl found video (e.g. Instagram stories).
-    VideoGalleryDl,
-    /// yt-dlp found nothing; gallery-dl found images.
+    /// gallery-dl returned one or more files, regardless of media type.
     Gallery,
     /// Neither probe found anything usable.
     None,
@@ -116,104 +114,42 @@ pub enum StickyMode {
 pub fn route(
     ytdlp_video: bool,
     gallery_items: Option<&[GalleryItem]>,
-    host_sticky: Option<StickyMode>,
+    _host_sticky: Option<StickyMode>,
 ) -> ProbeOutcome {
-    // An explicit Video preference can override an image-bearing gallery
-    // only when yt-dlp has a playable result.
-    let (has_video, has_images) = gallery_items
-        .map(|items| {
-            let mut video = false;
-            let mut images = false;
-            for item in items {
-                match GalleryContent::from_extension(&item.extension) {
-                    GalleryContent::Video => video = true,
-                    GalleryContent::Image => images = true,
-                    GalleryContent::Unknown => {}
-                }
-            }
-            (video, images)
-        })
-        .unwrap_or((false, false));
-
-    // An image-bearing gallery-dl result is the stronger signal for a
-    // gallery page. Use it by default even when yt-dlp also exposes the page
-    // as a playlist; retain an explicit per-host Video preference as an
-    // override when yt-dlp found a playable video.
-    if has_images {
-        return match host_sticky {
-            Some(StickyMode::Video) if ytdlp_video => ProbeOutcome::VideoYtDlp {
-                gallery_toggle: true,
-            },
-            _ => ProbeOutcome::Gallery,
-        };
+    // Any non-empty successful gallery-dl listing owns the lookup, even if
+    // yt-dlp also found a playable video or recognized a playlist.
+    if gallery_items.is_some_and(|items| !items.is_empty()) {
+        return ProbeOutcome::Gallery;
     }
 
-    match (ytdlp_video, has_video) {
-        (true, _) => ProbeOutcome::VideoYtDlp {
+    if ytdlp_video {
+        ProbeOutcome::VideoYtDlp {
             gallery_toggle: false,
-        },
-        (false, true) => ProbeOutcome::VideoGalleryDl,
-        (false, false) => ProbeOutcome::None,
+        }
+    } else {
+        ProbeOutcome::None
     }
 }
 
-/// Prefer gallery-dl for image-bearing collections, even when yt-dlp also
-/// recognizes a playlist. Preserve yt-dlp's stable item URLs and IDs for
-/// video-only playlists; use gallery-dl for other collections it can list.
+/// Prefer every successful non-empty gallery-dl listing over yt-dlp. Keep
+/// yt-dlp's playlist path only as a fallback when gallery-dl returns no files.
 pub(crate) fn route_for_collection(
     ytdlp_video: bool,
     ytdlp_playlist_entries: usize,
     gallery_items: Option<&[GalleryItem]>,
-    host_sticky: Option<StickyMode>,
+    _host_sticky: Option<StickyMode>,
 ) -> ProbeOutcome {
-    let (has_video, has_images) = gallery_items
-        .map(|items| {
-            let mut video = false;
-            let mut images = false;
-            for item in items {
-                match GalleryContent::from_extension(&item.extension) {
-                    GalleryContent::Video => video = true,
-                    GalleryContent::Image => images = true,
-                    GalleryContent::Unknown => {}
-                }
-            }
-            (video, images)
-        })
-        .unwrap_or((false, false));
-
-    // Image-bearing gallery results belong to gallery-dl, including when
-    // yt-dlp happens to expose the same page as a playlist. Video-only yt-dlp
-    // playlists retain their stable entry IDs and page URLs below.
-    if has_images {
-        return route(ytdlp_video, gallery_items, host_sticky);
-    }
-
-    // A video-only yt-dlp playlist has meaningful entry IDs and page URLs,
-    // unlike gallery-dl's positional --range listing.
-    if ytdlp_playlist_entries > 0 {
-        return ProbeOutcome::VideoYtDlp {
-            gallery_toggle: false,
-        };
-    }
-
-    // Video-only gallery-dl collections can use its collection downloader
-    // when the listing confirms more than one entry.
-    let multi_entry = gallery_items.is_some_and(|items| items.len() > 1);
-    if multi_entry && has_video {
-        return ProbeOutcome::VideoGalleryDl;
-    }
-
-    // gallery-dl may return a single file whose extension is outside our
-    // image/video tables (audio, archive, document). Route it to the all-files
-    // picker unless yt-dlp found a more specific video/list route.
-    let has_gallery_items = gallery_items.is_some_and(|items| !items.is_empty());
-    if has_gallery_items && !has_video && !has_images && !ytdlp_video && ytdlp_playlist_entries == 0
-    {
+    if gallery_items.is_some_and(|items| !items.is_empty()) {
         return ProbeOutcome::Gallery;
     }
 
-    // gallery-dl could not list usable media; preserve the existing yt-dlp path.
-    route(ytdlp_video, gallery_items, host_sticky)
+    if ytdlp_video || ytdlp_playlist_entries > 0 {
+        ProbeOutcome::VideoYtDlp {
+            gallery_toggle: false,
+        }
+    } else {
+        ProbeOutcome::None
+    }
 }
 
 /// Whether a probe error should be surfaced to the user instead of falling
@@ -1759,200 +1695,74 @@ done
     }
 
     #[test]
-    fn video_only_ytdlp_playlists_keep_their_picker() {
+    fn gallery_dl_success_overrides_ytdlp_playlists_and_single_videos() {
         let videos = vec![item("mp4"), item("webm")];
-        let ytdlp_playlist = ProbeOutcome::VideoYtDlp {
-            gallery_toggle: false,
-        };
-        assert_eq!(
-            route_for_collection(true, 4, Some(&videos), None),
-            ytdlp_playlist
-        );
-
-        // The gallery-dl preview is capped; a single preview item still must
-        // not replace the playlist's ID-based item selection.
-        let first_preview_item = vec![item("mp4")];
-        assert_eq!(
-            route_for_collection(true, 4, Some(&first_preview_item), None),
-            ytdlp_playlist
-        );
-
-        // Image collections use gallery-dl even when yt-dlp also reports
-        // a playlist. The gallery runner owns the image file enumeration.
+        let single_video = vec![item("mp4")];
         let images = vec![item("jpg"), item("png")];
-        assert_eq!(
-            route_for_collection(true, 4, Some(&images), None),
-            ProbeOutcome::Gallery
-        );
-        // An explicit Video preference remains available when yt-dlp found
-        // a playable video, including on a page gallery-dl can enumerate.
-        assert_eq!(
-            route_for_collection(true, 4, Some(&images), Some(StickyMode::Video)),
-            ProbeOutcome::VideoYtDlp {
-                gallery_toggle: true
-            }
-        );
+        let unknown = vec![item("zip"), item("opus")];
 
-        // A single-entry yt-dlp playlist also retains its own route.
-        assert_eq!(
-            route_for_collection(true, 1, Some(&videos[..1]), None),
-            ytdlp_playlist
-        );
-
-        // Without a yt-dlp playlist, gallery-dl still handles multi-entry
-        // video collections; this preserves the non-playlist collection path.
-        assert_eq!(
-            route_for_collection(true, 0, Some(&videos), None),
-            ProbeOutcome::VideoGalleryDl
-        );
+        for items in [&videos[..], &single_video[..], &images[..], &unknown[..]] {
+            assert_eq!(
+                route_for_collection(true, 4, Some(items), None),
+                ProbeOutcome::Gallery,
+                "a non-empty gallery-dl result must win for items: {items:?}",
+            );
+            assert_eq!(
+                route_for_collection(false, 0, Some(items), None),
+                ProbeOutcome::Gallery,
+                "gallery-dl must also win when yt-dlp found nothing",
+            );
+            // A stored Video preference must not override a successful
+            // gallery-dl listing.
+            assert_eq!(
+                route_for_collection(true, 4, Some(items), Some(StickyMode::Video)),
+                ProbeOutcome::Gallery,
+            );
+        }
     }
 
     #[test]
-    fn unknown_extension_collection_routes_to_all_files_gallery() {
-        let items = vec![
-            GalleryItem {
-                filename: "archive.zip".into(),
-                extension: "zip".into(),
-                category: String::new(),
-                extra: serde_json::Map::new(),
-            },
-            GalleryItem {
-                filename: "audio.opus".into(),
-                extension: "opus".into(),
-                category: String::new(),
-                extra: serde_json::Map::new(),
-            },
-        ];
-        assert!(matches!(
-            route_for_collection(false, 0, Some(&items), None),
-            ProbeOutcome::Gallery
-        ));
-        assert!(matches!(
-            route_for_collection(true, 0, Some(&items), None),
-            ProbeOutcome::VideoYtDlp { .. }
-        ));
-    }
-
-    #[test]
-    fn route_falls_back_to_ytdlp_when_gallerydl_has_no_supported_items() {
-        // Unsupported or failed gallery-dl probes must not block a valid playlist.
+    fn yt_dlp_is_fallback_when_gallery_dl_returns_no_files() {
+        // Unsupported, failed, or empty gallery-dl results retain yt-dlp's
+        // stable single-video and playlist paths.
         assert_eq!(
             route_for_collection(true, 3, None, None),
             ProbeOutcome::VideoYtDlp {
                 gallery_toggle: false
             }
         );
-        let unknown = vec![item("xyz"), item("bin")];
         assert_eq!(
-            route_for_collection(true, 3, Some(&unknown), None),
+            route_for_collection(true, 0, Some(&[]), None),
             ProbeOutcome::VideoYtDlp {
                 gallery_toggle: false
             }
         );
-
-        // One entry is not forced through gallery-dl just because it has metadata.
-        let single = vec![item("mp4")];
         assert_eq!(
-            route_for_collection(true, 1, Some(&single), None),
-            ProbeOutcome::VideoYtDlp {
-                gallery_toggle: false
-            }
+            route_for_collection(false, 0, None, None),
+            ProbeOutcome::None
         );
     }
 
     #[test]
-    fn route_gallery_wins_by_default_when_images_are_available() {
-        let items = vec![item("jpg")];
-        assert_eq!(route(true, Some(&items), None), ProbeOutcome::Gallery);
-        assert_eq!(
-            route(true, Some(&items), Some(StickyMode::Video)),
-            ProbeOutcome::VideoYtDlp {
-                gallery_toggle: true
-            }
-        );
-    }
+    fn route_always_prefers_nonempty_gallery_dl_results() {
+        let video = vec![item("mp4")];
+        let unknown = vec![item("xyz")];
 
-    #[test]
-    fn route_ytdlp_wins_no_toggle_without_images() {
-        let items = vec![item("mp4")];
+        assert_eq!(route(true, Some(&video), None), ProbeOutcome::Gallery);
         assert_eq!(
-            route(true, Some(&items), None),
-            ProbeOutcome::VideoYtDlp {
-                gallery_toggle: false
-            }
+            route(true, Some(&video), Some(StickyMode::Video)),
+            ProbeOutcome::Gallery
         );
+        assert_eq!(route(false, Some(&video), None), ProbeOutcome::Gallery);
+        assert_eq!(route(true, Some(&unknown), None), ProbeOutcome::Gallery);
         assert_eq!(
             route(true, None, None),
             ProbeOutcome::VideoYtDlp {
                 gallery_toggle: false
             }
         );
-    }
-
-    #[test]
-    fn route_gallerydl_video_fallback() {
-        // Instagram stories: yt-dlp finds nothing, gallery-dl finds video.
-        let items = vec![item("mp4")];
-        assert_eq!(
-            route(false, Some(&items), None),
-            ProbeOutcome::VideoGalleryDl
-        );
-    }
-
-    #[test]
-    fn route_gallery_images() {
-        let items = vec![item("jpg"), item("png")];
-        assert_eq!(route(false, Some(&items), None), ProbeOutcome::Gallery);
-    }
-
-    #[test]
-    fn route_nothing() {
         assert_eq!(route(false, None, None), ProbeOutcome::None);
-        let unknown = vec![item("xyz")];
-        assert_eq!(route(false, Some(&unknown), None), ProbeOutcome::None);
-    }
-
-    #[test]
-    fn route_sticky_host_preference() {
-        let images = vec![item("jpg")];
-        // Sticky gallery wins when both viable.
-        assert_eq!(
-            route(true, Some(&images), Some(StickyMode::Gallery)),
-            ProbeOutcome::Gallery
-        );
-        // Sticky video → default Video with toggle.
-        assert_eq!(
-            route(true, Some(&images), Some(StickyMode::Video)),
-            ProbeOutcome::VideoYtDlp {
-                gallery_toggle: true
-            }
-        );
-        // No sticky → gallery-dl wins for image-bearing pages.
-        assert_eq!(route(true, Some(&images), None), ProbeOutcome::Gallery);
-        // Sticky never overrides an unviable mode: yt-dlp found nothing,
-        // so Video is not an option even with a Video preference.
-        assert_eq!(
-            route(false, Some(&images), Some(StickyMode::Video)),
-            ProbeOutcome::Gallery
-        );
-    }
-
-    #[test]
-    fn route_mixed_content_prefers_gallery_unless_video_is_explicitly_selected() {
-        // Image-bearing collections use gallery-dl regardless of item order.
-        let mixed = vec![item("mp4"), item("jpg")];
-        assert_eq!(route(true, Some(&mixed), None), ProbeOutcome::Gallery);
-        let mixed_rev = vec![item("jpg"), item("mp4")];
-        assert_eq!(route(true, Some(&mixed_rev), None), ProbeOutcome::Gallery);
-        // An explicit Video preference still selects yt-dlp when available.
-        assert_eq!(
-            route(true, Some(&mixed), Some(StickyMode::Video)),
-            ProbeOutcome::VideoYtDlp {
-                gallery_toggle: true
-            }
-        );
-        // Without a yt-dlp result, the gallery path owns mixed image/video pages.
-        assert_eq!(route(false, Some(&mixed), None), ProbeOutcome::Gallery);
+        assert_eq!(route(false, Some(&[]), None), ProbeOutcome::None);
     }
 
     #[test]

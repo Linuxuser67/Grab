@@ -3262,7 +3262,8 @@ impl DownloadManager {
                                     &file_id,
                                     DownloadStatus::Done,
                                     1.0,
-                                    &gettext("Finished • {size}").replace("{size}", &fmt_bytes(size)),
+                                    &gettext("Finished • {size}")
+                                        .replace("{size}", &fmt_bytes(size)),
                                     Some(&path),
                                 );
                                 this.persist_queue();

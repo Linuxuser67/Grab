@@ -138,7 +138,7 @@ Support a static single-period MP4 representation with an in-file
 `SegmentBase@indexRange`, `Initialization@range`, and bounded SIDX hierarchy.
 Fetch each bounded index range, decode SIDX with the existing `mp4box`
 dependency, and translate direct and nested references into ordered Grab
-byte-range resources. Separate initialization URLs, dynamic SegmentBase, malformed or out-of-file
+byte-range resources. Dynamic SegmentBase, malformed or out-of-file
 references, and hierarchies exceeding the explicit depth/node/size limits remain
 on yt-dlp fallback.
 
@@ -262,11 +262,18 @@ The native path now supports:
 - Bounded hierarchical SIDX when the index and media ranges are in the same
   media resource.
 
+The native path also supports unindexed single-file SegmentBase with an
+explicit Initialization child. The initialization must resolve to a separate
+HTTPS resource and may include a bounded byte range. In-file initialization
+ranges remain on fallback because the whole-file media resource would otherwise
+duplicate those bytes. Initialization resources are staged before the media
+resource and are included in representation identity.
+
 The following remain explicit yt-dlp fallbacks:
 - External RepresentationIndex hierarchies and external index resources without
   an explicit bounded range.
-- Separate initialization URLs, dynamic SegmentBase, and non-zero
-  `eptDelta`/`pbDelta`.
+- Dynamic SegmentBase and non-zero `eptDelta`/`pbDelta`.
+- BaseURL-level byte-range templates and WebM.
 
 `BaseURL@byteRange` remains unsupported. ISO/IEC 23009-1 Annex E defines it
 as an alternate byte-range URL template for regular GET requests when HTTP

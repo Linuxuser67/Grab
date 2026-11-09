@@ -57,6 +57,17 @@ substitution plus explicit child-playlist IMPORT of inherited master variables
 are supported for ordinary HLS and LL-HLS. Master-playlist NAME/VALUE and
 QUERYPARAM variables are expanded in variant and rendition URIs. I-frame-only
 media playlists, non-identity
+references or more than one URI-less member, CONTENT-STEERING, unsupported
+encryption schemes, and extensions with unmet REQ-prefixed attributes.
+Complete static VOD/EVENT playlists may omit well-formed EXT-X-GAP
+segments from the local resource plan; live/LL-HLS gaps remain on fallback. Media-playlist NAME/VALUE and QUERYPARAM variable
+substitution is supported for ordinary HLS and LL-HLS. Master-playlist
+NAME/VALUE and QUERYPARAM variables are expanded in variant and rendition
+URIs. Child media playlists may import explicitly named parent variables with
+EXT-X-DEFINE:IMPORT; the selected variable scope is carried through video,
+audio, subtitle, and LL-HLS reload planning. Undefined imports, duplicate
+definitions, and unsupported IMPORT attributes remain on yt-dlp fallback.
+I-frame-only media playlists, non-identity
 session-key formats, non-identity media-key formats, SAMPLE-AES over
 fragmented MP4/CBCS, and unsupported encryption remain on fallback. AES-128
 and supported SAMPLE-AES keys in ordinary HLS continue to use the existing
@@ -92,6 +103,12 @@ that hint from its generated VOD playlist. Child-playlist IMPORT is supported
 when each imported name is explicitly declared by the parent multivariant
 playlist. Mapless parts are accepted only when their fetched bytes pass the
 existing MPEG-TS validation path. Native LL-HLS does not strip ad markers or
+EXT-X-KEY signalling), incomplete continuity, GAP, unknown required
+attributes, and ad/date-range markers remain on yt-dlp fallback.
+EXT-X-START is treated as a playback-position hint: LL-HLS recording retains
+the full advertised live window rather than trimming media units to that hint.
+Mapless parts are accepted only when their fetched bytes pass the existing
+MPEG-TS validation path. Native LL-HLS does not strip ad markers or
 schedule ad-marked media. DRM, license acquisition, and CDM support remain
 unplanned.
 

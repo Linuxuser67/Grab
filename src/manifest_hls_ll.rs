@@ -328,6 +328,8 @@ fn build_plan(manifest_url: &str, playlist: LlMediaPlaylist) -> Result<HlsPlan, 
         return Err(ManifestError::InvalidDuration);
     }
     validate_start_point(&playlist)?;
+    // EXT-X-START is a playback-position hint, not a resource-selection
+    // directive. A recording retains every unit in the advertised live window.
     let has_parts = playlist
         .segments
         .iter()
@@ -1061,6 +1063,32 @@ mod tests {
             })
             .expect("fixture contains PART-HOLD-BACK");
         assert!(plan_hls_media_playlist(BASE, &below_floor).is_err());
+    }
+
+    #[test]
+    fn retains_the_entire_live_window_when_start_offset_is_present() {
+        let body = br#"#EXTM3U
+#EXT-X-START:TIME-OFFSET=-2.0,PRECISE=YES
+#EXT-X-VERSION:9
+#EXT-X-TARGETDURATION:2
+#EXT-X-MEDIA-SEQUENCE:10
+#EXT-X-SERVER-CONTROL:CAN-BLOCK-RELOAD=NO,PART-HOLD-BACK=1.0
+#EXT-X-PART-INF:PART-TARGET=0.5
+#EXT-X-PART:DURATION=0.5,URI="10.0.ts",INDEPENDENT=YES
+#EXT-X-PART:DURATION=0.5,URI="10.1.ts"
+"#;
+        let plan = plan_hls_media_playlist(BASE, body)
+            .expect("LL-HLS planner")
+            .expect("LL-HLS playlist is detected");
+
+        assert!(plan.is_live);
+        assert_eq!(plan.resources.len(), 2);
+        assert_eq!(plan.local_playlist.segments.len(), 2);
+        assert_eq!(plan.ll_unit_ids.as_ref().map(|ids| ids.len()), Some(2));
+        assert!(
+            plan.local_playlist.start.is_none(),
+            "the local recording playlist must not retain the source playback hint"
+        );
     }
 
     #[test]

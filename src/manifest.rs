@@ -1518,7 +1518,7 @@ fn build_hls_plan(base_url: Url, mut playlist: MediaPlaylist) -> Result<HlsPlan,
         segment.unknown_tags.retain(|tag| !is_benign_hls_tag(tag));
 
         // Preserve the first METHOD=NONE reset on the next kept program
-        // segment if its original boundary was inside the removed ad interval.
+        // segment if its original boundary was inside an omitted interval.
         if let Some(key) = segment.key.take() {
             if key.method == KeyMethod::None {
                 if !method_none_active {

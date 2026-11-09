@@ -1830,7 +1830,6 @@ fn push_playlist_items_page(
                         ) {
                             Ok(enqueued) => {
                                 apply_scheduled_at(&enqueued, scheduled_at);
-                                single_rows.push(enqueued);
                                 accepted_indices.push(*i);
                             }
                             Err(error) => {

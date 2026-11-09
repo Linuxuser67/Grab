@@ -1470,6 +1470,18 @@ pub(crate) fn plan_hls_media_playlist_with_variables(
 }
 
 fn build_hls_plan(base_url: Url, mut playlist: MediaPlaylist) -> Result<HlsPlan, ManifestError> {
+    if let Some(start) = playlist.start.as_ref() {
+        if !start.time_offset.is_finite() {
+            return Err(ManifestError::InvalidDuration);
+        }
+        if start
+            .other_attributes
+            .keys()
+            .any(|name| name.starts_with("REQ-"))
+        {
+            return Err(ManifestError::UnsupportedPlaylist);
+        }
+    }
     let is_live = !playlist.end_list;
     let end_list = playlist.end_list;
     let source_target_duration = playlist.target_duration;
@@ -1977,6 +1989,21 @@ segment-2.ts
             assert!(local.start.is_none());
             assert_eq!(local.segments.len(), 2);
         }
+    }
+
+    #[test]
+    fn invalid_start_offsets_and_unknown_required_attributes_fall_back() {
+        let invalid_offset = b"#EXTM3U\n#EXT-X-TARGETDURATION:4\n#EXT-X-START:TIME-OFFSET=NaN\n#EXTINF:4,\nsegment.ts\n#EXT-X-ENDLIST\n";
+        assert!(matches!(
+            plan_hls_media_playlist(BASE_URL, invalid_offset),
+            Err(ManifestError::InvalidDuration)
+        ));
+
+        let required_attribute = b"#EXTM3U\n#EXT-X-TARGETDURATION:4\n#EXT-X-START:TIME-OFFSET=1.5,REQ-FOO=YES\n#EXTINF:4,\nsegment.ts\n#EXT-X-ENDLIST\n";
+        assert!(matches!(
+            plan_hls_media_playlist(BASE_URL, required_attribute),
+            Err(ManifestError::UnsupportedPlaylist)
+        ));
     }
 
     #[test]

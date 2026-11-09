@@ -701,14 +701,6 @@ pub(crate) fn parse_dash_manifest_at(
                         template.is_low_latency(),
                         mime_type.as_deref(),
                     )?;
-                } else if is_dynamic
-                    && matches!(&addressing, DashAddressing::List(_))
-                    && !mime_type.as_deref().is_some_and(|mime| {
-                        mime.eq_ignore_ascii_case("video/mp4")
-                            || mime.eq_ignore_ascii_case("audio/mp4")
-                    })
-                {
-                    return Err(DashError::UnsupportedAddressing);
                 }
                 if matches!(
                     &addressing,
@@ -1756,7 +1748,21 @@ fn effective_addressing(
             }
             DashAddressing::Template(template)
         }
-        (false, true) => effective_list(&lists, is_dynamic).map(DashAddressing::List)?,
+        (false, true) => {
+            let mime_type = representation
+                .mimeType
+                .as_deref()
+                .or(adaptation.mimeType.as_deref());
+            if is_dynamic
+                && !mime_type.is_some_and(|mime| {
+                    mime.eq_ignore_ascii_case("video/mp4")
+                        || mime.eq_ignore_ascii_case("audio/mp4")
+                })
+            {
+                return Err(DashError::UnsupportedAddressing);
+            }
+            effective_list(&lists, is_dynamic).map(DashAddressing::List)?
+        }
         _ => return Err(DashError::UnsupportedAddressing),
     };
     if is_dynamic

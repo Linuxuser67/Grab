@@ -24,7 +24,7 @@ pub(super) fn plan_gap_removal(
         let mut gap_tags = segment
             .unknown_tags
             .iter()
-            .filter(|tag| tag.tag == "GAP");
+            .filter(|tag| tag.tag == "X-GAP");
         let Some(gap_tag) = gap_tags.next() else {
             continue;
         };

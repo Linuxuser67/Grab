@@ -828,9 +828,9 @@ pub(crate) fn build_download_group_row(
                 .find_map(|id| manager.find(*id).and_then(|item| item.group()))
                 .map(|group| group.id())
                 .filter(|id| {
-                    manager.find(*id).is_some_and(|item| {
-                        item.is_gallery() || item.is_collection_owner()
-                    })
+                    manager
+                        .find(*id)
+                        .is_some_and(|item| item.is_gallery() || item.is_collection_owner())
                 });
             let removal_ids =
                 collection_owner_id.map_or_else(|| ids.clone(), |owner_id| vec![owner_id]);

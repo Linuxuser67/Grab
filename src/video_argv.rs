@@ -344,16 +344,15 @@ pub(crate) fn playlist_download_argv(
         *progress = YTDLP_PLAYLIST_PROGRESS_TEMPLATE.to_string();
     }
     if let Some(print_at) = args.iter().position(|arg| arg == "after_move:filepath") {
-        args[print_at] = "after_move:[GrabPlaylistDone];%(id)s;%(playlist_index)s;%(filepath)s"
-            .to_string();
+        args[print_at] =
+            "after_move:[GrabPlaylistDone];%(id)s;%(playlist_index)s;%(filepath)s".to_string();
     }
     if let Some(separator) = args.iter().position(|arg| arg == "--") {
         args.splice(
             separator..separator,
             [
                 "--print".to_string(),
-                "before_dl:[GrabPlaylistStart];%(id)s;%(playlist_index)s;%(filename)s"
-                    .to_string(),
+                "before_dl:[GrabPlaylistStart];%(id)s;%(playlist_index)s;%(filename)s".to_string(),
             ],
         );
     }

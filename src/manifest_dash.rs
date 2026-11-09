@@ -1298,6 +1298,10 @@ fn stable_representation_key(identity: RepresentationIdentity<'_>) -> String {
         DashAddressing::List(list) => {
             hasher.update(b"list");
             hasher.update(list.timescale.to_le_bytes());
+            hash_optional_number(
+                &mut hasher,
+                list.segments.first().and_then(|segment| segment.duration),
+            );
             match &list.initialization {
                 Some(DashInitialization::Template(value)) => {
                     hasher.update(b"init-template");

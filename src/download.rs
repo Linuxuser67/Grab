@@ -836,16 +836,13 @@ impl DownloadManager {
         if self.batch.get() > 0 {
             return;
         }
-        let gallery_owners_with_rows = self
-            .items()
-            .filter(|item| item.is_gallery_child())
-            .filter_map(|item| item.group().map(|group| group.id()))
-            .collect::<HashSet<_>>();
+        // Collection children are passive progress rows. Count only their
+        // persisted owner once so a 100-file playlist never inflates the
+        // global queued count or the scheduler's concurrency model.
         self.queued.set(
             self.items()
                 .filter(|item| {
-                    item.status() == DownloadStatus::Queued
-                        && !(item.is_gallery() && gallery_owners_with_rows.contains(&item.id()))
+                    !item.is_collection_child() && item.status() == DownloadStatus::Queued
                 })
                 .count(),
         );
@@ -2106,7 +2103,7 @@ impl DownloadManager {
                 .items()
                 // A discard still tearing down owns its destination: the row stays Queued until the reservation clears.
                 .find(|it| {
-                    !it.is_gallery_child()
+                    !it.is_collection_child()
                         && it.status() == DownloadStatus::Queued
                         && !self.dest_reserved(&it.file_path())
                 });
@@ -2114,6 +2111,11 @@ impl DownloadManager {
                 Some(item) => {
                     if item.is_gallery() {
                         self.spawn_gallery(item);
+                    } else if matches!(
+                        self.video_source(item.id()),
+                        Some(crate::media_types::VideoSource::Playlist { .. })
+                    ) {
+                        self.spawn_video_playlist(item);
                     } else {
                         self.spawn(item);
                     }
@@ -2134,6 +2136,7 @@ impl DownloadManager {
             Some(
                 crate::media_types::VideoSource::Page { .. }
                     | crate::media_types::VideoSource::Manifest { .. }
+                    | crate::media_types::VideoSource::Playlist { .. }
             )
         );
         let segments = self.segment_state.borrow().get(&id).cloned();
@@ -2355,6 +2358,9 @@ impl DownloadManager {
                 }
                 Some(crate::media_types::VideoSource::Manifest { source }) => {
                     return self.spawn_manifest(item, source);
+                }
+                Some(crate::media_types::VideoSource::Playlist { .. }) => {
+                    return self.spawn_video_playlist(item);
                 }
                 _ => {
                     let detail = gettext("Could not prepare video source");

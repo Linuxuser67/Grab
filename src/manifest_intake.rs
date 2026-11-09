@@ -729,11 +729,9 @@ fn parse_hls_steering_manifest(body: &[u8]) -> Result<Vec<String>, ManifestIntak
     Ok(pathway_ids)
 }
 
-async fn fetch_hls_steering_manifest_once(
+async fn fetch_hls_steering_manifest(
     client: &reqwest::Client,
     steering: &crate::manifest::HlsContentSteering,
-    transport_policy: ManifestTransportPolicy,
-    fetch_mode: ManifestFetchMode,
 ) -> Result<Vec<u8>, ManifestIntakeError> {
     let mut request_url = steering.server_url.clone();
     if request_url
@@ -748,13 +746,7 @@ async fn fetch_hls_steering_manifest_once(
         "_HLS_pathway",
         steering.initial_pathway_id.as_deref().unwrap_or(""),
     );
-    let (_, body, _) = fetch_bounded_manifest_with_policy(
-        client,
-        request_url,
-        transport_policy,
-        fetch_mode,
-    )
-    .await?;
+    let (_, body, _) = fetch_bounded_manifest(client, request_url).await?;
     if body.len() > MAX_HLS_STEERING_MANIFEST_BYTES {
         return Err(ManifestIntakeError::Unsupported(
             "The HLS Content Steering manifest exceeds its byte limit".to_string(),
@@ -850,25 +842,16 @@ fn select_hls_content_steering_pathway(
 async fn apply_hls_content_steering(
     client: &reqwest::Client,
     mut master: crate::manifest::HlsMasterPlan,
-    transport_policy: ManifestTransportPolicy,
-    fetch_mode: ManifestFetchMode,
 ) -> Result<crate::manifest::HlsMasterPlan, ManifestIntakeError> {
     let Some(steering) = master.content_steering.as_ref() else {
         return Ok(master);
     };
     validate_hls_content_steering_stable_ids(&master)?;
-    let priority = match fetch_hls_steering_manifest_once(
-        client,
-        steering,
-        transport_policy,
-        fetch_mode,
-    )
-    .await
+    let priority = match fetch_hls_steering_manifest(client, steering).await
     {
         Ok(body) => parse_hls_steering_manifest(&body)?,
         Err(error) if steering.initial_pathway_id.is_some() => {
-            // Use the declared initial Pathway until a steering manifest has
-            // been obtained; do not retry the steering request.
+            // Use the declared initial Pathway if the guarded steering fetch fails.
             let _ = error;
             Vec::new()
         }
@@ -912,13 +895,7 @@ async fn lookup_with_client_policy(
         crate::media_types::ManifestKind::Hls => {
             match crate::manifest::parse_hls_master_playlist(final_url.as_str(), &body) {
                 Ok(master) => {
-                    let master = apply_hls_content_steering(
-                        client,
-                        master,
-                        transport_policy,
-                        fetch_mode,
-                    )
-                    .await?;
+                    let master = apply_hls_content_steering(client, master).await?;
                     validate_hls_stable_track_ids(&master)?;
                     NativeManifest::HlsMaster(master)
                 }

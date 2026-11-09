@@ -141,7 +141,7 @@ async fn run_video_playlist_download_inner(
     mut abort: oneshot::Receiver<StopIntent>,
     tx: tokio::sync::mpsc::UnboundedSender<crate::engine_msg::EngineMsg>,
 ) -> Result<VideoOutcome, VideoError> {
-    use crate::engine_msg::EngineMsg;
+    use crate::engine_msg::{EngineMsg, PlaylistFileEvent};
 
     let libs = resolve_libraries()?;
     let (_yt_version, ff_version) = ensure_tool_versions(&libs).await?;
@@ -308,13 +308,13 @@ async fn run_video_playlist_download_inner(
                     if let Some(previous) = current_file.replace(file_id.clone())
                         && !summary.finished_ids.contains(&previous)
                     {
-                        tx_reader.send(EngineMsg::PlaylistFileFailed {
+                        tx_reader.send(EngineMsg::PlaylistFile(Box::new(PlaylistFileEvent::Failed {
                             file_id: previous,
                             error: gettext("yt-dlp moved to the next playlist entry before finalizing this file"),
-                        }).ok();
+                        }))).ok();
                     }
                     tx_reader
-                        .send(EngineMsg::PlaylistFileStarted { file_id, filename })
+                        .send(EngineMsg::PlaylistFile(Box::new(PlaylistFileEvent::Started { file_id, filename })))
                         .ok();
                 }
                 Some(YtdlpPlaylistEvent::Progress {
@@ -325,11 +325,11 @@ async fn run_video_playlist_download_inner(
                 }) => {
                     if let Some(downloaded) = downloaded {
                         tx_reader
-                            .send(EngineMsg::PlaylistFileProgress {
+                            .send(EngineMsg::PlaylistFile(Box::new(PlaylistFileEvent::Progress {
                                 file_id,
                                 downloaded,
                                 total,
-                            })
+                            })))
                             .ok();
                     }
                 }
@@ -338,10 +338,10 @@ async fn run_video_playlist_download_inner(
                     let canonical = match tokio::fs::canonicalize(&output).await {
                         Ok(path) => path,
                         Err(error) => {
-                            tx_reader.send(EngineMsg::PlaylistFileFailed {
+                            tx_reader.send(EngineMsg::PlaylistFile(Box::new(PlaylistFileEvent::Failed {
                                 file_id: file_id.clone(),
                                 error: format!("yt-dlp reported a file that could not be inspected: {error}"),
-                            }).ok();
+                            }))).ok();
                             continue;
                         }
                     };
@@ -349,10 +349,10 @@ async fn run_video_playlist_download_inner(
                         Ok(metadata) if metadata.is_file() => metadata,
                         _ => {
                             tx_reader
-                                .send(EngineMsg::PlaylistFileFailed {
+                                .send(EngineMsg::PlaylistFile(Box::new(PlaylistFileEvent::Failed {
                                     file_id: file_id.clone(),
                                     error: gettext("yt-dlp did not produce a regular output file"),
-                                })
+                                })))
                                 .ok();
                             continue;
                         }
@@ -367,10 +367,10 @@ async fn run_video_playlist_download_inner(
                         });
                     if !contained {
                         tx_reader
-                            .send(EngineMsg::PlaylistFileFailed {
+                            .send(EngineMsg::PlaylistFile(Box::new(PlaylistFileEvent::Failed {
                                 file_id: file_id.clone(),
                                 error: gettext("yt-dlp output escaped the collection folder"),
-                            })
+                            })))
                             .ok();
                         continue;
                     }
@@ -380,11 +380,11 @@ async fn run_video_playlist_download_inner(
                         current_file = None;
                     }
                     tx_reader
-                        .send(EngineMsg::PlaylistFileFinished {
+                        .send(EngineMsg::PlaylistFile(Box::new(PlaylistFileEvent::Finished {
                             file_id,
                             path: canonical.to_string_lossy().into_owned(),
                             size: metadata.len(),
-                        })
+                        })))
                         .ok();
                 }
                 None => {
@@ -399,10 +399,10 @@ async fn run_video_playlist_download_inner(
             && !summary.finished_ids.contains(&file_id)
         {
             tx_reader
-                .send(EngineMsg::PlaylistFileFailed {
+                .send(EngineMsg::PlaylistFile(Box::new(PlaylistFileEvent::Failed {
                     file_id,
                     error: gettext("yt-dlp exited before finalizing this playlist entry"),
-                })
+                })))
                 .ok();
         }
         summary

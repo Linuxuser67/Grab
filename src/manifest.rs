@@ -2650,6 +2650,49 @@ video.m3u8
     }
 
     #[test]
+    fn encrypted_complete_segments_with_ll_control_tags_use_standard_hls_planner() {
+        let body = br#"#EXTM3U
+#EXT-X-TARGETDURATION:4
+#EXT-X-SERVER-CONTROL:CAN-BLOCK-RELOAD=YES
+#EXT-X-PART-INF:PART-TARGET=0.5
+#EXT-X-KEY:METHOD=AES-128,URI="key.bin"
+#EXTINF:4.0,
+segment.ts
+"#;
+        let plan = plan_hls_media_playlist(BASE_URL, body)
+            .expect("encrypted complete-segment LL-HLS playlist");
+        assert!(plan.is_live);
+        assert!(plan.ll_unit_ids.is_none());
+        assert_eq!(
+            plan.resources
+                .iter()
+                .filter(|resource| resource.kind == HlsResourceKind::Key)
+                .count(),
+            1
+        );
+        assert_eq!(
+            plan.resources
+                .iter()
+                .filter(|resource| resource.kind == HlsResourceKind::Segment)
+                .count(),
+            1
+        );
+        let local = m3u8_rs::parse_media_playlist_res(
+            &plan
+                .local_playlist_bytes()
+                .expect("serialize local playlist"),
+        )
+        .expect("parse local playlist");
+        assert_eq!(
+            local.segments[0]
+                .key
+                .as_ref()
+                .map(|key| key.method.clone()),
+            Some(KeyMethod::AES128)
+        );
+    }
+
+    #[test]
     fn llhls_delta_skip_advances_the_first_visible_media_sequence() {
         let body = br#"#EXTM3U
 #EXT-X-TARGETDURATION:2

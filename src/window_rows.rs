@@ -820,7 +820,19 @@ pub(crate) fn build_download_group_row(
         let toasts = Rc::clone(toasts);
         remove_btn.connect_clicked(move |_| {
             let ids = ids.borrow().clone();
-            let snapshots = ids
+            // Gallery child rows are projections of one process owner. Remove
+            // and Undo the owner as a single gallery job; its children are
+            // reconstructed from gallery-dl events after Undo.
+            let gallery_owner_id = ids
+                .iter()
+                .find_map(|id| manager.find(*id).and_then(|item| item.group()))
+                .map(|group| group.id())
+                .filter(|id| manager.find(*id).is_some_and(|item| item.is_gallery()));
+            let removal_ids = gallery_owner_id.map_or_else(
+                || ids.clone(),
+                |owner_id| vec![owner_id],
+            );
+            let snapshots = removal_ids
                 .iter()
                 .filter_map(|id| {
                     let item = manager.find(*id)?;
@@ -844,8 +856,8 @@ pub(crate) fn build_download_group_row(
                 return;
             }
 
-            let count = snapshots.len();
-            let removed = manager.remove_many(&ids);
+            let count = ids.len();
+            let removed = manager.remove_many(&removal_ids);
             if removed == 0 {
                 return;
             }
@@ -900,11 +912,88 @@ impl DownloadGroupRow {
     }
 }
 
+/// A gallery file is a read-only projection of one shared gallery-dl
+/// process. It intentionally has no per-file process controls: pause/cancel
+/// semantics belong to the parent collection job.
+fn build_gallery_file_row(item: &crate::download::DownloadItem) -> gtk4::ListBoxRow {
+    let outer = gtk4::Box::new(gtk4::Orientation::Vertical, 3);
+    outer.set_margin_top(5);
+    outer.set_margin_bottom(5);
+    outer.set_margin_start(12);
+    outer.set_margin_end(12);
+
+    let top = gtk4::Box::new(gtk4::Orientation::Horizontal, 8);
+    let name = gtk4::Label::builder()
+        .label(item.filename())
+        .halign(gtk4::Align::Start)
+        .hexpand(true)
+        .ellipsize(gtk4::pango::EllipsizeMode::Middle)
+        .build();
+    let status = gtk4::Label::builder()
+        .label(item.status().label())
+        .css_classes(["dimmed", "caption"])
+        .halign(gtk4::Align::End)
+        .build();
+    top.append(&name);
+    top.append(&status);
+
+    let progress = gtk4::ProgressBar::new();
+    progress.set_show_text(false);
+    progress.set_fraction(item.progress().clamp(0.0, 1.0));
+    progress.update_property(&[gtk4::accessible::Property::Label(&gettext(
+        "Gallery file progress",
+    ))]);
+    let detail = gtk4::Label::builder()
+        .label(item.detail())
+        .halign(gtk4::Align::Start)
+        .css_classes(["dimmed", "caption"])
+        .ellipsize(gtk4::pango::EllipsizeMode::End)
+        .build();
+
+    outer.append(&top);
+    outer.append(&progress);
+    outer.append(&detail);
+    let row = gtk4::ListBoxRow::new();
+    row.set_child(Some(&outer));
+    row.set_activatable(false);
+    row.set_selectable(false);
+
+    let name_weak = name.downgrade();
+    let status_weak = status.downgrade();
+    let progress_weak = progress.downgrade();
+    let detail_weak = detail.downgrade();
+    let refresh = move |item: &crate::download::DownloadItem| {
+        if let Some(name) = name_weak.upgrade() {
+            name.set_text(&item.filename());
+        }
+        if let Some(status) = status_weak.upgrade() {
+            status.set_text(&item.status().label());
+        }
+        if let Some(progress) = progress_weak.upgrade() {
+            progress.set_fraction(item.progress().clamp(0.0, 1.0));
+        }
+        if let Some(detail) = detail_weak.upgrade() {
+            detail.set_text(&item.detail());
+        }
+    };
+    let r1 = refresh.clone();
+    item.connect_progress_notify(move |item| r1(item));
+    let r2 = refresh.clone();
+    item.connect_status_notify(move |item| r2(item));
+    let r3 = refresh.clone();
+    item.connect_detail_notify(move |item| r3(item));
+    item.connect_filename_notify(move |item| refresh(item));
+    row
+}
+
 pub(crate) fn build_row(
     item: &crate::download::DownloadItem,
     manager: &Rc<DownloadManager>,
     toasts: &Rc<adw::ToastOverlay>,
 ) -> gtk4::ListBoxRow {
+    if item.is_gallery_child() {
+        return build_gallery_file_row(item);
+    }
     let outer = gtk4::Box::new(gtk4::Orientation::Vertical, 6);
     outer.set_margin_top(12);
     outer.set_margin_bottom(12);

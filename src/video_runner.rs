@@ -137,7 +137,7 @@ struct PlaylistStreamSummary {
 async fn run_video_playlist_download_inner(
     job: VideoJob,
     state: crate::media_types::VideoPlaylistState,
-    _gate: &std::sync::Arc<AttemptGate>,
+    gate: &std::sync::Arc<AttemptGate>,
     mut abort: oneshot::Receiver<StopIntent>,
     tx: tokio::sync::mpsc::UnboundedSender<crate::engine_msg::EngineMsg>,
 ) -> Result<VideoOutcome, VideoError> {
@@ -266,6 +266,10 @@ async fn run_video_playlist_download_inner(
             .iter()
             .all(|file| file.status == crate::download_store::DownloadStatus::Done)
         {
+            if !gate.try_commit() {
+                return Ok(VideoOutcome::Aborted);
+            }
+            gate.mark_delivered();
             return Ok(VideoOutcome::Finished(0));
         }
         return Err(VideoError::fetch(gettext(
@@ -521,6 +525,14 @@ async fn run_video_playlist_download_inner(
         )));
     }
 
+    // The playlist writes final files directly into its dedicated collection
+    // folder. This is the finish/discard linearization point: removal wins
+    // before commit and the owner cleanup removes the folder; commit wins and
+    // the completed collection is considered delivered.
+    if !gate.try_commit() {
+        return Ok(VideoOutcome::Aborted);
+    }
+    gate.mark_delivered();
     Ok(VideoOutcome::Finished(summary.total_size))
 }
 

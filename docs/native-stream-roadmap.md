@@ -48,12 +48,12 @@ date-time ranges can be mapped unambiguously to individual media segments.
 This is a deliberately bounded profile, not a claim of support for every HLS
 extension. Unknown parser tags and unsupported resource-affecting extensions
 fall back to yt-dlp. This includes VIDEO groups with unmatched variant
-references or more than one URI-less member, GAP, media-playlist IMPORT
-declarations, CONTENT-STEERING, unsupported encryption schemes, and extensions
-with unmet REQ-prefixed attributes. Master-playlist and media-playlist
+references or more than one URI-less member, GAP, CONTENT-STEERING, unsupported
+encryption schemes, and extensions with unmet REQ-prefixed attributes. Master-playlist and media-playlist
 NAME/VALUE and QUERYPARAM substitution are supported; child media playlists
-can explicitly IMPORT parent multivariant variables. I-frame-only media playlists, non-identity
-session-key formats, non-identity media-key formats, SAMPLE-AES over
+can explicitly IMPORT parent multivariant variables. Variable environments are
+kept in memory only and are re-derived from the master playlist during resume. I-frame-only media
+playlists, non-identity session-key formats, non-identity media-key formats, SAMPLE-AES over
 fragmented MP4/CBCS, and unsupported encryption remain on fallback. AES-128
 and supported SAMPLE-AES keys in ordinary HLS continue to use the existing
 bounded key-resource path; no license or CDM acquisition is added.

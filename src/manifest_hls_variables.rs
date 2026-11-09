@@ -41,6 +41,9 @@ pub(crate) fn expand_master_playlist(
     manifest_url: &str,
     body: &[u8],
 ) -> Result<(Option<Vec<u8>>, HlsVariableEnvironment), ManifestError> {
+    if body.len() > MAX_MANIFEST_BYTES {
+        return Err(unsupported("playlist exceeds its supported size limit"));
+    }
     let text = playlist_text(body)?;
     if !has_definitions(body) {
         if contains_variable_reference(text) {
@@ -83,6 +86,9 @@ pub(crate) fn expand_media_playlist_with_parent(
     body: &[u8],
     parent_variables: &HlsVariableEnvironment,
 ) -> Result<Option<Vec<u8>>, ManifestError> {
+    if body.len() > MAX_MANIFEST_BYTES {
+        return Err(unsupported("playlist exceeds its supported size limit"));
+    }
     let text = playlist_text(body)?;
     if !has_definitions(body) {
         return if contains_variable_reference(text) {
@@ -134,6 +140,7 @@ fn collect_variables(
     }
     let mut variables = HlsVariableEnvironment::default();
     let mut declared_names = HashSet::with_capacity(definitions.len());
+    let mut total_value_bytes = 0_usize;
 
     for definition in definitions {
         let (name, value, extra_attrs) = match definition {
@@ -184,8 +191,12 @@ fn collect_variables(
             return Err(unsupported("duplicate EXT-X-DEFINE variable"));
         }
         validate_value(&value)?;
-        if value.len() > MAX_MANIFEST_BYTES {
-            return Err(unsupported("HLS variable exceeds its supported size limit"));
+        total_value_bytes = total_value_bytes
+            .checked_add(name.len())
+            .and_then(|total| total.checked_add(value.len()))
+            .ok_or_else(|| unsupported("HLS variable storage size overflowed"))?;
+        if total_value_bytes > MAX_MANIFEST_BYTES {
+            return Err(unsupported("HLS variables exceed their combined size limit"));
         }
         variables.values.insert(name, value);
     }

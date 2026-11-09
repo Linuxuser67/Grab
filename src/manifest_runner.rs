@@ -2112,8 +2112,7 @@ async fn resolve_tracks(
             let subtitle = match subtitle_url {
                 Some(url) => {
                     guard_manifest_child_url(&source.url, &url, guarded_child_hosts)?;
-                    let plan =
-                        crate::manifest_intake::lookup_hls_media_with_variables(
+                    let plan = crate::manifest_intake::lookup_hls_media_with_variables(
                         client,
                         url.as_str(),
                         &variables,
@@ -2131,8 +2130,7 @@ async fn resolve_tracks(
             };
             let audio = match audio_url {
                 Some(url) => {
-                    let plan =
-                        crate::manifest_intake::lookup_hls_media_with_variables(
+                    let plan = crate::manifest_intake::lookup_hls_media_with_variables(
                         client,
                         url.as_str(),
                         &variables,

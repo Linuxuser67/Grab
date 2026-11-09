@@ -1142,6 +1142,40 @@ video/720.m3u8
     }
 
     #[test]
+    fn hls_master_download_plan_retains_parent_variables_for_child_imports() {
+        let body = br#"#EXTM3U
+#EXT-X-VERSION:8
+#EXT-X-DEFINE:NAME="folder",VALUE="media"
+#EXT-X-STREAM-INF:BANDWIDTH=1000000
+video.m3u8
+"#;
+        let master = crate::manifest::parse_hls_master_playlist(
+            "https://cdn.example.test/master.m3u8",
+            body,
+        )
+        .expect("valid variable-bearing master playlist");
+        let video_key = ManifestRepresentationKey::from(
+            hls_variant_keys(&master.variants)[0]
+                .as_deref()
+                .expect("video key"),
+        );
+        let lookup = ManifestLookup {
+            source_url: "https://cdn.example.test/master.m3u8".to_string(),
+            manifest: NativeManifest::HlsMaster(master),
+        };
+        let source = lookup
+            .selected_source(&video_key, None, None)
+            .expect("select source variant");
+        let plan = download_plan(lookup, &source).expect("build HLS master plan");
+        let ManifestDownloadPlan::HlsMaster(plan) = plan else {
+            panic!("expected HLS master plan");
+        };
+        assert_eq!(plan.variables.get("folder"), Some("media"));
+        assert!(!format!("{:?}", plan.variables).contains("media"));
+    }
+
+    #[test]
+    fn hls_download_plan_uses_the_selected_stable_video_and_audio_ids() {    #[test]
     fn hls_download_plan_uses_the_selected_stable_video_and_audio_ids() {
         let body = br#"#EXTM3U
 #EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID="audio",NAME="English",LANGUAGE="en",STABLE-RENDITION-ID="rendition-en",URI="audio/en.m3u8"

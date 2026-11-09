@@ -2138,6 +2138,38 @@ one.ts
     }
 
     #[test]
+    fn master_playlist_variables_expand_variant_and_rendition_uris() {
+        let body = br#"#EXTM3U
+#EXT-X-VERSION:8
+#EXT-X-DEFINE:NAME="folder",VALUE="encoded"
+#EXT-X-DEFINE:QUERYPARAM="token"
+#EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID="audio",NAME="English",URI="audio/{$folder}.m3u8?token={$token}"
+#EXT-X-STREAM-INF:BANDWIDTH=1000000,AUDIO="audio"
+{$folder}/index-{$token}.m3u8
+"#;
+        let master = parse_hls_master_playlist(
+            "https://cdn.example.test/live/master.m3u8?token=abc%2F123",
+            body,
+        )
+        .expect("master variables must expand before variant parsing");
+        assert_eq!(
+            master.variants[0].url.as_str(),
+            "https://cdn.example.test/live/encoded/index-abc/123.m3u8"
+        );
+        assert_eq!(
+            master.audio_renditions[0]
+                .url
+                .as_ref()
+                .expect("audio rendition URI")
+                .as_str(),
+            "https://cdn.example.test/live/audio/encoded.m3u8?token=abc/123"
+        );
+        assert_eq!(master.variables.get("folder"), Some("encoded"));
+        assert_eq!(master.variables.get("token"), Some("abc/123"));
+    }
+
+    #[test]
+    fn alternate_video_renditions_become_independent_video_choices() {    #[test]
     fn alternate_video_renditions_become_independent_video_choices() {
         let body = br#"#EXTM3U
 #EXT-X-MEDIA:TYPE=VIDEO,GROUP-ID="angles",NAME="Main",STABLE-RENDITION-ID="main"

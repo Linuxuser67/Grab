@@ -1611,6 +1611,7 @@ mod destination_part_tests {
             part_target: first_plan.part_target,
             blocking_reload: first_plan.blocking_reload,
             can_skip_until: first_plan.can_skip_until,
+            inherited_variables: first_plan.inherited_variables.clone(),
             rendition_reports: first_plan.rendition_reports.clone(),
             destination_part: Some(destination_state.clone()),
         };

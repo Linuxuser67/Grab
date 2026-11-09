@@ -1080,6 +1080,111 @@ async fn streamed_destination_writer_resumes_without_staged_source_files() {
 }
 
 #[tokio::test]
+async fn appendable_destination_writer_persists_empty_checkpoint_before_pause() {
+    let root = test_directory();
+    let staging = root.join("staging");
+    let track_directory = staging.join("video");
+    let destination_dir = root.join("destination");
+    tokio::fs::create_dir_all(&track_directory)
+        .await
+        .expect("create track staging");
+    tokio::fs::create_dir_all(&destination_dir)
+        .await
+        .expect("create destination");
+    let output = destination_dir.join("recording.mp4");
+    crate::manifest_destination::ensure_plan(&staging, &output, 79, false, false)
+        .expect("create destination plan");
+    tokio::fs::write(track_directory.join("first.bin"), b"first")
+        .await
+        .expect("write first resource");
+    let resources = vec!["first.bin".to_string()];
+    let track = crate::manifest_destination::TrackKind::Video;
+    let (stop_tx, mut abort) = stop_channel();
+
+    let (Some(mut writer), committed) = OrderedTrackWriter::open_appendable_destination_part(
+        resources.clone(),
+        &track_directory,
+        &staging,
+        "video-track.mp4",
+        &output,
+        79,
+        track,
+    )
+    .await
+    .expect("open fresh appendable destination writer") else {
+        panic!("a fresh destination part must return an active writer");
+    };
+    assert_eq!(committed, 0);
+    let checkpoint_path = track_directory.join("video-track.mp4.checkpoint.json");
+    let checkpoint: WriterCheckpoint = serde_json::from_slice(
+        &tokio::fs::read(&checkpoint_path)
+            .await
+            .expect("read the initial empty checkpoint"),
+    )
+    .expect("decode initial empty checkpoint");
+    assert_eq!(checkpoint.next_resource_index, 0);
+    assert_eq!(checkpoint.committed_offset, 0);
+    assert!(checkpoint.append_only);
+
+    let part = crate::manifest_destination::part_path(&staging, &output, 79, track)
+        .expect("resolve empty destination part");
+    assert_eq!(
+        tokio::fs::metadata(&part)
+            .await
+            .expect("inspect empty part")
+            .len(),
+        0
+    );
+
+    stop_tx
+        .send(crate::video::StopIntent::Pause)
+        .expect("queue pause before the first resource commit");
+    assert!(matches!(
+        writer
+            .append_next_outcome(&mut abort)
+            .await
+            .expect("pause first append"),
+        AppendNextOutcome::Stopped(crate::video::StopIntent::Pause)
+    ));
+    drop(writer);
+
+    let (_finish_tx, mut finish_abort) = stop_channel();
+    let (Some(mut resumed), committed) = OrderedTrackWriter::open_appendable_destination_part(
+        resources,
+        &track_directory,
+        &staging,
+        "video-track.mp4",
+        &output,
+        79,
+        track,
+    )
+    .await
+    .expect("resume after pause before the first resource commit") else {
+        panic!("an empty but checkpointed destination part must remain resumable");
+    };
+    assert_eq!(committed, 0);
+    assert_eq!(resumed.next_resource_index(), 0);
+    assert!(
+        resumed
+            .append_next(&mut finish_abort)
+            .await
+            .expect("append first resource after resume")
+    );
+    resumed
+        .finish()
+        .await
+        .expect("flush resumed destination part");
+    assert_eq!(
+        tokio::fs::read(&part).await.expect("read resumed part"),
+        b"first"
+    );
+
+    tokio::fs::remove_dir_all(root)
+        .await
+        .expect("remove test directory");
+}
+
+#[tokio::test]
 async fn missing_appendable_checkpoint_preserves_existing_destination_part() {
     let root = test_directory();
     let staging = root.join("staging");

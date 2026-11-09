@@ -47,11 +47,11 @@ date-time ranges can be mapped unambiguously to individual media segments.
 
 This is a deliberately bounded profile, not a claim of support for every HLS
 extension. Unknown parser tags and unsupported resource-affecting extensions
-fall back to yt-dlp. This includes alternate VIDEO rendition groups, GAP, master-playlist variables and
+fall back to yt-dlp. This includes alternate VIDEO rendition groups, GAP,
 media-playlist IMPORT declarations, CONTENT-STEERING, unsupported encryption
-schemes, and extensions with unmet REQ-prefixed attributes. Media-playlist
-NAME/VALUE and QUERYPARAM variable substitution is supported for ordinary HLS
-and LL-HLS. I-frame-only media playlists, non-identity
+schemes, and extensions with unmet REQ-prefixed attributes. Master-playlist
+and media-playlist NAME/VALUE and QUERYPARAM variable substitution is supported
+within each playlist's own scope. I-frame-only media playlists, non-identity
 session-key formats, non-identity media-key formats, SAMPLE-AES over
 fragmented MP4/CBCS, and unsupported encryption remain on fallback. AES-128
 and supported SAMPLE-AES keys in ordinary HLS continue to use the existing
@@ -80,8 +80,8 @@ This LL-HLS profile remains deliberately bounded. The first captured part must
 be independently decodable (or covered by EXT-X-INDEPENDENT-SEGMENTS).
 CMAF part capture without a known EXT-X-MAP, mapless parts that fail
 MPEG-TS validation, unsupported encryption (including all LL-HLS media-playlist
-EXT-X-KEY signalling), incomplete continuity, EXT-X-START, GAP, master-playlist variables and IMPORT declarations,
-unknown required attributes, and ad/date-range markers remain on yt-dlp
+EXT-X-KEY signalling), incomplete continuity, EXT-X-START, GAP, media-playlist IMPORT declarations, unknown required
+attributes, and ad/date-range markers remain on yt-dlp
 fallback. Mapless parts are accepted only when their fetched bytes pass the
 existing MPEG-TS validation path. Native LL-HLS does not strip ad markers or
 schedule ad-marked media. DRM, license acquisition, and CDM support remain

@@ -1126,6 +1126,8 @@ pub(crate) fn parse_hls_master_playlist(
     {
         return Err(ManifestError::UnsupportedPlaylist);
     }
+    let expanded_body = hls_variables::expand_master_playlist(manifest_url, body)?;
+    let body = expanded_body.as_deref().unwrap_or(body);
     let playlist =
         m3u8_rs::parse_playlist_res(body).map_err(|error| hls_parse_error(body, error))?;
 
@@ -2957,6 +2959,35 @@ one.ts
         assert_eq!(
             plan_hls_media_playlist(BASE_URL, body).err(),
             Some(ManifestError::UnsupportedEncryption)
+        );
+    }
+
+    #[test]
+    fn expands_master_playlist_variables_in_variant_and_rendition_uris() {
+        let body = br#"#EXTM3U
+#EXT-X-VERSION:8
+#EXT-X-DEFINE:NAME="path",VALUE="video"
+#EXT-X-DEFINE:QUERYPARAM="audio"
+#EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID="aud",NAME="English",DEFAULT=YES,URI="{$audio}"
+#EXT-X-STREAM-INF:BANDWIDTH=1000000,AUDIO="aud"
+{$path}/main.m3u8
+"#;
+        let master = parse_hls_master_playlist(
+            "https://cdn.example.test/master.m3u8?audio=sound%2Fen.m3u8",
+            body,
+        )
+        .expect("master playlist variables should be expanded");
+        assert_eq!(
+            master.variants[0].url.as_str(),
+            "https://cdn.example.test/video/main.m3u8"
+        );
+        assert_eq!(
+            master.audio_renditions[0]
+                .url
+                .as_ref()
+                .expect("audio rendition URL")
+                .as_str(),
+            "https://cdn.example.test/sound/en.m3u8"
         );
     }
 

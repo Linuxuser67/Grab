@@ -282,3 +282,21 @@ failed native resource request or add an alternate request path, so this
 fallback-only optimization is not implemented. Ordinary DASH byte ranges
 continue to use Grab's strict HTTP Range and Content-Range validation.
 
+### 7. Dynamic DASH SegmentList — implemented bounded profile
+
+Dynamic SegmentList is supported only for a single MP4 Period with a separate
+initialization resource, a zero-origin explicit SegmentTimeline containing one
+entry per SegmentURL, default startNumber, contiguous equal-duration segments,
+and a bounded live window. Segment sequence numbers are derived from the
+zero-origin timeline, allowing the existing live journal to detect missing or
+changed resources across MPD refreshes.
+
+Sliding lists with non-default startNumber, implicit timeline times, repeats,
+gaps, variable durations, missing initialization, non-MP4 tracks, and other
+unsupported SegmentList addressing remain on yt-dlp fallback. No automatic
+native transfer retries are introduced.
+
+Acceptance covers explicit timeline mapping, time-shift window selection,
+stable sequence identity, initialization identity, and conservative rejection
+of ambiguous or unsupported timeline forms.
+

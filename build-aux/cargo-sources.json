@@ -4493,7 +4493,7 @@
     },
     {
         "type": "inline",
-        "contents": "{\"package\":\"a49b42b5c75e867313b41eae0cbc250eaf8dc6c13db874583ad6bba5b527eef4\",\"files\":{}}",
+        "contents": "{\"package\": \"a49b42b5c75e867313b41eae0cbc250eaf8dc6c13db874583ad6bba5b527eef4\", \"files\": {}}",
         "dest": "cargo/scte35-splice-4.0.0",
         "dest-filename": ".cargo-checksum.json"
     },

@@ -227,28 +227,28 @@ async fn run_video_playlist_download_inner(
         ) {
             Ok(()) => selected_indices.push(index),
             Err(crate::download_net::CollectionHostError::TooManyDistinctHosts) => {
-                tx.send(EngineMsg::PlaylistFileFailed {
+                tx.send(EngineMsg::PlaylistFile(Box::new(PlaylistFileEvent::Failed {
                     file_id: file.id.clone(),
                     error: gettext("The collection exceeded the limit of distinct download hosts"),
-                })
+                })))
                 .ok();
             }
             Err(crate::download_net::CollectionHostError::UnsafeDestination) => {
-                tx.send(EngineMsg::PlaylistFileFailed {
+                tx.send(EngineMsg::PlaylistFile(Box::new(PlaylistFileEvent::Failed {
                     file_id: file.id.clone(),
                     error: gettext(
                         "The playlist entry could not be verified as a public destination",
                     ),
-                })
+                })))
                 .ok();
             }
         }
     }
     for file_id in missing_ids {
-        tx.send(EngineMsg::PlaylistFileFailed {
+        tx.send(EngineMsg::PlaylistFile(Box::new(PlaylistFileEvent::Failed {
             file_id,
             error: gettext("This playlist entry is no longer available"),
-        })
+        })))
         .ok();
     }
 

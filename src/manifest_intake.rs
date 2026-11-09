@@ -1096,7 +1096,6 @@ fn apply_hls_pathway_clones(
     }
 }
 
-
 fn hls_steering_request_url(
     steering: &crate::manifest::HlsContentSteering,
 ) -> Result<Url, ManifestIntakeError> {

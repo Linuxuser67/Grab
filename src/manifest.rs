@@ -1993,7 +1993,7 @@ segment-2.ts
 
     #[test]
     fn invalid_start_offsets_and_unknown_required_attributes_fall_back() {
-        let invalid_offset = b"#EXTM3U\n#EXT-X-TARGETDURATION:4\n#EXT-X-START:TIME-OFFSET=NaN\n#EXTINF:4,\nsegment.ts\n#EXT-X-ENDLIST\n";
+        let invalid_offset = b"#EXTM3U\n#EXT-X-TARGETDURATION:4\n#EXT-X-START:TIME-OFFSET=9999999999999999999999999999999999999999\n#EXTINF:4,\nsegment.ts\n#EXT-X-ENDLIST\n";
         assert!(matches!(
             plan_hls_media_playlist(BASE_URL, invalid_offset),
             Err(ManifestError::InvalidDuration)

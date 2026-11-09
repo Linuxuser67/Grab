@@ -306,6 +306,16 @@ pub fn resolve_tool() -> Result<PathBuf, String> {
     crate::gallery_tools::resolve_gallerydl().map_err(|e| e.to_string())
 }
 
+/// Persisted UI state for one file handled by a gallery-dl process.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct GalleryFileState {
+    /// Exact output path announced by gallery-dl.
+    pub path: String,
+    pub status: crate::download_store::DownloadStatus,
+    #[serde(default)]
+    pub progress: f64,
+}
+
 /// Inputs for a gallery download (one queue row per gallery).
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct GalleryJob {
@@ -330,6 +340,10 @@ pub struct GalleryJob {
     /// just threads it through to the argv.
     #[serde(default)]
     pub range: Option<String>,
+    /// File rows are projected into the collection UI and persist with the
+    /// single gallery owner, not as independently scheduled queue entries.
+    #[serde(default)]
+    pub file_rows: Vec<GalleryFileState>,
 }
 
 #[cfg(test)]

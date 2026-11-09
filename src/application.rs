@@ -1089,10 +1089,8 @@ fn register_actions(
                                 let toasts = undo_toasts.clone();
                                 let snapshots = snapshots.clone();
                                 glib::spawn_future_local(async move {
-                                    for snap in snapshots {
-                                        if let Err(error) = manager.unremove_async(snap).await {
-                                            toasts.add_toast(adw::Toast::new(&error));
-                                        }
+                                    if let Err(error) = manager.unremove_many_async(snapshots).await {
+                                        toasts.add_toast(adw::Toast::new(&error));
                                     }
                                 });
                             });

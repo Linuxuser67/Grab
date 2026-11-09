@@ -20,6 +20,7 @@
 
 use crate::download::DownloadManager;
 use crate::download_row::DownloadItem;
+#[cfg(test)]
 use crate::download_store::DownloadGroup;
 use crate::gallery_grid::GalleryGrid;
 use crate::window_rows::{

@@ -1605,10 +1605,10 @@ fn build_hls_plan(base_url: Url, mut playlist: MediaPlaylist) -> Result<HlsPlan,
     reject_unsupported_hls_tags_except(
         &playlist.unknown_tags,
         &[
-            "EXT-X-SERVER-CONTROL",
-            "EXT-X-PART-INF",
-            "EXT-X-PRELOAD-HINT",
-            "EXT-X-RENDITION-REPORT",
+            "X-SERVER-CONTROL",
+            "X-PART-INF",
+            "X-PRELOAD-HINT",
+            "X-RENDITION-REPORT",
         ],
     )?;
 
@@ -1663,7 +1663,18 @@ fn build_hls_plan(base_url: Url, mut playlist: MediaPlaylist) -> Result<HlsPlan,
         if skip_gap_segment {
             segment.unknown_tags.retain(|tag| tag.tag != "X-GAP");
         }
-        reject_unsupported_hls_tags(&segment.unknown_tags)?;
+        // m3u8-rs associates leading LL-HLS control tags with the next
+        // Media Segment, so allow the same non-resource metadata here as at
+        // playlist level. All other unrecognized segment tags still fall back.
+        reject_unsupported_hls_tags_except(
+            &segment.unknown_tags,
+            &[
+                "X-SERVER-CONTROL",
+                "X-PART-INF",
+                "X-PRELOAD-HINT",
+                "X-RENDITION-REPORT",
+            ],
+        )?;
         segment.unknown_tags.retain(|tag| !is_benign_hls_tag(tag));
 
         // Preserve the first METHOD=NONE reset on the next kept program

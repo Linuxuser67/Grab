@@ -1071,12 +1071,40 @@ fn apply_hls_pathway_clones(
         let cloned_variants = base_variants
             .into_iter()
             .map(|mut variant| {
-                let override_uri = variant
-                    .stable_variant_id
-                    .as_deref()
-                    .and_then(|stable_id| pathway_clone.per_variant_uris.get(stable_id))
-                    .map(String::as_str);
-                variant.url = replace_hls_pathway_uri(&variant.url, pathway_clone, override_uri)?;
+                if let Some(stream_url) = variant.video_variant_url.as_ref() {
+                    let stream_override = variant
+                        .stable_variant_id
+                        .as_deref()
+                        .and_then(|stable_id| pathway_clone.per_variant_uris.get(stable_id))
+                        .map(String::as_str);
+                    let cloned_stream_url =
+                        replace_hls_pathway_uri(stream_url, pathway_clone, stream_override)?;
+                    if variant.url == *stream_url {
+                        // A URI-less VIDEO rendition is embedded in its
+                        // STREAM-INF playlist and has no separate rendition URI.
+                        variant.url = cloned_stream_url.clone();
+                    } else {
+                        let rendition_override = variant
+                            .stable_video_rendition_id
+                            .as_deref()
+                            .and_then(|stable_id| pathway_clone.per_rendition_uris.get(stable_id))
+                            .map(String::as_str);
+                        variant.url = replace_hls_pathway_uri(
+                            &variant.url,
+                            pathway_clone,
+                            rendition_override,
+                        )?;
+                    }
+                    variant.video_variant_url = Some(cloned_stream_url);
+                } else {
+                    let variant_override = variant
+                        .stable_variant_id
+                        .as_deref()
+                        .and_then(|stable_id| pathway_clone.per_variant_uris.get(stable_id))
+                        .map(String::as_str);
+                    variant.url =
+                        replace_hls_pathway_uri(&variant.url, pathway_clone, variant_override)?;
+                }
                 if let Some(group) = variant.audio_group.as_mut() {
                     *group = audio_group_map.get(group)?.clone();
                 }
@@ -3568,6 +3596,57 @@ video/b.m3u8
         let replaced =
             replace_hls_pathway_uri(&source, &clone, None).expect("safe replacement URL");
         assert_eq!(replaced.query(), Some("keep=yes&token%2Bkey=new%2Fvalue"));
+    }
+
+    #[test]
+    fn pathway_clone_applies_variant_and_video_rendition_uri_overrides_separately() {
+        let mut master = crate::manifest::parse_hls_master_playlist(
+            MASTER_URL,
+            br#"#EXTM3U
+#EXT-X-CONTENT-STEERING:SERVER-URI="steering.json",PATHWAY-ID="cdn-a"
+#EXT-X-MEDIA:TYPE=VIDEO,GROUP-ID="angles",NAME="Main",URI="video/angle.m3u8",STABLE-RENDITION-ID="angle-main"
+#EXT-X-STREAM-INF:BANDWIDTH=1200000,VIDEO="angles",STABLE-VARIANT-ID="stream-main",PATHWAY-ID="cdn-a"
+video/variant.m3u8
+"#,
+        )
+        .expect("video-rendition master playlist");
+        let clone = parse_hls_steering_manifest(
+            br#"{
+                "VERSION": 1,
+                "TTL": 300,
+                "PATHWAY-PRIORITY": ["clone-a"],
+                "PATHWAY-CLONES": [{
+                    "BASE-ID": "cdn-a",
+                    "ID": "clone-a",
+                    "URI-REPLACEMENT": {
+                        "HOST": "backup.example.test",
+                        "PER-VARIANT-URIS": {
+                            "stream-main": "https://variant.example.test/override.m3u8"
+                        },
+                        "PER-RENDITION-URIS": {
+                            "angle-main": "https://rendition.example.test/override.m3u8"
+                        }
+                    }
+                }]
+            }"#,
+        )
+        .expect("valid video pathway clone");
+        apply_hls_pathway_clones(&mut master, &clone.pathway_clones);
+        let cloned = master
+            .variants
+            .iter()
+            .find(|variant| variant.pathway_id == "clone-a")
+            .expect("cloned video variant");
+        assert_eq!(
+            cloned.video_variant_url.as_ref().unwrap().as_str(),
+            "https://variant.example.test/override.m3u8"
+        );
+        assert_eq!(
+            cloned.url.as_str(),
+            "https://rendition.example.test/override.m3u8"
+        );
+        validate_hls_content_steering_stable_ids(&master)
+            .expect("video rendition clone preserves its stable identities");
     }
 
     #[test]

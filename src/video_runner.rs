@@ -155,7 +155,7 @@ async fn run_video_playlist_download_inner(
     );
 
     let dest_dir = PathBuf::from(&state.dest_dir);
-    if dest_dir != PathBuf::from(&job.dest) {
+    if dest_dir.as_path() != Path::new(&job.dest) {
         return Err(VideoError::staging(
             "playlist destination does not match its queue entry",
         ));
@@ -267,7 +267,7 @@ async fn run_video_playlist_download_inner(
 
     let (spec, merging) = unified_format_spec(None, "", &job.quality, job.audio_only);
     let merge_ext = merge_output_ext("mp4");
-    let mut argv = playlist_download_argv(
+    let argv = playlist_download_argv(
         &job,
         &spec,
         merging,

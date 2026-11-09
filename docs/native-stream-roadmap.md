@@ -53,8 +53,11 @@ CONTENT-STEERING, unsupported encryption schemes, and extensions with unmet
 REQ-prefixed attributes. Complete static VOD/EVENT playlists may omit
 well-formed EXT-X-GAP segments from the local resource plan; live/LL-HLS gaps
 remain on fallback. Media-playlist NAME/VALUE and QUERYPARAM variable
-substitution is supported for ordinary HLS and LL-HLS; master-playlist
-variables and child-playlist IMPORT declarations remain on yt-dlp fallback. I-frame-only media playlists, non-identity
+substitution is supported for ordinary HLS and LL-HLS. Master-playlist
+NAME/VALUE and QUERYPARAM variables are expanded in variant and rendition
+URIs. Child-playlist IMPORT declarations remain on yt-dlp fallback until
+master variables are propagated through selected-track planning. I-frame-only
+media playlists, non-identity
 session-key formats, non-identity media-key formats, SAMPLE-AES over
 fragmented MP4/CBCS, and unsupported encryption remain on fallback. AES-128
 and supported SAMPLE-AES keys in ordinary HLS continue to use the existing
@@ -83,7 +86,7 @@ This LL-HLS profile remains deliberately bounded. The first captured part must
 be independently decodable (or covered by EXT-X-INDEPENDENT-SEGMENTS).
 CMAF part capture without a known EXT-X-MAP, mapless parts that fail
 MPEG-TS validation, unsupported encryption (including all LL-HLS media-playlist
-EXT-X-KEY signalling), incomplete continuity, EXT-X-START, GAP, master-playlist variables and IMPORT declarations,
+EXT-X-KEY signalling), incomplete continuity, EXT-X-START, GAP and child-playlist IMPORT declarations,
 unknown required attributes, and ad/date-range markers remain on yt-dlp
 fallback. Mapless parts are accepted only when their fetched bytes pass the
 existing MPEG-TS validation path. Native LL-HLS does not strip ad markers or

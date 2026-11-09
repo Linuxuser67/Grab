@@ -3117,6 +3117,20 @@ video/b.m3u8
     }
 
     #[test]
+    fn uses_first_advertised_pathway_when_steering_has_no_initial_pathway() {
+        let mut master = master();
+        master
+            .content_steering
+            .as_mut()
+            .expect("steering declaration")
+            .initial_pathway_id = None;
+        select_hls_content_steering_pathway(&mut master, &[])
+            .expect("fall back to the first advertised Pathway");
+        assert_eq!(master.variants.len(), 1);
+        assert_eq!(master.variants[0].pathway_id, "cdn-a");
+    }
+
+    #[test]
     fn refuses_pathways_without_matching_stable_track_sets() {
         let mut master = master();
         master.variants[1].stable_variant_id = Some("different-variant".to_string());

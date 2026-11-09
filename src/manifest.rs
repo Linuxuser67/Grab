@@ -1599,7 +1599,18 @@ fn build_hls_plan(base_url: Url, mut playlist: MediaPlaylist) -> Result<HlsPlan,
     if playlist.segments.is_empty() {
         return Err(ManifestError::EmptyPlaylist);
     }
-    reject_unsupported_hls_tags(&playlist.unknown_tags)?;
+    // LL-HLS control metadata may accompany a complete-segment playlist.
+    // These advisory tags do not alter the complete resource plan; actual
+    // Partial Segments are routed through the dedicated LL-HLS planner.
+    reject_unsupported_hls_tags_except(
+        &playlist.unknown_tags,
+        &[
+            "X-SERVER-CONTROL",
+            "X-PART-INF",
+            "X-PRELOAD-HINT",
+            "X-RENDITION-REPORT",
+        ],
+    )?;
 
     let mut resources = Vec::with_capacity(playlist.segments.len());
     let mut map_filenames: HashMap<(String, Option<ManifestByteRange>), String> = HashMap::new();

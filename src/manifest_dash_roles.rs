@@ -83,7 +83,7 @@ pub(super) fn representation_metadata(
                     &mut adaptation_count,
                     &mut period_list_pto,
                     &mut adaptation_list_pto,
-                    )?;
+                )?;
                 stack.pop()?;
             }
             Event::End(_) => {

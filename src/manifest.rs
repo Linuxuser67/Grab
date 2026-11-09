@@ -1605,10 +1605,10 @@ fn build_hls_plan(base_url: Url, mut playlist: MediaPlaylist) -> Result<HlsPlan,
     reject_unsupported_hls_tags_except(
         &playlist.unknown_tags,
         &[
-            "X-SERVER-CONTROL",
-            "X-PART-INF",
-            "X-PRELOAD-HINT",
-            "X-RENDITION-REPORT",
+            "EXT-X-SERVER-CONTROL",
+            "EXT-X-PART-INF",
+            "EXT-X-PRELOAD-HINT",
+            "EXT-X-RENDITION-REPORT",
         ],
     )?;
 

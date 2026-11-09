@@ -1589,6 +1589,23 @@ mod group_row_tests {
         assert!(group.open_folder_btn.is_sensitive());
         assert!(group.remove_btn.is_sensitive());
 
+        // A collection spanning multiple download directories has no single
+        // folder to open. Keep the collection-level removal action available.
+        let third = DownloadItem::new(
+            12,
+            "https://example.com/three",
+            "Three.mp4",
+            "/var/tmp",
+        );
+        group.update(
+            std::slice::from_ref(&third),
+            &[first.clone(), second.clone(), third.clone()],
+        );
+        assert!(!group.open_folder_btn.is_visible());
+        assert!(!group.open_folder_btn.is_sensitive());
+        assert!(group.remove_btn.is_visible());
+        assert!(group.remove_btn.is_sensitive());
+
         group.update(&[], &[]);
         assert!(!group.open_folder_btn.is_visible());
         assert!(!group.remove_btn.is_visible());

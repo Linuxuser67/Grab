@@ -4312,21 +4312,35 @@ impl DownloadManager {
         retried
     }
 
-    /// Remove every row in a collection from the list.
+    /// Remove every row in a collection from the list with one queue update.
     pub fn remove_many(self: &Rc<Self>, ids: &[u64]) -> usize {
         let mut removed = 0;
         for &id in ids {
             if self.find(id).is_none() {
                 continue;
             }
-            self.remove(id);
+            self.remove_inner(id);
             removed += 1;
+        }
+        if removed > 0 {
+            self.persist_queue();
+            self.changed();
+            self.start_next();
         }
         removed
     }
 
     /// Cancel and drop a row; restore with [`DownloadManager::unremove`]. The partial file is kept so Undo can resume.
     pub fn remove(self: &Rc<Self>, id: u64) {
+        self.remove_inner(id);
+        self.persist_queue();
+        self.changed();
+        self.start_next();
+    }
+
+    /// Remove one row without publishing an intermediate queue state. Bulk
+    /// collection removal calls this for every member, then persists once.
+    fn remove_inner(self: &Rc<Self>, id: u64) {
         let _ = self.cancel_inner(id, true, Stop::Discard);
         self.epoch.borrow_mut().remove(&id);
         self.started.borrow_mut().remove(&id);
@@ -4360,9 +4374,6 @@ impl DownloadManager {
         if let Some(item) = released {
             Self::release_public_policy(&item);
         }
-        self.persist_queue();
-        self.changed();
-        self.start_next();
     }
 
     /// Segment bitmap snapshot for Undo: cloned before [`DownloadManager::remove`] drops the row's live bitmap.

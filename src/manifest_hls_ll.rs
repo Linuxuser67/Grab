@@ -1343,7 +1343,10 @@ segment.ts
         )
         .expect("parse local playlist");
         assert_eq!(
-            playlist.segments[0].key.as_ref().map(|key| key.method),
+            playlist.segments[0]
+                .key
+                .as_ref()
+                .map(|key| key.method.clone()),
             Some(KeyMethod::AES128)
         );
     }

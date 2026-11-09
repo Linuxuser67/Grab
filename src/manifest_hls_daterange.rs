@@ -199,6 +199,7 @@ pub(super) fn plan_ad_removal(
             .enumerate()
             .filter_map(|(index, value)| {
                 value
+                    .as_ref()
                     .filter(|entry| {
                         entry.start_micros.abs_diff(start)
                             <= BOUNDARY_TOLERANCE_MICROS as u64
@@ -211,6 +212,7 @@ pub(super) fn plan_ad_removal(
             .enumerate()
             .filter_map(|(index, value)| {
                 value
+                    .as_ref()
                     .filter(|entry| {
                         entry.end_micros.abs_diff(end) <= BOUNDARY_TOLERANCE_MICROS as u64
                     })
@@ -224,9 +226,15 @@ pub(super) fn plan_ad_removal(
         }
         let first = starts[0];
         let last = ends[0];
-        if first > last || timeline[first].as_ref().unwrap().component
-            != timeline[last].as_ref().unwrap().component
-        {
+        let first_component = timeline[first]
+            .as_ref()
+            .ok_or_else(|| unsupported("SCTE-35 start has no program-time mapping"))?
+            .component;
+        let last_component = timeline[last]
+            .as_ref()
+            .ok_or_else(|| unsupported("SCTE-35 end has no program-time mapping"))?
+            .component;
+        if first > last || first_component != last_component {
             return Err(unsupported(
                 "SCTE-35 splice interval is reversed or crosses a discontinuity",
             ));
@@ -314,23 +322,25 @@ fn segment_timeline(
         }
     }
 
-    playlist
-        .segments
-        .iter()
-        .enumerate()
-        .map(|(index, _)| {
-            let base = bases.get(&component_ids[index])?;
-            let start_micros = base.checked_add(offsets[index])?;
-            let end_micros = start_micros.checked_add(durations[index])?;
-            Some(Some(SegmentTimeline {
-                component: component_ids[index],
-                start_micros,
-                end_micros,
-            }))
-            .unwrap_or(None)
-            .pipe(Ok)
-        })
-        .collect()
+    let mut timeline = Vec::with_capacity(playlist.segments.len());
+    for index in 0..playlist.segments.len() {
+        let Some(base) = bases.get(&component_ids[index]) else {
+            timeline.push(None);
+            continue;
+        };
+        let start_micros = base
+            .checked_add(offsets[index])
+            .ok_or(ManifestError::DurationOverflow)?;
+        let end_micros = start_micros
+            .checked_add(durations[index])
+            .ok_or(ManifestError::DurationOverflow)?;
+        timeline.push(Some(SegmentTimeline {
+            component: component_ids[index],
+            start_micros,
+            end_micros,
+        }));
+    }
+    Ok(timeline)
 }
 
 fn attribute<'a>(range: &'a DateRange, name: &str) -> Option<&'a str> {

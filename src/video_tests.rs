@@ -3514,6 +3514,41 @@ fn hls_selection_ignores_extractor_order() {
 
 // ── binary part downloads ────────────────────────────────────────────
 
+#[test]
+fn playlist_download_argv_uses_original_selected_indices_and_tagged_events() {
+    let job = direct_test_job();
+    let argv = crate::video_argv::playlist_download_argv(
+        &job,
+        "bv*[height<=720]+ba/b",
+        true,
+        "mp4",
+        std::path::Path::new("/usr/bin/ffmpeg"),
+        std::path::Path::new("/tmp/grab-playlist"),
+        &[0, 2, 6],
+    );
+
+    let value_after = |flag: &str| {
+        argv.iter()
+            .position(|arg| arg == flag)
+            .and_then(|index| argv.get(index + 1))
+            .map(String::as_str)
+    };
+    assert!(argv.iter().any(|arg| arg == "--yes-playlist"));
+    assert!(argv.iter().any(|arg| arg == "--ignore-errors"));
+    assert_eq!(value_after("--playlist-items"), Some("1,3,7"));
+    assert!(!argv.iter().any(|arg| arg == "--no-playlist"));
+    assert_eq!(
+        value_after("--progress-template"),
+        Some(crate::video_argv::YTDLP_PLAYLIST_PROGRESS_TEMPLATE)
+    );
+    assert!(argv.iter().any(|arg| {
+        arg == "before_dl:[GrabPlaylistStart];%(id)s;%(playlist_index)s;%(filename)s"
+    }));
+    assert!(argv.iter().any(|arg| {
+        arg == "after_move:[GrabPlaylistDone];%(id)s;%(playlist_index)s;%(filepath)s"
+    }));
+}
+
 fn direct_test_job() -> VideoJob {
     VideoJob {
         item_id: 1,

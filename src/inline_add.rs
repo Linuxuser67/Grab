@@ -1775,7 +1775,6 @@ fn push_playlist_items_page(
                 let mut skipped_by_host_limit = 0usize;
                 let mut accepted_indices = Vec::with_capacity(chosen.len());
                 let mut playlist_files = Vec::with_capacity(chosen.len());
-                let mut single_rows = Vec::with_capacity(chosen.len());
 
                 for (i, entry) in &chosen {
                     let item_page_url =

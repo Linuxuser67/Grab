@@ -3631,11 +3631,14 @@ impl DownloadManager {
             })
             .collect::<Vec<_>>();
         for item in ids {
-            if status == DownloadStatus::Done {
-                item.set_progress(1.0);
-                item.set_detail(gettext("Finished"));
-            } else {
-                item.set_detail(gettext("Gallery file failed"));
+            match status {
+                DownloadStatus::Done => {
+                    item.set_progress(1.0);
+                    item.set_detail(gettext("Finished"));
+                }
+                DownloadStatus::Paused => item.set_detail(gettext("Paused")),
+                DownloadStatus::Cancelled => item.set_detail(gettext("Cancelled")),
+                _ => item.set_detail(gettext("Gallery file failed")),
             }
             item.set_status(status);
         }
@@ -3970,6 +3973,9 @@ impl DownloadManager {
                 crate::torrent::pause_download(id);
             }
             if item.status() == DownloadStatus::Downloading {
+                if item.is_gallery() {
+                    self.finish_gallery_file_rows(id, DownloadStatus::Paused);
+                }
                 item.set_status(DownloadStatus::Paused);
                 item.set_detail(
                     gettext("Paused • {pct}%")
@@ -4141,6 +4147,9 @@ impl DownloadManager {
     pub fn cancel(self: &Rc<Self>, id: u64) {
         if let Some(path) = self.cancel_inner(id, false, Stop::Preserve) {
             self.schedule_partial_cleanup(path);
+        }
+        if self.find(id).is_some_and(|item| item.is_gallery()) {
+            self.finish_gallery_file_rows(id, DownloadStatus::Cancelled);
         }
         self.persist_queue();
         self.changed();

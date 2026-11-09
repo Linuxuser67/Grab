@@ -155,12 +155,31 @@ async fn run_video_playlist_download_inner(
     );
 
     let dest_dir = PathBuf::from(&state.dest_dir);
+    if dest_dir != PathBuf::from(&job.dest) {
+        return Err(VideoError::staging(
+            "playlist destination does not match its queue entry",
+        ));
+    }
+    let parent_dir = dest_dir
+        .parent()
+        .ok_or_else(|| VideoError::staging("playlist destination has no parent"))?
+        .to_path_buf();
     tokio::fs::create_dir_all(&dest_dir)
+        .await
+        .map_err(VideoError::staging)?;
+    let canonical_parent = tokio::fs::canonicalize(&parent_dir)
         .await
         .map_err(VideoError::staging)?;
     let canonical_dest = tokio::fs::canonicalize(&dest_dir)
         .await
         .map_err(VideoError::staging)?;
+    if canonical_dest.parent() != Some(canonical_parent.as_path())
+        || canonical_dest.file_name() != dest_dir.file_name()
+    {
+        return Err(VideoError::staging(
+            "playlist destination is not a direct directory under its queued parent",
+        ));
+    }
 
     phase_playlist(&tx, gettext("Resolving playlist…"));
     let mut current_playlist = match fetch_video_page(

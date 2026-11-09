@@ -2522,7 +2522,8 @@ fn build_video_preview(
     video_error.add_suffix(&video_retry_btn);
     video_error.set_visible(false);
     video_group.add(&video_error);
-    // Gallery info row: hidden by default, shown when probe finds an image gallery.
+    // Retained as a diagnostic row for file-enumeration failures only;
+    // a normal gallery preview never shows its collection name.
     let gallery_info = adw::ActionRow::builder()
         .title(gettext("Gallery"))
         .use_markup(false)
@@ -2530,7 +2531,8 @@ fn build_video_preview(
     // File selection is in the URL action row; this row carries the title only.
     gallery_info.set_visible(false);
     video_group.add(&gallery_info);
-    // Gallery filter toggle: All / Images / Videos. Hidden by default.
+    // Internal gallery filter state. The preview no longer exposes
+    // All / Images / Videos; gallery queueing always uses All.
     let gallery_filter = adw::ToggleGroup::new();
     for (name, label) in [
         ("all", gettext("All")),
@@ -4789,7 +4791,7 @@ fn show_gallery_ready(v: &VideoStep, card: crate::gallery_card::GalleryCard, tit
     sync_entry_icon(v);
 }
 
-/// Refresh the gallery info row with the collection title only.
+/// Retain the collection title for the gallery job without showing a row.
 fn refresh_gallery_info(v: &VideoStep, title: &str) {
     v.gallery_info.set_title(title);
     v.gallery_info.set_subtitle("");

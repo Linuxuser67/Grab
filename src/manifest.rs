@@ -1234,7 +1234,7 @@ pub(crate) fn parse_hls_master_playlist(
         return Err(ManifestError::ExpectedMasterPlaylist);
     };
 
-    let content_steering = parse_hls_content_steering(&base_url, body)?;
+    let content_steering = parse_hls_content_steering(&base_url, expanded)?;
     // Session keys are optional preloading hints, not media-key substitutes.
     // Never fetch them; the selected media playlist's EXT-X-KEY remains authoritative.
     reject_unsupported_hls_session_keys(&master.session_key)?;
@@ -3340,6 +3340,19 @@ video/default.m3u8
         assert_eq!(steering.initial_pathway_id.as_deref(), Some("cdn-a"));
         assert_eq!(master.variants[0].pathway_id, "cdn-a");
         assert_eq!(master.variants[1].pathway_id, ".");
+
+        let variable_steering_uri = br#"#EXTM3U
+#EXT-X-DEFINE:NAME="steering_path",VALUE="steering"
+#EXT-X-CONTENT-STEERING:SERVER-URI="{$steering_path}.json",PATHWAY-ID="cdn-a"
+#EXT-X-STREAM-INF:BANDWIDTH=1000000,PATHWAY-ID="cdn-a"
+video.m3u8
+"#;
+        let variable_master = parse_hls_master_playlist(BASE_URL, variable_steering_uri)
+            .expect("master variables must be expanded in the steering URI");
+        assert_eq!(
+            variable_master.content_steering.unwrap().server_url.as_str(),
+            "https://cdn.example.test/path/steering.json"
+        );
 
         let duplicate = br#"#EXTM3U
 #EXT-X-CONTENT-STEERING:SERVER-URI="one.json"

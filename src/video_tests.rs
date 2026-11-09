@@ -3527,18 +3527,18 @@ fn playlist_download_argv_uses_original_selected_indices_and_tagged_events() {
         &[0, 2, 6],
     );
 
-    let value_after = |flag: &str| {
-        argv.iter()
+    fn value_after<'a>(args: &'a [String], flag: &str) -> Option<&'a str> {
+        args.iter()
             .position(|arg| arg == flag)
-            .and_then(|index| argv.get(index + 1))
+            .and_then(|index| args.get(index + 1))
             .map(String::as_str)
-    };
+    }
     assert!(argv.iter().any(|arg| arg == "--yes-playlist"));
     assert!(argv.iter().any(|arg| arg == "--ignore-errors"));
-    assert_eq!(value_after("--playlist-items"), Some("1,3,7"));
+    assert_eq!(value_after(&argv, "--playlist-items"), Some("1,3,7"));
     assert!(!argv.iter().any(|arg| arg == "--no-playlist"));
     assert_eq!(
-        value_after("--progress-template"),
+        value_after(&argv, "--progress-template"),
         Some(crate::video_argv::YTDLP_PLAYLIST_PROGRESS_TEMPLATE)
     );
     assert!(argv.iter().any(|arg| {

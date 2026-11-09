@@ -1,7 +1,7 @@
 //! gallery-dl download runner: spawn, parse progress, collect results.
 //!
 //! Spawns gallery-dl with the argv from [`gallery_argv`](crate::gallery_argv),
-//! feeds stdout lines through [`gallery_progress`](crate::gallery_progress),
+//! feeds the merged child output stream through [`gallery_progress`](crate::gallery_progress),
 //! and reports via callbacks. Cancellation: drop the future; the child is
 //! killed via ProcessGroupGuard.
 
@@ -392,7 +392,7 @@ mod tests {
 
     #[cfg(unix)]
     #[tokio::test]
-    async fn runner_attaches_stderr_progress_to_the_started_file_path() {
+    async fn runner_preserves_order_of_start_progress_and_completion_events() {
         use std::os::unix::fs::PermissionsExt as _;
         use std::sync::{Arc, Mutex};
 
@@ -405,7 +405,7 @@ mod tests {
         let first = dir.join("one.jpg");
         let second = dir.join("two.jpg");
         let script = format!(
-            "#!/bin/sh\nprintf '%s\\n' '@START:{}'\nprintf '50%%\\n' >&2\nprintf '%s\\n' '@DONE:{}'\nprintf '# %s\\n' '{}'\n",
+            "#!/bin/sh\nprintf '%s\\n' '@START:{}'\nprintf '50%%\\n' >&2\nprintf '%s\\n' '@DONE:{}'\nprintf '@SKIP:%s\\n' '{}'\n",
             first.display(),
             first.display(),
             second.display(),
@@ -456,6 +456,27 @@ mod tests {
                 Some(ProgressLine::Skipped(path)) if path == &second_path
             )
         }));
+
+
+        let started_at = updates
+            .iter()
+            .position(|update| matches!(update.event, Some(ProgressLine::Started(_))))
+            .expect("start event");
+        let progress_at = updates
+            .iter()
+            .position(|update| update.event.is_none() && update.current_file_percent == Some(50))
+            .expect("per-file progress event");
+        let completed_at = updates
+            .iter()
+            .position(|update| matches!(update.event, Some(ProgressLine::Completed(_))))
+            .expect("completion event");
+        let skipped_at = updates
+            .iter()
+            .position(|update| matches!(update.event, Some(ProgressLine::Skipped(_))))
+            .expect("skip event");
+        assert!(started_at < progress_at);
+        assert!(progress_at < completed_at);
+        assert!(completed_at < skipped_at);
 
         std::fs::remove_dir_all(&dir).ok();
     }

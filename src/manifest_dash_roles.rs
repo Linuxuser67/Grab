@@ -186,7 +186,10 @@ fn push_element(
         (Some(Element::Representation), "SegmentList", true) => {
             if let Some(offset) = segment_list_presentation_time_offset(start)? {
                 *representation_list_pto = offset;
-                periods.last_mut()?.last_mut()?.last_mut()?
+                periods
+                    .last_mut()?
+                    .last_mut()?
+                    .last_mut()?
                     .segment_list_presentation_time_offset = offset;
             }
             Element::Other

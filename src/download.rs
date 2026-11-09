@@ -486,6 +486,8 @@ pub(crate) struct RemovedSnapshot {
     pub public_only: bool,
     /// Keep a restored child in its original multi-item group.
     pub group: Option<crate::download_store::DownloadGroup>,
+    /// Restore a removed gallery collection as one gallery-dl process.
+    pub gallery_job: Option<crate::gallery_argv::GalleryJob>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -4380,6 +4382,11 @@ impl DownloadManager {
     /// are built outside this module).
     pub(crate) fn has_started(&self, id: u64) -> bool {
         self.started.borrow().contains(&id)
+    }
+
+    /// Gallery job payload used by collection Undo.
+    pub(crate) fn gallery_job(&self, id: u64) -> Option<crate::gallery_argv::GalleryJob> {
+        self.gallery_jobs.borrow().get(&id).cloned()
     }
 
     /// Restore a group of removed rows after listing each distinct destination

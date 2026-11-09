@@ -430,8 +430,8 @@ pub(crate) fn push_gallery_picker_page(
                 cookies_browser: settings.cookies_browser().to_string(),
                 speed_limit: crate::gallery_runner::gallery_speed_limit(settings),
                 range: Some(range),
-            
-                file_rows: Vec::new(),};
+                file_rows: Vec::new(),
+            };
             let manager = Rc::clone(&manager);
             let dest_dir = Rc::clone(&dest_dir);
             let close_card = Rc::clone(&close_card);

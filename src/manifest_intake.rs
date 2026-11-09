@@ -838,10 +838,10 @@ fn select_hls_content_steering_pathway(
                 .as_ref()
                 .and_then(|steering| steering.initial_pathway_id.clone())
         })
+        .or_else(|| master.variants.first().map(|variant| variant.pathway_id.clone()))
         .ok_or_else(|| {
             ManifestIntakeError::Unsupported(
-                "No HLS Content Steering priority Pathway is available in the master playlist"
-                    .to_string(),
+                "HLS Content Steering master playlist has no downloadable Pathway".to_string(),
             )
         })?;
     filter_hls_master_to_pathway(master, &selected)
@@ -858,17 +858,17 @@ async fn apply_hls_content_steering(
     let priority = match fetch_hls_steering_manifest(client, steering).await {
         Ok(body) => match parse_hls_steering_manifest(&body) {
             Ok(priority) => priority,
-            Err(_error) if steering.initial_pathway_id.is_some() => {
-                // Use the declared initial Pathway if the steering response is invalid.
+            Err(_error) => {
+                // If the steering response is invalid, use the declared initial
+                // Pathway or the first advertised Pathway until steering recovers.
                 Vec::new()
             }
-            Err(error) => return Err(error),
         },
-        Err(_error) if steering.initial_pathway_id.is_some() => {
-            // Use the declared initial Pathway if the guarded steering fetch fails.
+        Err(_error) => {
+            // A failed steering fetch must not prevent a download when the
+            // master playlist already advertises usable Pathways.
             Vec::new()
-        }
-        Err(error) => return Err(error),
+        },
     };
     select_hls_content_steering_pathway(&mut master, &priority)?;
     Ok(master)

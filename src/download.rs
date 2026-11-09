@@ -3667,11 +3667,18 @@ impl DownloadManager {
         for state in file_rows {
             let status = match (owner.status(), state.status) {
                 (DownloadStatus::Done, _) => DownloadStatus::Done,
-                (DownloadStatus::Failed, DownloadStatus::Downloading) => DownloadStatus::Failed,
-                (DownloadStatus::Cancelled, DownloadStatus::Downloading) => {
-                    DownloadStatus::Cancelled
-                }
-                (DownloadStatus::Paused, DownloadStatus::Downloading) => DownloadStatus::Paused,
+                (
+                    DownloadStatus::Failed,
+                    DownloadStatus::Queued | DownloadStatus::Paused | DownloadStatus::Downloading,
+                ) => DownloadStatus::Failed,
+                (
+                    DownloadStatus::Cancelled,
+                    DownloadStatus::Queued | DownloadStatus::Paused | DownloadStatus::Downloading,
+                ) => DownloadStatus::Cancelled,
+                (
+                    DownloadStatus::Paused,
+                    DownloadStatus::Queued | DownloadStatus::Downloading,
+                ) => DownloadStatus::Paused,
                 (
                     DownloadStatus::Queued,
                     DownloadStatus::Downloading | DownloadStatus::Paused,

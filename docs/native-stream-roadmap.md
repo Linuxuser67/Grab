@@ -272,7 +272,8 @@ resource and are included in representation identity.
 The following remain explicit yt-dlp fallbacks:
 - External RepresentationIndex hierarchies and external index resources without
   an explicit bounded range.
-- Dynamic SegmentBase and non-zero `eptDelta`/`pbDelta`.
+- Separate initialization URLs on indexed SegmentBase, dynamic SegmentBase,
+  and non-zero `eptDelta`/`pbDelta`.
 - BaseURL-level byte-range templates and WebM.
 
 `BaseURL@byteRange` remains unsupported. ISO/IEC 23009-1 Annex E defines it

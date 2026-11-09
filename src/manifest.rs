@@ -3350,7 +3350,11 @@ video.m3u8
         let variable_master = parse_hls_master_playlist(BASE_URL, variable_steering_uri)
             .expect("master variables must be expanded in the steering URI");
         assert_eq!(
-            variable_master.content_steering.unwrap().server_url.as_str(),
+            variable_master
+                .content_steering
+                .unwrap()
+                .server_url
+                .as_str(),
             "https://cdn.example.test/path/steering.json"
         );
 

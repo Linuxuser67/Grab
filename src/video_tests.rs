@@ -1185,9 +1185,12 @@ fn parse_playlist_reads_flat_entries() {
     assert_eq!(pl.items.len(), 2);
     assert_eq!(&*pl.items[0].title, "First");
     assert_eq!(pl.items[0].page_url, "https://www.youtube.com/watch?v=a1");
-    // Empty title falls back to id.
+    assert_eq!(pl.items[0].playlist_index, 1);
+    // Empty title falls back to id. Its original index survives the invalid
+    // and null entries omitted from the visible list.
     assert_eq!(&*pl.items[1].title, "b2");
     assert_eq!(pl.items[1].page_url, "https://example.com/v/b2");
+    assert_eq!(pl.items[1].playlist_index, 3);
 }
 
 #[test]

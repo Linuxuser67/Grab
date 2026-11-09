@@ -1768,7 +1768,7 @@ impl DownloadManager {
         this.video_sources.borrow_mut().insert(
             id,
             crate::media_types::VideoSource::Playlist {
-                page_url: pl.page_url.to_string(),
+                page_url: current.url().to_string(),
                 quality,
                 audio_only,
                 state: state.clone(),
@@ -3089,6 +3089,9 @@ impl DownloadManager {
                         break;
                     }
                     EngineMsg::Failed(e) => {
+                        if item.is_collection_owner() {
+                            this.finish_video_playlist_file_rows(id, DownloadStatus::Failed);
+                        }
                         // A failed download keeps its URL-derived name.
                         this.pending_names.borrow_mut().remove(&id);
                         this.server_mtime.borrow_mut().remove(&id);
@@ -3167,6 +3170,91 @@ impl DownloadManager {
                     }
                     EngineMsg::TorrentPieces(have) => {
                         this.torrent_pieces.borrow_mut().insert(id, have);
+                    }
+                    EngineMsg::PlaylistFileStarted {
+                        file_id,
+                        filename: _filename,
+                    } => {
+                        if item.is_collection_owner()
+                            && item.status() == DownloadStatus::Downloading
+                        {
+                            this.upsert_video_playlist_file_row(
+                                &item,
+                                &file_id,
+                                DownloadStatus::Downloading,
+                                0.0,
+                                &gettext("Downloading"),
+                                None,
+                            );
+                            this.persist_queue();
+                            this.changed();
+                        }
+                    }
+                    EngineMsg::PlaylistFileProgress {
+                        file_id,
+                        downloaded,
+                        total,
+                    } => {
+                        if item.is_collection_owner()
+                            && item.status() == DownloadStatus::Downloading
+                        {
+                            let progress = total
+                                .filter(|total| *total > 0)
+                                .map(|total| (downloaded as f64 / total as f64).clamp(0.0, 1.0))
+                                .unwrap_or(0.0);
+                            let detail = total
+                                .filter(|total| *total > 0)
+                                .map(|total| {
+                                    format!(
+                                        "{} • {} / {}",
+                                        ((progress * 100.0) as u64),
+                                        fmt_bytes(downloaded),
+                                        fmt_bytes(total)
+                                    )
+                                })
+                                .unwrap_or_else(|| fmt_bytes(downloaded));
+                            this.upsert_video_playlist_file_row(
+                                &item,
+                                &file_id,
+                                DownloadStatus::Downloading,
+                                progress,
+                                &detail,
+                                None,
+                            );
+                            this.changed();
+                        }
+                    }
+                    EngineMsg::PlaylistFileFinished {
+                        file_id,
+                        path,
+                        size,
+                    } => {
+                        if item.is_collection_owner() {
+                            this.upsert_video_playlist_file_row(
+                                &item,
+                                &file_id,
+                                DownloadStatus::Done,
+                                1.0,
+                                &gettext("Finished • {size}").replace("{size}", &fmt_bytes(size)),
+                                Some(&path),
+                            );
+                            this.persist_queue();
+                            this.changed();
+                        }
+                    }
+                    EngineMsg::PlaylistFileFailed { file_id, error } => {
+                        if item.is_collection_owner() {
+                            this.upsert_video_playlist_file_row(
+                                &item,
+                                &file_id,
+                                DownloadStatus::Failed,
+                                0.0,
+                                &error,
+                                None,
+                            );
+                            this.persist_queue();
+                            this.changed();
+                        }
                     }
                     EngineMsg::Phase(detail) => {
                         if item.status() == DownloadStatus::Downloading {

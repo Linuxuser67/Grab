@@ -6,7 +6,12 @@
 
 use std::collections::HashMap;
 
+use broadcast_common::Parse;
 use m3u8_rs::{DateRange, MediaPlaylist, QuotedOrUnquoted};
+use scte35_splice::{
+    SpliceInfoSection,
+    commands::{AnyCommand, SpliceInsert},
+};
 
 use super::{
     ManifestError,
@@ -51,6 +56,11 @@ pub(super) fn validate_tag_layout(body: &[u8]) -> Result<(), ManifestError> {
             pending_ranges = 0;
         }
     }
+    if pending_ranges != 0 {
+        return Err(unsupported(
+            "DATERANGE tag is not followed by a media segment",
+        ));
+    }
     Ok(())
 }
 
@@ -73,6 +83,9 @@ pub(super) fn plan_ad_removal(
             continue;
         }
         has_splice_signal = true;
+        if date_range.id.trim().is_empty() {
+            return Err(unsupported("DATERANGE ID is empty"));
+        }
 
         if date_range.end_on_next
             || date_range
@@ -97,12 +110,11 @@ pub(super) fn plan_ad_removal(
                 "SCTE-35 DATERANGE contains unrecognized attributes",
             ));
         }
-        if out_signal.is_some_and(|value| !is_scte35_hex(value))
-            || in_signal.is_some_and(|value| !is_scte35_hex(value))
-        {
-            return Err(unsupported(
-                "SCTE35-OUT/IN is not a valid hexadecimal sequence",
-            ));
+        if let Some(value) = out_signal {
+            validate_scte35_signal(value, true)?;
+        }
+        if let Some(value) = in_signal {
+            validate_scte35_signal(value, false)?;
         }
 
         let range = ranges.entry(date_range.id.clone()).or_default();
@@ -166,9 +178,6 @@ pub(super) fn plan_ad_removal(
         let Some(in_signal) = range.in_signal.as_deref() else {
             return Err(unsupported("SCTE35-OUT has no matching SCTE35-IN"));
         };
-        if !is_scte35_hex(out_signal) || !is_scte35_hex(in_signal) {
-            return Err(unsupported("incomplete SCTE-35 splice pair"));
-        }
         let start = range
             .start_micros
             .ok_or_else(|| unsupported("DATERANGE has no START-DATE"))?;
@@ -349,14 +358,78 @@ fn attribute<'a>(range: &'a DateRange, name: &str) -> Option<&'a str> {
     })
 }
 
-fn is_scte35_hex(value: &str) -> bool {
-    let value = value
+/// Parse and classify an SCTE-35 splice section. The parser verifies the
+/// table ID, section length, command structure, and MPEG-2 CRC before any
+/// ad decision is made. Only clear program-mode splice_insert commands are
+/// accepted; time_signal and unknown/encrypted commands conservatively fall
+/// back until their segmentation descriptors can be mapped explicitly.
+fn validate_scte35_signal(
+    value: &str,
+    expected_out_of_network: bool,
+) -> Result<(), ManifestError> {
+    let bytes = decode_scte35_hex(value)?;
+    if bytes.len() < 3 {
+        return Err(unsupported("SCTE35 signal is shorter than a section header"));
+    }
+    let section_length =
+        usize::from((u16::from(bytes[1] & 0x0F) << 8) | u16::from(bytes[2]));
+    if bytes.len() != section_length + 3 {
+        return Err(unsupported("SCTE35 signal has an inconsistent section length"));
+    }
+
+    let section = SpliceInfoSection::parse(&bytes)
+        .map_err(|_| unsupported("SCTE35 signal failed structural or CRC validation"))?;
+    if section.protocol_version != 0 || section.encrypted_packet {
+        return Err(unsupported(
+            "SCTE35 signal must be a clear section using protocol version zero",
+        ));
+    }
+    let Some(clear) = section.clear.as_ref() else {
+        return Err(unsupported("SCTE35 signal has no clear splice command"));
+    };
+    match &clear.command {
+        AnyCommand::SpliceInsert(splice)
+            if !splice.splice_event_cancel_indicator
+                && splice.program_splice_flag
+                && splice.out_of_network_indicator == expected_out_of_network =>
+        {
+            Ok(())
+        }
+        AnyCommand::SpliceInsert(_) => Err(unsupported(
+            "SCTE35 splice_insert direction or splice mode does not match its DATERANGE attribute",
+        )),
+        _ => Err(unsupported(
+            "only clear program-mode SCTE35 splice_insert commands are supported",
+        )),
+    }
+}
+
+fn decode_scte35_hex(value: &str) -> Result<Vec<u8>, ManifestError> {
+    let encoded = value
         .strip_prefix("0x")
         .or_else(|| value.strip_prefix("0X"))
         .unwrap_or(value);
-    value.len() >= 2
-        && value.len() % 2 == 0
-        && value.bytes().all(|byte| byte.is_ascii_hexdigit())
+    if encoded.len() < 2 || encoded.len() > 8_196 || encoded.len() % 2 != 0 {
+        return Err(unsupported("SCTE35 signal has an invalid hexadecimal length"));
+    }
+    let mut decoded = Vec::with_capacity(encoded.len() / 2);
+    for pair in encoded.as_bytes().chunks_exact(2) {
+        let high = hex_nibble(pair[0])
+            .ok_or_else(|| unsupported("SCTE35 signal is not hexadecimal"))?;
+        let low = hex_nibble(pair[1])
+            .ok_or_else(|| unsupported("SCTE35 signal is not hexadecimal"))?;
+        decoded.push((high << 4) | low);
+    }
+    Ok(decoded)
+}
+
+fn hex_nibble(value: u8) -> Option<u8> {
+    match value {
+        b'0'..=b'9' => Some(value - b'0'),
+        b'a'..=b'f' => Some(value - b'a' + 10),
+        b'A'..=b'F' => Some(value - b'A' + 10),
+        _ => None,
+    }
 }
 
 fn seconds_to_micros(seconds: f64) -> Result<i64, ManifestError> {
@@ -377,7 +450,7 @@ fn merge_same(
     value: i64,
     name: &str,
 ) -> Result<(), ManifestError> {
-    if target.is_some_and(|current| current.abs_diff(value) > 1_000) {
+    if target.is_some_and(|current| current != value) {
         return Err(unsupported(&format!("DATERANGE {name} changes for one ID")));
     }
     *target = Some(value);
@@ -411,20 +484,45 @@ mod tests {
         plan_hls_media_playlist(BASE_URL, body.as_bytes())
     }
 
-    fn date_range_start() -> &'static str {
-        "#EXT-X-DATERANGE:ID=\"ad-break-1\",START-DATE=\"2026-01-01T00:00:04Z\",SCTE35-OUT=0xFC3020\n"
+    fn scte35_signal(out_of_network: bool) -> String {
+        use broadcast_common::Serialize;
+
+        let splice = SpliceInsert {
+            out_of_network_indicator: out_of_network,
+            splice_immediate_flag: true,
+            ..SpliceInsert::default()
+        };
+        let section =
+            SpliceInfoSection::new_clear(AnyCommand::SpliceInsert(splice), &[]);
+        let bytes = section.try_to_bytes().expect("serialize SCTE35 test section");
+        let mut encoded = String::from("0x");
+        for byte in bytes {
+            use std::fmt::Write as _;
+            write!(&mut encoded, "{byte:02X}").expect("write hex");
+        }
+        encoded
     }
 
-    fn date_range_end() -> &'static str {
-        "#EXT-X-DATERANGE:ID=\"ad-break-1\",START-DATE=\"2026-01-01T00:00:04Z\",END-DATE=\"2026-01-01T00:00:08Z\",DURATION=4,SCTE35-IN=0xFC3021\n"
+    fn date_range_start(out_signal: &str) -> String {
+        format!(
+            "#EXT-X-DATERANGE:ID=\"ad-break-1\",START-DATE=\"2026-01-01T00:00:04Z\",SCTE35-OUT={out_signal}\n"
+        )
+    }
+
+    fn date_range_end(in_signal: &str, end_second: u8, duration: u8) -> String {
+        format!(
+            "#EXT-X-DATERANGE:ID=\"ad-break-1\",START-DATE=\"2026-01-01T00:00:04Z\",END-DATE=\"2026-01-01T00:00:{end_second:02}Z\",DURATION={duration},SCTE35-IN={in_signal}\n"
+        )
     }
 
     #[test]
     fn removes_only_segments_inside_a_pdt_aligned_scte35_splice() {
+        let out_signal = scte35_signal(true);
+        let in_signal = scte35_signal(false);
         let body = format!(
             "#EXTM3U\n#EXT-X-TARGETDURATION:4\n#EXT-X-PLAYLIST-TYPE:VOD\n#EXT-X-PROGRAM-DATE-TIME:2026-01-01T00:00:00Z\n#EXTINF:4,\nprogram-before.ts\n{}#EXT-X-PROGRAM-DATE-TIME:2026-01-01T00:00:04Z\n#EXTINF:4,\nad-1.ts\n#EXTINF:4,\nad-2.ts\n{}#EXT-X-PROGRAM-DATE-TIME:2026-01-01T00:00:12Z\n#EXTINF:4,\nprogram-after.ts\n#EXT-X-ENDLIST\n",
-            date_range_start(),
-            date_range_end()
+            date_range_start(&out_signal),
+            date_range_end(&in_signal, 12, 8)
         );
         let plan = playlist(&body).expect("complete aligned SCTE-35 range should be removed");
         let segment_urls = plan
@@ -462,10 +560,12 @@ mod tests {
 
     #[test]
     fn requires_exact_boundaries_and_an_actual_splice_end() {
+        let out_signal = scte35_signal(true);
+        let in_signal = scte35_signal(false);
         let unaligned = format!(
             "#EXTM3U\n#EXT-X-TARGETDURATION:4\n#EXT-X-PROGRAM-DATE-TIME:2026-01-01T00:00:00Z\n#EXTINF:4,\nprogram.ts\n{}#EXTINF:4,\nad.ts\n{}#EXTINF:4,\nafter.ts\n#EXT-X-ENDLIST\n",
-            date_range_start(),
-            "#EXT-X-DATERANGE:ID=\"ad-break-1\",START-DATE=\"2026-01-01T00:00:04Z\",PLANNED-DURATION=4,SCTE35-IN=0xFC3021\n"
+            date_range_start(&out_signal),
+            date_range_end(&in_signal, 10, 6)
         );
         assert!(matches!(
             playlist(&unaligned),
@@ -475,18 +575,48 @@ mod tests {
 
     #[test]
     fn live_and_orphaned_scte35_ranges_fall_back() {
+        let out_signal = scte35_signal(true);
+        let in_signal = scte35_signal(false);
         let live = format!(
             "#EXTM3U\n#EXT-X-TARGETDURATION:4\n#EXT-X-PROGRAM-DATE-TIME:2026-01-01T00:00:00Z\n{}#EXTINF:4,\nad.ts\n",
-            date_range_start()
+            date_range_start(&out_signal)
         );
         assert!(matches!(
             playlist(&live),
             Err(ManifestError::UnsupportedAdInsertion(_))
         ));
 
-        let orphan = "#EXTM3U\n#EXT-X-TARGETDURATION:4\n#EXT-X-PROGRAM-DATE-TIME:2026-01-01T00:00:00Z\n#EXT-X-DATERANGE:ID=\"ad-break-1\",START-DATE=\"2026-01-01T00:00:00Z\",SCTE35-IN=0xFC3021\n#EXTINF:4,\nad.ts\n#EXT-X-ENDLIST\n";
+        let orphan = format!(
+            "#EXTM3U\n#EXT-X-TARGETDURATION:4\n#EXT-X-PROGRAM-DATE-TIME:2026-01-01T00:00:00Z\n#EXT-X-DATERANGE:ID=\"ad-break-1\",START-DATE=\"2026-01-01T00:00:00Z\",SCTE35-IN={}\n#EXTINF:4,\nad.ts\n#EXT-X-ENDLIST\n",
+            in_signal
+        );
         assert!(matches!(
             playlist(orphan),
+            Err(ManifestError::UnsupportedAdInsertion(_))
+        ));
+    }
+
+    #[test]
+    fn rejects_invalid_scte35_crc_and_wrong_splice_direction() {
+        let valid_out = scte35_signal(true);
+        let mut corrupt = valid_out.clone().into_bytes();
+        let last = corrupt.len() - 1;
+        corrupt[last] = if corrupt[last] == b'0' { b'1' } else { b'0' };
+        let corrupt = String::from_utf8(corrupt).expect("ASCII hex");
+        let invalid = format!(
+            "#EXTM3U\n#EXT-X-TARGETDURATION:4\n#EXT-X-PROGRAM-DATE-TIME:2026-01-01T00:00:00Z\n#EXT-X-DATERANGE:ID=\"a\",START-DATE=\"2026-01-01T00:00:00Z\",SCTE35-OUT={corrupt}\n#EXTINF:4,\na.ts\n#EXT-X-ENDLIST\n"
+        );
+        assert!(matches!(
+            playlist(&invalid),
+            Err(ManifestError::UnsupportedAdInsertion(_))
+        ));
+
+        let wrong_direction = format!(
+            "#EXTM3U\n#EXT-X-TARGETDURATION:4\n#EXT-X-PROGRAM-DATE-TIME:2026-01-01T00:00:00Z\n#EXT-X-DATERANGE:ID=\"a\",START-DATE=\"2026-01-01T00:00:00Z\",SCTE35-OUT={}\n#EXTINF:4,\na.ts\n#EXT-X-ENDLIST\n",
+            scte35_signal(false)
+        );
+        assert!(matches!(
+            playlist(&wrong_direction),
             Err(ManifestError::UnsupportedAdInsertion(_))
         ));
     }

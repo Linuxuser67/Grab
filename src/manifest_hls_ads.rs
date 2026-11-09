@@ -30,14 +30,18 @@ pub(super) fn plan_ad_removal(
     playlist: &MediaPlaylist,
     is_live: bool,
 ) -> Result<AdRemovalPlan, ManifestError> {
-    if playlist
-        .segments
-        .iter()
-        .any(|segment| segment.daterange.is_some())
-    {
-        return Err(unsupported_ad_marker(
-            "EXT-X-DATERANGE boundaries are not mapped to exact media segments",
-        ));
+    if let Some(plan) = super::hls_daterange::plan_ad_removal(playlist, is_live)? {
+        if playlist
+            .segments
+            .iter()
+            .flat_map(|segment| segment.unknown_tags.iter())
+            .any(is_ad_marker_tag)
+        {
+            return Err(unsupported_ad_marker(
+                "CUE markers and SCTE-35 DATERANGE signals cannot be combined safely",
+            ));
+        }
+        return Ok(plan);
     }
 
     let has_ad_marker = playlist

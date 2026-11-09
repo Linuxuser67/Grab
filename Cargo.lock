@@ -1509,9 +1509,9 @@ dependencies = [
  "quick-xml 0.42.0",
  "reqwest",
  "rustix",
+ "scte35-splice",
  "serde",
  "serde_json",
- "scte35-splice",
  "sha2",
  "tempfile",
  "thiserror 2.0.21",
@@ -3787,6 +3787,17 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "8a7852d02fc848982e0c167ef163aaff9cd91dc640ba85e263cb1ce46fae51cd"
 
 [[package]]
+name = "scte35-splice"
+version = "4.0.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a49b42b5c75e867313b41eae0cbc250eaf8dc6c13db874583ad6bba5b527eef4"
+dependencies = [
+ "base64",
+ "broadcast-common",
+ "thiserror 2.0.21",
+]
+
+[[package]]
 name = "serde"
 version = "1.0.229"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3915,17 +3926,6 @@ dependencies = [
  "proc-macro2",
  "quote",
  "syn 3.0.9",
-]
-
-[[package]]
-name = "scte35-splice"
-version = "4.0.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "a49b42b5c75e867313b41eae0cbc250eaf8dc6c13db874583ad6bba5b527eef4"
-dependencies = [
- "base64",
- "broadcast-common",
- "thiserror 2.0.21",
 ]
 
 [[package]]

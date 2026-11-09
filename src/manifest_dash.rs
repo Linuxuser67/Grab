@@ -357,6 +357,8 @@ struct DashList {
     initialization: Option<DashInitialization>,
     timescale: u64,
     presentation_time_offset: u64,
+    /// Effective finite BaseURL availability offset for dynamic presentations.
+    availability_time_offset: Duration,
     segments: Box<[DashListSegment]>,
 }
 
@@ -489,12 +491,15 @@ pub(crate) fn parse_dash_manifest_at(
     };
 
     let is_dynamic = matches!(presentation, DashPresentation::Dynamic(_));
+    if dash_roles::has_unsupported_segment_list_timing_attributes(body.as_bytes())
+        .ok_or(DashError::Parse)?
+    {
+        return Err(DashError::UnsupportedAddressing);
+    }
     if is_dynamic
         && (dash_roles::has_nonzero_segment_list_presentation_time_offset(body.as_bytes())
             .ok_or(DashError::Parse)?
             || dash_roles::has_nondefault_segment_list_start_number(body.as_bytes())
-                .ok_or(DashError::Parse)?
-            || dash_roles::has_unsupported_segment_list_timing_attributes(body.as_bytes())
                 .ok_or(DashError::Parse)?)
     {
         return Err(DashError::UnsupportedAddressing);
@@ -688,7 +693,7 @@ pub(crate) fn parse_dash_manifest_at(
 
                 let representation_base =
                     resolve_base_url(adaptation_base.clone(), &representation.BaseURL)?;
-                let addressing = effective_addressing(
+                let mut addressing = effective_addressing(
                     period,
                     adaptation,
                     representation,
@@ -700,11 +705,55 @@ pub(crate) fn parse_dash_manifest_at(
                         .segment_list_presentation_time_offset
                         .unwrap_or(0),
                 )?;
-                if let DashAddressing::Template(template) = &addressing {
-                    low_latency::validate_template_mime(
-                        template.is_low_latency(),
-                        mime_type.as_deref(),
-                    )?;
+                let base_url_offset = effective_base_url_availability_offset(
+                    [
+                        mpd.base_url.as_slice(),
+                        period.BaseURL.as_slice(),
+                        adaptation.BaseURL.as_slice(),
+                        representation.BaseURL.as_slice(),
+                    ],
+                    is_dynamic,
+                )?;
+                match &mut addressing {
+                    DashAddressing::Template(template) => {
+                        template.availability_time_offset = template
+                            .availability_time_offset
+                            .checked_add(base_url_offset)
+                            .ok_or(DashError::UnsupportedAddressing)?;
+                        low_latency::validate_template_availability(
+                            is_dynamic,
+                            template.availability_time_offset,
+                            template.availability_time_complete,
+                        )?;
+                        low_latency::validate_template_mime(
+                            template.is_low_latency(),
+                            mime_type.as_deref(),
+                        )?;
+                    }
+                    DashAddressing::List(list) => {
+                        let segment_list_offset = adaptation_metadata
+                            .get(representation_index)
+                            .ok_or(DashError::Parse)?
+                            .segment_list_availability_time_offset
+                            .as_deref()
+                            .unwrap_or("0")
+                            .parse::<f64>()
+                            .map_err(|_| DashError::UnsupportedAddressing)?;
+                        let segment_list_offset =
+                            low_latency::parse_availability_time_offset(segment_list_offset)?;
+                        if !is_dynamic && !segment_list_offset.is_zero() {
+                            return Err(DashError::UnsupportedAddressing);
+                        }
+                        list.availability_time_offset = list
+                            .availability_time_offset
+                            .checked_add(segment_list_offset)
+                            .and_then(|offset| offset.checked_add(base_url_offset))
+                            .ok_or(DashError::UnsupportedAddressing)?;
+                    }
+                    _ if !base_url_offset.is_zero() => {
+                        return Err(DashError::UnsupportedAddressing);
+                    }
+                    _ => {}
                 }
                 if matches!(
                     &addressing,
@@ -1526,9 +1575,6 @@ fn resolve_base_url(
     let Some(value) = values.next() else {
         if candidates.iter().any(|candidate| {
             candidate.byte_range.is_some()
-                || candidate
-                    .availability_time_offset
-                    .is_some_and(|offset| offset != 0.0)
                 || candidate.availability_time_complete == Some(false)
                 || candidate.timeShiftBufferDepth.is_some()
         }) {
@@ -1540,9 +1586,6 @@ fn resolve_base_url(
     if values.next().is_some()
         || candidates.iter().any(|candidate| {
             candidate.byte_range.is_some()
-                || candidate
-                    .availability_time_offset
-                    .is_some_and(|offset| offset != 0.0)
                 || candidate.availability_time_complete == Some(false)
                 || candidate.timeShiftBufferDepth.is_some()
         })
@@ -1554,6 +1597,27 @@ fn resolve_base_url(
         .join(value)
         .map_err(|_| DashError::UnsupportedAddressing)?;
     validate_https_url(resolved)
+}
+
+/// Sum finite BaseURL availability offsets across the selected URL hierarchy.
+fn effective_base_url_availability_offset<'a>(
+    levels: impl IntoIterator<Item = &'a [dash_mpd_core::BaseURL]>,
+    is_dynamic: bool,
+) -> Result<Duration, DashError> {
+    let mut total = Duration::ZERO;
+    for candidate in levels.into_iter().flatten() {
+        let Some(offset) = candidate.availability_time_offset else {
+            continue;
+        };
+        let parsed = low_latency::parse_availability_time_offset(offset)?;
+        if !is_dynamic {
+            return Err(DashError::UnsupportedAddressing);
+        }
+        total = total
+            .checked_add(parsed)
+            .ok_or(DashError::UnsupportedAddressing)?;
+    }
+    Ok(total)
 }
 
 fn has_trick_mode_properties(
@@ -2088,6 +2152,7 @@ fn effective_list(
         initialization,
         timescale,
         presentation_time_offset,
+        availability_time_offset: Duration::ZERO,
         segments: segments.into_boxed_slice(),
     })
 }
@@ -2147,7 +2212,10 @@ fn expand_dynamic_list(
             .minimum_update_period
             .saturating_add(ticks_to_duration(segment_duration, list.timescale)?),
     );
-    let elapsed_ticks = duration_to_ticks(elapsed, list.timescale)?;
+    let available_elapsed = elapsed
+        .checked_add(list.availability_time_offset)
+        .ok_or(DashError::UnsupportedPresentation)?;
+    let elapsed_ticks = duration_to_ticks(available_elapsed, list.timescale)?;
     let window_start_ticks =
         duration_to_ticks(elapsed.saturating_sub(window_depth), list.timescale)?;
 
@@ -4628,6 +4696,247 @@ mod tests {
             .filter_map(|resource| resource.segment_number)
             .collect::<Vec<_>>();
         assert_eq!(numbers, vec![56, 57, 58, 59, 60]);
+    }
+
+    #[test]
+    fn dynamic_segment_template_retains_cumulative_base_url_availability_offsets() {
+        let body = r#"<?xml version="1.0"?>
+<MPD xmlns="urn:mpeg:dash:schema:mpd:2011"
+     type="dynamic"
+     availabilityStartTime="1970-01-01T00:00:00Z"
+     minimumUpdatePeriod="PT2S"
+     timeShiftBufferDepth="PT10S">
+  <BaseURL availabilityTimeOffset="1">https://cdn.example.test/</BaseURL>
+  <Period>
+    <BaseURL availabilityTimeOffset="2">live/</BaseURL>
+    <AdaptationSet contentType="video" mimeType="video/mp4">
+      <BaseURL availabilityTimeOffset="3">video/</BaseURL>
+      <SegmentTemplate timescale="1" duration="2"
+                       media="seg-$Number$.m4s"
+                       initialization="init.mp4"/>
+      <Representation id="v1" bandwidth="1000000">
+        <BaseURL availabilityTimeOffset="4">high/</BaseURL>
+      </Representation>
+    </AdaptationSet>
+  </Period>
+</MPD>"#;
+        let manifest = parse_dash_manifest_at(BASE_URL, body, dynamic_test_clock(120))
+            .expect("finite BaseURL offsets should remain supported for SegmentTemplate");
+        let representation = &manifest.video_representations[0];
+        let plan = plan_dash_representation(&manifest, &representation.live_key)
+            .expect("dynamic SegmentTemplate should expand");
+        let numbers = plan
+            .resources
+            .iter()
+            .filter(|resource| resource.kind == DashResourceKind::Segment)
+            .filter_map(|resource| resource.segment_number)
+            .collect::<Vec<_>>();
+        assert_eq!(numbers.last(), Some(&65));
+        assert!(numbers.contains(&61));
+    }
+
+    #[test]
+    fn dynamic_segment_list_applies_inherited_segment_list_availability_offset() {
+        let mut urls = String::new();
+        let mut timeline = String::new();
+        for index in 0..70_u64 {
+            let time = index * 2;
+            urls.push_str(&format!(r#"<SegmentURL media="seg-{time}.m4s"/>"#));
+            timeline.push_str(&format!(r#"<S t="{time}" d="2"/>"#));
+        }
+        let body = format!(
+            r#"<MPD xmlns="urn:mpeg:dash:schema:mpd:2011"
+                type="dynamic"
+                availabilityStartTime="1970-01-01T00:00:00Z"
+                minimumUpdatePeriod="PT2S"
+                timeShiftBufferDepth="PT10S">
+              <Period>
+                <AdaptationSet contentType="video" mimeType="video/mp4">
+                  <SegmentList timescale="1" availabilityTimeOffset="4">
+                    <Initialization sourceURL="init.mp4"/>
+                    <SegmentTimeline>{timeline}</SegmentTimeline>
+                    {urls}
+                  </SegmentList>
+                  <Representation id="v1" bandwidth="1000000"/>
+                </AdaptationSet>
+              </Period>
+            </MPD>"#
+        );
+        let manifest = parse_dash_manifest_at(BASE_URL, &body, dynamic_test_clock(120))
+            .expect("finite SegmentList availability offset should parse");
+        let representation = &manifest.video_representations[0];
+        let plan = plan_dash_representation(&manifest, &representation.live_key)
+            .expect("dynamic SegmentList should expand");
+        let numbers = plan
+            .resources
+            .iter()
+            .filter(|resource| resource.kind == DashResourceKind::Segment)
+            .filter_map(|resource| resource.segment_number)
+            .collect::<Vec<_>>();
+        assert_eq!(numbers.first(), Some(&56));
+        assert_eq!(numbers.last(), Some(&62));
+        assert_eq!(numbers.len(), 7);
+    }
+
+    #[test]
+    fn dynamic_segment_list_rejects_negative_segment_list_availability_offset() {
+        let body = r#"<MPD xmlns="urn:mpeg:dash:schema:mpd:2011"
+            type="dynamic"
+            availabilityStartTime="1970-01-01T00:00:00Z"
+            minimumUpdatePeriod="PT2S"
+            timeShiftBufferDepth="PT10S">
+          <Period>
+            <AdaptationSet contentType="video" mimeType="video/mp4">
+              <SegmentList timescale="1" availabilityTimeOffset="-1">
+                <Initialization sourceURL="init.mp4"/>
+                <SegmentTimeline><S t="0" d="2"/></SegmentTimeline>
+                <SegmentURL media="seg-0.m4s"/>
+              </SegmentList>
+              <Representation id="v1" bandwidth="1000000"/>
+            </AdaptationSet>
+          </Period>
+        </MPD>"#;
+        assert_eq!(
+            parse_dash_manifest_at(BASE_URL, body, dynamic_test_clock(120)).err(),
+            Some(DashError::UnsupportedAddressing)
+        );
+    }
+
+    #[test]
+    fn static_segment_list_rejects_availability_time_complete() {
+        let body = r#"<MPD xmlns="urn:mpeg:dash:schema:mpd:2011"
+            type="static" mediaPresentationDuration="PT4S">
+          <Period duration="PT4S">
+            <AdaptationSet contentType="video" mimeType="video/mp4">
+              <SegmentList availabilityTimeComplete="false">
+                <SegmentURL media="seg.m4s"/>
+              </SegmentList>
+              <Representation id="v1"/>
+            </AdaptationSet>
+          </Period>
+        </MPD>"#;
+        assert_eq!(
+            parse_dash_manifest(BASE_URL, body).err(),
+            Some(DashError::UnsupportedAddressing)
+        );
+    }
+
+    #[test]
+    fn static_segment_list_rejects_nonzero_segment_list_availability_offset() {
+        let body = r#"<MPD xmlns="urn:mpeg:dash:schema:mpd:2011"
+            type="static" mediaPresentationDuration="PT4S">
+          <Period duration="PT4S">
+            <AdaptationSet contentType="video" mimeType="video/mp4">
+              <SegmentList availabilityTimeOffset="1">
+                <SegmentURL media="seg.m4s"/>
+              </SegmentList>
+              <Representation id="v1"/>
+            </AdaptationSet>
+          </Period>
+        </MPD>"#;
+        assert_eq!(
+            parse_dash_manifest(BASE_URL, body).err(),
+            Some(DashError::UnsupportedAddressing)
+        );
+    }
+
+    #[test]
+    fn dynamic_segment_list_applies_cumulative_base_url_availability_offsets() {
+        let mut urls = String::new();
+        let mut timeline = String::new();
+        for index in 0..70_u64 {
+            let time = index * 2;
+            urls.push_str(&format!(r#"<SegmentURL media="seg-{time}.m4s"/>"#));
+            timeline.push_str(&format!(r#"<S t="{time}" d="2"/>"#));
+        }
+        let body = format!(
+            r#"<MPD xmlns="urn:mpeg:dash:schema:mpd:2011"
+                type="dynamic"
+                availabilityStartTime="1970-01-01T00:00:00Z"
+                minimumUpdatePeriod="PT2S"
+                timeShiftBufferDepth="PT10S">
+              <BaseURL availabilityTimeOffset="1">https://cdn.example.test/</BaseURL>
+              <Period>
+                <BaseURL availabilityTimeOffset="2">live/</BaseURL>
+                <AdaptationSet contentType="video" mimeType="video/mp4">
+                  <BaseURL availabilityTimeOffset="3">video/</BaseURL>
+                  <SegmentList timescale="1">
+                    <Initialization sourceURL="init.mp4"/>
+                    <SegmentTimeline>{timeline}</SegmentTimeline>
+                    {urls}
+                  </SegmentList>
+                  <Representation id="v1" bandwidth="1000000">
+                    <BaseURL availabilityTimeOffset="4">high/</BaseURL>
+                  </Representation>
+                </AdaptationSet>
+              </Period>
+            </MPD>"#
+        );
+        let manifest = parse_dash_manifest_at(BASE_URL, &body, dynamic_test_clock(120))
+            .expect("finite BaseURL offsets should be supported for dynamic SegmentList");
+        let representation = &manifest.video_representations[0];
+        let plan = plan_dash_representation(&manifest, &representation.live_key)
+            .expect("dynamic SegmentList should expand");
+        let numbers = plan
+            .resources
+            .iter()
+            .filter(|resource| resource.kind == DashResourceKind::Segment)
+            .filter_map(|resource| resource.segment_number)
+            .collect::<Vec<_>>();
+        assert_eq!(numbers.first(), Some(&56));
+        assert_eq!(numbers.last(), Some(&65));
+        assert_eq!(numbers.len(), 10);
+        assert!(plan.resources[1..].iter().all(|resource| {
+            resource
+                .url
+                .as_str()
+                .starts_with("https://cdn.example.test/live/video/high/")
+        }));
+    }
+
+    #[test]
+    fn dynamic_segment_list_rejects_negative_base_url_availability_offsets() {
+        let body = r#"<MPD xmlns="urn:mpeg:dash:schema:mpd:2011"
+            type="dynamic"
+            availabilityStartTime="1970-01-01T00:00:00Z"
+            minimumUpdatePeriod="PT2S"
+            timeShiftBufferDepth="PT10S">
+          <BaseURL availabilityTimeOffset="-1">https://cdn.example.test/</BaseURL>
+          <Period>
+            <AdaptationSet contentType="video" mimeType="video/mp4">
+              <SegmentList timescale="1">
+                <Initialization sourceURL="init.mp4"/>
+                <SegmentTimeline><S t="0" d="2"/></SegmentTimeline>
+                <SegmentURL media="seg-0.m4s"/>
+              </SegmentList>
+              <Representation id="v1" bandwidth="1000000"/>
+            </AdaptationSet>
+          </Period>
+        </MPD>"#;
+        assert_eq!(
+            parse_dash_manifest_at(BASE_URL, body, dynamic_test_clock(120)).err(),
+            Some(DashError::UnsupportedAddressing)
+        );
+    }
+
+    #[test]
+    fn static_segment_list_rejects_base_url_availability_offsets() {
+        let body = r#"<MPD xmlns="urn:mpeg:dash:schema:mpd:2011"
+            type="static" mediaPresentationDuration="PT4S">
+          <BaseURL availabilityTimeOffset="1">https://cdn.example.test/</BaseURL>
+          <Period duration="PT4S">
+            <AdaptationSet contentType="video" mimeType="video/mp4">
+              <SegmentList>
+                <SegmentURL media="seg.m4s"/>
+              </SegmentList>
+              <Representation id="v1"/>
+            </AdaptationSet>
+          </Period>
+        </MPD>"#;
+        assert_eq!(
+            parse_dash_manifest(BASE_URL, body).err(),
+            Some(DashError::UnsupportedAddressing)
+        );
     }
 
     #[test]

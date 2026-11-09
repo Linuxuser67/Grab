@@ -32,6 +32,14 @@ pub(super) type PeriodRepresentationMetadata = Vec<Vec<RepresentationRoleMetadat
 /// Representation metadata grouped in MPD Period source order.
 pub(super) type RepresentationMetadata = Vec<PeriodRepresentationMetadata>;
 
+#[derive(Default)]
+struct MetadataState {
+    representation_count: usize,
+    adaptation_count: usize,
+    period_list_pto: Option<u64>,
+    adaptation_list_pto: Option<u64>,
+}
+
 #[derive(Clone, Copy)]
 enum Element {
     Mpd,
@@ -53,10 +61,7 @@ pub(super) fn representation_metadata(
     let mut buffer = Vec::new();
     let mut stack = Vec::new();
     let mut periods: RepresentationMetadata = Vec::new();
-    let mut representation_count = 0_usize;
-    let mut adaptation_count = 0_usize;
-    let mut period_list_pto = None;
-    let mut adaptation_list_pto = None;
+    let mut state = MetadataState::default();
 
     loop {
         let (namespace, event) = reader.read_resolved_event_into(&mut buffer).ok()?;
@@ -67,10 +72,7 @@ pub(super) fn representation_metadata(
                 &mut stack,
                 &mut periods,
                 max_representations,
-                &mut representation_count,
-                &mut adaptation_count,
-                &mut period_list_pto,
-                &mut adaptation_list_pto,
+                &mut state,
             )?,
             Event::Empty(start) => {
                 push_element(
@@ -79,10 +81,7 @@ pub(super) fn representation_metadata(
                     &mut stack,
                     &mut periods,
                     max_representations,
-                    &mut representation_count,
-                    &mut adaptation_count,
-                    &mut period_list_pto,
-                    &mut adaptation_list_pto,
+                    &mut state,
                 )?;
                 stack.pop()?;
             }
@@ -108,10 +107,7 @@ fn push_element(
     stack: &mut Vec<Element>,
     periods: &mut RepresentationMetadata,
     max_representations: usize,
-    representation_count: &mut usize,
-    adaptation_count: &mut usize,
-    period_list_pto: &mut Option<u64>,
-    adaptation_list_pto: &mut Option<u64>,
+    state: &mut MetadataState,
 ) -> Option<()> {
     if stack.len() >= MAX_ELEMENT_DEPTH {
         return None;
@@ -130,22 +126,22 @@ fn push_element(
                 return None;
             }
             periods.push(Vec::new());
-            *period_list_pto = None;
-            *adaptation_list_pto = None;
+            state.period_list_pto = None;
+            state.adaptation_list_pto = None;
             Element::Period
         }
         (Some(Element::Period), "AdaptationSet", true) => {
-            *adaptation_count = (*adaptation_count).checked_add(1)?;
-            if *adaptation_count > max_representations {
+            state.adaptation_count = state.adaptation_count.checked_add(1)?;
+            if state.adaptation_count > max_representations {
                 return None;
             }
             periods.last_mut()?.push(Vec::new());
-            *adaptation_list_pto = *period_list_pto;
+            state.adaptation_list_pto = state.period_list_pto;
             Element::AdaptationSet
         }
         (Some(Element::AdaptationSet), "Representation", true) => {
-            *representation_count = (*representation_count).checked_add(1)?;
-            if *representation_count > max_representations {
+            state.representation_count = state.representation_count.checked_add(1)?;
+            if state.representation_count > max_representations {
                 return None;
             }
             periods
@@ -154,7 +150,7 @@ fn push_element(
                 .push(RepresentationRoleMetadata {
                     id: representation_id(start)?,
                     is_main: false,
-                    segment_list_presentation_time_offset: *adaptation_list_pto,
+                    segment_list_presentation_time_offset: state.adaptation_list_pto,
                 });
             Element::Representation
         }
@@ -166,13 +162,13 @@ fn push_element(
         }
         (Some(Element::Period), "SegmentList", true) => {
             if let Some(offset) = segment_list_presentation_time_offset(start)? {
-                *period_list_pto = Some(offset);
+                state.period_list_pto = Some(offset);
             }
             Element::Other
         }
         (Some(Element::AdaptationSet), "SegmentList", true) => {
             if let Some(offset) = segment_list_presentation_time_offset(start)? {
-                *adaptation_list_pto = Some(offset);
+                state.adaptation_list_pto = Some(offset);
             }
             Element::Other
         }

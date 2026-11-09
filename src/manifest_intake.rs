@@ -861,13 +861,10 @@ async fn apply_hls_content_steering(
     };
     validate_hls_content_steering_stable_ids(&master)?;
     let priority = match fetch_hls_steering_manifest(client, steering).await {
-        Ok(body) => match parse_hls_steering_manifest(&body) {
-            Ok(priority) => priority,
-            Err(_error) => {
-                // If the steering response is invalid, use the declared initial
-                // Pathway or the first advertised Pathway until steering recovers.
-                Vec::new()
-            }
+        Ok(body) => {
+            // If the steering response is invalid, use the declared initial
+            // Pathway or the first advertised Pathway until steering recovers.
+            parse_hls_steering_manifest(&body).unwrap_or_default()
         },
         Err(_error) => {
             // A failed steering fetch must not prevent a download when the

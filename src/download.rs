@@ -3559,10 +3559,6 @@ impl DownloadManager {
         self.pump(item, id, generation, rx);
     }
 
-    /// Spawn a gallery download via gallery-dl.
-    /// Runs on the tokio runtime (the runner needs tokio::process); progress
-    /// is bridged to the glib main thread via a channel. The handle is
-    /// registered in `running` for cancel/concurrency/shutdown.
     /// Create or refresh a transient read-only child row for one file in a
     /// gallery collection. The path must remain inside gallery-dl's assigned
     /// output directory; extractor-controlled paths are never accepted as
@@ -3662,8 +3658,16 @@ impl DownloadManager {
     ) {
         for state in file_rows {
             let status = match (owner.status(), state.status) {
-                (DownloadStatus::Queued, DownloadStatus::Downloading) => DownloadStatus::Queued,
+                (DownloadStatus::Done, _) => DownloadStatus::Done,
+                (DownloadStatus::Failed, DownloadStatus::Downloading) => DownloadStatus::Failed,
+                (DownloadStatus::Cancelled, DownloadStatus::Downloading) => {
+                    DownloadStatus::Cancelled
+                }
                 (DownloadStatus::Paused, DownloadStatus::Downloading) => DownloadStatus::Paused,
+                (
+                    DownloadStatus::Queued,
+                    DownloadStatus::Downloading | DownloadStatus::Paused,
+                ) => DownloadStatus::Queued,
                 (_, status) => status,
             };
             let detail = match status {
@@ -3758,6 +3762,9 @@ impl DownloadManager {
         }
     }
 
+    /// Spawn one gallery-dl process for the collection owner.
+    /// Progress and file lifecycle events are bridged to the GTK main thread;
+    /// the handle owns collection-wide pause, cancel and concurrency control.
     fn spawn_gallery(self: &Rc<Self>, item: DownloadItem) {
         self.prepare_gallery_file_rows_for_attempt(item.id());
         item.set_status(DownloadStatus::Downloading);

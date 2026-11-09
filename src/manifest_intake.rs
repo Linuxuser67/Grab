@@ -1234,15 +1234,61 @@ fn hls_steering_request_url(
 
 async fn fetch_hls_steering_manifest(
     client: &reqwest::Client,
+    master_url: &Url,
     steering: &crate::manifest::HlsContentSteering,
+    transport_policy: ManifestTransportPolicy,
+    fetch_mode: ManifestFetchMode,
+    proxy_configured: bool,
 ) -> Result<Vec<u8>, ManifestIntakeError> {
     let request_url = hls_steering_request_url(steering)?;
-    let (_, body, _) = fetch_bounded_manifest(client, request_url).await?;
-    if body.len() > MAX_HLS_STEERING_MANIFEST_BYTES {
+
+    // An upstream proxy resolves the target remotely, outside Grab's guarded
+    // resolver. Steering is optional, so keep the advertised master Pathways
+    // rather than make a proxied request whose DNS destination cannot be
+    // checked locally.
+    if proxy_configured {
         return Err(ManifestIntakeError::Unsupported(
-            "The HLS Content Steering manifest exceeds its byte limit".to_string(),
+            "HLS Content Steering fetches are disabled while an upstream proxy is configured"
+                .to_string(),
         ));
     }
+
+    // The master URL was selected by the user. A different SERVER-URI host
+    // came from untrusted playlist data, so register it before the resolver
+    // can connect and reject private/local destinations up front.
+    if request_url.origin() != master_url.origin() {
+        let host = request_url.host_str().ok_or_else(|| {
+            ManifestIntakeError::Unsupported(
+                "The HLS Content Steering SERVER-URI has no hostname".to_string(),
+            )
+        })?;
+        if !crate::download_net::require_public_resolution(host) {
+            return Err(ManifestIntakeError::Unsupported(
+                "The HLS Content Steering SERVER-URI failed the public-host safety policy"
+                    .to_string(),
+            ));
+        }
+    }
+
+    let (request_timeout, max_attempts) = match fetch_mode {
+        ManifestFetchMode::Preview => (
+            MANIFEST_PREVIEW_REQUEST_TIMEOUT,
+            MAX_PREVIEW_MANIFEST_ATTEMPTS,
+        ),
+        // Native download steering does not retry: a failed optional steering
+        // request falls back to the master playlist's advertised Pathways.
+        ManifestFetchMode::Download => (MANIFEST_REQUEST_TIMEOUT, 1),
+    };
+    let (_, body, _) = fetch_bounded_manifest_with_limits_and_size(
+        client,
+        request_url,
+        transport_policy,
+        request_timeout,
+        max_attempts,
+        fetch_mode,
+        MAX_HLS_STEERING_MANIFEST_BYTES,
+    )
+    .await?;
     Ok(body)
 }
 
@@ -1337,13 +1383,26 @@ fn select_hls_content_steering_pathway(
 
 async fn apply_hls_content_steering(
     client: &reqwest::Client,
+    master_url: &Url,
     mut master: crate::manifest::HlsMasterPlan,
+    transport_policy: ManifestTransportPolicy,
+    fetch_mode: ManifestFetchMode,
+    proxy_configured: bool,
 ) -> Result<crate::manifest::HlsMasterPlan, ManifestIntakeError> {
     let Some(steering) = master.content_steering.as_ref() else {
         return Ok(master);
     };
     validate_hls_content_steering_stable_ids(&master)?;
-    let priority = match fetch_hls_steering_manifest(client, steering).await {
+    let priority = match fetch_hls_steering_manifest(
+        client,
+        master_url,
+        steering,
+        transport_policy,
+        fetch_mode,
+        proxy_configured,
+    )
+    .await
+    {
         Ok(body) => {
             // A malformed steering response must not prevent downloads from
             // Pathways already advertised by the multivariant playlist.
@@ -1352,12 +1411,21 @@ async fn apply_hls_content_steering(
                     apply_hls_pathway_clones(&mut master, &manifest.pathway_clones);
                     manifest.pathway_priority
                 }
-                Err(_error) => Vec::new(),
+                Err(error) => {
+                    tracing::debug!(error = %error, "HLS Content Steering response was invalid; using advertised Pathways");
+                    Vec::new()
+                }
             }
         }
-        Err(_error) => {
-            // A failed steering fetch must not prevent a download when the
-            // master playlist already advertises usable Pathways.
+        Err(error) => {
+            // A failed optional steering fetch falls back to the master
+            // playlist's already-advertised Pathways. Keep a diagnostic so
+            // DNS policy, proxy and server failures are observable.
+            tracing::debug!(
+                host = %steering.server_url.host_str().unwrap_or_default(),
+                error = %error,
+                "HLS Content Steering fetch failed; using advertised Pathways"
+            );
             Vec::new()
         }
     };
@@ -1399,7 +1467,15 @@ async fn lookup_with_client_policy(
         crate::media_types::ManifestKind::Hls => {
             match crate::manifest::parse_hls_master_playlist(final_url.as_str(), &body) {
                 Ok(master) => {
-                    let master = apply_hls_content_steering(client, master).await?;
+                    let master = apply_hls_content_steering(
+                        client,
+                        &final_url,
+                        master,
+                        transport_policy,
+                        fetch_mode,
+                        proxy_configured,
+                    )
+                    .await?;
                     validate_hls_stable_track_ids(&master)?;
                     NativeManifest::HlsMaster(master)
                 }
@@ -1778,6 +1854,27 @@ async fn fetch_bounded_manifest_with_limits(
     max_attempts: u32,
     fetch_mode: ManifestFetchMode,
 ) -> Result<(Url, Vec<u8>, SystemTime), ManifestIntakeError> {
+    fetch_bounded_manifest_with_limits_and_size(
+        client,
+        requested_url,
+        transport_policy,
+        request_timeout,
+        max_attempts,
+        fetch_mode,
+        MAX_MANIFEST_BYTES,
+    )
+    .await
+}
+
+async fn fetch_bounded_manifest_with_limits_and_size(
+    client: &reqwest::Client,
+    requested_url: Url,
+    transport_policy: ManifestTransportPolicy,
+    request_timeout: Duration,
+    max_attempts: u32,
+    fetch_mode: ManifestFetchMode,
+    max_bytes: usize,
+) -> Result<(Url, Vec<u8>, SystemTime), ManifestIntakeError> {
     if !transport_policy.accepts_url(&requested_url) {
         return Err(ManifestIntakeError::Failed(gettext(
             "Invalid stream manifest URL",
@@ -1787,12 +1884,13 @@ async fn fetch_bounded_manifest_with_limits(
     let mut attempt = 0_u32;
     loop {
         attempt += 1;
-        match fetch_bounded_manifest_once(
+        match fetch_bounded_manifest_once_with_limit(
             client,
             &requested_url,
             transport_policy,
             request_timeout,
             fetch_mode,
+            max_bytes,
         )
         .await
         {
@@ -1873,6 +1971,25 @@ async fn fetch_bounded_manifest_once(
     request_timeout: Duration,
     fetch_mode: ManifestFetchMode,
 ) -> Result<(Url, Vec<u8>, SystemTime), ManifestIntakeError> {
+    fetch_bounded_manifest_once_with_limit(
+        client,
+        requested_url,
+        transport_policy,
+        request_timeout,
+        fetch_mode,
+        MAX_MANIFEST_BYTES,
+    )
+    .await
+}
+
+async fn fetch_bounded_manifest_once_with_limit(
+    client: &reqwest::Client,
+    requested_url: &Url,
+    transport_policy: ManifestTransportPolicy,
+    request_timeout: Duration,
+    fetch_mode: ManifestFetchMode,
+    max_bytes: usize,
+) -> Result<(Url, Vec<u8>, SystemTime), ManifestIntakeError> {
     let response = client
         .get(requested_url.clone())
         .timeout(request_timeout)
@@ -1898,7 +2015,7 @@ async fn fetch_bounded_manifest_once(
         .and_then(|value| value.to_str().ok())
         .and_then(|value| httpdate::parse_http_date(value).ok())
         .unwrap_or_else(SystemTime::now);
-    let body = read_bounded_response(response).await?;
+    let body = read_bounded_response_with_limit(response, max_bytes, "stream manifest").await?;
     Ok((final_url, body, server_now))
 }
 

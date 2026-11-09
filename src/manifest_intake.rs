@@ -571,7 +571,7 @@ fn validate_hls_stable_track_ids(master: &HlsMasterPlan) -> Result<(), ManifestI
     if !master
         .audio_renditions
         .iter()
-        .filter(|rendition| audio_groups.contains(rendition.group_id.as_str()))
+        .filter(|rendition| audio_groups.contains(&rendition.group_id))
         .all(|rendition| rendition_keys.insert(hls_audio_rendition_key(rendition)))
     {
         return Err(ManifestIntakeError::Unsupported(gettext(
@@ -588,7 +588,7 @@ fn validate_hls_stable_track_ids(master: &HlsMasterPlan) -> Result<(), ManifestI
     if !master
         .subtitle_renditions
         .iter()
-        .filter(|rendition| subtitle_groups.contains(rendition.group_id.as_str()))
+        .filter(|rendition| subtitle_groups.contains(&rendition.group_id))
         .all(|rendition| subtitle_keys.insert(hls_subtitle_rendition_key(rendition)))
     {
         return Err(ManifestIntakeError::Unsupported(gettext(
@@ -734,7 +734,7 @@ fn parse_hls_steering_manifest(body: &[u8]) -> Result<HlsSteeringManifest, Manif
         pathway_ids.push(pathway_id.to_string());
     }
 
-    let clones = value
+    let clones: Vec<HlsPathwayClone> = value
         .get("PATHWAY-CLONES")
         .map(|value| {
             let clones = value.as_array().ok_or_else(|| {
@@ -1029,15 +1029,15 @@ fn apply_hls_pathway_clones(
 
         let audio_groups = base_variants
             .iter()
-            .filter_map(|variant| variant.audio_group.as_deref())
+            .filter_map(|variant| variant.audio_group.clone())
             .collect::<HashSet<_>>();
         let subtitle_groups = base_variants
             .iter()
-            .filter_map(|variant| variant.subtitles_group.as_deref())
+            .filter_map(|variant| variant.subtitles_group.clone())
             .collect::<HashSet<_>>();
         let video_groups = base_variants
             .iter()
-            .filter_map(|variant| variant.video_rendition_group.as_deref())
+            .filter_map(|variant| variant.video_rendition_group.clone())
             .collect::<HashSet<_>>();
         let mut used_audio_groups = master
             .audio_renditions
@@ -2770,6 +2770,7 @@ video/es.m3u8
             subtitles_group: None,
             video_rendition_group: None,
             video_variant_path: None,
+            video_variant_url: None,
             video_rendition_name: None,
             stable_video_rendition_id: None,
             stable_variant_id: Some(stable_id.to_string()),
@@ -2816,6 +2817,7 @@ video/es.m3u8
             subtitles_group: None,
             video_rendition_group: None,
             video_variant_path: None,
+            video_variant_url: None,
             video_rendition_name: None,
             stable_video_rendition_id: None,
             stable_variant_id: None,
@@ -2893,6 +2895,7 @@ video/es.m3u8
             subtitles_group: None,
             video_rendition_group: Some("angles".to_string()),
             video_variant_path: Some(parent_path.to_string()),
+            video_variant_url: None,
             video_rendition_name: Some("Main".to_string()),
             stable_video_rendition_id: None,
             stable_variant_id: None,
@@ -2919,6 +2922,7 @@ video/es.m3u8
             subtitles_group: None,
             video_rendition_group: None,
             video_variant_path: None,
+            video_variant_url: None,
             video_rendition_name: None,
             stable_video_rendition_id: None,
             stable_variant_id: Some("variant-1080".to_string()),

@@ -1781,7 +1781,7 @@ fn push_playlist_items_page(
                 for (i, entry) in &chosen {
                     let item_page_url =
                         crate::video_probe::story_segment_url(&page_url, &entry.id)
-                            .unwrap_or_else(|| entry.page_url.clone());
+                            .unwrap_or_else(|| entry.page_url.to_string());
                     let inheritance = {
                         let mut seen_hosts = guarded_child_hosts.borrow_mut();
                         crate::download_net::inherit_public_resolution_for_collection(

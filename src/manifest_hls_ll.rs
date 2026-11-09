@@ -211,24 +211,6 @@ pub(crate) fn plan_hls_media_playlist(
     build_plan(manifest_url, playlist).map(Some)
 }
 
-fn has_unattached_discontinuity(body: &[u8]) -> bool {
-    const EXTINF: &[u8] = b"#EXTINF:";
-    let tail_start = body
-        .windows(EXTINF.len())
-        .rposition(|window| window == EXTINF)
-        .unwrap_or(0);
-    body[tail_start..]
-        .split(|byte| *byte == b'\n')
-        .any(|raw_line| {
-            let line = raw_line.strip_suffix(b"\r").unwrap_or(raw_line);
-            let start = line
-                .iter()
-                .position(|byte| !byte.is_ascii_whitespace())
-                .unwrap_or(line.len());
-            &line[start..] == b"#EXT-X-DISCONTINUITY"
-        })
-}
-
 fn build_plan(manifest_url: &str, playlist: LlMediaPlaylist) -> Result<HlsPlan, ManifestError> {
     let base_url = parse_manifest_url(manifest_url)?;
     let source_target_duration = u64::from(playlist.target_duration);
@@ -1146,7 +1128,7 @@ mod tests {
     }
 
     #[test]
-    fn trailing_discontinuity_before_open_parts_falls_back() {
+    fn discontinuity_before_open_parts_is_attached_to_the_first_part() {
         let body = br#"#EXTM3U
 #EXT-X-TARGETDURATION:2
 #EXT-X-MEDIA-SEQUENCE:20
@@ -1158,10 +1140,15 @@ mod tests {
 #EXT-X-DISCONTINUITY
 #EXT-X-PART:DURATION=0.5,URI="21.0.m4s",INDEPENDENT=YES
 "#;
-        assert!(matches!(
-            plan_hls_media_playlist(BASE, body),
-            Err(ManifestError::UnsupportedPlaylistFeature(_))
-        ));
+        let plan = plan_hls_media_playlist(BASE, body)
+            .expect("open parts after a discontinuity should be planned")
+            .expect("LL-HLS detected");
+        assert_eq!(plan.local_playlist.segments.len(), 2);
+        assert!(!plan.local_playlist.segments[0].discontinuity);
+        assert!(
+            plan.local_playlist.segments[1].discontinuity,
+            "the first open part carries the pending discontinuity"
+        );
     }
 
     #[test]

@@ -261,7 +261,7 @@ pub async fn run_gallery_download_with_proxy(
         }
 
         for &byte in &chunk[..read] {
-            if matches!(byte, b'\\r' | b'\\n') {
+            if matches!(byte, b'\r' | b'\n') {
                 if !discard_line && !line_buf.is_empty() {
                     let line = String::from_utf8_lossy(&line_buf).into_owned();
                     process_line(line);
@@ -405,7 +405,7 @@ mod tests {
         let first = dir.join("one.jpg");
         let second = dir.join("two.jpg");
         let script = format!(
-            "#!/bin/sh\\nprintf '%s\\\\n' '@START:{}'\\nprintf '50%%\\\\n' >&2\\nprintf '%s\\\\n' '@DONE:{}'\\nprintf '# %s\\\\n' '{}'\\n",
+            "#!/bin/sh\nprintf '%s\\n' '@START:{}'\nprintf '50%%\\n' >&2\nprintf '%s\\n' '@DONE:{}'\nprintf '# %s\\n' '{}'\n",
             first.display(),
             first.display(),
             second.display(),

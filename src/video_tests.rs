@@ -1487,6 +1487,7 @@ fn probe_result_helpers_cover_both_variants() {
         id: "a1".into(),
         title: "First".into(),
         page_url: "https://www.youtube.com/watch?v=a1".into(),
+        playlist_index: 1,
     }]
     .into_boxed_slice();
     let list = ProbeResult::Playlist(PlaylistInfo {
@@ -6841,7 +6842,8 @@ fn expand_child_target_routes_entries() {
         PlaylistItem {
             id: id.into(),
             title: "t".into(),
-            page_url: page_url.to_string(),
+            page_url: page_url.into(),
+            playlist_index: 1,
         }
     }
     let tray = "https://www.instagram.com/stories/someuser/";

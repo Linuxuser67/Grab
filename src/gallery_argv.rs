@@ -89,8 +89,8 @@ impl GalleryFilter {
 /// - `extractor.cookies-update=false`: don't mutate Grab's staged cookies
 /// - `downloader.http.progress=0.5`: emit per-file progress to stderr
 /// - `output.progress=false`: disable multi-URL progress indicator
-/// - custom `output.mode`: keep success/skip paths line-oriented on stdout and
-///   emit a parseable percentage (or `?` when size is unknown) on stderr
+/// - custom `output.mode`: emit a flushed, tagged file-start path plus
+///   success/skip paths on stdout, and a parseable percentage on stderr
 ///
 /// Build a gallery-dl `--range` spec from 0-based selected indices.
 /// gallery-dl uses 1-based indices; consecutive runs compress to `a-b`.
@@ -194,7 +194,7 @@ pub fn download_argv_with_proxy(
         "-o".to_string(),
         // All three path templates are required by gallery-dl's CustomOutput.
         // Omitting one triggers AttributeError in output.py _make_func.
-        r##"output.mode={"start":"","success":"{}\n","skip":"# {}\n","progress":"?\n","progress-total":"{3}%\n"}"##.to_string(),
+        r##"output.mode={"start":"@START:{}\n","success":"{}\n","skip":"# {}\n","progress":"?\n","progress-total":"{3}%\n"}"##.to_string(),
     ];
     if let Some(cookies) = cookies_file {
         argv.push("-C".to_string());
@@ -418,7 +418,7 @@ mod tests {
             .expect("custom output mode must be configured");
         let mode: serde_json::Value =
             serde_json::from_str(mode).expect("custom output mode must be valid JSON");
-        assert_eq!(mode["start"], "");
+        assert_eq!(mode["start"], "@START:{}\\n");
         assert_eq!(mode["success"], "{}\n");
         assert_eq!(mode["skip"], "# {}\n");
         assert_eq!(mode["progress"], "?\n");

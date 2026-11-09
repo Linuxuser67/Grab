@@ -1317,8 +1317,8 @@ mod tests {
 #EXTINF:4.0,
 segment.ts
 "#;
-        let plan = super::plan_hls_media_playlist(BASE, body)
-            .expect("complete-segment LL-HLS playlist");
+        let plan =
+            super::plan_hls_media_playlist(BASE, body).expect("complete-segment LL-HLS playlist");
         assert!(plan.is_live);
         assert!(plan.ll_unit_ids.is_none());
         assert_eq!(
@@ -1336,7 +1336,9 @@ segment.ts
             1
         );
         let playlist = m3u8_rs::parse_media_playlist_res(
-            &plan.local_playlist_bytes().expect("serialize local playlist"),
+            &plan
+                .local_playlist_bytes()
+                .expect("serialize local playlist"),
         )
         .expect("parse local playlist");
         assert_eq!(
@@ -1359,7 +1361,9 @@ segment.ts
         assert!(plan.is_live);
         assert!(plan.ll_unit_ids.is_none());
         assert!(
-            plan.resources.iter().all(|resource| !resource.url.path().ends_with("future.part")),
+            plan.resources
+                .iter()
+                .all(|resource| !resource.url.path().ends_with("future.part")),
             "preload hints are not committed until they appear as a confirmed part"
         );
     }

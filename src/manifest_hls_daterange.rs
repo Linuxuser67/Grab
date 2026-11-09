@@ -26,6 +26,8 @@ struct SpliceRange {
     class: Option<String>,
     out_signal: Option<String>,
     in_signal: Option<String>,
+    out_signal_identity: Option<SpliceSignalIdentity>,
+    in_signal_identity: Option<SpliceSignalIdentity>,
     end_micros: Option<i64>,
     actual_duration_micros: Option<i64>,
     attached_segments: Vec<usize>,
@@ -35,6 +37,12 @@ struct SegmentTimeline {
     component: usize,
     start_micros: i64,
     end_micros: i64,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+struct SpliceSignalIdentity {
+    event_id: u32,
+    unique_program_id: u16,
 }
 
 /// Detect DATERANGE tags that m3u8-rs would overwrite before parsing.
@@ -110,14 +118,26 @@ pub(super) fn plan_ad_removal(
                 "SCTE-35 DATERANGE contains unrecognized attributes",
             ));
         }
+        let range = ranges.entry(date_range.id.clone()).or_default();
         if let Some(value) = out_signal {
-            validate_scte35_signal(value, true)?;
+            let identity = validate_scte35_signal(value, true)?;
+            merge_identity(
+                &mut range.out_signal_identity,
+                identity,
+                "SCTE35-OUT",
+            )?;
+            merge_same_string(&mut range.out_signal, value, "SCTE35-OUT")?;
         }
         if let Some(value) = in_signal {
-            validate_scte35_signal(value, false)?;
+            let identity = validate_scte35_signal(value, false)?;
+            merge_identity(
+                &mut range.in_signal_identity,
+                identity,
+                "SCTE35-IN",
+            )?;
+            merge_same_string(&mut range.in_signal, value, "SCTE35-IN")?;
         }
 
-        let range = ranges.entry(date_range.id.clone()).or_default();
         let start_micros = date_range.start_date.timestamp_micros();
         merge_same(&mut range.start_micros, start_micros, "START-DATE")?;
         if let Some(class) = date_range.class.as_ref() {
@@ -126,11 +146,7 @@ pub(super) fn plan_ad_removal(
             }
             range.class = Some(class.clone());
         }
-        if let Some(value) = out_signal {
-            merge_same_string(&mut range.out_signal, value, "SCTE35-OUT")?;
-        }
-        if let Some(value) = in_signal {
-            merge_same_string(&mut range.in_signal, value, "SCTE35-IN")?;
+        if in_signal.is_some() {
             if let Some(end_date) = date_range.end_date.as_ref() {
                 merge_same(
                     &mut range.end_micros,
@@ -175,9 +191,20 @@ pub(super) fn plan_ad_removal(
         let Some(out_signal) = range.out_signal.as_deref() else {
             return Err(unsupported("SCTE35-IN has no matching SCTE35-OUT"));
         };
-        let Some(in_signal) = range.in_signal.as_deref() else {
+        let Some(_in_signal) = range.in_signal.as_deref() else {
             return Err(unsupported("SCTE35-OUT has no matching SCTE35-IN"));
         };
+        let out_identity = range
+            .out_signal_identity
+            .ok_or_else(|| unsupported("SCTE35-OUT has no parsed splice identity"))?;
+        let in_identity = range
+            .in_signal_identity
+            .ok_or_else(|| unsupported("SCTE35-IN has no parsed splice identity"))?;
+        if out_identity != in_identity {
+            return Err(unsupported(
+                "SCTE35-OUT and SCTE35-IN do not identify the same splice event",
+            ));
+        }
         let start = range
             .start_micros
             .ok_or_else(|| unsupported("DATERANGE has no START-DATE"))?;
@@ -366,7 +393,7 @@ fn attribute<'a>(range: &'a DateRange, name: &str) -> Option<&'a str> {
 fn validate_scte35_signal(
     value: &str,
     expected_out_of_network: bool,
-) -> Result<(), ManifestError> {
+) -> Result<SpliceSignalIdentity, ManifestError> {
     let bytes = decode_scte35_hex(value)?;
     if bytes.len() < 3 {
         return Err(unsupported("SCTE35 signal is shorter than a section header"));
@@ -393,7 +420,10 @@ fn validate_scte35_signal(
                 && splice.program_splice_flag
                 && splice.out_of_network_indicator == expected_out_of_network =>
         {
-            Ok(())
+            Ok(SpliceSignalIdentity {
+                event_id: splice.splice_event_id,
+                unique_program_id: splice.unique_program_id,
+            })
         }
         AnyCommand::SpliceInsert(_) => Err(unsupported(
             "SCTE35 splice_insert direction or splice mode does not match its DATERANGE attribute",
@@ -457,6 +487,20 @@ fn merge_same(
     Ok(())
 }
 
+fn merge_identity(
+    target: &mut Option<SpliceSignalIdentity>,
+    value: SpliceSignalIdentity,
+    name: &str,
+) -> Result<(), ManifestError> {
+    if target.is_some_and(|current| current != value) {
+        return Err(unsupported(&format!(
+            "DATERANGE {name} identifies multiple splice events"
+        )));
+    }
+    *target = Some(value);
+    Ok(())
+}
+
 fn merge_same_string(
     target: &mut Option<String>,
     value: &str,
@@ -485,9 +529,14 @@ mod tests {
     }
 
     fn scte35_signal(out_of_network: bool) -> String {
+        scte35_signal_with_event(out_of_network, 7)
+    }
+
+    fn scte35_signal_with_event(out_of_network: bool, event_id: u32) -> String {
         use broadcast_common::Serialize;
 
         let splice = SpliceInsert {
+            splice_event_id: event_id,
             out_of_network_indicator: out_of_network,
             splice_immediate_flag: true,
             ..SpliceInsert::default()
@@ -617,6 +666,16 @@ mod tests {
         );
         assert!(matches!(
             playlist(&wrong_direction),
+            Err(ManifestError::UnsupportedAdInsertion(_))
+        ));
+
+        let mismatched_pair = format!(
+            "#EXTM3U\\n#EXT-X-TARGETDURATION:4\\n#EXT-X-PLAYLIST-TYPE:VOD\\n#EXT-X-PROGRAM-DATE-TIME:2026-01-01T00:00:00Z\\n#EXTINF:4,\\nprogram.ts\\n{}#EXTINF:4,\\nad.ts\\n{}#EXTINF:4,\\nafter.ts\\n#EXT-X-ENDLIST\\n",
+            date_range_start(&scte35_signal_with_event(true, 7)),
+            date_range_end(&scte35_signal_with_event(false, 8), 12, 8)
+        );
+        assert!(matches!(
+            playlist(&mismatched_pair),
             Err(ManifestError::UnsupportedAdInsertion(_))
         ));
     }

@@ -208,10 +208,33 @@ pub(crate) fn plan_hls_media_playlist(
     let playlist = LlMediaPlaylist::parse(text).map_err(|error| {
         ManifestError::Parse(format!("could not parse LL-HLS playlist: {error}"))
     })?;
-    build_plan(manifest_url, playlist).map(Some)
+    let open_segment_discontinuity = has_trailing_open_discontinuity(body);
+    build_plan(manifest_url, playlist, open_segment_discontinuity).map(Some)
 }
 
-fn build_plan(manifest_url: &str, playlist: LlMediaPlaylist) -> Result<HlsPlan, ManifestError> {
+fn has_trailing_open_discontinuity(body: &[u8]) -> bool {
+    const EXTINF: &[u8] = b"#EXTINF:";
+    let tail_start = body
+        .windows(EXTINF.len())
+        .rposition(|window| window == EXTINF)
+        .unwrap_or(0);
+    body[tail_start..]
+        .split(|byte| *byte == b'\n')
+        .any(|raw_line| {
+            let line = raw_line.strip_suffix(b"\r").unwrap_or(raw_line);
+            let start = line
+                .iter()
+                .position(|byte| !byte.is_ascii_whitespace())
+                .unwrap_or(line.len());
+            &line[start..] == b"#EXT-X-DISCONTINUITY"
+        })
+}
+
+fn build_plan(
+    manifest_url: &str,
+    playlist: LlMediaPlaylist,
+    open_segment_discontinuity: bool,
+) -> Result<HlsPlan, ManifestError> {
     let base_url = parse_manifest_url(manifest_url)?;
     let source_target_duration = u64::from(playlist.target_duration);
     if source_target_duration == 0 || playlist.iframes_only {
@@ -441,10 +464,7 @@ fn build_plan(manifest_url: &str, playlist: LlMediaPlaylist) -> Result<HlsPlan, 
             &mut resources,
             &mut map_filenames,
         )?;
-        let discontinuity = open
-            .pre_tags
-            .iter()
-            .any(|tag| tag == "#EXT-X-DISCONTINUITY");
+        let discontinuity = open_segment_discontinuity;
         append_part_units(
             &base_url,
             media_sequence,

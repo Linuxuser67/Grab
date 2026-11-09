@@ -1972,6 +1972,7 @@ video/es.m3u8
             audio_group: None,
             subtitles_group: None,
             video_rendition_group: None,
+            video_variant_path: None,
             video_rendition_name: None,
             stable_video_rendition_id: None,
             stable_variant_id: Some(stable_id.to_string()),
@@ -2016,6 +2017,7 @@ video/es.m3u8
             audio_group: Some(format!("audio-{bandwidth}")),
             subtitles_group: None,
             video_rendition_group: None,
+            video_variant_path: None,
             video_rendition_name: None,
             stable_video_rendition_id: None,
             stable_variant_id: None,
@@ -2079,6 +2081,32 @@ video/es.m3u8
     }
 
     #[test]
+    fn hls_video_rendition_content_keys_include_parent_variant_and_audio_group() {
+        let variant = |parent_path: &str, audio_group: &str| HlsVariant {
+            url: Url::parse("https://cdn.example.test/angles/main.m3u8")
+                .expect("valid angle URL"),
+            bandwidth: 2_000_000,
+            average_bandwidth: Some(1_800_000),
+            width: Some(1920),
+            height: Some(1080),
+            codecs: Some("avc1.640028".to_string()),
+            frame_rate: Some(30.0),
+            audio_group: Some(audio_group.to_string()),
+            subtitles_group: None,
+            video_rendition_group: Some("angles".to_string()),
+            video_variant_path: Some(parent_path.to_string()),
+            video_rendition_name: Some("Main".to_string()),
+            stable_video_rendition_id: None,
+            stable_variant_id: None,
+        };
+        let first = variant("/video/first.m3u8", "audio-en");
+        let other_variant = variant("/video/second.m3u8", "audio-en");
+        let other_audio = variant("/video/first.m3u8", "audio-fr");
+        assert_ne!(hls_variant_key(&first), hls_variant_key(&other_variant));
+        assert_ne!(hls_variant_key(&first), hls_variant_key(&other_audio));
+    }
+
+    #[test]
     fn hls_stable_variant_key_survives_resource_rotation() {
         let variant = |url: &str| HlsVariant {
             url: Url::parse(url).expect("valid variant URL"),
@@ -2091,6 +2119,7 @@ video/es.m3u8
             audio_group: Some("audio-main".to_string()),
             subtitles_group: None,
             video_rendition_group: None,
+            video_variant_path: None,
             video_rendition_name: None,
             stable_video_rendition_id: None,
             stable_variant_id: Some("variant-1080".to_string()),

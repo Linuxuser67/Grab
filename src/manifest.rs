@@ -300,6 +300,8 @@ pub(crate) struct HlsVariant {
     pub(crate) subtitles_group: Option<String>,
     /// Group and display name when this choice selects an EXT-X-MEDIA VIDEO rendition.
     pub(crate) video_rendition_group: Option<String>,
+    /// Original EXT-X-STREAM-INF playlist path, kept separate from the selected angle URL.
+    pub(crate) video_variant_path: Option<String>,
     pub(crate) video_rendition_name: Option<String>,
     /// Apple HLS STABLE-RENDITION-ID for the selected VIDEO rendition.
     pub(crate) stable_video_rendition_id: Option<String>,
@@ -1171,6 +1173,7 @@ pub(crate) fn parse_hls_master_playlist(
                 .filter(|value| !value.is_empty());
             let make_variant = |url: Url,
                                 video_rendition_group: Option<String>,
+                                video_variant_path: Option<String>,
                                 video_rendition_name: Option<String>,
                                 stable_video_rendition_id: Option<String>| {
                 HlsVariant {
@@ -1184,6 +1187,7 @@ pub(crate) fn parse_hls_master_playlist(
                     audio_group: variant.audio.clone(),
                     subtitles_group: variant.subtitles.clone(),
                     video_rendition_group,
+                    video_variant_path,
                     video_rendition_name,
                     stable_video_rendition_id,
                     stable_variant_id: stable_variant_id.clone(),
@@ -1191,7 +1195,7 @@ pub(crate) fn parse_hls_master_playlist(
             };
 
             let Some(group_id) = variant.video.as_deref() else {
-                return Ok(vec![make_variant(variant_url, None, None, None)]);
+                return Ok(vec![make_variant(variant_url, None, None, None, None)]);
             };
             if group_id.trim().is_empty() {
                 return Err(ManifestError::InvalidVideoGroup);
@@ -1234,6 +1238,7 @@ pub(crate) fn parse_hls_master_playlist(
                 choices.push(make_variant(
                     url,
                     Some(group_id.to_string()),
+                    Some(variant_url.path().to_string()),
                     Some(rendition.name.clone()),
                     stable_video_rendition_id,
                 ));

@@ -620,6 +620,7 @@ fn hls_variant_content_key(variant: &HlsVariant) -> String {
         let variant_identity = variant
             .stable_variant_id
             .as_deref()
+            .or(variant.video_variant_path.as_deref())
             .unwrap_or_else(|| variant.url.path());
         let rendition_identity = variant
             .stable_video_rendition_id
@@ -647,6 +648,8 @@ fn hls_variant_content_key(variant: &HlsVariant) -> String {
                     .to_bits()
                     .to_le_bytes(),
                 variant.codecs.as_deref().unwrap_or_default().as_bytes(),
+                variant.audio_group.as_deref().unwrap_or_default().as_bytes(),
+                variant.subtitles_group.as_deref().unwrap_or_default().as_bytes(),
             ],
         );
     }

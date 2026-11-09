@@ -9646,3 +9646,34 @@ fn playlist_staged_import_does_not_duplicate_identical_entry() {
         "a duplicate playlist entry must be rejected"
     );
 }
+
+#[test]
+fn remove_many_removes_existing_members_once_and_persists_an_empty_queue() {
+    let (_q, _l) = test_locks();
+    let _qf = test_queue_file("remove-many");
+    let manager = DownloadManager::new(gio::ListStore::new::<DownloadItem>(), test_settings());
+    let first_id = 981_000 + std::process::id() as u64;
+    let second_id = first_id + 1;
+    manager.store().append(&DownloadItem::new(
+        first_id,
+        "https://example.com/first",
+        "first.bin",
+        "/tmp",
+    ));
+    manager.store().append(&DownloadItem::new(
+        second_id,
+        "https://example.com/second",
+        "second.bin",
+        "/tmp",
+    ));
+
+    assert_eq!(
+        manager.remove_many(&[first_id, second_id, first_id, u64::MAX]),
+        2,
+        "bulk removal should count each existing row once"
+    );
+    assert_eq!(manager.store().n_items(), 0);
+    assert!(manager.find(first_id).is_none());
+    assert!(manager.find(second_id).is_none());
+}
+

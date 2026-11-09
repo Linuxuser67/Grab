@@ -1352,7 +1352,12 @@ segment.ts
             .expect("full-segment live playlist with preload hint")
             .expect("full-segment HLS plan");
         assert!(plan.is_live);
-        assert!(plan.ll_unit_ids.is_none());
+        assert!(
+            plan.ll_unit_ids
+                .as_ref()
+                .is_some_and(|unit_ids| unit_ids.len() == 1),
+            "the confirmed complete segment retains its live identity"
+        );
         assert!(
             plan.resources
                 .iter()

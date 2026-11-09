@@ -823,7 +823,10 @@ fn parse_hls_pathway_clone(
             let mut params = BTreeMap::new();
             for (name, value) in object {
                 let value = value.as_str().ok_or_else(invalid)?;
-                if name.is_empty() || name.starts_with("_HLS_") {
+                if name.starts_with("_HLS_")
+                    || !is_valid_hls_query_component(name, false)
+                    || !is_valid_hls_query_component(value, true)
+                {
                     return Err(invalid());
                 }
                 params.insert(name.clone(), value.to_string());
@@ -844,6 +847,59 @@ fn parse_hls_pathway_clone(
         per_variant_uris,
         per_rendition_uris,
     })
+}
+
+fn is_valid_hls_query_component(value: &str, allow_empty: bool) -> bool {
+    if value.is_empty() {
+        return allow_empty;
+    }
+    let bytes = value.as_bytes();
+    let mut index = 0;
+    while index < bytes.len() {
+        let byte = bytes[index];
+        if byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'.' | b'_' | b'~') {
+            index += 1;
+            continue;
+        }
+        if byte == b'%'
+            && index + 2 < bytes.len()
+            && bytes[index + 1].is_ascii_hexdigit()
+            && bytes[index + 2].is_ascii_hexdigit()
+        {
+            index += 3;
+            continue;
+        }
+        return false;
+    }
+    true
+}
+
+fn append_hls_pathway_params(uri: &mut Url, params: &BTreeMap<String, String>) {
+    if params.is_empty() {
+        return;
+    }
+
+    let mut retained = uri
+        .query()
+        .unwrap_or_default()
+        .split('&')
+        .filter(|pair| {
+            let name = pair.split_once('=').map_or(*pair, |(name, _)| name);
+            let decoded_name = url::form_urlencoded::parse(format!("{name}=").as_bytes())
+                .next()
+                .map(|(name, _)| name.into_owned());
+            !decoded_name.is_some_and(|name| params.contains_key(&name))
+        })
+        .filter(|pair| !pair.is_empty())
+        .map(str::to_string)
+        .collect::<Vec<_>>();
+    retained.extend(
+        params
+            .iter()
+            .map(|(name, value)| format!("{name}={value}")),
+    );
+    let query = retained.join("&");
+    uri.set_query((!query.is_empty()).then_some(query.as_str()));
 }
 
 fn parse_hls_steering_uri_overrides(
@@ -884,21 +940,7 @@ fn replace_hls_pathway_uri(
         uri.set_host(Some(host)).ok()?;
     }
 
-    if !pathway_clone.params.is_empty() {
-        let mut pairs = uri
-            .query_pairs()
-            .filter(|(name, _)| !pathway_clone.params.contains_key(name.as_ref()))
-            .map(|(name, value)| (name.into_owned(), value.into_owned()))
-            .collect::<Vec<_>>();
-        pairs.extend(
-            pathway_clone
-                .params
-                .iter()
-                .map(|(name, value)| (name.clone(), value.clone())),
-        );
-        uri.set_query(None);
-        uri.query_pairs_mut().extend_pairs(pairs);
-    }
+    append_hls_pathway_params(&mut uri, &pathway_clone.params);
 
     if let Some(override_uri) = override_uri {
         uri = Url::parse(override_uri).ok()?;
@@ -3492,7 +3534,7 @@ video/b.m3u8
             host: Some("backup.example.test".to_string()),
             params: BTreeMap::from([
                 ("z".to_string(), "last".to_string()),
-                ("token".to_string(), "new value".to_string()),
+                ("token".to_string(), "new%20value".to_string()),
                 ("a".to_string(), "first".to_string()),
             ]),
             per_variant_uris: HashMap::new(),
@@ -3501,18 +3543,9 @@ video/b.m3u8
         let replaced =
             replace_hls_pathway_uri(&source, &clone, None).expect("safe replacement URL");
         assert_eq!(replaced.host_str(), Some("backup.example.test"));
-        let pairs = replaced
-            .query_pairs()
-            .map(|(name, value)| (name.into_owned(), value.into_owned()))
-            .collect::<Vec<_>>();
         assert_eq!(
-            pairs,
-            [
-                ("keep".to_string(), "yes".to_string()),
-                ("a".to_string(), "first".to_string()),
-                ("token".to_string(), "new value".to_string()),
-                ("z".to_string(), "last".to_string()),
-            ]
+            replaced.query(),
+            Some("keep=yes&a=first&token=new%20value&z=last")
         );
     }
 

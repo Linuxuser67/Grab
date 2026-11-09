@@ -1175,7 +1175,6 @@ video.m3u8
     }
 
     #[test]
-    fn hls_download_plan_uses_the_selected_stable_video_and_audio_ids() {    #[test]
     fn hls_download_plan_uses_the_selected_stable_video_and_audio_ids() {
         let body = br#"#EXTM3U
 #EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID="audio",NAME="English",LANGUAGE="en",STABLE-RENDITION-ID="rendition-en",URI="audio/en.m3u8"

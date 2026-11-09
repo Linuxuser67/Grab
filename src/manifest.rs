@@ -2169,7 +2169,6 @@ one.ts
     }
 
     #[test]
-    fn alternate_video_renditions_become_independent_video_choices() {    #[test]
     fn alternate_video_renditions_become_independent_video_choices() {
         let body = br#"#EXTM3U
 #EXT-X-MEDIA:TYPE=VIDEO,GROUP-ID="angles",NAME="Main",STABLE-RENDITION-ID="main"

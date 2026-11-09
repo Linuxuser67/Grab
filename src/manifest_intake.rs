@@ -821,13 +821,12 @@ fn select_hls_content_steering_pathway(
         .content_steering
         .as_ref()
         .and_then(|steering| steering.initial_pathway_id.as_deref())
+        && !available.contains(initial)
     {
-        if !available.contains(initial) {
-            return Err(ManifestIntakeError::Unsupported(
-                "The HLS Content Steering initial PATHWAY-ID is not present in the master playlist"
-                    .to_string(),
-            ));
-        }
+        return Err(ManifestIntakeError::Unsupported(
+            "The HLS Content Steering initial PATHWAY-ID is not present in the master playlist"
+                .to_string(),
+        ));
     }
     let selected = priority
         .iter()

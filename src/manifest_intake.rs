@@ -2074,12 +2074,6 @@ pub(crate) fn valid_source(source: &crate::media_types::ManifestSource) -> bool 
     video_key_is_valid && audio_key_is_valid && subtitle_key_is_valid
 }
 
-async fn read_bounded_response(
-    response: reqwest::Response,
-) -> Result<Vec<u8>, ManifestIntakeError> {
-    read_bounded_response_with_limit(response, MAX_MANIFEST_BYTES, "stream manifest").await
-}
-
 async fn read_bounded_response_with_limit(
     mut response: reqwest::Response,
     max_bytes: usize,

@@ -4303,7 +4303,7 @@ impl DownloadManager {
         }
     }
 
-    /// Synchronous Undo for tests; production callers use [`Self::unremove_async`].
+    /// Synchronous Undo for tests; production callers use [`Self::unremove_many_async`].
     #[cfg(test)]
     pub fn unremove(self: &Rc<Self>, snap: RemovedSnapshot) -> DownloadItem {
         let existing = crate::video_staging::dir_file_names(std::path::Path::new(&snap.dest_dir));

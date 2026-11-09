@@ -1638,6 +1638,9 @@ impl DownloadManager {
 
     /// Queue one row per playlist entry for collection-shaped resolves with no picked entry. Returns (added, reported total). One persist for the whole import.
     /// Queue collection children after creating/listing their destination off GTK.
+    /// Convert a single-video carrier that resolved to a playlist into one
+    /// parent-owned yt-dlp collection. Child entries are projections, not
+    /// separately scheduled DownloadItems.
     async fn expand_playlist_rows_async(
         weak: std::rc::Weak<Self>,
         id: u64,
@@ -1657,33 +1660,23 @@ impl DownloadManager {
             _ => return (0, pl.total, 0),
         };
         let base_dir = this.resolve_dir(Some(&item.dest_dir()));
-        let multi = pl.total > 1;
-        let title = pl.title.clone();
-        let collection_group = if multi {
-            crate::download_store::DownloadGroup::try_new(id, &title)
-        } else {
-            None
-        };
-        // The local task must not keep a strong manager Rc pinned while the
-        // directory worker is pending; upgrade again before touching queue state.
+        let title = pl.title.to_string();
         drop(this);
+
+        // Collection folder creation and readdir can block on network mounts.
         let prepared = gio::spawn_blocking(move || {
-            let dest_dir = if multi {
-                crate::file_names::collection_subdir(&base_dir, &title)
-            } else {
-                base_dir
-            };
+            let dest_dir = crate::file_names::collection_subdir(&base_dir, &title);
             crate::video_staging::try_dir_file_names(std::path::Path::new(&dest_dir))
-                .map(|existing| (dest_dir, existing))
+                .map(|_| dest_dir)
         })
         .await;
-        let (dest_dir, existing) = match prepared {
-            Ok(Ok(prepared)) => prepared,
+        let dest_dir = match prepared {
+            Ok(Ok(dest_dir)) => dest_dir,
             Ok(Err(error)) => {
                 tracing::warn!(
                     error = %error,
                     parent_id = id,
-                    "playlist import directory listing failed"
+                    "playlist collection directory listing failed"
                 );
                 return (0, pl.total, 0);
             }
@@ -1691,7 +1684,7 @@ impl DownloadManager {
                 tracing::warn!(
                     error = ?error,
                     parent_id = id,
-                    "playlist import directory preparation failed"
+                    "playlist collection directory preparation failed"
                 );
                 return (0, pl.total, 0);
             }
@@ -1700,10 +1693,6 @@ impl DownloadManager {
         let Some(this) = weak.upgrade() else {
             return (0, pl.total, 0);
         };
-        // The main context yielded while the folder was prepared. Do not
-        // enqueue stale children after pause/cancel/remove.
-        // Collection metadata is untrusted. Re-check the carrier after yielding so
-        // removed/cancelled rows cannot create children from stale resolver output.
         if !this.is_current(id, generation) {
             return (0, pl.total, 0);
         }
@@ -1717,14 +1706,14 @@ impl DownloadManager {
             return (0, pl.total, 0);
         }
 
-        let _batch = this.batch_guard();
-        // Collection results are untrusted input. Keep policy inheritance and the
-        // distinct-host cap in the shared helper so automatic expansion and the picker
-        // enforce the same destination/network rules.
         let mut guarded_child_hosts = HashSet::new();
+        let mut files = Vec::with_capacity(pl.items.len());
+        let mut seen_ids = HashSet::new();
         let mut skipped_by_host_limit = 0usize;
-        let mut added = 0usize;
         for entry in &pl.items {
+            if entry.id.trim().is_empty() || !seen_ids.insert(entry.id.to_string()) {
+                continue;
+            }
             let Some(url) =
                 crate::video_probe::expand_child_target(&item.url(), &pl.page_url, entry)
             else {
@@ -1742,32 +1731,53 @@ impl DownloadManager {
                 }
                 Err(crate::download_net::CollectionHostError::UnsafeDestination) => continue,
             }
-            // Match the interactive picker by carrying each entry title into its filename.
-            let remux = crate::video_prefs::remux_video_active(&this.settings.remux_video());
-            let name =
-                crate::video::default_video_filename(&entry.title, audio_only, remux.as_deref());
-            // Live streams discovered inside a collection use the VOD path; each child
-            // resolves its own page rather than inheriting the carrier's live-capture state.
-            if let Ok(child) = this.enqueue_video_staged(
-                &url,
-                &dest_dir,
-                Some(&name),
-                crate::media_types::VideoChoices {
-                    quality: quality.clone(),
-                    audio_only,
-                    video_format_id: None,
-                    is_live: false,
-                    playlist_item_id: None,
-                },
-                &existing,
-            ) {
-                child.set_group(collection_group.clone());
-                added += 1;
-            }
+            files.push(crate::media_types::VideoPlaylistFile {
+                id: entry.id.to_string(),
+                title: entry.title.to_string(),
+                page_url: url,
+                status: DownloadStatus::Queued,
+                progress: 0.0,
+                path: None,
+            });
         }
-        // Report the collection's stated total, not merely attempted entries, so the
-        // carrier can accurately show "added of total" alongside host-cap omissions.
-        (added, pl.total, skipped_by_host_limit)
+
+        if files.is_empty() {
+            return (0, pl.total, skipped_by_host_limit);
+        }
+
+        let filename = std::path::Path::new(&dest_dir)
+            .file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or("playlist")
+            .to_string();
+        let state = crate::media_types::VideoPlaylistState {
+            title: pl.title.to_string(),
+            dest_dir: dest_dir.clone(),
+            files,
+        };
+        let group = crate::download_store::DownloadGroup::try_new(id, &state.title);
+        current.set_filename(filename);
+        current.set_is_collection_owner(true);
+        current.set_group(group);
+        current.set_gallery_url(item.url());
+        current.set_gallery_file_count(state.files.len().min(u32::MAX as usize) as u32);
+        current.set_gallery_files_done(0);
+        current.set_progress(0.0);
+        current.set_detail(gettext("Playlist • waiting for a download slot"));
+        current.set_status(DownloadStatus::Queued);
+        this.video_sources.borrow_mut().insert(
+            id,
+            crate::media_types::VideoSource::Playlist {
+                page_url: pl.page_url.to_string(),
+                quality,
+                audio_only,
+                state: state.clone(),
+            },
+        );
+        this.restore_video_playlist_file_rows(&current, &state.files);
+        this.persist_queue();
+        this.changed();
+        (state.files.len(), pl.total, skipped_by_host_limit)
     }
 
     /// Synchronous restore helper for tests; production passes a prelisted destination.

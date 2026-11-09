@@ -3197,8 +3197,7 @@ impl DownloadManager {
                     EngineMsg::TorrentPieces(have) => {
                         this.torrent_pieces.borrow_mut().insert(id, have);
                     }
-                    EngineMsg::PlaylistFile(event) => {
-                        match *event {
+                    EngineMsg::PlaylistFile(event) => match *event {
                             crate::engine_msg::PlaylistFileEvent::Started {
                                 file_id,
                                 filename: _filename,
@@ -3288,7 +3287,7 @@ impl DownloadManager {
                                 }
                             }
                         }
-                    }
+                    },
                     EngineMsg::Phase(detail) => {
                         if item.status() == DownloadStatus::Downloading {
                             item.set_detail(detail);

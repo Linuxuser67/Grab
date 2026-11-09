@@ -3291,7 +3291,13 @@ video.m3u8
             Err(ManifestError::UnsupportedPlaylist)
         ));
 
-        let media = b"#EXTM3U\\n#EXT-X-TARGETDURATION:2\\n#EXT-X-DEFINE:NAME=\\"path\\",VALUE=\\"video\\"\\n#EXTINF:2,\\n{$path}/one.ts\\n#EXT-X-ENDLIST\\n";
+        let media = br#"#EXTM3U
+#EXT-X-TARGETDURATION:2
+#EXT-X-DEFINE:NAME="path",VALUE="video"
+#EXTINF:2,
+{$path}/one.ts
+#EXT-X-ENDLIST
+"#;
         let plan = plan_hls_media_playlist(BASE_URL, media)
             .expect("declared media-playlist variables should be expanded");
         assert_eq!(

@@ -246,7 +246,7 @@ fn source_timestamp_offset(
         DashAddressing::Template(template) => {
             (template.timescale, template.presentation_time_offset)
         }
-        DashAddressing::List(_) => (1, 0),
+        DashAddressing::List(list) => (list.timescale, 0),
         DashAddressing::Base(base) => (base.timescale, base.presentation_time_offset),
         DashAddressing::IndexedBase(index) => {
             (index.timescale.unwrap_or(1), index.presentation_time_offset)
@@ -354,6 +354,7 @@ enum DashInitialization {
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct DashList {
     initialization: Option<DashInitialization>,
+    timescale: u64,
     segments: Box<[DashListSegment]>,
 }
 
@@ -361,6 +362,8 @@ struct DashList {
 struct DashListSegment {
     media: String,
     range: Option<ManifestByteRange>,
+    time: Option<u64>,
+    duration: Option<u64>,
 }
 
 #[cfg(test)]
@@ -1051,8 +1054,8 @@ pub(crate) fn plan_dash_representation(
             (DashPresentation::Dynamic(dynamic), DashAddressing::Template(template)) => {
                 expand_dynamic_template(&period_representation, &template.media, template, dynamic)?
             }
-            (DashPresentation::Dynamic(_), DashAddressing::List(_)) => {
-                return Err(DashError::UnsupportedAddressing);
+            (DashPresentation::Dynamic(dynamic), DashAddressing::List(list)) => {
+                expand_dynamic_list(&period_representation, list, dynamic)?
             }
             (
                 DashPresentation::Dynamic(_),
@@ -1397,7 +1400,22 @@ fn live_representation_key(
                 None => hasher.update(b"no-init"),
             }
         }
-        DashAddressing::List(_) => {}
+        DashAddressing::List(list) => {
+            hasher.update(b"list");
+            hasher.update(list.timescale.to_le_bytes());
+            match &list.initialization {
+                Some(DashInitialization::Template(value)) => {
+                    hasher.update(b"init-template");
+                    hasher.update(value.as_bytes());
+                }
+                Some(DashInitialization::Resource { url, range }) => {
+                    hasher.update(b"init-resource");
+                    hash_separate_initialization_identity(&mut hasher, base_url, url.as_deref());
+                    hash_optional_range(&mut hasher, *range);
+                }
+                None => hasher.update(b"no-init"),
+            }
+        }
         DashAddressing::Base(_) => {
             hasher.update(b"base");
         }
@@ -1705,7 +1723,7 @@ fn effective_addressing(
         }));
     }
 
-    if is_dynamic && (!has_template || has_list) {
+    if is_dynamic && (has_template == has_list) {
         return Err(DashError::UnsupportedAddressing);
     }
     let addressing = match (has_template, has_list) {
@@ -1716,7 +1734,7 @@ fn effective_addressing(
             }
             DashAddressing::Template(template)
         }
-        (false, true) => effective_list(&lists).map(DashAddressing::List)?,
+        (false, true) => effective_list(&lists, is_dynamic).map(DashAddressing::List)?,
         _ => return Err(DashError::UnsupportedAddressing),
     };
     if is_dynamic
@@ -1886,13 +1904,22 @@ fn effective_template(
     })
 }
 
-fn effective_list(levels: &[Option<&dash_mpd_core::SegmentList>]) -> Result<DashList, DashError> {
+fn effective_list(
+    levels: &[Option<&dash_mpd_core::SegmentList>],
+    is_dynamic: bool,
+) -> Result<DashList, DashError> {
     let mut initialization = None;
     let mut segment_urls = None;
     let mut segment_list_seen = false;
+    let mut timescale = 1_u64;
+    let mut timeline = None;
 
     for list in levels.iter().flatten() {
         segment_list_seen = true;
+        timescale = list.timescale.unwrap_or(timescale);
+        if let Some(segment_timeline) = &list.SegmentTimeline {
+            timeline = Some(segment_timeline.segments.as_slice());
+        }
         if list.indexRange.is_some()
             || list.indexRangeExact == Some(true)
             || list.href.is_some()
@@ -1931,9 +1958,39 @@ fn effective_list(levels: &[Option<&dash_mpd_core::SegmentList>]) -> Result<Dash
         });
     }
 
+    if timescale == 0 {
+        return Err(DashError::InvalidSegment);
+    }
+    let timeline = timeline
+        .map(|entries| {
+            entries
+                .iter()
+                .map(|entry| {
+                    if entry.d == 0 || entry.r.is_some_and(|repeat| repeat != 0) || entry.n.is_some() || entry.k.is_some() {
+                        return Err(DashError::UnsupportedAddressing);
+                    }
+                    Ok(DashTimelineEntry {
+                        start: entry.t,
+                        duration: entry.d,
+                        repeat: 0,
+                    })
+                })
+                .collect::<Result<Vec<_>, DashError>>()
+        })
+        .transpose()?;
+    if is_dynamic
+        && !timeline.as_ref().is_some_and(|entries| {
+            entries.len() == segment_urls.len()
+                && entries.iter().all(|entry| entry.start.is_some())
+        })
+    {
+        return Err(DashError::UnsupportedAddressing);
+    }
+
     let segments = segment_urls
         .iter()
-        .map(|segment| {
+        .enumerate()
+        .map(|(index, segment)| {
             if segment.index.is_some() || segment.indexRange.is_some() {
                 return Err(DashError::UnsupportedAddressing);
             }
@@ -1947,15 +2004,35 @@ fn effective_list(levels: &[Option<&dash_mpd_core::SegmentList>]) -> Result<Dash
                 .as_deref()
                 .map(parse_byte_range)
                 .transpose()?;
+            let (time, duration) = timeline
+                .as_ref()
+                .and_then(|entries| entries.get(index))
+                .map_or((None, None), |entry| (entry.start, Some(entry.duration)));
             Ok(DashListSegment {
                 media: media.to_owned(),
                 range,
+                time,
+                duration,
             })
         })
         .collect::<Result<Vec<_>, DashError>>()?;
 
+    if is_dynamic {
+        let mut previous_end = None;
+        for segment in &segments {
+            let start = segment.time.ok_or(DashError::UnsupportedAddressing)?;
+            let duration = segment.duration.ok_or(DashError::UnsupportedAddressing)?;
+            let end = start.checked_add(duration).ok_or(DashError::InvalidSegment)?;
+            if previous_end.is_some_and(|previous| start < previous) {
+                return Err(DashError::InvalidSegment);
+            }
+            previous_end = Some(end);
+        }
+    }
+
     Ok(DashList {
         initialization,
+        timescale,
         segments: segments.into_boxed_slice(),
     })
 }
@@ -4325,6 +4402,58 @@ mod tests {
     }
 
     #[test]
+    #[test]
+    fn dynamic_segment_list_uses_explicit_timeline_times_as_stable_sequence_ids() {
+        let mut urls = String::new();
+        let mut timeline = String::new();
+        for index in 0..10_u64 {
+            let time = 100 + index * 2;
+            urls.push_str(&format!(r#"<SegmentURL media="seg-{time}.m4s"/>"#));
+            timeline.push_str(&format!(r#"<S t="{time}" d="2"/>"#));
+        }
+        let body = format!(
+            r#"<MPD xmlns="urn:mpeg:dash:schema:mpd:2011" type="dynamic" availabilityStartTime="1970-01-01T00:00:00Z" minimumUpdatePeriod="PT2S" timeShiftBufferDepth="PT10S"><Period><AdaptationSet contentType="video" mimeType="video/mp4"><SegmentList timescale="1"><Initialization sourceURL="init.mp4"/><SegmentTimeline>{timeline}</SegmentTimeline>{urls}</SegmentList><Representation id="v1" bandwidth="1000000"/></AdaptationSet></Period></MPD>"#
+        );
+        let manifest = parse_dash_manifest_at(
+            BASE_URL,
+            &body,
+            SystemTime::UNIX_EPOCH + Duration::from_secs(120),
+        )
+        .expect("dynamic SegmentList with explicit timeline should parse");
+        let representation = &manifest.video_representations[0];
+        let plan = plan_dash_representation(&manifest, &representation.live_key)
+            .expect("dynamic SegmentList should expand");
+        let numbers = plan
+            .resources
+            .iter()
+            .filter(|resource| resource.kind == DashResourceKind::Segment)
+            .filter_map(|resource| resource.segment_number)
+            .collect::<Vec<_>>();
+        assert_eq!(numbers, vec![110, 112, 114, 116, 118]);
+    }
+
+    #[test]
+    fn dynamic_segment_list_rejects_implicit_timeline_times_and_repeat_runs() {
+        for timeline in [
+            r#"<S d="2"/>"#,
+            r#"<S t="100" d="2" r="1"/>"#,
+        ] {
+            let body = format!(
+                r#"<MPD xmlns="urn:mpeg:dash:schema:mpd:2011" type="dynamic" availabilityStartTime="1970-01-01T00:00:00Z" minimumUpdatePeriod="PT2S" timeShiftBufferDepth="PT10S"><Period><AdaptationSet contentType="video" mimeType="video/mp4"><SegmentList timescale="1"><Initialization sourceURL="init.mp4"/><SegmentTimeline>{timeline}</SegmentTimeline><SegmentURL media="seg-100.m4s"/><SegmentURL media="seg-102.m4s"/></SegmentList><Representation id="v1" bandwidth="1000000"/></AdaptationSet></Period></MPD>"#
+            );
+            assert_eq!(
+                parse_dash_manifest_at(
+                    BASE_URL,
+                    &body,
+                    SystemTime::UNIX_EPOCH + Duration::from_secs(120)
+                )
+                .err(),
+                Some(DashError::UnsupportedAddressing),
+                "{timeline}"
+            );
+        }
+    }
+
     fn dynamic_dash_requires_bounded_update_metadata_and_rejects_segment_list() {
         let missing_ast = r#"<MPD xmlns="urn:mpeg:dash:schema:mpd:2011" type="dynamic" minimumUpdatePeriod="PT4S"><Period><AdaptationSet contentType="video" mimeType="video/mp4"><SegmentTemplate duration="4" media="s-$Number$.m4s"/><Representation id="v1"/></AdaptationSet></Period></MPD>"#;
         let missing_update = r#"<MPD xmlns="urn:mpeg:dash:schema:mpd:2011" type="dynamic" availabilityStartTime="1970-01-01T00:00:00Z"><Period><AdaptationSet contentType="video" mimeType="video/mp4"><SegmentTemplate duration="4" media="s-$Number$.m4s"/><Representation id="v1"/></AdaptationSet></Period></MPD>"#;

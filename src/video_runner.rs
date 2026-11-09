@@ -211,11 +211,10 @@ async fn run_video_playlist_download_inner(
         .iter()
         .filter(|file| file.status != crate::download_store::DownloadStatus::Done)
     {
-        let Some((index, current)) = current_playlist
+        let Some(current) = current_playlist
             .items
             .iter()
-            .enumerate()
-            .find(|(_, current)| current.id.as_ref() == file.id)
+            .find(|current| current.id.as_ref() == file.id)
         else {
             missing_ids.push(file.id.clone());
             continue;
@@ -225,7 +224,7 @@ async fn run_video_playlist_download_inner(
             &current.page_url,
             &mut guarded_child_hosts,
         ) {
-            Ok(()) => selected_indices.push(index),
+            Ok(()) => selected_indices.push(current.playlist_index.saturating_sub(1) as usize),
             Err(crate::download_net::CollectionHostError::TooManyDistinctHosts) => {
                 tx.send(EngineMsg::PlaylistFile(Box::new(
                     PlaylistFileEvent::Failed {

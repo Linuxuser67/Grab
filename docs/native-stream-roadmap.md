@@ -292,9 +292,11 @@ zero-origin timeline, allowing the existing live journal to detect missing or
 changed resources across MPD refreshes.
 
 Sliding lists with non-default startNumber, implicit timeline times, repeats,
-gaps, variable durations, missing initialization, non-MP4 tracks, and other
-unsupported SegmentList addressing remain on yt-dlp fallback. No automatic
-native transfer retries are introduced.
+gaps, variable durations, duration-mode addressing, non-zero
+presentationTimeOffset, availabilityTimeOffset/availabilityTimeComplete,
+eptDelta/pbDelta, missing initialization, non-MP4 tracks, and other unsupported
+SegmentList addressing remain on yt-dlp fallback. No automatic native transfer
+retries are introduced.
 
 Acceptance covers explicit timeline mapping, time-shift window selection,
 stable sequence identity, initialization identity, and conservative rejection

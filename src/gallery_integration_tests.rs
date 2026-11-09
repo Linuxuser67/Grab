@@ -173,7 +173,8 @@ async fn gallery_integration_probe_count_download() {
         cookies_browser: "none".to_string(),
         speed_limit: None,
         range: None,
-    };
+    
+        file_rows: Vec::new(),};
     let completed = std::cell::Cell::new(0u32);
     let result =
         match crate::gallery_runner::run_gallery_download(&job, &tool, None, None, |update| {
@@ -256,7 +257,8 @@ async fn gallery_integration_filtered_download() {
         cookies_browser: "none".to_string(),
         speed_limit: None,
         range: None,
-    };
+    
+        file_rows: Vec::new(),};
     let result =
         match crate::gallery_runner::run_gallery_download(&job, &tool, None, None, |_| {}).await {
             Ok(r) => r,
@@ -349,7 +351,8 @@ async fn gallery_integration_range_indexes_filtered_files() {
         cookies_browser: "none".to_string(),
         speed_limit: None,
         range: Some(range),
-    };
+    
+        file_rows: Vec::new(),};
     let result =
         match crate::gallery_runner::run_gallery_download(&job, &tool, None, None, |_| {}).await {
             Ok(r) => r,

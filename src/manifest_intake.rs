@@ -49,7 +49,6 @@ struct HlsSteeringManifest {
     pathway_clones: Vec<HlsPathwayClone>,
 }
 
-
 // Preview metadata is short-lived: HLS/DASH source manifests can change, and
 // signed child URLs may expire. Dynamic presentations are never cached.
 const MANIFEST_PREVIEW_CACHE_TTL: Duration = Duration::from_secs(5 * 60);
@@ -798,7 +797,10 @@ fn parse_hls_pathway_clone(
     let host = replacement
         .get("HOST")
         .map(|value| {
-            let host = value.as_str().filter(|host| !host.is_empty()).ok_or_else(invalid)?;
+            let host = value
+                .as_str()
+                .filter(|host| !host.is_empty())
+                .ok_or_else(invalid)?;
             let probe = Url::parse(&format!("https://{host}/")).map_err(|_| invalid())?;
             if probe.host_str().is_none()
                 || probe.port().is_some()
@@ -830,12 +832,9 @@ fn parse_hls_pathway_clone(
         })
         .transpose()?
         .unwrap_or_default();
-    let per_variant_uris = parse_hls_steering_uri_overrides(
-        replacement.get("PER-VARIANT-URIS"),
-    )?;
-    let per_rendition_uris = parse_hls_steering_uri_overrides(
-        replacement.get("PER-RENDITION-URIS"),
-    )?;
+    let per_variant_uris = parse_hls_steering_uri_overrides(replacement.get("PER-VARIANT-URIS"))?;
+    let per_rendition_uris =
+        parse_hls_steering_uri_overrides(replacement.get("PER-RENDITION-URIS"))?;
 
     Ok(HlsPathwayClone {
         base_id,
@@ -923,11 +922,7 @@ fn replace_hls_pathway_uri(
     Some(uri)
 }
 
-fn unique_cloned_group_id(
-    pathway_id: &str,
-    group_id: &str,
-    used: &mut HashSet<String>,
-) -> String {
+fn unique_cloned_group_id(pathway_id: &str, group_id: &str, used: &mut HashSet<String>) -> String {
     let base = format!("{pathway_id}__{group_id}");
     if used.insert(base.clone()) {
         return base;
@@ -988,11 +983,7 @@ fn apply_hls_pathway_clones(
             .map(|group| {
                 (
                     (*group).to_string(),
-                    unique_cloned_group_id(
-                        &pathway_clone.id,
-                        group,
-                        &mut used_audio_groups,
-                    ),
+                    unique_cloned_group_id(&pathway_clone.id, group, &mut used_audio_groups),
                 )
             })
             .collect::<HashMap<_, _>>();
@@ -1001,11 +992,7 @@ fn apply_hls_pathway_clones(
             .map(|group| {
                 (
                     (*group).to_string(),
-                    unique_cloned_group_id(
-                        &pathway_clone.id,
-                        group,
-                        &mut used_subtitle_groups,
-                    ),
+                    unique_cloned_group_id(&pathway_clone.id, group, &mut used_subtitle_groups),
                 )
             })
             .collect::<HashMap<_, _>>();
@@ -1019,11 +1006,7 @@ fn apply_hls_pathway_clones(
                     .as_deref()
                     .and_then(|stable_id| pathway_clone.per_variant_uris.get(stable_id))
                     .map(String::as_str);
-                variant.url = replace_hls_pathway_uri(
-                    &variant.url,
-                    pathway_clone,
-                    override_uri,
-                )?;
+                variant.url = replace_hls_pathway_uri(&variant.url, pathway_clone, override_uri)?;
                 if let Some(group) = variant.audio_group.as_mut() {
                     *group = audio_group_map.get(group)?.clone();
                 }
@@ -1059,11 +1042,8 @@ fn apply_hls_pathway_clones(
                         .as_deref()
                         .and_then(|stable_id| pathway_clone.per_rendition_uris.get(stable_id))
                         .map(String::as_str);
-                    rendition.url = Some(replace_hls_pathway_uri(
-                        uri,
-                        pathway_clone,
-                        override_uri,
-                    )?);
+                    rendition.url =
+                        Some(replace_hls_pathway_uri(uri, pathway_clone, override_uri)?);
                 }
                 Some(rendition)
             })
@@ -1077,11 +1057,8 @@ fn apply_hls_pathway_clones(
                     .as_deref()
                     .and_then(|stable_id| pathway_clone.per_rendition_uris.get(stable_id))
                     .map(String::as_str);
-                rendition.url = replace_hls_pathway_uri(
-                    &rendition.url,
-                    pathway_clone,
-                    override_uri,
-                )?;
+                rendition.url =
+                    replace_hls_pathway_uri(&rendition.url, pathway_clone, override_uri)?;
                 Some(rendition)
             })
             .collect::<Option<Vec<_>>>();
@@ -3476,7 +3453,10 @@ video/b.m3u8
             .iter()
             .find(|variant| variant.pathway_id == "clone-a")
             .expect("cloned video variant");
-        assert_eq!(cloned.url.as_str(), "https://video.example.test/override.m3u8");
+        assert_eq!(
+            cloned.url.as_str(),
+            "https://video.example.test/override.m3u8"
+        );
         let cloned_audio = master
             .audio_renditions
             .iter()
@@ -3506,8 +3486,7 @@ video/b.m3u8
 
     #[test]
     fn pathway_clone_applies_host_and_sorted_query_parameter_replacements() {
-        let source = Url::parse("https://origin.example.test/a.m3u8?token=old&keep=yes")
-            .unwrap();
+        let source = Url::parse("https://origin.example.test/a.m3u8?token=old&keep=yes").unwrap();
         let clone = HlsPathwayClone {
             base_id: "origin".to_string(),
             id: "backup".to_string(),
@@ -3520,8 +3499,8 @@ video/b.m3u8
             per_variant_uris: HashMap::new(),
             per_rendition_uris: HashMap::new(),
         };
-        let replaced = replace_hls_pathway_uri(&source, &clone, None)
-            .expect("safe replacement URL");
+        let replaced =
+            replace_hls_pathway_uri(&source, &clone, None).expect("safe replacement URL");
         assert_eq!(replaced.host_str(), Some("backup.example.test"));
         let pairs = replaced
             .query_pairs()

@@ -1222,6 +1222,59 @@ mod tests {
     }
 
     #[test]
+    fn completed_ll_hls_playlist_omits_gap_and_carries_its_discontinuity() {
+        let body = br#"#EXTM3U
+#EXT-X-TARGETDURATION:2
+#EXT-X-MEDIA-SEQUENCE:7
+#EXT-X-SERVER-CONTROL:CAN-BLOCK-RELOAD=NO,PART-HOLD-BACK=1.5
+#EXT-X-PART-INF:PART-TARGET=0.5
+#EXTINF:1.0,
+7.m4s
+#EXT-X-DISCONTINUITY
+#EXT-X-GAP
+#EXTINF:1.0,
+8.m4s
+#EXTINF:1.0,
+9.m4s
+#EXT-X-ENDLIST
+"#;
+        let plan = plan_hls_media_playlist(BASE, body)
+            .expect("completed LL-HLS playlist with a declared gap")
+            .expect("LL-HLS detected");
+        let segments = plan
+            .resources
+            .iter()
+            .filter(|resource| resource.kind == HlsResourceKind::Segment)
+            .collect::<Vec<_>>();
+        assert_eq!(segments.len(), 2);
+        assert!(segments[0].url.path().ends_with("/7.m4s"));
+        assert!(segments[1].url.path().ends_with("/9.m4s"));
+        assert_eq!(plan.local_playlist.segments.len(), 2);
+        assert!(!plan.local_playlist.segments[0].discontinuity);
+        assert!(plan.local_playlist.segments[1].discontinuity);
+        assert_eq!(plan.ll_unit_ids.as_ref().map(|ids| ids.len()), Some(2));
+    }
+
+    #[test]
+    fn live_ll_hls_parent_gap_still_falls_back() {
+        let body = br#"#EXTM3U
+#EXT-X-TARGETDURATION:2
+#EXT-X-MEDIA-SEQUENCE:7
+#EXT-X-SERVER-CONTROL:CAN-BLOCK-RELOAD=NO,PART-HOLD-BACK=1.5
+#EXT-X-PART-INF:PART-TARGET=0.5
+#EXTINF:1.0,
+7.m4s
+#EXT-X-GAP
+#EXTINF:1.0,
+8.m4s
+"#;
+        assert!(matches!(
+            plan_hls_media_playlist(BASE, body),
+            Err(ManifestError::UnsupportedPlaylistFeature(_))
+        ));
+    }
+
+    #[test]
     fn rejects_delta_gap_ad_and_encrypted_part_playlists() {
         let prefix = "#EXTM3U\n#EXT-X-TARGETDURATION:2\n#EXT-X-MEDIA-SEQUENCE:7\n#EXT-X-MAP:URI=\"init.mp4\"\n#EXT-X-SERVER-CONTROL:CAN-BLOCK-RELOAD=NO,PART-HOLD-BACK=1.5\n#EXT-X-PART-INF:PART-TARGET=0.5\n";
         let delta = format!(

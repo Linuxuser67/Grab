@@ -327,6 +327,7 @@ pub(crate) fn playlist_download_argv(
         scope_at..=scope_at,
         [
             "--yes-playlist".to_string(),
+            "--ignore-errors".to_string(),
             "--playlist-items".to_string(),
             indices,
         ],

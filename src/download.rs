@@ -4302,7 +4302,23 @@ impl DownloadManager {
         }
     }
 
-    /// Synchronous Undo for tests; production callers use [`Self::unremove_many_async`].
+    /// Re-insert one previously removed download (Undo) after listing its
+    /// destination off GTK. Collection actions use the batched entry point.
+    pub(crate) async fn unremove_async(
+        self: &Rc<Self>,
+        snap: RemovedSnapshot,
+    ) -> Result<DownloadItem, String> {
+        let dir = snap.dest_dir.clone();
+        let existing = gio::spawn_blocking(move || {
+            crate::video_staging::try_dir_file_names(std::path::Path::new(&dir))
+        })
+        .await
+        .map_err(|error| format!("Could not inspect Undo destination: {error:?}"))?
+        .map_err(|error| format!("Could not inspect Undo destination: {error}"))?;
+        Ok(self.unremove_with_listing(snap, &existing))
+    }
+
+    /// Synchronous Undo for tests; production single-row callers use `unremove_async`.
     #[cfg(test)]
     pub fn unremove(self: &Rc<Self>, snap: RemovedSnapshot) -> DownloadItem {
         let existing = crate::video_staging::dir_file_names(std::path::Path::new(&snap.dest_dir));

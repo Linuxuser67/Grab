@@ -693,8 +693,7 @@ async fn lookup_extractors_inner(
                 }
                 (ytdlp, gallery_error)
             }
-            crate::gallery_probe::ProbeOutcome::VideoGalleryDl
-            | crate::gallery_probe::ProbeOutcome::Gallery => {
+            crate::gallery_probe::ProbeOutcome::Gallery => {
                 return Ok(MediaLookupOutcome::Gallery(
                     gallery.ok().flatten().unwrap_or_default(),
                 ));
@@ -769,11 +768,12 @@ pub(crate) struct VideoStep {
     pub(crate) options: Rc<RefCell<Vec<FormatOption>>>,
     pub(crate) tools: adw::ActionRow,
     pub(crate) error: adw::ActionRow,
-    /// Gallery info row: shows the collection title for an image gallery.
+    /// Hidden gallery title/error row. It is only revealed for a picker
+    /// enumeration error; normal gallery previews do not add a title row.
     pub(crate) gallery_info: adw::ActionRow,
-    /// Gallery filter toggle (All/Images/Videos). Shown with gallery_info.
+    /// Internal filter state, kept at All; no type-filter control is shown.
     pub(crate) gallery_filter: adw::ToggleGroup,
-    /// Wrapper for the filter toggle (for visibility control).
+    /// Wrapper retained for the hidden internal filter control.
     pub(crate) gallery_filter_wrap: gtk4::Box,
     /// Media-type switcher (Video ⇄ Gallery), the established AdwToggleGroup:
     /// shown only when both backends are viable for the current decode
@@ -2521,7 +2521,8 @@ fn build_video_preview(
     video_error.add_suffix(&video_retry_btn);
     video_error.set_visible(false);
     video_group.add(&video_error);
-    // Gallery info row: hidden by default, shown when probe finds an image gallery.
+    // Retained as a diagnostic row for file-enumeration failures only;
+    // a normal gallery preview never shows its collection name.
     let gallery_info = adw::ActionRow::builder()
         .title(gettext("Gallery"))
         .use_markup(false)
@@ -2529,7 +2530,8 @@ fn build_video_preview(
     // File selection is in the URL action row; this row carries the title only.
     gallery_info.set_visible(false);
     video_group.add(&gallery_info);
-    // Gallery filter toggle: All / Images / Videos. Hidden by default.
+    // Internal gallery filter state. The preview no longer exposes
+    // All / Images / Videos; gallery queueing always uses All.
     let gallery_filter = adw::ToggleGroup::new();
     for (name, label) in [
         ("all", gettext("All")),
@@ -4587,10 +4589,13 @@ fn make_gallery_picker_opener(
                 step3.select_files_btn.set_sensitive(true);
                 step3.select_files_btn.set_label(&orig_label);
             };
-            // Surface enumeration failures on the gallery row instead of
-            // only logging: the user clicked a button and deserves feedback.
+            // Keep the collection title out of the normal preview. Reuse
+            // the hidden row only for an enumeration error when no picker
+            // page was opened to display the failure.
             let show_error = |msg: &str| {
+                step3.gallery_info.set_title("");
                 step3.gallery_info.set_subtitle(msg);
+                step3.gallery_info.set_visible(true);
             };
             let proxy3 = match proxy3 {
                 Ok(proxy) => proxy,
@@ -4766,11 +4771,13 @@ fn show_gallery_ready(v: &VideoStep, card: crate::gallery_card::GalleryCard, tit
         .update_property(&[gtk4::accessible::Property::Label(&gettext(
             "Queue all files",
         ))]);
-    // Reset filter to All.
+    // Gallery downloads now use the complete gallery-dl collection.
+    // Keep its title in the hidden state for the queued job, but do not show
+    // a gallery-name row or an All/Images/Videos filter beneath the URL bar.
     v.gallery_filter.set_active_name(Some("all"));
     refresh_gallery_info(v, title);
-    v.gallery_info.set_visible(true);
-    v.gallery_filter_wrap.set_visible(true);
+    v.gallery_info.set_visible(false);
+    v.gallery_filter_wrap.set_visible(false);
     // The switcher is live while both sides are stored; flipping to Video
     // restores the yt-dlp preview.
     v.mode_toggle_wrap
@@ -4783,7 +4790,7 @@ fn show_gallery_ready(v: &VideoStep, card: crate::gallery_card::GalleryCard, tit
     sync_entry_icon(v);
 }
 
-/// Refresh the gallery info row with the collection title only.
+/// Retain the collection title for the gallery job without showing a row.
 fn refresh_gallery_info(v: &VideoStep, title: &str) {
     v.gallery_info.set_title(title);
     v.gallery_info.set_subtitle("");

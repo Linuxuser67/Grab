@@ -9641,5 +9641,8 @@ fn playlist_staged_import_does_not_duplicate_identical_entry() {
         choices.clone(),
         &[],
     );
-    assert!(second.is_err(), "a duplicate playlist entry must be rejected");
+    assert!(
+        second.is_err(),
+        "a duplicate playlist entry must be rejected"
+    );
 }

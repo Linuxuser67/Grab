@@ -1401,13 +1401,17 @@ impl DownloadManager {
         if self.items().any(|it| {
             it.status() != DownloadStatus::Done
                 && it.url() == url
-                && self.video_sources.borrow().get(&it.id()).and_then(|src| match src {
-                    crate::media_types::VideoSource::Page {
-                        playlist_item_id,
-                        ..
-                    } => playlist_item_id.clone(),
-                    _ => None,
-                }) == incoming_pid
+                && self
+                    .video_sources
+                    .borrow()
+                    .get(&it.id())
+                    .and_then(|src| match src {
+                        crate::media_types::VideoSource::Page {
+                            playlist_item_id, ..
+                        } => playlist_item_id.clone(),
+                        _ => None,
+                    })
+                    == incoming_pid
         }) {
             return Err(gettext("This item is already in the list"));
         }

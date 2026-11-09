@@ -875,9 +875,7 @@ pub(crate) fn build_download_group_row(
             manager.remove_many(&ids);
         });
     }
-    for action in [&remove] {
-        actions.add_action(action);
-    }
+    actions.add_action(&remove);
 
     // Group actions mirror the single-row icon buttons instead of an overflow
     // menu. They are shown only when at least one child needs them.
@@ -885,8 +883,7 @@ pub(crate) fn build_download_group_row(
     let resume_btn = icon_button("media-playback-start-symbolic", &gettext("Resume All"));
     let cancel_btn = icon_button("process-stop-symbolic", &gettext("Cancel All"));
     let retry_btn = icon_button("view-refresh-symbolic", &gettext("Retry Failed"));
-    let open_folder_btn =
-        icon_button("folder-open-symbolic", &gettext("Open Collection Folder"));
+    let open_folder_btn = icon_button("folder-open-symbolic", &gettext("Open Collection Folder"));
     let remove_btn = icon_button("list-remove-symbolic", &gettext("Remove from List"));
     for (button, action) in [
         (&pause_btn, &pause),

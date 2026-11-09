@@ -1454,8 +1454,8 @@ fn submit_gallery_all(
         cookies_browser: settings.cookies_browser().to_string(),
         speed_limit: crate::gallery_runner::gallery_speed_limit(settings),
         range: None,
-    
-        file_rows: Vec::new(),};
+        file_rows: Vec::new(),
+    };
     let enqueue_manager = Rc::clone(manager);
     let error_step = Rc::clone(step);
     let error_lookup_add = Rc::clone(lookup_add);

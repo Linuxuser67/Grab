@@ -140,8 +140,8 @@ mod tests {
         let local_text = String::from_utf8(local_bytes).expect("local playlist is UTF-8");
         assert_eq!(local_text.matches("#EXT-X-KEY:").count(), 2);
         assert!(local_text.contains("#EXT-X-KEY:METHOD=NONE"));
-        let local = m3u8_rs::parse_media_playlist_res(local_text.as_bytes())
-            .expect("parse local playlist");
+        let local =
+            m3u8_rs::parse_media_playlist_res(local_text.as_bytes()).expect("parse local playlist");
         assert_eq!(local.segments.len(), 2);
         assert_eq!(
             local.segments[0].key.as_ref().map(|key| key.method.clone()),

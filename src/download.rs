@@ -3286,7 +3286,6 @@ impl DownloadManager {
                                     this.changed();
                                 }
                             }
-                        }
                     },
                     EngineMsg::Phase(detail) => {
                         if item.status() == DownloadStatus::Downloading {

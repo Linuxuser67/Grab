@@ -921,11 +921,7 @@ fn append_hls_pathway_params(uri: &mut Url, params: &BTreeMap<String, String>) {
                 .collect::<Vec<_>>()
         })
         .unwrap_or_default();
-    retained.extend(
-        params
-            .iter()
-            .map(|(name, value)| format!("{name}={value}")),
-    );
+    retained.extend(params.iter().map(|(name, value)| format!("{name}={value}")));
     let query = retained.join("&");
     uri.set_query((!query.is_empty()).then_some(query.as_str()));
 }
@@ -3583,8 +3579,8 @@ video/b.m3u8
 
     #[test]
     fn query_parameter_replacement_decodes_names_without_form_plus_semantics() {
-        let source = Url::parse("https://origin.example.test/a.m3u8?token%2Bkey=old&keep=yes")
-            .unwrap();
+        let source =
+            Url::parse("https://origin.example.test/a.m3u8?token%2Bkey=old&keep=yes").unwrap();
         let clone = HlsPathwayClone {
             base_id: "origin".to_string(),
             id: "backup".to_string(),

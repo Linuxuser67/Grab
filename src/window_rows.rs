@@ -867,7 +867,12 @@ pub(crate) fn build_download_group_row(
     row.add_suffix(&open_folder_btn);
     row.add_suffix(&remove_btn);
 
-    DownloadGroupRow { row, members }
+    DownloadGroupRow {
+        row,
+        members,
+        open_folder_btn,
+        remove_btn,
+    }
 }
 
 impl DownloadGroupRow {
@@ -1525,7 +1530,7 @@ mod group_row_tests {
 
     #[test]
     #[ignore = "needs a display; run under Xvfb"]
-    fn expandable_playlist_group_row_updates_actions_and_children() {
+    fn expandable_playlist_group_row_exposes_only_remove_and_open_folder() {
         gtk4::init().expect("gtk::init (run under Xvfb)");
         // SAFETY: this UI test runs in its own process before constructing GSettings.
         unsafe {
@@ -1556,17 +1561,22 @@ mod group_row_tests {
 
         assert!(first_row.parent().is_some());
         assert!(second_row.parent().is_some());
-        assert!(group.pause.is_enabled());
-        assert!(!group.resume.is_enabled());
-        assert!(group.cancel.is_enabled());
-        assert!(!group.retry.is_enabled());
-        assert!(group.open_folder.is_enabled());
+        assert!(group.open_folder_btn.is_visible());
+        assert!(group.open_folder_btn.is_sensitive());
+        assert!(group.remove_btn.is_visible());
+        assert!(group.remove_btn.is_sensitive());
 
+        // Group-level actions are independent of each child's status.
         second.set_status(DownloadStatus::Failed);
         group.update(
             std::slice::from_ref(&second),
             &[first.clone(), second.clone()],
         );
-        assert!(group.retry.is_enabled());
+        assert!(group.open_folder_btn.is_sensitive());
+        assert!(group.remove_btn.is_sensitive());
+
+        group.update(&[], &[]);
+        assert!(!group.open_folder_btn.is_visible());
+        assert!(!group.remove_btn.is_visible());
     }
 }

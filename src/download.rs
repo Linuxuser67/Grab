@@ -4693,6 +4693,9 @@ impl DownloadManager {
                 if item.is_gallery() {
                     self.finish_gallery_file_rows(id, DownloadStatus::Paused);
                 }
+                if item.is_collection_owner() {
+                    self.finish_video_playlist_file_rows(id, DownloadStatus::Paused);
+                }
                 item.set_status(DownloadStatus::Paused);
                 item.set_detail(
                     gettext("Paused • {pct}%")
@@ -4865,8 +4868,13 @@ impl DownloadManager {
         if let Some(path) = self.cancel_inner(id, false, Stop::Preserve) {
             self.schedule_partial_cleanup(path);
         }
-        if self.find(id).is_some_and(|item| item.is_gallery()) {
-            self.finish_gallery_file_rows(id, DownloadStatus::Cancelled);
+        if let Some(item) = self.find(id) {
+            if item.is_gallery() {
+                self.finish_gallery_file_rows(id, DownloadStatus::Cancelled);
+            }
+            if item.is_collection_owner() {
+                self.finish_video_playlist_file_rows(id, DownloadStatus::Cancelled);
+            }
         }
         self.persist_queue();
         self.changed();
@@ -5020,11 +5028,19 @@ impl DownloadManager {
         // Gallery downloads: gallery-dl skips existing files on retry
         // (file-level resume). Reset the UI counter; the runner
         // reports newly completed files via progress updates.
+        let playlist_owner = matches!(
+            self.video_source(id),
+            Some(crate::media_types::VideoSource::Playlist { .. })
+        );
         if item.is_gallery() {
             item.set_gallery_files_done(0);
             item.set_progress(0.0);
+        } else if playlist_owner {
+            self.refresh_video_playlist_summary(item);
         }
-        item.set_detail(String::new());
+        if !playlist_owner {
+            item.set_detail(String::new());
+        }
         item.set_status(DownloadStatus::Queued);
         true
     }
@@ -5072,11 +5088,15 @@ impl DownloadManager {
     /// collection removal calls this for every member, then persists once.
     fn remove_inner(self: &Rc<Self>, id: u64) {
         let _ = self.cancel_inner(id, true, Stop::Discard);
-        if self.find(id).is_some_and(|item| item.is_gallery()) {
+        if self
+            .find(id)
+            .is_some_and(|item| item.is_gallery() || item.is_collection_owner())
+        {
             let children = self
                 .items()
                 .filter(|item| {
-                    item.is_gallery_child() && item.group().is_some_and(|group| group.id() == id)
+                    item.is_collection_child()
+                        && item.group().is_some_and(|group| group.id() == id)
                 })
                 .map(|item| item.id())
                 .collect::<Vec<_>>();
@@ -5455,12 +5475,17 @@ impl DownloadManager {
                 )
             },
             |m, id| {
-                let gallery_owner = m.find(id).is_some_and(|item| item.is_gallery());
+                let owner = m.find(id);
+                let gallery_owner = owner.as_ref().is_some_and(|item| item.is_gallery());
+                let playlist_owner = owner.as_ref().is_some_and(|item| item.is_collection_owner());
                 if let Some(path) = m.cancel_inner(id, false, Stop::Preserve) {
                     partials_to_remove.push(path);
                 }
                 if gallery_owner {
                     m.finish_gallery_file_rows(id, DownloadStatus::Cancelled);
+                }
+                if playlist_owner {
+                    m.finish_video_playlist_file_rows(id, DownloadStatus::Cancelled);
                 }
             },
         );
@@ -5517,15 +5542,15 @@ impl DownloadManager {
                 if item.status() != DownloadStatus::Done {
                     return false;
                 }
-                if item.is_gallery_child() {
+                if item.is_collection_child() {
                     return item
                         .group()
                         .and_then(|group| self.find(group.id()))
                         .is_some_and(|owner| owner.status() == DownloadStatus::Done);
                 }
-                if item.is_gallery() {
+                if item.is_gallery() || item.is_collection_owner() {
                     return !self.items().any(|child| {
-                        child.is_gallery_child()
+                        child.is_collection_child()
                             && child.group().is_some_and(|group| group.id() == item.id())
                     });
                 }
@@ -5537,7 +5562,7 @@ impl DownloadManager {
     /// Snapshots of every finished row, in list order, for Clear Finished's Undo.
     pub fn finished_snapshots(&self) -> Vec<RemovedSnapshot> {
         self.items()
-            .filter(|it| it.status() == DownloadStatus::Done && !it.is_gallery_child())
+            .filter(|it| it.status() == DownloadStatus::Done && !it.is_collection_child())
             .map(|it| RemovedSnapshot {
                 url: it.url().to_string(),
                 dest_dir: it.dest_dir().to_string(),
@@ -5559,12 +5584,13 @@ impl DownloadManager {
     /// Drop one finished row: files stay on disk. Unlike `remove` there is nothing to cancel, snapshot or clean.
     fn drop_finished_row(&self, id: u64) {
         if let Some(item) = self.find(id)
-            && item.is_gallery()
+            && (item.is_gallery() || item.is_collection_owner())
         {
             let children = self
                 .items()
                 .filter(|child| {
-                    child.is_gallery_child() && child.group().is_some_and(|group| group.id() == id)
+                    child.is_collection_child()
+                        && child.group().is_some_and(|group| group.id() == id)
                 })
                 .map(|child| child.id())
                 .collect::<Vec<_>>();
@@ -5598,7 +5624,7 @@ impl DownloadManager {
     ) {
         let ids: Vec<u64> = self
             .items()
-            .filter(|it| !it.is_gallery_child() && matches(it.status()))
+            .filter(|it| !it.is_collection_child() && matches(it.status()))
             .map(|it| it.id())
             .collect();
         for id in ids {
@@ -5625,7 +5651,7 @@ impl DownloadManager {
     pub fn active_count(&self) -> usize {
         self.items()
             .filter(|it| {
-                !it.is_gallery_child()
+                !it.is_collection_child()
                     && matches!(
                         it.status(),
                         DownloadStatus::Queued
@@ -5653,7 +5679,7 @@ impl DownloadManager {
 
     fn any_status(&self, pred: impl Fn(DownloadStatus) -> bool) -> bool {
         self.items()
-            .any(|it| !it.is_gallery_child() && pred(it.status()))
+            .any(|it| !it.is_collection_child() && pred(it.status()))
     }
 
     fn queue_file() -> std::path::PathBuf {

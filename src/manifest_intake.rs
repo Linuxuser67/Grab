@@ -3947,6 +3947,7 @@ video/variant.m3u8
             Err(ManifestIntakeError::Unsupported(_))
         ));
     }
+
     #[test]
     fn steering_fetch_limits_follow_preview_and_no_download_retry_policy() {
         assert_eq!(

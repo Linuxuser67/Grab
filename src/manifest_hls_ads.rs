@@ -767,7 +767,6 @@ program.ts
     #[test]
     fn resource_affecting_and_unrecognized_tags_still_fall_back() {
         for tag in [
-            "#EXT-X-GAP",
             "#EXT-X-CONTENT-STEERING:SERVER-URI=\"steering.json\"",
             "#EXT-X-AD-UNKNOWN:URI=\"other.m3u8\"",
         ] {

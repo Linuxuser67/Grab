@@ -4264,10 +4264,9 @@ impl DownloadManager {
             directories
                 .into_iter()
                 .map(|directory| {
-                    let result = crate::video_staging::try_dir_file_names(
-                        std::path::Path::new(&directory),
-                    )
-                    .map_err(|error| error.to_string());
+                    let result =
+                        crate::video_staging::try_dir_file_names(std::path::Path::new(&directory))
+                            .map_err(|error| error.to_string());
                     (directory, result)
                 })
                 .collect::<HashMap<_, _>>()

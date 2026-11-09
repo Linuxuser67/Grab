@@ -48,11 +48,17 @@ mod imp {
         /// True if this is the queue owner for one gallery-dl process.
         #[property(get, set)]
         pub is_gallery: Cell<bool>,
-        /// Ephemeral read-only file row owned by a gallery collection process.
-        /// These rows are recreated from gallery-dl events after queue restore.
+        /// Queue owner for any collection that has read-only child file rows.
+        #[property(get, set)]
+        pub is_collection_owner: Cell<bool>,
+        /// Ephemeral read-only file row owned by one collection process.
+        /// These rows are recreated from persisted owner state after restore.
         #[property(get, set)]
         pub is_gallery_child: Cell<bool>,
-        /// Exact output path announced by gallery-dl; session-only identity.
+        /// Stable extractor/file identity for yt-dlp playlist child rows.
+        #[property(get, set)]
+        pub collection_file_id: RefCell<String>,
+        /// Exact output path announced by the owning downloader.
         #[property(get, set)]
         pub gallery_file_path: RefCell<String>,
         /// Progress denominator for a gallery download (0 if unknown or not a gallery).
@@ -86,6 +92,16 @@ glib::wrapper! {
 }
 
 impl DownloadItem {
+    /// Whether this row is a passive file entry owned by a collection process.
+    pub(crate) fn is_collection_child(&self) -> bool {
+        self.is_gallery_child()
+    }
+
+    /// Mark a row as a passive collection file entry.
+    pub(crate) fn set_is_collection_child(&self, value: bool) {
+        self.set_is_gallery_child(value);
+    }
+
     /// The collection this child belongs to, if it was queued from a multi-item source.
     pub(crate) fn group(&self) -> Option<DownloadGroup> {
         self.imp().group.borrow().clone()

@@ -1031,7 +1031,14 @@ mod tests {
         };
         assert!(is_public_destination_host("cdn.example.test"));
         assert!(is_public_destination_host("8.8.8.8"));
-        for host in ["127.0.0.1", "[::1]", "localhost", "printer.local", "nas", ""] {
+        for host in [
+            "127.0.0.1",
+            "[::1]",
+            "localhost",
+            "printer.local",
+            "nas",
+            "",
+        ] {
             assert!(!is_public_destination_host(host), "must reject {host}");
         }
         assert!(

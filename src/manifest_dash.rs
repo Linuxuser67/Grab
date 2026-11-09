@@ -5105,10 +5105,8 @@ mod tests {
             let body = format!(
                 r#"<MPD xmlns="urn:mpeg:dash:schema:mpd:2011" type="static" mediaPresentationDuration="PT4S"><Period duration="PT4S"><AdaptationSet contentType="video" mimeType="video/mp4"><Representation id="v1"><BaseURL>video.mp4</BaseURL><SegmentBase>{initialization}</SegmentBase></Representation></AdaptationSet></Period></MPD>"#
             );
-            let manifest =
-                parse_dash_manifest(BASE_URL, &body).expect("manifest metadata is valid");
             assert_eq!(
-                plan_dash_representation(&manifest, &manifest.video_representations[0].key).err(),
+                parse_dash_manifest(BASE_URL, &body).err(),
                 Some(DashError::UnsupportedAddressing),
                 "{initialization}"
             );

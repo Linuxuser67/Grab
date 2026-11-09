@@ -43,9 +43,14 @@ and implicit byte-range offsets advance across removed source segments.
 omitted ad. Live playlists with ad markers, ad intervals containing a
 discontinuity, playlists using `EXT-X-START`, ambiguous or incomplete cues,
 and live or ambiguous `EXT-X-DATERANGE` ad ranges remain on yt-dlp fallback.
-Static SCTE-35 date ranges are supported only when paired splice-out/splice-in
-signals map to exact segment boundaries through validated
-`EXT-X-PROGRAM-DATE-TIME` values.
+Static SCTE-35 date ranges are supported only when clear, CRC-valid,
+program-mode `splice_insert` sections with matching event/program IDs provide
+paired `SCTE35-OUT` and `SCTE35-IN` signals. Both splice times must map to
+exact segment boundaries through mutually consistent
+`EXT-X-PROGRAM-DATE-TIME` anchors. `time_signal`, encrypted sections,
+component-mode commands, mismatched IDs, unaligned boundaries, live ranges,
+and ad-like DATERANGE classes without a supported pair remain on fallback;
+non-ad metadata DATERANGE tags are preserved.
 
 This is a deliberately bounded profile, not a claim of support for every HLS
 extension. Unknown parser tags and unsupported resource-affecting extensions

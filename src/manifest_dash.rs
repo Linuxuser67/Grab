@@ -1868,7 +1868,7 @@ fn effective_template(
         return Err(DashError::InvalidSegment);
     }
 
-    let timeline = is_dynamic.then_some(timeline).flatten()
+    let timeline = timeline
         .map(|entries| {
             entries
                 .iter()
@@ -1978,7 +1978,7 @@ fn effective_list(
     if timescale == 0 {
         return Err(DashError::InvalidSegment);
     }
-    let timeline = timeline
+    let timeline = is_dynamic.then_some(timeline).flatten()
         .map(|entries| {
             entries
                 .iter()
@@ -4505,7 +4505,6 @@ mod tests {
     }
 
     #[test]
-    #[test]
     fn dynamic_segment_list_uses_explicit_timeline_times_as_stable_sequence_ids() {
         let mut urls = String::new();
         let mut timeline = String::new();
@@ -4557,6 +4556,7 @@ mod tests {
         }
     }
 
+    #[test]
     fn dynamic_dash_requires_bounded_update_metadata_and_rejects_segment_list() {
         let missing_ast = r#"<MPD xmlns="urn:mpeg:dash:schema:mpd:2011" type="dynamic" minimumUpdatePeriod="PT4S"><Period><AdaptationSet contentType="video" mimeType="video/mp4"><SegmentTemplate duration="4" media="s-$Number$.m4s"/><Representation id="v1"/></AdaptationSet></Period></MPD>"#;
         let missing_update = r#"<MPD xmlns="urn:mpeg:dash:schema:mpd:2011" type="dynamic" availabilityStartTime="1970-01-01T00:00:00Z"><Period><AdaptationSet contentType="video" mimeType="video/mp4"><SegmentTemplate duration="4" media="s-$Number$.m4s"/><Representation id="v1"/></AdaptationSet></Period></MPD>"#;

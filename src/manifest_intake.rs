@@ -4,7 +4,7 @@
 //! resources remain remote until the queue/fetch phase consumes the selected
 //! representation.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::{LazyLock, Mutex};
 use std::time::{Duration, Instant, SystemTime};
 
@@ -29,7 +29,25 @@ const MANIFEST_LOOKUP_BUDGET: Duration = Duration::from_secs(10);
 const MAX_MANIFEST_ATTEMPTS: u32 = 3;
 const MAX_PREVIEW_MANIFEST_ATTEMPTS: u32 = 2;
 const MANIFEST_RETRY_BASE_DELAY: Duration = Duration::from_millis(250);
+
 const MAX_HLS_STEERING_MANIFEST_BYTES: usize = 256 * 1024;
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct HlsPathwayClone {
+    base_id: String,
+    id: String,
+    host: Option<String>,
+    params: BTreeMap<String, String>,
+    per_variant_uris: HashMap<String, String>,
+    per_rendition_uris: HashMap<String, String>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct HlsSteeringManifest {
+    pathway_priority: Vec<String>,
+    pathway_clones: Vec<HlsPathwayClone>,
+}
+
 
 // Preview metadata is short-lived: HLS/DASH source manifests can change, and
 // signed child URLs may expire. Dynamic presentations are never cached.
@@ -651,7 +669,7 @@ fn validate_hls_content_steering_stable_ids(
     Ok(())
 }
 
-fn parse_hls_steering_manifest(body: &[u8]) -> Result<Vec<String>, ManifestIntakeError> {
+fn parse_hls_steering_manifest(body: &[u8]) -> Result<HlsSteeringManifest, ManifestIntakeError> {
     if body.len() > MAX_HLS_STEERING_MANIFEST_BYTES {
         return Err(ManifestIntakeError::Unsupported(
             "The HLS Content Steering manifest exceeds its byte limit".to_string(),
@@ -684,18 +702,7 @@ fn parse_hls_steering_manifest(body: &[u8]) -> Result<Vec<String>, ManifestIntak
             "The HLS Content Steering RELOAD-URI is invalid".to_string(),
         ));
     }
-    if let Some(clones) = value.get("PATHWAY-CLONES") {
-        let clones = clones.as_array().ok_or_else(|| {
-            ManifestIntakeError::Unsupported(
-                "The HLS Content Steering PATHWAY-CLONES member is invalid".to_string(),
-            )
-        })?;
-        if !clones.is_empty() {
-            return Err(ManifestIntakeError::Unsupported(
-                "HLS Content Steering PATHWAY-CLONES are not supported yet".to_string(),
-            ));
-        }
-    }
+
     let priority = value
         .get("PATHWAY-PRIORITY")
         .and_then(serde_json::Value::as_array)
@@ -726,8 +733,383 @@ fn parse_hls_steering_manifest(body: &[u8]) -> Result<Vec<String>, ManifestIntak
         }
         pathway_ids.push(pathway_id.to_string());
     }
-    Ok(pathway_ids)
+
+    let clones = value
+        .get("PATHWAY-CLONES")
+        .map(|value| {
+            value.as_array().ok_or_else(|| {
+                ManifestIntakeError::Unsupported(
+                    "The HLS Content Steering PATHWAY-CLONES member is invalid".to_string(),
+                )
+            })
+        })
+        .transpose()?
+        .into_iter()
+        .flatten()
+        .map(parse_hls_pathway_clone)
+        .collect::<Result<Vec<_>, _>>()?;
+    let mut clone_ids = HashSet::with_capacity(clones.len());
+    for clone in &clones {
+        if !clone_ids.insert(clone.id.clone()) {
+            return Err(ManifestIntakeError::Unsupported(
+                "The HLS Content Steering PATHWAY-CLONES list contains duplicate IDs".to_string(),
+            ));
+        }
+    }
+
+    Ok(HlsSteeringManifest {
+        pathway_priority: pathway_ids,
+        pathway_clones: clones,
+    })
 }
+
+fn parse_hls_pathway_clone(
+    value: &serde_json::Value,
+) -> Result<HlsPathwayClone, ManifestIntakeError> {
+    let invalid = || {
+        ManifestIntakeError::Unsupported(
+            "The HLS Content Steering PATHWAY-CLONES member is invalid".to_string(),
+        )
+    };
+    let base_id = value
+        .get("BASE-ID")
+        .and_then(serde_json::Value::as_str)
+        .filter(|value| crate::manifest::is_valid_hls_pathway_id(value))
+        .ok_or_else(invalid)?
+        .to_string();
+    let id = value
+        .get("ID")
+        .and_then(serde_json::Value::as_str)
+        .filter(|value| crate::manifest::is_valid_hls_pathway_id(value))
+        .ok_or_else(invalid)?
+        .to_string();
+    if id == base_id {
+        return Err(invalid());
+    }
+    let replacement = value
+        .get("URI-REPLACEMENT")
+        .and_then(serde_json::Value::as_object)
+        .ok_or_else(invalid)?;
+    let host = replacement
+        .get("HOST")
+        .map(|value| {
+            let host = value.as_str().filter(|host| !host.is_empty()).ok_or_else(invalid)?;
+            let probe = Url::parse(&format!("https://{host}/")).map_err(|_| invalid())?;
+            if probe.host_str().is_none()
+                || probe.port().is_some()
+                || !probe.username().is_empty()
+                || probe.password().is_some()
+                || probe.path() != "/"
+                || probe.query().is_some()
+                || probe.fragment().is_some()
+            {
+                return Err(invalid());
+            }
+            Ok(host.to_string())
+        })
+        .transpose()?;
+
+    let params = replacement
+        .get("PARAMS")
+        .map(|value| {
+            let object = value.as_object().ok_or_else(invalid)?;
+            let mut params = BTreeMap::new();
+            for (name, value) in object {
+                let value = value.as_str().ok_or_else(invalid)?;
+                if name.is_empty() || name.starts_with("_HLS_") {
+                    return Err(invalid());
+                }
+                params.insert(name.clone(), value.to_string());
+            }
+            Ok(params)
+        })
+        .transpose()?
+        .unwrap_or_default();
+    let per_variant_uris = parse_hls_steering_uri_overrides(
+        replacement.get("PER-VARIANT-URIS"),
+    )?;
+    let per_rendition_uris = parse_hls_steering_uri_overrides(
+        replacement.get("PER-RENDITION-URIS"),
+    )?;
+
+    Ok(HlsPathwayClone {
+        base_id,
+        id,
+        host,
+        params,
+        per_variant_uris,
+        per_rendition_uris,
+    })
+}
+
+fn parse_hls_steering_uri_overrides(
+    value: Option<&serde_json::Value>,
+) -> Result<HashMap<String, String>, ManifestIntakeError> {
+    let Some(value) = value else {
+        return Ok(HashMap::new());
+    };
+    let object = value.as_object().ok_or_else(|| {
+        ManifestIntakeError::Unsupported(
+            "The HLS Content Steering URI override map is invalid".to_string(),
+        )
+    })?;
+    let mut overrides = HashMap::with_capacity(object.len());
+    for (stable_id, uri) in object {
+        let uri = uri.as_str().filter(|uri| !uri.is_empty()).ok_or_else(|| {
+            ManifestIntakeError::Unsupported(
+                "The HLS Content Steering URI override map contains an invalid URI".to_string(),
+            )
+        })?;
+        if stable_id.is_empty() {
+            return Err(ManifestIntakeError::Unsupported(
+                "The HLS Content Steering URI override map contains an empty stable ID".to_string(),
+            ));
+        }
+        overrides.insert(stable_id.clone(), uri.to_string());
+    }
+    Ok(overrides)
+}
+
+fn replace_hls_pathway_uri(
+    source: &Url,
+    pathway_clone: &HlsPathwayClone,
+    override_uri: Option<&str>,
+) -> Option<Url> {
+    let mut uri = source.clone();
+    if let Some(host) = pathway_clone.host.as_deref() {
+        uri.set_host(Some(host)).ok()?;
+    }
+
+    if !pathway_clone.params.is_empty() {
+        let mut pairs = uri
+            .query_pairs()
+            .filter(|(name, _)| !pathway_clone.params.contains_key(name.as_ref()))
+            .map(|(name, value)| (name.into_owned(), value.into_owned()))
+            .collect::<Vec<_>>();
+        pairs.extend(
+            pathway_clone
+                .params
+                .iter()
+                .map(|(name, value)| (name.clone(), value.clone())),
+        );
+        uri.set_query(None);
+        uri.query_pairs_mut().extend_pairs(pairs);
+    }
+
+    if let Some(override_uri) = override_uri {
+        uri = Url::parse(override_uri).ok()?;
+    }
+    if uri.scheme() != "https"
+        || uri.host_str().is_none()
+        || !uri.username().is_empty()
+        || uri.password().is_some()
+        || uri.fragment().is_some()
+    {
+        return None;
+    }
+    let host = uri.host_str()?;
+    if !source
+        .host_str()
+        .is_some_and(|source_host| source_host.eq_ignore_ascii_case(host))
+        && !crate::download_net::require_public_resolution(host)
+    {
+        return None;
+    }
+    Some(uri)
+}
+
+fn unique_cloned_group_id(
+    pathway_id: &str,
+    group_id: &str,
+    used: &mut HashSet<String>,
+) -> String {
+    let base = format!("{pathway_id}__{group_id}");
+    if used.insert(base.clone()) {
+        return base;
+    }
+    for suffix in 1_u32.. {
+        let candidate = format!("{base}_{suffix}");
+        if used.insert(candidate.clone()) {
+            return candidate;
+        }
+    }
+    unreachable!("u32 suffix space is finite and all IDs are exhausted")
+}
+
+fn apply_hls_pathway_clones(
+    master: &mut crate::manifest::HlsMasterPlan,
+    clones: &[HlsPathwayClone],
+) {
+    for pathway_clone in clones {
+        let pathway_ids = master
+            .variants
+            .iter()
+            .map(|variant| variant.pathway_id.as_str())
+            .collect::<HashSet<_>>();
+        if pathway_ids.contains(pathway_clone.id.as_str()) {
+            continue;
+        }
+        let base_variants = master
+            .variants
+            .iter()
+            .filter(|variant| variant.pathway_id == pathway_clone.base_id)
+            .cloned()
+            .collect::<Vec<_>>();
+        if base_variants.is_empty() {
+            // Unknown BASE-ID values are ignored as required by Content Steering.
+            continue;
+        }
+
+        let audio_groups = base_variants
+            .iter()
+            .filter_map(|variant| variant.audio_group.as_deref())
+            .collect::<HashSet<_>>();
+        let subtitle_groups = base_variants
+            .iter()
+            .filter_map(|variant| variant.subtitles_group.as_deref())
+            .collect::<HashSet<_>>();
+        let mut used_audio_groups = master
+            .audio_renditions
+            .iter()
+            .map(|rendition| rendition.group_id.clone())
+            .collect::<HashSet<_>>();
+        let mut used_subtitle_groups = master
+            .subtitle_renditions
+            .iter()
+            .map(|rendition| rendition.group_id.clone())
+            .collect::<HashSet<_>>();
+        let audio_group_map = audio_groups
+            .iter()
+            .map(|group| {
+                (
+                    (*group).to_string(),
+                    unique_cloned_group_id(
+                        &pathway_clone.id,
+                        group,
+                        &mut used_audio_groups,
+                    ),
+                )
+            })
+            .collect::<HashMap<_, _>>();
+        let subtitle_group_map = subtitle_groups
+            .iter()
+            .map(|group| {
+                (
+                    (*group).to_string(),
+                    unique_cloned_group_id(
+                        &pathway_clone.id,
+                        group,
+                        &mut used_subtitle_groups,
+                    ),
+                )
+            })
+            .collect::<HashMap<_, _>>();
+
+        let cloned_variants = base_variants
+            .into_iter()
+            .filter_map(|mut variant| {
+                let override_uri = variant
+                    .stable_variant_id
+                    .as_deref()
+                    .and_then(|stable_id| pathway_clone.per_variant_uris.get(stable_id))
+                    .map(String::as_str);
+                variant.url = replace_hls_pathway_uri(
+                    &variant.url,
+                    pathway_clone,
+                    override_uri,
+                )?;
+                if let Some(group) = variant.audio_group.as_mut() {
+                    *group = audio_group_map.get(group)?.clone();
+                }
+                if let Some(group) = variant.subtitles_group.as_mut() {
+                    *group = subtitle_group_map.get(group)?.clone();
+                }
+                variant.pathway_id.clone_from(&pathway_clone.id);
+                Some(variant)
+            })
+            .collect::<Vec<_>>();
+
+        // A clone is atomic: if any advertised member cannot be represented
+        // safely, do not publish a partial pathway with missing track choices.
+        let base_audio = master
+            .audio_renditions
+            .iter()
+            .filter(|rendition| audio_groups.contains(rendition.group_id.as_str()))
+            .cloned()
+            .collect::<Vec<_>>();
+        let base_subtitles = master
+            .subtitle_renditions
+            .iter()
+            .filter(|rendition| subtitle_groups.contains(rendition.group_id.as_str()))
+            .cloned()
+            .collect::<Vec<_>>();
+        let cloned_audio = base_audio
+            .into_iter()
+            .map(|mut rendition| {
+                rendition.group_id = audio_group_map.get(&rendition.group_id)?.clone();
+                if let Some(uri) = rendition.url.as_ref() {
+                    let override_uri = rendition
+                        .stable_rendition_id
+                        .as_deref()
+                        .and_then(|stable_id| pathway_clone.per_rendition_uris.get(stable_id))
+                        .map(String::as_str);
+                    rendition.url = Some(replace_hls_pathway_uri(
+                        uri,
+                        pathway_clone,
+                        override_uri,
+                    )?);
+                }
+                Some(rendition)
+            })
+            .collect::<Option<Vec<_>>>();
+        let cloned_subtitles = base_subtitles
+            .into_iter()
+            .map(|mut rendition| {
+                rendition.group_id = subtitle_group_map.get(&rendition.group_id)?.clone();
+                let override_uri = rendition
+                    .stable_rendition_id
+                    .as_deref()
+                    .and_then(|stable_id| pathway_clone.per_rendition_uris.get(stable_id))
+                    .map(String::as_str);
+                rendition.url = replace_hls_pathway_uri(
+                    &rendition.url,
+                    pathway_clone,
+                    override_uri,
+                )?;
+                Some(rendition)
+            })
+            .collect::<Option<Vec<_>>>();
+
+        if cloned_variants.is_empty()
+            || cloned_audio.is_none()
+            || cloned_subtitles.is_none()
+        {
+            continue;
+        }
+        master.variants = master
+            .variants
+            .iter()
+            .cloned()
+            .chain(cloned_variants)
+            .collect::<Vec<_>>()
+            .into_boxed_slice();
+        master.audio_renditions = master
+            .audio_renditions
+            .iter()
+            .cloned()
+            .chain(cloned_audio.unwrap_or_default())
+            .collect::<Vec<_>>()
+            .into_boxed_slice();
+        master.subtitle_renditions = master
+            .subtitle_renditions
+            .iter()
+            .cloned()
+            .chain(cloned_subtitles.unwrap_or_default())
+            .collect::<Vec<_>>()
+            .into_boxed_slice();
+    }
+}
+
 
 fn hls_steering_request_url(
     steering: &crate::manifest::HlsContentSteering,
@@ -862,9 +1244,15 @@ async fn apply_hls_content_steering(
     validate_hls_content_steering_stable_ids(&master)?;
     let priority = match fetch_hls_steering_manifest(client, steering).await {
         Ok(body) => {
-            // If the steering response is invalid, use the declared initial
-            // Pathway or the first advertised Pathway until steering recovers.
-            parse_hls_steering_manifest(&body).unwrap_or_default()
+            // A malformed steering response must not prevent downloads from
+            // Pathways already advertised by the multivariant playlist.
+            match parse_hls_steering_manifest(&body) {
+                Ok(manifest) => {
+                    apply_hls_pathway_clones(&mut master, &manifest.pathway_clones);
+                    manifest.pathway_priority
+                }
+                Err(_error) => Vec::new(),
+            }
         }
         Err(_error) => {
             // A failed steering fetch must not prevent a download when the

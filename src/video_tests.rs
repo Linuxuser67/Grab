@@ -1184,12 +1184,12 @@ fn parse_playlist_reads_flat_entries() {
     // Null, empty and unusable-URL entries are dropped.
     assert_eq!(pl.items.len(), 2);
     assert_eq!(&*pl.items[0].title, "First");
-    assert_eq!(pl.items[0].page_url, "https://www.youtube.com/watch?v=a1");
+    assert_eq!(pl.items[0].page_url.as_ref(), "https://www.youtube.com/watch?v=a1");
     assert_eq!(pl.items[0].playlist_index, 1);
     // Empty title falls back to id. Its original index survives the invalid
     // and null entries omitted from the visible list.
     assert_eq!(&*pl.items[1].title, "b2");
-    assert_eq!(pl.items[1].page_url, "https://example.com/v/b2");
+    assert_eq!(pl.items[1].page_url.as_ref(), "https://example.com/v/b2");
     assert_eq!(pl.items[1].playlist_index, 3);
 }
 
@@ -1340,7 +1340,7 @@ fn retarget_story_items_points_entries_at_tray() {
     retarget_story_items(story_url, &mut pl);
     assert_eq!(pl.items.len(), 2);
     for item in &pl.items {
-        assert_eq!(item.page_url, "https://www.instagram.com/stories/someuser/");
+        assert_eq!(item.page_url.as_ref(), "https://www.instagram.com/stories/someuser/");
     }
 }
 
@@ -1360,7 +1360,7 @@ fn retarget_story_items_leaves_highlights_alone() {
     .expect("playlist");
     assert_eq!(pl.kind, PlaylistKind::Highlights);
     retarget_story_items(hl_url, &mut pl);
-    assert_eq!(pl.items[0].page_url, hl_url);
+    assert_eq!(pl.items[0].page_url.as_ref(), hl_url);
 }
 
 #[test]
@@ -6988,7 +6988,7 @@ fn fetch_video_page_returns_playlist_for_expansion() {
         Ok(FetchedVideo::Playlist(pl)) => {
             assert_eq!(pl.items.len(), 1);
             assert_eq!(
-                pl.items[0].page_url,
+                pl.items[0].page_url.as_ref(),
                 "https://www.instagram.com/stories/x/1/"
             );
         }

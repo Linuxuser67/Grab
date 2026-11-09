@@ -1956,11 +1956,7 @@ segment-2.ts
                 "#EXT-X-ENDLIST\n",
                 "#EXT-X-START:TIME-OFFSET=-1.5,PRECISE=YES\n",
             ),
-            (
-                "",
-                "",
-                "#EXT-X-START:TIME-OFFSET=-3.0,PRECISE=NO\n",
-            ),
+            ("", "", "#EXT-X-START:TIME-OFFSET=-3.0,PRECISE=NO\n"),
         ] {
             let body = format!(
                 "#EXTM3U\n#EXT-X-TARGETDURATION:4\n{playlist_type}{start}#EXTINF:4,\nfirst.ts\n#EXTINF:4,\nsecond.ts\n{end_list}"
@@ -1973,7 +1969,9 @@ segment-2.ts
                 plan.local_playlist.start.is_none(),
                 "the local recording playlist must not inherit EXT-X-START"
             );
-            let local = plan.local_playlist_bytes().expect("serialized local playlist");
+            let local = plan
+                .local_playlist_bytes()
+                .expect("serialized local playlist");
             let local = m3u8_rs::parse_media_playlist_res(&local)
                 .expect("serialized playlist should parse");
             assert!(local.start.is_none());

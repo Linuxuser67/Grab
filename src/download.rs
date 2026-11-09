@@ -1469,6 +1469,119 @@ impl DownloadManager {
         Ok(self.insert(item))
     }
 
+    /// Enqueue selected yt-dlp playlist entries as one schedulable owner.
+    /// The supplied directory is the unique collection subfolder already
+    /// created off the GTK thread.
+    pub(crate) fn enqueue_video_playlist_staged(
+        self: &Rc<Self>,
+        page_url: &str,
+        title: &str,
+        dest_dir: &str,
+        files: Vec<crate::media_types::VideoPlaylistFile>,
+        quality: String,
+        audio_only: bool,
+    ) -> Result<DownloadItem, String> {
+        let url = normalize_url(page_url)?;
+        let output_dir = std::path::Path::new(dest_dir);
+        if !output_dir.is_absolute()
+            || !output_dir.is_dir()
+            || output_dir.file_name().is_none()
+        {
+            return Err(gettext("The playlist destination folder is invalid"));
+        }
+        let parent_dir = output_dir
+            .parent()
+            .ok_or_else(|| gettext("The playlist destination folder is invalid"))?;
+        let filename = output_dir
+            .file_name()
+            .and_then(|name| name.to_str())
+            .ok_or_else(|| gettext("The playlist destination folder is invalid"))?;
+        if !sane_filename(filename) {
+            return Err(gettext("The playlist destination folder is invalid"));
+        }
+        if files.is_empty() {
+            return Err(gettext("Select at least one playlist entry"));
+        }
+
+        let mut seen_ids = HashSet::new();
+        for file in &files {
+            if file.id.trim().is_empty()
+                || file.id.len() > 512
+                || file.title.trim().is_empty()
+                || !seen_ids.insert(file.id.clone())
+            {
+                return Err(gettext("The selected playlist entries are invalid"));
+            }
+            let _ = normalize_url(&file.page_url)?;
+        }
+
+        // A still-live owner already covers this URL; never create a second
+        // process for the same playlist while an earlier owner is active.
+        if self.items().any(|item| {
+            item.status() != DownloadStatus::Done
+                && item.url() == url
+                && matches!(
+                    self.video_source(item.id()),
+                    Some(crate::media_types::VideoSource::Playlist { .. })
+                )
+        }) {
+            return Err(gettext("This playlist is already in the list"));
+        }
+
+        let id = self.alloc_id();
+        let title = if title.trim().is_empty() {
+            filename
+        } else {
+            title
+        };
+        let state = crate::media_types::VideoPlaylistState {
+            title: title.to_string(),
+            dest_dir: dest_dir.to_string(),
+            files,
+        };
+        let item = DownloadItem::new(
+            id,
+            &url,
+            filename,
+            &parent_dir.to_string_lossy(),
+        );
+        item.set_public_only(
+            url::Url::parse(&url)
+                .ok()
+                .and_then(|parsed| parsed.host_str().map(str::to_string))
+                .is_some_and(|host| {
+                    self.items().any(|row| {
+                        row.public_only()
+                            && url::Url::parse(&row.url())
+                                .ok()
+                                .and_then(|parsed| parsed.host_str().map(str::to_string))
+                                .is_some_and(|other| other == host)
+                    }) || crate::download_net::is_untrusted_handoff_host(&host)
+                }),
+        );
+        item.set_is_collection_owner(true);
+        item.set_group(crate::download_store::DownloadGroup::try_new(id, title));
+        item.set_gallery_url(url.clone());
+        item.set_gallery_file_count(state.files.len().min(u32::MAX as usize) as u32);
+        item.set_gallery_files_done(0);
+        item.set_detail(pending_resolve_detail(audio_only));
+
+        let batch = self.batch_guard();
+        self.video_sources.borrow_mut().insert(
+            id,
+            crate::media_types::VideoSource::Playlist {
+                page_url: url,
+                quality,
+                audio_only,
+                state: state.clone(),
+            },
+        );
+        let item = self.insert(item);
+        self.restore_video_playlist_file_rows(&item, &state.files);
+        drop(batch);
+        Ok(item)
+    }
+
     /// Commit a manifest row after its destination snapshot has been prepared.
     fn enqueue_manifest_staged(
         self: &Rc<Self>,

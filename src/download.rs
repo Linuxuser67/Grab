@@ -833,9 +833,18 @@ impl DownloadManager {
         if self.batch.get() > 0 {
             return;
         }
+        let gallery_owners_with_rows = self
+            .items()
+            .filter(|item| item.is_gallery_child())
+            .filter_map(|item| item.group().map(|group| group.id()))
+            .collect::<HashSet<_>>();
         self.queued.set(
             self.items()
-                .filter(|it| it.status() == DownloadStatus::Queued)
+                .filter(|item| {
+                    item.status() == DownloadStatus::Queued
+                        && !(item.is_gallery()
+                            && gallery_owners_with_rows.contains(&item.id()))
+                })
                 .count(),
         );
         if let Some(refresh) = self.scheduler_refresh.borrow().as_ref() {

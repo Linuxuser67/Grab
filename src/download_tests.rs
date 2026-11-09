@@ -2055,7 +2055,8 @@ fn unremove_restores_video_source() {
         started: false,
         public_only: item.public_only(),
         group: item.group(),
-    };
+    
+        gallery_job: None,};
     manager.remove(id);
     assert_eq!(manager.video_source(id), None);
     let revived = manager.unremove(snap);
@@ -3141,7 +3142,8 @@ fn unremove_restores_started_for_single_connection_partial() {
         started: manager.has_started(id),
         public_only: item.public_only(),
         group: item.group(),
-    };
+    
+        gallery_job: None,};
     manager.remove(id);
     assert!(
         !manager.has_started(id),
@@ -7159,7 +7161,8 @@ fn released_reservation_wakes_parked_unremoved_row() {
         started: false,
         public_only: false,
         group: None,
-    };
+    
+        gallery_job: None,};
     let revived = manager.unremove(snap);
     let id = revived.id();
     assert_eq!(revived.status(), DownloadStatus::Queued);
@@ -7240,7 +7243,8 @@ fn an_unremove_of_a_settled_row_stays_settled_while_reserved() {
         started: false,
         public_only: false,
         group: None,
-    };
+    
+        gallery_job: None,};
     let revived = manager.unremove(snap);
     assert_eq!(
         revived.status(),
@@ -9671,7 +9675,8 @@ fn unremove_many_reports_partial_failures_with_one_refresh() {
         started: false,
         public_only: false,
         group: None,
-    })
+    
+        gallery_job: None,})
     .collect::<Vec<_>>();
 
     let error = glib::MainContext::default()
@@ -9712,7 +9717,8 @@ fn unremove_many_restores_collection_members_with_one_queue_refresh() {
             started: false,
             public_only: false,
             group: Some(group.clone()),
-        })
+        
+            gallery_job: None,})
         .collect::<Vec<_>>();
 
     let restored = glib::MainContext::default()

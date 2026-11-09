@@ -246,6 +246,7 @@ fn inflight_suppresses(
 /// Attach newly queued playlist children to the same collection group.
 /// `group_id` is retained by the picker after partial imports so a later retry
 /// adds children to the original group rather than creating another one.
+#[cfg(test)]
 fn assign_playlist_group(
     items: &[DownloadItem],
     title: &str,

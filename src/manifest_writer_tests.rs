@@ -1111,8 +1111,7 @@ async fn appendable_destination_writer_persists_empty_checkpoint_before_pause() 
         track,
     )
     .await
-    .expect("open fresh appendable destination writer")
-    else {
+    .expect("open fresh appendable destination writer") else {
         panic!("a fresh destination part must return an active writer");
     };
     assert_eq!(committed, 0);
@@ -1160,8 +1159,7 @@ async fn appendable_destination_writer_persists_empty_checkpoint_before_pause() 
         track,
     )
     .await
-    .expect("resume after pause before the first resource commit")
-    else {
+    .expect("resume after pause before the first resource commit") else {
         panic!("an empty but checkpointed destination part must remain resumable");
     };
     assert_eq!(committed, 0);

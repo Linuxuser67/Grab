@@ -9722,8 +9722,9 @@ fn unremove_many_restores_collection_members_with_one_queue_refresh() {
     assert_eq!(manager.store().n_items(), 2);
     assert_eq!(changes.get(), 1, "one batch must refresh the queue once");
     assert!(
-        manager.items().all(|item| item.group() == Some(group.clone())),
+        manager
+            .items()
+            .all(|item| item.group() == Some(group.clone())),
         "every restored child must retain its collection identity"
     );
 }
-

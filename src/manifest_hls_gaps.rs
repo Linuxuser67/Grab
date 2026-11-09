@@ -137,15 +137,19 @@ mod tests {
             "the earlier encrypted segment still needs its key"
         );
         let local_bytes = plan.local_playlist_bytes().expect("local playlist");
-        let local = m3u8_rs::parse_media_playlist_res(&local_bytes).expect("parse local playlist");
+        let local_text = String::from_utf8(local_bytes).expect("local playlist is UTF-8");
+        assert_eq!(local_text.matches("#EXT-X-KEY:").count(), 2);
+        assert!(local_text.contains("#EXT-X-KEY:METHOD=NONE"));
+        let local = m3u8_rs::parse_media_playlist_res(local_text.as_bytes())
+            .expect("parse local playlist");
         assert_eq!(local.segments.len(), 2);
         assert_eq!(
             local.segments[0].key.as_ref().map(|key| key.method.clone()),
             Some(m3u8_rs::KeyMethod::AES128)
         );
-        assert_eq!(
-            local.segments[1].key.as_ref().map(|key| key.method.clone()),
-            Some(m3u8_rs::KeyMethod::None)
+        assert!(
+            local.segments[1].key.is_none(),
+            "METHOD=NONE is represented by an explicit key tag, then no active key"
         );
     }
 

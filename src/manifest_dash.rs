@@ -5096,21 +5096,17 @@ mod tests {
     }
 
     #[test]
-    fn rejects_nonzero_segment_list_presentation_time_offset() {
-        let body = r#"<?xml version="1.0"?>
-<MPD xmlns="urn:mpeg:dash:schema:mpd:2011" type="static" mediaPresentationDuration="PT2S">
-  <Period duration="PT2S">
-    <AdaptationSet contentType="video" mimeType="video/mp4">
-      <SegmentList presentationTimeOffset="9000">
-        <Initialization sourceURL="init.mp4"/>
-        <SegmentURL media="segment.m4s"/>
-      </SegmentList>
-      <Representation id="v1"/>
-    </AdaptationSet>
-  </Period>
-</MPD>"#;
+    fn dynamic_segment_list_with_nonzero_presentation_time_offset_uses_fallback() {
+        let body = dynamic_mpd(
+            r#"<SegmentList timescale="1000" presentationTimeOffset="9000">
+                 <Initialization sourceURL="init.mp4"/>
+                 <SegmentTimeline><S t="0" d="2000"/></SegmentTimeline>
+                 <SegmentURL media="segment.m4s"/>
+               </SegmentList>"#,
+            r#"timeShiftBufferDepth="PT10S""#,
+        );
         assert_eq!(
-            parse_dash_manifest(BASE_URL, body).err(),
+            parse_dash_manifest_at(BASE_URL, &body, dynamic_test_clock(120)).err(),
             Some(DashError::UnsupportedAddressing)
         );
     }

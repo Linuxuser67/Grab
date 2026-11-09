@@ -701,7 +701,7 @@ pub(crate) fn parse_dash_manifest_at(
                         mime_type.as_deref(),
                     )?;
                 } else if is_dynamic
-                    && matches!(addressing, DashAddressing::List(_))
+                    && matches!(&addressing, DashAddressing::List(_))
                     && !mime_type.as_deref().is_some_and(|mime| {
                         mime.eq_ignore_ascii_case("video/mp4")
                             || mime.eq_ignore_ascii_case("audio/mp4")

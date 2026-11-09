@@ -47,11 +47,13 @@ date-time ranges can be mapped unambiguously to individual media segments.
 
 This is a deliberately bounded profile, not a claim of support for every HLS
 extension. Unknown parser tags and unsupported resource-affecting extensions
-fall back to yt-dlp. This includes alternate VIDEO rendition groups, GAP, master-playlist variables and
-media-playlist IMPORT declarations, CONTENT-STEERING, unsupported encryption
-schemes, and extensions with unmet REQ-prefixed attributes. Media-playlist
-NAME/VALUE and QUERYPARAM variable substitution is supported for ordinary HLS
-and LL-HLS. I-frame-only media playlists, non-identity
+fall back to yt-dlp. This includes VIDEO groups with unmatched variant
+references or more than one URI-less member, GAP, media-playlist IMPORT
+declarations, CONTENT-STEERING, unsupported encryption schemes, and extensions
+with unmet REQ-prefixed attributes. Media-playlist NAME/VALUE and
+QUERYPARAM variable substitution is supported for ordinary HLS and LL-HLS;
+master-playlist variables and child-playlist IMPORT declarations remain on
+yt-dlp fallback. I-frame-only media playlists, non-identity
 session-key formats, non-identity media-key formats, SAMPLE-AES over
 fragmented MP4/CBCS, and unsupported encryption remain on fallback. AES-128
 and supported SAMPLE-AES keys in ordinary HLS continue to use the existing

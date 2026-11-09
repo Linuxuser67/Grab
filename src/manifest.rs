@@ -1138,8 +1138,19 @@ pub(crate) fn parse_hls_master_playlist(
     {
         return Err(ManifestError::UnsupportedPlaylist);
     }
-    let playlist =
-        m3u8_rs::parse_playlist_res(body).map_err(|error| hls_parse_error(body, error))?;
+    // Classify the original response before applying master-only variable
+    // expansion. A media playlist can also carry EXT-X-DEFINE; it must reach
+    // the media planner so its own NAME/VALUE/QUERYPARAM/IMPORT policy applies.
+    let original_playlist = m3u8_rs::parse_playlist_res(body)
+        .map_err(|error| hls_parse_error(body, error))?;
+    if matches!(original_playlist, Playlist::MediaPlaylist(_)) {
+        return Err(ManifestError::ExpectedMasterPlaylist);
+    }
+
+    let expanded_body = hls_variables::expand_master_playlist(manifest_url, body)?;
+    let expanded = expanded_body.as_deref().unwrap_or(body);
+    let playlist = m3u8_rs::parse_playlist_res(expanded)
+        .map_err(|error| hls_parse_error(expanded, error))?;
 
     let Playlist::MasterPlaylist(master) = playlist else {
         return Err(ManifestError::ExpectedMasterPlaylist);

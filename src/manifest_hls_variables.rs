@@ -1,4 +1,4 @@
-//! Bounded RFC 8216bis media-playlist variable substitution.
+//! Bounded RFC 8216bis HLS playlist variable substitution.
 //!
 //! broadcast-hls provides the typed EXT-X-DEFINE representation. Grab applies
 //! the cross-line substitutions before handing the expanded playlist to the
@@ -207,11 +207,279 @@ fn unsupported(reason: &str) -> ManifestError {
     ManifestError::UnsupportedPlaylistFeature(format!("#EXT-X-DEFINE: {reason}"))
 }
 
+fn contains_master_variable_reference(text: &str) -> bool {
+    text.lines().any(|raw_line| {
+        let line = raw_line.trim_start();
+        (line.starts_with("#EXT") || (!line.is_empty() && !line.starts_with('#')))
+            && line.contains("{$")
+    })
+}
+
+pub(super) fn expand_master_playlist(
+    manifest_url: &str,
+    body: &[u8],
+) -> Result<Option<Vec<u8>>, ManifestError> {
+    let text = std::str::from_utf8(body)
+        .map_err(|error| ManifestError::Parse(format!("HLS playlist is not UTF-8: {error}")))?;
+    let definitions = text
+        .lines()
+        .filter(|line| line.trim_start().starts_with("#EXT-X-DEFINE:"))
+        .collect::<Vec<_>>();
+    if definitions.is_empty() {
+        return if contains_master_variable_reference(text) {
+            Err(unsupported(
+                "variable reference has no EXT-X-DEFINE declaration",
+            ))
+        } else {
+            Ok(None)
+        };
+    }
+    if definitions.len() > MAX_VARIABLES {
+        return Err(unsupported("playlist has too many variable declarations"));
+    }
+
+    // Reuse broadcast-hls's typed DEFINE parser rather than reimplementing
+    // HLS attribute-list quoting and comma handling. The synthetic media
+    // playlist contains only the master playlist's declarations.
+    let mut definition_playlist =
+        String::from("#EXTM3U\n#EXT-X-VERSION:8\n#EXT-X-TARGETDURATION:1\n");
+    for definition in &definitions {
+        definition_playlist.push_str(definition.trim());
+        definition_playlist.push('\n');
+    }
+    definition_playlist.push_str("#EXTINF:1,\nplaceholder.ts\n#EXT-X-ENDLIST\n");
+    let parsed = MediaPlaylist::parse(&definition_playlist).map_err(|error| {
+        ManifestError::Parse(format!(
+            "could not parse HLS master-playlist variable declarations: {error}"
+        ))
+    })?;
+    if parsed.defines.len() != definitions.len() {
+        return Err(unsupported(
+            "master-playlist DEFINE declarations could not be represented exactly",
+        ));
+    }
+
+    let playlist_url = Url::parse(manifest_url).map_err(|_| ManifestError::InvalidManifestUrl)?;
+    let mut variables = HashMap::with_capacity(parsed.defines.len());
+    let mut total_variable_bytes = 0_usize;
+    for definition in parsed.defines {
+        let (name, value) = match definition {
+            Define::Name {
+                name,
+                value,
+                extra_attrs,
+            } => {
+                if !extra_attrs.is_empty() {
+                    return Err(unsupported(
+                        "EXT-X-DEFINE has unsupported required attributes",
+                    ));
+                }
+                let value = substitute(&value, &variables)?;
+                (name, value)
+            }
+            Define::QueryParam { name, extra_attrs } => {
+                if !extra_attrs.is_empty() {
+                    return Err(unsupported(
+                        "EXT-X-DEFINE has unsupported required attributes",
+                    ));
+                }
+                let mut values = playlist_url
+                    .query_pairs()
+                    .filter(|(key, _)| key.as_ref() == name.as_str())
+                    .map(|(_, value)| value.into_owned());
+                let value = values
+                    .next()
+                    .ok_or_else(|| unsupported("EXT-X-DEFINE query parameter is missing"))?;
+                if values.next().is_some() {
+                    return Err(unsupported("EXT-X-DEFINE query parameter is ambiguous"));
+                }
+                (name, value)
+            }
+            Define::Import { .. } => {
+                return Err(unsupported(
+                    "master-playlist IMPORT declarations have no parent playlist",
+                ));
+            }
+            _ => return Err(unsupported("unsupported EXT-X-DEFINE declaration")),
+        };
+        validate_value(&value)?;
+        total_variable_bytes = total_variable_bytes
+            .checked_add(name.len())
+            .and_then(|total| total.checked_add(value.len()))
+            .ok_or_else(|| unsupported("aggregate HLS variable size overflow"))?;
+        if total_variable_bytes > MAX_MANIFEST_BYTES {
+            return Err(unsupported(
+                "aggregate HLS variable values exceed their supported size limit",
+            ));
+        }
+        if variables.insert(name, value).is_some() {
+            return Err(unsupported("duplicate EXT-X-DEFINE variable"));
+        }
+    }
+
+    let mut expanded = String::with_capacity(text.len());
+    for line in text.split_inclusive('\n') {
+        let line_content = line.trim_end_matches(['\r', '\n']);
+        if line_content.trim_start().starts_with("#EXT-X-DEFINE:") {
+            expanded.push_str(&line[line_content.len()..]);
+            continue;
+        }
+        expanded.push_str(&substitute_playlist_line(line_content, &variables)?);
+        expanded.push_str(&line[line_content.len()..]);
+        if expanded.len() > MAX_MANIFEST_BYTES {
+            return Err(unsupported(
+                "expanded playlist exceeds its supported size limit",
+            ));
+        }
+    }
+    if expanded.len() > MAX_MANIFEST_BYTES {
+        return Err(unsupported(
+            "expanded playlist exceeds its supported size limit",
+        ));
+    }
+    if contains_master_variable_reference(&expanded) {
+        return Err(unsupported(
+            "master-playlist variable reference was not expanded",
+        ));
+    }
+    Ok(Some(expanded.into_bytes()))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
     const BASE: &str = "https://cdn.example.test/live/index.m3u8";
+
+    #[test]
+    fn expands_master_variables_in_variant_and_rendition_uris() {
+        let body = br#"#EXTM3U
+#EXT-X-DEFINE:NAME="base",VALUE="streams"
+#EXT-X-DEFINE:NAME="root",VALUE="{$base}/v1"
+#EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID="audio",NAME="English",DEFAULT=YES,URI="{$root}/audio/en.m3u8"
+#EXT-X-STREAM-INF:BANDWIDTH=1000000,AUDIO="audio"
+{$root}/video/main.m3u8
+"#;
+        let expanded = expand_master_playlist(
+            "https://cdn.example.test/master.m3u8",
+            body,
+        )
+        .expect("master variables should expand")
+        .expect("master contains DEFINE tags");
+        let text = String::from_utf8(expanded).expect("expanded master is UTF-8");
+        assert!(!text.contains("#EXT-X-DEFINE:"));
+        assert!(text.contains("streams/v1/video/main.m3u8"));
+        assert!(text.contains("URI=\"streams/v1/audio/en.m3u8\""));
+
+        let plan = crate::manifest::parse_hls_master_playlist(
+            "https://cdn.example.test/master.m3u8",
+            text.as_bytes(),
+        )
+        .expect("expanded master should parse");
+        assert_eq!(
+            plan.variants[0].url.as_str(),
+            "https://cdn.example.test/streams/v1/video/main.m3u8"
+        );
+        assert_eq!(
+            plan.audio_renditions[0].url.as_ref().map(Url::as_str),
+            Some("https://cdn.example.test/streams/v1/audio/en.m3u8")
+        );
+    }
+
+    #[test]
+    fn expands_master_query_variables_from_the_final_manifest_url() {
+        let body = br#"#EXTM3U
+#EXT-X-DEFINE:QUERYPARAM="token"
+#EXT-X-STREAM-INF:BANDWIDTH=1000000
+https://cdn.example.test/{$token}/video.m3u8
+"#;
+        let expanded = expand_master_playlist(
+            "https://origin.example.test/master.m3u8?token=signed%2Fvalue",
+            body,
+        )
+        .expect("query variable should expand")
+        .expect("master contains DEFINE tags");
+        let text = String::from_utf8(expanded).expect("expanded master is UTF-8");
+        assert!(text.contains("https://cdn.example.test/signed/value/video.m3u8"));
+    }
+
+    #[test]
+    fn master_variables_fail_closed_for_import_missing_duplicate_and_injection() {
+        let import = br#"#EXTM3U
+#EXT-X-DEFINE:IMPORT="token"
+#EXT-X-STREAM-INF:BANDWIDTH=1000000
+video.m3u8
+"#;
+        assert!(expand_master_playlist(BASE, import).is_err());
+
+        let missing = br#"#EXTM3U
+#EXT-X-DEFINE:QUERYPARAM="token"
+#EXT-X-STREAM-INF:BANDWIDTH=1000000
+{$token}.m3u8
+"#;
+        assert!(expand_master_playlist(BASE, missing).is_err());
+
+        assert!(
+            expand_master_playlist(
+                "https://cdn.example.test/master.m3u8?token=a&token=b",
+                missing,
+            )
+            .is_err()
+        );
+
+        assert!(
+            expand_master_playlist(
+                "https://cdn.example.test/master.m3u8?token=%0A%23EXT-X-STREAM-INF",
+                missing,
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn rejects_unquoted_master_variable_references_instead_of_leaving_them_literal() {
+        let body = br#"#EXTM3U
+#EXT-X-DEFINE:NAME="root",VALUE="streams"
+#EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID="audio",NAME="English",URI={$root}/audio.m3u8
+#EXT-X-STREAM-INF:BANDWIDTH=1000000
+video.m3u8
+"#;
+        assert!(matches!(
+            expand_master_playlist(BASE, body),
+            Err(ManifestError::UnsupportedPlaylistFeature(_))
+        ));
+    }
+
+    #[test]
+    fn media_playlist_import_reaches_media_fallback_not_master_expansion() {
+        let media = br#"#EXTM3U
+#EXT-X-TARGETDURATION:4
+#EXT-X-DEFINE:IMPORT="token"
+#EXTINF:4,
+segment-{$token}.ts
+#EXT-X-ENDLIST
+"#;
+        assert_eq!(
+            crate::manifest::parse_hls_master_playlist(BASE, media).err(),
+            Some(ManifestError::ExpectedMasterPlaylist)
+        );
+        assert!(matches!(
+            crate::manifest::plan_hls_media_playlist(BASE, media),
+            Err(ManifestError::UnsupportedPlaylistFeature(_))
+        ));
+    }
+
+    #[test]
+    fn master_variable_references_without_definitions_fall_back() {
+        let body = br#"#EXTM3U
+#EXT-X-STREAM-INF:BANDWIDTH=1000000
+{$missing}.m3u8
+"#;
+        assert!(matches!(
+            expand_master_playlist(BASE, body),
+            Err(ManifestError::UnsupportedPlaylistFeature(_))
+        ));
+    }
 
     #[test]
     fn expands_name_value_and_query_parameter_variables() {
@@ -364,3 +632,11 @@ segment-{$token}.ts
         );
     }
 }
+
+
+/// Expand RFC 8216bis variables in an HLS multivariant playlist.
+///
+/// Only NAME/VALUE and QUERYPARAM definitions are accepted here. IMPORT is
+/// meaningful only in a child media playlist and needs parent context to be
+/// propagated through the selected-track handoff; until that is implemented,
+/// it remains an explicit fallback.

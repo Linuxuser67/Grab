@@ -571,7 +571,7 @@ fn validate_hls_stable_track_ids(master: &HlsMasterPlan) -> Result<(), ManifestI
     if !master
         .audio_renditions
         .iter()
-        .filter(|rendition| audio_groups.contains(&rendition.group_id))
+        .filter(|rendition| audio_groups.contains(rendition.group_id.as_str()))
         .all(|rendition| rendition_keys.insert(hls_audio_rendition_key(rendition)))
     {
         return Err(ManifestIntakeError::Unsupported(gettext(
@@ -588,7 +588,7 @@ fn validate_hls_stable_track_ids(master: &HlsMasterPlan) -> Result<(), ManifestI
     if !master
         .subtitle_renditions
         .iter()
-        .filter(|rendition| subtitle_groups.contains(&rendition.group_id))
+        .filter(|rendition| subtitle_groups.contains(rendition.group_id.as_str()))
         .all(|rendition| subtitle_keys.insert(hls_subtitle_rendition_key(rendition)))
     {
         return Err(ManifestIntakeError::Unsupported(gettext(

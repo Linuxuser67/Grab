@@ -74,7 +74,7 @@ pub(crate) enum YtdlpPlaylistEvent {
 /// Parse one tagged playlist event. File paths are the final, unsplit field:
 /// a semicolon in a legitimate filename must not change event identity.
 pub(crate) fn parse_ytdlp_playlist_event(line: &str) -> Option<YtdlpPlaylistEvent> {
-    let line = line.trim_end_matches(['\\r', '\\n']);
+    let line = line.trim_end_matches(['\r', '\n']);
     let parse_index = |raw: &str| raw.parse::<usize>().ok();
     let parse_bytes = |raw: Option<&str>| {
         raw.filter(|value| *value != "NA")

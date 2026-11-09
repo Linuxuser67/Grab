@@ -282,7 +282,7 @@ mod tests {
                     id: "second".into(),
                     title: "Second item".into(),
                     page_url: "https://example.test/second".into(),
-                    playlist_index: 2,
+                    playlist_index: 7,
                 },
             ]
             .into_boxed_slice(),
@@ -304,6 +304,7 @@ mod tests {
         assert_eq!(restored.items[1].id.as_ref(), "second");
         assert_eq!(restored.items[1].title.as_ref(), "Second item");
         assert_eq!(restored.items[1].page_url, "https://example.test/second");
+        assert_eq!(restored.items[1].playlist_index, 7);
     }
 
     #[tokio::test(flavor = "current_thread")]

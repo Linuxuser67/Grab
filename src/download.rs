@@ -1766,6 +1766,13 @@ impl DownloadManager {
         let item = DownloadItem::new(id, &url, &title, &stored.dest_dir);
         item.set_public_only(public_only);
         item.set_is_gallery(true);
+        item.set_group(
+            stored
+                .group
+                .clone()
+                .filter(|group| group.is_valid())
+                .or_else(|| crate::download_store::DownloadGroup::try_new(id, &job.title)),
+        );
         let file_count = job.file_count.unwrap_or(0);
         item.set_gallery_file_count(file_count);
         // Restore the completion counter used by the gallery progress bar.
@@ -4339,6 +4346,21 @@ impl DownloadManager {
     /// collection removal calls this for every member, then persists once.
     fn remove_inner(self: &Rc<Self>, id: u64) {
         let _ = self.cancel_inner(id, true, Stop::Discard);
+        if self.find(id).is_some_and(|item| item.is_gallery()) {
+            let children = self
+                .items()
+                .filter(|item| {
+                    item.is_gallery_child()
+                        && item.group().is_some_and(|group| group.id() == id)
+                })
+                .map(|item| item.id())
+                .collect::<Vec<_>>();
+            for child_id in children {
+                if let Some(position) = self.position_of(child_id) {
+                    self.store.remove(position);
+                }
+            }
+        }
         self.epoch.borrow_mut().remove(&id);
         self.started.borrow_mut().remove(&id);
         // Video rows defer the sweep to `finish_discard`, which waits for the worker: a finalize path still inside its rename would otherwise deliver a file for a row that no longer exists.
@@ -4488,7 +4510,17 @@ impl DownloadManager {
         });
         item.set_output_dir(snap.output_dir);
         item.set_public_only(snap.public_only);
-        item.set_group(snap.group);
+        if let Some(mut job) = snap.gallery_job {
+            job.item_id = id;
+            item.set_is_gallery(true);
+            item.set_gallery_file_count(job.file_count.unwrap_or(0));
+            item.set_gallery_files_done(0);
+            item.set_gallery_url(job.page_url.clone());
+            item.set_group(crate::download_store::DownloadGroup::try_new(id, &job.title));
+            self.gallery_jobs.borrow_mut().insert(id, job);
+        } else {
+            item.set_group(snap.group);
+        }
         if let Some(st) = snap.segments {
             self.segment_state.borrow_mut().insert(item.id(), st);
         }

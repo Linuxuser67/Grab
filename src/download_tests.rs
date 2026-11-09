@@ -9676,4 +9676,3 @@ fn remove_many_removes_each_existing_member_once() {
     assert!(manager.find(first_id).is_none());
     assert!(manager.find(second_id).is_none());
 }
-

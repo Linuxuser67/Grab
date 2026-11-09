@@ -838,10 +838,15 @@ fn select_hls_content_steering_pathway(
                 .as_ref()
                 .and_then(|steering| steering.initial_pathway_id.clone())
         })
+        .or_else(|| {
+            master
+                .variants
+                .first()
+                .map(|variant| variant.pathway_id.clone())
+        })
         .ok_or_else(|| {
             ManifestIntakeError::Unsupported(
-                "No HLS Content Steering priority Pathway is available in the master playlist"
-                    .to_string(),
+                "HLS Content Steering master playlist has no downloadable Pathway".to_string(),
             )
         })?;
     filter_hls_master_to_pathway(master, &selected)
@@ -856,19 +861,16 @@ async fn apply_hls_content_steering(
     };
     validate_hls_content_steering_stable_ids(&master)?;
     let priority = match fetch_hls_steering_manifest(client, steering).await {
-        Ok(body) => match parse_hls_steering_manifest(&body) {
-            Ok(priority) => priority,
-            Err(_error) if steering.initial_pathway_id.is_some() => {
-                // Use the declared initial Pathway if the steering response is invalid.
-                Vec::new()
-            }
-            Err(error) => return Err(error),
-        },
-        Err(_error) if steering.initial_pathway_id.is_some() => {
-            // Use the declared initial Pathway if the guarded steering fetch fails.
+        Ok(body) => {
+            // If the steering response is invalid, use the declared initial
+            // Pathway or the first advertised Pathway until steering recovers.
+            parse_hls_steering_manifest(&body).unwrap_or_default()
+        }
+        Err(_error) => {
+            // A failed steering fetch must not prevent a download when the
+            // master playlist already advertises usable Pathways.
             Vec::new()
         }
-        Err(error) => return Err(error),
     };
     select_hls_content_steering_pathway(&mut master, &priority)?;
     Ok(master)
@@ -3114,6 +3116,20 @@ video/b.m3u8
         assert_eq!(master.variants.len(), 1);
         assert_eq!(master.variants[0].pathway_id, "cdn-a");
         assert!(master.variants[0].url.path().ends_with("/video/a.m3u8"));
+    }
+
+    #[test]
+    fn uses_first_advertised_pathway_when_steering_has_no_initial_pathway() {
+        let mut master = master();
+        master
+            .content_steering
+            .as_mut()
+            .expect("steering declaration")
+            .initial_pathway_id = None;
+        select_hls_content_steering_pathway(&mut master, &[])
+            .expect("fall back to the first advertised Pathway");
+        assert_eq!(master.variants.len(), 1);
+        assert_eq!(master.variants[0].pathway_id, "cdn-a");
     }
 
     #[test]

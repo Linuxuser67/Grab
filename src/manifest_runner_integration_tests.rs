@@ -288,17 +288,18 @@ async fn hls_master_input_preserves_separate_rendition_timestamp_offsets() {
         .arg(root.path().join("track_%v/local.m3u8"))
         .output()
         .expect("generate separate HLS audio and video renditions");
-    assert_command_succeeded(&generated, "FFmpeg failed to generate the HLS rendition fixture");
+    assert_command_succeeded(
+        &generated,
+        "FFmpeg failed to generate the HLS rendition fixture",
+    );
 
     let video_dir = root.path().join("video");
     let audio_dir = root.path().join("audio");
     std::fs::rename(&first_track, &video_dir).expect("move video rendition into staging");
     std::fs::rename(&second_track, &audio_dir).expect("move audio rendition into staging");
-    for playlist in [
-        video_dir.join("local.m3u8"),
-        audio_dir.join("local.m3u8"),
-    ] {
-        let contents = std::fs::read_to_string(&playlist).expect("read generated rendition playlist");
+    for playlist in [video_dir.join("local.m3u8"), audio_dir.join("local.m3u8")] {
+        let contents =
+            std::fs::read_to_string(&playlist).expect("read generated rendition playlist");
         assert!(
             contents.contains("#EXT-X-PROGRAM-DATE-TIME:"),
             "the fixture must contain preserved program date-time metadata"
@@ -325,8 +326,12 @@ async fn hls_master_input_preserves_separate_rendition_timestamp_offsets() {
     );
 
     let starts = ffprobe_stream_start_times(Path::new("ffprobe"), &output);
-    let video_start = *starts.get("video").expect("output contains video timestamps");
-    let audio_start = *starts.get("audio").expect("output contains audio timestamps");
+    let video_start = *starts
+        .get("video")
+        .expect("output contains video timestamps");
+    let audio_start = *starts
+        .get("audio")
+        .expect("output contains audio timestamps");
     let offset = audio_start - video_start;
     assert!(
         (offset - 2.0).abs() < 0.1,
@@ -338,8 +343,8 @@ async fn hls_master_input_preserves_separate_rendition_timestamp_offsets() {
     let concat_track = |directory: &Path| {
         let playlist_bytes =
             std::fs::read(directory.join("local.m3u8")).expect("read rendition playlist");
-        let playlist = m3u8_rs::parse_media_playlist_res(&playlist_bytes)
-            .expect("parse rendition playlist");
+        let playlist =
+            m3u8_rs::parse_media_playlist_res(&playlist_bytes).expect("parse rendition playlist");
         let mut bytes = Vec::new();
         for segment in playlist.segments {
             bytes.extend(

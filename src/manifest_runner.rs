@@ -1794,8 +1794,7 @@ async fn finalize_manifest_download(
     tx.send(EngineMsg::Phase("Merging audio and video…".to_string()))
         .ok();
 
-    let has_separate_hls_audio =
-        has_audio && matches!(&tracks, Tracks::Hls { audio: Some(_), .. });
+    let has_separate_hls_audio = has_audio && matches!(&tracks, Tracks::Hls { audio: Some(_), .. });
     let has_local_hls_renditions = has_separate_hls_audio
         && staged_regular_file_exists(&video_dir.join("local.m3u8")).await
         && staged_regular_file_exists(&audio_dir.join("local.m3u8")).await;
@@ -2413,7 +2412,6 @@ async fn write_playlist(directory: &Path, plan: &HlsPlan) -> Result<(), String> 
         .map_err(|error| format!("Could not publish the local HLS playlist: {error}"))
 }
 
-
 /// Write a local multivariant playlist for FFmpeg's shared HLS rendition demuxer.
 ///
 /// Opening separate audio and video media playlists as independent FFmpeg inputs
@@ -2460,18 +2458,18 @@ async fn write_local_hls_master_playlist(staging: &Path) -> Result<PathBuf, Mani
         .map_err(|error| {
             manifest_storage_error("Could not create the local HLS master playlist", error)
         })?;
-    file.write_all(MASTER_PLAYLIST)
-        .await
-        .map_err(|error| {
-            manifest_storage_error("Could not write the local HLS master playlist", error)
-        })?;
+    file.write_all(MASTER_PLAYLIST).await.map_err(|error| {
+        manifest_storage_error("Could not write the local HLS master playlist", error)
+    })?;
     file.sync_all().await.map_err(|error| {
         manifest_storage_error("Could not flush the local HLS master playlist", error)
     })?;
     drop(file);
 
     crate::file_names::rename_noreplace(&part, &target).map_err(|error| {
-        ManifestRunError::Failed(format!("Could not publish the local HLS master playlist: {error}"))
+        ManifestRunError::Failed(format!(
+            "Could not publish the local HLS master playlist: {error}"
+        ))
     })?;
     sync_staging_directory(staging)
         .await

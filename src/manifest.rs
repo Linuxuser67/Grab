@@ -2002,8 +2002,10 @@ fn resolve_resource_url(base_url: &Url, raw: &str) -> Result<Url, ManifestError>
     Ok(url)
 }
 
-/// Inherit missing query parameters from a playlist URL without forwarding
-/// credentials across origins or rewriting the source's encoded query bytes.
+/// Inherit every parent query parameter not explicitly supplied by a child URL.
+///
+/// Inheritance is limited to identical origins and preserves the parent's raw
+/// query encoding; it does not interpret CDN-specific parameter names.
 pub(crate) fn inherit_query_parameters_same_origin(parent_url: &Url, target_url: &mut Url) {
     if parent_url.origin() != target_url.origin() {
         return;
@@ -2041,8 +2043,8 @@ fn raw_query_parameter_name(pair: &str) -> Vec<u8> {
     percent_encoding::percent_decode_str(raw_name).collect()
 }
 
-/// Resolve a media-playlist resource and retain the playlist's same-origin
-/// authorization query when the resource URI is relative or query-incomplete.
+/// Resolve a media-playlist resource and retain missing same-origin query
+/// parameters when its URI is relative or query-incomplete.
 fn resolve_hls_media_resource_url(base_url: &Url, raw: &str) -> Result<Url, ManifestError> {
     let mut url = resolve_resource_url(base_url, raw)?;
     inherit_query_parameters_same_origin(base_url, &mut url);

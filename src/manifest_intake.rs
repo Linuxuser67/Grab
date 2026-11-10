@@ -50,7 +50,8 @@ struct HlsSteeringManifest {
 }
 
 // Preview metadata is short-lived: HLS/DASH source manifests can change, and
-// signed child URLs may expire. Dynamic presentations are never cached.
+// query-bearing HLS resources may include opaque auth or content-selection
+// parameters. Dynamic presentations are never cached.
 const MANIFEST_PREVIEW_CACHE_TTL: Duration = Duration::from_secs(5 * 60);
 const MANIFEST_PREVIEW_CACHE_CAPACITY: usize = 32;
 
@@ -162,7 +163,8 @@ fn is_cacheable_static_manifest(lookup: &ManifestLookup) -> bool {
     match &lookup.manifest {
         // A master caches only short-lived track-selection metadata. The child
         // media playlist is still fetched at download time, so live windows are
-        // never reused here. Signed child URLs are excluded.
+        // never reused here. Any query-bearing child URL is excluded because its
+        // parameter names and semantics are CDN-specific.
         crate::manifest_types::NativeManifest::HlsMaster(plan) => {
             !source_has_query
                 && plan.content_steering.is_none()

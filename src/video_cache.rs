@@ -559,10 +559,11 @@ fn hash_file_identity(hasher: &mut Sha256, name: &[u8], path: &Path, metadata: &
     }
 }
 
-/// Detect only query names with established, conventional authentication semantics.
+/// Detect query names with established, conventional authentication semantics.
 ///
-/// HLS manifest caching applies a stricter policy and rejects every query-bearing
-/// source/resource; this predicate is used only for yt-dlp extraction identity.
+/// Generic URL-keyed caches use this as a conservative additional guard. HLS
+/// manifest preview caching separately rejects any query-bearing source or child
+/// resource because CDN-specific parameter names are opaque.
 pub(crate) fn has_known_rotating_auth_query(url: &url::Url) -> bool {
     url.query_pairs().any(|(name, _)| {
         matches!(

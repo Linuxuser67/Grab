@@ -54,6 +54,7 @@ pub(super) async fn restore_local_live_hls_tracks(
         audio: audio.map(Box::new),
         subtitle: None,
         subtitle_language: None,
+        content_steering: None,
     }))
 }
 
@@ -940,9 +941,325 @@ async fn poll_live_hls_track(
     clippy::too_many_arguments,
     reason = "the paired live renditions share one bounded capture session and cancellation signal"
 )]
+async fn refresh_live_hls_pathway(
+    client: &reqwest::Client,
+    source_url: &str,
+    source: &ManifestSource,
+    steering: &mut HlsContentSteering,
+    video: &mut LiveHlsTrack,
+    audio: &mut Option<LiveHlsTrack>,
+    connections: usize,
+    staging_dir: &Path,
+    destination_dir: &Path,
+    tx: &tokio::sync::mpsc::UnboundedSender<EngineMsg>,
+    downloaded: &Arc<AtomicU64>,
+    guarded_child_hosts: &mut std::collections::HashSet<String>,
+    abort: &mut tokio::sync::oneshot::Receiver<crate::video::StopIntent>,
+) -> Result<Option<crate::video::StopIntent>, ManifestRunError> {
+    let previous_pathway = steering.active_pathway_id.clone();
+    let refresh_result = tokio::select! {
+        biased;
+        stop = &mut *abort => return Ok(Some(
+            stop.unwrap_or(crate::video::StopIntent::Discard)
+        )),
+        result = crate::manifest_intake::refresh_hls_content_steering(
+            client,
+            source_url,
+            steering,
+        ) => result,
+    };
+    let lookup = match refresh_result {
+        Ok(Some(lookup)) => lookup,
+        Ok(None) => return Ok(None),
+        Err(error) => {
+            tracing::debug!(
+                error = %error,
+                "HLS Content Steering refresh could not be applied; retaining current Pathway"
+            );
+            steering.active_pathway_id = previous_pathway;
+            return Ok(None);
+        }
+    };
+
+    let plan = match crate::manifest_plan::download_plan(lookup, source) {
+        Ok(crate::manifest_plan::ManifestDownloadPlan::HlsMaster(plan)) => *plan,
+        Ok(_) => {
+            steering.active_pathway_id = previous_pathway;
+            return Ok(None);
+        }
+        Err(error) => {
+            tracing::debug!(
+                error = %error,
+                "HLS Content Steering refresh no longer matches the selected track"
+            );
+            steering.active_pathway_id = previous_pathway;
+            return Ok(None);
+        }
+    };
+
+    let video_changed = plan.video_url != video.playlist_url;
+    let audio_changed = match (audio.as_ref(), plan.audio_url.as_ref()) {
+        (Some(track), Some(url)) => *url != track.playlist_url,
+        (None, None) => false,
+        _ => {
+            tracing::debug!(
+                "HLS Content Steering refresh changed separate-audio topology; retaining current Pathway"
+            );
+            steering.active_pathway_id = previous_pathway;
+            return Ok(None);
+        }
+    };
+    if !video_changed && !audio_changed {
+        return Ok(None);
+    }
+    if video_changed && audio_changed {
+        tracing::debug!(
+            "HLS Content Steering refresh changed both video and audio URLs; deferring a multi-track switch"
+        );
+        steering.active_pathway_id = previous_pathway;
+        return Ok(None);
+    }
+
+    // LL-HLS tracks use part identities rather than media-sequence segment
+    // identities. Refresh metadata but do not switch their pathway here.
+    if video.accumulator.is_ll_capture()
+        || audio
+            .as_ref()
+            .is_some_and(|track| track.accumulator.is_ll_capture())
+    {
+        tracing::debug!(
+            "HLS Content Steering pathway switch deferred for LL-HLS capture"
+        );
+        steering.active_pathway_id = previous_pathway;
+        return Ok(None);
+    }
+
+    let mut next_video = if video_changed {
+        if let Err(error) =
+            guard_manifest_child_url(source_url, &plan.video_url, guarded_child_hosts)
+        {
+            tracing::debug!(
+                error = %error,
+                "refreshed HLS video playlist URL failed host validation; retaining current Pathway"
+            );
+            steering.active_pathway_id = previous_pathway;
+            return Ok(None);
+        }
+        let lookup = tokio::select! {
+            biased;
+            stop = &mut *abort => return Ok(Some(
+                stop.unwrap_or(crate::video::StopIntent::Discard)
+            )),
+            result = crate::manifest_intake::lookup_hls_media_with_variables(
+                client,
+                plan.video_url.as_str(),
+                &plan.inherited_variables,
+            ) => result,
+        };
+        let next = match lookup {
+            Ok(next) => next,
+            Err(error) => {
+                tracing::debug!(
+                    error = %error,
+                    "refreshed HLS video playlist fetch failed; retaining current Pathway"
+                );
+                steering.active_pathway_id = previous_pathway;
+                return Ok(None);
+            }
+        };
+        if let Err(error) = guard_hls_resources(source_url, &next, guarded_child_hosts) {
+            tracing::debug!(
+                error = %error,
+                "refreshed HLS video playlist resources failed validation; retaining current Pathway"
+            );
+            steering.active_pathway_id = previous_pathway;
+            return Ok(None);
+        }
+        Some(next)
+    } else {
+        None
+    };
+
+    let mut next_audio = match (audio_changed, plan.audio_url.as_ref()) {
+        (true, Some(url)) => {
+            if let Err(error) = guard_manifest_child_url(source_url, url, guarded_child_hosts) {
+                tracing::debug!(
+                    error = %error,
+                    "refreshed HLS audio playlist URL failed host validation; retaining current Pathway"
+                );
+                steering.active_pathway_id = previous_pathway;
+                return Ok(None);
+            }
+            let lookup = tokio::select! {
+                biased;
+                stop = &mut *abort => return Ok(Some(
+                    stop.unwrap_or(crate::video::StopIntent::Discard)
+                )),
+                result = crate::manifest_intake::lookup_hls_media_with_variables(
+                    client,
+                    url.as_str(),
+                    &plan.inherited_variables,
+                ) => result,
+            };
+            let next = match lookup {
+                Ok(next) => next,
+                Err(error) => {
+                    tracing::debug!(
+                        error = %error,
+                        "refreshed HLS audio playlist fetch failed; retaining current Pathway"
+                    );
+                    steering.active_pathway_id = previous_pathway;
+                    return Ok(None);
+                }
+            };
+            if let Err(error) = guard_hls_resources(source_url, &next, guarded_child_hosts) {
+                tracing::debug!(
+                    error = %error,
+                    "refreshed HLS audio playlist resources failed validation; retaining current Pathway"
+                );
+                steering.active_pathway_id = previous_pathway;
+                return Ok(None);
+            }
+            Some(next)
+        }
+        _ => None,
+    };
+
+    if let Some(next) = next_video.as_mut() {
+        let Some(next_sequence) = video.accumulator.next_sequence() else {
+            steering.active_pathway_id = previous_pathway;
+            return Ok(None);
+        };
+        if !video
+            .accumulator
+            .pathway_switch_preserves_discontinuity_sequence(next)
+            || next.trim_live_snapshot_to_sequence(next_sequence).is_err()
+            || video.accumulator.prepare_update(next).is_err()
+        {
+            tracing::debug!(
+                playlist = %diagnostic_url(&next.playlist_url),
+                "refreshed HLS video Pathway does not continue at the next media sequence"
+            );
+            steering.active_pathway_id = previous_pathway;
+            return Ok(None);
+        }
+    }
+    if let (Some(current), Some(next)) = (audio.as_ref(), next_audio.as_mut()) {
+        let Some(next_sequence) = current.accumulator.next_sequence() else {
+            steering.active_pathway_id = previous_pathway;
+            return Ok(None);
+        };
+        if !current
+            .accumulator
+            .pathway_switch_preserves_discontinuity_sequence(next)
+            || next.trim_live_snapshot_to_sequence(next_sequence).is_err()
+            || current.accumulator.prepare_update(next).is_err()
+        {
+            tracing::debug!(
+                playlist = %diagnostic_url(&next.playlist_url),
+                "refreshed HLS audio Pathway does not continue at the next media sequence"
+            );
+            steering.active_pathway_id = previous_pathway;
+            return Ok(None);
+        }
+    }
+
+    if let Some(next) = next_video.as_ref() {
+        match apply_live_hls_snapshot(
+            client,
+            next,
+            video,
+            connections,
+            tx,
+            downloaded,
+            abort,
+            audio
+                .as_ref()
+                .map_or(0, |track| track.accumulator.resource_bytes()),
+        )
+        .await
+        {
+            Ok(LiveHlsSnapshotOutcome::Committed) => {
+                ensure_manifest_mux_spaces(
+                    staging_dir,
+                    destination_dir,
+                    downloaded.load(Ordering::Relaxed),
+                )?;
+            }
+            Ok(LiveHlsSnapshotOutcome::Stopped(intent)) => return Ok(Some(intent)),
+            Ok(LiveHlsSnapshotOutcome::RetryScheduled | LiveHlsSnapshotOutcome::ContinuityLost) => {
+                tracing::debug!(
+                    "refreshed HLS video Pathway could not be committed; retaining current route"
+                );
+                steering.active_pathway_id = previous_pathway;
+                return Ok(None);
+            }
+            Err(error) => {
+                tracing::debug!(
+                    error = %error,
+                    "refreshed HLS video Pathway request failed; retaining current route"
+                );
+                steering.active_pathway_id = previous_pathway;
+                return Ok(None);
+            }
+        }
+    }
+
+    if let (Some(next), Some(current)) = (next_audio.as_ref(), audio.as_mut()) {
+        match apply_live_hls_snapshot(
+            client,
+            next,
+            current,
+            connections,
+            tx,
+            downloaded,
+            abort,
+            video.accumulator.resource_bytes(),
+        )
+        .await
+        {
+            Ok(LiveHlsSnapshotOutcome::Committed) => {
+                ensure_manifest_mux_spaces(
+                    staging_dir,
+                    destination_dir,
+                    downloaded.load(Ordering::Relaxed),
+                )?;
+            }
+            Ok(LiveHlsSnapshotOutcome::Stopped(intent)) => return Ok(Some(intent)),
+            Ok(LiveHlsSnapshotOutcome::RetryScheduled | LiveHlsSnapshotOutcome::ContinuityLost) => {
+                tracing::warn!(
+                    playlist = %diagnostic_url(&next.playlist_url),
+                    "HLS audio Pathway refresh could not be committed; preserving the existing audio route"
+                );
+                steering.active_pathway_id = previous_pathway;
+            }
+            Err(error) => {
+                tracing::warn!(
+                    playlist = %diagnostic_url(&next.playlist_url),
+                    error = %error,
+                    "HLS audio Pathway refresh failed; preserving the existing audio route"
+                );
+                steering.active_pathway_id = previous_pathway;
+            }
+        }
+    }
+
+    if let Some(audio) = audio.as_mut() {
+        apply_rendition_report(video, audio);
+        apply_rendition_report(audio, video);
+    }
+    Ok(None)
+}
+
+#[expect(
+    clippy::too_many_arguments,
+    reason = "coordinates tracks, paths, progress, guarded hosts, and the shared stop signal"
+)]
 pub(super) async fn run_live_hls_tracks(
     client: &reqwest::Client,
     source_url: &str,
+    source: &ManifestSource,
+    mut content_steering: Option<&mut HlsContentSteering>,
     destination_dir: &Path,
     destination: &Path,
     item_id: u64,
@@ -1189,12 +1506,16 @@ pub(super) async fn run_live_hls_tracks(
     }
 
     while !video.ended || audio.as_ref().is_some_and(|track| !track.ended) {
+        let steering_refresh_at = content_steering
+            .as_deref()
+            .and_then(|steering| steering.refresh_at);
         let next_poll = [
             (!video.ended).then_some(video.next_poll_at).flatten(),
             audio
                 .as_ref()
                 .filter(|track| !track.ended)
                 .and_then(|track| track.next_poll_at),
+            steering_refresh_at,
         ]
         .into_iter()
         .flatten()
@@ -1220,7 +1541,35 @@ pub(super) async fn run_live_hls_tracks(
         }
 
         let now = Instant::now();
-        if !video.ended && video.next_poll_at.is_some_and(|deadline| deadline <= now) {
+        if let Some(steering) = content_steering.as_deref_mut()
+            && steering.refresh_at.is_some_and(|deadline| deadline <= now)
+            && let Some(intent) = refresh_live_hls_pathway(
+                client,
+                source_url,
+                source,
+                steering,
+                &mut video,
+                &mut audio,
+                connections,
+                staging_dir,
+                destination_dir,
+                tx,
+                downloaded,
+                guarded_child_hosts,
+                abort,
+            )
+            .await?
+        {
+            return Ok(LiveHlsCapture::new(
+                match intent {
+                    crate::video::StopIntent::Pause => LiveHlsCaptureOutcome::Paused,
+                    crate::video::StopIntent::Finish => LiveHlsCaptureOutcome::Finish,
+                    crate::video::StopIntent::Discard => LiveHlsCaptureOutcome::Discard,
+                },
+                output,
+            ));
+        }
+        if !video.ended && video.next_poll_at.is_some_and(|deadline| deadline <= Instant::now()) {
             match poll_live_hls_track(
                 client,
                 source_url,

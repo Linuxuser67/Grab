@@ -5,7 +5,7 @@ use sha2::{Digest, Sha256};
 use url::Url;
 
 use crate::manifest::{
-    HlsAudioRendition, HlsPlan, HlsSubtitleRendition, HlsVariant,
+    HlsAudioRendition, HlsContentSteering, HlsPlan, HlsSubtitleRendition, HlsVariant,
     dash::{DashPresentation, DashRepresentationPlan},
 };
 use crate::manifest_types::{
@@ -23,6 +23,7 @@ pub(crate) struct HlsMasterDownloadPlan {
     pub(crate) subtitle_url: Option<Url>,
     pub(crate) subtitle_language: Option<String>,
     pub(crate) inherited_variables: Box<[(String, String)]>,
+    pub(crate) content_steering: Option<HlsContentSteering>,
 }
 
 #[derive(Debug)]
@@ -522,6 +523,7 @@ pub(crate) fn download_plan(
                             })
                     }),
                     inherited_variables: master.inherited_variables.clone(),
+                    content_steering: master.content_steering.clone(),
                 },
             )))
         }
@@ -674,6 +676,7 @@ fn hls_variant_content_key(variant: &HlsVariant) -> String {
                     .to_bits()
                     .to_le_bytes(),
                 variant.codecs.as_deref().unwrap_or_default().as_bytes(),
+                variant.video_range.as_deref().unwrap_or_default().as_bytes(),
                 variant
                     .audio_group
                     .as_deref()
@@ -700,6 +703,7 @@ fn hls_variant_content_key(variant: &HlsVariant) -> String {
                 .to_bits()
                 .to_le_bytes(),
             variant.codecs.as_deref().unwrap_or_default().as_bytes(),
+            variant.video_range.as_deref().unwrap_or_default().as_bytes(),
             variant
                 .audio_group
                 .as_deref()

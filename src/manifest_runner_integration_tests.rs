@@ -226,6 +226,251 @@ fn ffprobe_stream_start_times(ffprobe: &Path, path: &Path) -> HashMap<String, f6
         .collect()
 }
 
+fn ffmpeg_encoder_available(encoder: &str) -> bool {
+    let Ok(output) = Command::new("ffmpeg")
+        .args(["-hide_banner", "-encoders"])
+        .output()
+    else {
+        return false;
+    };
+    if !output.status.success() {
+        return false;
+    }
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    stdout
+        .lines()
+        .chain(stderr.lines())
+        .any(|line| line.split_whitespace().nth(1) == Some(encoder))
+}
+
+#[test]
+fn mainstream_apple_hls_profiles_remux_with_stream_copy() {
+    if !tools_available() {
+        return;
+    }
+
+    struct Profile {
+        name: &'static str,
+        video_encoder: &'static str,
+        video_codec: &'static str,
+        video_tag: &'static str,
+        pixel_format: &'static str,
+        audio_encoder: &'static str,
+        audio_codec: &'static str,
+        audio_tag: &'static str,
+        audio_channels: &'static str,
+        color_transfer: Option<&'static str>,
+    }
+
+    let profiles = [
+        Profile {
+            name: "avc-aac-sdr",
+            video_encoder: "libx264",
+            video_codec: "h264",
+            video_tag: "avc1",
+            pixel_format: "yuv420p",
+            audio_encoder: "aac",
+            audio_codec: "aac",
+            audio_tag: "mp4a",
+            audio_channels: "2",
+            color_transfer: None,
+        },
+        Profile {
+            name: "hevc-eac3-pq",
+            video_encoder: "libx265",
+            video_codec: "hevc",
+            video_tag: "hvc1",
+            pixel_format: "yuv420p10le",
+            audio_encoder: "eac3",
+            audio_codec: "eac3",
+            audio_tag: "ec-3",
+            audio_channels: "6",
+            color_transfer: Some("smpte2084"),
+        },
+        Profile {
+            name: "avc-ac3-sdr-fallback",
+            video_encoder: "libx264",
+            video_codec: "h264",
+            video_tag: "avc1",
+            pixel_format: "yuv420p",
+            audio_encoder: "ac3",
+            audio_codec: "ac3",
+            audio_tag: "ac-3",
+            audio_channels: "6",
+            color_transfer: None,
+        },
+    ];
+
+    let root = TempRoot::new("apple-hls-profiles");
+    for profile in profiles {
+        if !ffmpeg_encoder_available(profile.video_encoder)
+            || !ffmpeg_encoder_available(profile.audio_encoder)
+        {
+            eprintln!(
+                "SKIP Apple HLS profile {}: FFmpeg encoder {} or {} is unavailable",
+                profile.name, profile.video_encoder, profile.audio_encoder
+            );
+            continue;
+        }
+
+        let playlist_name = format!("{}.m3u8", profile.name);
+        let segment_pattern = format!("{}_%03d.m4s", profile.name);
+        let init_name = format!("{}_init.mp4", profile.name);
+        let mut encode = Command::new("ffmpeg");
+        encode
+            .current_dir(root.path())
+            .args([
+                "-hide_banner",
+                "-loglevel",
+                "error",
+                "-y",
+                "-f",
+                "lavfi",
+                "-i",
+                "testsrc2=size=160x90:rate=24",
+                "-f",
+                "lavfi",
+                "-i",
+                "sine=frequency=1000:sample_rate=48000",
+                "-t",
+                "2",
+                "-threads",
+                "1",
+                "-c:v",
+                profile.video_encoder,
+                "-pix_fmt",
+                profile.pixel_format,
+                "-tag:v",
+                profile.video_tag,
+                "-c:a",
+                profile.audio_encoder,
+                "-b:a",
+                "384k",
+                "-ac",
+                profile.audio_channels,
+                "-tag:a",
+                profile.audio_tag,
+                "-color_primaries",
+            ])
+            .arg(if profile.color_transfer.is_some() {
+                "bt2020"
+            } else {
+                "bt709"
+            })
+            .arg("-color_trc")
+            .arg(profile.color_transfer.unwrap_or("bt709"))
+            .arg("-colorspace")
+            .arg(if profile.color_transfer.is_some() {
+                "bt2020nc"
+            } else {
+                "bt709"
+            });
+        if profile.video_encoder == "libx265" {
+            encode.args([
+                "-x265-params",
+                "colorprim=9:transfer=16:colormatrix=9:log-level=error:pools=1",
+            ]);
+        }
+        let encoded = encode
+            .args([
+                "-f",
+                "hls",
+                "-hls_time",
+                "1",
+                "-hls_playlist_type",
+                "vod",
+                "-hls_segment_type",
+                "fmp4",
+                "-hls_fmp4_init_filename",
+                &init_name,
+                "-hls_segment_filename",
+                &segment_pattern,
+                "-hls_flags",
+                "independent_segments",
+                &playlist_name,
+            ])
+            .output()
+            .expect("run FFmpeg to generate an Apple-profile fMP4 HLS fixture");
+        assert_command_succeeded(&encoded, &format!("{} HLS fixture generation", profile.name));
+
+        let playlist_path = root.path().join(&playlist_name);
+        let playlist = std::fs::read(&playlist_path).expect("read generated HLS playlist");
+        let plan = crate::manifest::plan_hls_media_playlist(
+            &format!("https://fixture.example.test/{playlist_name}"),
+            &playlist,
+        )
+        .expect("generated fMP4 HLS playlist should be accepted by the native planner");
+        assert!(
+            plan.is_single_init_fmp4_presentation(),
+            "{} should use one fMP4 initialization section",
+            profile.name
+        );
+
+        let output_path = root.path().join(format!("{}-copy.mp4", profile.name));
+        let remuxed = Command::new("ffmpeg")
+            .args([
+                "-hide_banner",
+                "-loglevel",
+                "error",
+                "-y",
+                "-allowed_extensions",
+                "ALL",
+                "-i",
+            ])
+            .arg(&playlist_path)
+            .args([
+                "-map",
+                "0:v:0",
+                "-map",
+                "0:a:0",
+                "-c",
+                "copy",
+                "-movflags",
+                "+faststart",
+            ])
+            .arg(&output_path)
+            .output()
+            .expect("run FFmpeg stream-copy remux for Apple HLS fixture");
+        assert_command_succeeded(&remuxed, &format!("{} stream-copy remux", profile.name));
+
+        let probed = Command::new("ffprobe")
+            .args([
+                "-v",
+                "error",
+                "-show_entries",
+                "stream=codec_type,codec_name,codec_tag_string,color_transfer,channels",
+                "-of",
+                "default=noprint_wrappers=1",
+            ])
+            .arg(&output_path)
+            .output()
+            .expect("run ffprobe on Apple HLS remux");
+        assert_command_succeeded(&probed, &format!("{} ffprobe", profile.name));
+        let stream_info = String::from_utf8_lossy(&probed.stdout);
+        for expected in [
+            format!("codec_name={}", profile.video_codec),
+            format!("codec_tag_string={}", profile.video_tag),
+            format!("codec_name={}", profile.audio_codec),
+            format!("codec_tag_string={}", profile.audio_tag),
+            format!("channels={}", profile.audio_channels),
+        ] {
+            assert!(
+                stream_info.contains(&expected),
+                "{} is missing {expected}: {stream_info}",
+                profile.name
+            );
+        }
+        if let Some(expected_transfer) = profile.color_transfer {
+            assert!(
+                stream_info.contains(&format!("color_transfer={expected_transfer}")),
+                "{} lost HDR transfer metadata: {stream_info}",
+                profile.name
+            );
+        }
+    }
+}
+
 #[tokio::test]
 async fn hls_separate_inputs_preserve_rendition_timestamp_offsets() {
     if !tools_available() {

@@ -4,7 +4,7 @@
 //! body into validated remote resources and a local playlist description.
 
 use std::collections::{HashMap, HashSet};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use m3u8_rs::{AlternativeMediaType, KeyMethod, MediaPlaylist, MediaPlaylistType, Playlist};
 use sha2::{Digest, Sha256};
@@ -301,6 +301,8 @@ pub(crate) struct HlsVariant {
     pub(crate) width: Option<u64>,
     pub(crate) height: Option<u64>,
     pub(crate) codecs: Option<String>,
+    /// Apple HLS VIDEO-RANGE metadata (SDR, HLG or PQ).
+    pub(crate) video_range: Option<String>,
     pub(crate) frame_rate: Option<f64>,
     pub(crate) audio_group: Option<String>,
     pub(crate) subtitles_group: Option<String>,
@@ -351,10 +353,40 @@ pub(crate) struct HlsSubtitleRendition {
 }
 
 /// A Content Steering declaration resolved against the master playlist URL.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq)]
 pub(crate) struct HlsContentSteering {
+    /// Effective multivariant playlist URL, including its final redirect and query.
+    pub(crate) master_url: Option<Url>,
+    /// Whether this attempt uses an upstream proxy that bypasses local DNS guards.
+    pub(crate) proxy_configured: bool,
+    /// Initial SERVER-URI advertised by the multivariant playlist.
     pub(crate) server_url: Url,
+    /// URI used for the next steering refresh, updated by RELOAD-URI.
+    pub(crate) reload_url: Url,
     pub(crate) initial_pathway_id: Option<String>,
+    /// Current applied pathway sent as _HLS_pathway on refresh requests.
+    pub(crate) active_pathway_id: Option<String>,
+    pub(crate) ttl: Duration,
+    pub(crate) refresh_at: Option<Instant>,
+    /// Unfiltered master playlist, without Content Steering state, used to
+    /// apply each new clone set without retaining stale clones.
+    pub(crate) base_master: Option<Box<HlsMasterPlan>>,
+}
+
+impl HlsContentSteering {
+    pub(crate) fn new(server_url: Url, initial_pathway_id: Option<String>) -> Self {
+        Self {
+            master_url: None,
+            proxy_configured: false,
+            reload_url: server_url.clone(),
+            server_url,
+            active_pathway_id: initial_pathway_id.clone(),
+            initial_pathway_id,
+            ttl: Duration::ZERO,
+            refresh_at: None,
+            base_master: None,
+        }
+    }
 }
 
 /// Master-playlist choices in manifest order; no variant is silently selected.
@@ -388,6 +420,52 @@ pub(crate) struct HlsPlan {
 }
 
 impl HlsPlan {
+    /// Trim a refreshed non-LL-HLS playlist to the next uncommitted sequence.
+    ///
+    /// Content Steering may move a live rendition to a CDN whose segment URIs
+    /// differ from the previous pathway. Only the already-committed prefix is
+    /// discarded; the new pathway must still advertise the exact next sequence.
+    ///
+    /// # Errors
+    /// Returns an error for LL-HLS, ended playlists, or a missing next sequence.
+    pub(crate) fn trim_live_snapshot_to_sequence(
+        &mut self,
+        next_sequence: u64,
+    ) -> Result<(), ManifestError> {
+        if self.ll_unit_ids.is_some() || !self.is_live || self.end_list {
+            return Err(ManifestError::LiveSequenceGap);
+        }
+        let first_sequence = self.local_playlist.media_sequence;
+        let skipped = next_sequence
+            .checked_sub(first_sequence)
+            .and_then(|count| usize::try_from(count).ok())
+            .ok_or(ManifestError::LiveSequenceGap)?;
+        if skipped >= self.local_playlist.segments.len()
+            || self.local_playlist.segments[..skipped]
+                .iter()
+                .any(|segment| segment.discontinuity)
+        {
+            return Err(ManifestError::LiveSequenceGap);
+        }
+        self.local_playlist.segments.drain(..skipped);
+        self.local_playlist.media_sequence = next_sequence;
+
+        let mut retained_resources = HashSet::new();
+        for segment in &self.local_playlist.segments {
+            retained_resources.extend(
+                segment_resource_filenames(segment).map(str::to_string),
+            );
+        }
+        self.resources = self
+            .resources
+            .iter()
+            .filter(|resource| retained_resources.contains(&resource.filename))
+            .cloned()
+            .collect::<Vec<_>>()
+            .into_boxed_slice();
+        Ok(())
+    }
+
     /// Confirmed LL-HLS part resources without an EXT-X-MAP initialization section.
     ///
     /// These are only valid for MPEG-TS parts; the runner validates their bytes
@@ -1075,6 +1153,23 @@ impl HlsLiveAccumulator {
         self.segment_identities.len()
     }
 
+    /// Sequence number expected from the next live media segment.
+    #[must_use]
+    pub(crate) fn next_sequence(&self) -> Option<u64> {
+        self.next_sequence
+    }
+
+    /// Whether a candidate playlist retains the committed discontinuity timeline.
+    #[must_use]
+    pub(crate) fn pathway_switch_preserves_discontinuity_sequence(
+        &self,
+        snapshot: &HlsPlan,
+    ) -> bool {
+        self.local_playlist.as_ref().is_some_and(|playlist| {
+            playlist.discontinuity_sequence == snapshot.local_playlist.discontinuity_sequence
+        })
+    }
+
     /// Last committed LL-HLS media unit, if this is a part-aware recording.
     #[must_use]
     pub(crate) fn last_ll_unit(&self) -> Option<&hls_ll::HlsLiveUnitId> {
@@ -1196,10 +1291,10 @@ fn parse_hls_content_steering(
         return Err(ManifestError::UnsupportedPlaylist);
     }
     let server_url = resolve_resource_url(base_url, &steering.server_uri)?;
-    Ok(Some(HlsContentSteering {
+    Ok(Some(HlsContentSteering::new(
         server_url,
-        initial_pathway_id: steering.pathway_id,
-    }))
+        steering.pathway_id,
+    )))
 }
 
 /// Validate rendition-group rules needed for deterministic language and track selection.
@@ -1376,6 +1471,17 @@ pub(crate) fn parse_hls_master_playlist(
                 .and_then(|attributes| attributes.get("STABLE-VARIANT-ID"))
                 .map(|value| value.as_str().to_string())
                 .filter(|value| !value.is_empty());
+            let video_range = variant
+                .other_attributes
+                .as_ref()
+                .and_then(|attributes| attributes.get("VIDEO-RANGE"))
+                .map(|value| value.as_str().to_string());
+            if video_range
+                .as_deref()
+                .is_some_and(|range| !matches!(range, "SDR" | "HLG" | "PQ"))
+            {
+                return Err(ManifestError::UnsupportedPlaylist);
+            }
             let pathway_id = variant
                 .other_attributes
                 .as_ref()
@@ -1393,6 +1499,7 @@ pub(crate) fn parse_hls_master_playlist(
                     width,
                     height,
                     codecs: variant.codecs,
+                    video_range: video_range.clone(),
                     frame_rate: variant.frame_rate,
                     audio_group: variant.audio,
                     subtitles_group: variant.subtitles,
@@ -1459,6 +1566,7 @@ pub(crate) fn parse_hls_master_playlist(
                     width,
                     height,
                     codecs: variant.codecs.clone(),
+                    video_range: video_range.clone(),
                     frame_rate: variant.frame_rate,
                     audio_group: variant.audio.clone(),
                     subtitles_group: variant.subtitles.clone(),
@@ -2204,6 +2312,37 @@ mod tests {
     }
 
     #[test]
+    fn content_steering_snapshot_trims_committed_prefix_to_next_sequence() {
+        let body = b"#EXTM3U\n#EXT-X-TARGETDURATION:4\n#EXT-X-MEDIA-SEQUENCE:40\n#EXTINF:4,\nsegment-40.ts\n#EXTINF:4,\nsegment-41.ts\n#EXTINF:4,\nsegment-42.ts\n";
+        let mut plan = plan_hls_media_playlist(BASE_URL, body)
+            .expect("ordinary live playlist should be accepted");
+        assert!(plan.is_live);
+        plan.trim_live_snapshot_to_sequence(41)
+            .expect("next sequence must remain available");
+        assert_eq!(plan.local_playlist.media_sequence, 41);
+        assert_eq!(plan.local_playlist.segments.len(), 2);
+        assert_eq!(plan.resources.len(), 2);
+
+        let mut missing_next = plan_hls_media_playlist(BASE_URL, body)
+            .expect("ordinary live playlist should be accepted");
+        assert_eq!(
+            missing_next.trim_live_snapshot_to_sequence(44),
+            Err(ManifestError::LiveSequenceGap)
+        );
+    }
+
+    #[test]
+    fn content_steering_snapshot_does_not_trim_away_discontinuity_markers() {
+        let body = b"#EXTM3U\n#EXT-X-TARGETDURATION:4\n#EXT-X-MEDIA-SEQUENCE:40\n#EXT-X-DISCONTINUITY\n#EXTINF:4,\nsegment-40.ts\n#EXTINF:4,\nsegment-41.ts\n";
+        let mut plan = plan_hls_media_playlist(BASE_URL, body)
+            .expect("ordinary live playlist with a discontinuity should be accepted");
+        assert_eq!(
+            plan.trim_live_snapshot_to_sequence(41),
+            Err(ManifestError::LiveSequenceGap)
+        );
+    }
+
+    #[test]
     fn plain_mpegts_presentation_excludes_non_concatenable_hls_features() {
         let plain = br#"#EXTM3U
 #EXT-X-VERSION:3
@@ -2545,6 +2684,44 @@ video.m3u8
             Some(
                 "public.accessibility.transcribes-spoken-dialog,public.accessibility.describes-music-and-sound"
             )
+        );
+    }
+
+    #[test]
+    fn master_playlist_preserves_mainstream_apple_codec_and_video_range_metadata() {
+        let body = br#"#EXTM3U
+#EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID="stereo",NAME="English stereo",CHANNELS="2",DEFAULT=YES,AUTOSELECT=YES,URI="audio/aac.m3u8"
+#EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID="surround",NAME="English surround",CHANNELS="6",DEFAULT=YES,AUTOSELECT=YES,URI="audio/eac3.m3u8"
+#EXT-X-STREAM-INF:BANDWIDTH=5000000,RESOLUTION=1920x1080,CODECS="avc1.640028,mp4a.40.2",AUDIO="stereo",VIDEO-RANGE=SDR
+avc-aac.m3u8
+#EXT-X-STREAM-INF:BANDWIDTH=12000000,RESOLUTION=3840x2160,CODECS="hvc1.2.4.L150.B0,ec-3",AUDIO="surround",VIDEO-RANGE=PQ
+hevc-eac3-pq.m3u8
+#EXT-X-STREAM-INF:BANDWIDTH=10000000,RESOLUTION=3840x2160,CODECS="hvc1.2.4.L120.B0,ac-3",AUDIO="surround",VIDEO-RANGE=HLG
+hevc-ac3-hlg.m3u8
+"#;
+        let master = parse_hls_master_playlist(BASE_URL, body)
+            .expect("mainstream Apple HLS variants should remain selectable");
+
+        assert_eq!(master.variants.len(), 3);
+        assert_eq!(master.variants[0].codecs.as_deref(), Some("avc1.640028,mp4a.40.2"));
+        assert_eq!(master.variants[0].video_range.as_deref(), Some("SDR"));
+        assert_eq!(master.variants[1].codecs.as_deref(), Some("hvc1.2.4.L150.B0,ec-3"));
+        assert_eq!(master.variants[1].video_range.as_deref(), Some("PQ"));
+        assert_eq!(master.variants[2].codecs.as_deref(), Some("hvc1.2.4.L120.B0,ac-3"));
+        assert_eq!(master.variants[2].video_range.as_deref(), Some("HLG"));
+        assert_eq!(master.audio_renditions[0].channels.as_deref(), Some("2"));
+        assert_eq!(master.audio_renditions[1].channels.as_deref(), Some("6"));
+    }
+
+    #[test]
+    fn unsupported_hls_video_range_falls_back() {
+        let body = br#"#EXTM3U
+#EXT-X-STREAM-INF:BANDWIDTH=1000000,CODECS="avc1.640028,mp4a.40.2",VIDEO-RANGE=UNKNOWN
+video.m3u8
+"#;
+        assert_eq!(
+            parse_hls_master_playlist(BASE_URL, body).err(),
+            Some(ManifestError::UnsupportedPlaylist)
         );
     }
 

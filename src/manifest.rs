@@ -234,9 +234,14 @@ fn resource_url_identity(url: &Url, preserve_query: bool) -> Url {
         return stable_url;
     }
 
+    let compact_signature = has_compact_signature_query(&stable_url);
     let query_pairs: Vec<(String, String)> = stable_url
         .query_pairs()
-        .filter(|(name, _)| !is_rotating_signature_parameter(name))
+        .filter(|(name, _)| {
+            !is_rotating_signature_parameter(name)
+                && !(compact_signature
+                    && matches!(name.to_ascii_lowercase().as_str(), "t" | "s" | "e"))
+        })
         .map(|(name, value)| (name.into_owned(), value.into_owned()))
         .collect();
     stable_url.set_query(None);
@@ -244,6 +249,19 @@ fn resource_url_identity(url: &Url, preserve_query: bool) -> Url {
         stable_url.query_pairs_mut().extend_pairs(query_pairs);
     }
     stable_url
+}
+
+fn has_compact_signature_query(url: &Url) -> bool {
+    let (mut has_t, mut has_s, mut has_e) = (false, false, false);
+    for (name, _) in url.query_pairs() {
+        match name.to_ascii_lowercase().as_str() {
+            "t" => has_t = true,
+            "s" => has_s = true,
+            "e" => has_e = true,
+            _ => {}
+        }
+    }
+    has_t && has_s && has_e
 }
 
 fn is_rotating_signature_parameter(name: &str) -> bool {
@@ -1740,8 +1758,7 @@ fn build_hls_plan(base_url: Url, mut playlist: MediaPlaylist) -> Result<HlsPlan,
             // only when the source URL and range can be parsed safely.
             previous_segment_range = match segment.byte_range.as_ref() {
                 Some(byte_range) if byte_range.length > 0 => {
-                    let resource_url = base_url
-                        .join(&segment.uri)
+                    let resource_url = resolve_hls_media_resource_url(&base_url, &segment.uri)
                         .ok()
                         .map(|url| resource_cache_key(&url));
                     resource_url.and_then(|resource_url| {
@@ -1766,7 +1783,7 @@ fn build_hls_plan(base_url: Url, mut playlist: MediaPlaylist) -> Result<HlsPlan,
             pending_discontinuity = false;
         }
 
-        let segment_url = resolve_resource_url(&base_url, &segment.uri)?;
+        let segment_url = resolve_hls_media_resource_url(&base_url, &segment.uri)?;
         let range = match segment.byte_range.as_ref() {
             Some(byte_range) => {
                 let resource_url = resource_cache_key(&segment_url);
@@ -1805,7 +1822,7 @@ fn build_hls_plan(base_url: Url, mut playlist: MediaPlaylist) -> Result<HlsPlan,
         }
 
         if let Some(map) = segment.map.as_mut() {
-            let map_url = resolve_resource_url(&base_url, &map.uri)?;
+            let map_url = resolve_hls_media_resource_url(&base_url, &map.uri)?;
             let map_range = map
                 .byte_range
                 .as_ref()
@@ -1868,7 +1885,7 @@ fn build_hls_plan(base_url: Url, mut playlist: MediaPlaylist) -> Result<HlsPlan,
                     .uri
                     .as_deref()
                     .ok_or(ManifestError::UnsupportedEncryption)?;
-                let key_url = resolve_resource_url(&base_url, key_uri)?;
+                let key_url = resolve_hls_media_resource_url(&base_url, key_uri)?;
                 let key_url_string = key_url.as_str().to_string();
                 let filename = match key_filenames.get(&key_url_string) {
                     Some(existing) => existing.clone(),
@@ -2000,6 +2017,58 @@ fn resolve_resource_url(base_url: &Url, raw: &str) -> Result<Url, ManifestError>
     if !is_valid_https_resource_url(&url) {
         return Err(ManifestError::UnsupportedResourceUrl);
     }
+    Ok(url)
+}
+
+/// Inherit missing query parameters from a playlist URL without forwarding
+/// credentials across origins or rewriting the source's encoded query bytes.
+pub(crate) fn inherit_query_parameters_same_origin(parent_url: &Url, target_url: &mut Url) {
+    if parent_url.origin() != target_url.origin() {
+        return;
+    }
+    let Some(parent_query) = parent_url.query().filter(|query| !query.is_empty()) else {
+        return;
+    };
+
+    let child_names = target_url
+        .query()
+        .unwrap_or_default()
+        .split('&')
+        .filter_map(raw_query_parameter_name)
+        .collect::<HashSet<_>>();
+    let inherited = parent_query
+        .split('&')
+        .filter(|pair| !pair.is_empty())
+        .filter(|pair| {
+            raw_query_parameter_name(pair).is_some_and(|name| !child_names.contains(&name))
+        })
+        .collect::<Vec<_>>();
+    if inherited.is_empty() {
+        return;
+    }
+
+    let child_query = target_url.query().unwrap_or_default();
+    let combined = if child_query.is_empty() {
+        inherited.join("&")
+    } else {
+        format!("{child_query}&{}", inherited.join("&"))
+    };
+    target_url.set_query(Some(&combined));
+}
+
+fn raw_query_parameter_name(pair: &str) -> Option<String> {
+    let raw_name = pair.split_once('=').map_or(pair, |(name, _)| name);
+    percent_encoding::percent_decode_str(raw_name)
+        .decode_utf8()
+        .ok()
+        .map(|name| name.into_owned())
+}
+
+/// Resolve a media-playlist resource and retain the playlist's same-origin
+/// authorization query when the resource URI is relative or query-incomplete.
+fn resolve_hls_media_resource_url(base_url: &Url, raw: &str) -> Result<Url, ManifestError> {
+    let mut url = resolve_resource_url(base_url, raw)?;
+    inherit_query_parameters_same_origin(base_url, &mut url);
     Ok(url)
 }
 
@@ -3580,6 +3649,89 @@ one.ts
     }
 
     #[test]
+    fn same_origin_query_inheritance_preserves_encoding_and_child_overrides() {
+        let parent = Url::parse(
+            "https://cdn.example.test/master.m3u8?t=opaque&s=parent%2Fsignature&e=86400",
+        )
+        .expect("signed parent URL");
+        let mut child =
+            Url::parse("https://cdn.example.test/video/index.m3u8?quality=1080&s=child-signature")
+                .expect("child URL");
+        inherit_query_parameters_same_origin(&parent, &mut child);
+        assert_eq!(
+            child.query(),
+            Some("quality=1080&s=child-signature&t=opaque&e=86400"),
+            "parent query octets are preserved and explicit child values win"
+        );
+
+        let mut other_origin =
+            Url::parse("https://media.example.test/video/index.m3u8").expect("off-origin child");
+        inherit_query_parameters_same_origin(&parent, &mut other_origin);
+        assert_eq!(other_origin.query(), None);
+    }
+
+    #[test]
+    fn hls_media_resources_inherit_signed_query_for_segments_maps_and_keys() {
+        let parent =
+            "https://cdn.example.test/video/index.m3u8?t=parent-token&s=parent%2Fsignature&e=86400";
+        let body = br#"#EXTM3U
+#EXT-X-VERSION:6
+#EXT-X-TARGETDURATION:4
+#EXT-X-MAP:URI="init.mp4"
+#EXT-X-KEY:METHOD=AES-128,URI="key.bin",IV=0x00000000000000000000000000000001
+#EXTINF:4,
+segment.ts?quality=1080&t=child-token
+#EXT-X-ENDLIST
+"#;
+        let plan = plan_hls_media_playlist(parent, body).expect("signed media playlist");
+        let segment = plan
+            .resources
+            .iter()
+            .find(|resource| resource.kind == HlsResourceKind::Segment)
+            .expect("segment resource");
+        assert_eq!(
+            segment
+                .url
+                .query_pairs()
+                .find(|(name, _)| name == "t")
+                .map(|(_, value)| value.into_owned())
+                .as_deref(),
+            Some("child-token")
+        );
+        assert_eq!(
+            segment
+                .url
+                .query_pairs()
+                .find(|(name, _)| name == "s")
+                .map(|(_, value)| value.into_owned())
+                .as_deref(),
+            Some("parent/signature")
+        );
+        assert_eq!(
+            segment
+                .url
+                .query_pairs()
+                .find(|(name, _)| name == "e")
+                .map(|(_, value)| value.into_owned())
+                .as_deref(),
+            Some("86400")
+        );
+
+        for kind in [HlsResourceKind::InitMap, HlsResourceKind::Key] {
+            let resource = plan
+                .resources
+                .iter()
+                .find(|resource| resource.kind == kind)
+                .expect("init-map or key resource");
+            assert!(resource.url.query().is_some_and(|query| {
+                query.contains("t=parent-token")
+                    && query.contains("s=parent%2Fsignature")
+                    && query.contains("e=86400")
+            }));
+        }
+    }
+
+    #[test]
     fn media_resource_cache_reuses_bytes_after_signature_rotation() {
         let first =
             Url::parse("https://cdn.example.test/seg/1.m4s?quality=1080&sig=old&expires=100")
@@ -3590,7 +3742,20 @@ one.ts
         let different_variant =
             Url::parse("https://cdn.example.test/seg/1.m4s?quality=720&sig=new&expires=200")
                 .expect("different representation URL");
+        let compact_first = Url::parse(
+            "https://cdn.example.test/seg/1.m4s?quality=1080&t=old&s=old-signature&e=100",
+        )
+        .expect("first compact-token resource URL");
+        let compact_refreshed = Url::parse(
+            "https://cdn.example.test/seg/1.m4s?quality=1080&e=200&s=new-signature&t=new",
+        )
+        .expect("refreshed compact-token resource URL");
 
+        assert_eq!(
+            resource_filename("segment", Some(1), &compact_first, None),
+            resource_filename("segment", Some(1), &compact_refreshed, None),
+            "compact rotating auth tuples must not invalidate completed media resources",
+        );
         assert_eq!(
             resource_filename("segment", Some(1), &first, None),
             resource_filename("segment", Some(1), &refreshed, None),

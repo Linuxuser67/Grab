@@ -410,7 +410,7 @@ fn build_plan(
                 ));
             }
             let _duration = checked_duration(segment.duration.get(), source_target_duration)?;
-            let url = resolve_resource_url(&base_url, &segment.uri)?;
+            let url = resolve_hls_media_resource_url(&base_url, &segment.uri)?;
             let _range = plan_range(segment.byte_range.as_ref(), &url, &mut previous_range)?;
             pending_discontinuity |= segment.discontinuous;
             continue;
@@ -425,7 +425,7 @@ fn build_plan(
         )?;
         if segment.parts.is_empty() {
             let duration = checked_duration(segment.duration.get(), source_target_duration)?;
-            let url = resolve_resource_url(&base_url, &segment.uri)?;
+            let url = resolve_hls_media_resource_url(&base_url, &segment.uri)?;
             let range = plan_range(segment.byte_range.as_ref(), &url, &mut previous_range)?;
             let filename = ll_resource_filename(media_sequence, None, &url, range);
             resources.push(HlsResource {
@@ -609,7 +609,7 @@ fn append_part_units(
         }
         validate_part(part)?;
         let duration = checked_duration(part.duration.get(), source_target_duration)?;
-        let url = resolve_resource_url(base_url, &part.uri)?;
+        let url = resolve_hls_media_resource_url(base_url, &part.uri)?;
         let range = plan_range(part.byte_range.as_ref(), &url, previous_range)?;
         let filename = ll_resource_filename(media_sequence, Some(part_index), &url, range);
         resources.push(HlsResource {
@@ -648,7 +648,7 @@ fn parse_rendition_reports(
                 return Err(ManifestError::UnsupportedPlaylist);
             }
             Ok(HlsRenditionReport {
-                playlist_url: resolve_resource_url(base_url, &report.uri)?,
+                playlist_url: resolve_hls_media_resource_url(base_url, &report.uri)?,
                 last_msn: report.last_msn,
                 last_part: report.last_part,
             })
@@ -800,7 +800,7 @@ fn plan_map(
     {
         return Err(ManifestError::UnsupportedPlaylist);
     }
-    let url = resolve_resource_url(base_url, &map.uri)?;
+    let url = resolve_hls_media_resource_url(base_url, &map.uri)?;
     let range = map
         .byte_range
         .as_ref()

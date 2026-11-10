@@ -231,8 +231,66 @@ pub(crate) fn plan_hls_media_playlist(
     let playlist = LlMediaPlaylist::parse(text).map_err(|error| {
         ManifestError::Parse(format!("could not parse LL-HLS playlist: {error}"))
     })?;
+    // broadcast-hls 0.4 retains segment-scoped tags verbatim. Reuse the
+    // already-pinned m3u8-rs parser for RFC 3339 validation and its typed PDT
+    // value when a completed parent segment carries a wall-clock anchor.
+    let source_segments = if playlist.segments.iter().any(|segment| {
+        segment
+            .pre_tags
+            .iter()
+            .any(|tag| tag.starts_with("#EXT-X-PROGRAM-DATE-TIME:"))
+    }) {
+        let parsed = m3u8_rs::parse_media_playlist_res(body)
+            .map_err(|error| hls_parse_error(body, error))?;
+        if parsed.segments.len() != playlist.segments.len() {
+            return Err(ManifestError::UnsupportedPlaylist);
+        }
+        Some(parsed.segments)
+    } else {
+        None
+    };
     let open_segment_discontinuity = has_trailing_open_discontinuity(body);
-    build_plan(manifest_url, playlist, open_segment_discontinuity).map(Some)
+    build_plan(
+        manifest_url,
+        playlist,
+        open_segment_discontinuity,
+        source_segments.as_deref(),
+    )
+    .map(Some)
+}
+
+fn open_segment_program_date_time(
+    open: &broadcast_hls::OpenSegment,
+) -> Result<Option<m3u8_rs::MediaSegment>, ManifestError> {
+    let mut date_tags = open
+        .pre_tags
+        .iter()
+        .filter(|tag| tag.starts_with("#EXT-X-PROGRAM-DATE-TIME:"));
+    let Some(tag) = date_tags.next() else {
+        return Ok(None);
+    };
+    if date_tags.next().is_some()
+        || tag.len() > 128
+        || tag.contains('\\r')
+        || tag.contains('\\n')
+    {
+        return Err(ManifestError::UnsupportedPlaylist);
+    }
+
+    let probe = format!(
+        "#EXTM3U\\n#EXT-X-TARGETDURATION:1\\n{tag}\\n#EXTINF:1,\\nopen-ll-hls-pdt-probe.ts\\n#EXT-X-ENDLIST\\n"
+    );
+    let parsed = m3u8_rs::parse_media_playlist_res(probe.as_bytes())
+        .map_err(|error| hls_parse_error(probe.as_bytes(), error))?;
+    let segment = parsed
+        .segments
+        .into_iter()
+        .next()
+        .ok_or(ManifestError::UnsupportedPlaylist)?;
+    if segment.program_date_time.is_none() {
+        return Err(ManifestError::UnsupportedPlaylist);
+    }
+    Ok(Some(segment))
 }
 
 fn has_trailing_open_discontinuity(body: &[u8]) -> bool {
@@ -257,6 +315,7 @@ fn build_plan(
     manifest_url: &str,
     playlist: LlMediaPlaylist,
     open_segment_discontinuity: bool,
+    source_segments: Option<&[m3u8_rs::MediaSegment]>,
 ) -> Result<HlsPlan, ManifestError> {
     let base_url = parse_manifest_url(manifest_url)?;
     let source_target_duration = u64::from(playlist.target_duration);
@@ -335,7 +394,10 @@ fn build_plan(
             .part_hold_back
             .ok_or(ManifestError::InvalidDuration)?
             .get();
-        if !part_hold_back.is_finite() || part_hold_back < 2.0 * part_target.as_secs_f64() {
+        // Apple's HLS authoring profile requires PART-HOLD-BACK to be at
+        // least three Part Targets. The two-times protocol floor alone is
+        // insufficient for the Apple-profile LL-HLS path.
+        if !part_hold_back.is_finite() || part_hold_back < 3.0 * part_target.as_secs_f64() {
             return Err(ManifestError::InvalidDuration);
         }
     }
@@ -390,6 +452,9 @@ fn build_plan(
 
     let mut pending_discontinuity = false;
     for (segment_index, segment) in playlist.segments.iter().enumerate() {
+        let program_date_time = source_segments
+            .and_then(|segments| segments.get(segment_index))
+            .and_then(|source| source.program_date_time.clone());
         let offset = u64::try_from(segment_index).map_err(|_| ManifestError::DurationOverflow)?;
         let media_sequence = first_visible_sequence
             .checked_add(offset)
@@ -438,6 +503,7 @@ fn build_plan(
                 duration: duration.as_secs_f64() as f32,
                 discontinuity,
                 map,
+                program_date_time,
                 ..Default::default()
             });
             unit_ids.push(HlsLiveUnitId::Segment(media_sequence));
@@ -455,6 +521,7 @@ fn build_plan(
         if (parts_duration - parent_duration.as_secs_f64()).abs() > 0.02 {
             return Err(ManifestError::LivePartDurationMismatch);
         }
+        let first_part_position = local_segments.len();
         append_part_units(
             &base_url,
             media_sequence,
@@ -469,6 +536,9 @@ fn build_plan(
             &mut local_segments,
             &mut unit_ids,
         )?;
+        if let Some(program_date_time) = program_date_time {
+            local_segments[first_part_position].program_date_time = Some(program_date_time);
+        }
     }
 
     if let Some(open) = playlist.open_segment.as_ref() {
@@ -487,6 +557,9 @@ fn build_plan(
             &mut map_filenames,
         )?;
         let discontinuity = open_segment_discontinuity;
+        let open_date_time = open_segment_program_date_time(open)?
+            .and_then(|segment| segment.program_date_time);
+        let first_part_position = local_segments.len();
         append_part_units(
             &base_url,
             media_sequence,
@@ -501,6 +574,9 @@ fn build_plan(
             &mut local_segments,
             &mut unit_ids,
         )?;
+        if let Some(program_date_time) = open_date_time {
+            local_segments[first_part_position].program_date_time = Some(program_date_time);
+        }
     }
 
     if local_segments.is_empty()
@@ -665,6 +741,22 @@ fn low_latency_can_skip_until(playlist: &LlMediaPlaylist) -> Option<Duration> {
 }
 
 fn validate_playlist_tags(playlist: &LlMediaPlaylist) -> Result<(), ManifestError> {
+    if playlist
+        .extra_tags
+        .iter()
+        .any(|tag| tag.starts_with("#EXT-X-PROGRAM-DATE-TIME:"))
+    {
+        return Err(ManifestError::UnsupportedPlaylist);
+    }
+    if playlist.segments.iter().any(|segment| {
+        let mut tags = segment
+            .pre_tags
+            .iter()
+            .filter(|tag| tag.starts_with("#EXT-X-PROGRAM-DATE-TIME:"));
+        tags.next().is_some() && tags.next().is_some()
+    }) {
+        return Err(ManifestError::UnsupportedPlaylist);
+    }
     for tag in playlist.extra_tags.iter().chain(
         playlist
             .segments
@@ -1075,31 +1167,47 @@ mod tests {
     }
 
     #[test]
-    fn accepts_the_mandatory_two_part_target_hold_back() {
+    fn requires_at_least_three_part_target_hold_back() {
         let body = br#"#EXTM3U
 #EXT-X-TARGETDURATION:2
 #EXT-X-MEDIA-SEQUENCE:10
-#EXT-X-SERVER-CONTROL:CAN-BLOCK-RELOAD=NO,PART-HOLD-BACK=1.0
+#EXT-X-SERVER-CONTROL:CAN-BLOCK-RELOAD=NO,PART-HOLD-BACK=1.5
 #EXT-X-PART-INF:PART-TARGET=0.5
 #EXT-X-PART:DURATION=0.5,URI="10.0.m4s",INDEPENDENT=YES
 "#;
         assert!(
             plan_hls_media_playlist(BASE, body).is_ok(),
-            "the mandatory two-times Part Target floor is valid"
+            "Apple's three-times Part Target floor is valid"
         );
         let below_floor = body
-            .windows(b"PART-HOLD-BACK=1.0".len())
-            .position(|window| window == b"PART-HOLD-BACK=1.0")
+            .windows(b"PART-HOLD-BACK=1.5".len())
+            .position(|window| window == b"PART-HOLD-BACK=1.5")
             .map(|offset| {
                 let mut invalid = body.to_vec();
                 invalid.splice(
-                    offset..offset + b"PART-HOLD-BACK=1.0".len(),
-                    b"PART-HOLD-BACK=0.999".iter().copied(),
+                    offset..offset + b"PART-HOLD-BACK=1.5".len(),
+                    b"PART-HOLD-BACK=1.499".iter().copied(),
                 );
                 invalid
             })
             .expect("fixture contains PART-HOLD-BACK");
         assert!(plan_hls_media_playlist(BASE, &below_floor).is_err());
+        let protocol_only_floor = body
+            .windows(b"PART-HOLD-BACK=1.5".len())
+            .position(|window| window == b"PART-HOLD-BACK=1.5")
+            .map(|offset| {
+                let mut invalid = body.to_vec();
+                invalid.splice(
+                    offset..offset + b"PART-HOLD-BACK=1.5".len(),
+                    b"PART-HOLD-BACK=1.0".iter().copied(),
+                );
+                invalid
+            })
+            .expect("fixture contains PART-HOLD-BACK");
+        assert!(
+            plan_hls_media_playlist(BASE, &protocol_only_floor).is_err(),
+            "the protocol-only two-times floor does not meet Apple's authoring profile"
+        );
     }
 
     #[test]
@@ -1108,7 +1216,7 @@ mod tests {
 #EXT-X-PLAYLIST-TYPE:VOD
 #EXT-X-TARGETDURATION:2
 #EXT-X-MEDIA-SEQUENCE:100
-#EXT-X-SERVER-CONTROL:CAN-BLOCK-RELOAD=NO,PART-HOLD-BACK=1.0
+#EXT-X-SERVER-CONTROL:CAN-BLOCK-RELOAD=NO,PART-HOLD-BACK=1.5
 #EXT-X-PART-INF:PART-TARGET=0.5
 #EXT-X-PART:DURATION=0.5,URI="100.0.ts",INDEPENDENT=YES
 #EXT-X-PART:DURATION=0.5,URI="100.1.ts"
@@ -1133,7 +1241,7 @@ mod tests {
 #EXT-X-VERSION:9
 #EXT-X-TARGETDURATION:2
 #EXT-X-MEDIA-SEQUENCE:10
-#EXT-X-SERVER-CONTROL:CAN-BLOCK-RELOAD=NO,PART-HOLD-BACK=1.0
+#EXT-X-SERVER-CONTROL:CAN-BLOCK-RELOAD=NO,PART-HOLD-BACK=1.5
 #EXT-X-PART-INF:PART-TARGET=0.5
 #EXT-X-PART:DURATION=0.5,URI="10.0.ts",INDEPENDENT=YES
 #EXT-X-PART:DURATION=0.5,URI="10.1.ts"
@@ -1196,12 +1304,95 @@ mod tests {
     }
 
     #[test]
+    fn preserves_program_date_time_on_complete_ll_hls_segments() {
+        let body = br#"#EXTM3U
+#EXT-X-TARGETDURATION:2
+#EXT-X-MEDIA-SEQUENCE:30
+#EXT-X-SERVER-CONTROL:CAN-BLOCK-RELOAD=NO
+#EXT-X-PROGRAM-DATE-TIME:2026-11-10T10:00:00.000Z
+#EXTINF:1.0,
+30.m4s
+"#;
+        let plan = plan_hls_media_playlist(BASE, body)
+            .expect("LL-HLS plan")
+            .expect("LL-HLS detected");
+        let local = m3u8_rs::parse_media_playlist_res(
+            &plan.local_playlist_bytes().expect("serialize local playlist"),
+        )
+        .expect("local LL-HLS playlist parses");
+        assert!(local.segments[0].program_date_time.is_some());
+    }
+
+    #[test]
+    fn preserves_program_date_time_on_the_first_part_of_a_completed_parent() {
+        let body = br#"#EXTM3U
+#EXT-X-TARGETDURATION:2
+#EXT-X-MEDIA-SEQUENCE:40
+#EXT-X-MAP:URI="init.mp4"
+#EXT-X-SERVER-CONTROL:CAN-BLOCK-RELOAD=NO,PART-HOLD-BACK=1.5
+#EXT-X-PART-INF:PART-TARGET=0.5
+#EXT-X-PROGRAM-DATE-TIME:2026-11-10T10:00:00.000Z
+#EXT-X-PART:DURATION=0.5,URI="40.0.m4s",INDEPENDENT=YES
+#EXT-X-PART:DURATION=0.5,URI="40.1.m4s"
+#EXTINF:1.0,
+40.m4s
+"#;
+        let plan = plan_hls_media_playlist(BASE, body)
+            .expect("LL-HLS plan")
+            .expect("LL-HLS detected");
+        let local = m3u8_rs::parse_media_playlist_res(
+            &plan.local_playlist_bytes().expect("serialize local playlist"),
+        )
+        .expect("local LL-HLS playlist parses");
+        assert_eq!(local.segments.len(), 2);
+        assert!(local.segments[0].program_date_time.is_some());
+        assert!(local.segments[1].program_date_time.is_none());
+    }
+
+    #[test]
+    fn preserves_program_date_time_on_open_ll_hls_parts() {
+        let body = br#"#EXTM3U
+#EXT-X-TARGETDURATION:2
+#EXT-X-MEDIA-SEQUENCE:50
+#EXT-X-MAP:URI="init.mp4"
+#EXT-X-SERVER-CONTROL:CAN-BLOCK-RELOAD=NO,PART-HOLD-BACK=1.5
+#EXT-X-PART-INF:PART-TARGET=0.5
+#EXTINF:1.0,
+50.m4s
+#EXT-X-PROGRAM-DATE-TIME:2026-11-10T10:00:01.000Z
+#EXT-X-PART:DURATION=0.5,URI="51.0.m4s",INDEPENDENT=YES
+"#;
+        let plan = plan_hls_media_playlist(BASE, body)
+            .expect("LL-HLS plan")
+            .expect("LL-HLS detected");
+        let local = m3u8_rs::parse_media_playlist_res(
+            &plan.local_playlist_bytes().expect("serialize local playlist"),
+        )
+        .expect("local LL-HLS playlist parses");
+        assert_eq!(local.segments.len(), 2);
+        assert!(local.segments[1].program_date_time.is_some());
+    }
+
+    #[test]
+    fn malformed_program_date_time_falls_back_instead_of_being_discarded() {
+        let body = br#"#EXTM3U
+#EXT-X-TARGETDURATION:2
+#EXT-X-MEDIA-SEQUENCE:60
+#EXT-X-SERVER-CONTROL:CAN-BLOCK-RELOAD=NO
+#EXT-X-PROGRAM-DATE-TIME:not-a-date
+#EXTINF:1.0,
+60.m4s
+"#;
+        assert!(plan_hls_media_playlist(BASE, body).is_err());
+    }
+
+    #[test]
     fn ext_x_start_required_attributes_remain_unsupported() {
         let body = br#"#EXTM3U
 #EXT-X-TARGETDURATION:2
 #EXT-X-MEDIA-SEQUENCE:7
 #EXT-X-MAP:URI="init.mp4"
-#EXT-X-SERVER-CONTROL:CAN-BLOCK-RELOAD=NO,PART-HOLD-BACK=1.0
+#EXT-X-SERVER-CONTROL:CAN-BLOCK-RELOAD=NO,PART-HOLD-BACK=1.5
 #EXT-X-PART-INF:PART-TARGET=0.5
 #EXT-X-START:TIME-OFFSET=1.0,REQ-FOO="bar"
 #EXT-X-PART:DURATION=0.5,URI="7.0.m4s",INDEPENDENT=YES

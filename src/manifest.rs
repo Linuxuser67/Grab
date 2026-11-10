@@ -1123,7 +1123,7 @@ fn hls_segment_identity(segment: &m3u8_rs::MediaSegment) -> String {
             )
         })
         .unwrap_or_default();
-    format!(
+    let identity = format!(
         "{}|{}|{}|{}|{}|{}",
         segment.uri,
         segment.duration.to_bits(),
@@ -1131,7 +1131,12 @@ fn hls_segment_identity(segment: &m3u8_rs::MediaSegment) -> String {
         segment.discontinuity,
         map_uri,
         key_identity
-    )
+    );
+    if let Some(program_date_time) = segment.program_date_time.as_ref() {
+        format!("{identity}|{}", program_date_time.to_rfc3339())
+    } else {
+        identity
+    }
 }
 
 /// A Pathway ID is a non-empty ASCII token from the Content Steering alphabet.

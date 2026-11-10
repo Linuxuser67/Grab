@@ -2399,7 +2399,7 @@ video/1080.m3u8
             r#"REQ-UNSUPPORTED-FEATURE="value""#,
         ] {
             let body = format!(
-                "#EXTM3U\\n#EXT-X-STREAM-INF:BANDWIDTH=1000000,{attribute}\\nvideo.m3u8\\n"
+                "#EXTM3U\n#EXT-X-STREAM-INF:BANDWIDTH=1000000,{attribute}\nvideo.m3u8\n"
             );
             assert_eq!(
                 parse_hls_master_playlist(BASE_URL, body.as_bytes()).err(),

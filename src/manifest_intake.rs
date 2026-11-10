@@ -4118,7 +4118,7 @@ video/b.m3u8
         .expect("relative reload URI");
         assert_eq!(
             next.as_str(),
-            "https://steering.example.test/next.json?version=2"
+            "https://steering.example.test/next.json?version=2&token=rotated"
         );
     }
 

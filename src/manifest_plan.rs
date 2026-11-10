@@ -5,7 +5,7 @@ use sha2::{Digest, Sha256};
 use url::Url;
 
 use crate::manifest::{
-    HlsAudioRendition, HlsPlan, HlsSubtitleRendition, HlsVariant,
+    HlsAudioRendition, HlsContentSteering, HlsPlan, HlsSubtitleRendition, HlsVariant,
     dash::{DashPresentation, DashRepresentationPlan},
 };
 use crate::manifest_types::{
@@ -23,6 +23,7 @@ pub(crate) struct HlsMasterDownloadPlan {
     pub(crate) subtitle_url: Option<Url>,
     pub(crate) subtitle_language: Option<String>,
     pub(crate) inherited_variables: Box<[(String, String)]>,
+    pub(crate) content_steering: Option<HlsContentSteering>,
 }
 
 #[derive(Debug)]
@@ -522,6 +523,7 @@ pub(crate) fn download_plan(
                             })
                     }),
                     inherited_variables: master.inherited_variables.clone(),
+                    content_steering: master.content_steering.clone(),
                 },
             )))
         }
@@ -675,6 +677,11 @@ fn hls_variant_content_key(variant: &HlsVariant) -> String {
                     .to_le_bytes(),
                 variant.codecs.as_deref().unwrap_or_default().as_bytes(),
                 variant
+                    .video_range
+                    .as_deref()
+                    .unwrap_or_default()
+                    .as_bytes(),
+                variant
                     .audio_group
                     .as_deref()
                     .unwrap_or_default()
@@ -700,6 +707,11 @@ fn hls_variant_content_key(variant: &HlsVariant) -> String {
                 .to_bits()
                 .to_le_bytes(),
             variant.codecs.as_deref().unwrap_or_default().as_bytes(),
+            variant
+                .video_range
+                .as_deref()
+                .unwrap_or_default()
+                .as_bytes(),
             variant
                 .audio_group
                 .as_deref()
@@ -947,7 +959,7 @@ fn hls_audio_rendition_label(rendition: &HlsAudioRendition) -> String {
 
 #[must_use]
 pub(crate) fn hls_variant_key(variant: &HlsVariant) -> Option<String> {
-    if let Some(group_id) = variant.video_rendition_group.as_deref() {
+    if variant.video_rendition_group.is_some() {
         if let (Some(variant_id), Some(rendition_id)) = (
             variant.stable_variant_id.as_deref(),
             variant.stable_video_rendition_id.as_deref(),
@@ -955,11 +967,7 @@ pub(crate) fn hls_variant_key(variant: &HlsVariant) -> Option<String> {
             return Some(derived_hls_track_key(
                 "hls-variant-",
                 b"variant-video-rendition",
-                &[
-                    variant_id.as_bytes(),
-                    group_id.as_bytes(),
-                    rendition_id.as_bytes(),
-                ],
+                &[variant_id.as_bytes(), rendition_id.as_bytes()],
             ));
         }
         return Some(hls_variant_content_key(variant));

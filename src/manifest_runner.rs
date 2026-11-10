@@ -18,7 +18,8 @@ use url::Url;
 use crate::content_range::{ParsedContentRange, parse_content_range};
 use crate::engine_msg::EngineMsg;
 use crate::manifest::{
-    HlsLiveAccumulator, HlsPlan, HlsResource, HlsResourceKind, ManifestByteRange,
+    HlsContentSteering, HlsLiveAccumulator, HlsPlan, HlsResource, HlsResourceKind,
+    ManifestByteRange,
     dash::{
         DashPresentation, DashRepresentationPlan, DashResource, DashResourceKind,
         DashSegmentBaseIndex, DashSidxEntry, MAX_DASH_SIDX_SEGMENTS, dash_sidx_media_resource,
@@ -330,6 +331,7 @@ enum Tracks {
         audio: Option<Box<HlsPlan>>,
         subtitle: Option<Box<HlsPlan>>,
         subtitle_language: Option<String>,
+        content_steering: Option<Box<HlsContentSteering>>,
     },
     Dash {
         video: Box<DashRepresentationPlan>,
@@ -1141,6 +1143,8 @@ struct ManifestLiveHlsFinalization<'a> {
     finish_only: bool,
     video: &'a HlsPlan,
     audio: Option<&'a HlsPlan>,
+    source: &'a ManifestSource,
+    content_steering: Option<&'a mut HlsContentSteering>,
     video_dir: &'a Path,
     audio_dir: &'a Path,
     concurrency: usize,
@@ -1286,6 +1290,8 @@ async fn prepare_live_hls_finalization(
         finish_only,
         video,
         audio,
+        source,
+        content_steering,
         video_dir,
         audio_dir,
         concurrency,
@@ -1299,6 +1305,8 @@ async fn prepare_live_hls_finalization(
     let capture = run_live_hls_tracks(
         client,
         source_url,
+        source,
+        content_steering,
         dest_dir,
         destination,
         item_id,
@@ -1583,7 +1591,7 @@ pub(crate) async fn run_manifest_download(
         video_dir,
         audio_dir,
         client,
-        tracks,
+        mut tracks,
         mut guarded_child_hosts,
         mut has_audio,
         live_hls,
@@ -1596,7 +1604,13 @@ pub(crate) async fn run_manifest_download(
     let static_destination_parts = !live_hls && !live_dash && tracks.uses_destination_parts();
     let mut live_destination_parts = live_dash;
     if live_hls {
-        let Tracks::Hls { video, audio, .. } = &tracks else {
+        let Tracks::Hls {
+            video,
+            audio,
+            content_steering,
+            ..
+        } = &mut tracks
+        else {
             return Err(ManifestRunError::Failed(
                 "Live HLS capture requires HLS media tracks".to_string(),
             ));
@@ -1611,6 +1625,8 @@ pub(crate) async fn run_manifest_download(
             finish_only: finish_requested,
             video: video.as_ref(),
             audio: audio.as_deref(),
+            source: &job.source,
+            content_steering: content_steering.as_deref_mut(),
             video_dir: &video_dir,
             audio_dir: &audio_dir,
             concurrency,
@@ -2105,6 +2121,7 @@ async fn resolve_tracks(
                 audio: None,
                 subtitle: None,
                 subtitle_language: None,
+                content_steering: None,
             })
         }
         ManifestDownloadPlan::HlsMaster(plan) => {
@@ -2114,6 +2131,7 @@ async fn resolve_tracks(
                 subtitle_url,
                 subtitle_language,
                 inherited_variables,
+                content_steering,
             } = *plan;
             guard_manifest_child_url(&source.url, &video_url, guarded_child_hosts)?;
             if let Some(audio_url) = audio_url.as_ref() {
@@ -2170,6 +2188,7 @@ async fn resolve_tracks(
                 audio: audio.map(Box::new),
                 subtitle,
                 subtitle_language,
+                content_steering: content_steering.map(Box::new),
             })
         }
         ManifestDownloadPlan::Dash {

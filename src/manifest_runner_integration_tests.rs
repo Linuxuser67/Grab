@@ -227,7 +227,7 @@ fn ffprobe_stream_start_times(ffprobe: &Path, path: &Path) -> HashMap<String, f6
 }
 
 #[tokio::test]
-async fn hls_master_input_preserves_separate_rendition_timestamp_offsets() {
+async fn hls_separate_inputs_preserve_rendition_timestamp_offsets() {
     if !tools_available() {
         return;
     }
@@ -306,23 +306,31 @@ async fn hls_master_input_preserves_separate_rendition_timestamp_offsets() {
         );
     }
 
-    let master = write_local_hls_master_playlist(root.path())
-        .await
-        .expect("write the combined local HLS master playlist");
+    // Separate playlist inputs must retain the original rendition PTS clock.
+    // Without -copyts FFmpeg rebases each HLS input independently.
+    let video_playlist = video_dir.join("local.m3u8");
+    let audio_playlist = audio_dir.join("local.m3u8");
     let output = root.path().join("rendition-sync.part.mp4");
     let (_stop_tx, mut abort) = tokio::sync::oneshot::channel();
     assert!(
-        run_ffmpeg(
+        run_ffmpeg_with_offsets(
             Path::new("ffmpeg"),
-            &master,
-            None,
+            FfmpegInput {
+                path: &video_playlist,
+                timestamp_offset: None,
+            },
+            Some(FfmpegInput {
+                path: &audio_playlist,
+                timestamp_offset: None,
+            }),
+            true,
             SubtitleOutput::default(),
             &output,
             &mut abort,
         )
         .await
-        .expect("finalize synchronized HLS renditions"),
-        "FFmpeg unexpectedly aborted the HLS rendition finalization"
+        .expect("finalize separate HLS renditions with source timestamps"),
+        "FFmpeg unexpectedly aborted separate HLS rendition finalization"
     );
 
     let starts = ffprobe_stream_start_times(Path::new("ffprobe"), &output);

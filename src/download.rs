@@ -4596,15 +4596,27 @@ impl DownloadManager {
                                 // Set detail BEFORE status: the status notify
                                 // fires synchronously and opens the dialog,
                                 // which reads the detail (same as Err below).
-                                let done =
-                                    crate::gallery_runner::done_count(r.files.len(), r.skipped);
+                                let done = crate::gallery_runner::done_count(
+                                    r.files_completed,
+                                    r.skipped,
+                                );
                                 let detail = if r.exit_code.is_some() {
                                     "Gallery \u{2022} some failed".to_string()
                                 } else {
                                     "Gallery".to_string()
                                 };
                                 item_c.set_gallery_files_done(done);
-                                item_c.set_progress(1.0);
+                                let progress = if r.exit_code.is_some() {
+                                    crate::gallery_progress::progress_fraction(
+                                        done,
+                                        None,
+                                        item_c.gallery_file_count(),
+                                    )
+                                    .unwrap_or_else(|| item_c.progress())
+                                } else {
+                                    1.0
+                                };
+                                item_c.set_progress(progress);
                                 item_c.set_detail(detail);
                                 // Partial failure (exit_code.is_some()) is marked
                                 // Failed so it's retryable via retry_failed().
@@ -4623,7 +4635,7 @@ impl DownloadManager {
                                     item_c.set_status(DownloadStatus::Done);
                                 }
                                 tracing::info!(
-                                    files = r.files.len(),
+                                    files = r.files_completed,
                                     skipped = r.skipped,
                                     "gallery download complete"
                                 );

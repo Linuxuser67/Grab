@@ -17,19 +17,19 @@ use crate::video_spawn::ProcessGroupGuard;
 /// Outcome of a gallery download.
 #[derive(Debug)]
 pub struct GalleryResult {
-    /// Full paths of downloaded files (in completion order).
-    pub files: Vec<PathBuf>,
+    /// Number of files completed by gallery-dl.
+    pub files_completed: u32,
     /// Files skipped (already existed).
     pub skipped: u32,
-    /// gallery-dl exit code, if it exited non-zero but produced files.
+    /// gallery-dl exit code, if it exited non-zero after partial success.
     /// `None` means clean success.
     pub exit_code: Option<i32>,
 }
 
 /// Total files handled (downloaded + skipped), for internal progress bookkeeping.
 /// Skipped files were already on disk from a previous run.
-pub fn done_count(files: usize, skipped: u32) -> u32 {
-    files as u32 + skipped
+pub fn done_count(files_completed: u32, skipped: u32) -> u32 {
+    files_completed.saturating_add(skipped)
 }
 
 #[cfg(test)]
@@ -204,7 +204,6 @@ pub async fn run_gallery_download_with_proxy(
     let mut diagnostic_lines = Vec::<String>::new();
 
     let mut progress = GalleryProgress::new();
-    let mut files = Vec::new();
     let mut last_completed: Option<String> = None;
 
     let mut process_line = |line: String| {
@@ -233,9 +232,7 @@ pub async fn run_gallery_download_with_proxy(
                 if let ProgressLine::Completed(path) = &event {
                     last_completed = Some(path.clone());
                 }
-                if let Some(path) = progress.feed(event.clone()) {
-                    files.push(PathBuf::from(path));
-                }
+                let _ = progress.feed(event.clone());
                 on_progress(GalleryProgressUpdate {
                     files_done: progress.files_done(),
                     current_file_percent: progress.current_file_percent,
@@ -295,9 +292,9 @@ pub async fn run_gallery_download_with_proxy(
         tracing::warn!(stderr = %redact_query_tokens(&stderr_tail), "gallery-dl stderr tail");
         // Partial success: files were downloaded/skipped before the failure.
         // Return Ok with the exit code so the row shows Done with a warning.
-        if !files.is_empty() || progress.files_skipped > 0 {
+        if progress.files_completed > 0 || progress.files_skipped > 0 {
             return Ok(GalleryResult {
-                files,
+                files_completed: progress.files_completed,
                 skipped: progress.files_skipped,
                 exit_code: code,
             });
@@ -323,28 +320,28 @@ pub async fn run_gallery_download_with_proxy(
     }
 
     // Classify the result: clean exit with zero files is a visible failure.
-    let files =
-        classify_result(files, progress.files_skipped, None).map_err(GalleryError::runtime)?;
+    classify_result(progress.files_completed, progress.files_skipped, None)
+        .map_err(GalleryError::runtime)?;
 
     Ok(GalleryResult {
-        files,
+        files_completed: progress.files_completed,
         skipped: progress.files_skipped,
         exit_code: None,
     })
 }
 
 /// Classify a gallery-dl run result for the UI.
-/// Returns the user-facing outcome: Ok(files) for success, Err(msg) for failure.
+/// A non-clean exit with completed or skipped files remains a partial success.
 pub(crate) fn classify_result(
-    files: Vec<PathBuf>,
+    files_completed: u32,
     skipped: u32,
     exit_code: Option<i32>,
-) -> Result<Vec<PathBuf>, String> {
+) -> Result<(), String> {
     // Clean exit with zero files and zero skipped: visible failure, not Done.
-    if exit_code.is_none() && files.is_empty() && skipped == 0 {
+    if exit_code.is_none() && files_completed == 0 && skipped == 0 {
         return Err("gallery-dl found no files (check login or filter)".to_string());
     }
-    Ok(files)
+    Ok(())
 }
 
 /// Speed limit for gallery downloads, from settings.
@@ -362,27 +359,25 @@ mod tests {
     fn classify_result_clean_no_files_is_failure() {
         // Clean exit (None), zero files, zero skipped: visible failure.
         // Mutation: return Ok → assertion on Err fails.
-        let err = classify_result(vec![], 0, None).unwrap_err();
+        let err = classify_result(0, 0, None).unwrap_err();
         assert_eq!(err, "gallery-dl found no files (check login or filter)");
     }
 
     #[test]
     fn classify_result_with_files_is_ok() {
-        let files = vec![PathBuf::from("/tmp/a.jpg")];
-        assert!(classify_result(files, 0, None).is_ok());
+        assert!(classify_result(1, 0, None).is_ok());
     }
 
     #[test]
     fn classify_result_skipped_only_is_ok() {
         // All skipped (not downloaded): not a failure, just nothing new.
-        assert!(classify_result(vec![], 3, None).is_ok());
+        assert!(classify_result(0, 3, None).is_ok());
     }
 
     #[test]
     fn classify_result_partial_with_exit_code_is_ok() {
         // Non-clean exit but files present: partial success (handled upstream).
-        let files = vec![PathBuf::from("/tmp/a.jpg")];
-        assert!(classify_result(files, 0, Some(4)).is_ok());
+        assert!(classify_result(1, 0, Some(4)).is_ok());
     }
 
     #[cfg(unix)]

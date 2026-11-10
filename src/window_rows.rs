@@ -798,12 +798,25 @@ pub(crate) fn build_download_group_row(
     let members = Rc::new(RefCell::new(Vec::new()));
     let progress = gtk4::ProgressBar::new();
     progress.set_show_text(false);
-    progress.set_size_request(112, -1);
+    progress.set_size_request(-1, -1);
+    progress.set_hexpand(true);
+    progress.set_halign(gtk4::Align::Fill);
     progress.set_valign(gtk4::Align::Center);
     progress.set_visible(false);
     progress.update_property(&[gtk4::accessible::Property::Label(&gettext(
         "Collection progress",
     ))]);
+    // A collapsed collection shows its aggregate progress like a regular
+    // download row. Once expanded, the child rows provide detailed progress,
+    // so keep the header bar compact beside the collection actions.
+    {
+        let progress = progress.clone();
+        row.connect_expanded_notify(move |row| {
+            let expanded = row.is_expanded();
+            progress.set_hexpand(!expanded);
+            progress.set_size_request(if expanded { 112 } else { -1 }, -1);
+        });
+    }
     let open_folder_btn = icon_button("folder-open-symbolic", &gettext("Open Collection Folder"));
     {
         let ids = Rc::clone(&members);

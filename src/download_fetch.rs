@@ -1467,7 +1467,9 @@ mod destination_ownership_tests {
             let (mut first, _) = listener.accept().await.expect("first request");
             read_request(&mut first).await;
             first
-                .write_all(b"HTTP/1.1 503 Service Unavailable\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
+                .write_all(
+                    b"HTTP/1.1 503 Service Unavailable\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+                )
                 .await
                 .expect("write first response");
             drop(first);
@@ -1480,14 +1482,20 @@ mod destination_ownership_tests {
             {
                 read_request(&mut second).await;
                 second
-                    .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 13\r\nConnection: close\r\n\r\nreplacement!!")
+                    .write_all(
+                        b"HTTP/1.1 200 OK\r\nContent-Length: 13\r\nConnection: close\r\n\r\nreplacement!!",
+                    )
                     .await
                     .expect("write second response");
             }
         });
 
         let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
-        let context = test_context(format!("http://{address}/download.bin"), destination.clone(), tx);
+        let context = test_context(
+            format!("http://{address}/download.bin"),
+            destination.clone(),
+            tx,
+        );
         let mut tries = 3;
         let mut expected_identity: Option<FileIdentity> = None;
         single_loop(&context, &mut tries, None, &mut expected_identity).await;
@@ -1495,7 +1503,10 @@ mod destination_ownership_tests {
 
         let bytes = tokio::fs::read(&destination).await.expect("read destination");
         assert_eq!(bytes, b"foreign sentinel");
-        assert!(expected_identity.is_none(), "a failed pre-open attempt must not acquire ownership");
+        assert!(
+            expected_identity.is_none(),
+            "a failed pre-open attempt must not acquire ownership"
+        );
     }
 
     #[tokio::test]
@@ -1524,7 +1535,10 @@ mod destination_ownership_tests {
 
         let mut expected_identity = Some(expected);
         let result = ensure_sized(&destination, 1024, &mut expected_identity).await;
-        assert!(result.is_err(), "a replacement inode must not be adopted or resized");
+        assert!(
+            result.is_err(),
+            "a replacement inode must not be adopted or resized"
+        );
         assert_eq!(
             tokio::fs::read(&destination).await.expect("read replacement"),
             b"foreign sentinel"
@@ -1539,7 +1553,11 @@ mod destination_ownership_tests {
             .await
             .expect("write foreign file");
         let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
-        let context = test_context("http://127.0.0.1:1/download.bin".to_string(), destination.clone(), tx);
+        let context = test_context(
+            "http://127.0.0.1:1/download.bin".to_string(),
+            destination.clone(),
+            tx,
+        );
         let mut identity = None;
         let error = attempt_once(&context, None, &mut identity)
             .await

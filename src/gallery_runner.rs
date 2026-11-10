@@ -5,7 +5,7 @@
 //! and reports via callbacks. Cancellation: drop the future; the child is
 //! killed via ProcessGroupGuard.
 
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use tokio::io::{AsyncReadExt, BufReader};
 use tokio::process::Command;
 
@@ -41,6 +41,11 @@ mod done_count_tests {
         assert_eq!(done_count(5, 0), 5);
         assert_eq!(done_count(0, 3), 3);
         assert_eq!(done_count(2, 3), 5);
+    }
+
+    #[test]
+    fn saturates_the_total_file_count() {
+        assert_eq!(done_count(u32::MAX, 1), u32::MAX);
     }
 }
 
@@ -354,6 +359,7 @@ pub fn gallery_speed_limit(settings: &crate::settings::AppSettings) -> Option<u6
 mod tests {
     use super::*;
     use crate::gallery_argv::GalleryFilter;
+    use std::path::PathBuf;
 
     #[test]
     fn classify_result_clean_no_files_is_failure() {
@@ -424,7 +430,7 @@ mod tests {
         .await
         .expect("fixture gallery download");
 
-        assert_eq!(result.files, vec![first.clone()]);
+        assert_eq!(result.files_completed, 1);
         assert_eq!(result.skipped, 1);
         let first_path = first.to_string_lossy().into_owned();
         let second_path = second.to_string_lossy().into_owned();

@@ -263,6 +263,13 @@ fn build_plan(
     if source_target_duration == 0 || playlist.iframes_only {
         return Err(ManifestError::UnsupportedPlaylist);
     }
+    // VOD is immutable even when an origin omits the redundant ENDLIST marker.
+    // Keep LL-HLS VOD out of the live reload path, as with the standard planner.
+    let declared_vod = matches!(
+        playlist.playlist_type.as_ref(),
+        Some(broadcast_hls::PlaylistType::Vod)
+    );
+    let end_list = playlist.endlist || declared_vod;
     let skipped_segments = playlist
         .skip
         .as_ref()
@@ -284,14 +291,6 @@ fn build_plan(
             "#EXT-X-DEFINE variables must be expanded before LL-HLS planning".to_string(),
         ));
     }
-    if matches!(
-        playlist.playlist_type.as_ref(),
-        Some(broadcast_hls::PlaylistType::Vod)
-    ) && !playlist.endlist
-    {
-        return Err(ManifestError::UnsupportedPlaylist);
-    }
-
     let low_latency = playlist
         .low_latency
         .as_ref()
@@ -365,7 +364,7 @@ fn build_plan(
     }
 
     validate_playlist_tags(&playlist)?;
-    if playlist.endlist && playlist.open_segment.is_some() {
+    if end_list && playlist.open_segment.is_some() {
         return Err(ManifestError::UnsupportedPlaylist);
     }
     if playlist.segments.is_empty()
@@ -403,7 +402,7 @@ fn build_plan(
             // the source sequence and timestamp progression. A live snapshot
             // needs a persistent gap unit in the recovery journal, which the
             // current writer cannot represent safely.
-            if !playlist.endlist || !segment.parts.is_empty() {
+            if !end_list || !segment.parts.is_empty() {
                 return Err(ManifestError::UnsupportedPlaylistFeature(
                     "#EXT-X-GAP in a live or partial LL-HLS segment cannot be reconciled safely"
                         .to_string(),
@@ -506,7 +505,7 @@ fn build_plan(
 
     if local_segments.is_empty()
         || local_segments.len() > MAX_HLS_LIVE_UNITS
-        || (!playlist.endlist && !validate_live_unit_ids(&unit_ids))
+        || (!end_list && !validate_live_unit_ids(&unit_ids))
         || local_segments
             .iter()
             .any(|segment| !segment.duration.is_finite() || segment.duration <= 0.0)
@@ -514,7 +513,7 @@ fn build_plan(
         return Err(ManifestError::UnsupportedPlaylist);
     }
 
-    let blocking_reload = if !playlist.endlist && low_latency.can_block_reload {
+    let blocking_reload = if !end_list && low_latency.can_block_reload {
         let next_msn = first_visible_sequence
             .checked_add(
                 u64::try_from(playlist.segments.len())
@@ -551,8 +550,8 @@ fn build_plan(
     Ok(HlsPlan {
         resources: resources.into_boxed_slice(),
         playlist_url: base_url,
-        is_live: !playlist.endlist,
-        end_list: playlist.endlist,
+        is_live: !end_list,
+        end_list,
         source_target_duration,
         local_playlist,
         ll_unit_ids: Some(unit_ids.into_boxed_slice()),
@@ -1101,6 +1100,30 @@ mod tests {
             })
             .expect("fixture contains PART-HOLD-BACK");
         assert!(plan_hls_media_playlist(BASE, &below_floor).is_err());
+    }
+
+    #[test]
+    fn declared_vod_ll_hls_playlist_without_end_list_is_finite() {
+        let body = br#"#EXTM3U
+#EXT-X-PLAYLIST-TYPE:VOD
+#EXT-X-TARGETDURATION:2
+#EXT-X-MEDIA-SEQUENCE:100
+#EXT-X-SERVER-CONTROL:CAN-BLOCK-RELOAD=NO,PART-HOLD-BACK=1.0
+#EXT-X-PART-INF:PART-TARGET=0.5
+#EXT-X-PART:DURATION=0.5,URI="100.0.ts",INDEPENDENT=YES
+#EXT-X-PART:DURATION=0.5,URI="100.1.ts"
+#EXTINF:1.0,
+100.ts
+"#;
+        let plan = plan_hls_media_playlist(BASE, body)
+            .expect("declared LL-HLS VOD playlist")
+            .expect("LL-HLS planner should handle partial segments");
+
+        assert!(!plan.is_live);
+        assert!(plan.end_list);
+        assert_eq!(plan.blocking_reload, None);
+        assert_eq!(plan.resources.len(), 2);
+        assert_eq!(plan.ll_unit_ids.as_ref().map(|ids| ids.len()), Some(2));
     }
 
     #[test]

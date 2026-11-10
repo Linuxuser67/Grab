@@ -1576,8 +1576,12 @@ fn build_hls_plan(base_url: Url, mut playlist: MediaPlaylist) -> Result<HlsPlan,
             return Err(ManifestError::UnsupportedPlaylist);
         }
     }
-    let is_live = !playlist.end_list;
-    let end_list = playlist.end_list;
+    // A VOD playlist is immutable by definition. Some servers omit the
+    // redundant ENDLIST marker, but clients must not reload such playlists as
+    // live sources (RFC 8216, Sections 4.3.3.5 and 6.2.1).
+    let declared_vod = playlist.playlist_type == Some(MediaPlaylistType::Vod);
+    let end_list = playlist.end_list || declared_vod;
+    let is_live = !end_list;
     let source_target_duration = playlist.target_duration;
     if playlist.i_frames_only || source_target_duration == 0 {
         return Err(ManifestError::UnsupportedPlaylist);
@@ -1589,9 +1593,6 @@ fn build_hls_plan(base_url: Url, mut playlist: MediaPlaylist) -> Result<HlsPlan,
                 "#EXT-X-PLAYLIST-TYPE:{}",
                 value.escape_default()
             )));
-        }
-        Some(MediaPlaylistType::Vod) if is_live => {
-            return Err(ManifestError::UnsupportedPlaylist);
         }
         Some(MediaPlaylistType::Vod) | Some(MediaPlaylistType::Event) | None => {}
     }
@@ -2217,10 +2218,17 @@ segment-2.ts
 
         let vod_without_end_list =
             b"#EXTM3U\n#EXT-X-TARGETDURATION:4\n#EXT-X-PLAYLIST-TYPE:vod\n#EXTINF:4,\nsegment.ts\n";
-        assert_eq!(
-            plan_hls_media_playlist(BASE_URL, vod_without_end_list).err(),
-            Some(ManifestError::UnsupportedPlaylist)
-        );
+        let vod_plan = plan_hls_media_playlist(BASE_URL, vod_without_end_list)
+            .expect("declared VOD playlists are finite without ENDLIST");
+        assert!(!vod_plan.is_live);
+        assert!(vod_plan.end_list);
+
+        let event_without_end_list =
+            b"#EXTM3U\n#EXT-X-TARGETDURATION:4\n#EXT-X-PLAYLIST-TYPE:EVENT\n#EXTINF:4,\nsegment.ts\n";
+        let event_plan = plan_hls_media_playlist(BASE_URL, event_without_end_list)
+            .expect("EVENT playlists without ENDLIST remain live");
+        assert!(event_plan.is_live);
+        assert!(!event_plan.end_list);
 
         let body = b"#EXTM3U\n#EXT-X-TARGETDURATION:4\n#EXT-X-ALLOW-CACHE:NO\n#EXT-X-BITRATE:1200\n#EXTINF:4,\nsegment.ts\n#EXT-X-ENDLIST\n";
         let plan = plan_hls_media_playlist(BASE_URL, body)
@@ -3526,6 +3534,27 @@ video.m3u8
             plan.resources[0].url.as_str(),
             "https://cdn.example.test/path/video/one.ts"
         );
+    }
+
+    #[test]
+    fn declared_vod_playlist_without_end_list_is_finite() {
+        let body = b"#EXTM3U\n#EXT-X-TARGETDURATION:4\n#EXT-X-MEDIA-SEQUENCE:120\n#EXT-X-PLAYLIST-TYPE:VOD\n#EXTINF:4,\nsegment.ts\n";
+        let plan = plan_hls_media_playlist(BASE_URL, body)
+            .expect("an immutable VOD playlist is finite without ENDLIST");
+
+        assert!(!plan.is_live);
+        assert!(plan.end_list);
+        assert_eq!(plan.resources.len(), 1);
+        assert!(plan.is_plain_mpegts_presentation());
+
+        let local = m3u8_rs::parse_media_playlist_res(
+            &plan
+                .local_playlist_bytes()
+                .expect("serialize local VOD playlist"),
+        )
+        .expect("local VOD playlist should parse");
+        assert!(local.end_list);
+        assert_eq!(local.playlist_type, Some(MediaPlaylistType::Vod));
     }
 
     #[test]

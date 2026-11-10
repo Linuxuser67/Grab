@@ -4451,9 +4451,7 @@ mod tests {
 
     #[test]
     fn mux_failure_error_keeps_the_recent_ffmpeg_diagnostics() {
-        let error = mux_failure_error(
-            "first diagnostic\n\nsecond diagnostic\nthird diagnostic\n",
-        );
+        let error = mux_failure_error("first diagnostic\n\nsecond diagnostic\nthird diagnostic\n");
         assert_eq!(
             error.to_string(),
             "FFmpeg could not mux the stream:\nfirst diagnostic\nsecond diagnostic\nthird diagnostic"

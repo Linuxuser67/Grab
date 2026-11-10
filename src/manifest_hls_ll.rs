@@ -777,8 +777,25 @@ fn validate_playlist_tags(playlist: &LlMediaPlaylist) -> Result<(), ManifestErro
         if tag.starts_with("#EXT-X-KEY:") {
             return Err(ManifestError::UnsupportedEncryption);
         }
-        if tag.starts_with("#EXT-X-PROGRAM-DATE-TIME:")
-            || tag.starts_with("#EXT-X-ALLOW-CACHE:")
+        if tag.starts_with("#EXT-X-PROGRAM-DATE-TIME:") {
+            if tag.len() > 128 || tag.contains('\r') || tag.contains('\n') {
+                return Err(ManifestError::UnsupportedPlaylist);
+            }
+            let probe = format!(
+                "#EXTM3U\n#EXT-X-TARGETDURATION:1\n{tag}\n#EXTINF:1,\npdt-validation-probe.ts\n#EXT-X-ENDLIST\n"
+            );
+            let parsed = m3u8_rs::parse_media_playlist_res(probe.as_bytes())
+                .map_err(|error| hls_parse_error(probe.as_bytes(), error))?;
+            if parsed
+                .segments
+                .first()
+                .is_none_or(|segment| segment.program_date_time.is_none())
+            {
+                return Err(ManifestError::UnsupportedPlaylist);
+            }
+            continue;
+        }
+        if tag.starts_with("#EXT-X-ALLOW-CACHE:")
             || tag.starts_with("#EXT-X-BITRATE:")
         {
             continue;
@@ -1380,8 +1397,12 @@ mod tests {
         let body = br#"#EXTM3U
 #EXT-X-TARGETDURATION:2
 #EXT-X-MEDIA-SEQUENCE:60
-#EXT-X-SERVER-CONTROL:CAN-BLOCK-RELOAD=NO
+#EXT-X-MAP:URI="init.mp4"
+#EXT-X-SERVER-CONTROL:CAN-BLOCK-RELOAD=NO,PART-HOLD-BACK=1.5
+#EXT-X-PART-INF:PART-TARGET=0.5
 #EXT-X-PROGRAM-DATE-TIME:not-a-date
+#EXT-X-PART:DURATION=0.5,URI="60.0.m4s",INDEPENDENT=YES
+#EXT-X-PART:DURATION=0.5,URI="60.1.m4s"
 #EXTINF:1.0,
 60.m4s
 "#;

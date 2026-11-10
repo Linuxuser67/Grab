@@ -20,6 +20,7 @@ pub(crate) struct ManifestAudioChoice {
     pub(crate) key: ManifestAudioKey,
     pub(crate) label: String,
     pub(crate) is_default: bool,
+    pub(crate) is_autoselect: bool,
 }
 
 /// One selectable subtitle rendition associated with a selected video representation.
@@ -28,6 +29,8 @@ pub(crate) struct ManifestSubtitleChoice {
     pub(crate) key: ManifestSubtitleKey,
     pub(crate) language: Option<String>,
     pub(crate) is_default: bool,
+    pub(crate) is_autoselect: bool,
+    pub(crate) is_forced: bool,
 }
 
 /// Parsed native presentation, before the user's representation selection is applied.

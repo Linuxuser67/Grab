@@ -1393,6 +1393,12 @@ async fn apply_hls_content_steering(
     fetch_mode: ManifestFetchMode,
     proxy_configured: bool,
 ) -> Result<crate::manifest::HlsMasterPlan, ManifestIntakeError> {
+    if let Some(steering) = master.content_steering.as_mut() {
+        crate::manifest::inherit_query_parameters_same_origin(
+            master_url,
+            &mut steering.server_url,
+        );
+    }
     let Some(steering) = master.content_steering.as_ref() else {
         return Ok(master);
     };
@@ -1437,6 +1443,28 @@ async fn apply_hls_content_steering(
     Ok(master)
 }
 
+/// Attach the master's signed query only to selected child URLs on the same
+/// origin. Content-Steering clones on alternate hosts remain untouched.
+fn inherit_hls_master_query_parameters(
+    master_url: &Url,
+    master: &mut crate::manifest::HlsMasterPlan,
+) {
+    for variant in master.variants.iter_mut() {
+        crate::manifest::inherit_query_parameters_same_origin(master_url, &mut variant.url);
+        if let Some(video_variant_url) = variant.video_variant_url.as_mut() {
+            crate::manifest::inherit_query_parameters_same_origin(master_url, video_variant_url);
+        }
+    }
+    for rendition in master.audio_renditions.iter_mut() {
+        if let Some(url) = rendition.url.as_mut() {
+            crate::manifest::inherit_query_parameters_same_origin(master_url, url);
+        }
+    }
+    for rendition in master.subtitle_renditions.iter_mut() {
+        crate::manifest::inherit_query_parameters_same_origin(master_url, &mut rendition.url);
+    }
+}
+
 async fn lookup_with_client_policy(
     client: &reqwest::Client,
     raw_url: &str,
@@ -1450,6 +1478,7 @@ async fn lookup_with_client_policy(
         return Ok(None);
     }
     let manifest_kind_hint = manifest_kind_for_transport(&requested_url, transport_policy);
+    let original_request_url = requested_url.clone();
     let (final_url, body, server_now) = match fetch_mode {
         ManifestFetchMode::Preview => {
             fetch_bounded_preview_manifest_with_policy(client, requested_url, transport_policy)
@@ -1459,7 +1488,7 @@ async fn lookup_with_client_policy(
             fetch_bounded_manifest_with_policy(client, requested_url, transport_policy).await?
         }
     };
-    let final_url = transport_policy.planning_url(final_url)?;
+    let mut final_url = transport_policy.planning_url(final_url)?;
     let kind = manifest_kind_hint
         .or_else(|| sniff_manifest_kind(&body))
         .ok_or_else(|| {
@@ -1469,6 +1498,10 @@ async fn lookup_with_client_policy(
         })?;
     let manifest = match kind {
         crate::media_types::ManifestKind::Hls => {
+            crate::manifest::inherit_query_parameters_same_origin(
+                &original_request_url,
+                &mut final_url,
+            );
             match crate::manifest::parse_hls_master_playlist(final_url.as_str(), &body) {
                 Ok(master) => {
                     let master = apply_hls_content_steering(
@@ -1480,6 +1513,7 @@ async fn lookup_with_client_policy(
                         proxy_configured,
                     )
                     .await?;
+                    inherit_hls_master_query_parameters(&final_url, &mut master);
                     validate_hls_stable_track_ids(&master)?;
                     NativeManifest::HlsMaster(master)
                 }
@@ -1710,7 +1744,8 @@ pub(crate) async fn lookup_hls_media_with_variables(
 ) -> Result<HlsPlan, ManifestIntakeError> {
     let requested_url = Url::parse(raw_url)
         .map_err(|_| ManifestIntakeError::Failed(gettext("Invalid stream manifest URL")))?;
-    let (final_url, body, _) = fetch_bounded_manifest(client, requested_url).await?;
+    let (mut final_url, body, _) = fetch_bounded_manifest(client, requested_url.clone()).await?;
+    crate::manifest::inherit_query_parameters_same_origin(&requested_url, &mut final_url);
     crate::manifest::plan_hls_media_playlist_with_variables(
         final_url.as_str(),
         &body,
@@ -1729,6 +1764,7 @@ pub(crate) async fn lookup_hls_live_media(
     inherited_variables: &[(String, String)],
 ) -> Result<HlsPlan, ManifestIntakeError> {
     let requested_url = hls_live_reload_url(raw_url, blocking_reload, can_skip_until)?;
+    let authorization_url = strip_hls_blocking_reload_query(&requested_url);
     let (final_url, body, _) = fetch_bounded_manifest_once(
         client,
         &requested_url,
@@ -1737,7 +1773,8 @@ pub(crate) async fn lookup_hls_live_media(
         ManifestFetchMode::Download,
     )
     .await?;
-    let final_url = strip_hls_blocking_reload_query(&final_url);
+    let mut final_url = strip_hls_blocking_reload_query(&final_url);
+    crate::manifest::inherit_query_parameters_same_origin(&authorization_url, &mut final_url);
     crate::manifest::plan_hls_media_playlist_with_variables(
         final_url.as_str(),
         &body,
@@ -2115,6 +2152,33 @@ mod tests {
     use crate::manifest_plan::{
         hls_audio_rendition_key, hls_audio_rendition_keys, hls_variant_key, hls_variant_keys,
     };
+
+    #[test]
+    fn signed_master_query_is_inherited_only_by_same_origin_renditions() {
+        let body = br#"#EXTM3U
+#EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID="aud",NAME="English",DEFAULT=YES,URI="audio.m3u8"
+#EXT-X-MEDIA:TYPE=SUBTITLES,GROUP-ID="subs",NAME="English",URI="https://other.example.test/subs.m3u8"
+#EXT-X-STREAM-INF:BANDWIDTH=1000000,AUDIO="aud",SUBTITLES="subs"
+video.m3u8
+"#;
+        let mut master = crate::manifest::parse_hls_master_playlist(
+            "https://cdn.example.test/master.m3u8?t=token&s=signature&e=86400",
+            body,
+        )
+        .expect("HLS master");
+        inherit_hls_master_query_parameters(
+            &Url::parse("https://cdn.example.test/master.m3u8?t=token&s=signature&e=86400")
+                .expect("signed master URL"),
+            &mut master,
+        );
+        assert!(master.variants[0].url.query().is_some_and(|query| {
+            query.contains("t=token") && query.contains("s=signature") && query.contains("e=86400")
+        }));
+        assert!(master.audio_renditions[0].url.as_ref().is_some_and(|url| {
+            url.query().is_some_and(|query| query.contains("t=token"))
+        }));
+        assert_eq!(master.subtitle_renditions[0].url.query(), None);
+    }
 
     #[tokio::test(flavor = "current_thread")]
     async fn dash_xlink_resolves_a_period_through_the_bounded_client() {

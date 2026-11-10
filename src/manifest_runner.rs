@@ -173,12 +173,18 @@ fn mux_failure_error(log: &str) -> ManifestRunError {
         );
     }
 
-    let detail = log
+    let details = log
         .lines()
+        .filter(|line| !line.trim().is_empty())
         .rev()
-        .find(|line| !line.trim().is_empty())
-        .unwrap_or("FFmpeg could not mux the stream");
-    ManifestRunError::Failed(format!("FFmpeg could not mux the stream: {detail}"))
+        .take(8)
+        .collect::<Vec<_>>();
+    if details.is_empty() {
+        return ManifestRunError::Failed("FFmpeg could not mux the stream".to_string());
+    }
+
+    let detail = details.into_iter().rev().collect::<Vec<_>>().join("\n");
+    ManifestRunError::Failed(format!("FFmpeg could not mux the stream:\n{detail}"))
 }
 
 /// Inputs retained by the queue; URLs for individual segments are resolved again on every attempt.
@@ -4442,6 +4448,17 @@ async fn run_ffmpeg_with_offsets(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn mux_failure_error_keeps_the_recent_ffmpeg_diagnostics() {
+        let error = mux_failure_error(
+            "first diagnostic\n\nsecond diagnostic\nthird diagnostic\n",
+        );
+        assert_eq!(
+            error.to_string(),
+            "FFmpeg could not mux the stream:\nfirst diagnostic\nsecond diagnostic\nthird diagnostic"
+        );
+    }
 
     #[test]
     fn vsd_adts_validation_rejects_zero_length_frames() {

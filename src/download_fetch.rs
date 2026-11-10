@@ -826,7 +826,7 @@ fn std_open_nofollow(
     use std::os::unix::fs::OpenOptionsExt as _;
     let mut opts = std::fs::OpenOptions::new();
     configure(&mut opts);
-    opts.custom_flags(libc::O_NOFOLLOW).open(path)
+    opts.custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK | libc::O_NOCTTY | libc::O_CLOEXEC)
 }
 
 async fn open_nofollow(
@@ -978,6 +978,9 @@ async fn ensure_sized(
         .metadata()
         .await
         .map_err(|error| AttemptFail::Retryable(format!("Cannot inspect file: {error}")))?;
+    if !metadata.is_file() {
+        return Err(AttemptFail::Retryable(DEST_EXISTS.to_string()));
+    }
     let actual_identity = file_identity(&metadata);
     match *expected_identity {
         Some(expected) if expected != actual_identity => {
@@ -1417,7 +1420,11 @@ mod destination_ownership_tests {
     use std::time::Duration;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
-    fn test_context(url: String, dest: std::path::PathBuf, tx: tokio::sync::mpsc::UnboundedSender<crate::engine_msg::EngineMsg>) -> FetchCtx {
+    fn test_context(
+        url: String,
+        dest: std::path::PathBuf,
+        tx: tokio::sync::mpsc::UnboundedSender<crate::engine_msg::EngineMsg>,
+    ) -> FetchCtx {
         FetchCtx {
             client: reqwest::Client::builder()
                 .no_proxy()
@@ -1437,7 +1444,7 @@ mod destination_ownership_tests {
     async fn read_request(stream: &mut tokio::net::TcpStream) {
         let mut request = Vec::new();
         let mut chunk = [0_u8; 1024];
-        while !request.windows(4).any(|window| window == b"\\r\\n\\r\\n") {
+        while !request.windows(4).any(|window| window == b"\r\n\r\n") {
             let read = stream.read(&mut chunk).await.expect("read request");
             if read == 0 {
                 break;
@@ -1460,7 +1467,7 @@ mod destination_ownership_tests {
             let (mut first, _) = listener.accept().await.expect("first request");
             read_request(&mut first).await;
             first
-                .write_all(b"HTTP/1.1 503 Service Unavailable\\r\\nContent-Length: 0\\r\\nConnection: close\\r\\n\\r\\n")
+                .write_all(b"HTTP/1.1 503 Service Unavailable\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
                 .await
                 .expect("write first response");
             drop(first);
@@ -1473,7 +1480,7 @@ mod destination_ownership_tests {
             {
                 read_request(&mut second).await;
                 second
-                    .write_all(b"HTTP/1.1 200 OK\\r\\nContent-Length: 14\\r\\nConnection: close\\r\\n\\r\\nreplacement!!")
+                    .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 13\r\nConnection: close\r\n\r\nreplacement!!")
                     .await
                     .expect("write second response");
             }

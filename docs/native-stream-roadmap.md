@@ -86,14 +86,18 @@ the omitted prefix must be covered by the committed capture before new media is
 accepted. Sliding windows retain stable part identities. A single failed
 blocking request is not retried in-place; the normal next-poll schedule resumes
 capture. Preload hints remain speculative and are not fetched until the part is
-confirmed in a later playlist.
+confirmed in a later playlist. LL-HLS `EXT-X-PROGRAM-DATE-TIME` anchors are
+retained on the first captured unit of each closed or open segment; malformed
+or unanchored date-time tags fall back rather than being dropped. Native LL-HLS
+enforces Apple's authoring-profile minimum `PART-HOLD-BACK >= 3 * PART-TARGET`.
 
 This LL-HLS profile remains deliberately bounded. The first captured part must
 be independently decodable (or covered by EXT-X-INDEPENDENT-SEGMENTS).
 CMAF part capture without a known EXT-X-MAP, mapless parts that fail
-MPEG-TS validation, unsupported encryption (including all LL-HLS media-playlist
-EXT-X-KEY signalling), incomplete continuity, GAP, unknown required
-attributes, and ad/date-range markers remain on yt-dlp fallback.
+MPEG-TS validation, unsupported encryption for partial/delta LL-HLS (complete
+segment playlists without parts can use the ordinary AES-128 path), incomplete
+continuity, GAP, unknown required attributes, and ad/date-range markers remain
+on yt-dlp fallback.
 EXT-X-START is treated as a playback-position hint: LL-HLS recording retains
 the full advertised live window rather than trimming media units to that hint.
 Mapless parts are accepted only when their fetched bytes pass the existing

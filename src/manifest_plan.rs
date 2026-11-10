@@ -676,7 +676,11 @@ fn hls_variant_content_key(variant: &HlsVariant) -> String {
                     .to_bits()
                     .to_le_bytes(),
                 variant.codecs.as_deref().unwrap_or_default().as_bytes(),
-                variant.video_range.as_deref().unwrap_or_default().as_bytes(),
+                variant
+                    .video_range
+                    .as_deref()
+                    .unwrap_or_default()
+                    .as_bytes(),
                 variant
                     .audio_group
                     .as_deref()
@@ -703,7 +707,11 @@ fn hls_variant_content_key(variant: &HlsVariant) -> String {
                 .to_bits()
                 .to_le_bytes(),
             variant.codecs.as_deref().unwrap_or_default().as_bytes(),
-            variant.video_range.as_deref().unwrap_or_default().as_bytes(),
+            variant
+                .video_range
+                .as_deref()
+                .unwrap_or_default()
+                .as_bytes(),
             variant
                 .audio_group
                 .as_deref()

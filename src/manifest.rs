@@ -452,9 +452,7 @@ impl HlsPlan {
 
         let mut retained_resources = HashSet::new();
         for segment in &self.local_playlist.segments {
-            retained_resources.extend(
-                segment_resource_filenames(segment).map(str::to_string),
-            );
+            retained_resources.extend(segment_resource_filenames(segment).map(str::to_string));
         }
         self.resources = self
             .resources
@@ -2703,11 +2701,20 @@ hevc-ac3-hlg.m3u8
             .expect("mainstream Apple HLS variants should remain selectable");
 
         assert_eq!(master.variants.len(), 3);
-        assert_eq!(master.variants[0].codecs.as_deref(), Some("avc1.640028,mp4a.40.2"));
+        assert_eq!(
+            master.variants[0].codecs.as_deref(),
+            Some("avc1.640028,mp4a.40.2")
+        );
         assert_eq!(master.variants[0].video_range.as_deref(), Some("SDR"));
-        assert_eq!(master.variants[1].codecs.as_deref(), Some("hvc1.2.4.L150.B0,ec-3"));
+        assert_eq!(
+            master.variants[1].codecs.as_deref(),
+            Some("hvc1.2.4.L150.B0,ec-3")
+        );
         assert_eq!(master.variants[1].video_range.as_deref(), Some("PQ"));
-        assert_eq!(master.variants[2].codecs.as_deref(), Some("hvc1.2.4.L120.B0,ac-3"));
+        assert_eq!(
+            master.variants[2].codecs.as_deref(),
+            Some("hvc1.2.4.L120.B0,ac-3")
+        );
         assert_eq!(master.variants[2].video_range.as_deref(), Some("HLG"));
         assert_eq!(master.audio_renditions[0].channels.as_deref(), Some("2"));
         assert_eq!(master.audio_renditions[1].channels.as_deref(), Some("6"));

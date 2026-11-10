@@ -392,7 +392,10 @@ fn mainstream_apple_hls_profiles_remux_with_stream_copy() {
             ])
             .output()
             .expect("run FFmpeg to generate an Apple-profile fMP4 HLS fixture");
-        assert_command_succeeded(&encoded, &format!("{} HLS fixture generation", profile.name));
+        assert_command_succeeded(
+            &encoded,
+            &format!("{} HLS fixture generation", profile.name),
+        );
 
         let playlist_path = root.path().join(&playlist_name);
         let playlist = std::fs::read(&playlist_path).expect("read generated HLS playlist");

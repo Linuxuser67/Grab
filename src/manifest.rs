@@ -3538,7 +3538,9 @@ video.m3u8
         assert!(plan.is_plain_mpegts_presentation());
 
         let local = m3u8_rs::parse_media_playlist_res(
-            &plan.local_playlist_bytes().expect("serialize local VOD playlist"),
+            &plan
+                .local_playlist_bytes()
+                .expect("serialize local VOD playlist"),
         )
         .expect("local VOD playlist should parse");
         assert!(local.end_list);

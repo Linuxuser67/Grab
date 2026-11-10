@@ -676,11 +676,7 @@ fn hls_variant_content_key(variant: &HlsVariant) -> String {
                     .to_bits()
                     .to_le_bytes(),
                 variant.codecs.as_deref().unwrap_or_default().as_bytes(),
-                variant
-                    .video_range
-                    .as_deref()
-                    .unwrap_or_default()
-                    .as_bytes(),
+                variant.video_range.as_deref().unwrap_or_default().as_bytes(),
                 variant
                     .audio_group
                     .as_deref()
@@ -707,11 +703,7 @@ fn hls_variant_content_key(variant: &HlsVariant) -> String {
                 .to_bits()
                 .to_le_bytes(),
             variant.codecs.as_deref().unwrap_or_default().as_bytes(),
-            variant
-                .video_range
-                .as_deref()
-                .unwrap_or_default()
-                .as_bytes(),
+            variant.video_range.as_deref().unwrap_or_default().as_bytes(),
             variant
                 .audio_group
                 .as_deref()
@@ -959,7 +951,7 @@ fn hls_audio_rendition_label(rendition: &HlsAudioRendition) -> String {
 
 #[must_use]
 pub(crate) fn hls_variant_key(variant: &HlsVariant) -> Option<String> {
-    if let Some(group_id) = variant.video_rendition_group.as_deref() {
+    if variant.video_rendition_group.is_some() {
         if let (Some(variant_id), Some(rendition_id)) = (
             variant.stable_variant_id.as_deref(),
             variant.stable_video_rendition_id.as_deref(),
@@ -969,7 +961,6 @@ pub(crate) fn hls_variant_key(variant: &HlsVariant) -> Option<String> {
                 b"variant-video-rendition",
                 &[
                     variant_id.as_bytes(),
-                    group_id.as_bytes(),
                     rendition_id.as_bytes(),
                 ],
             ));

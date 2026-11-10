@@ -68,7 +68,8 @@ verification. VIDEO-RANGE accepts the Apple SDR, HLG and PQ values; unknown
 values fall back instead of being silently discarded. Native finalization uses
 FFmpeg stream copy and does not transcode unsupported codecs. FFmpeg/ffprobe
 integration fixtures cover AVC/AAC SDR, HEVC/E-AC-3 PQ and AVC/AC-3 fallback
-when the corresponding encoders are present on the test host.
+when the corresponding encoders are present on the test host. This matrix does
+not claim Dolby Vision, AV1, or spatial-video verification.
 
 HLS Content Steering retains the unfiltered master and applies each refreshed
 clone set afresh. Ordinary live HLS follows the response TTL and relative

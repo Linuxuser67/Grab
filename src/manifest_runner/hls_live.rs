@@ -1027,7 +1027,9 @@ async fn refresh_live_hls_pathway(
             .as_ref()
             .is_some_and(|track| track.accumulator.is_ll_capture())
     {
-        tracing::debug!("HLS Content Steering pathway switch deferred for LL-HLS capture");
+        tracing::debug!(
+            "HLS Content Steering pathway switch deferred for LL-HLS capture"
+        );
         steering.active_pathway_id = previous_pathway;
         return Ok(None);
     }
@@ -1229,7 +1231,6 @@ async fn refresh_live_hls_pathway(
                     playlist = %diagnostic_url(&next.playlist_url),
                     "HLS audio Pathway refresh could not be committed; preserving the existing audio route"
                 );
-                steering.active_pathway_id = previous_pathway;
             }
             Err(error) => {
                 tracing::warn!(
@@ -1237,7 +1238,6 @@ async fn refresh_live_hls_pathway(
                     error = %error,
                     "HLS audio Pathway refresh failed; preserving the existing audio route"
                 );
-                steering.active_pathway_id = previous_pathway;
             }
         }
     }
@@ -1251,7 +1251,7 @@ async fn refresh_live_hls_pathway(
 
 #[expect(
     clippy::too_many_arguments,
-    reason = "coordinates tracks, paths, progress, guarded hosts, and the shared stop signal"
+    reason = "the runner coordinates the selected renditions, storage paths, progress, host policy, and shared stop signal"
 )]
 pub(super) async fn run_live_hls_tracks(
     client: &reqwest::Client,
@@ -1567,11 +1567,7 @@ pub(super) async fn run_live_hls_tracks(
                 output,
             ));
         }
-        if !video.ended
-            && video
-                .next_poll_at
-                .is_some_and(|deadline| deadline <= Instant::now())
-        {
+        if !video.ended && video.next_poll_at.is_some_and(|deadline| deadline <= Instant::now()) {
             match poll_live_hls_track(
                 client,
                 source_url,

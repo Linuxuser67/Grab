@@ -352,15 +352,13 @@ pub(crate) struct HlsSubtitleRendition {
     pub(crate) stable_rendition_id: Option<String>,
 }
 
-/// A Content Steering declaration resolved against the master playlist URL.
-#[derive(Clone, Debug, PartialEq)]
+/// Runtime Content Steering state for one selected HLS multivariant playlist.
+#[derive(Clone, PartialEq)]
 pub(crate) struct HlsContentSteering {
     /// Effective multivariant playlist URL, including its final redirect and query.
     pub(crate) master_url: Option<Url>,
     /// Whether this attempt uses an upstream proxy that bypasses local DNS guards.
     pub(crate) proxy_configured: bool,
-    /// Initial SERVER-URI advertised by the multivariant playlist.
-    pub(crate) server_url: Url,
     /// URI used for the next steering refresh, updated by RELOAD-URI.
     pub(crate) reload_url: Url,
     pub(crate) initial_pathway_id: Option<String>,
@@ -373,13 +371,38 @@ pub(crate) struct HlsContentSteering {
     pub(crate) base_master: Option<Box<HlsMasterPlan>>,
 }
 
+fn redacted_steering_url(url: &Url) -> Url {
+    let mut redacted = url.clone();
+    redacted.set_query(None);
+    redacted.set_fragment(None);
+    redacted
+}
+
+impl std::fmt::Debug for HlsContentSteering {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("HlsContentSteering")
+            .field(
+                "master_url",
+                &self.master_url.as_ref().map(redacted_steering_url),
+            )
+            .field("proxy_configured", &self.proxy_configured)
+            .field("reload_url", &redacted_steering_url(&self.reload_url))
+            .field("initial_pathway_id", &self.initial_pathway_id)
+            .field("active_pathway_id", &self.active_pathway_id)
+            .field("ttl", &self.ttl)
+            .field("refresh_at", &self.refresh_at)
+            .field("has_base_master", &self.base_master.is_some())
+            .finish()
+    }
+}
+
 impl HlsContentSteering {
     pub(crate) fn new(server_url: Url, initial_pathway_id: Option<String>) -> Self {
         Self {
             master_url: None,
             proxy_configured: false,
-            reload_url: server_url.clone(),
-            server_url,
+            reload_url: server_url,
             active_pathway_id: initial_pathway_id.clone(),
             initial_pathway_id,
             ttl: Duration::ZERO,
@@ -452,7 +475,9 @@ impl HlsPlan {
 
         let mut retained_resources = HashSet::new();
         for segment in &self.local_playlist.segments {
-            retained_resources.extend(segment_resource_filenames(segment).map(str::to_string));
+            retained_resources.extend(
+                segment_resource_filenames(segment).into_iter().map(str::to_string),
+            );
         }
         self.resources = self
             .resources
@@ -2341,6 +2366,18 @@ mod tests {
     }
 
     #[test]
+    fn content_steering_debug_redacts_signed_url_queries() {
+        let steering = HlsContentSteering::new(
+            Url::parse("https://steering.example.test/list.json?token=secret-value")
+                .expect("valid steering URL"),
+            Some("cdn-a".to_string()),
+        );
+        let debug = format!("{steering:?}");
+        assert!(debug.contains("steering.example.test"));
+        assert!(!debug.contains("secret-value"));
+    }
+
+    #[test]
     fn plain_mpegts_presentation_excludes_non_concatenable_hls_features() {
         let plain = br#"#EXTM3U
 #EXT-X-VERSION:3
@@ -2701,20 +2738,11 @@ hevc-ac3-hlg.m3u8
             .expect("mainstream Apple HLS variants should remain selectable");
 
         assert_eq!(master.variants.len(), 3);
-        assert_eq!(
-            master.variants[0].codecs.as_deref(),
-            Some("avc1.640028,mp4a.40.2")
-        );
+        assert_eq!(master.variants[0].codecs.as_deref(), Some("avc1.640028,mp4a.40.2"));
         assert_eq!(master.variants[0].video_range.as_deref(), Some("SDR"));
-        assert_eq!(
-            master.variants[1].codecs.as_deref(),
-            Some("hvc1.2.4.L150.B0,ec-3")
-        );
+        assert_eq!(master.variants[1].codecs.as_deref(), Some("hvc1.2.4.L150.B0,ec-3"));
         assert_eq!(master.variants[1].video_range.as_deref(), Some("PQ"));
-        assert_eq!(
-            master.variants[2].codecs.as_deref(),
-            Some("hvc1.2.4.L120.B0,ac-3")
-        );
+        assert_eq!(master.variants[2].codecs.as_deref(), Some("hvc1.2.4.L120.B0,ac-3"));
         assert_eq!(master.variants[2].video_range.as_deref(), Some("HLG"));
         assert_eq!(master.audio_renditions[0].channels.as_deref(), Some("2"));
         assert_eq!(master.audio_renditions[1].channels.as_deref(), Some("6"));
@@ -3929,7 +3957,7 @@ video/default.m3u8
             .expect("typed Content Steering declaration should be accepted");
         let steering = master.content_steering.expect("steering declaration");
         assert_eq!(
-            steering.server_url.as_str(),
+            steering.reload_url.as_str(),
             "https://cdn.example.test/path/steering.json"
         );
         assert_eq!(steering.initial_pathway_id.as_deref(), Some("cdn-a"));
@@ -3948,7 +3976,7 @@ video.m3u8
             variable_master
                 .content_steering
                 .unwrap()
-                .server_url
+                .reload_url
                 .as_str(),
             "https://cdn.example.test/path/steering.json"
         );

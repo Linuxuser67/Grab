@@ -261,6 +261,7 @@ fn mainstream_apple_hls_profiles_remux_with_stream_copy() {
         audio_tag: &'static str,
         audio_channels: &'static str,
         color_transfer: Option<&'static str>,
+        x265_transfer: Option<&'static str>,
     }
 
     let profiles = [
@@ -275,6 +276,7 @@ fn mainstream_apple_hls_profiles_remux_with_stream_copy() {
             audio_tag: "mp4a",
             audio_channels: "2",
             color_transfer: None,
+            x265_transfer: None,
         },
         Profile {
             name: "hevc-eac3-pq",
@@ -287,6 +289,20 @@ fn mainstream_apple_hls_profiles_remux_with_stream_copy() {
             audio_tag: "ec-3",
             audio_channels: "6",
             color_transfer: Some("smpte2084"),
+            x265_transfer: Some("16"),
+        },
+        Profile {
+            name: "hevc-ac3-hlg",
+            video_encoder: "libx265",
+            video_codec: "hevc",
+            video_tag: "hvc1",
+            pixel_format: "yuv420p10le",
+            audio_encoder: "ac3",
+            audio_codec: "ac3",
+            audio_tag: "ac-3",
+            audio_channels: "6",
+            color_transfer: Some("arib-std-b67"),
+            x265_transfer: Some("18"),
         },
         Profile {
             name: "avc-ac3-sdr-fallback",
@@ -299,6 +315,7 @@ fn mainstream_apple_hls_profiles_remux_with_stream_copy() {
             audio_tag: "ac-3",
             audio_channels: "6",
             color_transfer: None,
+            x265_transfer: None,
         },
     ];
 
@@ -366,11 +383,11 @@ fn mainstream_apple_hls_profiles_remux_with_stream_copy() {
             } else {
                 "bt709"
             });
-        if profile.video_encoder == "libx265" {
-            encode.args([
-                "-x265-params",
-                "colorprim=9:transfer=16:colormatrix=9:log-level=error:pools=1",
-            ]);
+        if let Some(transfer) = profile.x265_transfer {
+            let parameters = format!(
+                "colorprim=9:transfer={transfer}:colormatrix=9:log-level=error:pools=1"
+            );
+            encode.args(["-x265-params", parameters.as_str()]);
         }
         let encoded = encode
             .args([
@@ -392,10 +409,7 @@ fn mainstream_apple_hls_profiles_remux_with_stream_copy() {
             ])
             .output()
             .expect("run FFmpeg to generate an Apple-profile fMP4 HLS fixture");
-        assert_command_succeeded(
-            &encoded,
-            &format!("{} HLS fixture generation", profile.name),
-        );
+        assert_command_succeeded(&encoded, &format!("{} HLS fixture generation", profile.name));
 
         let playlist_path = root.path().join(&playlist_name);
         let playlist = std::fs::read(&playlist_path).expect("read generated HLS playlist");
@@ -442,7 +456,7 @@ fn mainstream_apple_hls_profiles_remux_with_stream_copy() {
                 "-v",
                 "error",
                 "-show_entries",
-                "stream=codec_type,codec_name,codec_tag_string,color_transfer,channels",
+                "stream=codec_type,codec_name,codec_tag_string,color_transfer,channels,pix_fmt",
                 "-of",
                 "default=noprint_wrappers=1",
             ])
@@ -457,6 +471,7 @@ fn mainstream_apple_hls_profiles_remux_with_stream_copy() {
             format!("codec_name={}", profile.audio_codec),
             format!("codec_tag_string={}", profile.audio_tag),
             format!("channels={}", profile.audio_channels),
+            format!("pix_fmt={}", profile.pixel_format),
         ] {
             assert!(
                 stream_info.contains(&expected),
@@ -1183,8 +1198,20 @@ fn localize_live_plan_resources(plan: &mut HlsPlan, fixture_base: &Url) {
     }
 }
 
+fn live_hls_test_source(url: &str) -> crate::media_types::ManifestSource {
+    crate::media_types::ManifestSource {
+        url: url.to_string(),
+        kind: crate::media_types::ManifestKind::Hls,
+        representation_key: "live-hls-test".into(),
+        audio_key: None,
+        subtitle_key: None,
+        subtitle_language: None,
+    }
+}
+
 #[tokio::test]
 async fn saved_live_hls_capture_finalizes_without_contacting_the_origin() {
+    let source = live_hls_test_source("https://origin.example.test/master.m3u8");
     let root = TempRoot::new("live-offline");
     let video_dir = root.path().join("video");
     let audio_dir = root.path().join("audio");
@@ -1231,6 +1258,8 @@ async fn saved_live_hls_capture_finalizes_without_contacting_the_origin() {
     let outcome = run_live_hls_tracks(
         &client,
         "https://origin.example.test/master.m3u8",
+        &source,
+        None,
         root.path(),
         root.path(),
         0,
@@ -1261,6 +1290,8 @@ async fn saved_live_hls_capture_finalizes_without_contacting_the_origin() {
     let finish_outcome = run_live_hls_tracks(
         &client,
         "https://origin.example.test/master.m3u8",
+        &source,
+        None,
         root.path(),
         root.path(),
         0,
@@ -1938,6 +1969,7 @@ async fn live_hls_sequence_gap_preserves_already_committed_media() {
 
 #[tokio::test]
 async fn live_hls_pause_keeps_the_last_committed_window() {
+    let source = live_hls_test_source("https://origin.example.test/live.m3u8");
     let root = TempRoot::new("live-preserve");
     let video_dir = root.path().join("video");
     let audio_dir = root.path().join("audio");
@@ -2034,6 +2066,8 @@ async fn live_hls_pause_keeps_the_last_committed_window() {
     let finished = run_live_hls_tracks(
         &client,
         "https://origin.example.test/live.m3u8",
+        &source,
+        None,
         root.path(),
         root.path(),
         0,
@@ -2057,6 +2091,7 @@ async fn live_hls_pause_keeps_the_last_committed_window() {
 
 #[tokio::test]
 async fn live_hls_runner_returns_paused_without_finalizing() {
+    let source = live_hls_test_source("https://origin.example.test/live.m3u8");
     let root = TempRoot::new("live-pause-runner");
     let video_dir = root.path().join("video");
     let audio_dir = root.path().join("audio");
@@ -2083,6 +2118,8 @@ async fn live_hls_runner_returns_paused_without_finalizing() {
     let outcome = run_live_hls_tracks(
         &client,
         "https://origin.example.test/live.m3u8",
+        &source,
+        None,
         root.path(),
         root.path(),
         0,

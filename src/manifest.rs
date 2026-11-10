@@ -2215,10 +2215,17 @@ segment-2.ts
 
         let vod_without_end_list =
             b"#EXTM3U\n#EXT-X-TARGETDURATION:4\n#EXT-X-PLAYLIST-TYPE:vod\n#EXTINF:4,\nsegment.ts\n";
-        assert_eq!(
-            plan_hls_media_playlist(BASE_URL, vod_without_end_list).err(),
-            Some(ManifestError::UnsupportedPlaylist)
-        );
+        let vod_plan = plan_hls_media_playlist(BASE_URL, vod_without_end_list)
+            .expect("declared VOD playlists are finite without ENDLIST");
+        assert!(!vod_plan.is_live);
+        assert!(vod_plan.end_list);
+
+        let event_without_end_list =
+            b"#EXTM3U\\n#EXT-X-TARGETDURATION:4\\n#EXT-X-PLAYLIST-TYPE:EVENT\\n#EXTINF:4,\\nsegment.ts\\n";
+        let event_plan = plan_hls_media_playlist(BASE_URL, event_without_end_list)
+            .expect("EVENT playlists without ENDLIST remain live");
+        assert!(event_plan.is_live);
+        assert!(!event_plan.end_list);
 
         let body = b"#EXTM3U\n#EXT-X-TARGETDURATION:4\n#EXT-X-ALLOW-CACHE:NO\n#EXT-X-BITRATE:1200\n#EXTINF:4,\nsegment.ts\n#EXT-X-ENDLIST\n";
         let plan = plan_hls_media_playlist(BASE_URL, body)

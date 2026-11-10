@@ -192,10 +192,7 @@ async fn gallery_integration_probe_count_download() {
             }
             Err(e) => panic!("download failed: {e:?}"),
         };
-    assert_eq!(
-        result.files_completed, 4,
-        "expected 4 completed files"
-    );
+    assert_eq!(result.files_completed, 4, "expected 4 completed files");
     assert_eq!(completed.get(), 4, "progress should report 4 completed");
     let downloaded = std::fs::read_dir(&dest)
         .expect("list downloaded gallery files")

@@ -155,7 +155,7 @@ fn gallery_preview_cache_key(
 ) -> Option<GalleryPreviewCacheKey> {
     let mut url = url::Url::parse(raw_url).ok()?;
     url.set_fragment(None);
-    if crate::video_cache::has_rotating_auth_query(&url) {
+    if crate::video_cache::has_known_rotating_auth_query(&url) {
         return None;
     }
     let handoff_cookie_hash = match auth.cookies_path.as_deref() {

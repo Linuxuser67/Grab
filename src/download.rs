@@ -4596,10 +4596,8 @@ impl DownloadManager {
                                 // Set detail BEFORE status: the status notify
                                 // fires synchronously and opens the dialog,
                                 // which reads the detail (same as Err below).
-                                let done = crate::gallery_runner::done_count(
-                                    r.files_completed,
-                                    r.skipped,
-                                );
+                                let done =
+                                    crate::gallery_runner::done_count(r.files_completed, r.skipped);
                                 let detail = if r.exit_code.is_some() {
                                     "Gallery \u{2022} some failed".to_string()
                                 } else {

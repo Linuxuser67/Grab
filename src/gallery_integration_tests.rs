@@ -192,10 +192,21 @@ async fn gallery_integration_probe_count_download() {
             }
             Err(e) => panic!("download failed: {e:?}"),
         };
-    assert_eq!(result.files.len(), 4, "expected 4 downloaded files");
+    assert_eq!(
+        result.files_completed, 4,
+        "expected 4 completed files"
+    );
     assert_eq!(completed.get(), 4, "progress should report 4 completed");
-    for f in &result.files {
-        assert!(f.exists(), "downloaded file should exist: {f:?}");
+    let downloaded = std::fs::read_dir(&dest)
+        .expect("list downloaded gallery files")
+        .map(|entry| entry.expect("read gallery entry").path())
+        .collect::<Vec<_>>();
+    assert_eq!(downloaded.len(), 4, "expected 4 files on disk");
+    for path in downloaded {
+        assert!(
+            path.is_file(),
+            "downloaded gallery entry should be a file: {path:?}"
+        );
     }
 
     // 4. Second run reports all as skipped.
@@ -216,7 +227,7 @@ async fn gallery_integration_probe_count_download() {
             }
             Err(e) => panic!("second download failed: {e:?}"),
         };
-    assert_eq!(result2.files.len(), 0, "no new files on second run");
+    assert_eq!(result2.files_completed, 0, "no new files on second run");
     assert_eq!(result2.skipped, 4, "all 4 files skipped on second run");
     assert_eq!(
         resumed_progress.get(),
@@ -272,8 +283,7 @@ async fn gallery_integration_filtered_download() {
             Err(e) => panic!("filtered download failed: {e:?}"),
         };
     assert_eq!(
-        result.files.len(),
-        3,
+        result.files_completed, 3,
         "all 3 test images pass the ImagesOnly filter"
     );
 
@@ -365,13 +375,12 @@ async fn gallery_integration_range_indexes_filtered_files() {
             }
             Err(e) => panic!("range download failed: {e:?}"),
         };
-    assert_eq!(result.files.len(), 1, "range 1 selects exactly one file");
-    let name = result.files[0]
-        .file_name()
-        .map(|n| n.to_string_lossy().into_owned());
     assert_eq!(
-        name.as_deref(),
-        Some("img1.jpg"),
+        result.files_completed, 1,
+        "range 1 selects exactly one file"
+    );
+    assert!(
+        dest.join("img1.jpg").is_file(),
         "--range must index the filtered list, not the raw one"
     );
 

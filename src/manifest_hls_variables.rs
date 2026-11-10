@@ -399,7 +399,7 @@ mod tests {
         let body = br#"#EXTM3U
 #EXT-X-DEFINE:NAME="base",VALUE="streams"
 #EXT-X-DEFINE:NAME="root",VALUE="{$base}/v1"
-#EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID="audio",NAME="English",DEFAULT=YES,URI="{$root}/audio/en.m3u8"
+#EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID="audio",NAME="English",DEFAULT=YES,AUTOSELECT=YES,URI="{$root}/audio/en.m3u8"
 #EXT-X-STREAM-INF:BANDWIDTH=1000000,AUDIO="audio"
 {$root}/video/main.m3u8
 "#;
@@ -664,8 +664,8 @@ video.m3u8
     fn master_import_scope_survives_selected_video_audio_and_subtitle_planning() {
         let body = br#"#EXTM3U
 #EXT-X-DEFINE:NAME="root",VALUE="media"
-#EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID="audio",NAME="English",LANGUAGE="en",DEFAULT=YES,URI="{$root}/audio.m3u8",STABLE-RENDITION-ID="audio-en"
-#EXT-X-MEDIA:TYPE=SUBTITLES,GROUP-ID="subs",NAME="English",LANGUAGE="en",DEFAULT=YES,URI="{$root}/subs.m3u8",STABLE-RENDITION-ID="subs-en"
+#EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID="audio",NAME="English",LANGUAGE="en",DEFAULT=YES,AUTOSELECT=YES,URI="{$root}/audio.m3u8",STABLE-RENDITION-ID="audio-en"
+#EXT-X-MEDIA:TYPE=SUBTITLES,GROUP-ID="subs",NAME="English",LANGUAGE="en",DEFAULT=YES,AUTOSELECT=YES,URI="{$root}/subs.m3u8",STABLE-RENDITION-ID="subs-en"
 #EXT-X-STREAM-INF:BANDWIDTH=1000000,AUDIO="audio",SUBTITLES="subs",STABLE-VARIANT-ID="video-main"
 {$root}/video.m3u8
 "#;

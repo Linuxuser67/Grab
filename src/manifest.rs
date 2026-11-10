@@ -326,7 +326,11 @@ pub(crate) struct HlsAudioRendition {
     pub(crate) group_id: String,
     pub(crate) name: String,
     pub(crate) language: Option<String>,
+    pub(crate) assoc_language: Option<String>,
     pub(crate) is_default: bool,
+    pub(crate) is_autoselect: bool,
+    pub(crate) characteristics: Option<String>,
+    pub(crate) channels: Option<String>,
     /// Apple HLS STABLE-RENDITION-ID, when the origin provides one.
     pub(crate) stable_rendition_id: Option<String>,
 }
@@ -338,7 +342,11 @@ pub(crate) struct HlsSubtitleRendition {
     pub(crate) group_id: String,
     pub(crate) name: String,
     pub(crate) language: Option<String>,
+    pub(crate) assoc_language: Option<String>,
     pub(crate) is_default: bool,
+    pub(crate) is_autoselect: bool,
+    pub(crate) is_forced: bool,
+    pub(crate) characteristics: Option<String>,
     pub(crate) stable_rendition_id: Option<String>,
 }
 
@@ -1189,6 +1197,59 @@ fn parse_hls_content_steering(
     }))
 }
 
+/// Validate rendition-group rules needed for deterministic language and track selection.
+fn validate_hls_rendition_groups(
+    alternatives: &[m3u8_rs::AlternativeMedia],
+) -> Result<(), ManifestError> {
+    let mut names = HashSet::new();
+    let mut defaults = HashSet::new();
+    let mut autoselect_signatures = HashSet::new();
+
+    for alternative in alternatives {
+        let group_error = match &alternative.media_type {
+            AlternativeMediaType::Audio => ManifestError::InvalidAudioGroup,
+            AlternativeMediaType::Video => ManifestError::InvalidVideoGroup,
+            AlternativeMediaType::Subtitles => ManifestError::InvalidSubtitleGroup,
+            // Closed captions are handled by a dedicated extraction/finalization
+            // path. Unknown rendition types must not be silently discarded.
+            AlternativeMediaType::ClosedCaptions | AlternativeMediaType::Other(_) => {
+                return Err(ManifestError::UnsupportedPlaylist);
+            }
+        };
+        let group = alternative.group_id.clone();
+        let media_type = alternative.media_type.clone();
+
+        if !names.insert((media_type.clone(), group.clone(), alternative.name.clone())) {
+            return Err(group_error);
+        }
+        if alternative.default {
+            // HLS requires DEFAULT=YES renditions to also be AUTOSELECT=YES.
+            if !alternative.autoselect
+                || !defaults.insert((media_type.clone(), group.clone()))
+            {
+                return Err(group_error);
+            }
+        }
+        if alternative.autoselect {
+            // AUTOSELECT renditions in one group need distinct language,
+            // associated-language, forced, and characteristics signatures.
+            let signature = (
+                media_type,
+                group,
+                alternative.language.clone(),
+                alternative.assoc_language.clone(),
+                alternative.forced,
+                alternative.characteristics.clone(),
+            );
+            if !autoselect_signatures.insert(signature) {
+                return Err(group_error);
+            }
+        }
+    }
+
+    Ok(())
+}
+
 /// Parse an HLS master playlist into user-selectable video and audio choices.
 ///
 /// Variant order is preserved. I-frame-only entries are excluded because they
@@ -1265,6 +1326,14 @@ pub(crate) fn parse_hls_master_playlist(
             .is_some_and(|attributes| attributes.keys().any(|name| name.starts_with("REQ-")))
     });
     if has_unknown_required_variant_attribute || has_unknown_required_rendition_attribute {
+        return Err(ManifestError::UnsupportedPlaylist);
+    }
+    validate_hls_rendition_groups(&master.alternatives)?;
+    if master.variants.iter().any(|variant| {
+        variant.closed_captions.as_ref().is_some_and(|group| {
+            !matches!(group, m3u8_rs::ClosedCaptionGroupId::None)
+        })
+    }) {
         return Err(ManifestError::UnsupportedPlaylist);
     }
 
@@ -1413,7 +1482,11 @@ pub(crate) fn parse_hls_master_playlist(
                 group_id: alternative.group_id.clone(),
                 name: alternative.name.clone(),
                 language: alternative.language.clone(),
+                assoc_language: alternative.assoc_language.clone(),
                 is_default: alternative.default,
+                is_autoselect: alternative.autoselect,
+                characteristics: alternative.characteristics.clone(),
+                channels: alternative.channels.clone(),
                 stable_rendition_id: alternative
                     .other_attributes
                     .as_ref()
@@ -1439,7 +1512,11 @@ pub(crate) fn parse_hls_master_playlist(
                 group_id: alternative.group_id.clone(),
                 name: alternative.name.clone(),
                 language: alternative.language.clone(),
+                assoc_language: alternative.assoc_language.clone(),
                 is_default: alternative.default,
+                is_autoselect: alternative.autoselect,
+                is_forced: alternative.forced,
+                characteristics: alternative.characteristics.clone(),
                 stable_rendition_id: alternative
                     .other_attributes
                     .as_ref()
@@ -2365,7 +2442,7 @@ segment-2.m4s
     #[test]
     fn master_playlist_keeps_variants_in_manifest_order_and_audio_renditions() {
         let body = br#"#EXTM3U
-#EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID="audio",NAME="English",LANGUAGE="en",DEFAULT=YES,URI="audio/en.m3u8"
+#EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID="audio",NAME="English",LANGUAGE="en",DEFAULT=YES,AUTOSELECT=YES,URI="audio/en.m3u8"
 #EXT-X-STREAM-INF:BANDWIDTH=1200000,AVERAGE-BANDWIDTH=1000000,RESOLUTION=1280x720,CODECS="avc1.64001f,mp4a.40.2",AUDIO="audio"
 video/720.m3u8
 #EXT-X-I-FRAME-STREAM-INF:BANDWIDTH=200000,URI="video/thumbs.m3u8"
@@ -2414,6 +2491,93 @@ video/1080.m3u8
         let body = br#"#EXTM3U
 #EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID="audio",NAME="English",LANGUAGE="en",URI="audio/en.m3u8",REQ-UNSUPPORTED-FEATURE="value"
 #EXT-X-STREAM-INF:BANDWIDTH=1000000,AUDIO="audio"
+video.m3u8
+"#;
+        assert_eq!(
+            parse_hls_master_playlist(BASE_URL, body).err(),
+            Some(ManifestError::UnsupportedPlaylist)
+        );
+    }
+
+    #[test]
+    fn master_playlist_preserves_audio_and_subtitle_rendition_selection_metadata() {
+        let body = br#"#EXTM3U
+#EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID="audio",NAME="English",LANGUAGE="en",ASSOC-LANGUAGE="fr",DEFAULT=YES,AUTOSELECT=YES,CHANNELS="6",CHARACTERISTICS="public.accessibility.describes-video",URI="audio/en.m3u8"
+#EXT-X-MEDIA:TYPE=SUBTITLES,GROUP-ID="subs",NAME="English Forced",LANGUAGE="en",ASSOC-LANGUAGE="fr",AUTOSELECT=YES,FORCED=YES,CHARACTERISTICS="public.accessibility.transcribes-spoken-dialog,public.accessibility.describes-music-and-sound",URI="subs/en-forced.m3u8"
+#EXT-X-STREAM-INF:BANDWIDTH=1000000,RESOLUTION=1280x720,CODECS="avc1.64001f,mp4a.40.2",AUDIO="audio",SUBTITLES="subs"
+video.m3u8
+"#;
+        let master = parse_hls_master_playlist(BASE_URL, body)
+            .expect("valid rendition metadata");
+
+        let audio = &master.audio_renditions[0];
+        assert_eq!(audio.language.as_deref(), Some("en"));
+        assert_eq!(audio.assoc_language.as_deref(), Some("fr"));
+        assert!(audio.is_default);
+        assert!(audio.is_autoselect);
+        assert_eq!(audio.channels.as_deref(), Some("6"));
+        assert_eq!(
+            audio.characteristics.as_deref(),
+            Some("public.accessibility.describes-video")
+        );
+
+        let subtitle = &master.subtitle_renditions[0];
+        assert_eq!(subtitle.language.as_deref(), Some("en"));
+        assert_eq!(subtitle.assoc_language.as_deref(), Some("fr"));
+        assert!(subtitle.is_autoselect);
+        assert!(subtitle.is_forced);
+        assert_eq!(
+            subtitle.characteristics.as_deref(),
+            Some("public.accessibility.transcribes-spoken-dialog,public.accessibility.describes-music-and-sound")
+        );
+    }
+
+    #[test]
+    fn rejects_default_renditions_without_autoselect() {
+        let body = br#"#EXTM3U
+#EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID="audio",NAME="English",LANGUAGE="en",DEFAULT=YES,URI="audio/en.m3u8"
+#EXT-X-STREAM-INF:BANDWIDTH=1000000,AUDIO="audio"
+video.m3u8
+"#;
+        assert_eq!(
+            parse_hls_master_playlist(BASE_URL, body).err(),
+            Some(ManifestError::InvalidAudioGroup)
+        );
+    }
+
+    #[test]
+    fn rejects_multiple_default_renditions_in_one_group() {
+        let body = br#"#EXTM3U
+#EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID="audio",NAME="English",LANGUAGE="en",DEFAULT=YES,AUTOSELECT=YES,URI="audio/en.m3u8"
+#EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID="audio",NAME="French",LANGUAGE="fr",DEFAULT=YES,AUTOSELECT=YES,URI="audio/fr.m3u8"
+#EXT-X-STREAM-INF:BANDWIDTH=1000000,AUDIO="audio"
+video.m3u8
+"#;
+        assert_eq!(
+            parse_hls_master_playlist(BASE_URL, body).err(),
+            Some(ManifestError::InvalidAudioGroup)
+        );
+    }
+
+    #[test]
+    fn rejects_ambiguous_autoselect_renditions_in_one_group() {
+        let body = br#"#EXTM3U
+#EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID="audio",NAME="English Main",LANGUAGE="en",AUTOSELECT=YES,URI="audio/main.m3u8"
+#EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID="audio",NAME="English Alternate",LANGUAGE="en",AUTOSELECT=YES,URI="audio/alternate.m3u8"
+#EXT-X-STREAM-INF:BANDWIDTH=1000000,AUDIO="audio"
+video.m3u8
+"#;
+        assert_eq!(
+            parse_hls_master_playlist(BASE_URL, body).err(),
+            Some(ManifestError::InvalidAudioGroup)
+        );
+    }
+
+    #[test]
+    fn closed_caption_renditions_are_not_silently_ignored() {
+        let body = br#"#EXTM3U
+#EXT-X-MEDIA:TYPE=CLOSED-CAPTIONS,GROUP-ID="captions",NAME="English",LANGUAGE="en",INSTREAM-ID="CC1"
+#EXT-X-STREAM-INF:BANDWIDTH=1000000,CLOSED-CAPTIONS="captions"
 video.m3u8
 "#;
         assert_eq!(

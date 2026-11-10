@@ -271,14 +271,14 @@ fn open_segment_program_date_time(
     };
     if date_tags.next().is_some()
         || tag.len() > 128
-        || tag.contains('\\r')
-        || tag.contains('\\n')
+        || tag.contains('\r')
+        || tag.contains('\n')
     {
         return Err(ManifestError::UnsupportedPlaylist);
     }
 
     let probe = format!(
-        "#EXTM3U\\n#EXT-X-TARGETDURATION:1\\n{tag}\\n#EXTINF:1,\\nopen-ll-hls-pdt-probe.ts\\n#EXT-X-ENDLIST\\n"
+        "#EXTM3U\n#EXT-X-TARGETDURATION:1\n{tag}\n#EXTINF:1,\nopen-ll-hls-pdt-probe.ts\n#EXT-X-ENDLIST\n"
     );
     let parsed = m3u8_rs::parse_media_playlist_res(probe.as_bytes())
         .map_err(|error| hls_parse_error(probe.as_bytes(), error))?;

@@ -51,6 +51,10 @@ use hls_live::{
 
 /// Upper bound for one media resource, independent of a server-supplied length.
 const MAX_RESOURCE_BYTES: u64 = crate::manifest_writer::MAX_RESOURCE_BYTES;
+/// Maximum encrypted SAMPLE-AES segment size accepted by the in-memory decoder.
+/// The decoder and MPEG-TS preflight both need whole-segment buffers, so this
+/// limit is intentionally much smaller than the general staged-resource cap.
+const MAX_SAMPLE_AES_SEGMENT_BYTES: usize = 32 * 1024 * 1024;
 /// Aggregate resource ceiling, matching the regular segmented downloader's 1 TiB trust limit.
 const MAX_MANIFEST_DOWNLOAD_BYTES: u64 = 1 << 40;
 /// Idle budget for receiving a response body; progressing transfers are not wall-clock limited.
@@ -2387,6 +2391,39 @@ async fn write_playlist(directory: &Path, plan: &HlsPlan) -> Result<(), String> 
         .map_err(|error| format!("Could not publish the local HLS playlist: {error}"))
 }
 
+/// Read a staged SAMPLE-AES resource off the async executor with a dedicated
+/// bound for data that must be held in memory by the decryptor and preflight.
+async fn read_sample_aes_resource(
+    path: &Path,
+    description: &'static str,
+    max_bytes: usize,
+) -> Result<Vec<u8>, ManifestRunError> {
+    let path = path.to_path_buf();
+    let result = tokio::task::spawn_blocking(move || {
+        crate::bounded_file::read_regular_file_bounded(&path, max_bytes)
+    })
+    .await
+    .map_err(|error| {
+        ManifestRunError::Failed(format!(
+            "The {description} read worker failed: {error}"
+        ))
+    })?;
+
+    result.map_err(|error| match error {
+        crate::bounded_file::BoundedFileError::NotRegularFile => {
+            ManifestRunError::Failed(format!("The {description} is not a regular file"))
+        }
+        crate::bounded_file::BoundedFileError::TooLarge => {
+            ManifestRunError::Unsupported(format!(
+                "The {description} exceeds its {max_bytes}-byte SAMPLE-AES memory limit"
+            ))
+        }
+        crate::bounded_file::BoundedFileError::Io(source) => {
+            ManifestRunError::Failed(format!("Could not read {description}: {source}"))
+        }
+    })
+}
+
 /// Decrypt identity SAMPLE-AES MPEG-TS segments with iori-ssa, the engine used by VSD,
 /// then remove the corresponding key tags from the local playlist.
 async fn decrypt_hls_sample_aes_segments(
@@ -2416,23 +2453,8 @@ async fn decrypt_hls_sample_aes_segments(
             ManifestRunError::Unsupported("The HLS SAMPLE-AES key URI is missing".to_string())
         })?;
         let key_path = local_hls_resource_path(directory, key_uri)?;
-        let key_metadata = tokio::fs::symlink_metadata(&key_path)
-            .await
-            .map_err(|error| {
-                ManifestRunError::Failed(format!(
-                    "Could not inspect the staged HLS SAMPLE-AES key: {error}"
-                ))
-            })?;
-        if key_metadata.file_type().is_symlink() || !key_metadata.is_file() {
-            return Err(ManifestRunError::Failed(
-                "The staged HLS SAMPLE-AES key is not a regular file".to_string(),
-            ));
-        }
-        let key_bytes = tokio::fs::read(&key_path).await.map_err(|error| {
-            ManifestRunError::Failed(format!(
-                "Could not read the staged HLS SAMPLE-AES key: {error}"
-            ))
-        })?;
+        let key_bytes =
+            read_sample_aes_resource(&key_path, "staged HLS SAMPLE-AES key", 16).await?;
         let key: [u8; 16] = key_bytes.as_slice().try_into().map_err(|_| {
             ManifestRunError::Unsupported("The HLS identity key is not 16 bytes".to_string())
         })?;
@@ -2450,24 +2472,12 @@ async fn decrypt_hls_sample_aes_segments(
 
         let segment_uri = segment.uri.clone();
         let segment_path = local_hls_resource_path(directory, &segment_uri)?;
-        let segment_metadata =
-            tokio::fs::symlink_metadata(&segment_path)
-                .await
-                .map_err(|error| {
-                    ManifestRunError::Failed(format!(
-                        "Could not inspect the staged HLS segment: {error}"
-                    ))
-                })?;
-        if segment_metadata.file_type().is_symlink() || !segment_metadata.is_file() {
-            return Err(ManifestRunError::Failed(
-                "The staged HLS SAMPLE-AES segment is not a regular file".to_string(),
-            ));
-        }
-        let encrypted = tokio::fs::read(&segment_path).await.map_err(|error| {
-            ManifestRunError::Failed(format!(
-                "Could not read the staged HLS SAMPLE-AES segment: {error}"
-            ))
-        })?;
+        let encrypted = read_sample_aes_resource(
+            &segment_path,
+            "staged HLS SAMPLE-AES segment",
+            MAX_SAMPLE_AES_SEGMENT_BYTES,
+        )
+        .await?;
         let encrypted_size = encrypted.len();
 
         let decrypted = tokio::task::spawn_blocking(move || {

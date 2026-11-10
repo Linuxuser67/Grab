@@ -1,6 +1,9 @@
 //! Focused tests for the preflight protecting iori-ssa's SAMPLE-AES parser.
 
-use super::{validate_iori_adts_pes, validate_iori_sample_aes_segment};
+use super::{
+    MAX_SAMPLE_AES_SEGMENT_BYTES, ManifestRunError, read_sample_aes_resource,
+    validate_iori_adts_pes, validate_iori_sample_aes_segment,
+};
 use mpeg2ts::{
     es::{StreamId, StreamType},
     pes::PesHeader,
@@ -190,4 +193,37 @@ fn rejects_id3_and_packed_audio_before_iori_ssa() {
         validate_iori_sample_aes_segment(&packed_audio_frame).is_err(),
         "a packed MPEG-audio frame is not a transport stream"
     );
+}
+
+
+#[tokio::test]
+async fn rejects_sample_aes_segment_over_the_in_memory_limit() {
+    let directory = tempfile::tempdir().expect("create temporary directory");
+    let path = directory.path().join("oversized.ts");
+    let file = std::fs::File::create(&path).expect("create oversized segment");
+    file.set_len(MAX_SAMPLE_AES_SEGMENT_BYTES as u64 + 1)
+        .expect("extend segment beyond the processing limit");
+
+    let error = read_sample_aes_resource(
+        &path,
+        "staged HLS SAMPLE-AES segment",
+        MAX_SAMPLE_AES_SEGMENT_BYTES,
+    )
+    .await
+    .expect_err("oversized SAMPLE-AES segments must not enter the decoder");
+
+    assert!(matches!(error, ManifestRunError::Unsupported(message) if message.contains("memory limit")));
+}
+
+#[tokio::test]
+async fn reads_sample_aes_key_with_a_sixteen_byte_bound() {
+    let directory = tempfile::tempdir().expect("create temporary directory");
+    let path = directory.path().join("key.bin");
+    std::fs::write(&path, [0x2a; 16]).expect("write identity key");
+
+    let key = read_sample_aes_resource(&path, "staged HLS SAMPLE-AES key", 16)
+        .await
+        .expect("read bounded key");
+
+    assert_eq!(key, [0x2a; 16]);
 }

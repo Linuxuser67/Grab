@@ -249,7 +249,9 @@ pub(crate) async fn run_download(mut ctx: FetchCtx, connections: usize, mode: St
                 Ok(Some(identity)) => Some(identity),
                 Ok(None) => {
                     ctx.tx
-                        .send(EngineMsg::Failed(gettext("The partial download file is missing")))
+                        .send(EngineMsg::Failed(gettext(
+                            "The partial download file is missing",
+                        )))
                         .ok();
                     return;
                 }
@@ -269,13 +271,7 @@ pub(crate) async fn run_download(mut ctx: FetchCtx, connections: usize, mode: St
             .await
             {
                 let mut single_tries = 3;
-                single_loop(
-                    &ctx,
-                    &mut single_tries,
-                    Some(total),
-                    &mut expected_identity,
-                )
-                .await;
+                single_loop(&ctx, &mut single_tries, Some(total), &mut expected_identity).await;
             }
         }
     }
@@ -333,14 +329,7 @@ async fn multi_loop(
     let mut st = saved.unwrap_or_else(|| SegmentState::new(total));
     let mut failures: u32 = 0;
     loop {
-        let result = attempt_multi(
-            ctx,
-            total,
-            &mut st,
-            max_workers,
-            expected_identity,
-        )
-        .await;
+        let result = attempt_multi(ctx, total, &mut st, max_workers, expected_identity).await;
 
         match result {
             Ok(()) => {
@@ -610,7 +599,9 @@ async fn attempt_once(
                     ParsedContentRange::Satisfied { .. } => None,
                 });
             let still_owned = match *expected_identity {
-                Some(expected) => verify_destination_identity(&ctx.dest, expected).await.is_ok(),
+                Some(expected) => verify_destination_identity(&ctx.dest, expected)
+                    .await
+                    .is_ok(),
                 None => false,
             };
             // "Already complete" only with proof: matching length, unchanged inode,
@@ -826,7 +817,9 @@ fn std_open_nofollow(
     use std::os::unix::fs::OpenOptionsExt as _;
     let mut opts = std::fs::OpenOptions::new();
     configure(&mut opts);
-    opts.custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK | libc::O_NOCTTY | libc::O_CLOEXEC)
+    opts
+        .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK | libc::O_NOCTTY | libc::O_CLOEXEC)
+        .open(path)
 }
 
 async fn open_nofollow(
@@ -884,9 +877,7 @@ fn file_identity(metadata: &std::fs::Metadata) -> FileIdentity {
 
 /// Capture an existing regular destination before a resume request. A fresh
 /// download receives `None` and must create its first file with create_new.
-async fn destination_identity(
-    path: &std::path::Path,
-) -> Result<Option<FileIdentity>, String> {
+async fn destination_identity(path: &std::path::Path) -> Result<Option<FileIdentity>, String> {
     match tokio::fs::symlink_metadata(path).await {
         Ok(metadata) if metadata.file_type().is_symlink() || !metadata.is_file() => {
             Err(DEST_EXISTS.to_string())
@@ -914,9 +905,14 @@ async fn open_owned_destination(
     path: &std::path::Path,
     expected: FileIdentity,
 ) -> Result<tokio::fs::File, String> {
-    let file = open_nofollow(|options| { options.write(true); }, path)
-        .await
-        .map_err(|error| format!("Cannot write file: {error}"))?;
+    let file = open_nofollow(
+        |options| {
+            options.write(true);
+        },
+        path,
+    )
+    .await
+    .map_err(|error| format!("Cannot write file: {error}"))?;
     let metadata = file
         .metadata()
         .await
@@ -958,10 +954,18 @@ async fn ensure_sized(
     // been recorded, retries may reopen only that same inode without truncating
     // it during the open itself.
     let file_result = if expected_identity.is_some() {
-        open_nofollow(|options| { options.write(true); }, dest).await
+        open_nofollow(
+            |options| {
+                options.write(true);
+            },
+            dest,
+        )
+        .await
     } else {
         open_nofollow(
-            |options| { options.write(true).create_new(true); },
+            |options| {
+                options.write(true).create_new(true);
+            },
             dest,
         )
         .await
@@ -1412,7 +1416,6 @@ pub fn filename_from_content_disposition(value: &str) -> Option<String> {
 /// Per-piece fetch attempts before a worker gives up on it.
 const PIECE_TRIES: u32 = 3;
 
-
 #[cfg(test)]
 mod destination_ownership_tests {
     use super::{FetchCtx, FileIdentity, attempt_once, ensure_sized, single_loop};
@@ -1501,7 +1504,9 @@ mod destination_ownership_tests {
         single_loop(&context, &mut tries, None, &mut expected_identity).await;
         server.await.expect("server task");
 
-        let bytes = tokio::fs::read(&destination).await.expect("read destination");
+        let bytes = tokio::fs::read(&destination)
+            .await
+            .expect("read destination");
         assert_eq!(bytes, b"foreign sentinel");
         assert!(
             expected_identity.is_none(),
@@ -1540,7 +1545,9 @@ mod destination_ownership_tests {
             "a replacement inode must not be adopted or resized"
         );
         assert_eq!(
-            tokio::fs::read(&destination).await.expect("read replacement"),
+            tokio::fs::read(&destination)
+                .await
+                .expect("read replacement"),
             b"foreign sentinel"
         );
     }
@@ -1564,7 +1571,9 @@ mod destination_ownership_tests {
             .expect_err("an unowned file must be rejected before networking");
         assert_eq!(error, crate::engine_msg::DEST_EXISTS);
         assert_eq!(
-            tokio::fs::read(&destination).await.expect("read destination"),
+            tokio::fs::read(&destination)
+                .await
+                .expect("read destination"),
             b"foreign sentinel"
         );
     }

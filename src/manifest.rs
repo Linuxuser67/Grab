@@ -1206,10 +1206,10 @@ fn validate_hls_rendition_groups(
     let mut autoselect_signatures = HashSet::new();
 
     for alternative in alternatives {
-        let group_error = match &alternative.media_type {
-            AlternativeMediaType::Audio => ManifestError::InvalidAudioGroup,
-            AlternativeMediaType::Video => ManifestError::InvalidVideoGroup,
-            AlternativeMediaType::Subtitles => ManifestError::InvalidSubtitleGroup,
+        let (group_kind, group_error) = match &alternative.media_type {
+            AlternativeMediaType::Audio => ("AUDIO", ManifestError::InvalidAudioGroup),
+            AlternativeMediaType::Video => ("VIDEO", ManifestError::InvalidVideoGroup),
+            AlternativeMediaType::Subtitles => ("SUBTITLES", ManifestError::InvalidSubtitleGroup),
             // Closed captions are handled by a dedicated extraction/finalization
             // path. Unknown rendition types must not be silently discarded.
             AlternativeMediaType::ClosedCaptions | AlternativeMediaType::Other(_) => {
@@ -1217,15 +1217,14 @@ fn validate_hls_rendition_groups(
             }
         };
         let group = alternative.group_id.clone();
-        let media_type = alternative.media_type.clone();
 
         if group.trim().is_empty() || alternative.name.trim().is_empty() {
             return Err(group_error);
         }
-        if !names.insert((media_type.clone(), group.clone(), alternative.name.clone())) {
+        if !names.insert((group_kind, group.clone(), alternative.name.clone())) {
             return Err(group_error);
         }
-        if alternative.default && !defaults.insert((media_type.clone(), group.clone())) {
+        if alternative.default && !defaults.insert((group_kind, group.clone())) {
             return Err(group_error);
         }
 
@@ -1243,7 +1242,7 @@ fn validate_hls_rendition_groups(
                 // AUTOSELECT renditions in one group need distinct language,
                 // associated-language, forced, and characteristics signatures.
                 let signature = (
-                    media_type,
+                    group_kind,
                     group,
                     alternative.language.clone(),
                     alternative.assoc_language.clone(),

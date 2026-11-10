@@ -270,9 +270,8 @@ impl ManifestLookup {
         }
         let preferred_index =
             Self::preferred_subtitle_choice_index_for_language(choices, preferred);
-        preferred_index.or_else(|| {
-            Self::preferred_subtitle_choice_index_for_language(choices, "en")
-        })
+        preferred_index
+            .or_else(|| Self::preferred_subtitle_choice_index_for_language(choices, "en"))
     }
 
     fn preferred_subtitle_choice_index_for_language(
@@ -727,9 +726,20 @@ fn hls_audio_rendition_content_key(rendition: &HlsAudioRendition) -> String {
         &[
             rendition.group_id.as_bytes(),
             rendition.name.as_bytes(),
-            &[u8::from(rendition.is_default), u8::from(rendition.is_autoselect)],
-            rendition.assoc_language.as_deref().unwrap_or_default().as_bytes(),
-            rendition.characteristics.as_deref().unwrap_or_default().as_bytes(),
+            &[
+                u8::from(rendition.is_default),
+                u8::from(rendition.is_autoselect),
+            ],
+            rendition
+                .assoc_language
+                .as_deref()
+                .unwrap_or_default()
+                .as_bytes(),
+            rendition
+                .characteristics
+                .as_deref()
+                .unwrap_or_default()
+                .as_bytes(),
             rendition.channels.as_deref().unwrap_or_default().as_bytes(),
             rendition
                 .url
@@ -755,8 +765,16 @@ fn hls_subtitle_rendition_content_key(rendition: &HlsSubtitleRendition) -> Strin
                 u8::from(rendition.is_autoselect),
                 u8::from(rendition.is_forced),
             ],
-            rendition.assoc_language.as_deref().unwrap_or_default().as_bytes(),
-            rendition.characteristics.as_deref().unwrap_or_default().as_bytes(),
+            rendition
+                .assoc_language
+                .as_deref()
+                .unwrap_or_default()
+                .as_bytes(),
+            rendition
+                .characteristics
+                .as_deref()
+                .unwrap_or_default()
+                .as_bytes(),
             rendition.url.path().as_bytes(),
         ],
     )
@@ -1081,10 +1099,7 @@ mod tests {
                 is_autoselect: true,
             },
         ];
-        assert_eq!(
-            ManifestLookup::preferred_audio_choice_index(&choices),
-            1
-        );
+        assert_eq!(ManifestLookup::preferred_audio_choice_index(&choices), 1);
         let mut default_choices = choices.clone();
         default_choices[0].is_default = true;
         assert_eq!(

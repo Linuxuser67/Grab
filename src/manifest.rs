@@ -1224,9 +1224,7 @@ fn validate_hls_rendition_groups(
         }
         if alternative.default {
             // HLS requires DEFAULT=YES renditions to also be AUTOSELECT=YES.
-            if !alternative.autoselect
-                || !defaults.insert((media_type.clone(), group.clone()))
-            {
+            if !alternative.autoselect || !defaults.insert((media_type.clone(), group.clone())) {
                 return Err(group_error);
             }
         }
@@ -1330,9 +1328,10 @@ pub(crate) fn parse_hls_master_playlist(
     }
     validate_hls_rendition_groups(&master.alternatives)?;
     if master.variants.iter().any(|variant| {
-        variant.closed_captions.as_ref().is_some_and(|group| {
-            !matches!(group, m3u8_rs::ClosedCaptionGroupId::None)
-        })
+        variant
+            .closed_captions
+            .as_ref()
+            .is_some_and(|group| !matches!(group, m3u8_rs::ClosedCaptionGroupId::None))
     }) {
         return Err(ManifestError::UnsupportedPlaylist);
     }
@@ -2507,8 +2506,7 @@ video.m3u8
 #EXT-X-STREAM-INF:BANDWIDTH=1000000,RESOLUTION=1280x720,CODECS="avc1.64001f,mp4a.40.2",AUDIO="audio",SUBTITLES="subs"
 video.m3u8
 "#;
-        let master = parse_hls_master_playlist(BASE_URL, body)
-            .expect("valid rendition metadata");
+        let master = parse_hls_master_playlist(BASE_URL, body).expect("valid rendition metadata");
 
         let audio = &master.audio_renditions[0];
         assert_eq!(audio.language.as_deref(), Some("en"));
@@ -2528,7 +2526,9 @@ video.m3u8
         assert!(subtitle.is_forced);
         assert_eq!(
             subtitle.characteristics.as_deref(),
-            Some("public.accessibility.transcribes-spoken-dialog,public.accessibility.describes-music-and-sound")
+            Some(
+                "public.accessibility.transcribes-spoken-dialog,public.accessibility.describes-music-and-sound"
+            )
         );
     }
 

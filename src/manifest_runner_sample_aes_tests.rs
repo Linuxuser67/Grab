@@ -195,7 +195,6 @@ fn rejects_id3_and_packed_audio_before_iori_ssa() {
     );
 }
 
-
 #[tokio::test]
 async fn rejects_sample_aes_segment_over_the_in_memory_limit() {
     let directory = tempfile::tempdir().expect("create temporary directory");
@@ -212,7 +211,9 @@ async fn rejects_sample_aes_segment_over_the_in_memory_limit() {
     .await
     .expect_err("oversized SAMPLE-AES segments must not enter the decoder");
 
-    assert!(matches!(error, ManifestRunError::Unsupported(message) if message.contains("memory limit")));
+    assert!(
+        matches!(error, ManifestRunError::Unsupported(message) if message.contains("memory limit"))
+    );
 }
 
 #[tokio::test]

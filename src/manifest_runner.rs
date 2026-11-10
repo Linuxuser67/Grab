@@ -2404,20 +2404,16 @@ async fn read_sample_aes_resource(
     })
     .await
     .map_err(|error| {
-        ManifestRunError::Failed(format!(
-            "The {description} read worker failed: {error}"
-        ))
+        ManifestRunError::Failed(format!("The {description} read worker failed: {error}"))
     })?;
 
     result.map_err(|error| match error {
         crate::bounded_file::BoundedFileError::NotRegularFile => {
             ManifestRunError::Failed(format!("The {description} is not a regular file"))
         }
-        crate::bounded_file::BoundedFileError::TooLarge => {
-            ManifestRunError::Unsupported(format!(
-                "The {description} exceeds its {max_bytes}-byte SAMPLE-AES memory limit"
-            ))
-        }
+        crate::bounded_file::BoundedFileError::TooLarge => ManifestRunError::Unsupported(format!(
+            "The {description} exceeds its {max_bytes}-byte SAMPLE-AES memory limit"
+        )),
         crate::bounded_file::BoundedFileError::Io(source) => {
             ManifestRunError::Failed(format!("Could not read {description}: {source}"))
         }

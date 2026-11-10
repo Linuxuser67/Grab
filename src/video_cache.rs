@@ -312,7 +312,7 @@ fn identity_key(
 ) -> Option<String> {
     let mut url = url::Url::parse(raw_url).ok()?;
     url.set_fragment(None);
-    if has_rotating_auth_query(&url) {
+    if has_known_rotating_auth_query(&url) {
         return None;
     }
     canonicalize_youtube_url(&mut url);
@@ -559,21 +559,11 @@ fn hash_file_identity(hasher: &mut Sha256, name: &[u8], path: &Path, metadata: &
     }
 }
 
-/// URLs carrying rotating authentication/signature parameters are not reusable.
-pub(crate) fn has_rotating_auth_query(url: &url::Url) -> bool {
-    let (mut has_t, mut has_s, mut has_e) = (false, false, false);
-    for (name, _) in url.query_pairs() {
-        match name.to_ascii_lowercase().as_str() {
-            "t" => has_t = true,
-            "s" => has_s = true,
-            "e" => has_e = true,
-            _ => {}
-        }
-    }
-    if has_t && has_s && has_e {
-        return true;
-    }
-
+/// Detect only query names with established, conventional authentication semantics.
+///
+/// HLS manifest caching applies a stricter policy and rejects every query-bearing
+/// source/resource; this predicate is used only for yt-dlp extraction identity.
+pub(crate) fn has_known_rotating_auth_query(url: &url::Url) -> bool {
     url.query_pairs().any(|(name, _)| {
         matches!(
             name.to_ascii_lowercase().as_str(),
@@ -611,7 +601,7 @@ pub(crate) fn has_rotating_auth_query(url: &url::Url) -> bool {
 mod tests {
     use super::{
         AUTHENTICATED_PREVIEW_TTL, AUTHENTICATED_VIDEO_NAMESPACE, cache_key,
-        has_rotating_auth_query, lookup_video, persistent_cache_record, playlist_cache_key,
+        has_known_rotating_auth_query, lookup_video, persistent_cache_record, playlist_cache_key,
         prune_authenticated_previews, restore_persistent_cache_record, store_video,
         validate_cache_file_path,
     };
@@ -793,26 +783,30 @@ mod tests {
     }
 
     #[test]
-    fn rejects_rotating_auth_query_parameters() {
+    fn rejects_known_rotating_auth_query_parameters() {
         for url in [
             "https://example.test/watch?v=1&token=abc",
             "https://example.test/watch?signature=abc",
             "https://example.test/watch?X-Amz-Signature=abc",
         ] {
-            assert!(has_rotating_auth_query(&url::Url::parse(url).unwrap()));
+            assert!(has_known_rotating_auth_query(&url::Url::parse(url).unwrap()));
         }
-        assert!(!has_rotating_auth_query(
+        assert!(!has_known_rotating_auth_query(
             &url::Url::parse("https://example.test/watch?v=1").unwrap()
         ));
-        assert!(has_rotating_auth_query(
-            &url::Url::parse("https://example.test/master.m3u8?t=opaque&s=signature&e=86400")
-                .unwrap()
-        ));
         assert!(
-            !has_rotating_auth_query(
-                &url::Url::parse("https://example.test/master.m3u8?t=tracking&s=short").unwrap()
+            !has_known_rotating_auth_query(
+                &url::Url::parse("https://example.test/master.m3u8?t=opaque&s=signature&e=86400")
+                    .unwrap()
             ),
-            "the short parameter names alone must not disable caching"
+            "opaque t/s/e query fields are not assumed to be auth parameters"
+        );
+        assert!(
+            !has_known_rotating_auth_query(
+                &url::Url::parse("https://example.test/master.m3u8?f=418899&srv=server&i=0.4&sp=500&p1=one&p2=two&asn=327934")
+                    .unwrap()
+            ),
+            "provider-specific parameters are not assumed to be auth parameters"
         );
     }
 

@@ -284,7 +284,7 @@ async fn hls_master_input_preserves_separate_rendition_timestamp_offsets() {
             "v:0,agroup:aud a:0,agroup:aud,default:yes",
             "-hls_segment_filename",
         ])
-        .arg(root.path().join("track_%v/segment_%03d.ts"))
+        .arg(root.path().join("track_%v/segment_%03d.bin"))
         .arg(root.path().join("track_%v/local.m3u8"))
         .output()
         .expect("generate separate HLS audio and video renditions");

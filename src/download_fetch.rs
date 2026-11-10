@@ -791,6 +791,57 @@ async fn attempt_once(
         };
     }
 }
+/// Re-apply both torrent speed caps from settings (editing one key must never clear the other).
+pub(crate) fn apply_torrent_limits(s: &crate::settings::AppSettings) {
+    crate::torrent::apply_live_limits(
+        parse_rate(s.speed_limit().trim()),
+        parse_rate(s.torrent_upload_limit().trim()),
+    );
+}
+
+/// Shrink `path` to the longest completed piece prefix (a single-stream resume appends at EOF, so holes must go). Only shrinks.
+pub(crate) fn truncate_to_prefix(path: &std::path::Path, st: &SegmentState) {
+    let prefix = st.prefix_len();
+    if let Ok(md) = std::fs::metadata(path)
+        && md.len() > prefix
+        && let Ok(f) = std_open_nofollow(
+            |o| {
+                o.write(true);
+            },
+            path,
+        )
+    {
+        let _ = f.set_len(prefix);
+    }
+}
+
+/// Open for writing without truncating (truncating here would corrupt resumed pieces the bitmap claims as done).
+/// Open a file refusing to follow symlinks: a link swapped in between attempts
+/// must not divert a resume-append or retry-truncate onto an arbitrary file.
+/// Returns ELOOP if the final component is a symlink.
+fn std_open_nofollow(
+    configure: impl FnOnce(&mut std::fs::OpenOptions),
+    path: &std::path::Path,
+) -> std::io::Result<std::fs::File> {
+    use std::os::unix::fs::OpenOptionsExt as _;
+    let mut opts = std::fs::OpenOptions::new();
+    configure(&mut opts);
+    opts.custom_flags(libc::O_NOFOLLOW).open(path)
+}
+
+async fn open_nofollow(
+    configure: impl FnOnce(&mut std::fs::OpenOptions) + Send + 'static,
+    path: &std::path::Path,
+) -> std::io::Result<tokio::fs::File> {
+    // Keep O_NOFOLLOW while moving the synchronous open off the Tokio worker.
+    let path = path.to_path_buf();
+    let file = crate::runtime::tokio_rt()
+        .spawn_blocking(move || std_open_nofollow(configure, &path))
+        .await
+        .map_err(std::io::Error::other)??;
+    Ok(tokio::fs::File::from_std(file))
+}
+
 /// Open a partial download for append only if it still holds exactly the `start` bytes the Range offset was computed from.
 pub(crate) async fn open_partial(
     path: &std::path::Path,

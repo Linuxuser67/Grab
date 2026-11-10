@@ -331,7 +331,7 @@ enum Tracks {
         audio: Option<Box<HlsPlan>>,
         subtitle: Option<Box<HlsPlan>>,
         subtitle_language: Option<String>,
-        content_steering: Option<HlsContentSteering>,
+        content_steering: Option<Box<HlsContentSteering>>,
     },
     Dash {
         video: Box<DashRepresentationPlan>,
@@ -1626,7 +1626,7 @@ pub(crate) async fn run_manifest_download(
             video: video.as_ref(),
             audio: audio.as_deref(),
             source: &job.source,
-            content_steering: content_steering.as_mut(),
+            content_steering: content_steering.as_deref_mut(),
             video_dir: &video_dir,
             audio_dir: &audio_dir,
             concurrency,
@@ -2188,7 +2188,7 @@ async fn resolve_tracks(
                 audio: audio.map(Box::new),
                 subtitle,
                 subtitle_language,
-                content_steering,
+                content_steering: content_steering.map(Box::new),
             })
         }
         ManifestDownloadPlan::Dash {

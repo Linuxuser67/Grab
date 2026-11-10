@@ -1394,10 +1394,7 @@ async fn apply_hls_content_steering(
     proxy_configured: bool,
 ) -> Result<crate::manifest::HlsMasterPlan, ManifestIntakeError> {
     if let Some(steering) = master.content_steering.as_mut() {
-        crate::manifest::inherit_query_parameters_same_origin(
-            master_url,
-            &mut steering.server_url,
-        );
+        crate::manifest::inherit_query_parameters_same_origin(master_url, &mut steering.server_url);
     }
     let Some(steering) = master.content_steering.as_ref() else {
         return Ok(master);
@@ -2174,9 +2171,12 @@ video.m3u8
         assert!(master.variants[0].url.query().is_some_and(|query| {
             query.contains("t=token") && query.contains("s=signature") && query.contains("e=86400")
         }));
-        assert!(master.audio_renditions[0].url.as_ref().is_some_and(|url| {
-            url.query().is_some_and(|query| query.contains("t=token"))
-        }));
+        assert!(
+            master.audio_renditions[0]
+                .url
+                .as_ref()
+                .is_some_and(|url| { url.query().is_some_and(|query| query.contains("t=token")) })
+        );
         assert_eq!(master.subtitle_renditions[0].url.query(), None);
     }
 

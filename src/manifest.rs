@@ -3654,10 +3654,9 @@ one.ts
             "https://cdn.example.test/master.m3u8?t=opaque&s=parent%2Fsignature&e=86400",
         )
         .expect("signed parent URL");
-        let mut child = Url::parse(
-            "https://cdn.example.test/video/index.m3u8?quality=1080&s=child-signature",
-        )
-        .expect("child URL");
+        let mut child =
+            Url::parse("https://cdn.example.test/video/index.m3u8?quality=1080&s=child-signature")
+                .expect("child URL");
         inherit_query_parameters_same_origin(&parent, &mut child);
         assert_eq!(
             child.query(),
@@ -3673,7 +3672,8 @@ one.ts
 
     #[test]
     fn hls_media_resources_inherit_signed_query_for_segments_maps_and_keys() {
-        let parent = "https://cdn.example.test/video/index.m3u8?t=parent-token&s=parent%2Fsignature&e=86400";
+        let parent =
+            "https://cdn.example.test/video/index.m3u8?t=parent-token&s=parent%2Fsignature&e=86400";
         let body = br#"#EXTM3U
 #EXT-X-VERSION:6
 #EXT-X-TARGETDURATION:4
@@ -3690,23 +3690,38 @@ segment.ts?quality=1080&t=child-token
             .find(|resource| resource.kind == HlsResourceKind::Segment)
             .expect("segment resource");
         assert_eq!(
-            segment.url.query_pairs().find(|(name, _)| name == "t")
-                .map(|(_, value)| value.into_owned()).as_deref(),
+            segment
+                .url
+                .query_pairs()
+                .find(|(name, _)| name == "t")
+                .map(|(_, value)| value.into_owned())
+                .as_deref(),
             Some("child-token")
         );
         assert_eq!(
-            segment.url.query_pairs().find(|(name, _)| name == "s")
-                .map(|(_, value)| value.into_owned()).as_deref(),
+            segment
+                .url
+                .query_pairs()
+                .find(|(name, _)| name == "s")
+                .map(|(_, value)| value.into_owned())
+                .as_deref(),
             Some("parent/signature")
         );
         assert_eq!(
-            segment.url.query_pairs().find(|(name, _)| name == "e")
-                .map(|(_, value)| value.into_owned()).as_deref(),
+            segment
+                .url
+                .query_pairs()
+                .find(|(name, _)| name == "e")
+                .map(|(_, value)| value.into_owned())
+                .as_deref(),
             Some("86400")
         );
 
         for kind in [HlsResourceKind::InitMap, HlsResourceKind::Key] {
-            let resource = plan.resources.iter().find(|resource| resource.kind == kind)
+            let resource = plan
+                .resources
+                .iter()
+                .find(|resource| resource.kind == kind)
                 .expect("init-map or key resource");
             assert!(resource.url.query().is_some_and(|query| {
                 query.contains("t=parent-token")

@@ -786,7 +786,7 @@ pub fn build_window(
 
             for (key, group) in groups.borrow().iter() {
                 if !grouped.contains_key(key) {
-                    group.update(&[], &[]);
+                    group.update(&[], &[], &m);
                     group.row.set_visible(false);
                 }
             }

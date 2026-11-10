@@ -269,11 +269,7 @@ fn open_segment_program_date_time(
     let Some(tag) = date_tags.next() else {
         return Ok(None);
     };
-    if date_tags.next().is_some()
-        || tag.len() > 128
-        || tag.contains('\r')
-        || tag.contains('\n')
-    {
+    if date_tags.next().is_some() || tag.len() > 128 || tag.contains('\r') || tag.contains('\n') {
         return Err(ManifestError::UnsupportedPlaylist);
     }
 
@@ -557,8 +553,8 @@ fn build_plan(
             &mut map_filenames,
         )?;
         let discontinuity = open_segment_discontinuity;
-        let open_date_time = open_segment_program_date_time(open)?
-            .and_then(|segment| segment.program_date_time);
+        let open_date_time =
+            open_segment_program_date_time(open)?.and_then(|segment| segment.program_date_time);
         let first_part_position = local_segments.len();
         append_part_units(
             &base_url,
@@ -1317,7 +1313,9 @@ mod tests {
             .expect("LL-HLS plan")
             .expect("LL-HLS detected");
         let local = m3u8_rs::parse_media_playlist_res(
-            &plan.local_playlist_bytes().expect("serialize local playlist"),
+            &plan
+                .local_playlist_bytes()
+                .expect("serialize local playlist"),
         )
         .expect("local LL-HLS playlist parses");
         assert!(local.segments[0].program_date_time.is_some());
@@ -1341,7 +1339,9 @@ mod tests {
             .expect("LL-HLS plan")
             .expect("LL-HLS detected");
         let local = m3u8_rs::parse_media_playlist_res(
-            &plan.local_playlist_bytes().expect("serialize local playlist"),
+            &plan
+                .local_playlist_bytes()
+                .expect("serialize local playlist"),
         )
         .expect("local LL-HLS playlist parses");
         assert_eq!(local.segments.len(), 2);
@@ -1366,7 +1366,9 @@ mod tests {
             .expect("LL-HLS plan")
             .expect("LL-HLS detected");
         let local = m3u8_rs::parse_media_playlist_res(
-            &plan.local_playlist_bytes().expect("serialize local playlist"),
+            &plan
+                .local_playlist_bytes()
+                .expect("serialize local playlist"),
         )
         .expect("local LL-HLS playlist parses");
         assert_eq!(local.segments.len(), 2);

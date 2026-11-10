@@ -148,7 +148,6 @@ impl ManifestLookup {
                             key: key.into(),
                             label: hls_audio_rendition_label(rendition),
                             is_default: rendition.is_default,
-                            is_autoselect: rendition.is_autoselect,
                         })
                     })
                     .collect()
@@ -186,7 +185,6 @@ impl ManifestLookup {
                             key: representation.key.clone().into(),
                             label,
                             is_default: representation.is_default_audio,
-                            is_autoselect: false,
                         }
                     })
                     .collect::<Vec<_>>();
@@ -225,8 +223,6 @@ impl ManifestLookup {
                             key: key.into(),
                             language: rendition.language.clone(),
                             is_default: rendition.is_default,
-                            is_autoselect: rendition.is_autoselect,
-                            is_forced: rendition.is_forced,
                         })
                     })
                     .collect()
@@ -247,8 +243,6 @@ impl ManifestLookup {
                         key: track.key.clone().into(),
                         language: track.language.clone(),
                         is_default: track.is_default_subtitle,
-                        is_autoselect: false,
-                        is_forced: false,
                     })
                     .collect::<Vec<_>>();
                 choices.sort_by_key(|choice| !choice.is_default);
@@ -268,34 +262,22 @@ impl ManifestLookup {
         if preferred.eq_ignore_ascii_case("off") {
             return None;
         }
-        let preferred_index =
-            Self::preferred_subtitle_choice_index_for_language(choices, preferred);
-        preferred_index
-            .or_else(|| Self::preferred_subtitle_choice_index_for_language(choices, "en"))
-    }
-
-    fn preferred_subtitle_choice_index_for_language(
-        choices: &[ManifestSubtitleChoice],
-        language: &str,
-    ) -> Option<usize> {
         choices
             .iter()
-            .enumerate()
-            .filter(|(_, choice)| {
+            .position(|choice| {
                 choice
                     .language
                     .as_deref()
-                    .is_some_and(|available| subtitle_language_matches(language, available))
+                    .is_some_and(|language| subtitle_language_matches(preferred, language))
             })
-            .min_by_key(|(index, choice)| {
-                (
-                    choice.is_forced,
-                    !choice.is_default,
-                    !choice.is_autoselect,
-                    *index,
-                )
+            .or_else(|| {
+                choices.iter().position(|choice| {
+                    choice
+                        .language
+                        .as_deref()
+                        .is_some_and(|language| subtitle_language_matches("en", language))
+                })
             })
-            .map(|(index, _)| index)
     }
 
     /// Resolve the selected subtitle key using the same language preference as yt-dlp.
@@ -316,7 +298,6 @@ impl ManifestLookup {
         choices
             .iter()
             .position(|choice| choice.is_default)
-            .or_else(|| choices.iter().position(|choice| choice.is_autoselect))
             .unwrap_or(0)
     }
 
@@ -470,13 +451,6 @@ pub(crate) fn download_plan(
                         .iter()
                         .filter(|rendition| rendition.group_id == group)
                         .find(|rendition| rendition.is_default)
-                        .or_else(|| {
-                            master
-                                .audio_renditions
-                                .iter()
-                                .filter(|rendition| rendition.group_id == group)
-                                .find(|rendition| rendition.is_autoselect)
-                        })
                         .or_else(|| {
                             master
                                 .audio_renditions
@@ -726,21 +700,7 @@ fn hls_audio_rendition_content_key(rendition: &HlsAudioRendition) -> String {
         &[
             rendition.group_id.as_bytes(),
             rendition.name.as_bytes(),
-            &[
-                u8::from(rendition.is_default),
-                u8::from(rendition.is_autoselect),
-            ],
-            rendition
-                .assoc_language
-                .as_deref()
-                .unwrap_or_default()
-                .as_bytes(),
-            rendition
-                .characteristics
-                .as_deref()
-                .unwrap_or_default()
-                .as_bytes(),
-            rendition.channels.as_deref().unwrap_or_default().as_bytes(),
+            &[u8::from(rendition.is_default)],
             rendition
                 .url
                 .as_ref()
@@ -760,21 +720,7 @@ fn hls_subtitle_rendition_content_key(rendition: &HlsSubtitleRendition) -> Strin
         &[
             rendition.group_id.as_bytes(),
             rendition.name.as_bytes(),
-            &[
-                u8::from(rendition.is_default),
-                u8::from(rendition.is_autoselect),
-                u8::from(rendition.is_forced),
-            ],
-            rendition
-                .assoc_language
-                .as_deref()
-                .unwrap_or_default()
-                .as_bytes(),
-            rendition
-                .characteristics
-                .as_deref()
-                .unwrap_or_default()
-                .as_bytes(),
+            &[u8::from(rendition.is_default)],
             rendition.url.path().as_bytes(),
         ],
     )
@@ -901,42 +847,11 @@ fn hls_audio_rendition_label(rendition: &HlsAudioRendition) -> String {
     if let Some(name) = name.filter(|name| Some(*name) != language) {
         parts.push(short_label(name));
     }
-    if let Some(assoc_language) = rendition
-        .assoc_language
-        .as_deref()
-        .filter(|language| !language.is_empty())
-    {
-        parts.push(format!(
-            "{}: {}",
-            gettext("Associated language"),
-            short_label(assoc_language)
-        ));
-    }
-    if let Some(channels) = rendition
-        .channels
-        .as_deref()
-        .filter(|channels| !channels.is_empty())
-    {
-        parts.push(format!(
-            "{}: {}",
-            gettext("Channels"),
-            short_label(channels)
-        ));
-    }
-    if rendition.characteristics.as_deref().is_some_and(|value| {
-        value
-            .split(',')
-            .any(|item| item.trim() == "public.accessibility.describes-video")
-    }) {
-        parts.push(gettext("Audio description"));
-    }
     if rendition.url.is_none() {
         parts.push(gettext("Embedded audio"));
     }
     if rendition.is_default {
         parts.push(gettext("Default"));
-    } else if rendition.is_autoselect {
-        parts.push(gettext("Auto-selectable"));
     }
     if parts.is_empty() {
         gettext("Audio track")
@@ -1024,15 +939,11 @@ mod tests {
                 key: "fr".into(),
                 language: Some("fr".to_string()),
                 is_default: true,
-                is_autoselect: true,
-                is_forced: false,
             },
             ManifestSubtitleChoice {
                 key: "en".into(),
                 language: Some("en".to_string()),
                 is_default: false,
-                is_autoselect: false,
-                is_forced: false,
             },
         ];
 
@@ -1052,68 +963,11 @@ mod tests {
     }
 
     #[test]
-    fn subtitle_selection_prefers_regular_tracks_then_default_and_autoselect() {
-        let choices = vec![
-            ManifestSubtitleChoice {
-                key: "forced".into(),
-                language: Some("en".to_string()),
-                is_default: true,
-                is_autoselect: true,
-                is_forced: true,
-            },
-            ManifestSubtitleChoice {
-                key: "regular-auto".into(),
-                language: Some("en".to_string()),
-                is_default: false,
-                is_autoselect: true,
-                is_forced: false,
-            },
-            ManifestSubtitleChoice {
-                key: "regular-default".into(),
-                language: Some("en".to_string()),
-                is_default: true,
-                is_autoselect: true,
-                is_forced: false,
-            },
-        ];
-        assert_eq!(
-            ManifestLookup::preferred_subtitle_choice_index(&choices, Some("en")),
-            Some(2),
-            "the regular rendition is preferred over a forced-only rendition"
-        );
-    }
-
-    #[test]
-    fn audio_selection_prefers_default_then_autoselect_then_first() {
-        let choices = vec![
-            ManifestAudioChoice {
-                key: "first".into(),
-                label: "First".to_string(),
-                is_default: false,
-                is_autoselect: false,
-            },
-            ManifestAudioChoice {
-                key: "auto".into(),
-                label: "Auto".to_string(),
-                is_default: false,
-                is_autoselect: true,
-            },
-        ];
-        assert_eq!(ManifestLookup::preferred_audio_choice_index(&choices), 1);
-        let mut default_choices = choices.clone();
-        default_choices[0].is_default = true;
-        assert_eq!(
-            ManifestLookup::preferred_audio_choice_index(&default_choices),
-            0
-        );
-    }
-
-    #[test]
     fn hls_video_rendition_selection_resolves_the_selected_angle() {
         let body = br#"#EXTM3U
 #EXT-X-MEDIA:TYPE=VIDEO,GROUP-ID="angles",NAME="Main",URI="video/main.m3u8",STABLE-RENDITION-ID="main"
 #EXT-X-MEDIA:TYPE=VIDEO,GROUP-ID="angles",NAME="Camera B",URI="video/camera-b.m3u8",STABLE-RENDITION-ID="camera-b"
-#EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID="audio",NAME="English",LANGUAGE="en",DEFAULT=YES,AUTOSELECT=YES,URI="audio/en.m3u8"
+#EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID="audio",NAME="English",LANGUAGE="en",DEFAULT=YES,URI="audio/en.m3u8"
 #EXT-X-STREAM-INF:BANDWIDTH=2000000,RESOLUTION=1920x1080,VIDEO="angles",AUDIO="audio",STABLE-VARIANT-ID="variant-1080"
 video/combined.m3u8
 "#;
@@ -1168,7 +1022,7 @@ video/combined.m3u8
     #[test]
     fn hls_subtitle_selection_uses_stable_rendition_ids_and_language_preference() {
         let body = br#"#EXTM3U
-#EXT-X-MEDIA:TYPE=SUBTITLES,GROUP-ID="subs",NAME="English",LANGUAGE="en",DEFAULT=YES,AUTOSELECT=YES,URI="subs/en.m3u8",STABLE-RENDITION-ID="subtitle-en"
+#EXT-X-MEDIA:TYPE=SUBTITLES,GROUP-ID="subs",NAME="English",LANGUAGE="en",DEFAULT=YES,URI="subs/en.m3u8",STABLE-RENDITION-ID="subtitle-en"
 #EXT-X-STREAM-INF:BANDWIDTH=1000000,RESOLUTION=1280x720,SUBTITLES="subs",STABLE-VARIANT-ID="variant-720"
 video/720.m3u8
 "#;

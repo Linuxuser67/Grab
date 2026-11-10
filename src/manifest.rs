@@ -1211,10 +1211,10 @@ fn validate_hls_rendition_groups(
     let mut autoselect_signatures = HashSet::new();
 
     for alternative in alternatives {
-        let group_error = match &alternative.media_type {
-            AlternativeMediaType::Audio => ManifestError::InvalidAudioGroup,
-            AlternativeMediaType::Video => ManifestError::InvalidVideoGroup,
-            AlternativeMediaType::Subtitles => ManifestError::InvalidSubtitleGroup,
+        let (group_kind, group_error) = match &alternative.media_type {
+            AlternativeMediaType::Audio => ("AUDIO", ManifestError::InvalidAudioGroup),
+            AlternativeMediaType::Video => ("VIDEO", ManifestError::InvalidVideoGroup),
+            AlternativeMediaType::Subtitles => ("SUBTITLES", ManifestError::InvalidSubtitleGroup),
             // Closed captions are handled by a dedicated extraction/finalization
             // path. Unknown rendition types must not be silently discarded.
             AlternativeMediaType::ClosedCaptions | AlternativeMediaType::Other(_) => {
@@ -1222,30 +1222,41 @@ fn validate_hls_rendition_groups(
             }
         };
         let group = alternative.group_id.clone();
-        let media_type = alternative.media_type.clone();
 
-        if !names.insert((media_type.clone(), group.clone(), alternative.name.clone())) {
+        if group.trim().is_empty() || alternative.name.trim().is_empty() {
             return Err(group_error);
         }
-        if alternative.default {
-            // HLS requires DEFAULT=YES renditions to also be AUTOSELECT=YES.
-            if !alternative.autoselect || !defaults.insert((media_type.clone(), group.clone())) {
+        if !names.insert((group_kind, group.clone(), alternative.name.clone())) {
+            return Err(group_error);
+        }
+        if alternative.default && !defaults.insert((group_kind, group.clone())) {
+            return Err(group_error);
+        }
+
+        // AUTOSELECT selection semantics apply to audio and subtitle tracks.
+        // Apple multivariant examples may mark VIDEO angles DEFAULT=YES
+        // without AUTOSELECT=YES.
+        if matches!(
+            &alternative.media_type,
+            AlternativeMediaType::Audio | AlternativeMediaType::Subtitles
+        ) {
+            if alternative.default && !alternative.autoselect {
                 return Err(group_error);
             }
-        }
-        if alternative.autoselect {
-            // AUTOSELECT renditions in one group need distinct language,
-            // associated-language, forced, and characteristics signatures.
-            let signature = (
-                media_type,
-                group,
-                alternative.language.clone(),
-                alternative.assoc_language.clone(),
-                alternative.forced,
-                alternative.characteristics.clone(),
-            );
-            if !autoselect_signatures.insert(signature) {
-                return Err(group_error);
+            if alternative.autoselect {
+                // AUTOSELECT renditions in one group need distinct language,
+                // associated-language, forced, and characteristics signatures.
+                let signature = (
+                    group_kind,
+                    group,
+                    alternative.language.clone(),
+                    alternative.assoc_language.clone(),
+                    alternative.forced,
+                    alternative.characteristics.clone(),
+                );
+                if !autoselect_signatures.insert(signature) {
+                    return Err(group_error);
+                }
             }
         }
     }
@@ -2534,6 +2545,45 @@ video.m3u8
             Some(
                 "public.accessibility.transcribes-spoken-dialog,public.accessibility.describes-music-and-sound"
             )
+        );
+    }
+
+    #[test]
+    fn accepts_default_video_rendition_without_autoselect() {
+        let body = br#"#EXTM3U
+#EXT-X-MEDIA:TYPE=VIDEO,GROUP-ID="angles",NAME="Director's Cut",DEFAULT=YES,URI="video/director.m3u8"
+#EXT-X-STREAM-INF:BANDWIDTH=1000000,VIDEO="angles"
+video/main.m3u8
+"#;
+        let plan = parse_hls_master_playlist(BASE_URL, body)
+            .expect("VIDEO defaults do not require AUTOSELECT");
+        assert_eq!(plan.variants.len(), 1);
+        assert_eq!(
+            plan.variants[0].video_rendition_name.as_deref(),
+            Some("Director's Cut")
+        );
+    }
+
+    #[test]
+    fn rejects_empty_rendition_group_ids_and_names() {
+        let empty_group = br#"#EXTM3U
+#EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID="",NAME="English",URI="audio/en.m3u8"
+#EXT-X-STREAM-INF:BANDWIDTH=1000000,AUDIO=""
+video.m3u8
+"#;
+        assert_eq!(
+            parse_hls_master_playlist(BASE_URL, empty_group).err(),
+            Some(ManifestError::InvalidAudioGroup)
+        );
+
+        let empty_name = br#"#EXTM3U
+#EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID="audio",NAME="",URI="audio/en.m3u8"
+#EXT-X-STREAM-INF:BANDWIDTH=1000000,AUDIO="audio"
+video.m3u8
+"#;
+        assert_eq!(
+            parse_hls_master_playlist(BASE_URL, empty_name).err(),
+            Some(ManifestError::InvalidAudioGroup)
         );
     }
 

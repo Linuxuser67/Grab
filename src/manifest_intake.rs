@@ -2169,7 +2169,7 @@ mod tests {
     #[test]
     fn signed_master_query_is_inherited_only_by_same_origin_renditions() {
         let body = br#"#EXTM3U
-#EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID="aud",NAME="English",DEFAULT=YES,URI="audio.m3u8"
+#EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID="aud",NAME="English",DEFAULT=YES,AUTOSELECT=YES,URI="audio.m3u8"
 #EXT-X-MEDIA:TYPE=SUBTITLES,GROUP-ID="subs",NAME="English",URI="https://other.example.test/subs.m3u8"
 #EXT-X-STREAM-INF:BANDWIDTH=1000000,AUDIO="aud",SUBTITLES="subs"
 video.m3u8
@@ -2754,7 +2754,11 @@ video/es.m3u8
             group_id: "audio-main".to_string(),
             name: "English".to_string(),
             language: Some("en".to_string()),
+            assoc_language: None,
             is_default: true,
+            is_autoselect: true,
+            characteristics: None,
+            channels: None,
             stable_rendition_id: Some("rendition-en".to_string()),
         };
         let original = rendition("https://cdn.example.test/audio/en.m3u8?sig=old");
@@ -2779,7 +2783,11 @@ video/es.m3u8
             group_id: "audio-main".to_string(),
             name: "English".to_string(),
             language: Some("en".to_string()),
+            assoc_language: None,
             is_default: true,
+            is_autoselect: true,
+            characteristics: None,
+            channels: None,
             stable_rendition_id: Some("rendition-en".to_string()),
         };
         let original = rendition("https://cdn.example.test/audio/en-old.m3u8?sig=old");

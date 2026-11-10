@@ -234,14 +234,9 @@ fn resource_url_identity(url: &Url, preserve_query: bool) -> Url {
         return stable_url;
     }
 
-    let compact_signature = has_compact_signature_query(&stable_url);
     let query_pairs: Vec<(String, String)> = stable_url
         .query_pairs()
-        .filter(|(name, _)| {
-            !is_rotating_signature_parameter(name)
-                && !(compact_signature
-                    && matches!(name.to_ascii_lowercase().as_str(), "t" | "s" | "e"))
-        })
+        .filter(|(name, _)| !is_rotating_signature_parameter(name))
         .map(|(name, value)| (name.into_owned(), value.into_owned()))
         .collect();
     stable_url.set_query(None);
@@ -249,19 +244,6 @@ fn resource_url_identity(url: &Url, preserve_query: bool) -> Url {
         stable_url.query_pairs_mut().extend_pairs(query_pairs);
     }
     stable_url
-}
-
-fn has_compact_signature_query(url: &Url) -> bool {
-    let (mut has_t, mut has_s, mut has_e) = (false, false, false);
-    for (name, _) in url.query_pairs() {
-        match name.to_ascii_lowercase().as_str() {
-            "t" => has_t = true,
-            "s" => has_s = true,
-            "e" => has_e = true,
-            _ => {}
-        }
-    }
-    has_t && has_s && has_e
 }
 
 fn is_rotating_signature_parameter(name: &str) -> bool {
@@ -2020,8 +2002,10 @@ fn resolve_resource_url(base_url: &Url, raw: &str) -> Result<Url, ManifestError>
     Ok(url)
 }
 
-/// Inherit missing query parameters from a playlist URL without forwarding
-/// credentials across origins or rewriting the source's encoded query bytes.
+/// Inherit every parent query parameter not explicitly supplied by a child URL.
+///
+/// Inheritance is limited to identical origins and preserves the parent's raw
+/// query encoding; it does not interpret CDN-specific parameter names.
 pub(crate) fn inherit_query_parameters_same_origin(parent_url: &Url, target_url: &mut Url) {
     if parent_url.origin() != target_url.origin() {
         return;
@@ -2034,14 +2018,12 @@ pub(crate) fn inherit_query_parameters_same_origin(parent_url: &Url, target_url:
         .query()
         .unwrap_or_default()
         .split('&')
-        .filter_map(raw_query_parameter_name)
+        .map(raw_query_parameter_name)
         .collect::<HashSet<_>>();
     let inherited = parent_query
         .split('&')
         .filter(|pair| !pair.is_empty())
-        .filter(|pair| {
-            raw_query_parameter_name(pair).is_some_and(|name| !child_names.contains(&name))
-        })
+        .filter(|pair| !child_names.contains(&raw_query_parameter_name(pair)))
         .collect::<Vec<_>>();
     if inherited.is_empty() {
         return;
@@ -2056,16 +2038,13 @@ pub(crate) fn inherit_query_parameters_same_origin(parent_url: &Url, target_url:
     target_url.set_query(Some(&combined));
 }
 
-fn raw_query_parameter_name(pair: &str) -> Option<String> {
+fn raw_query_parameter_name(pair: &str) -> Vec<u8> {
     let raw_name = pair.split_once('=').map_or(pair, |(name, _)| name);
-    percent_encoding::percent_decode_str(raw_name)
-        .decode_utf8()
-        .ok()
-        .map(|name| name.into_owned())
+    percent_encoding::percent_decode_str(raw_name).collect()
 }
 
-/// Resolve a media-playlist resource and retain the playlist's same-origin
-/// authorization query when the resource URI is relative or query-incomplete.
+/// Resolve a media-playlist resource and retain missing same-origin query
+/// parameters when its URI is relative or query-incomplete.
 fn resolve_hls_media_resource_url(base_url: &Url, raw: &str) -> Result<Url, ManifestError> {
     let mut url = resolve_resource_url(base_url, raw)?;
     inherit_query_parameters_same_origin(base_url, &mut url);
@@ -2085,6 +2064,30 @@ mod tests {
     use super::*;
 
     const BASE_URL: &str = "https://cdn.example.test/path/master.m3u8";
+
+    #[test]
+    fn inherits_all_same_origin_query_parameters_without_utf8_assumptions() {
+        let parent = Url::parse(
+            "https://cdn.example.test/master.m3u8?t=opaque&s=signature&e=129600&f=418899&srv=server&i=0.4&sp=500&p1=one&p2=two&asn=327934&%FF=opaque",
+        )
+        .expect("signed parent URL");
+        let mut child =
+            Url::parse("https://cdn.example.test/video/index.m3u8?f=child-value&child=1")
+                .expect("child URL");
+        inherit_query_parameters_same_origin(&parent, &mut child);
+        assert_eq!(
+            child.query(),
+            Some(
+                "f=child-value&child=1&t=opaque&s=signature&e=129600&srv=server&i=0.4&sp=500&p1=one&p2=two&asn=327934&%FF=opaque"
+            ),
+            "inherit every parent parameter, preserve its encoding, and let the child override f",
+        );
+
+        let mut other_origin =
+            Url::parse("https://other.example.test/video/index.m3u8").expect("other origin");
+        inherit_query_parameters_same_origin(&parent, &mut other_origin);
+        assert_eq!(other_origin.query(), None);
+    }
 
     #[test]
     fn plain_mpegts_presentation_excludes_non_concatenable_hls_features() {
@@ -3747,14 +3750,19 @@ segment.ts?quality=1080&t=child-token
         )
         .expect("first compact-token resource URL");
         let compact_refreshed = Url::parse(
-            "https://cdn.example.test/seg/1.m4s?quality=1080&e=200&s=new-signature&t=new",
+            "https://cdn.example.test/seg/1.m4s?quality=1080&t=new&s=new-signature&e=200",
         )
         .expect("refreshed compact-token resource URL");
 
-        assert_eq!(
+        assert_ne!(
             resource_filename("segment", Some(1), &compact_first, None),
             resource_filename("segment", Some(1), &compact_refreshed, None),
-            "compact rotating auth tuples must not invalidate completed media resources",
+            "undocumented t/s/e values remain part of resource identity",
+        );
+        assert_ne!(
+            resource_cache_key(&compact_first),
+            resource_cache_key(&compact_refreshed),
+            "undocumented t/s/e values remain part of resource cache identity",
         );
         assert_eq!(
             resource_filename("segment", Some(1), &first, None),
@@ -3765,6 +3773,20 @@ segment.ts?quality=1080&t=child-token
             resource_filename("segment", Some(1), &first, None),
             resource_filename("segment", Some(1), &different_variant, None),
             "content-selecting query parameters must remain part of resource identity",
+        );
+
+        let provider_parameters = Url::parse(
+            "https://cdn.example.test/seg/1.m4s?f=418899&srv=server&i=0.4&sp=500&p1=one&p2=two&asn=327934",
+        )
+        .expect("provider-specific query parameters");
+        let changed_provider_parameters = Url::parse(
+            "https://cdn.example.test/seg/1.m4s?f=418900&srv=server&i=0.4&sp=500&p1=one&p2=two&asn=327934",
+        )
+        .expect("changed provider-specific query parameters");
+        assert_ne!(
+            resource_filename("segment", Some(1), &provider_parameters, None),
+            resource_filename("segment", Some(1), &changed_provider_parameters, None),
+            "unknown provider parameters must remain part of resource identity",
         );
     }
 

@@ -99,7 +99,7 @@ fn to_cached_playlist(key: &str, info: &PlaylistInfo) -> Option<Playlist> {
         return None;
     };
     if !matches!(page_url.scheme(), "http" | "https")
-        || crate::video_cache::has_rotating_auth_query(&page_url)
+        || crate::video_cache::has_known_rotating_auth_query(&page_url)
         || info.title.trim().is_empty()
         || info.items.iter().any(|item| {
             let Ok(url) = url::Url::parse(&item.page_url) else {
@@ -108,7 +108,7 @@ fn to_cached_playlist(key: &str, info: &PlaylistInfo) -> Option<Playlist> {
             !matches!(url.scheme(), "http" | "https")
                 || item.id.is_empty()
                 || item.title.trim().is_empty()
-                || crate::video_cache::has_rotating_auth_query(&url)
+                || crate::video_cache::has_known_rotating_auth_query(&url)
         })
     {
         return None;
@@ -163,7 +163,7 @@ fn from_cached_playlist(key: &str, playlist: Playlist) -> Option<PlaylistInfo> {
         return None;
     };
     if !matches!(parsed_page_url.scheme(), "http" | "https")
-        || crate::video_cache::has_rotating_auth_query(&parsed_page_url)
+        || crate::video_cache::has_known_rotating_auth_query(&parsed_page_url)
         || playlist.title.trim().is_empty()
         || playlist.entries.is_empty()
         || playlist.entries.len() >= crate::video_probe::MAX_PLAYLIST_ITEMS
@@ -185,7 +185,7 @@ fn from_cached_playlist(key: &str, playlist: Playlist) -> Option<PlaylistInfo> {
             if entry.id.is_empty()
                 || entry.title.trim().is_empty()
                 || !matches!(parsed_url.scheme(), "http" | "https")
-                || crate::video_cache::has_rotating_auth_query(&parsed_url)
+                || crate::video_cache::has_known_rotating_auth_query(&parsed_url)
             {
                 return None;
             }

@@ -50,7 +50,8 @@ struct HlsSteeringManifest {
 }
 
 // Preview metadata is short-lived: HLS/DASH source manifests can change, and
-// signed child URLs may expire. Dynamic presentations are never cached.
+// query-bearing HLS resources may include opaque auth or content-selection
+// parameters. Dynamic presentations are never cached.
 const MANIFEST_PREVIEW_CACHE_TTL: Duration = Duration::from_secs(5 * 60);
 const MANIFEST_PREVIEW_CACHE_CAPACITY: usize = 32;
 
@@ -100,6 +101,10 @@ static MANIFEST_PREVIEW_CACHE: LazyLock<
 /// so a rotation is at most [`MANIFEST_PREVIEW_CACHE_TTL`] stale. Extension
 /// handoff jars are keyed by cookie contents, so a re-handoff of the same
 /// credentials reuses the preview despite a new staged path.
+fn has_query_parameters(url: &Url) -> bool {
+    url.query().is_some_and(|query| !query.is_empty())
+}
+
 fn manifest_preview_cache_key(
     raw_url: &str,
     cookies_browser: &str,
@@ -107,7 +112,7 @@ fn manifest_preview_cache_key(
 ) -> Option<ManifestPreviewCacheKey> {
     let mut url = Url::parse(raw_url).ok()?;
     url.set_fragment(None);
-    if crate::video_cache::has_rotating_auth_query(&url) {
+    if crate::video_cache::has_known_rotating_auth_query(&url) {
         return None;
     }
 
@@ -150,32 +155,43 @@ fn manifest_preview_cache_insert(key: ManifestPreviewCacheKey, lookup: &Manifest
 }
 
 fn is_cacheable_static_manifest(lookup: &ManifestLookup) -> bool {
+    let Ok(source_url) = Url::parse(&lookup.source_url) else {
+        return false;
+    };
+    let source_has_query = has_query_parameters(&source_url);
+
     match &lookup.manifest {
         // A master caches only short-lived track-selection metadata. The child
         // media playlist is still fetched at download time, so live windows are
-        // never reused here. Signed child URLs are excluded.
+        // never reused here. Any query-bearing child URL is excluded because its
+        // parameter names and semantics are CDN-specific.
         crate::manifest_types::NativeManifest::HlsMaster(plan) => {
-            plan.content_steering.is_none()
-                && !plan
-                    .variants
-                    .iter()
-                    .any(|variant| crate::video_cache::has_rotating_auth_query(&variant.url))
+            !source_has_query
+                && plan.content_steering.is_none()
+                && !plan.variants.iter().any(|variant| {
+                    has_query_parameters(&variant.url)
+                        || variant
+                            .video_variant_url
+                            .as_ref()
+                            .is_some_and(has_query_parameters)
+                })
                 && !plan
                     .audio_renditions
                     .iter()
                     .filter_map(|rendition| rendition.url.as_ref())
-                    .any(crate::video_cache::has_rotating_auth_query)
+                    .any(has_query_parameters)
                 && !plan
                     .subtitle_renditions
                     .iter()
-                    .any(|rendition| crate::video_cache::has_rotating_auth_query(&rendition.url))
+                    .any(|rendition| has_query_parameters(&rendition.url))
         }
         crate::manifest_types::NativeManifest::HlsMedia(plan) => {
-            !plan.is_live
+            !source_has_query
+                && !plan.is_live
                 && !plan
                     .resources
                     .iter()
-                    .any(|resource| crate::video_cache::has_rotating_auth_query(&resource.url))
+                    .any(|resource| has_query_parameters(&resource.url))
         }
         crate::manifest_types::NativeManifest::Dash(plan) => {
             matches!(
@@ -3511,6 +3527,100 @@ segment.ts
             ),
         );
         assert!(manifest_preview_cache_get(&key).is_none());
+    }
+
+    #[test]
+    fn preview_cache_rejects_any_query_bearing_hls_source_and_child_resources() {
+        assert!(
+            manifest_preview_cache_key(
+                "https://cache-preview.example.test/master.m3u8?X-Amz-Signature=secret",
+                "none",
+                None,
+            )
+            .is_none(),
+            "known signed source URLs must not be cached"
+        );
+        assert!(
+            manifest_preview_cache_key(
+                "https://cache-preview.example.test/master.m3u8?f=418899&srv=server&i=0.4&sp=500&p1=one&p2=two&asn=327934",
+                "none",
+                None,
+            )
+            .is_some(),
+            "unknown query fields are not classified as signatures at URL-key creation"
+        );
+
+        let source_signed_master = crate::manifest::parse_hls_master_playlist(
+            "https://cache-preview.example.test/master.m3u8?f=418899&srv=server&i=0.4&sp=500&p1=one&p2=two&asn=327934",
+            br#"#EXTM3U
+#EXT-X-STREAM-INF:BANDWIDTH=1000000,RESOLUTION=1280x720
+video/720.m3u8
+"#,
+        )
+        .expect("valid HLS master with query-bearing source");
+        let source_master_lookup = ManifestLookup {
+            source_url: "https://cache-preview.example.test/master.m3u8?f=418899&srv=server&i=0.4&sp=500&p1=one&p2=two&asn=327934".to_string(),
+            manifest: crate::manifest_types::NativeManifest::HlsMaster(source_signed_master),
+        };
+        assert!(
+            !is_cacheable_static_manifest(&source_master_lookup),
+            "a query-bearing HLS source must not be reused even when parameter names are unknown"
+        );
+
+        let source_signed_media = crate::manifest::plan_hls_media_playlist(
+            "https://cache-preview.example.test/media.m3u8?f=418899&srv=server&i=0.4&sp=500&p1=one&p2=two&asn=327934",
+            br#"#EXTM3U
+#EXT-X-TARGETDURATION:10
+#EXTINF:10,
+segment.ts
+#EXT-X-ENDLIST
+"#,
+        )
+        .expect("valid static HLS media playlist with query-bearing source");
+        let source_media_lookup = ManifestLookup {
+            source_url: "https://cache-preview.example.test/media.m3u8?f=418899&srv=server&i=0.4&sp=500&p1=one&p2=two&asn=327934".to_string(),
+            manifest: crate::manifest_types::NativeManifest::HlsMedia(Box::new(source_signed_media)),
+        };
+        assert!(
+            !is_cacheable_static_manifest(&source_media_lookup),
+            "a query-bearing HLS media source must not be reused"
+        );
+
+        let signed_master = crate::manifest::parse_hls_master_playlist(
+            "https://cache-preview.example.test/master.m3u8",
+            br#"#EXTM3U
+#EXT-X-STREAM-INF:BANDWIDTH=1000000,RESOLUTION=1280x720
+video/720.m3u8?f=418899&srv=server&i=0.4&sp=500&p1=one&p2=two&asn=327934
+"#,
+        )
+        .expect("valid HLS master");
+        let master_lookup = ManifestLookup {
+            source_url: "https://cache-preview.example.test/master.m3u8".to_string(),
+            manifest: crate::manifest_types::NativeManifest::HlsMaster(signed_master),
+        };
+        assert!(
+            !is_cacheable_static_manifest(&master_lookup),
+            "a query-bearing variant URL must prevent caching the master selection"
+        );
+
+        let signed_media = crate::manifest::plan_hls_media_playlist(
+            "https://cache-preview.example.test/media.m3u8",
+            br#"#EXTM3U
+#EXT-X-TARGETDURATION:10
+#EXTINF:10,
+segment.ts?f=418899&srv=server&i=0.4&sp=500&p1=one&p2=two&asn=327934
+#EXT-X-ENDLIST
+"#,
+        )
+        .expect("valid static HLS media playlist");
+        let media_lookup = ManifestLookup {
+            source_url: "https://cache-preview.example.test/media.m3u8".to_string(),
+            manifest: crate::manifest_types::NativeManifest::HlsMedia(Box::new(signed_media)),
+        };
+        assert!(
+            !is_cacheable_static_manifest(&media_lookup),
+            "a query-bearing segment URL must prevent caching the media playlist"
+        );
     }
 
     #[test]

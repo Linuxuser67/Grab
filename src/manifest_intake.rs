@@ -1501,7 +1501,7 @@ async fn lookup_with_client_policy(
             );
             match crate::manifest::parse_hls_master_playlist(final_url.as_str(), &body) {
                 Ok(master) => {
-                    let master = apply_hls_content_steering(
+                    let mut master = apply_hls_content_steering(
                         client,
                         &final_url,
                         master,

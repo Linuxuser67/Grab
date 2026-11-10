@@ -3741,7 +3741,7 @@ segment.ts?quality=1080&t=child-token
             resource_filename("segment", Some(1), &compact_refreshed, None),
             "compact rotating auth tuples must not invalidate completed media resources",
         );
-        assert_eq!
+        assert_eq!(
             resource_filename("segment", Some(1), &first, None),
             resource_filename("segment", Some(1), &refreshed, None),
             "rotating signatures must not invalidate completed media resources",

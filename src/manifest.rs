@@ -2221,7 +2221,7 @@ segment-2.ts
         assert!(vod_plan.end_list);
 
         let event_without_end_list =
-            b"#EXTM3U\\n#EXT-X-TARGETDURATION:4\\n#EXT-X-PLAYLIST-TYPE:EVENT\\n#EXTINF:4,\\nsegment.ts\\n";
+            b"#EXTM3U\n#EXT-X-TARGETDURATION:4\n#EXT-X-PLAYLIST-TYPE:EVENT\n#EXTINF:4,\nsegment.ts\n";
         let event_plan = plan_hls_media_playlist(BASE_URL, event_without_end_list)
             .expect("EVENT playlists without ENDLIST remain live");
         assert!(event_plan.is_live);

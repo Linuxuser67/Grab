@@ -450,7 +450,7 @@ fn build_plan(
     for (segment_index, segment) in playlist.segments.iter().enumerate() {
         let program_date_time = source_segments
             .and_then(|segments| segments.get(segment_index))
-            .and_then(|source| source.program_date_time.clone());
+            .and_then(|source| source.program_date_time);
         let offset = u64::try_from(segment_index).map_err(|_| ManifestError::DurationOverflow)?;
         let media_sequence = first_visible_sequence
             .checked_add(offset)

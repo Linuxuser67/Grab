@@ -2565,24 +2565,24 @@ video/main.m3u8
     }
 
     #[test]
-    fn rejects_empty_rendition_group_ids_and_names() {
-        let empty_group = br#"#EXTM3U
-#EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID="",NAME="English",URI="audio/en.m3u8"
-#EXT-X-STREAM-INF:BANDWIDTH=1000000,AUDIO=""
+    fn rejects_blank_rendition_group_ids_and_names() {
+        let blank_group = br#"#EXTM3U
+#EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID=" ",NAME="English",URI="audio/en.m3u8"
+#EXT-X-STREAM-INF:BANDWIDTH=1000000,AUDIO=" "
 video.m3u8
 "#;
         assert_eq!(
-            parse_hls_master_playlist(BASE_URL, empty_group).err(),
+            parse_hls_master_playlist(BASE_URL, blank_group).err(),
             Some(ManifestError::InvalidAudioGroup)
         );
 
-        let empty_name = br#"#EXTM3U
-#EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID="audio",NAME="",URI="audio/en.m3u8"
+        let blank_name = br#"#EXTM3U
+#EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID="audio",NAME=" ",URI="audio/en.m3u8"
 #EXT-X-STREAM-INF:BANDWIDTH=1000000,AUDIO="audio"
 video.m3u8
 "#;
         assert_eq!(
-            parse_hls_master_playlist(BASE_URL, empty_name).err(),
+            parse_hls_master_playlist(BASE_URL, blank_name).err(),
             Some(ManifestError::InvalidAudioGroup)
         );
     }

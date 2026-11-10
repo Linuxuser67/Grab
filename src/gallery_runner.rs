@@ -215,7 +215,7 @@ pub async fn run_gallery_download_with_proxy(
         let parsed = parse_progress_line(&line);
         match parsed {
             ProgressLine::Progress(percent) => {
-                let _ = progress.feed(ProgressLine::Progress(percent));
+                progress.feed(ProgressLine::Progress(percent));
                 on_progress(GalleryProgressUpdate {
                     files_done: progress.files_done(),
                     current_file_percent: progress.current_file_percent,
@@ -237,7 +237,7 @@ pub async fn run_gallery_download_with_proxy(
                 if let ProgressLine::Completed(path) = &event {
                     last_completed = Some(path.clone());
                 }
-                let _ = progress.feed(event.clone());
+                progress.feed(event.clone());
                 on_progress(GalleryProgressUpdate {
                     files_done: progress.files_done(),
                     current_file_percent: progress.current_file_percent,

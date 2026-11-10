@@ -31,6 +31,14 @@ discontinuities; identity AES-128 keys (including key rotation and
 implicit identity key format; Grab never fetches or substitutes these hints for
 the selected media playlist's authoritative `EXT-X-KEY`.
 
+When a selected variant uses a separate audio rendition, Grab passes the
+video and audio media playlists as separate FFmpeg inputs and uses `-copyts`
+for both. Without it, FFmpeg rebases each input independently and can erase
+an intentional source timestamp offset. The same option is used when the static
+destination-part fast path supplies raw concatenated rendition tracks. Program
+date-time metadata remains in the local media playlists; it is not treated as
+an instruction to rewrite media timestamps.
+
 For complete static VOD/EVENT playlists, paired `EXT-X-CUE-OUT` /
 `EXT-X-CUE-IN` boundaries omit every segment in the marked ad break from
 native resource planning and from the local FFmpeg playlist. Valid

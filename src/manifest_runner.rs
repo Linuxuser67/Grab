@@ -1794,6 +1794,18 @@ async fn finalize_manifest_download(
     tx.send(EngineMsg::Phase("Merging audio and video…".to_string()))
         .ok();
 
+    let has_separate_hls_audio = has_audio && matches!(&tracks, Tracks::Hls { audio: Some(_), .. });
+    let has_local_hls_renditions = has_separate_hls_audio
+        && staged_regular_file_exists(&video_dir.join("local.m3u8")).await
+        && staged_regular_file_exists(&audio_dir.join("local.m3u8")).await;
+    if has_separate_hls_audio && !destination_parts && !has_local_hls_renditions {
+        return Err(ManifestRunError::Failed(
+            "The staged HLS audio or video rendition playlist is missing".to_string(),
+        ));
+    }
+    // Separate HLS rendition inputs must retain their common source PTS clock.
+    // The same applies to raw destination parts assembled from those renditions.
+    let preserve_hls_input_timestamps = has_separate_hls_audio;
     let video_input = if destination_parts {
         crate::manifest_destination::part_path_async(
             staging.to_path_buf(),
@@ -1940,6 +1952,7 @@ async fn finalize_manifest_download(
             path,
             timestamp_offset: audio_timestamp_offset.as_deref(),
         }),
+        preserve_hls_input_timestamps,
         SubtitleOutput {
             input: subtitle_input.as_deref(),
             embed: job.embed_subs,
@@ -4218,6 +4231,7 @@ async fn run_ffmpeg(
             path,
             timestamp_offset: None,
         }),
+        false,
         subtitles,
         output,
         abort,
@@ -4229,6 +4243,7 @@ async fn run_ffmpeg_with_offsets(
     ffmpeg: &Path,
     video_input: FfmpegInput<'_>,
     audio_input: Option<FfmpegInput<'_>>,
+    copy_input_timestamps: bool,
     subtitles: SubtitleOutput<'_>,
     output: &Path,
     abort: &mut tokio::sync::oneshot::Receiver<crate::video::StopIntent>,
@@ -4239,6 +4254,9 @@ async fn run_ffmpeg_with_offsets(
         add_hls_staging_options(&mut command);
     }
     command.arg("-hide_banner").arg("-nostdin").arg("-n");
+    if copy_input_timestamps {
+        command.arg("-copyts");
+    }
     if let Some(offset) = video_input.timestamp_offset {
         command.arg("-itsoffset").arg(offset);
     }

@@ -1247,6 +1247,26 @@ pub(crate) fn parse_hls_master_playlist(
         },
     )?;
 
+    // m3u8-rs stores extension attributes on typed playlist entries in
+    // `other_attributes`; they are not reported through `unknown_tags`.
+    // A REQ-* attribute changes how the entry must be interpreted. Reject it
+    // until Grab implements that requirement instead of silently dropping it
+    // (for example, REQ-VIDEO-LAYOUT on spatial-video variants).
+    let has_unknown_required_variant_attribute = master.variants.iter().any(|variant| {
+        variant.other_attributes.as_ref().is_some_and(|attributes| {
+            attributes.keys().any(|name| name.starts_with("REQ-"))
+        })
+    });
+    let has_unknown_required_rendition_attribute =
+        master.alternatives.iter().any(|alternative| {
+            alternative.other_attributes.as_ref().is_some_and(|attributes| {
+                attributes.keys().any(|name| name.starts_with("REQ-"))
+            })
+        });
+    if has_unknown_required_variant_attribute || has_unknown_required_rendition_attribute {
+        return Err(ManifestError::UnsupportedPlaylist);
+    }
+
     let video_renditions = master
         .alternatives
         .iter()
@@ -2369,6 +2389,36 @@ video/1080.m3u8
         assert_eq!(
             plan.audio_renditions[0].url.as_ref().map(Url::as_str),
             Some("https://cdn.example.test/path/audio/en.m3u8")
+        );
+    }
+
+    #[test]
+    fn unknown_required_variant_attributes_fall_back_instead_of_being_ignored() {
+        for attribute in [
+            r#"REQ-VIDEO-LAYOUT="CH-STEREO""#,
+            r#"REQ-UNSUPPORTED-FEATURE="value""#,
+        ] {
+            let body = format!(
+                "#EXTM3U\\n#EXT-X-STREAM-INF:BANDWIDTH=1000000,{attribute}\\nvideo.m3u8\\n"
+            );
+            assert_eq!(
+                parse_hls_master_playlist(BASE_URL, body.as_bytes()).err(),
+                Some(ManifestError::UnsupportedPlaylist),
+                "required variant attribute {attribute} must not be discarded"
+            );
+        }
+    }
+
+    #[test]
+    fn unknown_required_rendition_attributes_fall_back_instead_of_being_ignored() {
+        let body = br#"#EXTM3U
+#EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID="audio",NAME="English",LANGUAGE="en",URI="audio/en.m3u8",REQ-UNSUPPORTED-FEATURE="value"
+#EXT-X-STREAM-INF:BANDWIDTH=1000000,AUDIO="audio"
+video.m3u8
+"#;
+        assert_eq!(
+            parse_hls_master_playlist(BASE_URL, body).err(),
+            Some(ManifestError::UnsupportedPlaylist)
         );
     }
 

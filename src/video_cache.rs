@@ -790,7 +790,9 @@ mod tests {
             "https://example.test/watch?signature=abc",
             "https://example.test/watch?X-Amz-Signature=abc",
         ] {
-            assert!(has_known_rotating_auth_query(&url::Url::parse(url).unwrap()));
+            assert!(has_known_rotating_auth_query(
+                &url::Url::parse(url).unwrap()
+            ));
         }
         assert!(!has_known_rotating_auth_query(
             &url::Url::parse("https://example.test/watch?v=1").unwrap()

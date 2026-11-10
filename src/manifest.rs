@@ -2077,7 +2077,9 @@ mod tests {
         inherit_query_parameters_same_origin(&parent, &mut child);
         assert_eq!(
             child.query(),
-            Some("f=child-value&child=1&t=opaque&s=signature&e=129600&srv=server&i=0.4&sp=500&p1=one&p2=two&asn=327934&%FF=opaque"),
+            Some(
+                "f=child-value&child=1&t=opaque&s=signature&e=129600&srv=server&i=0.4&sp=500&p1=one&p2=two&asn=327934&%FF=opaque"
+            ),
             "inherit every parent parameter, preserve its encoding, and let the child override f",
         );
 

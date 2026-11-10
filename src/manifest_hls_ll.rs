@@ -795,9 +795,7 @@ fn validate_playlist_tags(playlist: &LlMediaPlaylist) -> Result<(), ManifestErro
             }
             continue;
         }
-        if tag.starts_with("#EXT-X-ALLOW-CACHE:")
-            || tag.starts_with("#EXT-X-BITRATE:")
-        {
+        if tag.starts_with("#EXT-X-ALLOW-CACHE:") || tag.starts_with("#EXT-X-BITRATE:") {
             continue;
         }
         return Err(ManifestError::UnsupportedPlaylistFeature(

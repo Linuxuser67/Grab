@@ -1794,7 +1794,26 @@ async fn finalize_manifest_download(
     tx.send(EngineMsg::Phase("Merging audio and video…".to_string()))
         .ok();
 
-    let video_input = if destination_parts {
+    let has_separate_hls_audio =
+        has_audio && matches!(&tracks, Tracks::Hls { audio: Some(_), .. });
+    let has_local_hls_renditions = has_separate_hls_audio
+        && staged_regular_file_exists(&video_dir.join("local.m3u8")).await
+        && staged_regular_file_exists(&audio_dir.join("local.m3u8")).await;
+    if has_separate_hls_audio && !destination_parts && !has_local_hls_renditions {
+        return Err(ManifestRunError::Failed(
+            "The staged HLS audio or video rendition playlist is missing".to_string(),
+        ));
+    }
+    let local_hls_master = if has_local_hls_renditions {
+        Some(write_local_hls_master_playlist(staging).await?)
+    } else {
+        None
+    };
+    let preserve_hls_input_timestamps =
+        has_separate_hls_audio && destination_parts && local_hls_master.is_none();
+    let video_input = if let Some(master) = local_hls_master.as_ref() {
+        master.clone()
+    } else if destination_parts {
         crate::manifest_destination::part_path_async(
             staging.to_path_buf(),
             job.dest.clone(),
@@ -1811,7 +1830,9 @@ async fn finalize_manifest_download(
             }
         }
     };
-    let audio_input = if has_audio {
+    let audio_input = if local_hls_master.is_some() {
+        None
+    } else if has_audio {
         Some(if destination_parts {
             crate::manifest_destination::part_path_async(
                 staging.to_path_buf(),
@@ -1940,6 +1961,7 @@ async fn finalize_manifest_download(
             path,
             timestamp_offset: audio_timestamp_offset.as_deref(),
         }),
+        preserve_hls_input_timestamps,
         SubtitleOutput {
             input: subtitle_input.as_deref(),
             embed: job.embed_subs,
@@ -2389,6 +2411,72 @@ async fn write_playlist(directory: &Path, plan: &HlsPlan) -> Result<(), String> 
     drop(file);
     crate::file_names::rename_noreplace(&part, &target)
         .map_err(|error| format!("Could not publish the local HLS playlist: {error}"))
+}
+
+
+/// Write a local multivariant playlist for FFmpeg's shared HLS rendition demuxer.
+///
+/// Opening separate audio and video media playlists as independent FFmpeg inputs
+/// normalizes their input timestamps independently. A local master keeps both
+/// renditions in one HLS demuxer, which can align their packet timestamps.
+async fn write_local_hls_master_playlist(staging: &Path) -> Result<PathBuf, ManifestRunError> {
+    const MASTER_PLAYLIST: &[u8] = b"#EXTM3U\n#EXT-X-VERSION:7\n#EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID=\"grab-audio\",NAME=\"Grab audio\",DEFAULT=YES,AUTOSELECT=YES,URI=\"audio/local.m3u8\"\n#EXT-X-STREAM-INF:BANDWIDTH=1000000,AUDIO=\"grab-audio\"\nvideo/local.m3u8\n";
+
+    for relative_path in ["video/local.m3u8", "audio/local.m3u8"] {
+        let playlist_path = staging.join(relative_path);
+        let metadata = tokio::fs::symlink_metadata(&playlist_path)
+            .await
+            .map_err(|error| {
+                ManifestRunError::Failed(format!(
+                    "Could not inspect a staged HLS rendition playlist: {error}"
+                ))
+            })?;
+        if metadata.file_type().is_symlink() || !metadata.is_file() {
+            return Err(ManifestRunError::Failed(
+                "A staged HLS rendition playlist is not a regular file".to_string(),
+            ));
+        }
+        if metadata.len() > crate::manifest::MAX_HLS_LOCAL_PLAYLIST_BYTES as u64 {
+            return Err(ManifestRunError::Failed(
+                "A staged HLS rendition playlist exceeds its size limit".to_string(),
+            ));
+        }
+    }
+
+    let target = staging.join("local-master.m3u8");
+    let part = staging.join("local-master.m3u8.part");
+    remove_regular_file_if_present(&target)
+        .await
+        .map_err(ManifestRunError::Failed)?;
+    remove_regular_file_if_present(&part)
+        .await
+        .map_err(ManifestRunError::Failed)?;
+
+    let mut file = tokio::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&part)
+        .await
+        .map_err(|error| {
+            manifest_storage_error("Could not create the local HLS master playlist", error)
+        })?;
+    file.write_all(MASTER_PLAYLIST)
+        .await
+        .map_err(|error| {
+            manifest_storage_error("Could not write the local HLS master playlist", error)
+        })?;
+    file.sync_all().await.map_err(|error| {
+        manifest_storage_error("Could not flush the local HLS master playlist", error)
+    })?;
+    drop(file);
+
+    crate::file_names::rename_noreplace(&part, &target).map_err(|error| {
+        ManifestRunError::Failed(format!("Could not publish the local HLS master playlist: {error}"))
+    })?;
+    sync_staging_directory(staging)
+        .await
+        .map_err(ManifestRunError::Failed)?;
+    Ok(target)
 }
 
 /// Read a staged SAMPLE-AES resource off the async executor with a dedicated
@@ -4218,6 +4306,7 @@ async fn run_ffmpeg(
             path,
             timestamp_offset: None,
         }),
+        false,
         subtitles,
         output,
         abort,
@@ -4229,6 +4318,7 @@ async fn run_ffmpeg_with_offsets(
     ffmpeg: &Path,
     video_input: FfmpegInput<'_>,
     audio_input: Option<FfmpegInput<'_>>,
+    copy_input_timestamps: bool,
     subtitles: SubtitleOutput<'_>,
     output: &Path,
     abort: &mut tokio::sync::oneshot::Receiver<crate::video::StopIntent>,
@@ -4239,6 +4329,9 @@ async fn run_ffmpeg_with_offsets(
         add_hls_staging_options(&mut command);
     }
     command.arg("-hide_banner").arg("-nostdin").arg("-n");
+    if copy_input_timestamps {
+        command.arg("-copyts");
+    }
     if let Some(offset) = video_input.timestamp_offset {
         command.arg("-itsoffset").arg(offset);
     }

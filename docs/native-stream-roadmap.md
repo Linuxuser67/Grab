@@ -31,6 +31,17 @@ discontinuities; identity AES-128 keys (including key rotation and
 implicit identity key format; Grab never fetches or substitutes these hints for
 the selected media playlist's authoritative `EXT-X-KEY`.
 
+When a selected variant uses a separate audio rendition, finalization
+generates a local master playlist that references Grab's staged video and audio
+media playlists and opens it as one FFmpeg HLS input. This lets FFmpeg's HLS
+demuxer coordinate both renditions using their packet timestamps. Passing the
+two media playlists as independent inputs normalizes their start times
+independently and can erase an intentional source offset. The static destination
+part fast path has no local playlists, so its raw track inputs use FFmpeg's
+`-copyts` option instead. Program date-time metadata remains in the local
+media playlists; it is not treated as an instruction to rewrite media
+timestamps.
+
 For complete static VOD/EVENT playlists, paired `EXT-X-CUE-OUT` /
 `EXT-X-CUE-IN` boundaries omit every segment in the marked ad break from
 native resource planning and from the local FFmpeg playlist. Valid

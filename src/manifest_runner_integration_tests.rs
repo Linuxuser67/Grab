@@ -226,6 +226,169 @@ fn ffprobe_stream_start_times(ffprobe: &Path, path: &Path) -> HashMap<String, f6
         .collect()
 }
 
+#[tokio::test]
+async fn hls_master_input_preserves_separate_rendition_timestamp_offsets() {
+    if !tools_available() {
+        return;
+    }
+
+    let root = TempRoot::new("hls-rendition-sync");
+    let first_track = root.path().join("track_0");
+    let second_track = root.path().join("track_1");
+    std::fs::create_dir_all(&first_track).expect("create video fixture directory");
+    std::fs::create_dir_all(&second_track).expect("create audio fixture directory");
+
+    let generated = Command::new("ffmpeg")
+        .args([
+            "-hide_banner",
+            "-loglevel",
+            "error",
+            "-y",
+            "-f",
+            "lavfi",
+            "-i",
+            "testsrc2=size=96x64:rate=12",
+            "-itsoffset",
+            "2",
+            "-f",
+            "lavfi",
+            "-i",
+            "sine=frequency=880:sample_rate=48000",
+            "-t",
+            "5",
+            "-map",
+            "0:v:0",
+            "-map",
+            "1:a:0",
+            "-c:v",
+            "mpeg2video",
+            "-g",
+            "12",
+            "-q:v",
+            "5",
+            "-c:a",
+            "aac",
+            "-b:a",
+            "64k",
+            "-f",
+            "hls",
+            "-hls_time",
+            "1",
+            "-hls_list_size",
+            "0",
+            "-hls_flags",
+            "program_date_time",
+            "-master_pl_name",
+            "source-master.m3u8",
+            "-var_stream_map",
+            "v:0,agroup:aud a:0,agroup:aud,default:yes",
+            "-hls_segment_filename",
+        ])
+        .arg(root.path().join("track_%v/segment_%03d.ts"))
+        .arg(root.path().join("track_%v/local.m3u8"))
+        .output()
+        .expect("generate separate HLS audio and video renditions");
+    assert_command_succeeded(&generated, "FFmpeg failed to generate the HLS rendition fixture");
+
+    let video_dir = root.path().join("video");
+    let audio_dir = root.path().join("audio");
+    std::fs::rename(&first_track, &video_dir).expect("move video rendition into staging");
+    std::fs::rename(&second_track, &audio_dir).expect("move audio rendition into staging");
+    for playlist in [
+        video_dir.join("local.m3u8"),
+        audio_dir.join("local.m3u8"),
+    ] {
+        let contents = std::fs::read_to_string(&playlist).expect("read generated rendition playlist");
+        assert!(
+            contents.contains("#EXT-X-PROGRAM-DATE-TIME:"),
+            "the fixture must contain preserved program date-time metadata"
+        );
+    }
+
+    let master = write_local_hls_master_playlist(root.path())
+        .await
+        .expect("write the combined local HLS master playlist");
+    let output = root.path().join("rendition-sync.part.mp4");
+    let (_stop_tx, mut abort) = tokio::sync::oneshot::channel();
+    assert!(
+        run_ffmpeg(
+            Path::new("ffmpeg"),
+            &master,
+            None,
+            SubtitleOutput::default(),
+            &output,
+            &mut abort,
+        )
+        .await
+        .expect("finalize synchronized HLS renditions"),
+        "FFmpeg unexpectedly aborted the HLS rendition finalization"
+    );
+
+    let starts = ffprobe_stream_start_times(Path::new("ffprobe"), &output);
+    let video_start = *starts.get("video").expect("output contains video timestamps");
+    let audio_start = *starts.get("audio").expect("output contains audio timestamps");
+    let offset = audio_start - video_start;
+    assert!(
+        (offset - 2.0).abs() < 0.1,
+        "the source's 2-second A/V offset must survive finalization; video={video_start}, audio={audio_start}, delta={offset}"
+    );
+
+    // The fast destination-part path supplies raw transport-stream inputs,
+    // not HLS playlists. In that case -copyts preserves the shared PTS clock.
+    let concat_track = |directory: &Path| {
+        let playlist_bytes =
+            std::fs::read(directory.join("local.m3u8")).expect("read rendition playlist");
+        let playlist = m3u8_rs::parse_media_playlist_res(&playlist_bytes)
+            .expect("parse rendition playlist");
+        let mut bytes = Vec::new();
+        for segment in playlist.segments {
+            bytes.extend(
+                std::fs::read(directory.join(segment.uri))
+                    .expect("read rendition transport-stream segment"),
+            );
+        }
+        bytes
+    };
+    let raw_video = root.path().join("video-track.ts");
+    let raw_audio = root.path().join("audio-track.ts");
+    std::fs::write(&raw_video, concat_track(&video_dir)).expect("assemble raw video track");
+    std::fs::write(&raw_audio, concat_track(&audio_dir)).expect("assemble raw audio track");
+    let raw_output = root.path().join("raw-rendition-sync.part.mp4");
+    let (_raw_stop_tx, mut raw_abort) = tokio::sync::oneshot::channel();
+    assert!(
+        run_ffmpeg_with_offsets(
+            Path::new("ffmpeg"),
+            FfmpegInput {
+                path: &raw_video,
+                timestamp_offset: None,
+            },
+            Some(FfmpegInput {
+                path: &raw_audio,
+                timestamp_offset: None,
+            }),
+            true,
+            SubtitleOutput::default(),
+            &raw_output,
+            &mut raw_abort,
+        )
+        .await
+        .expect("finalize raw HLS track parts with preserved timestamps"),
+        "FFmpeg unexpectedly aborted raw HLS track finalization"
+    );
+    let raw_starts = ffprobe_stream_start_times(Path::new("ffprobe"), &raw_output);
+    let raw_video_start = *raw_starts
+        .get("video")
+        .expect("raw output contains video timestamps");
+    let raw_audio_start = *raw_starts
+        .get("audio")
+        .expect("raw output contains audio timestamps");
+    let raw_offset = raw_audio_start - raw_video_start;
+    assert!(
+        (raw_offset - 2.0).abs() < 0.1,
+        "raw destination parts must retain the source A/V offset; video={raw_video_start}, audio={raw_audio_start}, delta={raw_offset}"
+    );
+}
+
 fn fixture_files(directory: &Path, urls: &[Url]) -> HashMap<String, Vec<u8>> {
     let mut files = HashMap::with_capacity(urls.len());
     for url in urls {
@@ -2706,6 +2869,7 @@ async fn dash_per_track_timestamp_offsets_align_fragmented_mp4_inputs() {
                 path: &audio_input,
                 timestamp_offset: Some("-2.000000000"),
             }),
+            false,
             SubtitleOutput::default(),
             &output,
             &mut abort,

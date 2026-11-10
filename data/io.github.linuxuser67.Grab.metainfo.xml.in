@@ -50,6 +50,32 @@
     </screenshot>
   </screenshots>
   <releases>
+    <release version="6.5.0~beta.16" date="2026-11-10">
+      <description>
+        <ul>
+          <li>Run yt-dlp playlists as single collection jobs with aggregate row progress.</li>
+          <li>Show per-file gallery-dl progress in the collection UI.</li>
+          <li>Prefer gallery-dl whenever the lookup succeeds.</li>
+          <li>Batch collection Undo and guard folder actions.</li>
+          <li>Native HLS: Content Steering pathways, pathway clones, EXT-X-START handling, and completed-gap/discontinuity improvements.</li>
+        </ul>
+      </description>
+    </release>
+    <release version="6.5.0~beta.15" date="2026-11-09">
+      <description>
+        <ul>
+          <li>Collection rows use conditional action icons like normal download rows, with a collection-level remove-from-list action.</li>
+          <li>Playlist imports reject duplicate entries, fixing the same video downloading twice under concurrent downloads.</li>
+        </ul>
+      </description>
+    </release>
+    <release version="6.5.0~beta.14" date="2026-11-08">
+      <description>
+        <ul>
+          <li>Group playlist downloads under expandable collection rows with shared metadata persisted across restarts.</li>
+        </ul>
+      </description>
+    </release>
     <release version="6.5.0~beta.13" date="2026-11-07">
       <description>
         <ul>

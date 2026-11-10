@@ -1675,6 +1675,19 @@ mod group_row_tests {
     use super::*;
 
     #[test]
+    fn collection_progress_fraction_uses_known_owner_progress() {
+        let owner = DownloadItem::new(1, "https://example.com/list", "List", "/tmp");
+        assert_eq!(collection_progress_fraction(&owner), None);
+
+        owner.set_gallery_file_count(4);
+        owner.set_progress(0.375);
+        assert_eq!(collection_progress_fraction(&owner), Some(0.375));
+
+        owner.set_progress(1.5);
+        assert_eq!(collection_progress_fraction(&owner), Some(1.0));
+    }
+
+    #[test]
     #[ignore = "needs a display; run under Xvfb"]
     fn expandable_playlist_group_row_exposes_only_remove_and_open_folder() {
         gtk4::init().expect("gtk::init (run under Xvfb)");
@@ -1703,6 +1716,7 @@ mod group_row_tests {
         group.update(
             std::slice::from_ref(&first),
             &[first.clone(), second.clone()],
+            &manager,
         );
 
         assert!(first_row.parent().is_some());
@@ -1717,6 +1731,7 @@ mod group_row_tests {
         group.update(
             std::slice::from_ref(&second),
             &[first.clone(), second.clone()],
+            &manager,
         );
         assert!(group.open_folder_btn.is_sensitive());
         assert!(group.remove_btn.is_sensitive());
@@ -1727,13 +1742,14 @@ mod group_row_tests {
         group.update(
             std::slice::from_ref(&third),
             &[first.clone(), second.clone(), third.clone()],
+            &manager,
         );
         assert!(!group.open_folder_btn.is_visible());
         assert!(!group.open_folder_btn.is_sensitive());
         assert!(group.remove_btn.is_visible());
         assert!(group.remove_btn.is_sensitive());
 
-        group.update(&[], &[]);
+        group.update(&[], &[], &manager);
         assert!(!group.open_folder_btn.is_visible());
         assert!(!group.remove_btn.is_visible());
     }

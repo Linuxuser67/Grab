@@ -747,8 +747,14 @@ fn show_failure_dialog(
 pub(crate) struct DownloadGroupRow {
     pub(crate) row: adw::ExpanderRow,
     members: Rc<RefCell<Vec<u64>>>,
+    progress: gtk4::ProgressBar,
     open_folder_btn: gtk4::Button,
     remove_btn: gtk4::Button,
+}
+
+/// Return the owner's aggregate fraction when its collection has a known file count.
+fn collection_progress_fraction(owner: &DownloadItem) -> Option<f64> {
+    (owner.gallery_file_count() > 0).then(|| owner.progress().clamp(0.0, 1.0))
 }
 
 fn group_summary(items: &[DownloadItem]) -> String {
@@ -790,6 +796,14 @@ pub(crate) fn build_download_group_row(
     row.set_expanded(false);
 
     let members = Rc::new(RefCell::new(Vec::new()));
+    let progress = gtk4::ProgressBar::new();
+    progress.set_show_text(false);
+    progress.set_size_request(112, -1);
+    progress.set_valign(gtk4::Align::Center);
+    progress.set_visible(false);
+    progress.update_property(&[gtk4::accessible::Property::Label(&gettext(
+        "Collection progress",
+    ))]);
     let open_folder_btn = icon_button("folder-open-symbolic", &gettext("Open Collection Folder"));
     {
         let ids = Rc::clone(&members);
@@ -887,21 +901,45 @@ pub(crate) fn build_download_group_row(
         });
     }
 
+    row.add_suffix(&progress);
     row.add_suffix(&open_folder_btn);
     row.add_suffix(&remove_btn);
 
     DownloadGroupRow {
         row,
         members,
+        progress,
         open_folder_btn,
         remove_btn,
     }
 }
 
 impl DownloadGroupRow {
-    pub(crate) fn update(&self, section_items: &[DownloadItem], group_items: &[DownloadItem]) {
+    pub(crate) fn update(
+        &self,
+        section_items: &[DownloadItem],
+        group_items: &[DownloadItem],
+        manager: &DownloadManager,
+    ) {
         *self.members.borrow_mut() = group_items.iter().map(DownloadItem::id).collect();
         self.row.set_subtitle(&group_summary(section_items));
+
+        let collection_owner = group_items
+            .iter()
+            .find(|item| item.is_collection_child())
+            .and_then(DownloadItem::group)
+            .and_then(|group| manager.find(group.id()))
+            .filter(|owner| owner.is_gallery() || owner.is_collection_owner());
+        if let Some(owner) = collection_owner {
+            if let Some(fraction) = collection_progress_fraction(&owner) {
+                self.progress.set_fraction(fraction);
+                self.progress.set_visible(true);
+            } else {
+                self.progress.set_visible(false);
+            }
+        } else {
+            self.progress.set_visible(false);
+        }
 
         let nonempty = !group_items.is_empty();
         let one_destination = group_items.first().is_some_and(|first| {
@@ -1637,6 +1675,19 @@ mod group_row_tests {
     use super::*;
 
     #[test]
+    fn collection_progress_fraction_uses_known_owner_progress() {
+        let owner = DownloadItem::new(1, "https://example.com/list", "List", "/tmp");
+        assert_eq!(collection_progress_fraction(&owner), None);
+
+        owner.set_gallery_file_count(4);
+        owner.set_progress(0.375);
+        assert_eq!(collection_progress_fraction(&owner), Some(0.375));
+
+        owner.set_progress(1.5);
+        assert_eq!(collection_progress_fraction(&owner), Some(1.0));
+    }
+
+    #[test]
     #[ignore = "needs a display; run under Xvfb"]
     fn expandable_playlist_group_row_exposes_only_remove_and_open_folder() {
         gtk4::init().expect("gtk::init (run under Xvfb)");
@@ -1665,6 +1716,7 @@ mod group_row_tests {
         group.update(
             std::slice::from_ref(&first),
             &[first.clone(), second.clone()],
+            &manager,
         );
 
         assert!(first_row.parent().is_some());
@@ -1679,6 +1731,7 @@ mod group_row_tests {
         group.update(
             std::slice::from_ref(&second),
             &[first.clone(), second.clone()],
+            &manager,
         );
         assert!(group.open_folder_btn.is_sensitive());
         assert!(group.remove_btn.is_sensitive());
@@ -1689,13 +1742,14 @@ mod group_row_tests {
         group.update(
             std::slice::from_ref(&third),
             &[first.clone(), second.clone(), third.clone()],
+            &manager,
         );
         assert!(!group.open_folder_btn.is_visible());
         assert!(!group.open_folder_btn.is_sensitive());
         assert!(group.remove_btn.is_visible());
         assert!(group.remove_btn.is_sensitive());
 
-        group.update(&[], &[]);
+        group.update(&[], &[], &manager);
         assert!(!group.open_folder_btn.is_visible());
         assert!(!group.remove_btn.is_visible());
     }

@@ -780,13 +780,13 @@ pub fn build_window(
                         .clone()
                 };
                 let all_members = all_groups.get(&key.0).map(Vec::as_slice).unwrap_or(&[]);
-                group.update(members, all_members);
+                group.update(members, all_members, &m);
                 group.row.set_visible(visible_groups.contains(key));
             }
 
             for (key, group) in groups.borrow().iter() {
                 if !grouped.contains_key(key) {
-                    group.update(&[], &[]);
+                    group.update(&[], &[], &m);
                     group.row.set_visible(false);
                 }
             }

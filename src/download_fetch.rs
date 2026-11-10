@@ -817,8 +817,7 @@ fn std_open_nofollow(
     use std::os::unix::fs::OpenOptionsExt as _;
     let mut opts = std::fs::OpenOptions::new();
     configure(&mut opts);
-    opts
-        .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK | libc::O_NOCTTY | libc::O_CLOEXEC)
+    opts.custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK | libc::O_NOCTTY | libc::O_CLOEXEC)
         .open(path)
 }
 

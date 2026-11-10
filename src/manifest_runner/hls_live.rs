@@ -1027,9 +1027,7 @@ async fn refresh_live_hls_pathway(
             .as_ref()
             .is_some_and(|track| track.accumulator.is_ll_capture())
     {
-        tracing::debug!(
-            "HLS Content Steering pathway switch deferred for LL-HLS capture"
-        );
+        tracing::debug!("HLS Content Steering pathway switch deferred for LL-HLS capture");
         steering.active_pathway_id = previous_pathway;
         return Ok(None);
     }
@@ -1567,7 +1565,11 @@ pub(super) async fn run_live_hls_tracks(
                 output,
             ));
         }
-        if !video.ended && video.next_poll_at.is_some_and(|deadline| deadline <= Instant::now()) {
+        if !video.ended
+            && video
+                .next_poll_at
+                .is_some_and(|deadline| deadline <= Instant::now())
+        {
             match poll_live_hls_track(
                 client,
                 source_url,

@@ -676,7 +676,11 @@ fn hls_variant_content_key(variant: &HlsVariant) -> String {
                     .to_bits()
                     .to_le_bytes(),
                 variant.codecs.as_deref().unwrap_or_default().as_bytes(),
-                variant.video_range.as_deref().unwrap_or_default().as_bytes(),
+                variant
+                    .video_range
+                    .as_deref()
+                    .unwrap_or_default()
+                    .as_bytes(),
                 variant
                     .audio_group
                     .as_deref()
@@ -703,7 +707,11 @@ fn hls_variant_content_key(variant: &HlsVariant) -> String {
                 .to_bits()
                 .to_le_bytes(),
             variant.codecs.as_deref().unwrap_or_default().as_bytes(),
-            variant.video_range.as_deref().unwrap_or_default().as_bytes(),
+            variant
+                .video_range
+                .as_deref()
+                .unwrap_or_default()
+                .as_bytes(),
             variant
                 .audio_group
                 .as_deref()
@@ -959,10 +967,7 @@ pub(crate) fn hls_variant_key(variant: &HlsVariant) -> Option<String> {
             return Some(derived_hls_track_key(
                 "hls-variant-",
                 b"variant-video-rendition",
-                &[
-                    variant_id.as_bytes(),
-                    rendition_id.as_bytes(),
-                ],
+                &[variant_id.as_bytes(), rendition_id.as_bytes()],
             ));
         }
         return Some(hls_variant_content_key(variant));

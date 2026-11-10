@@ -384,9 +384,8 @@ fn mainstream_apple_hls_profiles_remux_with_stream_copy() {
                 "bt709"
             });
         if let Some(transfer) = profile.x265_transfer {
-            let parameters = format!(
-                "colorprim=9:transfer={transfer}:colormatrix=9:log-level=error:pools=1"
-            );
+            let parameters =
+                format!("colorprim=9:transfer={transfer}:colormatrix=9:log-level=error:pools=1");
             encode.args(["-x265-params", parameters.as_str()]);
         }
         let encoded = encode
@@ -409,7 +408,10 @@ fn mainstream_apple_hls_profiles_remux_with_stream_copy() {
             ])
             .output()
             .expect("run FFmpeg to generate an Apple-profile fMP4 HLS fixture");
-        assert_command_succeeded(&encoded, &format!("{} HLS fixture generation", profile.name));
+        assert_command_succeeded(
+            &encoded,
+            &format!("{} HLS fixture generation", profile.name),
+        );
 
         let playlist_path = root.path().join(&playlist_name);
         let playlist = std::fs::read(&playlist_path).expect("read generated HLS playlist");

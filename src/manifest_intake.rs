@@ -639,8 +639,7 @@ fn validate_hls_content_steering_stable_ids(
             )));
         }
         if variant.video_rendition_group.is_some()
-            && (variant.stable_variant_id.is_none()
-                || variant.stable_video_rendition_id.is_none())
+            && (variant.stable_variant_id.is_none() || variant.stable_video_rendition_id.is_none())
         {
             return Err(ManifestIntakeError::Unsupported(gettext(
                 "Content Steering requires stable variant and rendition IDs for alternate video renditions",
@@ -1454,7 +1453,11 @@ fn strip_hls_pathway_query(url: &Url) -> Url {
         .filter(|pair| !is_hls_pathway_query_pair(pair))
         .collect::<Vec<_>>();
     let mut clean = url.clone();
-    clean.set_query((!preserved.is_empty()).then(|| preserved.join("&")).as_deref());
+    clean.set_query(
+        (!preserved.is_empty())
+            .then(|| preserved.join("&"))
+            .as_deref(),
+    );
     clean
 }
 
@@ -1571,7 +1574,10 @@ async fn apply_hls_content_steering(
 
     select_hls_content_steering_pathway(&mut master, &priority)?;
     if let Some(steering) = master.content_steering.as_mut() {
-        steering.active_pathway_id = master.variants.first().map(|variant| variant.pathway_id.clone());
+        steering.active_pathway_id = master
+            .variants
+            .first()
+            .map(|variant| variant.pathway_id.clone());
         if !proxy_configured {
             schedule_hls_steering_refresh(steering);
         }
@@ -1605,7 +1611,10 @@ async fn refresh_hls_content_steering_with_policy(
     transport_policy: ManifestTransportPolicy,
     proxy_configured: bool,
 ) -> Result<Option<crate::manifest_types::ManifestLookup>, ManifestIntakeError> {
-    if !steering.refresh_at.is_some_and(|deadline| deadline <= Instant::now()) {
+    if !steering
+        .refresh_at
+        .is_some_and(|deadline| deadline <= Instant::now())
+    {
         return Ok(None);
     }
     let Some(base_master) = steering.base_master.as_deref().cloned() else {
@@ -1718,7 +1727,10 @@ async fn refresh_hls_content_steering_with_policy(
         schedule_hls_steering_refresh(steering);
         return Ok(None);
     };
-    next_state.active_pathway_id = master.variants.first().map(|variant| variant.pathway_id.clone());
+    next_state.active_pathway_id = master
+        .variants
+        .first()
+        .map(|variant| variant.pathway_id.clone());
     next_state.initial_pathway_id = snapshot.initial_pathway_id;
     next_state.base_master = snapshot.base_master;
     schedule_hls_steering_refresh(&mut next_state);
@@ -4140,8 +4152,8 @@ video/b.m3u8
             .expect("valid signed steering URL"),
             Some("cdn-a".to_string()),
         );
-        let request = hls_steering_request_url(&steering)
-            .expect("build signed steering request URL");
+        let request =
+            hls_steering_request_url(&steering).expect("build signed steering request URL");
         assert_eq!(
             request.query(),
             Some("signature=%2f%2B%3D&expires=1700000000&_HLS_pathway=cdn-a")
@@ -4163,10 +4175,8 @@ video/b.m3u8
     #[test]
     fn steering_request_url_rejects_preexisting_reserved_pathway_query() {
         let steering = crate::manifest::HlsContentSteering::new(
-            Url::parse(
-                "https://steering.example.test/path/list.json?_HLS_pathway=other",
-            )
-            .expect("valid steering URL"),
+            Url::parse("https://steering.example.test/path/list.json?_HLS_pathway=other")
+                .expect("valid steering URL"),
             Some("cdn-a".to_string()),
         );
         assert!(matches!(
@@ -4598,7 +4608,9 @@ video/variant.m3u8
             "http://{address}/initial/steering.json?token=first"
         ))
         .expect("initial steering URL");
-        let first_body = br#"{"VERSION":1,"TTL":1,"RELOAD-URI":"refresh.json","PATHWAY-PRIORITY":["cdn-a"]}"#.to_vec();
+        let first_body =
+            br#"{"VERSION":1,"TTL":1,"RELOAD-URI":"refresh.json","PATHWAY-PRIORITY":["cdn-a"]}"#
+                .to_vec();
         let second_body = br#"{"VERSION":1,"TTL":90,"RELOAD-URI":"../next.json?token=rotated","PATHWAY-PRIORITY":["cdn-b"]}"#.to_vec();
         let server = tokio::spawn(async move {
             let mut requests = Vec::new();
@@ -4607,7 +4619,10 @@ video/variant.m3u8
                 let mut request = Vec::new();
                 loop {
                     let mut chunk = [0_u8; 1024];
-                    let read = stream.read(&mut chunk).await.expect("read steering request");
+                    let read = stream
+                        .read(&mut chunk)
+                        .await
+                        .expect("read steering request");
                     assert_ne!(read, 0, "request ended before HTTP headers");
                     request.extend_from_slice(&chunk[..read]);
                     if request.windows(4).any(|window| window == b"\r\n\r\n") {
@@ -4741,8 +4756,7 @@ video/variant.m3u8
         let address = listener.local_addr().expect("sentinel address");
         let steering_url =
             Url::parse(&format!("http://{address}/steering.json")).expect("steering URL");
-        let master_url =
-            Url::parse(&format!("http://{address}/master.m3u8")).expect("master URL");
+        let master_url = Url::parse(&format!("http://{address}/master.m3u8")).expect("master URL");
         let mut master = master();
         set_steering_url(&mut master, steering_url);
         let mut steering = master
@@ -4777,10 +4791,8 @@ video/variant.m3u8
             steering_fixture_response(200, vec![b'x'; MAX_HLS_STEERING_MANIFEST_BYTES + 1], false)
                 .await;
         let master_url = steering_url.join("/master.m3u8").expect("master URL");
-        let steering = crate::manifest::HlsContentSteering::new(
-            steering_url,
-            Some("cdn-a".to_string()),
-        );
+        let steering =
+            crate::manifest::HlsContentSteering::new(steering_url, Some("cdn-a".to_string()));
         let error = fetch_hls_steering_manifest(
             &steering_test_client(),
             &master_url,
@@ -4803,8 +4815,7 @@ video/variant.m3u8
         let address = listener.local_addr().expect("sentinel address");
         let master_url = Url::parse("http://master.example.test/master.m3u8").expect("master URL");
         let steering = crate::manifest::HlsContentSteering::new(
-            Url::parse(&format!("http://{address}/steering.json"))
-                .expect("private steering URL"),
+            Url::parse(&format!("http://{address}/steering.json")).expect("private steering URL"),
             Some("cdn-a".to_string()),
         );
         let error = fetch_hls_steering_manifest(
@@ -4853,10 +4864,8 @@ video/variant.m3u8
                 )]),
             )
             .expect("build guarded client with private DNS override");
-        let steering = crate::manifest::HlsContentSteering::new(
-            steering_url,
-            Some("cdn-a".to_string()),
-        );
+        let steering =
+            crate::manifest::HlsContentSteering::new(steering_url, Some("cdn-a".to_string()));
 
         let error = fetch_hls_steering_manifest(
             &client,
@@ -4889,8 +4898,7 @@ video/variant.m3u8
         let address = listener.local_addr().expect("sentinel address");
         let master_url = Url::parse(&format!("http://{address}/master.m3u8")).expect("master URL");
         let steering = crate::manifest::HlsContentSteering::new(
-            Url::parse(&format!("http://{address}/steering.json"))
-                .expect("steering URL"),
+            Url::parse(&format!("http://{address}/steering.json")).expect("steering URL"),
             Some("cdn-a".to_string()),
         );
         let error = fetch_hls_steering_manifest(

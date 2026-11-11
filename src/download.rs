@@ -1477,9 +1477,49 @@ impl DownloadManager {
         Ok(self.insert(item))
     }
 
+    /// Return the existing owner for a playlist URL, preferring an unfinished
+    /// collection over an older completed one.
+    pub(crate) fn video_playlist_owner_for_url(&self, page_url: &str) -> Option<DownloadItem> {
+        let url = normalize_url(page_url).ok()?;
+        let mut completed = None;
+        let mut cancelled = None;
+        for item in self.items() {
+            if item.url() != url
+                || !matches!(
+                    self.video_source(item.id()),
+                    Some(crate::media_types::VideoSource::Playlist { .. })
+                )
+            {
+                continue;
+            }
+            match item.status() {
+                DownloadStatus::Done => completed = Some(item),
+                DownloadStatus::Cancelled => cancelled = Some(item),
+                _ => return Some(item),
+            }
+        }
+        completed.or(cancelled)
+    }
+
+    /// Existing playlist output folder, only when its stored path is a direct
+    /// child of the owner's destination directory.
+    pub(crate) fn video_playlist_destination_for_url(&self, page_url: &str) -> Option<String> {
+        let owner = self.video_playlist_owner_for_url(page_url)?;
+        let Some(crate::media_types::VideoSource::Playlist { state, .. }) =
+            self.video_source(owner.id())
+        else {
+            return None;
+        };
+        let output_dir = std::path::Path::new(&state.dest_dir);
+        (output_dir.is_absolute()
+            && output_dir.parent() == Some(std::path::Path::new(&owner.dest_dir()))
+            && output_dir.file_name().is_some())
+        .then_some(state.dest_dir)
+    }
+
     /// Enqueue selected yt-dlp playlist entries as one schedulable owner.
-    /// The supplied directory is the unique collection subfolder already
-    /// created off the GTK thread.
+    /// Re-imports for the same URL extend that owner instead of creating a
+    /// second process; a running owner is restarted with the enlarged selection.
     pub(crate) fn enqueue_video_playlist_staged(
         self: &Rc<Self>,
         page_url: &str,
@@ -1522,17 +1562,9 @@ impl DownloadManager {
             let _ = normalize_url(&file.page_url)?;
         }
 
-        // A still-live owner already covers this URL; never create a second
-        // process for the same playlist while an earlier owner is active.
-        if self.items().any(|item| {
-            item.status() != DownloadStatus::Done
-                && item.url() == url
-                && matches!(
-                    self.video_source(item.id()),
-                    Some(crate::media_types::VideoSource::Playlist { .. })
-                )
-        }) {
-            return Err(gettext("This playlist is already in the list"));
+        if let Some(owner) = self.video_playlist_owner_for_url(&url) {
+            return self
+                .extend_video_playlist_staged(&owner, dest_dir, files, &quality, audio_only);
         }
 
         let id = self.alloc_id();
@@ -1582,6 +1614,95 @@ impl DownloadManager {
         self.restore_video_playlist_file_rows(&item, &state.files);
         drop(batch);
         Ok(item)
+    }
+
+    /// Extend one existing parent-owned playlist collection with new entry IDs.
+    /// The caller has already validated and inspected the shared destination off GTK.
+    fn extend_video_playlist_staged(
+        self: &Rc<Self>,
+        owner: &DownloadItem,
+        dest_dir: &str,
+        files: Vec<crate::media_types::VideoPlaylistFile>,
+        quality: &str,
+        audio_only: bool,
+    ) -> Result<DownloadItem, String> {
+        if owner.status() == DownloadStatus::Cancelled {
+            return Err(gettext(
+                "This playlist collection was cancelled. Remove it before adding more entries.",
+            ));
+        }
+
+        let Some(crate::media_types::VideoSource::Playlist {
+            quality: existing_quality,
+            audio_only: existing_audio_only,
+            state,
+            ..
+        }) = self.video_source(owner.id())
+        else {
+            return Err(gettext(
+                "The existing playlist collection is no longer available",
+            ));
+        };
+        if state.dest_dir != dest_dir {
+            return Err(gettext(
+                "This playlist is already queued in a different destination folder.",
+            ));
+        }
+        if existing_quality != quality || existing_audio_only != audio_only {
+            return Err(gettext(
+                "This playlist is already queued with different download options.",
+            ));
+        }
+
+        let existing_ids = state
+            .files
+            .iter()
+            .map(|file| file.id.as_str())
+            .collect::<HashSet<_>>();
+        let additions = files
+            .into_iter()
+            .filter(|file| !existing_ids.contains(file.id.as_str()))
+            .collect::<Vec<_>>();
+        if additions.is_empty() {
+            return Ok(owner.clone());
+        }
+
+        let previous_status = owner.status();
+        let _batch = self.batch_guard();
+        if previous_status == DownloadStatus::Downloading {
+            // The active yt-dlp process has already captured its playlist-index
+            // list. Stop it and let the next attempt resolve the enlarged ID set.
+            self.pause(owner.id());
+        }
+        let requeue = matches!(
+            previous_status,
+            DownloadStatus::Downloading | DownloadStatus::Done | DownloadStatus::Failed
+        );
+        if requeue {
+            owner.set_status(DownloadStatus::Queued);
+        }
+
+        let all_files = {
+            let mut sources = self.video_sources.borrow_mut();
+            let Some(crate::media_types::VideoSource::Playlist { state, .. }) =
+                sources.get_mut(&owner.id())
+            else {
+                return Err(gettext(
+                    "The existing playlist collection is no longer available",
+                ));
+            };
+            state.files.extend(additions);
+            state.files.clone()
+        };
+        self.restore_video_playlist_file_rows(owner, &all_files);
+        if requeue {
+            // A new invocation owns the expanded ID set. Reset every unfinished
+            // projection consistently; completed entries remain untouched.
+            self.prepare_video_playlist_file_rows_for_attempt(owner);
+        }
+        self.persist_queue();
+        self.changed();
+        Ok(owner.clone())
     }
 
     /// Commit a manifest row after its destination snapshot has been prepared.

@@ -80,7 +80,6 @@ impl GalleryCard {
     pub fn file_count(&self) -> usize {
         self.filtered_items().len()
     }
-
 }
 
 #[cfg(test)]

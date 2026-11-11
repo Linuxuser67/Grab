@@ -327,10 +327,6 @@ pub(crate) struct FormatOption {
     audio_only: bool,
 }
 
-/// The Video ⇄ Gallery switcher's Gallery side: the probe's items and the
-/// URL they came from.
-pub(crate) type ToggleItems = (Vec<crate::gallery_probe::GalleryItem>, String);
-
 /// Data returned by the backend lookup. It deliberately contains no GTK types:
 /// build_add_card owns all presentation and state transitions.
 struct VideoLookupResult {
@@ -340,7 +336,6 @@ struct VideoLookupResult {
         crate::video_tools::VideoError,
     >,
     gallery_error: Option<String>,
-    toggle_items: Option<ToggleItems>,
     native_fallback_reason: Option<String>,
 }
 
@@ -673,7 +668,6 @@ async fn lookup_extractors_inner(
         proxy.as_ref().map(|p| p.cli_url.clone()),
     );
 
-    let mut toggle_items: Option<ToggleItems> = None;
     let (ytdlp_result, gallery_error) = if let Some(tool) = gallery_tool {
         let probe_url = url.clone();
         let probe_browser = browser.clone();
@@ -738,7 +732,6 @@ async fn lookup_extractors_inner(
         probe_json_key,
         ytdlp_result,
         gallery_error,
-        toggle_items,
         native_fallback_reason: None,
     })))
 }
@@ -796,15 +789,6 @@ pub(crate) struct VideoStep {
     pub(crate) gallery_filter: adw::ToggleGroup,
     /// Wrapper retained for the hidden internal filter control.
     pub(crate) gallery_filter_wrap: gtk4::Box,
-    /// Media-type switcher (Video ⇄ Gallery), the established AdwToggleGroup:
-    /// shown only when both backends are viable for the current decode
-    /// (yt-dlp video + gallery-dl images).
-    pub(crate) mode_toggle: adw::ToggleGroup,
-    /// Wrapper for the switcher (visibility control + accessible label).
-    pub(crate) mode_toggle_wrap: gtk4::Box,
-    /// Items backing the switcher's Gallery side: Some only while the choice
-    /// is live. Cleared when a lookup starts and on reset.
-    pub(crate) toggle_items: Rc<RefCell<Option<ToggleItems>>>,
     /// True when the current preview is a gallery (not a video).
     pub(crate) is_gallery: Rc<Cell<bool>>,
     /// The gallery card state (filter, items) when is_gallery is true.
@@ -950,7 +934,6 @@ pub(crate) fn hide_video_step(v: &VideoStep) {
     v.gallery_info.set_visible(false);
     v.select_files_btn.set_visible(false);
     v.gallery_filter_wrap.set_visible(false);
-    v.mode_toggle_wrap.set_visible(false);
     v.is_gallery.set(false);
     v.gallery_card.borrow_mut().take();
     // NOTE: the URL actions keep their current appearance while the revealer
@@ -1126,8 +1109,6 @@ fn reset_video_step(step: &VideoStep) {
     step.tools.set_subtitle("");
     step.error.set_subtitle("");
     hide_video_step(step);
-    // The media-type choice does not survive a close either.
-    arm_mode_toggle(step, None);
     // No lookup survives a close: clear the flag (and unlock the entry)
     // before the entry text is cleared below (its changed handler would
     // otherwise keep the spinner).
@@ -1137,27 +1118,11 @@ fn reset_video_step(step: &VideoStep) {
     step.action_revealer.set_reveal_child(false);
 }
 
-/// Reset the Video ⇄ Gallery switcher and arm its Gallery side: `items` is
-/// Some when the decode has both a yt-dlp video and gallery-dl images
-/// (the previous route could represent both media types). The active name resets
-/// to Video while the items are absent, so the notify that fires on the
-/// reset finds an unarmed switcher and is ignored.
-fn arm_mode_toggle(step: &VideoStep, items: Option<ToggleItems>) {
-    step.toggle_items.borrow_mut().take();
-    step.mode_toggle.set_active_name(Some("video"));
-    if let Some(items) = items {
-        *step.toggle_items.borrow_mut() = Some(items);
-    }
-}
-
 fn show_video_loading(v: &VideoStep) {
     hide_video_step(v);
     clear_manifest_preview(v);
     // A new lookup supersedes any in-flight file enumeration: kill it.
     abort_enumeration(v);
-    // A new lookup supersedes the previous media-type choice; the switcher
-    // re-arms at completion when both backends are viable.
-    v.toggle_items.borrow_mut().take();
     // The tick morphs into a spinner in place (browser-address-bar style):
     // no separate indicator beside the entry, no layout shift.
     set_looking_up(v, true);
@@ -1188,9 +1153,6 @@ fn show_video_ready(v: &VideoStep) {
     v.name.set_visible(true);
     v.revert.set_visible(true);
     v.format.set_visible(true);
-    // The switcher shows while both sides exist for this decode.
-    v.mode_toggle_wrap
-        .set_visible(v.toggle_items.borrow().is_some());
     // Reveal after the rows are shown: set_visible(true) first so the
     // SlideDown has a mapped widget to animate (see slide_down_revealer).
     v.group_revealer.set_visible(true);
@@ -2552,24 +2514,6 @@ fn build_video_preview(
     // HIG AdwPreferencesGroup: title/description are built-in, rows get the
     // 12px internal margins natively.
     let video_group = adw::PreferencesGroup::new();
-    // Media-type switcher (Video ⇄ Gallery): the established AdwToggleGroup,
-    // same pattern as the gallery filter below. Hidden until both backends
-    // are viable for a decode.
-    let mode_toggle = adw::ToggleGroup::new();
-    for (name, label) in [("video", gettext("Video")), ("gallery", gettext("Gallery"))] {
-        let toggle = adw::Toggle::builder().name(name).label(&label).build();
-        mode_toggle.add(toggle);
-    }
-    mode_toggle.set_active_name(Some("video"));
-    mode_toggle
-        .dynamic_cast_ref::<gtk4::Accessible>()
-        .expect("AdwToggleGroup implements GtkAccessible")
-        .update_property(&[gtk4::accessible::Property::Label(&gettext("Preview type"))]);
-    // The wrapper only provides layout and visibility.
-    let mode_toggle_wrap = gtk4::Box::new(gtk4::Orientation::Horizontal, 6);
-    mode_toggle_wrap.append(&mode_toggle);
-    mode_toggle_wrap.set_visible(false);
-    video_group.add(&mode_toggle_wrap);
     let video_name = adw::EntryRow::builder().title(gettext("File name")).build();
     let video_revert_btn = gtk4::Button::builder()
         .icon_name("edit-undo-symbolic")
@@ -2691,9 +2635,6 @@ fn build_video_preview(
         gallery_info,
         gallery_filter,
         gallery_filter_wrap: filter_wrap,
-        mode_toggle,
-        mode_toggle_wrap,
-        toggle_items: Rc::new(RefCell::new(None)),
         is_gallery: Rc::new(Cell::new(false)),
         gallery_card: Rc::new(RefCell::new(None)),
         select_files_btn: select_files_btn.clone(),
@@ -2821,30 +2762,6 @@ fn wire_video_preview(step: Rc<VideoStep>) {
                     });
                 }
             });
-    }
-    // Media-type switcher: flipping to Gallery builds the card from the
-    // already-probed items (no second gallery-dl run); flipping back shows
-    // the yt-dlp preview from the stored probe. Programmatic active-name
-    // resets run with the items absent and are ignored here.
-    {
-        let step2 = step.clone();
-        step.mode_toggle.connect_active_name_notify(move |toggle| {
-            let state = step2.toggle_items.borrow().clone();
-            let Some((items, url)) = state else {
-                return;
-            };
-            if toggle.active_name().as_deref() != Some("gallery") {
-                show_video_ready(&step2);
-                return;
-            }
-            let title = crate::gallery_probe::collection_title(&items, &url);
-            let card = crate::gallery_card::GalleryCard::new(
-                items,
-                Some(crate::gallery_probe::StickyMode::Gallery),
-                url,
-            );
-            show_gallery_ready(&step2, card, &title);
-        });
     }
 }
 
@@ -3288,7 +3205,6 @@ fn build_video_lookup_kicker(context: VideoLookupContext) -> VideoLookupKick {
                 let (
                     ytdlp_result,
                     gallery_error,
-                    mut toggle_items,
                     probe_json_key,
                     native_fallback_reason,
                 ) = match outcome {
@@ -3372,13 +3288,11 @@ fn build_video_lookup_kicker(context: VideoLookupContext) -> VideoLookupKick {
                             probe_json_key,
                             ytdlp_result,
                             gallery_error,
-                            toggle_items,
                             native_fallback_reason,
                         } = *result;
                         (
                             ytdlp_result,
                             gallery_error,
-                            toggle_items,
                             probe_json_key,
                             native_fallback_reason,
                         )
@@ -3557,10 +3471,6 @@ fn build_video_lookup_kicker(context: VideoLookupContext) -> VideoLookupKick {
                                 // immediately with the pre-selected quality.
                                 probe_b.borrow_mut().info =
                                     Some(crate::video::ProbeResult::Single(v.clone()));
-                                // Both backends were viable (route() armed
-                                // the items): show the Video ⇄ Gallery
-                                // switcher with the preview.
-                                arm_mode_toggle(&step_b, toggle_items.take());
                                 if settings_b.auto_add_downloads() {
                                     submit_probed_single(
                                         &manager_b,
@@ -4923,10 +4833,6 @@ fn show_gallery_ready(v: &VideoStep, card: crate::gallery_card::GalleryCard, tit
     refresh_gallery_info(v, title);
     v.gallery_info.set_visible(false);
     v.gallery_filter_wrap.set_visible(false);
-    // The switcher is live while both sides are stored; flipping to Video
-    // restores the yt-dlp preview.
-    v.mode_toggle_wrap
-        .set_visible(v.toggle_items.borrow().is_some());
     // Reveal the block.
     v.action_revealer.set_visible(true);
     v.action_revealer.set_reveal_child(true);

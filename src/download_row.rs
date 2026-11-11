@@ -153,12 +153,7 @@ mod tests {
         gallery.set_is_gallery(true);
         assert!(gallery.is_collection_parent());
 
-        let playlist = DownloadItem::new(
-            2,
-            "https://example.com/playlist",
-            "Playlist",
-            "/tmp",
-        );
+        let playlist = DownloadItem::new(2, "https://example.com/playlist", "Playlist", "/tmp");
         playlist.set_is_collection_owner(true);
         assert!(playlist.is_collection_parent());
 

@@ -663,9 +663,7 @@ pub fn build_window(
 
             let mut group_sizes = HashMap::<u64, usize>::new();
             for item in &items {
-                if item.is_collection_parent()
-                    && collection_owner_ids.contains(&item.id())
-                {
+                if item.is_collection_parent() && collection_owner_ids.contains(&item.id()) {
                     continue;
                 }
                 if let Some(group) = item.group().filter(|group| group.is_valid()) {
@@ -678,9 +676,7 @@ pub fn build_window(
             };
             let mut all_groups = HashMap::<u64, Vec<crate::download::DownloadItem>>::new();
             for item in &items {
-                if item.is_collection_parent()
-                    && collection_owner_ids.contains(&item.id())
-                {
+                if item.is_collection_parent() && collection_owner_ids.contains(&item.id()) {
                     continue;
                 }
                 if let Some(group) = item
@@ -704,9 +700,7 @@ pub fn build_window(
             for item in &items {
                 // Represent an owner with one expandable collection header,
                 // never a second ordinary download row.
-                if item.is_collection_parent()
-                    && collection_owner_ids.contains(&item.id())
-                {
+                if item.is_collection_parent() && collection_owner_ids.contains(&item.id()) {
                     continue;
                 }
                 present.insert(item.id());
@@ -792,9 +786,7 @@ pub fn build_window(
             }
 
             for item in &items {
-                if item.is_collection_parent()
-                    && collection_owner_ids.contains(&item.id())
-                {
+                if item.is_collection_parent() && collection_owner_ids.contains(&item.id()) {
                     continue;
                 }
                 let bucket = effective_bucket(item);

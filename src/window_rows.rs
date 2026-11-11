@@ -827,9 +827,10 @@ pub(crate) fn build_download_group_row(
     expand_content.append(&chevron);
     expand_content.append(&title_label);
     expand_button.set_child(Some(&expand_content));
-    expand_button.update_property(&[gtk4::accessible::Property::Label(&gettext(
-        "Expand collection",
-    ))]);
+    let accessible_title = title.to_string();
+    expand_button.update_property(&[gtk4::accessible::Property::Label(
+        &gettext("Expand collection: {title}").replace("{title}", &accessible_title),
+    )]);
 
     let inline_progress = gtk4::ProgressBar::new();
     inline_progress.set_show_text(false);
@@ -880,6 +881,7 @@ pub(crate) fn build_download_group_row(
         let child_revealer = revealer.clone();
         let chevron = chevron.clone();
         let has_progress = Rc::clone(&has_progress);
+        let accessible_title = accessible_title.clone();
         expand_button.connect_toggled(move |button| {
             let expanded = button.is_active();
             child_revealer.set_reveal_child(expanded);
@@ -891,13 +893,12 @@ pub(crate) fn build_download_group_row(
                 "pan-end-symbolic"
             });
             let accessible_label = if expanded {
-                gettext("Collapse collection")
+                gettext("Collapse collection: {title}")
             } else {
-                gettext("Expand collection")
-            };
-            button.update_property(&[gtk4::accessible::Property::Label(
-                &accessible_label,
-            )]);
+                gettext("Expand collection: {title}")
+            }
+            .replace("{title}", &accessible_title);
+            button.update_property(&[gtk4::accessible::Property::Label(&accessible_label)]);
         });
     }
 

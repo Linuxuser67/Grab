@@ -487,7 +487,6 @@ mod tests {
         assert_eq!(mode["progress-total"], "@GRAB:test-run:PROGRESS:{3}%\n");
     }
 
-
     #[test]
     fn file_state_updates_remain_available_after_the_persistence_cap() {
         let mut job = GalleryJob {
@@ -525,11 +524,12 @@ mod tests {
             crate::download_store::DownloadStatus::Done
         );
 
-        job.file_rows.resize_with(MAX_GALLERY_PERSISTED_FILE_ROWS, || GalleryFileState {
-            path: "/tmp/gallery/retained.jpg".to_string(),
-            status: crate::download_store::DownloadStatus::Queued,
-            progress: 0.0,
-        });
+        job.file_rows
+            .resize_with(MAX_GALLERY_PERSISTED_FILE_ROWS, || GalleryFileState {
+                path: "/tmp/gallery/retained.jpg".to_string(),
+                status: crate::download_store::DownloadStatus::Queued,
+                progress: 0.0,
+            });
         assert_eq!(
             job.upsert_file_state(
                 "/tmp/gallery/overflow.jpg",

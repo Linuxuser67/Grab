@@ -1139,7 +1139,7 @@ fn reset_video_step(step: &VideoStep) {
 
 /// Reset the Video ⇄ Gallery switcher and arm its Gallery side: `items` is
 /// Some when the decode has both a yt-dlp video and gallery-dl images
-/// (route() → VideoYtDlp { gallery_toggle: true }). The active name resets
+/// (the previous route could represent both media types). The active name resets
 /// to Video while the items are absent, so the notify that fires on the
 /// reset finds an unarmed switcher and is ignored.
 fn arm_mode_toggle(step: &VideoStep, items: Option<ToggleItems>) {

@@ -2555,6 +2555,10 @@ pub(crate) fn valid_source(source: &crate::media_types::ManifestSource) -> bool 
     if !is_native_manifest_candidate(&url, ManifestTransportPolicy::HttpsOnly)
         || native_manifest_kind(&url).is_some_and(|kind| kind != source.kind)
         || source.representation_key.is_empty()
+        || source
+            .output_extension
+            .as_deref()
+            .is_some_and(|extension| !matches!(extension, "mp4" | "mkv" | "ts"))
     {
         return false;
     }
@@ -3381,10 +3385,15 @@ video/es.m3u8
             url: "https://cdn.example.test/master.m3u8".to_string(),
             kind: crate::media_types::ManifestKind::Hls,
             representation_key: "hls-variant-0123456789abcdef0123456789abcdef".into(),
+            output_extension: None,
             audio_key: Some("hls-audio-0123456789abcdef0123456789abcdef".into()),
             subtitle_key: None,
             subtitle_language: None,
         };
+        assert!(valid_source(&source));
+        source.output_extension = Some("../unexpected".to_string());
+        assert!(!valid_source(&source));
+        source.output_extension = None;
         assert!(valid_source(&source));
         source.url = "https://cdn.example.test/master".to_string();
         assert!(

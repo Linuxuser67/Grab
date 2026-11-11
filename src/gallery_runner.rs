@@ -438,7 +438,7 @@ mod tests {
         let first = dir.join("one.jpg");
         let second = dir.join("two.jpg");
         let script = format!(
-            "#!/bin/sh\n[ \"$PYTHONUNBUFFERED\" = \"1\" ] || exit 99\nprintf '%s\\n' \"@GRAB:$GRAB_GALLERY_EVENT_NONCE:START:{}\"\nprintf '50%%\\n' >&2\nprintf '%s\\n' \"@GRAB:$GRAB_GALLERY_EVENT_NONCE:DONE:{}\"\nprintf '%s\\n' \"@GRAB:$GRAB_GALLERY_EVENT_NONCE:SKIP:{}\"\n",
+            "#!/bin/sh\n[ \"$PYTHONUNBUFFERED\" = \"1\" ] || exit 99\nprintf '%s\\n' \"@GRAB:$GRAB_GALLERY_EVENT_NONCE:START:{}\"\nprintf '@GRAB:%s:PROGRESS:50%%\\n' "$GRAB_GALLERY_EVENT_NONCE" >&2\nprintf '%s\\n' \"@GRAB:$GRAB_GALLERY_EVENT_NONCE:DONE:{}\"\nprintf '%s\\n' \"@GRAB:$GRAB_GALLERY_EVENT_NONCE:SKIP:{}\"\n",
             first.display(),
             first.display(),
             second.display(),

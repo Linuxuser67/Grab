@@ -3381,6 +3381,18 @@ video/es.m3u8
             "hls-subtitle-0123456789abcdef0123456789abcdef"
         );
 
+        let mut preview_source = legacy_with_tracks.clone();
+        preview_source.output_extension = Some("ts".to_string());
+        let preview_encoded =
+            serde_json::to_value(&preview_source).expect("serialize preview metadata");
+        assert!(
+            preview_encoded.get("output_extension").is_none(),
+            "preview-only format hints must not become stale persisted metadata"
+        );
+        let restored_preview: crate::media_types::ManifestSource =
+            serde_json::from_value(preview_encoded).expect("restore persisted source");
+        assert_eq!(restored_preview.output_extension, None);
+
         let mut source = crate::media_types::ManifestSource {
             url: "https://cdn.example.test/master.m3u8".to_string(),
             kind: crate::media_types::ManifestKind::Hls,

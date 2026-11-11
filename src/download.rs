@@ -1358,7 +1358,7 @@ impl DownloadManager {
         // container. Resolve the selected media playlist/representation before
         // creating the queue row so its final filename matches its contents.
         let options = DownloadOptions::from_settings(&self.settings);
-        let proxy = options.proxy_config().ok().flatten();
+        let proxy = options.proxy_config()?;
         let detected_extension = crate::manifest_runner::detect_output_extension(
             &source,
             &options.cookies_browser,

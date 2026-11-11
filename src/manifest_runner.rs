@@ -2248,20 +2248,12 @@ pub(crate) async fn detect_output_extension(
     cookies_browser: &str,
     proxy: Option<&crate::net_types::ResolvedProxy>,
 ) -> Option<&'static str> {
-    let client = crate::manifest_intake::client_for_manifest(
-        &source.url,
-        cookies_browser,
-        proxy,
-    )
-    .await
-    .ok()?;
-    let lookup = crate::manifest_intake::lookup_with_client(
-        &client,
-        &source.url,
-        proxy.is_some(),
-    )
-    .await
-    .ok()??;
+    let client = crate::manifest_intake::client_for_manifest(&source.url, cookies_browser, proxy)
+        .await
+        .ok()?;
+    let lookup = crate::manifest_intake::lookup_with_client(&client, &source.url, proxy.is_some())
+        .await
+        .ok()??;
     if lookup.kind() != source.kind {
         return None;
     }
@@ -2280,7 +2272,10 @@ pub(crate) async fn detect_output_extension(
 }
 
 /// Whether the selected subtitle rendition can be embedded in the chosen container.
-fn embed_manifest_subtitles(embed_requested: bool, output_container: ManifestOutputContainer) -> bool {
+fn embed_manifest_subtitles(
+    embed_requested: bool,
+    output_container: ManifestOutputContainer,
+) -> bool {
     embed_requested && output_container != ManifestOutputContainer::MpegTs
 }
 
@@ -4963,16 +4958,31 @@ segment-2.m4s
 
     #[test]
     fn mpegts_subtitles_use_a_sidecar_when_embedding_was_requested() {
-        assert!(!embed_manifest_subtitles(true, ManifestOutputContainer::MpegTs));
-        assert!(!embed_manifest_subtitles(false, ManifestOutputContainer::Mp4));
+        assert!(!embed_manifest_subtitles(
+            true,
+            ManifestOutputContainer::MpegTs
+        ));
+        assert!(!embed_manifest_subtitles(
+            false,
+            ManifestOutputContainer::Mp4
+        ));
         assert!(embed_manifest_subtitles(true, ManifestOutputContainer::Mp4));
-        assert!(embed_manifest_subtitles(true, ManifestOutputContainer::Matroska));
+        assert!(embed_manifest_subtitles(
+            true,
+            ManifestOutputContainer::Matroska
+        ));
     }
 
     #[test]
     fn dash_output_container_follows_the_selected_video_mime_type() {
-        assert_eq!(dash_output_container_extension(Some("video/mp2t")), Some("ts"));
-        assert_eq!(dash_output_container_extension(Some("video/mp4")), Some("mp4"));
+        assert_eq!(
+            dash_output_container_extension(Some("video/mp2t")),
+            Some("ts")
+        );
+        assert_eq!(
+            dash_output_container_extension(Some("video/mp4")),
+            Some("mp4")
+        );
         assert_eq!(
             dash_output_container_extension(Some("application/mp4; codecs=avc1")),
             Some("mp4")

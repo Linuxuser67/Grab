@@ -742,12 +742,17 @@ fn show_failure_dialog(
 }
 
 /// One playlist group in a status section. Child rows remain the existing
-/// DownloadItem rows; only their parent row and group-level actions are new.
+/// DownloadItem rows; the header owns the aggregate progress presentation.
 #[derive(Clone)]
 pub(crate) struct DownloadGroupRow {
-    pub(crate) row: adw::ExpanderRow,
+    pub(crate) row: gtk4::ListBoxRow,
     members: Rc<RefCell<Vec<u64>>>,
-    progress: gtk4::ProgressBar,
+    inline_progress: gtk4::ProgressBar,
+    collapsed_progress: gtk4::ProgressBar,
+    summary: gtk4::Label,
+    child_rows: gtk4::ListBox,
+    expand_button: gtk4::ToggleButton,
+    has_progress: Rc<Cell<bool>>,
     open_folder_btn: gtk4::Button,
     remove_btn: gtk4::Button,
 }
@@ -789,34 +794,118 @@ pub(crate) fn build_download_group_row(
     manager: &Rc<DownloadManager>,
     toasts: &Rc<adw::ToastOverlay>,
 ) -> DownloadGroupRow {
-    let row = adw::ExpanderRow::new();
-    // Playlist titles come from remote pages; do not interpret them as Pango markup.
-    row.set_use_markup(false);
-    row.set_title(title);
-    row.set_expanded(false);
-
     let members = Rc::new(RefCell::new(Vec::new()));
-    let progress = gtk4::ProgressBar::new();
-    progress.set_show_text(false);
-    progress.set_size_request(-1, -1);
-    progress.set_hexpand(true);
-    progress.set_halign(gtk4::Align::Fill);
-    progress.set_valign(gtk4::Align::Center);
-    progress.set_visible(false);
-    progress.update_property(&[gtk4::accessible::Property::Label(&gettext(
+    let has_progress = Rc::new(Cell::new(false));
+
+    let root = gtk4::Box::new(gtk4::Orientation::Vertical, 6);
+    root.set_margin_top(12);
+    root.set_margin_bottom(12);
+    root.set_margin_start(12);
+    root.set_margin_end(12);
+
+    let header = gtk4::Box::new(gtk4::Orientation::Horizontal, 8);
+    header.set_valign(gtk4::Align::Center);
+
+    // The title is the disclosure control, so it remains keyboard accessible.
+    // In the expanded state the compact aggregate bar sits between the title
+    // and the two trailing collection actions.
+    let expand_button = gtk4::ToggleButton::builder()
+        .css_classes(["flat"])
+        .hexpand(true)
+        .valign(gtk4::Align::Center)
+        .build();
+    let expand_content = gtk4::Box::new(gtk4::Orientation::Horizontal, 8);
+    let chevron = gtk4::Image::from_icon_name("pan-end-symbolic");
+    chevron.set_valign(gtk4::Align::Center);
+    let title_label = gtk4::Label::builder()
+        .label(title)
+        .css_classes(["heading"])
+        .halign(gtk4::Align::Start)
+        .hexpand(true)
+        .ellipsize(gtk4::pango::EllipsizeMode::End)
+        .build();
+    expand_content.append(&chevron);
+    expand_content.append(&title_label);
+    expand_button.set_child(Some(&expand_content));
+    expand_button.update_property(&[gtk4::accessible::Property::Label(&gettext(
+        "Expand collection",
+    ))]);
+
+    let inline_progress = gtk4::ProgressBar::new();
+    inline_progress.set_show_text(false);
+    inline_progress.set_size_request(112, -1);
+    inline_progress.set_hexpand(false);
+    inline_progress.set_halign(gtk4::Align::Fill);
+    inline_progress.set_valign(gtk4::Align::Center);
+    inline_progress.set_visible(false);
+    inline_progress.update_property(&[gtk4::accessible::Property::Label(&gettext(
         "Collection progress",
     ))]);
-    // A collapsed collection shows its aggregate progress like a regular
-    // download row. Once expanded, the child rows provide detailed progress,
-    // so keep the header bar compact beside the collection actions.
+
+    // Collapsed collections use the same title-then-full-width-progress
+    // hierarchy as an ordinary download row. A second, compact bar is used
+    // only while expanded, where it belongs between the title and actions.
+    let collapsed_progress = gtk4::ProgressBar::new();
+    collapsed_progress.set_show_text(false);
+    collapsed_progress.set_hexpand(true);
+    collapsed_progress.set_halign(gtk4::Align::Fill);
+    collapsed_progress.set_margin_start(28);
+    collapsed_progress.set_visible(false);
+    collapsed_progress.update_property(&[gtk4::accessible::Property::Label(&gettext(
+        "Collection progress",
+    ))]);
+
+    let summary = gtk4::Label::builder()
+        .label("")
+        .css_classes(["dimmed", "caption"])
+        .halign(gtk4::Align::Start)
+        .ellipsize(gtk4::pango::EllipsizeMode::End)
+        .build();
+
+    let child_rows = gtk4::ListBox::builder()
+        .selection_mode(gtk4::SelectionMode::None)
+        .show_separators(true)
+        .css_classes(["boxed-list"])
+        .build();
+    child_rows.set_margin_start(28);
+
+    let revealer = gtk4::Revealer::new();
+    revealer.set_transition_type(gtk4::RevealerTransitionType::SlideDown);
+    revealer.set_reveal_child(false);
+    revealer.set_child(Some(&child_rows));
+
     {
-        let progress = progress.clone();
-        row.connect_expanded_notify(move |row| {
-            let expanded = row.is_expanded();
-            progress.set_hexpand(!expanded);
-            progress.set_size_request(if expanded { 112 } else { -1 }, -1);
+        let inline_progress = inline_progress.clone();
+        let collapsed_progress = collapsed_progress.clone();
+        let child_revealer = revealer.clone();
+        let chevron = chevron.clone();
+        let has_progress = Rc::clone(&has_progress);
+        expand_button.connect_toggled(move |button| {
+            let expanded = button.is_active();
+            child_revealer.set_reveal_child(expanded);
+            inline_progress.set_visible(expanded && has_progress.get());
+            collapsed_progress.set_visible(!expanded && has_progress.get());
+            chevron.set_icon_name(if expanded {
+                "pan-down-symbolic"
+            } else {
+                "pan-end-symbolic"
+            });
+            let accessible_label = if expanded {
+                gettext("Collapse collection")
+            } else {
+                gettext("Expand collection")
+            };
+            button.update_property(&[gtk4::accessible::Property::Label(
+                &accessible_label,
+            )]);
         });
     }
+
+    root.append(&header);
+    root.append(&collapsed_progress);
+    root.append(&summary);
+    root.append(&revealer);
+
     let open_folder_btn = icon_button("folder-open-symbolic", &gettext("Open Collection Folder"));
     {
         let ids = Rc::clone(&members);
@@ -914,20 +1003,37 @@ pub(crate) fn build_download_group_row(
         });
     }
 
-    row.add_suffix(&progress);
-    row.add_suffix(&open_folder_btn);
-    row.add_suffix(&remove_btn);
+
+    header.append(&expand_button);
+    header.append(&inline_progress);
+    header.append(&open_folder_btn);
+    header.append(&remove_btn);
+
+    let row = gtk4::ListBoxRow::new();
+    row.set_child(Some(&root));
+    row.set_activatable(false);
+    row.set_selectable(false);
 
     DownloadGroupRow {
         row,
         members,
-        progress,
+        inline_progress,
+        collapsed_progress,
+        summary,
+        child_rows,
+        expand_button,
+        has_progress,
         open_folder_btn,
         remove_btn,
     }
 }
 
 impl DownloadGroupRow {
+    /// Attach an existing download row to this collection's expandable child list.
+    pub(crate) fn add_row(&self, row: &gtk4::ListBoxRow) {
+        self.child_rows.append(row);
+    }
+
     pub(crate) fn update(
         &self,
         section_items: &[DownloadItem],
@@ -935,7 +1041,7 @@ impl DownloadGroupRow {
         manager: &DownloadManager,
     ) {
         *self.members.borrow_mut() = group_items.iter().map(DownloadItem::id).collect();
-        self.row.set_subtitle(&group_summary(section_items));
+        self.summary.set_text(&group_summary(section_items));
 
         let collection_owner = group_items
             .iter()
@@ -945,13 +1051,21 @@ impl DownloadGroupRow {
             .filter(|owner| owner.is_collection_parent());
         if let Some(owner) = collection_owner {
             if let Some(fraction) = collection_progress_fraction(&owner) {
-                self.progress.set_fraction(fraction);
-                self.progress.set_visible(true);
+                self.has_progress.set(true);
+                self.inline_progress.set_fraction(fraction);
+                self.collapsed_progress.set_fraction(fraction);
+                let expanded = self.expand_button.is_active();
+                self.inline_progress.set_visible(expanded);
+                self.collapsed_progress.set_visible(!expanded);
             } else {
-                self.progress.set_visible(false);
+                self.has_progress.set(false);
+                self.inline_progress.set_visible(false);
+                self.collapsed_progress.set_visible(false);
             }
         } else {
-            self.progress.set_visible(false);
+            self.has_progress.set(false);
+            self.inline_progress.set_visible(false);
+            self.collapsed_progress.set_visible(false);
         }
 
         let nonempty = !group_items.is_empty();
@@ -966,6 +1080,7 @@ impl DownloadGroupRow {
     }
 }
 
+/// A collection file is a read-only projection of one shared downloader process.
 /// A collection file is a read-only projection of one shared downloader
 /// process. It intentionally has no per-file process controls: pause/cancel
 /// semantics belong to the parent collection job.

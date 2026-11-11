@@ -14,6 +14,21 @@ use crate::gallery_progress::{GalleryProgress, ProgressLine, parse_progress_line
 use crate::gallery_tools::GalleryError;
 use crate::video_spawn::ProcessGroupGuard;
 
+fn gallery_event_nonce() -> Result<String, GalleryError> {
+    let mut bytes = [0_u8; 16];
+    getrandom::fill(&mut bytes).map_err(|error| {
+        GalleryError::runtime(format!("couldn't generate gallery event nonce: {error}"))
+    })?;
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    let mut nonce = String::with_capacity(bytes.len() * 2);
+    for byte in bytes {
+        nonce.push(char::from(HEX[(byte >> 4) as usize]));
+        nonce.push(char::from(HEX[(byte & 0x0f) as usize]));
+    }
+    Ok(nonce)
+}
+
+
 /// Outcome of a gallery download.
 #[derive(Debug)]
 pub struct GalleryResult {
@@ -141,6 +156,7 @@ pub async fn run_gallery_download_with_proxy(
             "Cannot safely use a configured proxy for an untrusted browser handoff".to_string(),
         ));
     }
+    let event_nonce = gallery_event_nonce()?;
     let argv = download_argv_with_proxy(
         tool,
         &job.page_url,
@@ -151,6 +167,7 @@ pub async fn run_gallery_download_with_proxy(
         job.speed_limit,
         job.range.as_deref(),
         proxy,
+        &event_nonce,
     );
     let guarded_proxy = if untrusted_handoff {
         crate::video_spawn::validate_guarded_proxy_args(&argv).map_err(GalleryError::probe)?;
@@ -172,6 +189,12 @@ pub async fn run_gallery_download_with_proxy(
     cmd.args(&argv);
     crate::video_spawn::apply_configured_proxy_env(&mut cmd, proxy);
     crate::video_spawn::apply_guarded_proxy_env(&mut cmd, guarded_proxy.as_deref());
+    // Python output must be flushed promptly so merged file and progress records
+    // preserve the order observed by the runner.
+    cmd.env("PYTHONUNBUFFERED", "1");
+    // The fixture process uses the same run identity embedded in gallery-dl's
+    // output templates; the nonce is not a credential and is not logged.
+    cmd.env("GRAB_GALLERY_EVENT_NONCE", &event_nonce);
     cmd.stdout(std::process::Stdio::piped());
     cmd.stderr(std::process::Stdio::null());
     // Own process group + kill-on-drop: cancel/abort/shutdown drops this
@@ -212,7 +235,7 @@ pub async fn run_gallery_download_with_proxy(
     let mut last_completed: Option<String> = None;
 
     let mut process_line = |line: String| {
-        let parsed = parse_progress_line(&line);
+        let parsed = parse_progress_line(&line, &event_nonce);
         match parsed {
             ProgressLine::Progress(percent) => {
                 progress.feed(ProgressLine::Progress(percent));
@@ -356,6 +379,20 @@ pub fn gallery_speed_limit(settings: &crate::settings::AppSettings) -> Option<u6
 }
 
 #[cfg(test)]
+mod gallery_event_nonce_tests {
+    use super::gallery_event_nonce;
+
+    #[test]
+    fn nonce_is_hex_and_unique_per_run() {
+        let first = gallery_event_nonce().expect("operating-system randomness");
+        let second = gallery_event_nonce().expect("operating-system randomness");
+        assert_eq!(first.len(), 32);
+        assert!(first.bytes().all(|byte| byte.is_ascii_hexdigit()));
+        assert_ne!(first, second);
+    }
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use crate::gallery_argv::GalleryFilter;
@@ -401,7 +438,7 @@ mod tests {
         let first = dir.join("one.jpg");
         let second = dir.join("two.jpg");
         let script = format!(
-            "#!/bin/sh\nprintf '%s\\n' '@START:{}'\nprintf '50%%\\n' >&2\nprintf '%s\\n' '@DONE:{}'\nprintf '@SKIP:%s\\n' '{}'\n",
+            "#!/bin/sh\\n[ \\"$PYTHONUNBUFFERED\\" = \\"1\\" ] || exit 99\\nprintf '@GRAB:%s:START:%s\\\\n' \\"$GRAB_GALLERY_EVENT_NONCE\\" '{}'\\nprintf '50%%\\\\n' >&2\\nprintf '@GRAB:%s:DONE:%s\\\\n' \\"$GRAB_GALLERY_EVENT_NONCE\\" '{}'\\nprintf '@GRAB:%s:SKIP:%s\\\\n' \\"$GRAB_GALLERY_EVENT_NONCE\\" '{}'\\n",
             first.display(),
             first.display(),
             second.display(),

@@ -992,7 +992,8 @@ fn refresh_manifest_audio_picker(
         .set_visible(step.manifest_audio_choices.borrow().len() > 1);
 }
 
-/// Native HLS/DASH output defaults to Matroska and honors explicit supported suffixes.
+/// Provisional filename for the Add card; enqueue replaces its suffix with the
+/// container detected from the selected HLS media playlist or DASH representation.
 fn manifest_filename(filename: &str) -> String {
     let path = std::path::Path::new(filename);
     let stem = path

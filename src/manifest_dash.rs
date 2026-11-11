@@ -491,16 +491,14 @@ pub(crate) fn parse_dash_manifest_at(
     };
 
     let is_dynamic = matches!(presentation, DashPresentation::Dynamic(_));
-    if dash_roles::has_unsupported_segment_list_timing_attributes(body.as_bytes())
-        .ok_or(DashError::Parse)?
-    {
-        return Err(DashError::UnsupportedAddressing);
-    }
-    if is_dynamic
-        && (dash_roles::has_nonzero_segment_list_presentation_time_offset(body.as_bytes())
-            .ok_or(DashError::Parse)?
-            || dash_roles::has_nondefault_segment_list_start_number(body.as_bytes())
-                .ok_or(DashError::Parse)?)
+    // One bounded auxiliary XML pass collects both the source-order
+    // representation metadata and SegmentList compatibility flags.
+    let role_metadata = dash_roles::representation_metadata(body.as_bytes(), MAX_REPRESENTATIONS)
+        .ok_or(DashError::Parse)?;
+    if role_metadata.has_unsupported_segment_list_timing_attributes
+        || (is_dynamic
+            && (role_metadata.has_nonzero_segment_list_presentation_time_offset
+                || role_metadata.has_nondefault_segment_list_start_number))
     {
         return Err(DashError::UnsupportedAddressing);
     }
@@ -515,14 +513,11 @@ pub(crate) fn parse_dash_manifest_at(
 
     // The typed parser and bounded metadata pass must describe the same source-order
     // structure for every Period; otherwise a foreign element could shift role indexes.
-    let representation_metadata =
-        dash_roles::representation_metadata(body.as_bytes(), MAX_REPRESENTATIONS)
-            .ok_or(DashError::Parse)?;
-    if representation_metadata.len() != mpd.periods.len()
+    if role_metadata.periods.len() != mpd.periods.len()
         || mpd
             .periods
             .iter()
-            .zip(&representation_metadata)
+            .zip(&role_metadata.periods)
             .any(|(period, metadata)| {
                 metadata.len() != period.adaptations.len()
                     || period

@@ -702,7 +702,6 @@ async fn lookup_extractors_inner(
             ytdlp_video,
             playlist_entries,
             gallery.as_ref().ok().and_then(|items| items.as_deref()),
-            None,
         );
         match routed {
             crate::gallery_probe::ProbeOutcome::VideoYtDlp => (ytdlp, gallery_error),
@@ -3268,13 +3267,11 @@ fn build_video_lookup_kicker(context: VideoLookupContext) -> VideoLookupKick {
                             // the dual probe may cap the file list.
                             let card = crate::gallery_card::GalleryCard::new(
                                 items,
-                                Some(crate::gallery_probe::StickyMode::Gallery),
                                 url.clone(),
                             );
                             let title = crate::gallery_probe::collection_title(&card.items, &url);
                             tracing::info!(
                                 files = card.file_count(),
-                                sticky = ?card.sticky_mode(),
                                 "gallery-dl items await user selection"
                             );
                             show_gallery_ready(&step_b, card, &title);

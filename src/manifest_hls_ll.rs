@@ -238,6 +238,17 @@ fn has_hls_encrypted_media_key_tag(body: &[u8]) -> bool {
     })
 }
 
+fn is_hls_method_none_key_tag(tag: &str) -> bool {
+    let Some(attributes) = tag.as_bytes().strip_prefix(b"#EXT-X-KEY:") else {
+        return false;
+    };
+    // RFC 8216 permits no attributes other than METHOD when its value is
+    // NONE. Reject malformed or extended forms instead of silently ignoring
+    // an unexpected key declaration.
+    !attributes.contains(&b',')
+        && hls_key_method(attributes).is_some_and(|method| method.eq_ignore_ascii_case(b"NONE"))
+}
+
 fn has_ll_hls_delta_update(body: &[u8]) -> bool {
     body.split(|byte| *byte == b'\n')
         .any(|line| line.starts_with(b"#EXT-X-SKIP:"))
@@ -819,6 +830,9 @@ fn validate_playlist_tags(playlist: &LlMediaPlaylist) -> Result<(), ManifestErro
             ));
         }
         if tag.starts_with("#EXT-X-KEY:") {
+            if is_hls_method_none_key_tag(tag) {
+                continue;
+            }
             return Err(ManifestError::UnsupportedEncryption);
         }
         if tag.starts_with("#EXT-X-PROGRAM-DATE-TIME:") {
@@ -1638,6 +1652,10 @@ segment.ts
                 .filter(|resource| resource.kind == HlsResourceKind::Segment)
                 .count(),
             1
+        );
+        assert!(
+            plan.local_playlist.segments[0].key.is_none(),
+            "METHOD=NONE must not be serialized as an active encryption key"
         );
     }
 

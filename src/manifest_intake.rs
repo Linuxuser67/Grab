@@ -4522,17 +4522,63 @@ video/variant.m3u8
     }
 
     #[test]
-    fn parser_rejects_hls_masters_over_the_variant_and_rendition_limits() {
-        let mut variants = String::from("#EXTM3U\n");
+    fn parser_rejects_hls_masters_over_the_variant_limit() {
+        let mut body = String::from("#EXTM3U\n");
         for index in 0..=crate::manifest::MAX_HLS_MASTER_VARIANTS {
-            variants.push_str(&format!(
+            body.push_str(&format!(
                 "#EXT-X-STREAM-INF:BANDWIDTH=1000000\nhttps://cdn.example.test/{index}.m3u8\n"
             ));
         }
         assert!(matches!(
-            crate::manifest::parse_hls_master_playlist(MASTER_URL, variants.as_bytes()),
+            crate::manifest::parse_hls_master_playlist(MASTER_URL, body.as_bytes()),
             Err(crate::manifest::ManifestError::Parse(_))
         ));
+    }
+
+    #[test]
+    fn parser_rejects_hls_masters_over_the_rendition_limit() {
+        let mut body = String::from("#EXTM3U\n");
+        for index in 0..=crate::manifest::MAX_HLS_MASTER_RENDITIONS {
+            body.push_str(&format!(
+                "#EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID=\"audio-{index}\",NAME=\"English {index}\",URI=\"audio/{index}.m3u8\"\n"
+            ));
+        }
+        body.push_str("#EXT-X-STREAM-INF:BANDWIDTH=1000000,AUDIO=\"audio-0\"\nvideo.m3u8\n");
+        assert!(matches!(
+            crate::manifest::parse_hls_master_playlist(MASTER_URL, body.as_bytes()),
+            Err(crate::manifest::ManifestError::Parse(_))
+        ));
+    }
+
+    #[test]
+    fn clone_is_skipped_when_rendition_fanout_would_exceed_its_limit() {
+        let mut master = master();
+        let base_audio = master.audio_renditions[0].clone();
+        let mut audio = Vec::with_capacity(crate::manifest::MAX_HLS_MASTER_RENDITIONS);
+        audio.push(base_audio.clone());
+        for index in 1..crate::manifest::MAX_HLS_MASTER_RENDITIONS {
+            let mut rendition = base_audio.clone();
+            rendition.name = format!("English {index}");
+            audio.push(rendition);
+        }
+        master.audio_renditions = audio.into_boxed_slice();
+
+        let clone = HlsPathwayClone {
+            base_id: "cdn-a".to_string(),
+            id: "clone-a".to_string(),
+            host: Some("backup.example.test".to_string()),
+            params: BTreeMap::new(),
+            per_variant_uris: HashMap::new(),
+            per_rendition_uris: HashMap::new(),
+        };
+        apply_hls_pathway_clones(&mut master, &[clone]);
+
+        assert_eq!(master.variants.len(), 2);
+        assert_eq!(
+            master.audio_renditions.len(),
+            crate::manifest::MAX_HLS_MASTER_RENDITIONS
+        );
+        assert!(!master.variants.iter().any(|variant| variant.pathway_id == "clone-a"));
     }
 
     #[test]

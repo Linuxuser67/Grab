@@ -28,7 +28,6 @@ fn gallery_event_nonce() -> Result<String, GalleryError> {
     Ok(nonce)
 }
 
-
 /// Outcome of a gallery download.
 #[derive(Debug)]
 pub struct GalleryResult {

@@ -118,7 +118,7 @@ pub(crate) fn merge_output_ext(video_ext: &str) -> String {
 const TRUTHFUL_CONTAINERS: &[&str] = &["mp4", "webm", "mkv", "flv", "ogg", "m4a"];
 
 /// Intake-name extensions Grab generates itself (the only ones the backstop second-guesses).
-const GENERATED_INTAKE_EXTS: &[&str] = &["mp4", "m4a"];
+const GENERATED_INTAKE_EXTS: &[&str] = &["mp4", "m4a", "ts"];
 
 /// Corrected row name when the discovered container disagrees with the intake name. Pure.
 pub(crate) fn container_truth_name(dest: &Path, discovered: &Path) -> Option<String> {

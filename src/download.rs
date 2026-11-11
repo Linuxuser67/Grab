@@ -1526,10 +1526,16 @@ impl DownloadManager {
         // selection extends that owner instead of creating a competing process.
         if let Some(owner) = self.items().find(|item| {
             item.url() == url
-                && matches!(
-                    self.video_source(item.id()),
-                    Some(crate::media_types::VideoSource::Playlist { .. })
-                )
+                && self
+                    .video_sources
+                    .borrow()
+                    .get(&item.id())
+                    .is_some_and(|source| {
+                        matches!(
+                            source,
+                            crate::media_types::VideoSource::Playlist { .. }
+                        )
+                    })
         }) {
             let (existing_quality, existing_audio_only, existing_dest_dir, existing_ids) = {
                 let sources = self.video_sources.borrow();

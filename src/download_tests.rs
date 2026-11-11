@@ -9738,7 +9738,6 @@ fn single_entry_playlist_staged_import_keeps_collection_owner() {
     let _ = std::fs::remove_dir_all(root);
 }
 
-
 #[test]
 fn second_staged_selection_extends_the_existing_playlist_owner() {
     let (_q, _l) = test_locks();
@@ -9849,7 +9848,6 @@ fn second_staged_selection_rejects_entries_already_owned_by_the_collection() {
     );
 }
 
-
 #[test]
 fn later_playlist_selection_requeues_a_completed_collection_owner() {
     let (_q, _l) = test_locks();
@@ -9908,7 +9906,6 @@ fn later_playlist_selection_requeues_a_completed_collection_owner() {
     assert_eq!(state.files[0].status, DownloadStatus::Done);
     assert_eq!(state.files[1].status, DownloadStatus::Queued);
 }
-
 
 #[test]
 fn playlist_staged_import_does_not_duplicate_identical_entry() {

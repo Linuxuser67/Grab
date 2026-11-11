@@ -1711,10 +1711,7 @@ done
             route_for_collection(true, 0, Some(&[])),
             ProbeOutcome::VideoYtDlp
         );
-        assert_eq!(
-            route_for_collection(false, 0, None),
-            ProbeOutcome::None
-        );
+        assert_eq!(route_for_collection(false, 0, None), ProbeOutcome::None);
     }
 
     #[test]

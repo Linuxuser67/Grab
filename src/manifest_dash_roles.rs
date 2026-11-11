@@ -31,8 +31,17 @@ pub(super) struct RepresentationRoleMetadata {
 /// Representation metadata for one Period, grouped by AdaptationSet.
 pub(super) type PeriodRepresentationMetadata = Vec<Vec<RepresentationRoleMetadata>>;
 
-/// Representation metadata grouped in MPD Period source order.
-pub(super) type RepresentationMetadata = Vec<PeriodRepresentationMetadata>;
+/// Representation metadata and SegmentList compatibility flags collected in one bounded XML pass.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(super) struct RepresentationMetadata {
+    /// Representation metadata grouped in MPD Period source order.
+    pub(super) periods: Vec<PeriodRepresentationMetadata>,
+    pub(super) has_unsupported_segment_list_timing_attributes: bool,
+    pub(super) has_nonzero_segment_list_presentation_time_offset: bool,
+    pub(super) has_invalid_segment_list_presentation_time_offset: bool,
+    pub(super) has_nondefault_segment_list_start_number: bool,
+    pub(super) has_invalid_segment_list_start_number: bool,
+}
 
 #[derive(Default)]
 struct MetadataState {
@@ -42,6 +51,11 @@ struct MetadataState {
     adaptation_list_pto: Option<u64>,
     period_list_ato: Option<String>,
     adaptation_list_ato: Option<String>,
+    has_unsupported_segment_list_timing_attributes: bool,
+    has_nonzero_segment_list_presentation_time_offset: bool,
+    has_invalid_segment_list_presentation_time_offset: bool,
+    has_nondefault_segment_list_start_number: bool,
+    has_invalid_segment_list_start_number: bool,
 }
 
 #[derive(Clone, Copy)]
@@ -53,7 +67,7 @@ enum Element {
     Other,
 }
 
-/// Return representation IDs and Role=main flags grouped by Period, AdaptationSet, and source order.
+/// Collect representation metadata and SegmentList compatibility flags in one bounded pass.
 ///
 /// IDs allow the caller to verify that this pass and the typed MPD parser
 /// identify the same representation at each source-order position.
@@ -64,7 +78,7 @@ pub(super) fn representation_metadata(
     let mut reader = NsReader::from_reader(body);
     let mut buffer = Vec::new();
     let mut stack = Vec::new();
-    let mut periods: RepresentationMetadata = Vec::new();
+    let mut periods: Vec<PeriodRepresentationMetadata> = Vec::new();
     let mut state = MetadataState::default();
 
     loop {
@@ -102,14 +116,24 @@ pub(super) fn representation_metadata(
         return None;
     }
 
-    Some(periods)
+    Some(RepresentationMetadata {
+        periods,
+        has_unsupported_segment_list_timing_attributes: state
+            .has_unsupported_segment_list_timing_attributes,
+        has_nonzero_segment_list_presentation_time_offset: state
+            .has_nonzero_segment_list_presentation_time_offset,
+        has_invalid_segment_list_presentation_time_offset: state
+            .has_invalid_segment_list_presentation_time_offset,
+        has_nondefault_segment_list_start_number: state.has_nondefault_segment_list_start_number,
+        has_invalid_segment_list_start_number: state.has_invalid_segment_list_start_number,
+    })
 }
 
 fn push_element(
     start: &BytesStart<'_>,
     namespace: &ResolveResult<'_>,
     stack: &mut Vec<Element>,
-    periods: &mut RepresentationMetadata,
+    periods: &mut Vec<PeriodRepresentationMetadata>,
     max_representations: usize,
     state: &mut MetadataState,
 ) -> Option<()> {
@@ -123,6 +147,40 @@ fn push_element(
         namespace,
         ResolveResult::Bound(namespace) if namespace.into_inner() == DASH_MPD_NAMESPACE
     );
+
+    // Collect compatibility flags while the representation metadata pass is
+    // already visiting each XML node. These checks deliberately cover every
+    // DASH SegmentList, not only the locations modeled for inheritance below.
+    if in_mpd_namespace && name == "SegmentList" {
+        for attribute in start.attributes() {
+            let attribute = attribute.ok()?;
+            let key = attribute.key.as_ref();
+            if key == "duration"
+                || key == "availabilityTimeComplete"
+                || key == "eptDelta"
+                || key == "pbDelta"
+            {
+                state.has_unsupported_segment_list_timing_attributes = true;
+            } else if key == "presentationTimeOffset" {
+                let value = attribute.normalized_value(XmlVersion::Implicit1_0).ok()?;
+                match value.parse::<u64>() {
+                    Ok(offset) => {
+                        state.has_nonzero_segment_list_presentation_time_offset |= offset != 0;
+                    }
+                    Err(_) => state.has_invalid_segment_list_presentation_time_offset = true,
+                }
+            } else if key == "startNumber" {
+                let value = attribute.normalized_value(XmlVersion::Implicit1_0).ok()?;
+                match value.parse::<u64>() {
+                    Ok(number) => {
+                        state.has_nondefault_segment_list_start_number |= number != 1;
+                    }
+                    Err(_) => state.has_invalid_segment_list_start_number = true,
+                }
+            }
+        }
+    }
+
     let element = match (stack.last().copied(), name, in_mpd_namespace) {
         (None, "MPD", true) => Element::Mpd,
         (Some(Element::Mpd), "Period", true) => {
@@ -272,153 +330,6 @@ fn is_main_role(start: &BytesStart<'_>) -> Option<bool> {
     Some(scheme.as_deref() == Some(DASH_ROLE_SCHEME) && value.as_deref() == Some("main"))
 }
 
-/// Detect non-zero SegmentList PTO that the pinned typed MPD model omits.
-pub(super) fn has_nonzero_segment_list_presentation_time_offset(body: &[u8]) -> Option<bool> {
-    let mut reader = NsReader::from_reader(body);
-    let mut buffer = Vec::new();
-    let mut depth = 0_usize;
-    let mut has_nonzero_offset = false;
-
-    loop {
-        let (namespace, event) = reader.read_resolved_event_into(&mut buffer).ok()?;
-        let start = match &event {
-            Event::Start(start) => {
-                depth = depth.checked_add(1)?;
-                if depth > MAX_ELEMENT_DEPTH {
-                    return None;
-                }
-                Some(start)
-            }
-            Event::Empty(start) => Some(start),
-            Event::End(_) => {
-                depth = depth.checked_sub(1)?;
-                None
-            }
-            Event::Eof => return (depth == 0).then_some(has_nonzero_offset),
-            _ => None,
-        };
-
-        if let Some(start) = start
-            && matches!(
-                &namespace,
-                ResolveResult::Bound(namespace)
-                    if namespace.into_inner() == DASH_MPD_NAMESPACE
-            )
-            && start.name().local_name().as_ref() == "SegmentList"
-        {
-            for attribute in start.attributes() {
-                let attribute = attribute.ok()?;
-                if attribute.key.as_ref() == "presentationTimeOffset" {
-                    let value = attribute.normalized_value(XmlVersion::Implicit1_0).ok()?;
-                    let offset = value.parse::<u64>().ok()?;
-                    has_nonzero_offset |= offset != 0;
-                }
-            }
-        }
-
-        buffer.clear();
-    }
-}
-
-/// Reject SegmentList timing attributes not interpreted by the bounded live planner.
-pub(super) fn has_unsupported_segment_list_timing_attributes(body: &[u8]) -> Option<bool> {
-    let mut reader = NsReader::from_reader(body);
-    let mut buffer = Vec::new();
-    let mut depth = 0_usize;
-    let mut unsupported = false;
-
-    loop {
-        let (namespace, event) = reader.read_resolved_event_into(&mut buffer).ok()?;
-        let start = match &event {
-            Event::Start(start) => {
-                depth = depth.checked_add(1)?;
-                if depth > MAX_ELEMENT_DEPTH {
-                    return None;
-                }
-                Some(start)
-            }
-            Event::Empty(start) => Some(start),
-            Event::End(_) => {
-                depth = depth.checked_sub(1)?;
-                None
-            }
-            Event::Eof => return (depth == 0).then_some(unsupported),
-            _ => None,
-        };
-
-        if let Some(start) = start
-            && matches!(
-                &namespace,
-                ResolveResult::Bound(namespace)
-                    if namespace.into_inner() == DASH_MPD_NAMESPACE
-            )
-            && start.name().local_name().as_ref() == "SegmentList"
-        {
-            for attribute in start.attributes() {
-                let attribute = attribute.ok()?;
-                let key = attribute.key.as_ref();
-                if key == "duration"
-                    || key == "availabilityTimeComplete"
-                    || key == "eptDelta"
-                    || key == "pbDelta"
-                {
-                    unsupported = true;
-                }
-            }
-        }
-
-        buffer.clear();
-    }
-}
-
-/// Detect SegmentList startNumber values that cannot be represented by the typed MPD model.
-pub(super) fn has_nondefault_segment_list_start_number(body: &[u8]) -> Option<bool> {
-    let mut reader = NsReader::from_reader(body);
-    let mut buffer = Vec::new();
-    let mut depth = 0_usize;
-    let mut nondefault = false;
-
-    loop {
-        let (namespace, event) = reader.read_resolved_event_into(&mut buffer).ok()?;
-        let start = match &event {
-            Event::Start(start) => {
-                depth = depth.checked_add(1)?;
-                if depth > MAX_ELEMENT_DEPTH {
-                    return None;
-                }
-                Some(start)
-            }
-            Event::Empty(start) => Some(start),
-            Event::End(_) => {
-                depth = depth.checked_sub(1)?;
-                None
-            }
-            Event::Eof => return (depth == 0).then_some(nondefault),
-            _ => None,
-        };
-
-        if let Some(start) = start
-            && matches!(
-                &namespace,
-                ResolveResult::Bound(namespace)
-                    if namespace.into_inner() == DASH_MPD_NAMESPACE
-            )
-            && start.name().local_name().as_ref() == "SegmentList"
-        {
-            for attribute in start.attributes() {
-                let attribute = attribute.ok()?;
-                if attribute.key.as_ref() == "startNumber" {
-                    let value = attribute.normalized_value(XmlVersion::Implicit1_0).ok()?;
-                    let number = value.parse::<u64>().ok()?;
-                    nondefault |= number != 1;
-                }
-            }
-        }
-
-        buffer.clear();
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::representation_metadata;
@@ -440,14 +351,14 @@ mod tests {
 </MPD>"#;
 
         let metadata = representation_metadata(body, 3).expect("valid MPD representation metadata");
-        assert_eq!(metadata.len(), 1);
-        assert_eq!(metadata[0].len(), 2);
-        assert_eq!(metadata[0][0][0].id.as_deref(), Some("first"));
-        assert!(!metadata[0][0][0].is_main);
-        assert_eq!(metadata[0][0][1].id.as_deref(), Some("main"));
-        assert!(metadata[0][0][1].is_main);
-        assert_eq!(metadata[0][1][0].id.as_deref(), Some("other"));
-        assert!(!metadata[0][1][0].is_main);
+        assert_eq!(metadata.periods.len(), 1);
+        assert_eq!(metadata.periods[0].len(), 2);
+        assert_eq!(metadata.periods[0][0][0].id.as_deref(), Some("first"));
+        assert!(!metadata.periods[0][0][0].is_main);
+        assert_eq!(metadata.periods[0][0][1].id.as_deref(), Some("main"));
+        assert!(metadata.periods[0][0][1].is_main);
+        assert_eq!(metadata.periods[0][1][0].id.as_deref(), Some("other"));
+        assert!(!metadata.periods[0][1][0].is_main);
     }
 
     #[test]
@@ -463,8 +374,8 @@ mod tests {
 </mpd:MPD>"#;
 
         let metadata = representation_metadata(body, 1).expect("valid MPD representation metadata");
-        assert_eq!(metadata[0][0][0].id.as_deref(), Some("main"));
-        assert!(metadata[0][0][0].is_main);
+        assert_eq!(metadata.periods[0][0][0].id.as_deref(), Some("main"));
+        assert!(metadata.periods[0][0][0].is_main);
     }
 
     #[test]
@@ -484,8 +395,8 @@ mod tests {
 </MPD>"#;
 
         let metadata = representation_metadata(body, 1).expect("valid MPD representation metadata");
-        assert_eq!(metadata[0][0][0].id.as_deref(), Some("main"));
-        assert!(metadata[0][0][0].is_main);
+        assert_eq!(metadata.periods[0][0][0].id.as_deref(), Some("main"));
+        assert!(metadata.periods[0][0][0].is_main);
     }
 
     #[test]
@@ -503,8 +414,8 @@ mod tests {
 
         let metadata =
             representation_metadata(body, 1).expect("foreign attributes do not invalidate the MPD");
-        assert_eq!(metadata[0][0][0].id.as_deref(), Some("main"));
-        assert!(!metadata[0][0][0].is_main);
+        assert_eq!(metadata.periods[0][0][0].id.as_deref(), Some("main"));
+        assert!(!metadata.periods[0][0][0].is_main);
     }
 
     #[test]
@@ -520,18 +431,21 @@ mod tests {
                 r#"<MPD xmlns="urn:mpeg:dash:schema:mpd:2011"><Period><AdaptationSet><SegmentList {attribute}/></AdaptationSet></Period></MPD>"#
             );
             assert_eq!(
-                super::has_unsupported_segment_list_timing_attributes(body.as_bytes()),
+                super::representation_metadata(body.as_bytes(), 1)
+                    .map(|metadata| metadata.has_unsupported_segment_list_timing_attributes),
                 Some(true),
                 "{attribute}"
             );
         }
         assert_eq!(
-            super::has_unsupported_segment_list_timing_attributes(supported),
+            super::representation_metadata(supported, 1)
+                .map(|metadata| metadata.has_unsupported_segment_list_timing_attributes),
             Some(false)
         );
         let finite_availability_offset = br#"<MPD xmlns="urn:mpeg:dash:schema:mpd:2011"><Period><AdaptationSet><SegmentList availabilityTimeOffset="1"/></AdaptationSet></Period></MPD>"#;
         assert_eq!(
-            super::has_unsupported_segment_list_timing_attributes(finite_availability_offset),
+            super::representation_metadata(finite_availability_offset, 1)
+                .map(|metadata| metadata.has_unsupported_segment_list_timing_attributes),
             Some(false)
         );
     }
@@ -541,11 +455,13 @@ mod tests {
         let default_number = br#"<MPD xmlns="urn:mpeg:dash:schema:mpd:2011"><Period><AdaptationSet><SegmentList startNumber="1"/></AdaptationSet></Period></MPD>"#;
         let nondefault_number = br#"<mpd:MPD xmlns:mpd="urn:mpeg:dash:schema:mpd:2011"><mpd:Period><mpd:AdaptationSet><mpd:SegmentList startNumber="42"/></mpd:AdaptationSet></mpd:Period></mpd:MPD>"#;
         assert_eq!(
-            super::has_nondefault_segment_list_start_number(default_number),
+            super::representation_metadata(default_number, 1)
+                .map(|metadata| metadata.has_nondefault_segment_list_start_number),
             Some(false)
         );
         assert_eq!(
-            super::has_nondefault_segment_list_start_number(nondefault_number),
+            super::representation_metadata(nondefault_number, 1)
+                .map(|metadata| metadata.has_nondefault_segment_list_start_number),
             Some(true)
         );
     }
@@ -569,31 +485,31 @@ mod tests {
 </MPD>"#;
         let metadata = representation_metadata(body, 3).expect("valid representation metadata");
         assert_eq!(
-            metadata[0][0][0].segment_list_presentation_time_offset,
+            metadata.periods[0][0][0].segment_list_presentation_time_offset,
             Some(20)
         );
         assert_eq!(
-            metadata[0][0][1].segment_list_presentation_time_offset,
+            metadata.periods[0][0][1].segment_list_presentation_time_offset,
             Some(30)
         );
         assert_eq!(
-            metadata[0][1][0].segment_list_presentation_time_offset,
+            metadata.periods[0][1][0].segment_list_presentation_time_offset,
             Some(10)
         );
         assert_eq!(
-            metadata[0][0][0]
+            metadata.periods[0][0][0]
                 .segment_list_availability_time_offset
                 .as_deref(),
             Some("2")
         );
         assert_eq!(
-            metadata[0][0][1]
+            metadata.periods[0][0][1]
                 .segment_list_availability_time_offset
                 .as_deref(),
             Some("3")
         );
         assert_eq!(
-            metadata[0][1][0]
+            metadata.periods[0][1][0]
                 .segment_list_availability_time_offset
                 .as_deref(),
             Some("1")
@@ -604,25 +520,42 @@ mod tests {
     fn detects_nonzero_segment_list_presentation_time_offsets() {
         let nonzero = br#"<MPD xmlns="urn:mpeg:dash:schema:mpd:2011"><Period><AdaptationSet><SegmentList presentationTimeOffset="9000"/></AdaptationSet></Period></MPD>"#;
         assert_eq!(
-            super::has_nonzero_segment_list_presentation_time_offset(nonzero),
+            super::representation_metadata(nonzero, 1)
+                .map(|metadata| metadata.has_nonzero_segment_list_presentation_time_offset),
             Some(true)
         );
 
         let zero = br#"<MPD xmlns="urn:mpeg:dash:schema:mpd:2011"><Period><AdaptationSet><SegmentList presentationTimeOffset="0"/></AdaptationSet></Period></MPD>"#;
         assert_eq!(
-            super::has_nonzero_segment_list_presentation_time_offset(zero),
+            super::representation_metadata(zero, 1)
+                .map(|metadata| metadata.has_nonzero_segment_list_presentation_time_offset),
             Some(false)
         );
 
         let foreign = br#"<MPD xmlns="urn:mpeg:dash:schema:mpd:2011" xmlns:foreign="urn:example:foreign"><Period><AdaptationSet><foreign:SegmentList presentationTimeOffset="9000"/></AdaptationSet></Period></MPD>"#;
         assert_eq!(
-            super::has_nonzero_segment_list_presentation_time_offset(foreign),
+            super::representation_metadata(foreign, 1)
+                .map(|metadata| metadata.has_nonzero_segment_list_presentation_time_offset),
             Some(false)
         );
     }
 
     #[test]
-    fn segment_list_timestamp_scan_rejects_excessive_xml_depth() {
+    fn records_invalid_dynamic_segment_list_numbers_without_rejecting_static_metadata() {
+        let invalid_offsets = br#"<MPD xmlns="urn:mpeg:dash:schema:mpd:2011"><Period><AdaptationSet><Other><SegmentList presentationTimeOffset="invalid"/></Other></AdaptationSet></Period></MPD>"#;
+        let invalid_start_number = br#"<MPD xmlns="urn:mpeg:dash:schema:mpd:2011"><Period><AdaptationSet><Other><SegmentList startNumber="invalid"/></Other></AdaptationSet></Period></MPD>"#;
+
+        let offset_metadata =
+            representation_metadata(invalid_offsets, 1).expect("bounded metadata scan");
+        assert!(offset_metadata.has_invalid_segment_list_presentation_time_offset);
+
+        let start_metadata =
+            representation_metadata(invalid_start_number, 1).expect("bounded metadata scan");
+        assert!(start_metadata.has_invalid_segment_list_start_number);
+    }
+
+    #[test]
+    fn metadata_scan_rejects_excessive_xml_depth() {
         let nested_tags = format!(
             "{}{}",
             "<Other>".repeat(super::MAX_ELEMENT_DEPTH),
@@ -634,7 +567,8 @@ mod tests {
         );
 
         assert_eq!(
-            super::has_nonzero_segment_list_presentation_time_offset(nested.as_bytes()),
+            super::representation_metadata(nested.as_bytes(), 1)
+                .map(|metadata| metadata.has_nonzero_segment_list_presentation_time_offset),
             None
         );
     }
@@ -657,9 +591,9 @@ mod tests {
   <Period><AdaptationSet><Representation id="second"/></AdaptationSet></Period>
 </MPD>"#;
         let metadata = representation_metadata(body, 2).expect("two-period metadata");
-        assert_eq!(metadata.len(), 2);
-        assert_eq!(metadata[0][0][0].id.as_deref(), Some("first"));
-        assert_eq!(metadata[1][0][0].id.as_deref(), Some("second"));
+        assert_eq!(metadata.periods.len(), 2);
+        assert_eq!(metadata.periods[0][0][0].id.as_deref(), Some("first"));
+        assert_eq!(metadata.periods[1][0][0].id.as_deref(), Some("second"));
     }
 
     #[test]

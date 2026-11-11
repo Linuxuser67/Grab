@@ -3622,7 +3622,10 @@ fn build_video_lookup_kicker(context: VideoLookupContext) -> VideoLookupKick {
                                             public_host_leases: Rc::clone(
                                                 &step_b.public_host_leases,
                                             ),
-                                            generation: step_b.public_host_leases.borrow().generation,
+                                            generation: step_b
+                                                .public_host_leases
+                                                .borrow()
+                                                .generation,
                                         },
                                         pl,
                                         scheduled_at_b.get(),

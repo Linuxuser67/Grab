@@ -115,7 +115,7 @@ pub(crate) fn merge_output_ext(video_ext: &str) -> String {
 }
 
 /// Containers the finished-name backstop may correct toward.
-const TRUTHFUL_CONTAINERS: &[&str] = &["mp4", "webm", "mkv", "flv", "ogg", "m4a"];
+const TRUTHFUL_CONTAINERS: &[&str] = &["mp4", "webm", "mkv", "flv", "ogg", "m4a", "ts"];
 
 /// Intake-name extensions Grab generates itself (the only ones the backstop second-guesses).
 const GENERATED_INTAKE_EXTS: &[&str] = &["mp4", "m4a", "ts"];

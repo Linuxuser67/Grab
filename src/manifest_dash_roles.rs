@@ -31,7 +31,7 @@ pub(super) struct RepresentationRoleMetadata {
 /// Representation metadata for one Period, grouped by AdaptationSet.
 pub(super) type PeriodRepresentationMetadata = Vec<Vec<RepresentationRoleMetadata>>;
 
-/// Representation metadata and unsupported SegmentList features collected in one bounded XML pass.
+/// Representation metadata and SegmentList compatibility flags collected in one bounded XML pass.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(super) struct RepresentationMetadata {
     /// Representation metadata grouped in MPD Period source order.
@@ -67,7 +67,7 @@ enum Element {
     Other,
 }
 
-/// Return representation IDs and Role=main flags grouped by Period, AdaptationSet, and source order.
+/// Collect representation metadata and SegmentList compatibility flags in one bounded pass.
 ///
 /// IDs allow the caller to verify that this pass and the typed MPD parser
 /// identify the same representation at each source-order position.

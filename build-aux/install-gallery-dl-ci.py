@@ -233,11 +233,10 @@ def install_pypi_wheel():
     if install_dir.exists():
         shutil.rmtree(install_dir)
     install_dir.mkdir(parents=True, exist_ok=True)
-    # pip validates wheel filenames, so keep the pinned canonical name rather
-    # than giving the verified bytes a random tempfile basename.
-    with tempfile.TemporaryDirectory(prefix="grab-gallery-dl-wheel.") as wheel_dir:
-        wheel_path = Path(wheel_dir) / PINNED_PYPI_WHEEL
-        wheel_path.write_bytes(wheel_bytes)
+    fd, wheel_path = tempfile.mkstemp(prefix="gallery-dl.", suffix=".whl")
+    try:
+        with os.fdopen(fd, "wb") as output:
+            output.write(wheel_bytes)
         subprocess.run(
             [
                 sys.executable,
@@ -250,10 +249,13 @@ def install_pypi_wheel():
                 "--no-compile",
                 "--target",
                 str(install_dir),
-                str(wheel_path),
+                wheel_path,
             ],
             check=True,
         )
+    finally:
+        if os.path.exists(wheel_path):
+            os.unlink(wheel_path)
 
     # The wheel's console entry point is gallery_dl:main. Keep the expected
     # command name while loading only the unpacked, checksum-verified package.

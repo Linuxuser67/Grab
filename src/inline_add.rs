@@ -54,7 +54,7 @@ impl PublicHostLeaseScope {
 
     fn close(&mut self) {
         self.generation = self.generation.wrapping_add(1);
-        self.hosts.take();
+        drop(self.hosts.take());
     }
 
     fn is_current(&self, generation: u64) -> bool {

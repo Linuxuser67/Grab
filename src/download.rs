@@ -4844,7 +4844,8 @@ impl DownloadManager {
                         // batches. Finish/pause/cancel paths still flush the final state.
                         if update.event.is_some() {
                             gallery_events_since_persist += 1;
-                            if gallery_events_since_persist >= GALLERY_QUEUE_PERSIST_EVENT_INTERVAL {
+                            if gallery_events_since_persist >= GALLERY_QUEUE_PERSIST_EVENT_INTERVAL
+                            {
                                 this.persist_queue();
                                 gallery_events_since_persist = 0;
                             }
@@ -7144,7 +7145,6 @@ impl DownloadManager {
         self.persist_for_shutdown();
     }
 }
-
 #[cfg(test)]
 #[path = "download_tests.rs"]
 mod tests;

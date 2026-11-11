@@ -2725,7 +2725,6 @@ video/1080.m3u8
         );
     }
 
-
     #[test]
     fn parser_rejects_hls_masters_over_the_variant_limit() {
         let mut body = String::from("#EXTM3U\n");

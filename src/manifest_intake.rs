@@ -4264,7 +4264,6 @@ video/b.m3u8
         .expect("valid Content Steering master")
     }
 
-
     #[test]
     fn pathway_clone_chain_stops_before_the_cumulative_variant_limit() {
         let mut master = master();

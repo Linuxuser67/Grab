@@ -7,6 +7,7 @@ use crate::video_staging::{
     VideoManifest, dest_part_path, manifest_path, write_private, ytdlp_output_template,
 };
 use crate::video_tools::{VideoError, ffmpeg_location_dir};
+use gettextrs::gettext;
 use std::path::{Path, PathBuf};
 
 pub(crate) async fn write_manifest(
@@ -300,9 +301,9 @@ fn replace_playlist_scope(
     playlist_indices: &[usize],
 ) -> Result<(), VideoError> {
     if playlist_indices.is_empty() {
-        return Err(VideoError::Fetch(
-            "No playlist entries were selected".to_string(),
-        ));
+        return Err(VideoError::Message(gettext(
+            "No playlist entries were selected",
+        )));
     }
 
     // Remove the default single-video scope when it exists, but do not make
@@ -321,7 +322,7 @@ fn replace_playlist_scope(
                 .checked_add(1)
                 .map(|index| index.to_string())
                 .ok_or_else(|| {
-                    VideoError::Fetch("A playlist entry index is out of range".to_string())
+                    VideoError::Message(gettext("A playlist entry index is out of range"))
                 })
         })
         .collect::<Result<Vec<_>, _>>()?

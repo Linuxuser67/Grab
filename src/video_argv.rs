@@ -302,24 +302,37 @@ fn replace_playlist_scope(
     playlist_indices: &[usize],
 ) -> Result<(), VideoError> {
     if playlist_indices.is_empty() {
-        return Err(VideoError::fetch("No playlist entries were selected"));
+        return Err(VideoError::Fetch(
+            "No playlist entries were selected".to_string(),
+        ));
+    }
+
+    // Remove the default single-video scope when it exists, but do not make
+    // its presence a prerequisite for constructing a playlist invocation.
+    if let Some(scope_at) = args.iter().position(|arg| arg == "--no-playlist") {
+        args.remove(scope_at);
     }
     let scope_at = args
         .iter()
-        .position(|arg| arg == "--no-playlist")
-        .ok_or_else(|| VideoError::fetch("Could not configure yt-dlp playlist scope"))?;
+        .position(|arg| arg == "--")
+        .ok_or_else(|| VideoError::Fetch(
+            "Could not locate yt-dlp's positional URL separator".to_string(),
+        ))?;
+
     let indices = playlist_indices
         .iter()
         .map(|index| {
             index
                 .checked_add(1)
                 .map(|index| index.to_string())
-                .ok_or_else(|| VideoError::fetch("A playlist entry index is out of range"))
+                .ok_or_else(|| {
+                    VideoError::Fetch("A playlist entry index is out of range".to_string())
+                })
         })
         .collect::<Result<Vec<_>, _>>()?
         .join(",");
     args.splice(
-        scope_at..=scope_at,
+        scope_at..scope_at,
         [
             "--yes-playlist".to_string(),
             "--ignore-errors".to_string(),
@@ -860,11 +873,31 @@ mod playlist_scope_invariant_tests {
     use super::replace_playlist_scope;
 
     #[test]
-    fn missing_single_video_scope_is_an_error_not_a_single_video_fallback() {
-        let mut args = vec!["--newline".to_string(), "--".to_string(), "https://example.test/list".to_string()];
-        let before = args.clone();
-        assert!(replace_playlist_scope(&mut args, &[0, 2]).is_err());
-        assert_eq!(args, before, "failed construction must not mutate argv");
+    fn missing_single_video_scope_still_builds_a_playlist_invocation() {
+        let mut args = vec![
+            "--newline".to_string(),
+            "--".to_string(),
+            "https://example.test/list".to_string(),
+        ];
+        replace_playlist_scope(&mut args, &[0, 2]).expect("playlist scope is inserted");
+        assert_eq!(
+            args,
+            vec![
+                "--newline",
+                "--yes-playlist",
+                "--ignore-errors",
+                "--playlist-items",
+                "1,3",
+                "--",
+                "https://example.test/list",
+            ]
+        );
+    }
+
+    #[test]
+    fn missing_url_separator_is_an_error() {
+        let mut args = vec!["--newline".to_string()];
+        assert!(replace_playlist_scope(&mut args, &[0]).is_err());
     }
 
     #[test]

@@ -1175,6 +1175,7 @@ pub(super) async fn run_live_dash_tracks(
                 url: source_url.to_string(),
                 kind: ManifestKind::Dash,
                 representation_key: ManifestRepresentationKey::from(selected_video_key.as_str()),
+            output_extension: None,
                 audio_key: audio_key
                     .clone()
                     .map(crate::media_types::ManifestAudioKey::from),

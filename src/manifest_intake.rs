@@ -1901,12 +1901,14 @@ async fn lookup_with_client_policy(
                     NativeManifest::HlsMaster(master)
                 }
                 Err(crate::manifest::ManifestError::ExpectedMasterPlaylist) => {
-                    let plan = crate::manifest::plan_hls_media_playlist(final_url.as_str(), &body)
-                        .map_err(|error| {
-                            ManifestIntakeError::Unsupported(format!(
-                                "The HLS media playlist is not supported: {error}"
-                            ))
-                        })?;
+                    let mut plan =
+                        crate::manifest::plan_hls_media_playlist(final_url.as_str(), &body)
+                            .map_err(|error| {
+                                ManifestIntakeError::Unsupported(format!(
+                                    "The HLS media playlist is not supported: {error}"
+                                ))
+                            })?;
+                    plan.requested_playlist_url = original_request_url;
                     NativeManifest::HlsMedia(Box::new(plan))
                 }
                 Err(error) => {

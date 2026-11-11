@@ -9738,6 +9738,117 @@ fn single_entry_playlist_staged_import_keeps_collection_owner() {
     let _ = std::fs::remove_dir_all(root);
 }
 
+
+#[test]
+fn second_staged_selection_extends_the_existing_playlist_owner() {
+    let (_q, _l) = test_locks();
+    let _qf = test_queue_file("playlist-second-selection");
+    let manager = DownloadManager::new(gio::ListStore::new::<DownloadItem>(), test_settings());
+    let root = tempfile::tempdir().expect("create playlist destination");
+    let destination = root.path().join("One playlist");
+    std::fs::create_dir(&destination).expect("create playlist folder");
+
+    let entry = |id: &str| crate::media_types::VideoPlaylistFile {
+        id: id.to_string(),
+        title: format!("Entry {id}"),
+        page_url: format!("https://example.com/playlist/{id}"),
+        status: DownloadStatus::Queued,
+        progress: 0.0,
+        path: None,
+    };
+    let first = manager
+        .enqueue_video_playlist_staged(
+            "https://example.com/playlist",
+            "One playlist",
+            destination.to_str().expect("UTF-8 playlist folder"),
+            vec![entry("first")],
+            "best".to_string(),
+            false,
+        )
+        .expect("first selection");
+    first.set_status(DownloadStatus::Downloading);
+
+    let second = manager
+        .enqueue_video_playlist_staged(
+            "https://example.com/playlist",
+            "One playlist",
+            destination.to_str().expect("UTF-8 playlist folder"),
+            vec![entry("second")],
+            "best".to_string(),
+            false,
+        )
+        .expect("second selection should extend the active owner");
+
+    assert_eq!(second.id(), first.id());
+    assert_eq!(second.group(), first.group());
+    assert_eq!(second.status(), DownloadStatus::Downloading);
+    assert_eq!(second.gallery_file_count(), 2);
+    let Some(crate::media_types::VideoSource::Playlist { state, .. }) =
+        manager.video_source(first.id())
+    else {
+        panic!("the existing owner must retain its playlist source");
+    };
+    assert_eq!(
+        state.files.iter().map(|file| file.id.as_str()).collect::<Vec<_>>(),
+        ["first", "second"],
+    );
+    let children = manager
+        .items()
+        .filter(DownloadItem::is_collection_child)
+        .collect::<Vec<_>>();
+    assert_eq!(children.len(), 2);
+    assert!(children.iter().all(|child| child.group() == first.group()));
+    assert!(manager.has_queued_video_playlist_files(first.id()));
+}
+
+#[test]
+fn second_staged_selection_rejects_entries_already_owned_by_the_collection() {
+    let (_q, _l) = test_locks();
+    let _qf = test_queue_file("playlist-second-selection-duplicate");
+    let manager = DownloadManager::new(gio::ListStore::new::<DownloadItem>(), test_settings());
+    let root = tempfile::tempdir().expect("create playlist destination");
+    let destination = root.path().join("One playlist");
+    std::fs::create_dir(&destination).expect("create playlist folder");
+    let entry = crate::media_types::VideoPlaylistFile {
+        id: "same-entry".to_string(),
+        title: "Same entry".to_string(),
+        page_url: "https://example.com/playlist/same-entry".to_string(),
+        status: DownloadStatus::Queued,
+        progress: 0.0,
+        path: None,
+    };
+    let owner = manager
+        .enqueue_video_playlist_staged(
+            "https://example.com/playlist",
+            "One playlist",
+            destination.to_str().expect("UTF-8 playlist folder"),
+            vec![entry.clone()],
+            "best".to_string(),
+            false,
+        )
+        .expect("initial selection");
+    owner.set_status(DownloadStatus::Downloading);
+    let error = manager
+        .enqueue_video_playlist_staged(
+            "https://example.com/playlist",
+            "One playlist",
+            destination.to_str().expect("UTF-8 playlist folder"),
+            vec![entry],
+            "best".to_string(),
+            false,
+        )
+        .expect_err("an already-owned entry must not be duplicated");
+    assert!(error.contains("already in the collection"));
+    assert_eq!(
+        manager.items().filter(DownloadItem::is_collection_parent).count(),
+        1,
+    );
+    assert_eq!(
+        manager.items().filter(DownloadItem::is_collection_child).count(),
+        1,
+    );
+}
+
 #[test]
 fn playlist_staged_import_does_not_duplicate_identical_entry() {
     let (_q, _l) = test_locks();

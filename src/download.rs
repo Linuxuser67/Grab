@@ -1522,17 +1522,80 @@ impl DownloadManager {
             let _ = normalize_url(&file.page_url)?;
         }
 
-        // A still-live owner already covers this URL; never create a second
-        // process for the same playlist while an earlier owner is active.
-        if self.items().any(|item| {
-            item.status() != DownloadStatus::Done
-                && item.url() == url
+        // A playlist has one persistent owner and output directory. A later
+        // selection extends that owner instead of creating a competing process.
+        if let Some(owner) = self.items().find(|item| {
+            item.url() == url
                 && matches!(
                     self.video_source(item.id()),
                     Some(crate::media_types::VideoSource::Playlist { .. })
                 )
         }) {
-            return Err(gettext("This playlist is already in the list"));
+            let (existing_quality, existing_audio_only, existing_dest_dir, existing_ids) = {
+                let sources = self.video_sources.borrow();
+                let Some(crate::media_types::VideoSource::Playlist {
+                    quality,
+                    audio_only,
+                    state,
+                    ..
+                }) = sources.get(&owner.id())
+                else {
+                    return Err(gettext("The existing playlist collection is unavailable"));
+                };
+                (
+                    quality.clone(),
+                    *audio_only,
+                    state.dest_dir.clone(),
+                    state
+                        .files
+                        .iter()
+                        .map(|file| file.id.clone())
+                        .collect::<HashSet<_>>(),
+                )
+            };
+            if existing_dest_dir != dest_dir {
+                return Err(gettext(
+                    "This playlist is already queued in a different destination folder",
+                ));
+            }
+            if existing_quality != quality || existing_audio_only != audio_only {
+                return Err(gettext(
+                    "This playlist is already queued with different download options",
+                ));
+            }
+            if owner.status() == DownloadStatus::Cancelled {
+                return Err(gettext(
+                    "This playlist collection was cancelled; remove it before adding more entries",
+                ));
+            }
+
+            let additions = files
+                .into_iter()
+                .filter(|file| !existing_ids.contains(&file.id))
+                .collect::<Vec<_>>();
+            if additions.is_empty() {
+                return Err(gettext("The selected playlist entries are already in the collection"));
+            }
+
+            let batch = self.batch_guard();
+            {
+                let mut sources = self.video_sources.borrow_mut();
+                let Some(crate::media_types::VideoSource::Playlist { state, .. }) =
+                    sources.get_mut(&owner.id())
+                else {
+                    return Err(gettext("The existing playlist collection is unavailable"));
+                };
+                state.files.extend(additions.iter().cloned());
+            }
+            self.restore_video_playlist_file_rows(&owner, &additions);
+            if matches!(
+                owner.status(),
+                DownloadStatus::Done | DownloadStatus::Failed
+            ) {
+                owner.set_status(DownloadStatus::Queued);
+            }
+            drop(batch);
+            return Ok(owner);
         }
 
         let id = self.alloc_id();
@@ -2690,6 +2753,15 @@ impl DownloadManager {
                         }
                     }
                     EngineMsg::Finished { size } => {
+                        // A later picker submission can extend the owner while
+                        // its current yt-dlp process is running. Finish this
+                        // invocation, then let the scheduler run the new entries.
+                        if this.has_queued_video_playlist_files(id) {
+                            this.refresh_video_playlist_summary(&item);
+                            item.set_status(DownloadStatus::Queued);
+                            done = true;
+                            break;
+                        }
                         if item.status() != DownloadStatus::Cancelled
                             && item.status() != DownloadStatus::Paused
                         {
@@ -4407,6 +4479,19 @@ impl DownloadManager {
         if let Some(owner) = self.find(owner_id) {
             self.refresh_video_playlist_summary(&owner);
         }
+    }
+
+    fn has_queued_video_playlist_files(&self, owner_id: u64) -> bool {
+        self.video_sources
+            .borrow()
+            .get(&owner_id)
+            .is_some_and(|source| {
+                matches!(
+                    source,
+                    crate::media_types::VideoSource::Playlist { state, .. }
+                        if state.files.iter().any(|file| file.status == DownloadStatus::Queued)
+                )
+            })
     }
 
     fn refresh_video_playlist_summary(&self, owner: &DownloadItem) {

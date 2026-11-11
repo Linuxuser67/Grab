@@ -4517,6 +4517,7 @@ pub fn build_add_card(manager: Rc<DownloadManager>) -> AddCard {
     let open = {
         let reveal = Rc::clone(&reveal);
         let open_state = Rc::clone(&open_state);
+        let public_host_leases = Rc::clone(&public_host_leases);
         let url_entry = url_entry.clone();
         let probe = Rc::clone(&probe);
         let pending_url = Rc::clone(&pending_url);
@@ -4530,6 +4531,9 @@ pub fn build_add_card(manager: Rc<DownloadManager>) -> AddCard {
             if saved.is_empty() { None } else { Some(saved) }
         }));
         Rc::new(move |initial_url: Option<String>| {
+            public_host_leases
+                .borrow_mut()
+                .get_or_insert_with(crate::download_net::PublicResolutionSet::default);
             let already = open_state.is_open();
             reveal();
             // Dropped/opened URLs land here pre-filled: setting the text syncs the form, and the

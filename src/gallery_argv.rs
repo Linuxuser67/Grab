@@ -360,7 +360,7 @@ pub struct GalleryJob {
     #[serde(default)]
     pub file_rows: Vec<GalleryFileState>,
 }
- 
+
 impl GalleryJob {
     /// Update a stored file row or append one while the persisted projection is below its cap.
     ///

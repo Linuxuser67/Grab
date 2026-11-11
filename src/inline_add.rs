@@ -3203,20 +3203,20 @@ fn build_video_lookup_kicker(context: VideoLookupContext) -> VideoLookupKick {
                     return;
                 }
                 let (ytdlp_result, gallery_error, probe_json_key, native_fallback_reason) =
-                    match outcome {    
+                    match outcome {
                         MediaLookupOutcome::Manifest(manifest) => {
                             let manifest = *manifest;
                             let preferred_quality = settings_b.video_quality();
                             let subtitle_language = settings_b.subtitle_language();
-                            let preferred_source =
-                                manifest.preferred_source(&preferred_quality, Some(&subtitle_language));
+                            let preferred_source = manifest
+                                .preferred_source(&preferred_quality, Some(&subtitle_language));
                             show_manifest_ready(
                                 &step_b,
                                 &lookup_add_b,
                                 Some(manifest),
                                 &preferred_quality,
                             );
-    
+
                             if submit_source.automatically_enqueues_manifest()
                                 && settings_b.auto_add_downloads()
                             {

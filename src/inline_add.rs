@@ -48,7 +48,6 @@ struct PlaylistPickerOwner {
     public_host_leases: PublicHostLeases,
 }
 
-
 /// Tokio detaches a task when its JoinHandle is dropped. Own the abort handle
 /// as well, so aborting the enclosing GLib lookup doesn't leave dual probes
 /// running (and holding child processes) for a URL the user has already changed.
@@ -3586,7 +3585,9 @@ fn build_video_lookup_kicker(context: VideoLookupContext) -> VideoLookupKick {
                                         dest_b.clone(),
                                         PlaylistPickerOwner {
                                             close_card: close_b.clone(),
-                                            public_host_leases: Rc::clone(&step_b.public_host_leases),
+                                            public_host_leases: Rc::clone(
+                                                &step_b.public_host_leases,
+                                            ),
                                         },
                                         pl,
                                         scheduled_at_b.get(),

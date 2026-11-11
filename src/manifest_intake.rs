@@ -1042,16 +1042,35 @@ fn apply_hls_pathway_clones(
         if pathway_ids.contains(pathway_clone.id.as_str()) {
             continue;
         }
+        let base_variant_count = master
+            .variants
+            .iter()
+            .filter(|variant| variant.pathway_id == pathway_clone.base_id)
+            .count();
+        if base_variant_count == 0 {
+            // Unknown BASE-ID values are ignored as required by Content Steering.
+            continue;
+        }
+        let Some(next_variant_count) = master.variants.len().checked_add(base_variant_count)
+        else {
+            continue;
+        };
+        if next_variant_count > crate::manifest::MAX_HLS_MASTER_VARIANTS {
+            tracing::debug!(
+                pathway = %pathway_clone.id,
+                current = master.variants.len(),
+                requested = base_variant_count,
+                limit = crate::manifest::MAX_HLS_MASTER_VARIANTS,
+                "skipping HLS Content Steering clone because the expanded variant limit would be exceeded"
+            );
+            continue;
+        }
         let base_variants = master
             .variants
             .iter()
             .filter(|variant| variant.pathway_id == pathway_clone.base_id)
             .cloned()
             .collect::<Vec<_>>();
-        if base_variants.is_empty() {
-            // Unknown BASE-ID values are ignored as required by Content Steering.
-            continue;
-        }
 
         let audio_groups = base_variants
             .iter()
@@ -1108,7 +1127,36 @@ fn apply_hls_pathway_clones(
             })
             .collect::<HashMap<_, _>>();
 
-        let base_variant_count = base_variants.len();
+        let base_audio_count = master
+            .audio_renditions
+            .iter()
+            .filter(|rendition| audio_groups.contains(rendition.group_id.as_str()))
+            .count();
+        let base_subtitle_count = master
+            .subtitle_renditions
+            .iter()
+            .filter(|rendition| subtitle_groups.contains(rendition.group_id.as_str()))
+            .count();
+        let Some(next_rendition_count) = master
+            .audio_renditions
+            .len()
+            .checked_add(master.subtitle_renditions.len())
+            .and_then(|count| count.checked_add(base_audio_count))
+            .and_then(|count| count.checked_add(base_subtitle_count))
+        else {
+            continue;
+        };
+        if next_rendition_count > crate::manifest::MAX_HLS_MASTER_RENDITIONS {
+            tracing::debug!(
+                pathway = %pathway_clone.id,
+                current = master.audio_renditions.len() + master.subtitle_renditions.len(),
+                requested = base_audio_count + base_subtitle_count,
+                limit = crate::manifest::MAX_HLS_MASTER_RENDITIONS,
+                "skipping HLS Content Steering clone because the expanded rendition limit would be exceeded"
+            );
+            continue;
+        }
+
         let cloned_variants = base_variants
             .into_iter()
             .map(|mut variant| {
@@ -4426,6 +4474,65 @@ video/variant.m3u8
         let replaced = replace_hls_pathway_uri(&source, &clone, None)
             .expect("public IPv6 literal should be accepted");
         assert_eq!(replaced.host_str(), Some("[2001:4860:4860::8888]"));
+    }
+
+    #[test]
+    fn pathway_clone_chain_stops_before_the_cumulative_variant_limit() {
+        let mut master = master();
+        let mut base = master.variants[0].clone();
+        base.pathway_id = "cdn-a".to_string();
+        let mut variants = Vec::with_capacity(300);
+        for index in 0..300 {
+            let mut variant = base.clone();
+            variant.stable_variant_id = Some(format!("main-{index}"));
+            variants.push(variant);
+        }
+        master.variants = variants.into_boxed_slice();
+
+        let clones = (1..=16)
+            .map(|index| HlsPathwayClone {
+                base_id: if index == 1 {
+                    "cdn-a".to_string()
+                } else {
+                    format!("clone-{}", index - 1)
+                },
+                id: format!("clone-{index}"),
+                host: Some(format!("cdn-{index}.example.test")),
+                params: BTreeMap::new(),
+                per_variant_uris: HashMap::new(),
+                per_rendition_uris: HashMap::new(),
+            })
+            .collect::<Vec<_>>();
+
+        apply_hls_pathway_clones(&mut master, &clones);
+
+        assert_eq!(
+            master.variants.len(),
+            3_900,
+            "the thirteenth 300-variant clone would exceed the 4096-entry cap",
+        );
+        assert!(
+            master.variants.iter().any(|variant| variant.pathway_id == "clone-12"),
+            "the last clone that fits should be retained",
+        );
+        assert!(
+            !master.variants.iter().any(|variant| variant.pathway_id == "clone-13"),
+            "the first clone that exceeds the cap should be skipped",
+        );
+    }
+
+    #[test]
+    fn parser_rejects_hls_masters_over_the_variant_and_rendition_limits() {
+        let mut variants = String::from("#EXTM3U\n");
+        for index in 0..=crate::manifest::MAX_HLS_MASTER_VARIANTS {
+            variants.push_str(&format!(
+                "#EXT-X-STREAM-INF:BANDWIDTH=1000000\nhttps://cdn.example.test/{index}.m3u8\n"
+            ));
+        }
+        assert!(matches!(
+            crate::manifest::parse_hls_master_playlist(MASTER_URL, variants.as_bytes()),
+            Err(crate::manifest::ManifestError::Parse(_))
+        ));
     }
 
     #[test]

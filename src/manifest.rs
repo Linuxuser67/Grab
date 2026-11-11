@@ -13,6 +13,10 @@ use url::Url;
 
 /// Maximum response body accepted by the native manifest intake.
 pub(crate) const MAX_MANIFEST_BYTES: usize = 4 * 1024 * 1024;
+/// Maximum variants retained after HLS Content Steering pathway expansion.
+pub(crate) const MAX_HLS_MASTER_VARIANTS: usize = 4_096;
+/// Maximum audio and subtitle renditions retained after pathway expansion.
+pub(crate) const MAX_HLS_MASTER_RENDITIONS: usize = 4_096;
 
 #[path = "manifest_dash.rs"]
 pub(crate) mod dash;
@@ -1619,6 +1623,12 @@ pub(crate) fn parse_hls_master_playlist(
         return Err(ManifestError::NoVideoVariants);
     }
 
+    if variants.len() > MAX_HLS_MASTER_VARIANTS {
+        return Err(ManifestError::Parse(
+            "HLS master contains too many video variants".to_string(),
+        ));
+    }
+
     let audio_renditions = master
         .alternatives
         .iter()
@@ -1678,6 +1688,14 @@ pub(crate) fn parse_hls_master_playlist(
             })
         })
         .collect::<Result<Vec<_>, ManifestError>>()?;
+
+    if audio_renditions.len().saturating_add(subtitle_renditions.len())
+        > MAX_HLS_MASTER_RENDITIONS
+    {
+        return Err(ManifestError::Parse(
+            "HLS master contains too many audio and subtitle renditions".to_string(),
+        ));
+    }
 
     let has_unmatched_subtitle_group = variants.iter().any(|variant| {
         variant.subtitles_group.as_deref().is_some_and(|group_id| {

@@ -1319,6 +1319,25 @@ impl DownloadManager {
         Ok((item, guard))
     }
 
+    /// Preserve the editable stem, but derive the media suffix from the selected rendition.
+    fn manifest_filename_for_extension(
+        filename: Option<&str>,
+        source_url: &str,
+        extension: &str,
+    ) -> String {
+        let fallback_stem = crate::file_names::title_from_manifest_url(source_url);
+        let stem = filename
+            .filter(|name| sane_filename(name))
+            .and_then(|name| {
+                std::path::Path::new(name)
+                    .file_stem()
+                    .and_then(|stem| stem.to_str())
+            })
+            .filter(|stem| !stem.is_empty())
+            .unwrap_or(&fallback_stem);
+        format!("{stem}.{extension}")
+    }
+
     /// Queue a native HLS/DASH selection after listing its destination off GTK.
     pub(crate) async fn enqueue_manifest_async_batched(
         self: &Rc<Self>,
@@ -1334,8 +1353,30 @@ impl DownloadManager {
         .await
         .map_err(|error| format!("Could not inspect download folder: {error:?}"))?
         .map_err(|error| format!("Could not inspect download folder: {error}"))?;
+
+        // The URL suffix identifies the manifest protocol, not the media
+        // container. Resolve the selected media playlist/representation before
+        // creating the queue row so its final filename matches its contents.
+        let options = DownloadOptions::from_settings(&self.settings);
+        let proxy = options.proxy_config().ok().flatten();
+        let detected_extension = crate::manifest_runner::detect_output_extension(
+            &source,
+            &options.cookies_browser,
+            proxy.as_ref(),
+        )
+        .await;
+        let extension = detected_extension.unwrap_or("mkv");
+        if detected_extension.is_none() {
+            tracing::debug!(
+                kind = ?source.kind,
+                "could not determine native manifest container; keeping the Matroska default"
+            );
+        }
+        let requested_name =
+            Self::manifest_filename_for_extension(filename, &source.url, extension);
+
         let guard = self.batch_guard();
-        let item = self.enqueue_manifest_staged(source, &dir, filename, &existing)?;
+        let item = self.enqueue_manifest_staged(source, &dir, Some(&requested_name), &existing)?;
         Ok((item, guard))
     }
 
@@ -1732,10 +1773,11 @@ impl DownloadManager {
         {
             Some(extension)
                 if extension.eq_ignore_ascii_case("mp4")
-                    || extension.eq_ignore_ascii_case("mkv") => {}
+                    || extension.eq_ignore_ascii_case("mkv")
+                    || extension.eq_ignore_ascii_case("ts") => {}
             Some(_) => {
                 return Err(gettext(
-                    "Native HLS/DASH downloads require an MP4 or MKV filename",
+                    "Native HLS/DASH downloads require an MP4, MKV, or TS filename",
                 ));
             }
             None => requested_name.push_str(".mkv"),

@@ -297,31 +297,26 @@ pub(crate) fn playlist_output_template(dest_dir: &Path) -> String {
 /// yt-dlp argv for one parent-owned playlist process. A single invocation
 /// receives the selected 1-based playlist indices and emits tagged per-file
 /// lifecycle events plus byte progress.
-pub(crate) fn playlist_download_argv(
-    job: &VideoJob,
-    spec: &str,
-    merging: bool,
-    merge_ext: &str,
-    ffmpeg_bin: &Path,
-    dest_dir: &Path,
+fn replace_playlist_scope(
+    args: &mut Vec<String>,
     playlist_indices: &[usize],
-) -> Vec<String> {
-    let mut args = unified_download_argv(
-        job,
-        spec,
-        merging,
-        merge_ext,
-        ffmpeg_bin,
-        Path::new("playlist-placeholder.%(ext)s"),
-        None,
-    );
-    let Some(scope_at) = args.iter().position(|arg| arg == "--no-playlist") else {
-        return args;
-    };
+) -> Result<(), VideoError> {
+    if playlist_indices.is_empty() {
+        return Err(VideoError::fetch("No playlist entries were selected"));
+    }
+    let scope_at = args
+        .iter()
+        .position(|arg| arg == "--no-playlist")
+        .ok_or_else(|| VideoError::fetch("Could not configure yt-dlp playlist scope"))?;
     let indices = playlist_indices
         .iter()
-        .map(|index| (index + 1).to_string())
-        .collect::<Vec<_>>()
+        .map(|index| {
+            index
+                .checked_add(1)
+                .map(|index| index.to_string())
+                .ok_or_else(|| VideoError::fetch("A playlist entry index is out of range"))
+        })
+        .collect::<Result<Vec<_>, _>>()?
         .join(",");
     args.splice(
         scope_at..=scope_at,
@@ -332,6 +327,31 @@ pub(crate) fn playlist_download_argv(
             indices,
         ],
     );
+    Ok(())
+}
+
+/// yt-dlp argv for one parent-owned playlist process. A single invocation
+/// receives the selected 1-based playlist indices and emits tagged per-file
+/// lifecycle events plus byte progress.
+pub(crate) fn playlist_download_argv(
+    job: &VideoJob,
+    spec: &str,
+    merging: bool,
+    merge_ext: &str,
+    ffmpeg_bin: &Path,
+    dest_dir: &Path,
+    playlist_indices: &[usize],
+) -> Result<Vec<String>, VideoError> {
+    let mut args = unified_download_argv(
+        job,
+        spec,
+        merging,
+        merge_ext,
+        ffmpeg_bin,
+        Path::new("playlist-placeholder.%(ext)s"),
+        None,
+    );
+    replace_playlist_scope(&mut args, playlist_indices)?;
 
     if let Some(output_at) = args.iter().position(|arg| arg == "-o")
         && let Some(output) = args.get_mut(output_at + 1)
@@ -356,7 +376,7 @@ pub(crate) fn playlist_download_argv(
             ],
         );
     }
-    args
+    Ok(args)
 }
 
 /// yt-dlp `-f` spec for one HLS attempt over the page URL (muxed files win over lower splits).
@@ -831,6 +851,42 @@ mod hls_protocol_family_tests {
         assert_eq!(
             live_hls_format_spec("720p", None),
             "(bv*[height<=720][protocol=m3u8_native]+ba[protocol=m3u8_native]/b[protocol=m3u8_native])/(bv*[height<=720][url~='(?i)^https://[^?#]+\\.m3u8(?:[?#]|$)']+ba[url~='(?i)^https://[^?#]+\\.m3u8(?:[?#]|$)']/b[url~='(?i)^https://[^?#]+\\.m3u8(?:[?#]|$)'])"
+        );
+    }
+}
+
+#[cfg(test)]
+mod playlist_scope_invariant_tests {
+    use super::replace_playlist_scope;
+
+    #[test]
+    fn missing_single_video_scope_is_an_error_not_a_single_video_fallback() {
+        let mut args = vec!["--newline".to_string(), "--".to_string(), "https://example.test/list".to_string()];
+        let before = args.clone();
+        assert!(replace_playlist_scope(&mut args, &[0, 2]).is_err());
+        assert_eq!(args, before, "failed construction must not mutate argv");
+    }
+
+    #[test]
+    fn empty_playlist_selection_is_rejected() {
+        let mut args = vec!["--no-playlist".to_string()];
+        assert!(replace_playlist_scope(&mut args, &[]).is_err());
+    }
+
+    #[test]
+    fn playlist_scope_uses_one_based_indices() {
+        let mut args = vec!["--no-playlist".to_string(), "--".to_string(), "https://example.test/list".to_string()];
+        replace_playlist_scope(&mut args, &[0, 2]).expect("valid playlist selection");
+        assert_eq!(
+            args,
+            vec![
+                "--yes-playlist",
+                "--ignore-errors",
+                "--playlist-items",
+                "1,3",
+                "--",
+                "https://example.test/list",
+            ]
         );
     }
 }

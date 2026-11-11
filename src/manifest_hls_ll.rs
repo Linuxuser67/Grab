@@ -443,10 +443,11 @@ fn build_plan(
             .part_hold_back
             .ok_or(ManifestError::InvalidDuration)?
             .get();
-        // Apple's HLS authoring profile requires PART-HOLD-BACK to be at
-        // least three Part Targets. The two-times protocol floor alone is
-        // insufficient for the Apple-profile LL-HLS path.
-        if !part_hold_back.is_finite() || part_hold_back < 3.0 * part_target.as_secs_f64() {
+        // RFC 8216bis requires at least two Part Targets; three is the
+        // recommended value, while Apple's authoring profile is stricter.
+        // Grab accepts any protocol-compliant LL-HLS server, not only streams
+        // authored for Apple clients.
+        if !part_hold_back.is_finite() || part_hold_back < 2.0 * part_target.as_secs_f64() {
             return Err(ManifestError::InvalidDuration);
         }
     }
@@ -1235,7 +1236,7 @@ mod tests {
     }
 
     #[test]
-    fn requires_at_least_three_part_target_hold_back() {
+    fn accepts_the_rfc_two_part_target_floor_and_rejects_values_below_it() {
         let body = br#"#EXTM3U
 #EXT-X-TARGETDURATION:2
 #EXT-X-MEDIA-SEQUENCE:10
@@ -1245,8 +1246,26 @@ mod tests {
 "#;
         assert!(
             plan_hls_media_playlist(BASE, body).is_ok(),
-            "Apple's three-times Part Target floor is valid"
+            "the recommended three-times Part Target value is valid"
         );
+
+        let at_protocol_floor = body
+            .windows(b"PART-HOLD-BACK=1.5".len())
+            .position(|window| window == b"PART-HOLD-BACK=1.5")
+            .map(|offset| {
+                let mut valid = body.to_vec();
+                valid.splice(
+                    offset..offset + b"PART-HOLD-BACK=1.5".len(),
+                    b"PART-HOLD-BACK=1.0".iter().copied(),
+                );
+                valid
+            })
+            .expect("fixture contains PART-HOLD-BACK");
+        assert!(
+            plan_hls_media_playlist(BASE, &at_protocol_floor).is_ok(),
+            "the RFC two-times Part Target floor is valid"
+        );
+
         let below_floor = body
             .windows(b"PART-HOLD-BACK=1.5".len())
             .position(|window| window == b"PART-HOLD-BACK=1.5")
@@ -1254,27 +1273,14 @@ mod tests {
                 let mut invalid = body.to_vec();
                 invalid.splice(
                     offset..offset + b"PART-HOLD-BACK=1.5".len(),
-                    b"PART-HOLD-BACK=1.499".iter().copied(),
-                );
-                invalid
-            })
-            .expect("fixture contains PART-HOLD-BACK");
-        assert!(plan_hls_media_playlist(BASE, &below_floor).is_err());
-        let protocol_only_floor = body
-            .windows(b"PART-HOLD-BACK=1.5".len())
-            .position(|window| window == b"PART-HOLD-BACK=1.5")
-            .map(|offset| {
-                let mut invalid = body.to_vec();
-                invalid.splice(
-                    offset..offset + b"PART-HOLD-BACK=1.5".len(),
-                    b"PART-HOLD-BACK=1.0".iter().copied(),
+                    b"PART-HOLD-BACK=0.999".iter().copied(),
                 );
                 invalid
             })
             .expect("fixture contains PART-HOLD-BACK");
         assert!(
-            plan_hls_media_playlist(BASE, &protocol_only_floor).is_err(),
-            "the protocol-only two-times floor does not meet Apple's authoring profile"
+            plan_hls_media_playlist(BASE, &below_floor).is_err(),
+            "values below the RFC two-times Part Target minimum are invalid"
         );
     }
 

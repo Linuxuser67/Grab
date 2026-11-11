@@ -98,24 +98,11 @@ pub enum ProbeOutcome {
     None,
 }
 
-/// Sticky per-host mode preference: which mode the user picked last time
-/// both were viable. Only honored when both modes are viable now.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum StickyMode {
-    Video,
-    Gallery,
-}
-
 /// Routing decision from both probe results.
 ///
 /// `ytdlp_video`: whether the yt-dlp probe found a playable video.
 /// `gallery_items`: gallery-dl `-j` items (`None` = probe failed/unsupported).
-/// `host_sticky`: the user's per-host mode preference, if any.
-pub fn route(
-    ytdlp_video: bool,
-    gallery_items: Option<&[GalleryItem]>,
-    _host_sticky: Option<StickyMode>,
-) -> ProbeOutcome {
+pub fn route(ytdlp_video: bool, gallery_items: Option<&[GalleryItem]>) -> ProbeOutcome {
     // Any non-empty successful gallery-dl listing owns the lookup, even if
     // yt-dlp also found a playable video or recognized a playlist.
     if gallery_items.is_some_and(|items| !items.is_empty()) {
@@ -135,10 +122,9 @@ pub(crate) fn route_for_collection(
     ytdlp_video: bool,
     ytdlp_playlist_entries: usize,
     gallery_items: Option<&[GalleryItem]>,
-    _host_sticky: Option<StickyMode>,
 ) -> ProbeOutcome {
     if gallery_items.is_some_and(|items| !items.is_empty()) {
-        return route(ytdlp_video, gallery_items, _host_sticky);
+        return route(ytdlp_video, gallery_items);
     }
 
     // A recognized yt-dlp playlist remains available when gallery-dl did
@@ -147,7 +133,7 @@ pub(crate) fn route_for_collection(
         return ProbeOutcome::VideoYtDlp;
     }
 
-    route(ytdlp_video, gallery_items, _host_sticky)
+    route(ytdlp_video, gallery_items)
 }
 
 /// Whether a probe error should be surfaced to the user instead of falling
@@ -1701,19 +1687,19 @@ done
 
         for items in [&videos[..], &single_video[..], &images[..], &unknown[..]] {
             assert_eq!(
-                route_for_collection(true, 4, Some(items), None),
+                route_for_collection(true, 4, Some(items)),
                 ProbeOutcome::Gallery,
                 "a non-empty gallery-dl result must win for items: {items:?}",
             );
             assert_eq!(
-                route_for_collection(false, 0, Some(items), None),
+                route_for_collection(false, 0, Some(items)),
                 ProbeOutcome::Gallery,
                 "gallery-dl must also win when yt-dlp found nothing",
             );
             // A stored Video preference must not override a successful
             // gallery-dl listing.
             assert_eq!(
-                route_for_collection(true, 4, Some(items), Some(StickyMode::Video)),
+                route_for_collection(true, 4, Some(items)),
                 ProbeOutcome::Gallery,
             );
         }
@@ -1724,15 +1710,15 @@ done
         // Unsupported, failed, or empty gallery-dl results retain yt-dlp's
         // stable single-video and playlist paths.
         assert_eq!(
-            route_for_collection(true, 3, None, None),
+            route_for_collection(true, 3, None),
             ProbeOutcome::VideoYtDlp
         );
         assert_eq!(
-            route_for_collection(true, 0, Some(&[]), None),
+            route_for_collection(true, 0, Some(&[])),
             ProbeOutcome::VideoYtDlp
         );
         assert_eq!(
-            route_for_collection(false, 0, None, None),
+            route_for_collection(false, 0, None),
             ProbeOutcome::None
         );
     }
@@ -1742,16 +1728,16 @@ done
         let video = vec![item("mp4")];
         let unknown = vec![item("xyz")];
 
-        assert_eq!(route(true, Some(&video), None), ProbeOutcome::Gallery);
+        assert_eq!(route(true, Some(&video)), ProbeOutcome::Gallery);
         assert_eq!(
-            route(true, Some(&video), Some(StickyMode::Video)),
+            route(true, Some(&video)),
             ProbeOutcome::Gallery
         );
-        assert_eq!(route(false, Some(&video), None), ProbeOutcome::Gallery);
-        assert_eq!(route(true, Some(&unknown), None), ProbeOutcome::Gallery);
-        assert_eq!(route(true, None, None), ProbeOutcome::VideoYtDlp);
-        assert_eq!(route(false, None, None), ProbeOutcome::None);
-        assert_eq!(route(false, Some(&[]), None), ProbeOutcome::None);
+        assert_eq!(route(false, Some(&video)), ProbeOutcome::Gallery);
+        assert_eq!(route(true, Some(&unknown)), ProbeOutcome::Gallery);
+        assert_eq!(route(true, None), ProbeOutcome::VideoYtDlp);
+        assert_eq!(route(false, None), ProbeOutcome::None);
+        assert_eq!(route(false, Some(&[])), ProbeOutcome::None);
     }
 
     #[test]
@@ -1892,7 +1878,7 @@ done
         ]"#;
         let messages: Vec<serde_json::Value> = serde_json::from_str(json).unwrap();
         let items = parse_probe_messages(&messages).unwrap();
-        assert_eq!(route(false, Some(&items), None), ProbeOutcome::Gallery);
+        assert_eq!(route(false, Some(&items)), ProbeOutcome::Gallery);
     }
 
     /// Regression: probe_gallery must work from a thread without a Tokio

@@ -2234,6 +2234,62 @@ async fn resolve_tracks(
     }
 }
 
+/// Resolve only the selected manifest playlists and infer the final container.
+///
+/// No media segments are downloaded here. HLS format comes from the selected
+/// media playlist's EXT-X-MAP marker; DASH uses the selected video MIME type.
+pub(crate) async fn detect_output_extension(
+    source: &ManifestSource,
+    cookies_browser: &str,
+    proxy: Option<&crate::net_types::ResolvedProxy>,
+) -> Option<&'static str> {
+    let client = crate::manifest_intake::client_for_manifest(
+        &source.url,
+        cookies_browser,
+        proxy,
+    )
+    .await
+    .ok()?;
+    let lookup = crate::manifest_intake::lookup_with_client(
+        &client,
+        &source.url,
+        proxy.is_some(),
+    )
+    .await
+    .ok()??;
+    if lookup.kind() != source.kind {
+        return None;
+    }
+
+    let mut guarded_child_hosts = crate::download_net::PublicResolutionSet::default();
+    let tracks = resolve_tracks(&client, lookup, source, &mut guarded_child_hosts)
+        .await
+        .ok()?;
+    match tracks {
+        Tracks::Hls { video, .. } => video.output_container_extension(),
+        Tracks::Dash { video, .. } => {
+            dash_output_container_extension(video.representation.mime_type.as_deref())
+        }
+        Tracks::DashLiveOffline { .. } => None,
+    }
+}
+
+/// Infer the output from a DASH video Representation's declared media type.
+fn dash_output_container_extension(mime_type: Option<&str>) -> Option<&'static str> {
+    let mime_type = mime_type?.split(';').next()?.trim();
+    if mime_type.eq_ignore_ascii_case("video/mp2t")
+        || mime_type.eq_ignore_ascii_case("application/mp2t")
+    {
+        Some("ts")
+    } else if mime_type.eq_ignore_ascii_case("video/mp4")
+        || mime_type.eq_ignore_ascii_case("application/mp4")
+    {
+        Some("mp4")
+    } else {
+        None
+    }
+}
+
 fn guard_hls_resources(
     parent_url: &str,
     plan: &HlsPlan,
@@ -4893,6 +4949,18 @@ segment-2.m4s
                 .is_err(),
             "a retry must not silently change the committed byte count"
         );
+    }
+
+    #[test]
+    fn dash_output_container_follows_the_selected_video_mime_type() {
+        assert_eq!(dash_output_container_extension(Some("video/mp2t")), Some("ts"));
+        assert_eq!(dash_output_container_extension(Some("video/mp4")), Some("mp4"));
+        assert_eq!(
+            dash_output_container_extension(Some("application/mp4; codecs=avc1")),
+            Some("mp4")
+        );
+        assert_eq!(dash_output_container_extension(Some("video/webm")), None);
+        assert_eq!(dash_output_container_extension(None), None);
     }
 
     #[test]

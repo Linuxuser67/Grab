@@ -472,6 +472,11 @@ impl PublicResolutionSet {
         self.hosts.contains(host)
     }
 
+    /// Clone leases for asynchronous work that may outlive the owning set.
+    pub(crate) fn clone_leases(&self) -> Vec<Arc<PublicResolutionLease>> {
+        self.leases.clone()
+    }
+
     pub(crate) fn insert(&mut self, host: String, lease: Arc<PublicResolutionLease>) {
         if self.hosts.insert(host) {
             self.leases.push(lease);
@@ -1184,6 +1189,35 @@ mod tests {
         assert!(is_untrusted_handoff_host("lease.example"));
         drop(clone);
         assert!(!is_untrusted_handoff_host("lease.example"));
+
+        *lock_recover(cache) = previous;
+    }
+
+    #[test]
+    fn cloned_set_leases_keep_hosts_registered_after_the_owner_drops() {
+        let _test_lock = lock_untrusted_handoff_policy_for_test();
+        let cache = UNTRUSTED_HANDOFF_HOSTS.get_or_init(Default::default);
+        let previous = {
+            let mut hosts = lock_recover(cache);
+            std::mem::take(&mut *hosts)
+        };
+
+        let mut owner = PublicResolutionSet::default();
+        let lease = acquire_public_resolution("background-count.example")
+            .expect("public host lease");
+        owner.insert(lease.host().to_string(), lease);
+        let background = owner.clone_leases();
+
+        drop(owner);
+        assert!(
+            is_untrusted_handoff_host("background-count.example"),
+            "background work keeps the policy after its UI owner closes"
+        );
+        drop(background);
+        assert!(
+            !is_untrusted_handoff_host("background-count.example"),
+            "the policy is released when the final background owner completes"
+        );
 
         *lock_recover(cache) = previous;
     }

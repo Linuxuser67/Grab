@@ -1004,7 +1004,6 @@ pub(crate) fn build_download_group_row(
         });
     }
 
-
     header.append(&expand_button);
     header.append(&inline_progress);
     header.append(&open_folder_btn);
@@ -1081,7 +1080,6 @@ impl DownloadGroupRow {
     }
 }
 
-/// A collection file is a read-only projection of one shared downloader process.
 /// A collection file is a read-only projection of one shared downloader
 /// process. It intentionally has no per-file process controls: pause/cancel
 /// semantics belong to the parent collection job.

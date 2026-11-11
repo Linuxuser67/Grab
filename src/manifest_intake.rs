@@ -1881,7 +1881,7 @@ async fn lookup_with_client_policy(
         })?;
     let manifest = match kind {
         crate::media_types::ManifestKind::Hls => {
-            crate::manifest::inherit_query_parameters_same_origin(
+            crate::manifest::inherit_query_parameters_same_origin_on_redirect(
                 &original_request_url,
                 &mut final_url,
             );
@@ -1901,12 +1901,14 @@ async fn lookup_with_client_policy(
                     NativeManifest::HlsMaster(master)
                 }
                 Err(crate::manifest::ManifestError::ExpectedMasterPlaylist) => {
-                    let plan = crate::manifest::plan_hls_media_playlist(final_url.as_str(), &body)
-                        .map_err(|error| {
-                            ManifestIntakeError::Unsupported(format!(
-                                "The HLS media playlist is not supported: {error}"
-                            ))
-                        })?;
+                    let mut plan =
+                        crate::manifest::plan_hls_media_playlist(final_url.as_str(), &body)
+                            .map_err(|error| {
+                                ManifestIntakeError::Unsupported(format!(
+                                    "The HLS media playlist is not supported: {error}"
+                                ))
+                            })?;
+                    plan.requested_playlist_url = original_request_url;
                     NativeManifest::HlsMedia(Box::new(plan))
                 }
                 Err(error) => {
@@ -2124,13 +2126,18 @@ pub(crate) async fn lookup_hls_media_with_variables(
     let requested_url = Url::parse(raw_url)
         .map_err(|_| ManifestIntakeError::Failed(gettext("Invalid stream manifest URL")))?;
     let (mut final_url, body, _) = fetch_bounded_manifest(client, requested_url.clone()).await?;
-    crate::manifest::inherit_query_parameters_same_origin(&requested_url, &mut final_url);
-    crate::manifest::plan_hls_media_playlist_with_variables(
+    crate::manifest::inherit_query_parameters_same_origin_on_redirect(
+        &requested_url,
+        &mut final_url,
+    );
+    let mut plan = crate::manifest::plan_hls_media_playlist_with_variables(
         final_url.as_str(),
         &body,
         inherited_variables,
     )
-    .map_err(|error| ManifestIntakeError::Unsupported(error.to_string()))
+    .map_err(|error| ManifestIntakeError::Unsupported(error.to_string()))?;
+    plan.requested_playlist_url = requested_url;
+    Ok(plan)
 }
 
 /// Poll one live HLS playlist snapshot. Blocking reloads use a single request:
@@ -2153,13 +2160,18 @@ pub(crate) async fn lookup_hls_live_media(
     )
     .await?;
     let mut final_url = strip_hls_blocking_reload_query(&final_url);
-    crate::manifest::inherit_query_parameters_same_origin(&authorization_url, &mut final_url);
-    crate::manifest::plan_hls_media_playlist_with_variables(
+    crate::manifest::inherit_query_parameters_same_origin_on_redirect(
+        &authorization_url,
+        &mut final_url,
+    );
+    let mut plan = crate::manifest::plan_hls_media_playlist_with_variables(
         final_url.as_str(),
         &body,
         inherited_variables,
     )
-    .map_err(|error| ManifestIntakeError::Unsupported(error.to_string()))
+    .map_err(|error| ManifestIntakeError::Unsupported(error.to_string()))?;
+    plan.requested_playlist_url = authorization_url;
+    Ok(plan)
 }
 
 fn hls_live_reload_url(
@@ -2169,32 +2181,46 @@ fn hls_live_reload_url(
 ) -> Result<Url, ManifestIntakeError> {
     let mut requested_url = Url::parse(raw_url)
         .map_err(|_| ManifestIntakeError::Failed(gettext("Invalid stream manifest URL")))?;
-    {
-        let mut query = requested_url.query_pairs_mut();
-        if let Some((media_sequence, part_index)) = blocking_reload {
-            query.append_pair("_HLS_msn", &media_sequence.to_string());
-            if let Some(part_index) = part_index {
-                query.append_pair("_HLS_part", &part_index.to_string());
-            }
+    let mut reload_parameters = Vec::with_capacity(3);
+    if let Some((media_sequence, part_index)) = blocking_reload {
+        reload_parameters.push(format!("_HLS_msn={media_sequence}"));
+        if let Some(part_index) = part_index {
+            reload_parameters.push(format!("_HLS_part={part_index}"));
         }
-        if can_skip_until.is_some() {
-            query.append_pair("_HLS_skip", "YES");
-        }
+    }
+    if can_skip_until.is_some() {
+        reload_parameters.push("_HLS_skip=YES".to_string());
+    }
+    if !reload_parameters.is_empty() {
+        let existing_query = requested_url.query().unwrap_or_default();
+        let query = if existing_query.is_empty() {
+            reload_parameters.join("&")
+        } else {
+            format!("{existing_query}&{}", reload_parameters.join("&"))
+        };
+        requested_url.set_query(Some(&query));
     }
     Ok(requested_url)
 }
 
 fn strip_hls_blocking_reload_query(url: &Url) -> Url {
-    let retained = url
-        .query_pairs()
-        .filter(|(name, _)| !matches!(name.as_ref(), "_HLS_msn" | "_HLS_part" | "_HLS_skip"))
-        .map(|(name, value)| (name.into_owned(), value.into_owned()))
+    let Some(query) = url.query() else {
+        return url.clone();
+    };
+    let retained = query
+        .split('&')
+        .filter(|pair| {
+            let name = pair.split_once('=').map_or(*pair, |(name, _)| name);
+            let decoded_name = percent_encoding::percent_decode_str(name).collect::<Vec<_>>();
+            !matches!(
+                decoded_name.as_slice(),
+                b"_HLS_msn" | b"_HLS_part" | b"_HLS_skip"
+            )
+        })
         .collect::<Vec<_>>();
+    let retained_query = retained.join("&");
     let mut clean = url.clone();
-    clean.set_query(None);
-    if !retained.is_empty() {
-        clean.query_pairs_mut().extend_pairs(retained);
-    }
+    clean.set_query((!retained_query.is_empty()).then_some(retained_query.as_str()));
     clean
 }
 
@@ -5061,6 +5087,43 @@ video/variant.m3u8
                 .await
                 .is_err(),
             "proxy policy must reject before issuing a request"
+        );
+    }
+    #[test]
+    fn stripping_blocking_reload_parameters_preserves_raw_query_encoding() {
+        let url = Url::parse(
+            "https://cdn.example.test/live.m3u8?sig=a%2Fb&label=hello%20world&tilde=~&flag&_HLS_msn=12&_HLS_part=3&_HLS_skip=YES",
+        )
+        .expect("live playlist URL");
+        let cleaned = strip_hls_blocking_reload_query(&url);
+        assert_eq!(
+            cleaned.query(),
+            Some("sig=a%2Fb&label=hello%20world&tilde=~&flag"),
+            "the retained query must remain byte-for-byte identical",
+        );
+
+        let encoded_control =
+            Url::parse("https://cdn.example.test/live.m3u8?sig=keep&%5FHLS_msn=12")
+                .expect("encoded blocking reload URL");
+        assert_eq!(
+            strip_hls_blocking_reload_query(&encoded_control).query(),
+            Some("sig=keep"),
+        );
+    }
+
+    #[test]
+    fn live_reload_parameters_append_without_reencoding_opaque_query() {
+        let url = hls_live_reload_url(
+            "https://cdn.example.test/live.m3u8?sig=a%2Fb&label=hello%20world&tilde=~&flag",
+            Some((42, Some(3))),
+            Some(Duration::from_secs(6)),
+        )
+        .expect("live reload URL");
+        assert_eq!(
+            url.query(),
+            Some(
+                "sig=a%2Fb&label=hello%20world&tilde=~&flag&_HLS_msn=42&_HLS_part=3&_HLS_skip=YES"
+            ),
         );
     }
 }

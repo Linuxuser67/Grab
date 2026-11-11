@@ -211,6 +211,7 @@ pub(super) async fn load_live_hls_track(
 
     Ok(LiveHlsTrack {
         playlist_url: plan.playlist_url.clone(),
+        requested_playlist_url: plan.requested_playlist_url.clone(),
         inherited_variables: plan.inherited_variables.clone(),
         directory: directory.to_path_buf(),
         accumulator,
@@ -1009,9 +1010,9 @@ async fn refresh_live_hls_pathway(
         }
     };
 
-    let video_changed = plan.video_url != video.playlist_url;
+    let video_changed = plan.video_url != video.requested_playlist_url;
     let audio_changed = match (audio.as_ref(), plan.audio_url.as_ref()) {
-        (Some(track), Some(url)) => *url != track.playlist_url,
+        (Some(track), Some(url)) => *url != track.requested_playlist_url,
         (None, None) => false,
         _ => {
             tracing::debug!(
@@ -1178,6 +1179,7 @@ async fn refresh_live_hls_pathway(
         .await
         {
             Ok(LiveHlsSnapshotOutcome::Committed) => {
+                video.requested_playlist_url = next.requested_playlist_url.clone();
                 ensure_manifest_mux_spaces(
                     staging_dir,
                     destination_dir,
@@ -1217,6 +1219,7 @@ async fn refresh_live_hls_pathway(
         .await
         {
             Ok(LiveHlsSnapshotOutcome::Committed) => {
+                current.requested_playlist_url = next.requested_playlist_url.clone();
                 ensure_manifest_mux_spaces(
                     staging_dir,
                     destination_dir,
@@ -1737,6 +1740,7 @@ mod destination_part_tests {
     fn live_track_from_plan(plan: &HlsPlan, accumulator: HlsLiveAccumulator) -> LiveHlsTrack {
         LiveHlsTrack {
             playlist_url: plan.playlist_url.clone(),
+            requested_playlist_url: plan.requested_playlist_url.clone(),
             inherited_variables: plan.inherited_variables.clone(),
             directory: PathBuf::new(),
             accumulator,
@@ -1950,6 +1954,7 @@ mod destination_part_tests {
         };
         let mut track = LiveHlsTrack {
             playlist_url: first_plan.playlist_url.clone(),
+            requested_playlist_url: first_plan.requested_playlist_url.clone(),
             inherited_variables: first_plan.inherited_variables.clone(),
             directory: video_dir.clone(),
             accumulator,

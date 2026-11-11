@@ -1192,6 +1192,9 @@ async fn interrupted_manifest_resource_fetch_preserves_completed_files_for_resum
 }
 
 fn localize_live_plan_resources(plan: &mut HlsPlan, fixture_base: &Url) {
+    plan.requested_playlist_url = fixture_base
+        .join("live.m3u8")
+        .expect("build fixture requested playlist URL");
     plan.playlist_url = fixture_base
         .join("live.m3u8")
         .expect("build fixture live playlist URL");

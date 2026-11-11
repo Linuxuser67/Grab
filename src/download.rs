@@ -3214,7 +3214,7 @@ impl DownloadManager {
                             break;
                         }
 
-                        tracing::warn!(
+                        tracing::debug!(
                             item_id = id,
                             reason = %crate::backend_debug::redact_query_tokens(&error),
                             "native manifest is unsupported; falling back to yt-dlp"

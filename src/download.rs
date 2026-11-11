@@ -3165,6 +3165,12 @@ impl DownloadManager {
                             break;
                         }
 
+                        tracing::warn!(
+                            item_id = id,
+                            reason = %crate::backend_debug::redact_query_tokens(&error),
+                            "native manifest is unsupported; falling back to yt-dlp"
+                        );
+
                         // Remove only files carrying this row's native-manifest
                         // ownership marker before switching the row to yt-dlp.
                         let directory = std::path::PathBuf::from(item.dest_dir());

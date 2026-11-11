@@ -5359,9 +5359,13 @@ mod tests {
         let background = scope.clone_leases();
 
         scope.close();
-        assert!(crate::download_net::is_untrusted_handoff_host("card-count.example"));
+        assert!(crate::download_net::is_untrusted_handoff_host(
+            "card-count.example"
+        ));
         drop(background);
-        assert!(!crate::download_net::is_untrusted_handoff_host("card-count.example"));
+        assert!(!crate::download_net::is_untrusted_handoff_host(
+            "card-count.example"
+        ));
     }
 
     #[test]

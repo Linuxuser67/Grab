@@ -318,6 +318,9 @@ pub fn resolve_tool() -> Result<PathBuf, String> {
     crate::gallery_tools::resolve_gallerydl().map_err(|e| e.to_string())
 }
 
+/// Maximum per-file UI records retained in the persistent gallery queue state.
+pub(crate) const MAX_GALLERY_PERSISTED_FILE_ROWS: usize = 10_000;
+
 /// Persisted UI state for one file handled by a gallery-dl process.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct GalleryFileState {

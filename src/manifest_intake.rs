@@ -5121,9 +5121,9 @@ video/variant.m3u8
         .expect("live reload URL");
         assert_eq!(
             url.query(),
-            Some("sig=a%2Fb&label=hello%20world&tilde=~&flag&_HLS_msn=42&_HLS_part=3&_HLS_skip=YES"),
+            Some(
+                "sig=a%2Fb&label=hello%20world&tilde=~&flag&_HLS_msn=42&_HLS_part=3&_HLS_skip=YES"
+            ),
         );
     }
-
-
 }

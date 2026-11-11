@@ -294,9 +294,7 @@ pub(crate) fn playlist_output_template(dest_dir: &Path) -> String {
     format!("{directory}/%(title).120s [%(id)s].%(ext)s")
 }
 
-/// yt-dlp argv for one parent-owned playlist process. A single invocation
-/// receives the selected 1-based playlist indices and emits tagged per-file
-/// lifecycle events plus byte progress.
+/// Replace the default single-video scope with the selected playlist entries.
 fn replace_playlist_scope(
     args: &mut Vec<String>,
     playlist_indices: &[usize],
@@ -312,12 +310,9 @@ fn replace_playlist_scope(
     if let Some(scope_at) = args.iter().position(|arg| arg == "--no-playlist") {
         args.remove(scope_at);
     }
-    let scope_at = args
-        .iter()
-        .position(|arg| arg == "--")
-        .ok_or_else(|| VideoError::Fetch(
-            "Could not locate yt-dlp's positional URL separator".to_string(),
-        ))?;
+    let scope_at = args.iter().position(|arg| arg == "--").ok_or_else(|| {
+        VideoError::Fetch("Could not locate yt-dlp's positional URL separator".to_string())
+    })?;
 
     let indices = playlist_indices
         .iter()
@@ -908,7 +903,11 @@ mod playlist_scope_invariant_tests {
 
     #[test]
     fn playlist_scope_uses_one_based_indices() {
-        let mut args = vec!["--no-playlist".to_string(), "--".to_string(), "https://example.test/list".to_string()];
+        let mut args = vec![
+            "--no-playlist".to_string(),
+            "--".to_string(),
+            "https://example.test/list".to_string(),
+        ];
         replace_playlist_scope(&mut args, &[0, 2]).expect("valid playlist selection");
         assert_eq!(
             args,

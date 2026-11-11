@@ -52,10 +52,6 @@ use crate::download_pieces::SegmentState;
 /// now (no re-exports: the engine consumes it here, tests import it directly).
 use crate::download_pieces::{BLOCK_CELLS, MAX_SEGMENTED_TOTAL};
 
-/// Persist gallery file-state transitions in batches instead of serializing the
-/// entire collection after every start/complete/skip event.
-const GALLERY_QUEUE_PERSIST_EVENT_INTERVAL: usize = 32;
-
 /// Facade: rate parsing/pacing + progress text lives in
 /// [`download_rate`](crate::download_rate); the engine consumes it here, tests import it directly.
 use crate::download_rate::{fmt_eta, format_amounts, parse_rate, publish_rate_limit};
@@ -68,6 +64,10 @@ pub use crate::download_store::DownloadStatus;
 /// (The stored structs stay imported below without re-export.)
 use crate::download_store::{QUEUE_VERSION, StoredItem, StoredQueue};
 use crate::video::AttemptGate;
+
+/// Persist gallery file-state transitions in batches instead of serializing the
+/// entire collection after every start/complete/skip event.
+const GALLERY_QUEUE_PERSIST_EVENT_INTERVAL: usize = 32;
 
 /// Runtime lookup cache for a gallery's persisted per-file states and transient GTK rows.
 #[derive(Default)]

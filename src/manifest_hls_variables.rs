@@ -696,7 +696,7 @@ video.m3u8
         );
         let lookup = crate::manifest_types::ManifestLookup {
             source_url: "https://cdn.example.test/master.m3u8".to_string(),
-            manifest: crate::manifest_types::NativeManifest::HlsMaster(master),
+            manifest: crate::manifest_types::NativeManifest::HlsMaster(Box::new(master)),
         };
         let source = lookup
             .selected_source(&video_key, Some(&audio_key), Some(&subtitle_key))

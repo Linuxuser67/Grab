@@ -13,6 +13,10 @@ use url::Url;
 
 /// Maximum response body accepted by the native manifest intake.
 pub(crate) const MAX_MANIFEST_BYTES: usize = 4 * 1024 * 1024;
+/// Maximum video variants retained from an HLS master, including pathway clones.
+pub(crate) const MAX_HLS_MASTER_VARIANTS: usize = 4_096;
+/// Maximum combined audio and subtitle renditions retained from an HLS master.
+pub(crate) const MAX_HLS_MASTER_RENDITIONS: usize = 4_096;
 
 #[path = "manifest_dash.rs"]
 pub(crate) mod dash;
@@ -366,6 +370,8 @@ pub(crate) struct HlsContentSteering {
     pub(crate) active_pathway_id: Option<String>,
     pub(crate) ttl: Duration,
     pub(crate) refresh_at: Option<Instant>,
+    /// Exponential delay for retrying an optional failed Content Steering refresh.
+    pub(crate) refresh_failure_backoff: Duration,
     /// Unfiltered master playlist, without Content Steering state, used to
     /// apply each new clone set without retaining stale clones.
     pub(crate) base_master: Option<Box<HlsMasterPlan>>,
@@ -394,6 +400,7 @@ impl std::fmt::Debug for HlsContentSteering {
             .field("active_pathway_id", &self.active_pathway_id)
             .field("ttl", &self.ttl)
             .field("refresh_at", &self.refresh_at)
+            .field("refresh_failure_backoff", &self.refresh_failure_backoff)
             .field("has_base_master", &self.base_master.is_some())
             .field("public_host_lease_count", &self.public_host_leases.len())
             .finish()
@@ -410,6 +417,7 @@ impl HlsContentSteering {
             initial_pathway_id,
             ttl: Duration::ZERO,
             refresh_at: None,
+            refresh_failure_backoff: Duration::ZERO,
             base_master: None,
             public_host_leases: Vec::new(),
         }
@@ -1622,6 +1630,11 @@ pub(crate) fn parse_hls_master_playlist(
     if variants.is_empty() {
         return Err(ManifestError::NoVideoVariants);
     }
+    if variants.len() > MAX_HLS_MASTER_VARIANTS {
+        return Err(ManifestError::Parse(
+            "HLS master contains too many video variants".to_string(),
+        ));
+    }
 
     let audio_renditions = master
         .alternatives
@@ -1682,6 +1695,14 @@ pub(crate) fn parse_hls_master_playlist(
             })
         })
         .collect::<Result<Vec<_>, ManifestError>>()?;
+
+    if audio_renditions.len().saturating_add(subtitle_renditions.len())
+        > MAX_HLS_MASTER_RENDITIONS
+    {
+        return Err(ManifestError::Parse(
+            "HLS master contains too many audio and subtitle renditions".to_string(),
+        ));
+    }
 
     let has_unmatched_subtitle_group = variants.iter().any(|variant| {
         variant.subtitles_group.as_deref().is_some_and(|group_id| {
@@ -2702,6 +2723,36 @@ video/1080.m3u8
             plan.audio_renditions[0].url.as_ref().map(Url::as_str),
             Some("https://cdn.example.test/path/audio/en.m3u8")
         );
+    }
+
+
+    #[test]
+    fn parser_rejects_hls_masters_over_the_variant_limit() {
+        let mut body = String::from("#EXTM3U\n");
+        for index in 0..=MAX_HLS_MASTER_VARIANTS {
+            body.push_str(&format!(
+                "#EXT-X-STREAM-INF:BANDWIDTH=1000000\nhttps://cdn.example.test/{index}.m3u8\n"
+            ));
+        }
+        assert!(matches!(
+            parse_hls_master_playlist(BASE_URL, body.as_bytes()),
+            Err(ManifestError::Parse(_))
+        ));
+    }
+
+    #[test]
+    fn parser_rejects_hls_masters_over_the_combined_rendition_limit() {
+        let mut body = String::from("#EXTM3U\n");
+        for index in 0..=MAX_HLS_MASTER_RENDITIONS {
+            body.push_str(&format!(
+                "#EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID=\"audio-{index}\",NAME=\"English {index}\",URI=\"audio/{index}.m3u8\"\n"
+            ));
+        }
+        body.push_str("#EXT-X-STREAM-INF:BANDWIDTH=1000000,AUDIO=\"audio-0\"\nvideo.m3u8\n");
+        assert!(matches!(
+            parse_hls_master_playlist(BASE_URL, body.as_bytes()),
+            Err(ManifestError::Parse(_))
+        ));
     }
 
     #[test]

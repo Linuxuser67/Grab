@@ -2015,25 +2015,21 @@ async fn resolve_dash_xlinks(
                 }
                 // A directly entered manifest is trusted as the user-selected
                 // origin, but a different host is still an untrusted remote
-                // link. Force public-only DNS for those children so a hostile
-                // MPD cannot turn XLink into a request to a private address.
-                if target.origin() != parent_url.origin()
-                    && !crate::download_net::require_public_resolution(host)
-                {
-                    return Err(ManifestIntakeError::Unsupported(
-                        "A DASH XLink target failed the public-host safety policy".to_string(),
-                    ));
-                }
-                crate::download_net::inherit_public_resolution_for_collection(
-                    parent_url.as_str(),
-                    target.as_str(),
-                    &mut seen_hosts,
-                )
-                .map_err(|_| {
-                    ManifestIntakeError::Unsupported(
-                        "A DASH XLink target failed the child-host safety policy".to_string(),
+                // link. Hold a public-only lease through the XLink request;
+                // expanded media resources receive their own transfer leases
+                // when the resulting MPD is planned.
+                let _target_lease = if target.origin() != parent_url.origin() {
+                    Some(
+                        crate::download_net::acquire_public_resolution(host).ok_or_else(|| {
+                            ManifestIntakeError::Unsupported(
+                                "A DASH XLink target failed the public-host safety policy"
+                                    .to_string(),
+                            )
+                        })?,
                     )
-                })?;
+                } else {
+                    None
+                };
                 seen_hosts.insert(host_key);
 
                 let remaining = MAX_MANIFEST_BYTES

@@ -20,8 +20,6 @@
 
 use crate::download::DownloadManager;
 use crate::download_row::DownloadItem;
-#[cfg(test)]
-use crate::download_store::DownloadGroup;
 use crate::gallery_grid::GalleryGrid;
 use crate::window_rows::{
     apply_scheduled_at, default_name_for, picker_enter_confirms, picker_header,
@@ -286,26 +284,6 @@ fn inflight_suppresses(
     _probe_unlisted: bool,
 ) -> bool {
     marker.as_ref().is_some_and(|(_, g, _)| *g == generation)
-}
-
-/// Attach newly queued playlist children to the same collection group.
-/// `group_id` is retained by the picker after partial imports so a later retry
-/// adds children to the original group rather than creating another one.
-#[cfg(test)]
-fn assign_playlist_group(
-    items: &[DownloadItem],
-    title: &str,
-    previous_group_id: Option<u64>,
-) -> Option<u64> {
-    if items.is_empty() {
-        return previous_group_id;
-    }
-    let group_id = previous_group_id.unwrap_or(items.first()?.id());
-    let group = DownloadGroup::try_new(group_id, title)?;
-    for item in items {
-        item.set_group(Some(group.clone()));
-    }
-    Some(group.id())
 }
 
 /// Item-count label for a probed collection, kind-aware ("3 stories"). The
@@ -733,12 +711,7 @@ async fn lookup_extractors_inner(
             None,
         );
         match routed {
-            crate::gallery_probe::ProbeOutcome::VideoYtDlp { gallery_toggle } => {
-                if gallery_toggle {
-                    toggle_items = gallery.ok().flatten().map(|items| (items, url.clone()));
-                }
-                (ytdlp, gallery_error)
-            }
+            crate::gallery_probe::ProbeOutcome::VideoYtDlp => (ytdlp, gallery_error)
             crate::gallery_probe::ProbeOutcome::Gallery => {
                 return Ok(MediaLookupOutcome::Gallery(
                     gallery.ok().flatten().unwrap_or_default(),
@@ -4971,30 +4944,6 @@ fn refresh_gallery_info(v: &VideoStep, title: &str) {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn playlist_group_assignment_keeps_the_original_id_across_partial_imports() {
-        let first = DownloadItem::new(10, "https://example.com/one", "One.mp4", "/tmp");
-        let second = DownloadItem::new(11, "https://example.com/two", "Two.mp4", "/tmp");
-
-        let group_id = assign_playlist_group(std::slice::from_ref(&first), "Course playlist", None)
-            .expect("first successful child establishes the group");
-        assert_eq!(group_id, 10);
-        let group = first
-            .group()
-            .expect("first row belongs to a playlist group");
-        assert_eq!(group.id(), 10);
-        assert_eq!(group.title(), "Course playlist");
-
-        let retained_id = assign_playlist_group(
-            std::slice::from_ref(&second),
-            "Course playlist",
-            Some(group_id),
-        )
-        .expect("a later partial-import retry reuses the original group");
-        assert_eq!(retained_id, 10);
-        assert_eq!(second.group(), first.group());
-    }
 
     // This runs with the existing picker_grid Xvfb job. It exercises the
     // playlist and torrent picker pages and proves they wait for user input.

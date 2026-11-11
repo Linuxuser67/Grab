@@ -444,11 +444,11 @@ mod tests {
             .expect("custom output mode must be configured");
         let mode: serde_json::Value =
             serde_json::from_str(mode).expect("custom output mode must be valid JSON");
-        assert_eq!(mode["start"], "@START:{}\n");
-        assert_eq!(mode["success"], "@DONE:{}\n");
-        assert_eq!(mode["skip"], "@SKIP:{}\n");
-        assert_eq!(mode["progress"], "?\n");
-        assert_eq!(mode["progress-total"], "{3}%\n");
+        assert_eq!(mode["start"], "@GRAB:test-run:START:{}\n");
+        assert_eq!(mode["success"], "@GRAB:test-run:DONE:{}\n");
+        assert_eq!(mode["skip"], "@GRAB:test-run:SKIP:{}\n");
+        assert_eq!(mode["progress"], "@GRAB:test-run:PROGRESS:?\n");
+        assert_eq!(mode["progress-total"], "@GRAB:test-run:PROGRESS:{3}%\n");
     }
 
     #[test]

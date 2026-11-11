@@ -1724,10 +1724,12 @@ done
         // Unsupported, failed, or empty gallery-dl results retain yt-dlp's
         // stable single-video and playlist paths.
         assert_eq!(
-            route_for_collection(true, 3, None, None),ProbeOutcome::VideoYtDlp
+            route_for_collection(true, 3, None, None),
+            ProbeOutcome::VideoYtDlp
         );
         assert_eq!(
-            route_for_collection(true, 0, Some(&[]), None),ProbeOutcome::VideoYtDlp
+            route_for_collection(true, 0, Some(&[]), None),
+            ProbeOutcome::VideoYtDlp
         );
         assert_eq!(
             route_for_collection(false, 0, None, None),
@@ -1748,7 +1750,8 @@ done
         assert_eq!(route(false, Some(&video), None), ProbeOutcome::Gallery);
         assert_eq!(route(true, Some(&unknown), None), ProbeOutcome::Gallery);
         assert_eq!(
-            route(true, None, None),ProbeOutcome::VideoYtDlp
+            route(true, None, None),
+            ProbeOutcome::VideoYtDlp
         );
         assert_eq!(route(false, None, None), ProbeOutcome::None);
         assert_eq!(route(false, Some(&[]), None), ProbeOutcome::None);

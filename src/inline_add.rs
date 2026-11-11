@@ -60,6 +60,14 @@ impl PublicHostLeaseScope {
     fn is_current(&self, generation: u64) -> bool {
         self.generation == generation && self.hosts.is_some()
     }
+
+    /// Keep active host policies alive for requests that outlive the card.
+    fn clone_leases(&self) -> Vec<std::sync::Arc<crate::download_net::PublicResolutionLease>> {
+        self.hosts
+            .as_ref()
+            .map(crate::download_net::PublicResolutionSet::clone_leases)
+            .unwrap_or_default()
+    }
 }
 
 type PublicHostLeases = Rc<RefCell<PublicHostLeaseScope>>;
@@ -2773,6 +2781,7 @@ fn wire_video_preview(step: Rc<VideoStep>) {
     // Counts are internal now; no numeric count is shown in the UI.
     {
         let card_rc = step.gallery_card.clone();
+        let public_host_leases = Rc::clone(&step.public_host_leases);
         step.gallery_filter
             .connect_active_name_notify(move |toggle| {
                 let filter = match toggle.active_name().as_deref() {
@@ -2793,6 +2802,10 @@ fn wire_video_preview(step: Rc<VideoStep>) {
                     }
                 };
                 if needs_count {
+                    // The count can outlive the Add card. Give its Tokio task
+                    // independent lease clones so closing the card does not
+                    // relax DNS policy while gallery-dl is still running.
+                    let count_host_leases = public_host_leases.borrow().clone_leases();
                     let card_rc = card_rc.clone();
                     glib::spawn_future_local(async move {
                         let url_for_count = url.clone();
@@ -2804,6 +2817,7 @@ fn wire_video_preview(step: Rc<VideoStep>) {
                                 .proxy_config();
                         let count_result = crate::runtime::tokio_rt()
                             .spawn(async move {
+                                let _count_host_leases = count_host_leases;
                                 let proxy = match proxy {
                                     Ok(proxy) => proxy,
                                     Err(error) => {
@@ -5327,6 +5341,27 @@ mod tests {
             is_live: false,
             fetchable: true,
         })
+    }
+
+    #[test]
+    fn card_lease_snapshot_survives_scope_close_until_background_work_finishes() {
+        let _policy = crate::download_net::isolate_untrusted_handoff_policy_for_test();
+        let mut scope = PublicHostLeaseScope::default();
+        scope.activate();
+
+        let lease = crate::download_net::acquire_public_resolution("card-count.example")
+            .expect("public card host lease");
+        scope
+            .hosts
+            .as_mut()
+            .expect("active card scope")
+            .insert(lease.host().to_string(), lease);
+        let background = scope.clone_leases();
+
+        scope.close();
+        assert!(crate::download_net::is_untrusted_handoff_host("card-count.example"));
+        drop(background);
+        assert!(!crate::download_net::is_untrusted_handoff_host("card-count.example"));
     }
 
     #[test]

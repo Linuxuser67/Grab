@@ -5103,7 +5103,10 @@ impl DownloadManager {
         if let Some(handle) = self.running.borrow().get(&id) {
             handle.abort();
         }
-        self.running.borrow_mut().remove(&id);
+        // Keep the scheduler reservation until the pump observes the worker's
+        // closed channel and removes this entry. Removing it here lets a retry
+        // of the same row start while the aborted worker is still tearing down
+        // its process group and destination state.
         true
     }
 

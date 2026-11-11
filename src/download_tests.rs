@@ -1823,7 +1823,7 @@ fn native_manifest_without_a_supplied_name_uses_a_title_from_the_manifest_url() 
 }
 
 #[test]
-fn native_manifest_accepts_mp4_and_mkv_but_rejects_other_containers() {
+fn native_manifest_accepts_mp4_mkv_and_ts_but_rejects_other_containers() {
     let (_queue_lock, _main_loop_lock) = test_locks();
     let dest = std::env::temp_dir().join(format!("grab-manifest-name-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dest);
@@ -1843,11 +1843,47 @@ fn native_manifest_accepts_mp4_and_mkv_but_rejects_other_containers() {
         .enqueue_manifest_staged(source.clone(), &directory, Some("Stream.mkv"), &[])
         .expect("MKV native manifest row");
     assert_eq!(mkv.filename(), "Stream.mkv");
+    let ts = manager
+        .enqueue_manifest_staged(source.clone(), &directory, Some("Stream.ts"), &[])
+        .expect("MPEG-TS native manifest row");
+    assert_eq!(ts.filename(), "Stream.ts");
+    let mp4 = manager
+        .enqueue_manifest_staged(source.clone(), &directory, Some("Stream.mp4"), &[])
+        .expect("MP4 native manifest row");
+    assert_eq!(mp4.filename(), "Stream.mp4");
     let unsupported = manager.enqueue_manifest_staged(source, &directory, Some("Stream.webm"), &[]);
     assert!(unsupported.is_err());
-    assert_eq!(manager.store().n_items(), 1);
+    assert_eq!(manager.store().n_items(), 3);
 
     let _ = std::fs::remove_dir_all(&dest);
+}
+
+#[test]
+fn native_manifest_filename_preserves_the_stem_and_uses_the_detected_container() {
+    assert_eq!(
+        DownloadManager::manifest_filename_for_extension(
+            Some("movie.part.MKV"),
+            "https://cdn.example.test/ignored.m3u8",
+            "ts",
+        ),
+        "movie.part.ts"
+    );
+    assert_eq!(
+        DownloadManager::manifest_filename_for_extension(
+            Some("movie.webm"),
+            "https://cdn.example.test/ignored.mpd",
+            "mp4",
+        ),
+        "movie.mp4"
+    );
+    assert_eq!(
+        DownloadManager::manifest_filename_for_extension(
+            None,
+            "https://cdn.example.test/my_video.m3u8?token=secret",
+            "ts",
+        ),
+        "my video.ts"
+    );
 }
 
 #[test]

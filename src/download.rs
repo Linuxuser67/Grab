@@ -1639,7 +1639,9 @@ impl DownloadManager {
             ..
         }) = self.video_source(owner.id())
         else {
-            return Err(gettext("The existing playlist collection is no longer available"));
+            return Err(gettext(
+                "The existing playlist collection is no longer available",
+            ));
         };
         if state.dest_dir != dest_dir {
             return Err(gettext(

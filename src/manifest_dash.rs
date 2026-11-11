@@ -504,10 +504,18 @@ pub(crate) fn parse_dash_manifest_at(
     // representation metadata and SegmentList compatibility flags.
     let role_metadata = dash_roles::representation_metadata(body.as_bytes(), MAX_REPRESENTATIONS)
         .ok_or(DashError::Parse)?;
-    if role_metadata.has_unsupported_segment_list_timing_attributes
-        || (is_dynamic
-            && (role_metadata.has_nonzero_segment_list_presentation_time_offset
-                || role_metadata.has_nondefault_segment_list_start_number))
+    if role_metadata.has_unsupported_segment_list_timing_attributes {
+        return Err(DashError::UnsupportedAddressing);
+    }
+    if is_dynamic
+        && (role_metadata.has_invalid_segment_list_presentation_time_offset
+            || role_metadata.has_invalid_segment_list_start_number)
+    {
+        return Err(DashError::Parse);
+    }
+    if is_dynamic
+        && (role_metadata.has_nonzero_segment_list_presentation_time_offset
+            || role_metadata.has_nondefault_segment_list_start_number)
     {
         return Err(DashError::UnsupportedAddressing);
     }

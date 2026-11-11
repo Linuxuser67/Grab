@@ -38,7 +38,9 @@ pub(super) struct RepresentationMetadata {
     pub(super) periods: Vec<PeriodRepresentationMetadata>,
     pub(super) has_unsupported_segment_list_timing_attributes: bool,
     pub(super) has_nonzero_segment_list_presentation_time_offset: bool,
+    pub(super) has_invalid_segment_list_presentation_time_offset: bool,
     pub(super) has_nondefault_segment_list_start_number: bool,
+    pub(super) has_invalid_segment_list_start_number: bool,
 }
 
 #[derive(Default)]
@@ -51,7 +53,9 @@ struct MetadataState {
     adaptation_list_ato: Option<String>,
     has_unsupported_segment_list_timing_attributes: bool,
     has_nonzero_segment_list_presentation_time_offset: bool,
+    has_invalid_segment_list_presentation_time_offset: bool,
     has_nondefault_segment_list_start_number: bool,
+    has_invalid_segment_list_start_number: bool,
 }
 
 #[derive(Clone, Copy)]
@@ -118,7 +122,10 @@ pub(super) fn representation_metadata(
             .has_unsupported_segment_list_timing_attributes,
         has_nonzero_segment_list_presentation_time_offset: state
             .has_nonzero_segment_list_presentation_time_offset,
+        has_invalid_segment_list_presentation_time_offset: state
+            .has_invalid_segment_list_presentation_time_offset,
         has_nondefault_segment_list_start_number: state.has_nondefault_segment_list_start_number,
+        has_invalid_segment_list_start_number: state.has_invalid_segment_list_start_number,
     })
 }
 
@@ -156,12 +163,20 @@ fn push_element(
                 state.has_unsupported_segment_list_timing_attributes = true;
             } else if key == "presentationTimeOffset" {
                 let value = attribute.normalized_value(XmlVersion::Implicit1_0).ok()?;
-                let offset = value.parse::<u64>().ok()?;
-                state.has_nonzero_segment_list_presentation_time_offset |= offset != 0;
+                match value.parse::<u64>() {
+                    Ok(offset) => {
+                        state.has_nonzero_segment_list_presentation_time_offset |= offset != 0;
+                    }
+                    Err(_) => state.has_invalid_segment_list_presentation_time_offset = true,
+                }
             } else if key == "startNumber" {
                 let value = attribute.normalized_value(XmlVersion::Implicit1_0).ok()?;
-                let number = value.parse::<u64>().ok()?;
-                state.has_nondefault_segment_list_start_number |= number != 1;
+                match value.parse::<u64>() {
+                    Ok(number) => {
+                        state.has_nondefault_segment_list_start_number |= number != 1;
+                    }
+                    Err(_) => state.has_invalid_segment_list_start_number = true,
+                }
             }
         }
     }

@@ -1034,7 +1034,9 @@ fn unique_cloned_group_id(pathway_id: &str, group_id: &str, used: &mut HashSet<S
 }
 
 fn hls_pathway_clone_fits_limit(current: usize, added: usize, limit: usize) -> bool {
-    current.checked_add(added).is_some_and(|total| total <= limit)
+    current
+        .checked_add(added)
+        .is_some_and(|total| total <= limit)
 }
 
 fn apply_hls_pathway_clones(
@@ -1109,11 +1111,13 @@ fn apply_hls_pathway_clones(
         let added_rendition_count = base_audio_count.checked_add(base_subtitle_count);
         if !current_rendition_count
             .zip(added_rendition_count)
-            .is_some_and(|(current, added)| hls_pathway_clone_fits_limit(
-                current,
-                added,
-                crate::manifest::MAX_HLS_MASTER_RENDITIONS,
-            ))
+            .is_some_and(|(current, added)| {
+                hls_pathway_clone_fits_limit(
+                    current,
+                    added,
+                    crate::manifest::MAX_HLS_MASTER_RENDITIONS,
+                )
+            })
         {
             tracing::debug!(
                 pathway_id = %pathway_clone.id,
@@ -1583,9 +1587,7 @@ fn schedule_hls_steering_retry(steering: &mut crate::manifest::HlsContentSteerin
         .max(INITIAL_HLS_STEERING_RETRY_BACKOFF)
         .min(MAX_HLS_STEERING_RETRY_BACKOFF);
     steering.refresh_at = Instant::now().checked_add(delay);
-    steering.refresh_failure_backoff = delay
-        .saturating_mul(2)
-        .min(MAX_HLS_STEERING_RETRY_BACKOFF);
+    steering.refresh_failure_backoff = delay.saturating_mul(2).min(MAX_HLS_STEERING_RETRY_BACKOFF);
 }
 
 async fn apply_hls_content_steering(
@@ -1747,7 +1749,7 @@ async fn refresh_hls_content_steering_with_timeout_and_policy(
                 ?timeout,
                 "HLS Content Steering refresh exceeded its live-loop budget; retaining current Pathway"
             );
-            schedule_hls_steering_refresh(steering);
+            schedule_hls_steering_retry(steering);
             Ok(None)
         }
     }
@@ -4299,8 +4301,18 @@ video/b.m3u8
             3_900,
             "the thirteenth 300-variant clone would exceed the 4096-entry cap",
         );
-        assert!(master.variants.iter().any(|variant| variant.pathway_id == "clone-12"));
-        assert!(!master.variants.iter().any(|variant| variant.pathway_id == "clone-13"));
+        assert!(
+            master
+                .variants
+                .iter()
+                .any(|variant| variant.pathway_id == "clone-12")
+        );
+        assert!(
+            !master
+                .variants
+                .iter()
+                .any(|variant| variant.pathway_id == "clone-13")
+        );
     }
 
     #[test]
@@ -4329,7 +4341,12 @@ video/b.m3u8
 
         assert_eq!(master.variants.len(), 2);
         assert_eq!(master.audio_renditions.len(), audio_count);
-        assert!(!master.variants.iter().any(|variant| variant.pathway_id == "clone-a"));
+        assert!(
+            !master
+                .variants
+                .iter()
+                .any(|variant| variant.pathway_id == "clone-a")
+        );
     }
 
     #[test]

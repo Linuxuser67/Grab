@@ -1696,7 +1696,9 @@ pub(crate) fn parse_hls_master_playlist(
         })
         .collect::<Result<Vec<_>, ManifestError>>()?;
 
-    if audio_renditions.len().saturating_add(subtitle_renditions.len())
+    if audio_renditions
+        .len()
+        .saturating_add(subtitle_renditions.len())
         > MAX_HLS_MASTER_RENDITIONS
     {
         return Err(ManifestError::Parse(

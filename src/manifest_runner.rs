@@ -1934,7 +1934,12 @@ async fn finalize_manifest_download(
                     .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-')
         })
         .unwrap_or("und");
-    let subtitle_sidecar = if subtitle_input.is_some() && !job.embed_subs {
+    let output_container = ManifestOutputContainer::from_path(&job.dest)?;
+    // MPEG-TS has inconsistent support for the WebVTT/TTML inputs normalized
+    // by Grab. Preserve the selected subtitles as an SRT sidecar instead of
+    // silently dropping them or failing the whole stream download.
+    let embed_subtitles = embed_manifest_subtitles(job.embed_subs, output_container);
+    let subtitle_sidecar = if subtitle_input.is_some() && !embed_subtitles {
         Some(crate::video_staging::sidecar_path_for(
             &output_part,
             subtitle_language,
@@ -1974,7 +1979,7 @@ async fn finalize_manifest_download(
         preserve_hls_input_timestamps,
         SubtitleOutput {
             input: subtitle_input.as_deref(),
-            embed: job.embed_subs,
+            embed: embed_subtitles,
             sidecar: subtitle_sidecar.as_deref(),
         },
         &output_part,
@@ -2272,6 +2277,11 @@ pub(crate) async fn detect_output_extension(
         }
         Tracks::DashLiveOffline { .. } => None,
     }
+}
+
+/// Whether the selected subtitle rendition can be embedded in the chosen container.
+fn embed_manifest_subtitles(embed_requested: bool, output_container: ManifestOutputContainer) -> bool {
+    embed_requested && output_container != ManifestOutputContainer::MpegTs
 }
 
 /// Infer the output from a DASH video Representation's declared media type.
@@ -4949,6 +4959,14 @@ segment-2.m4s
                 .is_err(),
             "a retry must not silently change the committed byte count"
         );
+    }
+
+    #[test]
+    fn mpegts_subtitles_use_a_sidecar_when_embedding_was_requested() {
+        assert!(!embed_manifest_subtitles(true, ManifestOutputContainer::MpegTs));
+        assert!(!embed_manifest_subtitles(false, ManifestOutputContainer::Mp4));
+        assert!(embed_manifest_subtitles(true, ManifestOutputContainer::Mp4));
+        assert!(embed_manifest_subtitles(true, ManifestOutputContainer::Matroska));
     }
 
     #[test]

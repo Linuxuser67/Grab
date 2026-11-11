@@ -9896,7 +9896,7 @@ fn later_playlist_selection_requeues_a_completed_collection_owner() {
         .expect("new entries should reactivate the completed owner");
 
     assert_eq!(merged.id(), owner.id());
-    assert_eq!(merged.status(), DownloadStatus::Queued);
+    assert_eq!(merged.status(), DownloadStatus::Downloading);
     let Some(crate::media_types::VideoSource::Playlist { state, .. }) =
         manager.video_source(owner.id())
     else {

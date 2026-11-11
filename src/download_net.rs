@@ -422,11 +422,10 @@ pub(crate) fn is_local_or_private_host(host: &str) -> bool {
     }
 }
 
-/// Exact hostnames originating from untrusted browser handoffs, with the
-/// number of queue rows that still need the restriction. Entries with no rows
-/// (an open card) keep the host registered; the cap fails closed rather than
-/// evicting one that a card may still use. Redirects use a separate
-/// resolver-only set.
+/// Exact hosts originating from untrusted browser handoffs. Queue rows and
+/// active cards, manifests, and transfers hold explicit references; only
+/// unreferenced provisional registrations expire. Redirects use a separate
+/// per-client resolver-only set.
 #[derive(Clone, Copy)]
 struct HandoffHostEntry {
     references: usize,
@@ -456,7 +455,7 @@ impl Drop for PublicResolutionLease {
     }
 }
 
-/// Per-manifest child hosts; leases are released with the transfer state.
+/// Per-operation child hosts; leases are released with the operation state.
 #[derive(Default)]
 pub(crate) struct PublicResolutionSet {
     hosts: std::collections::HashSet<String>,
@@ -466,10 +465,6 @@ pub(crate) struct PublicResolutionSet {
 impl PublicResolutionSet {
     pub(crate) fn len(&self) -> usize {
         self.hosts.len()
-    }
-
-    pub(crate) fn is_empty(&self) -> bool {
-        self.hosts.is_empty()
     }
 
     pub(crate) fn contains(&self, host: &str) -> bool {
@@ -785,8 +780,9 @@ pub(crate) fn inherit_public_resolution_for_manifest(
     Ok(())
 }
 
-/// Single-child convenience path for callers that are not expanding a
-/// collection; no collection-local limit applies.
+/// Single-child provisional registration for callers that do not expand a
+/// collection. The caller must acquire a lease or retain a queue-row reference
+/// before yielding control; otherwise the zero-reference entry expires.
 pub(crate) fn inherit_public_resolution(parent_url: &str, child_url: &str) -> bool {
     if !url::Url::parse(parent_url)
         .ok()

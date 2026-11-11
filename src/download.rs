@@ -1986,8 +1986,8 @@ impl DownloadManager {
         }
     }
 
-    /// Drop the row's policy reference. The host stays registered so an open
-    /// card or another row on the same host keeps its protection.
+    /// Drop this row's policy reference. Any remaining card, transfer, or
+    /// queue-row lease keeps the host registered until its owner is done.
     fn release_public_policy(item: &DownloadItem) {
         if item.public_only()
             && let Some(host) = url::Url::parse(&item.url())

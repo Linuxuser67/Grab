@@ -3936,18 +3936,13 @@ impl DownloadManager {
         if self.gallery_file_row_index.borrow().contains_key(&owner_id) {
             return true;
         }
-        let Some(state_indices) = self
-            .gallery_jobs
-            .borrow()
-            .get(&owner_id)
-            .map(|job| {
-                job.file_rows
-                    .iter()
-                    .enumerate()
-                    .map(|(index, state)| (state.path.clone(), index))
-                    .collect::<HashMap<_, _>>()
-            })
-        else {
+        let Some(state_indices) = self.gallery_jobs.borrow().get(&owner_id).map(|job| {
+            job.file_rows
+                .iter()
+                .enumerate()
+                .map(|(index, state)| (state.path.clone(), index))
+                .collect::<HashMap<_, _>>()
+        }) else {
             return false;
         };
 

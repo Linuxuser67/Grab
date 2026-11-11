@@ -646,7 +646,7 @@ pub fn build_window(
                 .collect::<HashSet<_>>();
             let collection_owners = items
                 .iter()
-                .filter(|item| item.is_gallery() || item.is_collection_owner())
+                .filter(|item| item.is_collection_parent())
                 .map(|item| (item.id(), item.clone()))
                 .collect::<HashMap<_, _>>();
             let effective_status = |item: &crate::download::DownloadItem| {
@@ -663,7 +663,7 @@ pub fn build_window(
 
             let mut group_sizes = HashMap::<u64, usize>::new();
             for item in &items {
-                if (item.is_gallery() || item.is_collection_owner())
+                if item.is_collection_parent()
                     && collection_owner_ids.contains(&item.id())
                 {
                     continue;
@@ -678,7 +678,7 @@ pub fn build_window(
             };
             let mut all_groups = HashMap::<u64, Vec<crate::download::DownloadItem>>::new();
             for item in &items {
-                if (item.is_gallery() || item.is_collection_owner())
+                if item.is_collection_parent()
                     && collection_owner_ids.contains(&item.id())
                 {
                     continue;
@@ -704,7 +704,7 @@ pub fn build_window(
             for item in &items {
                 // Represent an owner with one expandable collection header,
                 // never a second ordinary download row.
-                if (item.is_gallery() || item.is_collection_owner())
+                if item.is_collection_parent()
                     && collection_owner_ids.contains(&item.id())
                 {
                     continue;
@@ -792,7 +792,7 @@ pub fn build_window(
             }
 
             for item in &items {
-                if (item.is_gallery() || item.is_collection_owner())
+                if item.is_collection_parent()
                     && collection_owner_ids.contains(&item.id())
                 {
                     continue;

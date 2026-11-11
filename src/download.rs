@@ -5200,7 +5200,7 @@ impl DownloadManager {
         let _ = self.cancel_inner(id, true, Stop::Discard);
         if self
             .find(id)
-            .is_some_and(|item| item.is_gallery() || item.is_collection_owner())
+            .is_some_and(|item| item.is_collection_parent())
         {
             let children = self
                 .items()
@@ -5685,7 +5685,7 @@ impl DownloadManager {
                         .and_then(|group| self.find(group.id()))
                         .is_some_and(|owner| owner.status() == DownloadStatus::Done);
                 }
-                if item.is_gallery() || item.is_collection_owner() {
+                if item.is_collection_parent() {
                     return !self.items().any(|child| {
                         child.is_collection_child()
                             && child.group().is_some_and(|group| group.id() == item.id())
@@ -5721,7 +5721,7 @@ impl DownloadManager {
     /// Drop one finished row: files stay on disk. Unlike `remove` there is nothing to cancel, snapshot or clean.
     fn drop_finished_row(&self, id: u64) {
         if let Some(item) = self.find(id)
-            && (item.is_gallery() || item.is_collection_owner())
+            && item.is_collection_parent()
         {
             let children = self
                 .items()

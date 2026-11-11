@@ -92,6 +92,11 @@ glib::wrapper! {
 }
 
 impl DownloadItem {
+    /// Whether this row owns the queue entry for a gallery or video collection.
+    pub(crate) fn is_collection_parent(&self) -> bool {
+        self.is_gallery() || self.is_collection_owner()
+    }
+
     /// Whether this row is a passive file entry owned by a collection process.
     pub(crate) fn is_collection_child(&self) -> bool {
         self.is_gallery_child()
@@ -135,5 +140,33 @@ impl DownloadItem {
         } else {
             std::path::Path::new(&output_dir).join(self.filename())
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::DownloadItem;
+
+    #[test]
+    fn collection_parent_includes_gallery_and_video_owners_only() {
+        let gallery = DownloadItem::new(1, "https://example.com/gallery", "Gallery", "/tmp");
+        gallery.set_is_gallery(true);
+        assert!(gallery.is_collection_parent());
+
+        let playlist = DownloadItem::new(
+            2,
+            "https://example.com/playlist",
+            "Playlist",
+            "/tmp",
+        );
+        playlist.set_is_collection_owner(true);
+        assert!(playlist.is_collection_parent());
+
+        let child = DownloadItem::new(3, "https://example.com/item", "Item", "/tmp");
+        child.set_is_collection_child(true);
+        assert!(!child.is_collection_parent());
+
+        let ordinary = DownloadItem::new(4, "https://example.com/file", "File", "/tmp");
+        assert!(!ordinary.is_collection_parent());
     }
 }

@@ -1876,6 +1876,16 @@ mod group_row_tests {
         assert!(group.remove_btn.is_visible());
         assert!(group.remove_btn.is_sensitive());
 
+        // The aggregate bar moves between the full-width collapsed
+        // presentation and the compact header slot without losing progress.
+        group.has_progress.set(true);
+        group.expand_button.set_active(true);
+        assert!(group.inline_progress.is_visible());
+        assert!(!group.collapsed_progress.is_visible());
+        group.expand_button.set_active(false);
+        assert!(!group.inline_progress.is_visible());
+        assert!(group.collapsed_progress.is_visible());
+
         group.update(&[], &[], &manager);
         assert!(!group.open_folder_btn.is_visible());
         assert!(!group.remove_btn.is_visible());

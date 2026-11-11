@@ -38,7 +38,7 @@ use std::collections::VecDeque;
 use std::sync::Arc;
 use std::rc::Rc;
 
-type PublicHostLeases = Rc<RefCell<crate::download_net::PublicResolutionSet>>;
+type PublicHostLeases = Rc<RefCell<Option<crate::download_net::PublicResolutionSet>>>;
 
 /// Tokio detaches a task when its JoinHandle is dropped. Own the abort handle
 /// as well, so aborting the enclosing GLib lookup doesn't leave dual probes
@@ -1268,6 +1268,11 @@ fn inherit_public_resolution_for_card(
     parent_url: &str,
     child_url: &str,
 ) -> bool {
+    let mut lease_scope = step.public_host_leases.borrow_mut();
+    let Some(hosts) = lease_scope.as_mut() else {
+        // The card was closed while this lookup or picker was in flight.
+        return false;
+    };
     let parent_host = url::Url::parse(parent_url)
         .ok()
         .and_then(|url| url.host_str().map(str::to_string));
@@ -1283,16 +1288,15 @@ fn inherit_public_resolution_for_card(
     else {
         return false;
     };
-    if step.public_host_leases.borrow().contains(&child_host) {
+    let canonical_child_host = child_host.trim_end_matches('.').to_ascii_lowercase();
+    if hosts.contains(&canonical_child_host) {
         return true;
     }
     let Some(lease) = crate::download_net::acquire_public_resolution(&child_host) else {
         return false;
     };
     let canonical_host = lease.host().to_string();
-    step.public_host_leases
-        .borrow_mut()
-        .insert(canonical_host, lease);
+    hosts.insert(canonical_host, lease);
     true
 }
 
@@ -1823,12 +1827,17 @@ fn push_playlist_items_page(
                         crate::video_probe::story_segment_url(&page_url, &entry.id)
                             .unwrap_or_else(|| entry.page_url.to_string());
                     let inheritance = {
-                        let mut seen_hosts = guarded_child_hosts.borrow_mut();
-                        crate::download_net::inherit_public_resolution_for_collection(
-                            &page_url,
-                            &item_page_url,
-                            &mut seen_hosts,
-                        )
+                        let mut lease_scope = guarded_child_hosts.borrow_mut();
+                        match lease_scope.as_mut() {
+                            Some(seen_hosts) => {
+                                crate::download_net::inherit_public_resolution_for_collection(
+                                    &page_url,
+                                    &item_page_url,
+                                    seen_hosts,
+                                )
+                            }
+                            None => Err(crate::download_net::CollectionHostError::UnsafeDestination),
+                        }
                     };
                     match inheritance {
                         Ok(()) => {}
@@ -2327,6 +2336,9 @@ impl AddCard {
     /// Open With). An already-open card only gains focus — no reset;
     /// collapse always resets, so a reopened card starts fresh.
     pub fn open(&self, initial_url: Option<String>) {
+        self.public_host_leases
+            .borrow_mut()
+            .get_or_insert_with(crate::download_net::PublicResolutionSet::default);
         (self.open)(initial_url)
     }
 
@@ -2355,8 +2367,10 @@ impl AddCard {
         lease: Arc<crate::download_net::PublicResolutionLease>,
     ) {
         let host = lease.host().to_string();
-        if !self.public_host_leases.borrow().contains(&host) {
-            self.public_host_leases.borrow_mut().insert(host, lease);
+        let mut scope = self.public_host_leases.borrow_mut();
+        let hosts = scope.get_or_insert_with(crate::download_net::PublicResolutionSet::default);
+        if !hosts.contains(&host) {
+            hosts.insert(host, lease);
         }
     }
 
@@ -2368,6 +2382,9 @@ impl AddCard {
         bytes: Vec<u8>,
         entries: Vec<crate::torrent::TorrentFileEntry>,
     ) {
+        self.public_host_leases
+            .borrow_mut()
+            .get_or_insert_with(crate::download_net::PublicResolutionSet::default);
         (self.open_torrent_picker)(file_name, bytes, entries)
     }
 }
@@ -4290,9 +4307,7 @@ pub fn build_add_card(manager: Rc<DownloadManager>) -> AddCard {
     } = build_url_controls();
     form.append(&url_bar);
     form.append(&opts_revealer);
-    let public_host_leases = Rc::new(RefCell::new(
-        crate::download_net::PublicResolutionSet::default(),
-    ));
+    let public_host_leases: PublicHostLeases = Rc::new(RefCell::new(None));
     let (step, video_revealer, video_install_btn, video_retry_btn) = build_video_preview(
         &url_entry,
         spinner_paintable,
@@ -4362,7 +4377,7 @@ pub fn build_add_card(manager: Rc<DownloadManager>) -> AddCard {
         Rc::new(move || {
             // A closed card no longer has any outstanding requests or preview
             // actions that need the browser-handoff DNS policy.
-            public_host_leases.borrow_mut().clear();
+            public_host_leases.borrow_mut().take();
             open_state.set(false);
             // Cancel any in-flight probe and drop its state; the
             // generation bump discards the stale completion.

@@ -477,10 +477,6 @@ impl PublicResolutionSet {
         }
     }
 
-    pub(crate) fn clear(&mut self) {
-        self.hosts.clear();
-        self.leases.clear();
-    }
 }
 
 /// Maximum number of distinct child hosts one untrusted collection may add.

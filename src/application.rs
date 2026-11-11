@@ -351,10 +351,10 @@ async fn route_open_uri(
     // like a pasted URL. Plain enqueue would save a raw page — or a manifest
     // — as a file.
     if handoff_goes_to_card(&uri) {
+        add_card.open(Some(uri.as_str().to_string()));
         if let Some(lease) = public_host_lease {
             add_card.retain_public_resolution_lease(lease);
         }
-        add_card.open(Some(uri.as_str().to_string()));
         return Routed::OpenedCard;
     }
     match enqueue_direct_handoff(&manager, &uri).await {

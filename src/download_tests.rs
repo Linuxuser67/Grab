@@ -1859,6 +1859,34 @@ fn native_manifest_accepts_mp4_mkv_and_ts_but_rejects_other_containers() {
 }
 
 #[test]
+fn yt_dlp_fallback_corrects_an_auto_selected_ts_name_to_its_real_container() {
+    let destination = std::path::Path::new("/downloads/movie.ts");
+    assert_eq!(
+        crate::video_argv::container_truth_name(
+            destination,
+            std::path::Path::new("/staging/movie.mp4"),
+        )
+        .as_deref(),
+        Some("movie.mp4")
+    );
+    assert_eq!(
+        crate::video_argv::container_truth_name(
+            destination,
+            std::path::Path::new("/staging/movie.mkv"),
+        )
+        .as_deref(),
+        Some("movie.mkv")
+    );
+    assert_eq!(
+        crate::video_argv::container_truth_name(
+            destination,
+            std::path::Path::new("/staging/movie.ts"),
+        ),
+        None
+    );
+}
+
+#[test]
 fn native_manifest_filename_preserves_the_stem_and_uses_the_detected_container() {
     assert_eq!(
         DownloadManager::manifest_filename_for_extension(

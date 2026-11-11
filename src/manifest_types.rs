@@ -36,7 +36,7 @@ pub(crate) struct ManifestSubtitleChoice {
 /// Parsed native presentation, before the user's representation selection is applied.
 #[derive(Clone, Debug)]
 pub(crate) enum NativeManifest {
-    HlsMaster(HlsMasterPlan),
+    HlsMaster(Box<HlsMasterPlan>),
     HlsMedia(Box<HlsPlan>),
     Dash(DashManifestPlan),
 }

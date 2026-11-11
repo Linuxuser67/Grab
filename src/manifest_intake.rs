@@ -32,6 +32,10 @@ const MANIFEST_RETRY_BASE_DELAY: Duration = Duration::from_millis(250);
 
 const MAX_HLS_STEERING_MANIFEST_BYTES: usize = 256 * 1024;
 const MAX_HLS_STEERING_PATHWAY_CLONES: usize = 16;
+/// First retry delay after an optional Content Steering refresh fails.
+const INITIAL_HLS_STEERING_RETRY_BACKOFF: Duration = Duration::from_secs(5);
+/// Maximum delay between optional Content Steering retries.
+const MAX_HLS_STEERING_RETRY_BACKOFF: Duration = Duration::from_secs(300);
 /// App fallback interval when no valid steering TTL has been obtained.
 const DEFAULT_HLS_STEERING_TTL: Duration = Duration::from_secs(300);
 /// Prevent a zero-second TTL from producing a busy refresh loop.
@@ -1029,6 +1033,12 @@ fn unique_cloned_group_id(pathway_id: &str, group_id: &str, used: &mut HashSet<S
     unreachable!("u32 suffix space is finite and all IDs are exhausted")
 }
 
+fn hls_pathway_clone_fits_limit(current: usize, added: usize, limit: usize) -> bool {
+    current
+        .checked_add(added)
+        .is_some_and(|total| total <= limit)
+}
+
 fn apply_hls_pathway_clones(
     master: &mut crate::manifest::HlsMasterPlan,
     clones: &[HlsPathwayClone],
@@ -1042,16 +1052,35 @@ fn apply_hls_pathway_clones(
         if pathway_ids.contains(pathway_clone.id.as_str()) {
             continue;
         }
+        let base_variant_count = master
+            .variants
+            .iter()
+            .filter(|variant| variant.pathway_id == pathway_clone.base_id)
+            .count();
+        if base_variant_count == 0 {
+            // Unknown BASE-ID values are ignored as required by Content Steering.
+            continue;
+        }
+        if !hls_pathway_clone_fits_limit(
+            master.variants.len(),
+            base_variant_count,
+            crate::manifest::MAX_HLS_MASTER_VARIANTS,
+        ) {
+            tracing::debug!(
+                pathway_id = %pathway_clone.id,
+                current_variants = master.variants.len(),
+                added_variants = base_variant_count,
+                limit = crate::manifest::MAX_HLS_MASTER_VARIANTS,
+                "skipping HLS Pathway clone because the expanded variant limit would be exceeded"
+            );
+            continue;
+        }
         let base_variants = master
             .variants
             .iter()
             .filter(|variant| variant.pathway_id == pathway_clone.base_id)
             .cloned()
             .collect::<Vec<_>>();
-        if base_variants.is_empty() {
-            // Unknown BASE-ID values are ignored as required by Content Steering.
-            continue;
-        }
 
         let audio_groups = base_variants
             .iter()
@@ -1065,6 +1094,42 @@ fn apply_hls_pathway_clones(
             .iter()
             .filter_map(|variant| variant.video_rendition_group.clone())
             .collect::<HashSet<_>>();
+        let base_audio_count = master
+            .audio_renditions
+            .iter()
+            .filter(|rendition| audio_groups.contains(rendition.group_id.as_str()))
+            .count();
+        let base_subtitle_count = master
+            .subtitle_renditions
+            .iter()
+            .filter(|rendition| subtitle_groups.contains(rendition.group_id.as_str()))
+            .count();
+        let current_rendition_count = master
+            .audio_renditions
+            .len()
+            .checked_add(master.subtitle_renditions.len());
+        let added_rendition_count = base_audio_count.checked_add(base_subtitle_count);
+        if !current_rendition_count
+            .zip(added_rendition_count)
+            .is_some_and(|(current, added)| {
+                hls_pathway_clone_fits_limit(
+                    current,
+                    added,
+                    crate::manifest::MAX_HLS_MASTER_RENDITIONS,
+                )
+            })
+        {
+            tracing::debug!(
+                pathway_id = %pathway_clone.id,
+                current_audio_renditions = master.audio_renditions.len(),
+                added_audio_renditions = base_audio_count,
+                current_subtitle_renditions = master.subtitle_renditions.len(),
+                added_subtitle_renditions = base_subtitle_count,
+                limit = crate::manifest::MAX_HLS_MASTER_RENDITIONS,
+                "skipping HLS Pathway clone because the expanded rendition limit would be exceeded"
+            );
+            continue;
+        }
         let mut used_audio_groups = master
             .audio_renditions
             .iter()
@@ -1108,7 +1173,6 @@ fn apply_hls_pathway_clones(
             })
             .collect::<HashMap<_, _>>();
 
-        let base_variant_count = base_variants.len();
         let cloned_variants = base_variants
             .into_iter()
             .map(|mut variant| {
@@ -1510,8 +1574,20 @@ fn schedule_hls_steering_refresh(steering: &mut crate::manifest::HlsContentSteer
     if steering.ttl.is_zero() {
         steering.ttl = DEFAULT_HLS_STEERING_TTL;
     }
+    steering.refresh_failure_backoff = Duration::ZERO;
     steering.refresh_at =
         Instant::now().checked_add(steering.ttl.max(MIN_HLS_STEERING_REFRESH_INTERVAL));
+}
+
+/// Schedule a bounded retry for a failed optional steering refresh instead of
+/// immediately reusing a server-supplied TTL that may be one second.
+fn schedule_hls_steering_retry(steering: &mut crate::manifest::HlsContentSteering) {
+    let delay = steering
+        .refresh_failure_backoff
+        .max(INITIAL_HLS_STEERING_RETRY_BACKOFF)
+        .min(MAX_HLS_STEERING_RETRY_BACKOFF);
+    steering.refresh_at = Instant::now().checked_add(delay);
+    steering.refresh_failure_backoff = delay.saturating_mul(2).min(MAX_HLS_STEERING_RETRY_BACKOFF);
 }
 
 async fn apply_hls_content_steering(
@@ -1673,7 +1749,7 @@ async fn refresh_hls_content_steering_with_timeout_and_policy(
                 ?timeout,
                 "HLS Content Steering refresh exceeded its live-loop budget; retaining current Pathway"
             );
-            schedule_hls_steering_refresh(steering);
+            schedule_hls_steering_retry(steering);
             Ok(None)
         }
     }
@@ -1700,7 +1776,7 @@ async fn refresh_hls_content_steering_with_policy(
         return Ok(None);
     }
     let Some(base_master) = steering.base_master.as_deref().cloned() else {
-        schedule_hls_steering_refresh(steering);
+        schedule_hls_steering_retry(steering);
         return Ok(None);
     };
     let master_url = match steering
@@ -1710,7 +1786,7 @@ async fn refresh_hls_content_steering_with_policy(
     {
         Some(url) => url,
         None => {
-            schedule_hls_steering_refresh(steering);
+            schedule_hls_steering_retry(steering);
             return Ok(None);
         }
     };
@@ -1734,7 +1810,7 @@ async fn refresh_hls_content_steering_with_policy(
                 error = %error,
                 "HLS Content Steering refresh failed; retaining current Pathway"
             );
-            schedule_hls_steering_refresh(steering);
+            schedule_hls_steering_retry(steering);
             return Ok(None);
         }
     };
@@ -1747,7 +1823,7 @@ async fn refresh_hls_content_steering_with_policy(
                 error = %error,
                 "HLS Content Steering refresh was invalid; retaining current Pathway"
             );
-            schedule_hls_steering_refresh(steering);
+            schedule_hls_steering_retry(steering);
             return Ok(None);
         }
     };
@@ -1763,7 +1839,7 @@ async fn refresh_hls_content_steering_with_policy(
                 error = %error,
                 "HLS Content Steering RELOAD-URI was rejected; retaining current Pathway"
             );
-            schedule_hls_steering_refresh(steering);
+            schedule_hls_steering_retry(steering);
             return Ok(None);
         }
     };
@@ -1774,7 +1850,7 @@ async fn refresh_hls_content_steering_with_policy(
             error = %error,
             "refreshed HLS Content Steering identities are invalid; retaining current Pathway"
         );
-        schedule_hls_steering_refresh(steering);
+        schedule_hls_steering_retry(steering);
         return Ok(None);
     }
     let mut priority = manifest.pathway_priority.clone();
@@ -1793,7 +1869,7 @@ async fn refresh_hls_content_steering_with_policy(
             error = %error,
             "refreshed HLS Content Steering Pathway is unavailable; retaining current Pathway"
         );
-        schedule_hls_steering_refresh(steering);
+        schedule_hls_steering_retry(steering);
         return Ok(None);
     }
     inherit_hls_master_query_parameters(&master_url, &mut master);
@@ -1802,12 +1878,12 @@ async fn refresh_hls_content_steering_with_policy(
             error = %error,
             "refreshed HLS Content Steering tracks are invalid; retaining current Pathway"
         );
-        schedule_hls_steering_refresh(steering);
+        schedule_hls_steering_retry(steering);
         return Ok(None);
     }
 
     let Some(mut next_state) = master.content_steering.take() else {
-        schedule_hls_steering_refresh(steering);
+        schedule_hls_steering_retry(steering);
         return Ok(None);
     };
     next_state.active_pathway_id = master
@@ -1822,7 +1898,7 @@ async fn refresh_hls_content_steering_with_policy(
 
     Ok(Some(crate::manifest_types::ManifestLookup {
         source_url: master_url.to_string(),
-        manifest: crate::manifest_types::NativeManifest::HlsMaster(master),
+        manifest: crate::manifest_types::NativeManifest::HlsMaster(Box::new(master)),
     }))
 }
 
@@ -1898,7 +1974,7 @@ async fn lookup_with_client_policy(
                     .await?;
                     inherit_hls_master_query_parameters(&final_url, &mut master);
                     validate_hls_stable_track_ids(&master)?;
-                    NativeManifest::HlsMaster(master)
+                    NativeManifest::HlsMaster(Box::new(master))
                 }
                 Err(crate::manifest::ManifestError::ExpectedMasterPlaylist) => {
                     let mut plan =
@@ -2972,7 +3048,7 @@ highest.m3u8
         .expect("valid HLS master playlist");
         let lookup = ManifestLookup {
             source_url: "https://cdn.example.test/master.m3u8".to_string(),
-            manifest: NativeManifest::HlsMaster(master),
+            manifest: NativeManifest::HlsMaster(Box::new(master)),
         };
 
         let preferred = lookup
@@ -3022,7 +3098,7 @@ second.m3u8
         let original_keys = hls_variant_keys(&master.variants);
         let lookup = ManifestLookup {
             source_url: "https://cdn.example.test/master.m3u8".to_string(),
-            manifest: NativeManifest::HlsMaster(master),
+            manifest: NativeManifest::HlsMaster(Box::new(master)),
         };
 
         let choices = lookup.choices();
@@ -3096,7 +3172,7 @@ video/es.m3u8
         let video_keys = hls_variant_keys(&master.variants);
         let lookup = ManifestLookup {
             source_url: "https://cdn.example.test/master.m3u8".to_string(),
-            manifest: NativeManifest::HlsMaster(master),
+            manifest: NativeManifest::HlsMaster(Box::new(master)),
         };
 
         let english_video_key = crate::media_types::ManifestRepresentationKey::from(
@@ -3559,7 +3635,7 @@ video/720.m3u8
             .to_string();
         let lookup = ManifestLookup {
             source_url: "https://cdn.example.test/master.m3u8".to_string(),
-            manifest: NativeManifest::HlsMaster(master),
+            manifest: NativeManifest::HlsMaster(Box::new(master)),
         };
 
         assert!(
@@ -3663,7 +3739,7 @@ video/720.m3u8
         assert_ne!(keys[0], keys[1], "distinct tracks get distinct keys");
         let lookup = ManifestLookup {
             source_url: "https://video.twimg.com/amplify_video/6/pl/master.m3u8".to_string(),
-            manifest: NativeManifest::HlsMaster(master),
+            manifest: NativeManifest::HlsMaster(Box::new(master)),
         };
         assert_eq!(
             lookup.choices().len(),
@@ -3877,7 +3953,7 @@ video/720.m3u8
         .expect("valid HLS master");
         let lookup = ManifestLookup {
             source_url: "https://cache-preview.example.test/master.m3u8".to_string(),
-            manifest: crate::manifest_types::NativeManifest::HlsMaster(master),
+            manifest: crate::manifest_types::NativeManifest::HlsMaster(Box::new(master)),
         };
         assert!(is_cacheable_static_manifest(&lookup));
     }
@@ -3964,7 +4040,7 @@ video/720.m3u8
         .expect("valid HLS master with query-bearing source");
         let source_master_lookup = ManifestLookup {
             source_url: "https://cache-preview.example.test/master.m3u8?f=418899&srv=server&i=0.4&sp=500&p1=one&p2=two&asn=327934".to_string(),
-            manifest: crate::manifest_types::NativeManifest::HlsMaster(source_signed_master),
+            manifest: crate::manifest_types::NativeManifest::HlsMaster(Box::new(source_signed_master)),
         };
         assert!(
             !is_cacheable_static_manifest(&source_master_lookup),
@@ -4000,7 +4076,7 @@ video/720.m3u8?f=418899&srv=server&i=0.4&sp=500&p1=one&p2=two&asn=327934
         .expect("valid HLS master");
         let master_lookup = ManifestLookup {
             source_url: "https://cache-preview.example.test/master.m3u8".to_string(),
-            manifest: crate::manifest_types::NativeManifest::HlsMaster(signed_master),
+            manifest: crate::manifest_types::NativeManifest::HlsMaster(Box::new(signed_master)),
         };
         assert!(
             !is_cacheable_static_manifest(&master_lookup),
@@ -4188,6 +4264,120 @@ video/b.m3u8
 "#,
         )
         .expect("valid Content Steering master")
+    }
+
+    #[test]
+    fn pathway_clone_chain_stops_before_the_cumulative_variant_limit() {
+        let mut master = master();
+        let mut base = master.variants[0].clone();
+        base.pathway_id = "cdn-a".to_string();
+        let mut variants = Vec::with_capacity(300);
+        for index in 0..300 {
+            let mut variant = base.clone();
+            variant.stable_variant_id = Some(format!("main-{index}"));
+            variants.push(variant);
+        }
+        master.variants = variants.into_boxed_slice();
+
+        let clones = (1..=16)
+            .map(|index| HlsPathwayClone {
+                base_id: if index == 1 {
+                    "cdn-a".to_string()
+                } else {
+                    format!("clone-{}", index - 1)
+                },
+                id: format!("clone-{index}"),
+                host: Some(format!("cdn-{index}.example.test")),
+                params: BTreeMap::new(),
+                per_variant_uris: HashMap::new(),
+                per_rendition_uris: HashMap::new(),
+            })
+            .collect::<Vec<_>>();
+
+        apply_hls_pathway_clones(&mut master, &clones);
+
+        assert_eq!(
+            master.variants.len(),
+            3_900,
+            "the thirteenth 300-variant clone would exceed the 4096-entry cap",
+        );
+        assert!(
+            master
+                .variants
+                .iter()
+                .any(|variant| variant.pathway_id == "clone-12")
+        );
+        assert!(
+            !master
+                .variants
+                .iter()
+                .any(|variant| variant.pathway_id == "clone-13")
+        );
+    }
+
+    #[test]
+    fn clone_is_skipped_when_rendition_fanout_would_exceed_its_limit() {
+        let mut master = master();
+        let base_audio = master.audio_renditions[0].clone();
+        let audio_count =
+            crate::manifest::MAX_HLS_MASTER_RENDITIONS - master.subtitle_renditions.len();
+        let mut audio = Vec::with_capacity(audio_count);
+        for index in 0..audio_count {
+            let mut rendition = base_audio.clone();
+            rendition.name = format!("English {index}");
+            audio.push(rendition);
+        }
+        master.audio_renditions = audio.into_boxed_slice();
+
+        let clone = HlsPathwayClone {
+            base_id: "cdn-a".to_string(),
+            id: "clone-a".to_string(),
+            host: Some("backup.example.test".to_string()),
+            params: BTreeMap::new(),
+            per_variant_uris: HashMap::new(),
+            per_rendition_uris: HashMap::new(),
+        };
+        apply_hls_pathway_clones(&mut master, &[clone]);
+
+        assert_eq!(master.variants.len(), 2);
+        assert_eq!(master.audio_renditions.len(), audio_count);
+        assert!(
+            !master
+                .variants
+                .iter()
+                .any(|variant| variant.pathway_id == "clone-a")
+        );
+    }
+
+    #[test]
+    fn steering_failure_backoff_grows_to_five_minutes_and_success_resets_it() {
+        let mut steering = crate::manifest::HlsContentSteering::new(
+            Url::parse("https://cdn.example.test/steering").expect("steering URL"),
+            None,
+        );
+        let expected_next = [
+            Duration::from_secs(10),
+            Duration::from_secs(20),
+            Duration::from_secs(40),
+            Duration::from_secs(80),
+            Duration::from_secs(160),
+            Duration::from_secs(300),
+            Duration::from_secs(300),
+        ];
+        for expected in expected_next {
+            let before = Instant::now();
+            schedule_hls_steering_retry(&mut steering);
+            assert_eq!(steering.refresh_failure_backoff, expected);
+            let deadline = steering.refresh_at.expect("retry deadline");
+            assert!(deadline >= before + INITIAL_HLS_STEERING_RETRY_BACKOFF);
+            assert!(deadline <= Instant::now() + MAX_HLS_STEERING_RETRY_BACKOFF);
+        }
+
+        steering.ttl = Duration::from_secs(1);
+        schedule_hls_steering_refresh(&mut steering);
+        assert_eq!(steering.refresh_failure_backoff, Duration::ZERO);
+        let deadline = steering.refresh_at.expect("successful refresh deadline");
+        assert!(deadline <= Instant::now() + Duration::from_secs(1));
     }
 
     #[test]

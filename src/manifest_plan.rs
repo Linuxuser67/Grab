@@ -1142,7 +1142,7 @@ video/combined.m3u8
             .expect("Camera B has a stable selection key");
         let lookup = ManifestLookup {
             source_url: "https://cdn.example.test/master.m3u8".to_string(),
-            manifest: NativeManifest::HlsMaster(master),
+            manifest: NativeManifest::HlsMaster(Box::new(master)),
         };
         let choices = lookup.choices();
         assert_eq!(choices.len(), 2);
@@ -1197,7 +1197,7 @@ video/720.m3u8
         );
         let lookup = ManifestLookup {
             source_url: "https://cdn.example.test/master.m3u8".to_string(),
-            manifest: NativeManifest::HlsMaster(master),
+            manifest: NativeManifest::HlsMaster(Box::new(master)),
         };
 
         let choices = lookup.subtitle_choices(&video_key);
@@ -1319,7 +1319,7 @@ video/720.m3u8
         );
         let lookup = ManifestLookup {
             source_url: "https://cdn.example.test/master.m3u8".to_string(),
-            manifest: NativeManifest::HlsMaster(master),
+            manifest: NativeManifest::HlsMaster(Box::new(master)),
         };
         let source = lookup
             .selected_source(&video_key, Some(&audio_key), None)
@@ -1355,7 +1355,7 @@ video/720.m3u8
         .expect("valid HLS master playlist");
         let lookup = ManifestLookup {
             source_url: "https://cdn.example.test/master.m3u8".to_string(),
-            manifest: NativeManifest::HlsMaster(master),
+            manifest: NativeManifest::HlsMaster(Box::new(master)),
         };
         let source = ManifestSource {
             url: lookup.source_url.clone(),

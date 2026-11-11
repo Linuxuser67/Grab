@@ -99,7 +99,7 @@ fn to_cached_playlist(key: &str, info: &PlaylistInfo) -> Option<Playlist> {
         return None;
     };
     if !matches!(page_url.scheme(), "http" | "https")
-        || crate::video_cache::has_known_rotating_auth_query(&page_url)
+        || crate::video_cache::has_untrusted_cache_query(&page_url)
         || info.title.trim().is_empty()
         || info.items.iter().any(|item| {
             let Ok(url) = url::Url::parse(&item.page_url) else {
@@ -108,7 +108,7 @@ fn to_cached_playlist(key: &str, info: &PlaylistInfo) -> Option<Playlist> {
             !matches!(url.scheme(), "http" | "https")
                 || item.id.is_empty()
                 || item.title.trim().is_empty()
-                || crate::video_cache::has_known_rotating_auth_query(&url)
+                || crate::video_cache::has_untrusted_cache_query(&url)
         })
     {
         return None;
@@ -163,7 +163,7 @@ fn from_cached_playlist(key: &str, playlist: Playlist) -> Option<PlaylistInfo> {
         return None;
     };
     if !matches!(parsed_page_url.scheme(), "http" | "https")
-        || crate::video_cache::has_known_rotating_auth_query(&parsed_page_url)
+        || crate::video_cache::has_untrusted_cache_query(&parsed_page_url)
         || playlist.title.trim().is_empty()
         || playlist.entries.is_empty()
         || playlist.entries.len() >= crate::video_probe::MAX_PLAYLIST_ITEMS
@@ -185,7 +185,7 @@ fn from_cached_playlist(key: &str, playlist: Playlist) -> Option<PlaylistInfo> {
             if entry.id.is_empty()
                 || entry.title.trim().is_empty()
                 || !matches!(parsed_url.scheme(), "http" | "https")
-                || crate::video_cache::has_known_rotating_auth_query(&parsed_url)
+                || crate::video_cache::has_untrusted_cache_query(&parsed_url)
             {
                 return None;
             }
@@ -373,6 +373,31 @@ mod tests {
     fn rotating_collection_urls_are_not_cached() {
         let mut info = playlist();
         info.page_url = "https://example.test/playlist?token=rotating".into();
+        assert!(to_cached_playlist("key", &info).is_none());
+    }
+
+    #[test]
+    fn unknown_query_parameters_are_never_persisted_in_playlist_urls() {
+        let mut info = playlist();
+        info.page_url = "https://example.test/playlist?session_ticket=opaque".into();
+        assert!(to_cached_playlist("key", &info).is_none());
+
+        let mut info = playlist();
+        info.items[0].page_url =
+            "https://example.test/watch?delivery_key=opaque".into();
+        assert!(to_cached_playlist("key", &info).is_none());
+    }
+
+    #[test]
+    fn stable_youtube_playlist_identifiers_remain_cacheable() {
+        let mut info = playlist();
+        info.page_url = "https://www.youtube.com/playlist?list=PL123".into();
+        info.items[0].page_url =
+            "https://www.youtube.com/watch?v=video123&list=PL123&index=1".into();
+        assert!(to_cached_playlist("key", &info).is_some());
+
+        info.items[0].page_url =
+            "https://www.youtube.com/watch?v=video123&signature=opaque".into();
         assert!(to_cached_playlist("key", &info).is_none());
     }
 

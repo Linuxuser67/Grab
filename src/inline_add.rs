@@ -1785,14 +1785,10 @@ fn push_playlist_items_page(
                 error_caption.set_visible(true);
                 return;
             }
-            // Multiple items from one collection share a titled subfolder,
-            // torrent-style; a lone item keeps the flat behavior. The base
-            // dir is pure path manipulation; the subdir creation and readdir
-            // can stall on network mounts, so they run off the GTK thread.
+            // Every playlist is one collection owner, including a playlist
+            // with only one entry. Create and inspect its titled subfolder off
+            // GTK because destination paths may be network mounts.
             let base_dir = manager.resolve_dir(Some(&dest_dir.borrow()));
-            // The folder belongs to the collection, so retain it even when
-            // only one entry is selected from a multi-entry playlist.
-            let multi = playlist.total > 1;
             let title = playlist.title.clone();
             // The directory worker consumes `title`; retain a separate copy
             // for the collection metadata assigned after the async import.
@@ -1821,18 +1817,33 @@ fn push_playlist_items_page(
                 };
                 // Create one titled output folder per playlist. The listing
                 // runs off GTK because downloads may live on network mounts.
-                let (dir, existing) = match gio::spawn_blocking(move || {
-                    let dir = if multi {
-                        crate::file_names::collection_subdir(&base_dir, &title)
-                    } else {
-                        base_dir
-                    };
-                    crate::video_staging::try_dir_file_names(std::path::Path::new(&dir))
-                        .map(|existing| (dir, existing))
+                let dir = match gio::spawn_blocking(move || {
+                    let dir = crate::file_names::collection_subdir(&base_dir, &title);
+                    let path = std::path::Path::new(&dir);
+                    let metadata = std::fs::symlink_metadata(path)?;
+                    if metadata.file_type().is_symlink() || !metadata.is_dir() {
+                        return Err(std::io::Error::from(std::io::ErrorKind::NotADirectory));
+                    }
+                    crate::video_staging::try_dir_file_names(path).map(|_| ())?;
+                    Ok::<_, std::io::Error>(dir)
                 })
                 .await
                 {
-                    Ok(Ok(prepared)) => prepared,
+                    Ok(Ok(dir)) => dir,
+                    Ok(Err(error))
+                        if matches!(
+                            error.kind(),
+                            std::io::ErrorKind::NotFound | std::io::ErrorKind::NotADirectory
+                        ) =>
+                    {
+                        error_caption.set_text(&gettext(
+                            "The playlist destination folder is invalid",
+                        ));
+                        error_caption.set_visible(true);
+                        add_btn.set_sensitive(true);
+                        reveal_picker_on_error();
+                        return;
+                    }
                     Ok(Err(error)) => {
                         tracing::warn!("playlist import directory listing failed: {error}");
                         error_caption.set_text(&gettext("Could not inspect the download folder"));
@@ -1906,42 +1917,15 @@ fn push_playlist_items_page(
                         }
                     }
 
-                    if multi {
-                        playlist_files.push(crate::media_types::VideoPlaylistFile {
-                            id: entry.id.to_string(),
-                            title: entry.title.to_string(),
-                            page_url: item_page_url,
-                            status: crate::download_store::DownloadStatus::Queued,
-                            progress: 0.0,
-                            path: None,
-                        });
-                        accepted_indices.push(*i);
-                    } else {
-                        let settings = manager.settings();
-                        let name = default_name_for(settings, &entry.title, audio_only);
-                        match manager.enqueue_video_staged(
-                            &item_page_url,
-                            &dir,
-                            Some(&name),
-                            crate::media_types::VideoChoices {
-                                quality: manager.settings().video_quality(),
-                                audio_only,
-                                video_format_id: None,
-                                is_live: false,
-                                playlist_item_id: Some(entry.id.to_string()),
-                            },
-                            &existing,
-                        ) {
-                            Ok(enqueued) => {
-                                apply_scheduled_at(&enqueued, scheduled_at);
-                                accepted_indices.push(*i);
-                            }
-                            Err(error) => {
-                                failed = Some(error);
-                                break;
-                            }
-                        }
-                    }
+                    playlist_files.push(crate::media_types::VideoPlaylistFile {
+                        id: entry.id.to_string(),
+                        title: entry.title.to_string(),
+                        page_url: item_page_url,
+                        status: crate::download_store::DownloadStatus::Queued,
+                        progress: 0.0,
+                        path: None,
+                    });
+                    accepted_indices.push(*i);
                 }
 
                 if let Some(error) = failed {
@@ -1970,7 +1954,7 @@ fn push_playlist_items_page(
                     return;
                 }
 
-                if multi && !playlist_files.is_empty() {
+                if !playlist_files.is_empty() {
                     match manager.enqueue_video_playlist_staged(
                         &page_url,
                         &group_title,

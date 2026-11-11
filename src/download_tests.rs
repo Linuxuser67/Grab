@@ -9697,6 +9697,48 @@ fn deleting_native_manifest_download_preserves_replaced_parts_and_metadata() {
 }
 
 #[test]
+fn single_entry_playlist_staged_import_keeps_collection_owner() {
+    let (_q, _l) = test_locks();
+    let _qf = test_queue_file("playlist-single-owner");
+    let manager = DownloadManager::new(gio::ListStore::new::<DownloadItem>(), test_settings());
+
+    let root = std::env::temp_dir().join(format!("grab-playlist-single-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&root);
+    let destination = root.join("One-entry playlist");
+    std::fs::create_dir_all(&destination).expect("create playlist destination");
+
+    let owner = manager
+        .enqueue_video_playlist_staged(
+            "https://example.com/playlist",
+            "One-entry playlist",
+            destination.to_str().expect("UTF-8 temporary path"),
+            vec![crate::media_types::VideoPlaylistFile {
+                id: "only-entry".to_string(),
+                title: "Only entry".to_string(),
+                page_url: "https://example.com/playlist/only-entry".to_string(),
+                status: DownloadStatus::Queued,
+                progress: 0.0,
+                path: None,
+            }],
+            "best".to_string(),
+            false,
+        )
+        .expect("one-entry playlist should enqueue as a collection");
+
+    assert!(owner.is_collection_owner());
+    assert_eq!(owner.gallery_file_count(), 1);
+    let children = manager
+        .items()
+        .filter(DownloadItem::is_collection_child)
+        .collect::<Vec<_>>();
+    assert_eq!(children.len(), 1);
+    assert_eq!(children[0].collection_file_id(), "only-entry");
+    assert_eq!(children[0].group(), owner.group());
+
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[test]
 fn playlist_staged_import_does_not_duplicate_identical_entry() {
     let (_q, _l) = test_locks();
     let _qf = test_queue_file("playlist-dedupe");

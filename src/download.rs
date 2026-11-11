@@ -1491,7 +1491,9 @@ impl DownloadManager {
     ) -> Result<DownloadItem, String> {
         let url = normalize_url(page_url)?;
         let output_dir = std::path::Path::new(dest_dir);
-        if !output_dir.is_absolute() || !output_dir.is_dir() || output_dir.file_name().is_none() {
+        // The picker validates the directory on GIO's blocking pool. Keep this
+        // GTK-thread commit path limited to path-shape checks.
+        if !output_dir.is_absolute() || output_dir.file_name().is_none() {
             return Err(gettext("The playlist destination folder is invalid"));
         }
         let parent_dir = output_dir

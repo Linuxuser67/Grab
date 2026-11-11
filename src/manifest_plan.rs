@@ -435,9 +435,7 @@ impl ManifestLookup {
                 .iter()
                 .find(|representation| representation.matches_key(representation_key.as_str()))
                 .and_then(|representation| {
-                    dash_output_container_extension(
-                        representation.mime_type.as_deref(),
-                    )
+                    dash_output_container_extension(representation.mime_type.as_deref())
                 })
                 .map(str::to_owned),
         };

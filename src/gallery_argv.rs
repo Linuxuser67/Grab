@@ -156,6 +156,7 @@ pub fn download_argv(
         speed_limit,
         range,
         None,
+        "test-run",
     )
 }
 
@@ -173,6 +174,7 @@ pub fn download_argv_with_proxy(
     speed_limit: Option<u64>,
     range: Option<&str>,
     proxy: Option<&crate::net_types::ResolvedProxy>,
+    event_nonce: &str,
 ) -> Vec<String> {
     let mut argv = vec![
         tool.to_string_lossy().to_string(),
@@ -194,7 +196,17 @@ pub fn download_argv_with_proxy(
         "-o".to_string(),
         // All three path templates are required by gallery-dl's CustomOutput.
         // Omitting one triggers AttributeError in output.py _make_func.
-        r##"output.mode={"start":"@START:{}\n","success":"@DONE:{}\n","skip":"@SKIP:{}\n","progress":"?\n","progress-total":"{3}%\n"}"##.to_string(),
+        // Lifecycle markers are scoped to this invocation to avoid parsing log text as events.
+        format!(
+            "output.mode={}",
+            serde_json::json!({
+                "start": format!("@GRAB:{event_nonce}:START:{{}}\\n"),
+                "success": format!("@GRAB:{event_nonce}:DONE:{{}}\\n"),
+                "skip": format!("@GRAB:{event_nonce}:SKIP:{{}}\\n"),
+                "progress": "?\\n",
+                "progress-total": "{3}%\\n",
+            })
+        ),
     ];
     if let Some(cookies) = cookies_file {
         argv.push("-C".to_string());
@@ -631,6 +643,7 @@ mod tests {
             None,
             None,
             Some(&proxy),
+            "test-run",
         );
         let b = count_argv_with_proxy(
             &tool(),

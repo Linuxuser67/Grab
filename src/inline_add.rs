@@ -3203,11 +3203,7 @@ fn build_video_lookup_kicker(context: VideoLookupContext) -> VideoLookupKick {
                     return;
                 }
                 let (ytdlp_result, gallery_error, probe_json_key, native_fallback_reason) =
-                    match outcome {           ytdlp_result,
-                        gallery_error,
-                        probe_json_key,
-                        native_fallback_reason,
-                    ) = match outcome {
+                    match outcome {    
                         MediaLookupOutcome::Manifest(manifest) => {
                             let manifest = *manifest;
                             let preferred_quality = settings_b.video_quality();

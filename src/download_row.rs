@@ -54,7 +54,7 @@ mod imp {
         /// Ephemeral read-only file row owned by one collection process.
         /// These rows are recreated from persisted owner state after restore.
         #[property(get, set)]
-        pub is_gallery_child: Cell<bool>,
+        pub is_collection_child: Cell<bool>,
         /// Stable extractor/file identity for yt-dlp playlist child rows.
         #[property(get, set)]
         pub collection_file_id: RefCell<String>,
@@ -95,16 +95,6 @@ impl DownloadItem {
     /// Whether this row owns the queue entry for a gallery or video collection.
     pub(crate) fn is_collection_parent(&self) -> bool {
         self.is_gallery() || self.is_collection_owner()
-    }
-
-    /// Whether this row is a passive file entry owned by a collection process.
-    pub(crate) fn is_collection_child(&self) -> bool {
-        self.is_gallery_child()
-    }
-
-    /// Mark a row as a passive collection file entry.
-    pub(crate) fn set_is_collection_child(&self, value: bool) {
-        self.set_is_gallery_child(value);
     }
 
     /// The collection this child belongs to, if it was queued from a multi-item source.

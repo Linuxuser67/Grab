@@ -244,8 +244,8 @@ fn ffmpeg_encoder_available(encoder: &str) -> bool {
         .any(|line| line.split_whitespace().nth(1) == Some(encoder))
 }
 
-#[test]
-fn mainstream_apple_hls_profiles_remux_with_stream_copy() {
+#[tokio::test]
+async fn mainstream_apple_hls_profiles_remux_with_stream_copy() {
     if !tools_available() {
         return;
     }
@@ -486,6 +486,50 @@ fn mainstream_apple_hls_profiles_remux_with_stream_copy() {
                 stream_info.contains(&format!("color_transfer={expected_transfer}")),
                 "{} lost HDR transfer metadata: {stream_info}",
                 profile.name
+            );
+        }
+
+        // Exercise the production finalizer on the common H.264/AAC HLS
+        // profile. MPEG-TS output must preserve both encoded streams.
+        if profile.name == "avc-aac-sdr" {
+            let ts_output = root.path().join("avc-aac-sdr-copy.ts");
+            let (_abort_tx, mut abort) = tokio::sync::oneshot::channel();
+            assert!(
+                run_ffmpeg(
+                    Path::new("ffmpeg"),
+                    &playlist_path,
+                    None,
+                    SubtitleOutput::default(),
+                    &ts_output,
+                    &mut abort,
+                )
+                .await
+                .expect("finalize Apple HLS fixture as MPEG-TS"),
+                "MPEG-TS FFmpeg finalization unexpectedly aborted"
+            );
+            assert_has_audio_and_video(Path::new("ffprobe"), &ts_output);
+
+            let ts_probe = Command::new("ffprobe")
+                .args([
+                    "-v",
+                    "error",
+                    "-show_entries",
+                    "format=format_name:stream=codec_name",
+                    "-of",
+                    "default=noprint_wrappers=1",
+                ])
+                .arg(&ts_output)
+                .output()
+                .expect("probe MPEG-TS output");
+            assert_command_succeeded(&ts_probe, "ffprobe rejected MPEG-TS output");
+            let ts_info = String::from_utf8_lossy(&ts_probe.stdout);
+            assert!(
+                ts_info.contains("format_name=mpegts"),
+                "finalized TS file does not use the MPEG-TS muxer: {ts_info}"
+            );
+            assert!(
+                ts_info.contains("codec_name=h264") && ts_info.contains("codec_name=aac"),
+                "MPEG-TS finalization changed the H.264/AAC streams: {ts_info}"
             );
         }
     }

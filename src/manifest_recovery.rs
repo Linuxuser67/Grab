@@ -309,6 +309,10 @@ mod tests {
         );
         assert_ne!(
             baseline,
+            fingerprint(&original, "ts", true).expect("MPEG-TS fingerprint")
+        );
+        assert_ne!(
+            baseline,
             fingerprint(&original, "mp4", false).expect("external subtitle fingerprint")
         );
     }

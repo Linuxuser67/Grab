@@ -1715,12 +1715,9 @@ fn native_manifest_source_survives_queue_restore() {
 
     let id = {
         let manager = DownloadManager::new(gio::ListStore::new::<DownloadItem>(), test_settings());
-        let (item, guard) = glib::MainContext::default()
-            .block_on(manager.enqueue_manifest_async_batched(
-                source.clone(),
-                Some(&dest_string),
-                Some("Stream.mp4"),
-            ))
+        let guard = manager.batch_guard();
+        let item = manager
+            .enqueue_manifest_staged(source.clone(), &dest_string, Some("Stream.mkv"), &[])
             .expect("native manifest enqueue");
         item.set_status(DownloadStatus::Paused);
         let id = item.id();
@@ -1823,7 +1820,7 @@ fn native_manifest_without_a_supplied_name_uses_a_title_from_the_manifest_url() 
 }
 
 #[test]
-fn native_manifest_accepts_mp4_and_mkv_but_rejects_other_containers() {
+fn native_manifest_accepts_mp4_mkv_and_ts_but_rejects_other_containers() {
     let (_queue_lock, _main_loop_lock) = test_locks();
     let dest = std::env::temp_dir().join(format!("grab-manifest-name-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dest);
@@ -1843,11 +1840,83 @@ fn native_manifest_accepts_mp4_and_mkv_but_rejects_other_containers() {
         .enqueue_manifest_staged(source.clone(), &directory, Some("Stream.mkv"), &[])
         .expect("MKV native manifest row");
     assert_eq!(mkv.filename(), "Stream.mkv");
+    let ts = manager
+        .enqueue_manifest_staged(source.clone(), &directory, Some("Transport.ts"), &[])
+        .expect("MPEG-TS native manifest row");
+    assert_eq!(ts.filename(), "Transport.ts");
+    let mp4 = manager
+        .enqueue_manifest_staged(source.clone(), &directory, Some("Clip.mp4"), &[])
+        .expect("MP4 native manifest row");
+    assert_eq!(mp4.filename(), "Clip.mp4");
     let unsupported = manager.enqueue_manifest_staged(source, &directory, Some("Stream.webm"), &[]);
     assert!(unsupported.is_err());
-    assert_eq!(manager.store().n_items(), 1);
+    assert_eq!(manager.store().n_items(), 3);
 
     let _ = std::fs::remove_dir_all(&dest);
+}
+
+#[test]
+fn yt_dlp_fallback_corrects_an_auto_selected_ts_name_to_its_real_container() {
+    let destination = std::path::Path::new("/downloads/movie.ts");
+    assert_eq!(
+        crate::video_argv::container_truth_name(
+            destination,
+            std::path::Path::new("/staging/movie.mp4"),
+        )
+        .as_deref(),
+        Some("movie.mp4")
+    );
+    assert_eq!(
+        crate::video_argv::container_truth_name(
+            destination,
+            std::path::Path::new("/staging/movie.mkv"),
+        )
+        .as_deref(),
+        Some("movie.mkv")
+    );
+    assert_eq!(
+        crate::video_argv::container_truth_name(
+            destination,
+            std::path::Path::new("/staging/movie.ts"),
+        ),
+        None
+    );
+    assert_eq!(
+        crate::video_argv::container_truth_name(
+            std::path::Path::new("/downloads/movie.mp4"),
+            std::path::Path::new("/staging/movie.ts"),
+        )
+        .as_deref(),
+        Some("movie.ts")
+    );
+}
+
+#[test]
+fn native_manifest_filename_preserves_the_stem_and_uses_the_detected_container() {
+    assert_eq!(
+        DownloadManager::manifest_filename_for_extension(
+            Some("movie.part.MKV"),
+            "https://cdn.example.test/ignored.m3u8",
+            "ts",
+        ),
+        "movie.part.ts"
+    );
+    assert_eq!(
+        DownloadManager::manifest_filename_for_extension(
+            Some("movie.webm"),
+            "https://cdn.example.test/ignored.mpd",
+            "mp4",
+        ),
+        "movie.mp4"
+    );
+    assert_eq!(
+        DownloadManager::manifest_filename_for_extension(
+            None,
+            "https://cdn.example.test/my_video.m3u8?token=secret",
+            "ts",
+        ),
+        "my video.ts"
+    );
 }
 
 #[test]

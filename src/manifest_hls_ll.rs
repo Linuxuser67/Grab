@@ -1634,7 +1634,7 @@ segment.ts
     fn method_none_keeps_unencrypted_complete_segments_on_the_ll_hls_planner() {
         let body = br#"#EXTM3U
 #EXT-X-TARGETDURATION:4
-#EXT-X-SERVER-CONTROL:CAN-BLOCK-RELOAD=YES
+#EXT-X-SERVER-CONTROL:CAN-BLOCK-RELOAD=YES,PART-HOLD-BACK=1.5
 #EXT-X-PART-INF:PART-TARGET=0.5
 #EXT-X-KEY:METHOD=NONE
 #EXTINF:4.0,

@@ -606,10 +606,9 @@ pub(crate) fn has_untrusted_cache_query(url: &url::Url) -> bool {
         return true;
     }
 
-    let Some(query) = url.query().filter(|query| !query.is_empty()) else {
+    if url.query().is_none_or(str::is_empty) {
         return false;
-    };
-    let _ = query;
+    }
 
     let is_youtube_page = matches!(
         url.host_str().map(str::to_ascii_lowercase).as_deref(),

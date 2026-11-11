@@ -3280,7 +3280,12 @@ fn build_video_lookup_kicker(context: VideoLookupContext) -> VideoLookupKick {
                 // outer card flow is polled by GLib, so run this entire backend
                 // lookup as a Tokio task and keep GTK updates on this context.
                 let lookup_url = url.clone();
+                // Keep the browser-handoff DNS policy alive until the detached
+                // Tokio lookup has actually stopped, even when card close
+                // aborts the outer GLib future.
+                let lookup_host_leases = step_b.public_host_leases.borrow().clone_leases();
                 let lookup_task = crate::runtime::tokio_rt().spawn(async move {
+                    let _lookup_host_leases = lookup_host_leases;
                     lookup_media(lookup_url, browser, newest_first, proxy).await
                 });
                 let _abort_lookup_on_drop = AbortTaskOnDrop(lookup_task.abort_handle());
@@ -4790,10 +4795,15 @@ fn make_gallery_picker_opener(
                 }
             };
             let url_c = url.clone();
+            // The enumeration is detached from the card's GLib future. Keep
+            // the current URL and inherited child-host leases alive until the
+            // gallery-dl request exits, including a close/abort race.
+            let enumeration_host_leases = step3.public_host_leases.borrow().clone_leases();
             let (items_tx, mut items_rx) = tokio::sync::mpsc::channel(
                 crate::gallery_probe::GALLERY_ENUMERATION_CHANNEL_CAPACITY,
             );
             let handle = crate::runtime::tokio_rt().spawn(async move {
+                let _enumeration_host_leases = enumeration_host_leases;
                 // Unified auth: handoff jar first, browser export as
                 // fallback (was handoff-only: auth-gated galleries could
                 // list nothing here but download fine).

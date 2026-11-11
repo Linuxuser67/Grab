@@ -4208,36 +4208,17 @@ impl DownloadManager {
             let Some(job) = jobs.get_mut(&owner_id) else {
                 return;
             };
-            if existing_state_index.is_none()
-                && job.file_rows.len() >= crate::gallery_argv::MAX_GALLERY_PERSISTED_FILE_ROWS
-            {
-                // The owner still shows aggregate progress and the child remains
-                // visible in this session; only the persisted per-file projection
-                // is bounded. gallery-dl can announce files again after restore.
-                None
-            } else {
-                let index = existing_state_index.unwrap_or_else(|| {
-                    let index = job.file_rows.len();
-                    job.file_rows.push(crate::gallery_argv::GalleryFileState {
-                        path: path.to_string(),
-                        status,
-                        progress,
-                    });
-                    index
-                });
-                let Some(state) = job.file_rows.get_mut(index) else {
-                    tracing::warn!(
-                        gallery_id = owner_id,
-                        path,
-                        state_index = index,
-                        "gallery file state index is stale; ignoring the update"
-                    );
-                    return;
-                };
-                state.status = status;
-                state.progress = progress;
-                Some(index)
+            let state_index = job.upsert_file_state(path, status, progress, existing_state_index);
+            if existing_state_index.is_some() && state_index.is_none() {
+                tracing::warn!(
+                    gallery_id = owner_id,
+                    path,
+                    state_index = existing_state_index,
+                    "gallery file state index is stale; ignoring the update"
+                );
+                return;
             }
+            state_index
         };
         if let Some(state_index) = state_index
             && existing_state_index.is_none()
@@ -7167,15 +7148,4 @@ impl DownloadManager {
 #[cfg(test)]
 #[path = "download_tests.rs"]
 mod tests;
-
-#[cfg(test)]
-mod gallery_file_row_limit_tests {
-    use crate::gallery_argv::MAX_GALLERY_PERSISTED_FILE_ROWS;
-
-    #[test]
-    fn persisted_gallery_rows_have_a_hard_upper_bound() {
-        assert!(MAX_GALLERY_PERSISTED_FILE_ROWS > 0);
-        assert_eq!(MAX_GALLERY_PERSISTED_FILE_ROWS, 10_000);
-    }
-}
 

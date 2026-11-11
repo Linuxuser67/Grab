@@ -1032,18 +1032,6 @@ async fn refresh_live_hls_pathway(
         return Ok(None);
     }
 
-    // LL-HLS tracks use part identities rather than media-sequence segment
-    // identities. Refresh metadata but do not switch their pathway here.
-    if video.accumulator.is_ll_capture()
-        || audio
-            .as_ref()
-            .is_some_and(|track| track.accumulator.is_ll_capture())
-    {
-        tracing::debug!("HLS Content Steering pathway switch deferred for LL-HLS capture");
-        steering.active_pathway_id = previous_pathway;
-        return Ok(None);
-    }
-
     let mut next_video = if video_changed {
         if let Err(error) =
             guard_manifest_child_url(source_url, &plan.video_url, guarded_child_hosts)

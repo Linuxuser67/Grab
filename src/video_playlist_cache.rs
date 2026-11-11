@@ -389,6 +389,19 @@ mod tests {
     }
 
     #[test]
+    fn cached_legacy_entries_with_unknown_query_parameters_are_rejected() {
+        let key = cache_key("grab-ytdlp-video-v1:legacy");
+        let mut stored = to_cached_playlist(&key, &playlist()).expect("complete playlist");
+        stored.url = Some("https://example.test/playlist?auth_ticket=opaque".into());
+        assert!(from_cached_playlist(&key, stored).is_none());
+
+        let mut stored = to_cached_playlist(&key, &playlist()).expect("complete playlist");
+        stored.entries[0].url =
+            "https://example.test/watch?signature=opaque".into();
+        assert!(from_cached_playlist(&key, stored).is_none());
+    }
+
+    #[test]
     fn stable_youtube_playlist_identifiers_remain_cacheable() {
         let mut info = playlist();
         info.page_url = "https://www.youtube.com/playlist?list=PL123".into();

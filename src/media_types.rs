@@ -103,9 +103,8 @@ pub(crate) struct ManifestSource {
     pub(crate) url: String,
     pub(crate) kind: ManifestKind,
     pub(crate) representation_key: ManifestRepresentationKey,
-    /// Container inferred from metadata already fetched for the Add-card preview.
-    /// Missing means the selected presentation needs the conservative Matroska default.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    /// Transient container hint from the Add-card preview; never part of persisted source identity.
+    #[serde(skip)]
     pub(crate) output_extension: Option<String>,
     /// Missing values preserve the automatic default/first-track behavior of
     /// queue entries created before audio selection was introduced.

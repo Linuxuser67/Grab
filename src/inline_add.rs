@@ -1262,11 +1262,7 @@ fn rebuild_format_options(step: &Rc<VideoStep>, info: &crate::video::VideoInfo, 
 
 /// Retain public-only policy for a resolved child of an untrusted handoff
 /// for as long as the Add card remains open.
-fn inherit_public_resolution_for_card(
-    step: &VideoStep,
-    parent_url: &str,
-    child_url: &str,
-) -> bool {
+fn inherit_public_resolution_for_card(step: &VideoStep, parent_url: &str, child_url: &str) -> bool {
     let mut lease_scope = step.public_host_leases.borrow_mut();
     let Some(hosts) = lease_scope.as_mut() else {
         // The card was closed while this lookup or picker was in flight.

@@ -7,10 +7,10 @@ use gtk4::gio;
 use gtk4::gio::prelude::*;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::path::PathBuf;
-use std::time::{Duration, Instant};
 #[cfg(test)]
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
+use std::time::{Duration, Instant};
 
 #[derive(Debug, Clone, Default)]
 pub struct DownloadOptions {
@@ -432,8 +432,9 @@ struct HandoffHostEntry {
     last_seen: Instant,
 }
 
-static UNTRUSTED_HANDOFF_HOSTS: OnceLock<Mutex<std::collections::BTreeMap<String, HandoffHostEntry>>> =
-    OnceLock::new();
+static UNTRUSTED_HANDOFF_HOSTS: OnceLock<
+    Mutex<std::collections::BTreeMap<String, HandoffHostEntry>>,
+> = OnceLock::new();
 const UNTRUSTED_HANDOFF_HOSTS_CAP: usize = 4096;
 const UNREFERENCED_HANDOFF_HOST_TTL: Duration = Duration::from_secs(15 * 60);
 

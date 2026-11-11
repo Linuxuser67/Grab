@@ -3202,102 +3202,102 @@ fn build_video_lookup_kicker(context: VideoLookupContext) -> VideoLookupKick {
                 if probe_b.borrow().generation != my {
                     return;
                 }
-                let (
-                    ytdlp_result,
-                    gallery_error,
-                    probe_json_key,
-                    native_fallback_reason,
-                ) = match outcome {
-                    MediaLookupOutcome::Manifest(manifest) => {
-                        let manifest = *manifest;
-                        let preferred_quality = settings_b.video_quality();
-                        let subtitle_language = settings_b.subtitle_language();
-                        let preferred_source =
-                            manifest.preferred_source(&preferred_quality, Some(&subtitle_language));
-                        show_manifest_ready(
-                            &step_b,
-                            &lookup_add_b,
-                            Some(manifest),
-                            &preferred_quality,
-                        );
-
-                        if submit_source.automatically_enqueues_manifest()
-                            && settings_b.auto_add_downloads()
-                        {
-                            if let Some(source) = preferred_source {
-                                let filename = step_b.name.text().trim().to_string();
-                                let enqueue_manager = Rc::clone(&manager_b);
-                                let error_step = Rc::clone(&step_b);
-                                let error_lookup_add = Rc::clone(&lookup_add_b);
-                                enqueue_and_close_async(
-                                    &dest_b,
-                                    &close_b,
-                                    scheduled_at_b.get(),
-                                    move |directory| async move {
-                                        enqueue_manager
-                                            .enqueue_manifest_async_batched(
-                                                source,
-                                                directory.as_deref(),
-                                                Some(&filename),
-                                            )
-                                            .await
-                                    },
-                                    move |error| {
-                                        show_video_error(&error_step, error);
-                                        set_lookup_add(&error_lookup_add, true);
-                                    },
-                                );
-                            } else {
-                                show_video_error(
-                                    &step_b,
-                                    &gettext(
-                                        "Could not identify a unique stream representation for automatic download.",
-                                    ),
-                                );
-                                set_lookup_add(&lookup_add_b, true);
+                let (ytdlp_result, gallery_error, probe_json_key, native_fallback_reason) =
+                    match outcome {           ytdlp_result,
+                        gallery_error,
+                        probe_json_key,
+                        native_fallback_reason,
+                    ) = match outcome {
+                        MediaLookupOutcome::Manifest(manifest) => {
+                            let manifest = *manifest;
+                            let preferred_quality = settings_b.video_quality();
+                            let subtitle_language = settings_b.subtitle_language();
+                            let preferred_source =
+                                manifest.preferred_source(&preferred_quality, Some(&subtitle_language));
+                            show_manifest_ready(
+                                &step_b,
+                                &lookup_add_b,
+                                Some(manifest),
+                                &preferred_quality,
+                            );
+    
+                            if submit_source.automatically_enqueues_manifest()
+                                && settings_b.auto_add_downloads()
+                            {
+                                if let Some(source) = preferred_source {
+                                    let filename = step_b.name.text().trim().to_string();
+                                    let enqueue_manager = Rc::clone(&manager_b);
+                                    let error_step = Rc::clone(&step_b);
+                                    let error_lookup_add = Rc::clone(&lookup_add_b);
+                                    enqueue_and_close_async(
+                                        &dest_b,
+                                        &close_b,
+                                        scheduled_at_b.get(),
+                                        move |directory| async move {
+                                            enqueue_manager
+                                                .enqueue_manifest_async_batched(
+                                                    source,
+                                                    directory.as_deref(),
+                                                    Some(&filename),
+                                                )
+                                                .await
+                                        },
+                                        move |error| {
+                                            show_video_error(&error_step, error);
+                                            set_lookup_add(&error_lookup_add, true);
+                                        },
+                                    );
+                                } else {
+                                    show_video_error(
+                                        &step_b,
+                                        &gettext(
+                                            "Could not identify a unique stream representation for automatic download.",
+                                        ),
+                                    );
+                                    set_lookup_add(&lookup_add_b, true);
+                                }
                             }
+                            return;
                         }
-                        return;
-                    }
-                    MediaLookupOutcome::Gallery(items) => {
-                        // Queue creation stays behind the full picker because
-                        // the dual probe may cap the file list.
-                        let card = crate::gallery_card::GalleryCard::new(
-                            items,
-                            Some(crate::gallery_probe::StickyMode::Gallery),
-                            url.clone(),
-                        );
-                        let title = crate::gallery_probe::collection_title(&card.items, &url);
-                        tracing::info!(
-                            files = card.file_count(),
-                            sticky = ?card.sticky_mode(),
-                            "gallery-dl items await user selection"
-                        );
-                        show_gallery_ready(&step_b, card, &title);
-                        set_lookup_add(&lookup_add_b, true);
-                        if settings_b.auto_add_downloads() {
-                            let opener = step_b.gallery_select_opener.borrow().clone();
-                            if let Some(open) = opener {
-                                open();
+                        MediaLookupOutcome::Gallery(items) => {
+                            // Queue creation stays behind the full picker because
+                            // the dual probe may cap the file list.
+                            let card = crate::gallery_card::GalleryCard::new(
+                                items,
+                                Some(crate::gallery_probe::StickyMode::Gallery),
+                                url.clone(),
+                            );
+                            let title = crate::gallery_probe::collection_title(&card.items, &url);
+                            tracing::info!(
+                                files = card.file_count(),
+                                sticky = ?card.sticky_mode(),
+                                "gallery-dl items await user selection"
+                            );
+                            show_gallery_ready(&step_b, card, &title);
+                            set_lookup_add(&lookup_add_b, true);
+                            if settings_b.auto_add_downloads() {
+                                let opener = step_b.gallery_select_opener.borrow().clone();
+                                if let Some(open) = opener {
+                                    open();
+                                }
                             }
+                            return;
                         }
-                        return;
-                    }
-                    MediaLookupOutcome::Video(result) => {
-                        let VideoLookupResult {
-                            probe_json_key,
-                            ytdlp_result,
-                            gallery_error,
-                            native_fallback_reason,
-                        } = *result;
-                        (
-                            ytdlp_result,
-                            gallery_error,
-                            probe_json_key,
-                            native_fallback_reason,
-                        )
-                    }
-                };
+                        MediaLookupOutcome::Video(result) => {
+                            let VideoLookupResult {
+                                probe_json_key,
+                                ytdlp_result,
+                                gallery_error,
+                                native_fallback_reason,
+                            } = *result;
+                            (
+                                ytdlp_result,
+                                gallery_error,
+                                probe_json_key,
+                                native_fallback_reason,
+                            )
+                        }
+                    };
                 match ytdlp_result {
                     Err(e) => {
                         if probe_b.borrow().generation != my {

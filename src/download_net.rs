@@ -472,14 +472,19 @@ impl PublicResolutionSet {
         self.hosts.is_empty()
     }
 
-    fn contains(&self, host: &str) -> bool {
+    pub(crate) fn contains(&self, host: &str) -> bool {
         self.hosts.contains(host)
     }
 
-    fn insert(&mut self, host: String, lease: Arc<PublicResolutionLease>) {
+    pub(crate) fn insert(&mut self, host: String, lease: Arc<PublicResolutionLease>) {
         if self.hosts.insert(host) {
             self.leases.push(lease);
         }
+    }
+
+    pub(crate) fn clear(&mut self) {
+        self.hosts.clear();
+        self.leases.clear();
     }
 }
 
@@ -1260,7 +1265,7 @@ mod tests {
             std::mem::take(&mut *set)
         };
         assert!(require_public_resolution("collection-limit.example"));
-        let mut seen = std::collections::HashSet::new();
+        let mut seen = PublicResolutionSet::default();
         for i in 0..MAX_GUARDED_CHILD_HOSTS_PER_COLLECTION {
             inherit_public_resolution_for_collection(
                 "https://collection-limit.example/list",
@@ -1288,6 +1293,10 @@ mod tests {
         )
         .expect("an already-counted host should remain accepted");
         assert_eq!(seen.len(), MAX_GUARDED_CHILD_HOSTS_PER_COLLECTION);
+        assert!(is_untrusted_handoff_host("child-0.example"));
+        drop(seen);
+        assert!(!is_untrusted_handoff_host("child-0.example"));
+        assert!(is_untrusted_handoff_host("collection-limit.example"));
         *lock_recover(cache) = previous;
     }
 

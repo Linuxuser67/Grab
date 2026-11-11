@@ -38,8 +38,7 @@ use std::collections::{HashMap, VecDeque};
 use std::sync::Arc;
 use std::rc::Rc;
 
-type PublicHostLeases =
-    Rc<RefCell<HashMap<String, Arc<crate::download_net::PublicResolutionLease>>>>;
+type PublicHostLeases = Rc<RefCell<crate::download_net::PublicResolutionSet>>;
 
 /// Tokio detaches a task when its JoinHandle is dropped. Own the abort handle
 /// as well, so aborting the enclosing GLib lookup doesn't leave dual probes
@@ -1275,9 +1274,6 @@ fn inherit_public_resolution_for_card(
     let inherited = parent_host
         .as_deref()
         .is_some_and(crate::download_net::is_untrusted_handoff_host);
-    if !crate::download_net::inherit_public_resolution(parent_url, child_url) {
-        return false;
-    }
     if !inherited {
         return true;
     }
@@ -1287,7 +1283,7 @@ fn inherit_public_resolution_for_card(
     else {
         return false;
     };
-    if step.public_host_leases.borrow().contains_key(&child_host) {
+    if step.public_host_leases.borrow().contains(&child_host) {
         return true;
     }
     let Some(lease) = crate::download_net::acquire_public_resolution(&child_host) else {
@@ -1442,6 +1438,7 @@ fn submit_probe(
                 manager.clone(),
                 dest.clone(),
                 close_card.clone(),
+                Rc::clone(&step.public_host_leases),
                 pl,
                 scheduled_at,
                 queue_all,
@@ -1623,6 +1620,7 @@ fn push_playlist_items_page(
     manager: Rc<DownloadManager>,
     dest_dir: Rc<RefCell<String>>,
     close_card: Rc<dyn Fn()>,
+    guarded_child_hosts: PublicHostLeases,
     playlist: crate::media_types::PlaylistInfo,
     scheduled_at: Option<i64>,
     queue_all: bool,
@@ -1711,13 +1709,8 @@ fn push_playlist_items_page(
         ngettext("_Queue {} item", "_Queue {} items", n as u32).replace("{}", &n.to_string())
     });
 
-    // Preserve this collection's accepted hosts across partial picker imports.
-    // Otherwise repeatedly clicking Queue could reset the cap and eventually
-    // register every host from a hostile playlist.
-    let guarded_child_hosts = Rc::new(RefCell::new(
-        crate::download_net::PublicResolutionSet::default(),
-    ));
-
+    // The card owns these host leases so they are released with the picker,
+    // including when the card closes while a partial import is pending.
     {
         let nav_on_error = nav.clone();
         let picker_page_on_error = picker_page.clone();
@@ -2360,10 +2353,10 @@ impl AddCard {
         &self,
         lease: Arc<crate::download_net::PublicResolutionLease>,
     ) {
-        self.public_host_leases
-            .borrow_mut()
-            .entry(lease.host().to_string())
-            .or_insert(lease);
+        let host = lease.host().to_string();
+        if !self.public_host_leases.borrow().contains(&host) {
+            self.public_host_leases.borrow_mut().insert(host, lease);
+        }
     }
 
     /// Push the multi-file torrent picker for an already-read .torrent
@@ -4296,7 +4289,9 @@ pub fn build_add_card(manager: Rc<DownloadManager>) -> AddCard {
     } = build_url_controls();
     form.append(&url_bar);
     form.append(&opts_revealer);
-    let public_host_leases = Rc::new(RefCell::new(HashMap::new()));
+    let public_host_leases = Rc::new(RefCell::new(
+        crate::download_net::PublicResolutionSet::default(),
+    ));
     let (step, video_revealer, video_install_btn, video_retry_btn) = build_video_preview(
         &url_entry,
         spinner_paintable,

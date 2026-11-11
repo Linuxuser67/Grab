@@ -5398,8 +5398,9 @@ segment-2.m4s
             error.to_string(),
             "The stream manifest references a local or private network resource"
         );
-        assert!(
-            seen_hosts.is_empty(),
+        assert_eq!(
+            seen_hosts.len(),
+            0,
             "rejected hosts must not consume a slot"
         );
     }

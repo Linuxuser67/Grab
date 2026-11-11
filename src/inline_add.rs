@@ -40,6 +40,15 @@ use std::sync::Arc;
 
 type PublicHostLeases = Rc<RefCell<Option<crate::download_net::PublicResolutionSet>>>;
 
+/// Card-owned lifetime for a playlist picker: selected children retain the
+/// card's guarded-host scope until queue rows take over their own references.
+#[derive(Clone)]
+struct PlaylistPickerOwner {
+    close_card: Rc<dyn Fn()>,
+    public_host_leases: PublicHostLeases,
+}
+
+
 /// Tokio detaches a task when its JoinHandle is dropped. Own the abort handle
 /// as well, so aborting the enclosing GLib lookup doesn't leave dual probes
 /// running (and holding child processes) for a URL the user has already changed.
@@ -1436,8 +1445,10 @@ fn submit_probe(
                 nav,
                 manager.clone(),
                 dest.clone(),
-                close_card.clone(),
-                Rc::clone(&step.public_host_leases),
+                PlaylistPickerOwner {
+                    close_card: close_card.clone(),
+                    public_host_leases: Rc::clone(&step.public_host_leases),
+                },
                 pl,
                 scheduled_at,
                 queue_all,
@@ -1618,8 +1629,7 @@ fn push_playlist_items_page(
     nav: &adw::NavigationView,
     manager: Rc<DownloadManager>,
     dest_dir: Rc<RefCell<String>>,
-    close_card: Rc<dyn Fn()>,
-    guarded_child_hosts: PublicHostLeases,
+    owner: PlaylistPickerOwner,
     playlist: crate::media_types::PlaylistInfo,
     scheduled_at: Option<i64>,
     queue_all: bool,
@@ -1713,9 +1723,9 @@ fn push_playlist_items_page(
     {
         let nav_on_error = nav.clone();
         let picker_page_on_error = picker_page.clone();
-        let guarded_child_hosts = guarded_child_hosts.clone();
+        let guarded_child_hosts = Rc::clone(&owner.public_host_leases);
 
-        let close_card = close_card.clone();
+        let close_card = Rc::clone(&owner.close_card);
         let grid = grid.clone();
         let add_btn_click = add_btn.clone();
         let add_btn_guard = add_btn.clone();
@@ -3574,8 +3584,10 @@ fn build_video_lookup_kicker(context: VideoLookupContext) -> VideoLookupKick {
                                         &nav_b,
                                         manager_b.clone(),
                                         dest_b.clone(),
-                                        close_b.clone(),
-                                        Rc::clone(&step_b.public_host_leases),
+                                        PlaylistPickerOwner {
+                                            close_card: close_b.clone(),
+                                            public_host_leases: Rc::clone(&step_b.public_host_leases),
+                                        },
                                         pl,
                                         scheduled_at_b.get(),
                                         false,
@@ -3906,8 +3918,10 @@ fn build_submit_handler(context: SubmitContext) -> SubmitHandler {
                                 &nav2,
                                 m.clone(),
                                 dd.clone(),
-                                close_card.clone(),
-                                Rc::clone(&step2.public_host_leases),
+                                PlaylistPickerOwner {
+                                    close_card: close_card.clone(),
+                                    public_host_leases: Rc::clone(&step2.public_host_leases),
+                                },
                                 pl,
                                 scheduled_at.get(),
                                 false,
@@ -4958,10 +4972,12 @@ mod tests {
             &nav,
             Rc::clone(&manager),
             Rc::clone(&destination),
-            Rc::clone(&close_card),
-            Rc::new(RefCell::new(Some(
-                crate::download_net::PublicResolutionSet::default(),
-            ))),
+            PlaylistPickerOwner {
+                close_card: Rc::clone(&close_card),
+                public_host_leases: Rc::new(RefCell::new(Some(
+                    crate::download_net::PublicResolutionSet::default(),
+                ))),
+            },
             crate::media_types::PlaylistInfo {
                 title: "Playlist".into(),
                 page_url: "https://example.com/playlist".into(),

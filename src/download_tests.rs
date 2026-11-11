@@ -9702,10 +9702,7 @@ fn single_entry_playlist_staged_import_keeps_collection_owner() {
     let _qf = test_queue_file("playlist-single-owner");
     let manager = DownloadManager::new(gio::ListStore::new::<DownloadItem>(), test_settings());
 
-    let root = std::env::temp_dir().join(format!(
-        "grab-playlist-single-{}",
-        std::process::id()
-    ));
+    let root = std::env::temp_dir().join(format!("grab-playlist-single-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&root);
     let destination = root.join("One-entry playlist");
     std::fs::create_dir_all(&destination).expect("create playlist destination");

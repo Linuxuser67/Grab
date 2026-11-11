@@ -361,7 +361,10 @@ impl Tracks {
 
 #[derive(Debug)]
 struct LiveHlsTrack {
+    /// Effective post-redirect playlist URL used for resource resolution and polling.
     playlist_url: Url,
+    /// URL advertised by the selected master pathway, before media-playlist redirects.
+    requested_playlist_url: Url,
     inherited_variables: Box<[(String, String)]>,
     directory: PathBuf,
     accumulator: HlsLiveAccumulator,

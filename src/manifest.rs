@@ -431,6 +431,9 @@ pub(crate) struct HlsMasterPlan {
 #[derive(Clone, Debug)]
 pub(crate) struct HlsPlan {
     pub(crate) resources: Box<[HlsResource]>,
+    /// URL requested from the master or caller before HTTP redirects.
+    pub(crate) requested_playlist_url: Url,
+    /// Effective playlist URL after redirects; used to resolve resources and poll.
     pub(crate) playlist_url: Url,
     pub(crate) is_live: bool,
     pub(crate) end_list: bool,
@@ -2193,6 +2196,7 @@ fn build_hls_plan(base_url: Url, mut playlist: MediaPlaylist) -> Result<HlsPlan,
 
     Ok(HlsPlan {
         resources: resources.into_boxed_slice(),
+        requested_playlist_url: base_url.clone(),
         playlist_url: base_url,
         is_live,
         end_list,
@@ -2289,6 +2293,18 @@ pub(crate) fn inherit_query_parameters_same_origin(parent_url: &Url, target_url:
     target_url.set_query(Some(&combined));
 }
 
+/// Inherit a parent query after a same-origin redirect only when the redirect
+/// removed the query entirely. An explicit redirect query replaces the old one.
+pub(crate) fn inherit_query_parameters_same_origin_on_redirect(
+    parent_url: &Url,
+    target_url: &mut Url,
+) {
+    if target_url.query().is_some_and(|query| !query.is_empty()) {
+        return;
+    }
+    inherit_query_parameters_same_origin(parent_url, target_url);
+}
+
 fn raw_query_parameter_name(pair: &str) -> Vec<u8> {
     let raw_name = pair.split_once('=').map_or(pair, |(name, _)| name);
     percent_encoding::percent_decode_str(raw_name).collect()
@@ -2338,6 +2354,28 @@ mod tests {
             Url::parse("https://other.example.test/video/index.m3u8").expect("other origin");
         inherit_query_parameters_same_origin(&parent, &mut other_origin);
         assert_eq!(other_origin.query(), None);
+    }
+
+    #[test]
+    fn redirect_inherits_parent_query_only_when_the_redirect_drops_it() {
+        let parent = Url::parse(
+            "https://cdn.example.test/master.m3u8?token=A&session=X&label=a%20b&tilde=~",
+        )
+        .expect("parent URL");
+
+        let mut explicit = Url::parse("https://cdn.example.test/redirected.m3u8?token=B")
+            .expect("redirect URL with an explicit query");
+        inherit_query_parameters_same_origin_on_redirect(&parent, &mut explicit);
+        assert_eq!(explicit.query(), Some("token=B"));
+
+        let mut dropped =
+            Url::parse("https://cdn.example.test/redirected.m3u8").expect("redirect URL");
+        inherit_query_parameters_same_origin_on_redirect(&parent, &mut dropped);
+        assert_eq!(
+            dropped.query(),
+            Some("token=A&session=X&label=a%20b&tilde=~"),
+            "a redirect with no query inherits the raw parent query unchanged",
+        );
     }
 
     #[test]

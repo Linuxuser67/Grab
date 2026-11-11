@@ -20,11 +20,26 @@ pub enum ProgressLine {
 }
 
 /// Parse one stdout file event or stderr progress record from gallery-dl.
-pub fn parse_progress_line(line: &str) -> ProgressLine {
+///
+/// File lifecycle records are accepted only when their marker contains the
+/// random nonce assigned to this gallery-dl invocation. Plain log text and
+/// records from another run remain diagnostics.
+pub fn parse_progress_line(line: &str, run_nonce: &str) -> ProgressLine {
     let line = line.strip_suffix('\n').unwrap_or(line);
 
-    if let Some(path) = line.strip_prefix("@START:").filter(|path| !path.is_empty()) {
-        return ProgressLine::Started(path.to_string());
+    if let Some(tagged) = line.strip_prefix("@GRAB:")
+        && let Some((nonce, event)) = tagged.split_once(':')
+        && nonce == run_nonce
+    {
+        if let Some(path) = event.strip_prefix("START:").filter(|path| !path.is_empty()) {
+            return ProgressLine::Started(path.to_string());
+        }
+        if let Some(path) = event.strip_prefix("SKIP:").filter(|path| !path.is_empty()) {
+            return ProgressLine::Skipped(path.to_string());
+        }
+        if let Some(path) = event.strip_prefix("DONE:").filter(|path| !path.is_empty()) {
+            return ProgressLine::Completed(path.to_string());
+        }
     }
 
     let trimmed = line.trim();
@@ -37,18 +52,6 @@ pub fn parse_progress_line(line: &str) -> ProgressLine {
         .filter(|percent| *percent <= 100)
     {
         return ProgressLine::Progress(Some(percent));
-    }
-
-    // Skip lines have an explicit marker so merged diagnostic output cannot
-    // be mistaken for an already-existing gallery file.
-    if let Some(path) = line.strip_prefix("@SKIP:").filter(|path| !path.is_empty()) {
-        return ProgressLine::Skipped(path.to_string());
-    }
-
-    // Success lines are tagged so merged stderr log lines containing paths
-    // can never be mistaken for completed downloads.
-    if let Some(path) = line.strip_prefix("@DONE:").filter(|path| !path.is_empty()) {
-        return ProgressLine::Completed(path.to_string());
     }
 
     ProgressLine::Other(line.to_string())
@@ -115,10 +118,26 @@ impl GalleryProgress {
 mod tests {
     use super::*;
 
+    fn parse(line: &str) -> ProgressLine {
+        parse_progress_line(line, "test-run")
+    }
+
+    #[test]
+    fn lifecycle_events_require_the_current_run_nonce() {
+        let event = "@GRAB:test-run:START:/tmp/a.jpg";
+        assert_eq!(parse(event), ProgressLine::Started("/tmp/a.jpg".to_string()));
+        assert_eq!(
+            parse_progress_line(event, "another-run"),
+            ProgressLine::Other(event.to_string())
+        );
+        let legacy = "@START:/tmp/a.jpg";
+        assert_eq!(parse(legacy), ProgressLine::Other(legacy.to_string()));
+    }
+
     #[test]
     fn parse_started() {
         assert_eq!(
-            parse_progress_line("@START:/tmp/dest/image.jpg"),
+            parse("@START:/tmp/dest/image.jpg"),
             ProgressLine::Started("/tmp/dest/image.jpg".to_string())
         );
     }
@@ -126,7 +145,7 @@ mod tests {
     #[test]
     fn parse_completed() {
         assert_eq!(
-            parse_progress_line("@DONE:/tmp/dest/image.jpg\n"),
+            parse("@DONE:/tmp/dest/image.jpg\n"),
             ProgressLine::Completed("/tmp/dest/image.jpg".to_string())
         );
     }
@@ -134,17 +153,17 @@ mod tests {
     #[test]
     fn parse_skipped() {
         assert_eq!(
-            parse_progress_line("@SKIP:/tmp/dest/image.jpg\n"),
+            parse("@SKIP:/tmp/dest/image.jpg\n"),
             ProgressLine::Skipped("/tmp/dest/image.jpg".to_string())
         );
     }
 
     #[test]
     fn parse_progress_percent_and_unknown_total() {
-        assert_eq!(parse_progress_line("42%"), ProgressLine::Progress(Some(42)));
-        assert_eq!(parse_progress_line("?"), ProgressLine::Progress(None));
+        assert_eq!(parse("42%"), ProgressLine::Progress(Some(42)));
+        assert_eq!(parse("?"), ProgressLine::Progress(None));
         assert_eq!(
-            parse_progress_line("101%"),
+            parse("101%"),
             ProgressLine::Other("101%".to_string())
         );
     }
@@ -152,11 +171,11 @@ mod tests {
     #[test]
     fn parse_other() {
         assert_eq!(
-            parse_progress_line("some log noise\n"),
+            parse("some log noise\n"),
             ProgressLine::Other("some log noise".to_string())
         );
         assert_eq!(
-            parse_progress_line("warning: saved /tmp/image.jpg"),
+            parse("warning: saved /tmp/image.jpg"),
             ProgressLine::Other("warning: saved /tmp/image.jpg".to_string())
         );
     }
@@ -164,14 +183,14 @@ mod tests {
     #[test]
     fn feed_tracks_current_file_and_counts() {
         let mut p = GalleryProgress::new();
-        p.feed(parse_progress_line("@START:/a.jpg"));
+        p.feed(parse("@START:/a.jpg"));
         assert_eq!(p.current_file_path.as_deref(), Some("/a.jpg"));
-        p.feed(parse_progress_line("42%"));
+        p.feed(parse("42%"));
         assert_eq!(p.current_file_percent, Some(42));
-        p.feed(parse_progress_line("@DONE:/a.jpg"));
+        p.feed(parse("@DONE:/a.jpg"));
         assert_eq!(p.current_file_path, None);
         assert_eq!(p.current_file_percent, None);
-        p.feed(parse_progress_line("@SKIP:/b.jpg"));
+        p.feed(parse("@SKIP:/b.jpg"));
         assert_eq!(p.files_completed, 1);
         assert_eq!(p.files_skipped, 1);
         assert_eq!(p.files_done(), 2);

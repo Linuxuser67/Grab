@@ -9849,6 +9849,67 @@ fn second_staged_selection_rejects_entries_already_owned_by_the_collection() {
     );
 }
 
+
+#[test]
+fn later_playlist_selection_requeues_a_completed_collection_owner() {
+    let (_q, _l) = test_locks();
+    let _qf = test_queue_file("playlist-selection-after-completion");
+    let manager = DownloadManager::new(gio::ListStore::new::<DownloadItem>(), test_settings());
+    let root = tempfile::tempdir().expect("create playlist destination");
+    let destination = root.path().join("One playlist");
+    std::fs::create_dir(&destination).expect("create playlist folder");
+    let entry = |id: &str| crate::media_types::VideoPlaylistFile {
+        id: id.to_string(),
+        title: format!("Entry {id}"),
+        page_url: format!("https://example.com/playlist/{id}"),
+        status: DownloadStatus::Queued,
+        progress: 0.0,
+        path: None,
+    };
+    let owner = manager
+        .enqueue_video_playlist_staged(
+            "https://example.com/playlist",
+            "One playlist",
+            destination.to_str().expect("UTF-8 playlist folder"),
+            vec![entry("first")],
+            "best".to_string(),
+            false,
+        )
+        .expect("initial selection");
+    manager.upsert_video_playlist_file_row(
+        &owner,
+        "first",
+        DownloadStatus::Done,
+        1.0,
+        "Finished",
+        Some("/tmp/first.mp4"),
+    );
+    owner.set_status(DownloadStatus::Done);
+
+    let merged = manager
+        .enqueue_video_playlist_staged(
+            "https://example.com/playlist",
+            "One playlist",
+            destination.to_str().expect("UTF-8 playlist folder"),
+            vec![entry("second")],
+            "best".to_string(),
+            false,
+        )
+        .expect("new entries should reactivate the completed owner");
+
+    assert_eq!(merged.id(), owner.id());
+    assert_eq!(merged.status(), DownloadStatus::Queued);
+    let Some(crate::media_types::VideoSource::Playlist { state, .. }) =
+        manager.video_source(owner.id())
+    else {
+        panic!("the reactivated owner must retain its playlist source");
+    };
+    assert_eq!(state.files.len(), 2);
+    assert_eq!(state.files[0].status, DownloadStatus::Done);
+    assert_eq!(state.files[1].status, DownloadStatus::Queued);
+}
+
+
 #[test]
 fn playlist_staged_import_does_not_duplicate_identical_entry() {
     let (_q, _l) = test_locks();

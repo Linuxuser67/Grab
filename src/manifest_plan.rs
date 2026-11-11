@@ -429,16 +429,14 @@ impl ManifestLookup {
         // rather than performing a second network lookup during Add.
         let output_extension = match &self.manifest {
             NativeManifest::HlsMaster(_) => None,
-            NativeManifest::HlsMedia(plan) => {
-                plan.output_container_extension().map(str::to_owned)
-            }
+            NativeManifest::HlsMedia(plan) => plan.output_container_extension().map(str::to_owned),
             NativeManifest::Dash(dash) => dash
                 .video_representations
                 .iter()
                 .find(|representation| representation.matches_key(representation_key.as_str()))
                 .and_then(|representation| {
                     dash_output_container_extension(
-                        representation.representation.mime_type.as_deref(),
+                        representation.mime_type.as_deref(),
                     )
                 })
                 .map(str::to_owned),
@@ -1335,8 +1333,14 @@ video/720.m3u8
 
     #[test]
     fn dash_output_container_uses_the_selected_representation_mime_type() {
-        assert_eq!(dash_output_container_extension(Some("video/mp2t")), Some("ts"));
-        assert_eq!(dash_output_container_extension(Some("video/mp4")), Some("mp4"));
+        assert_eq!(
+            dash_output_container_extension(Some("video/mp2t")),
+            Some("ts")
+        );
+        assert_eq!(
+            dash_output_container_extension(Some("video/mp4")),
+            Some("mp4")
+        );
         assert_eq!(
             dash_output_container_extension(Some("application/mp4; codecs=avc1")),
             Some("mp4")
@@ -1396,8 +1400,7 @@ video/720.m3u8
             .selected_source(&video_key, Some(&audio_key), None)
             .expect("valid stable track selection");
         assert_eq!(
-            source.output_extension,
-            None,
+            source.output_extension, None,
             "HLS master children are not fetched during preview; use the safe Matroska default"
         );
 

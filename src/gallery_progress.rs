@@ -125,7 +125,10 @@ mod tests {
     #[test]
     fn lifecycle_events_require_the_current_run_nonce() {
         let event = "@GRAB:test-run:START:/tmp/a.jpg";
-        assert_eq!(parse(event), ProgressLine::Started("/tmp/a.jpg".to_string()));
+        assert_eq!(
+            parse(event),
+            ProgressLine::Started("/tmp/a.jpg".to_string())
+        );
         assert_eq!(
             parse_progress_line(event, "another-run"),
             ProgressLine::Other(event.to_string())
@@ -170,8 +173,14 @@ mod tests {
 
     #[test]
     fn parse_progress_percent_and_unknown_total() {
-        assert_eq!(parse("@GRAB:test-run:PROGRESS:42%"), ProgressLine::Progress(Some(42)));
-        assert_eq!(parse("@GRAB:test-run:PROGRESS:?"), ProgressLine::Progress(None));
+        assert_eq!(
+            parse("@GRAB:test-run:PROGRESS:42%"),
+            ProgressLine::Progress(Some(42))
+        );
+        assert_eq!(
+            parse("@GRAB:test-run:PROGRESS:?"),
+            ProgressLine::Progress(None)
+        );
         assert_eq!(
             parse("@GRAB:test-run:PROGRESS:101%"),
             ProgressLine::Other("@GRAB:test-run:PROGRESS:101%".to_string())

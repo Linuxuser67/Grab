@@ -604,7 +604,7 @@ async fn prepare_manifest_attempt(
 
     // Reclaim either supported container left by an interrupted attempt only
     // after validating both the state-dir owner marker and the recovery plan.
-    for extension in ["mp4", "mkv"] {
+    for extension in ["mp4", "mkv", "ts"] {
         remove_regular_file_if_present(&staging.join(format!("output.part.{extension}"))).await?;
     }
     let output_part = staging.join(format!("output.part.{}", output_container.extension()));
@@ -3186,6 +3186,7 @@ fn content_range_matches(header: Option<&str>, range: ManifestByteRange) -> bool
 enum ManifestOutputContainer {
     Mp4,
     Matroska,
+    MpegTs,
 }
 
 impl ManifestOutputContainer {
@@ -3193,8 +3194,9 @@ impl ManifestOutputContainer {
         match path.extension().and_then(|extension| extension.to_str()) {
             Some(extension) if extension.eq_ignore_ascii_case("mp4") => Ok(Self::Mp4),
             Some(extension) if extension.eq_ignore_ascii_case("mkv") => Ok(Self::Matroska),
+            Some(extension) if extension.eq_ignore_ascii_case("ts") => Ok(Self::MpegTs),
             _ => Err(ManifestRunError::Failed(
-                "Native HLS/DASH output must use an MP4 or MKV filename".to_string(),
+                "Native HLS/DASH output must use an MP4, MKV, or TS filename".to_string(),
             )),
         }
     }
@@ -3203,6 +3205,7 @@ impl ManifestOutputContainer {
         match self {
             Self::Mp4 => "mp4",
             Self::Matroska => "mkv",
+            Self::MpegTs => "ts",
         }
     }
 }
@@ -4261,6 +4264,13 @@ async fn run_ffmpeg(
     .await
 }
 
+fn mpegts_embedded_subtitle_error() -> ManifestRunError {
+    ManifestRunError::Failed(
+        "MPEG-TS output cannot embed the selected subtitle track. Disable subtitle embedding to write an SRT sidecar, or choose MP4/MKV output."
+            .to_string(),
+    )
+}
+
 async fn run_ffmpeg_with_offsets(
     ffmpeg: &Path,
     video_input: FfmpegInput<'_>,
@@ -4271,6 +4281,13 @@ async fn run_ffmpeg_with_offsets(
     abort: &mut tokio::sync::oneshot::Receiver<crate::video::StopIntent>,
 ) -> Result<bool, ManifestRunError> {
     let output_container = ManifestOutputContainer::from_path(output)?;
+    if output_container == ManifestOutputContainer::MpegTs
+        && subtitles.input.is_some()
+        && subtitles.embed
+    {
+        return Err(mpegts_embedded_subtitle_error());
+    }
+
     let mut command = tokio::process::Command::new(ffmpeg);
     if is_hls_playlist_input(video_input.path) {
         add_hls_staging_options(&mut command);
@@ -4315,6 +4332,9 @@ async fn run_ffmpeg_with_offsets(
                 // Matroska preserves the source subtitle codec instead of
                 // forcing MP4's mov_text representation.
                 ManifestOutputContainer::Matroska => "copy",
+                ManifestOutputContainer::MpegTs => {
+                    return Err(mpegts_embedded_subtitle_error());
+                }
             },
         ]);
     }
@@ -4324,6 +4344,9 @@ async fn run_ffmpeg_with_offsets(
         }
         ManifestOutputContainer::Matroska => {
             command.args(["-f", "matroska"]);
+        }
+        ManifestOutputContainer::MpegTs => {
+            command.args(["-f", "mpegts"]);
         }
     }
     command.arg(output);
@@ -4873,7 +4896,7 @@ segment-2.m4s
     }
 
     #[test]
-    fn manifest_output_container_accepts_only_mp4_and_mkv_extensions() {
+    fn manifest_output_container_accepts_mp4_mkv_and_ts_extensions() {
         assert_eq!(
             ManifestOutputContainer::from_path(Path::new("stream.mp4")).expect("MP4 path"),
             ManifestOutputContainer::Mp4
@@ -4882,8 +4905,41 @@ segment-2.m4s
             ManifestOutputContainer::from_path(Path::new("stream.MKV")).expect("MKV path"),
             ManifestOutputContainer::Matroska
         );
+        assert_eq!(
+            ManifestOutputContainer::from_path(Path::new("stream.TS")).expect("TS path"),
+            ManifestOutputContainer::MpegTs
+        );
         assert!(ManifestOutputContainer::from_path(Path::new("stream.webm")).is_err());
         assert!(ManifestOutputContainer::from_path(Path::new("stream")).is_err());
+    }
+
+    #[tokio::test]
+    async fn mpegts_output_rejects_embedded_subtitles_before_spawning_ffmpeg() {
+        let (_abort_tx, mut abort) = tokio::sync::oneshot::channel();
+        let result = run_ffmpeg_with_offsets(
+            Path::new("ffmpeg-is-not-invoked"),
+            FfmpegInput {
+                path: Path::new("video.mp4"),
+                timestamp_offset: None,
+            },
+            None,
+            false,
+            SubtitleOutput {
+                input: Some(Path::new("subtitles.vtt")),
+                embed: true,
+                sidecar: None,
+            },
+            Path::new("output.ts"),
+            &mut abort,
+        )
+        .await;
+
+        assert!(matches!(
+            result,
+            Err(ManifestRunError::Failed(message))
+                if message.contains("Disable subtitle embedding")
+                    && message.contains("SRT sidecar")
+        ));
     }
 
     #[test]

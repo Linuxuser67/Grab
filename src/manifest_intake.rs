@@ -2181,17 +2181,24 @@ fn hls_live_reload_url(
 ) -> Result<Url, ManifestIntakeError> {
     let mut requested_url = Url::parse(raw_url)
         .map_err(|_| ManifestIntakeError::Failed(gettext("Invalid stream manifest URL")))?;
-    {
-        let mut query = requested_url.query_pairs_mut();
-        if let Some((media_sequence, part_index)) = blocking_reload {
-            query.append_pair("_HLS_msn", &media_sequence.to_string());
-            if let Some(part_index) = part_index {
-                query.append_pair("_HLS_part", &part_index.to_string());
-            }
+    let mut reload_parameters = Vec::with_capacity(3);
+    if let Some((media_sequence, part_index)) = blocking_reload {
+        reload_parameters.push(format!("_HLS_msn={media_sequence}"));
+        if let Some(part_index) = part_index {
+            reload_parameters.push(format!("_HLS_part={part_index}"));
         }
-        if can_skip_until.is_some() {
-            query.append_pair("_HLS_skip", "YES");
-        }
+    }
+    if can_skip_until.is_some() {
+        reload_parameters.push("_HLS_skip=YES".to_string());
+    }
+    if !reload_parameters.is_empty() {
+        let existing_query = requested_url.query().unwrap_or_default();
+        let query = if existing_query.is_empty() {
+            reload_parameters.join("&")
+        } else {
+            format!("{existing_query}&{}", reload_parameters.join("&"))
+        };
+        requested_url.set_query(Some(&query));
     }
     Ok(requested_url)
 }
@@ -5103,5 +5110,20 @@ video/variant.m3u8
             Some("sig=keep"),
         );
     }
+
+    #[test]
+    fn live_reload_parameters_append_without_reencoding_opaque_query() {
+        let url = hls_live_reload_url(
+            "https://cdn.example.test/live.m3u8?sig=a%2Fb&label=hello%20world&tilde=~&flag",
+            Some((42, Some(3))),
+            Some(Duration::from_secs(6)),
+        )
+        .expect("live reload URL");
+        assert_eq!(
+            url.query(),
+            Some("sig=a%2Fb&label=hello%20world&tilde=~&flag&_HLS_msn=42&_HLS_part=3&_HLS_skip=YES"),
+        );
+    }
+
 
 }

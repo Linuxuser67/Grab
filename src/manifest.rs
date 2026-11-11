@@ -2299,7 +2299,7 @@ pub(crate) fn inherit_query_parameters_same_origin_on_redirect(
     parent_url: &Url,
     target_url: &mut Url,
 ) {
-    if target_url.query().is_some_and(|query| !query.is_empty()) {
+    if target_url.query().is_some() {
         return;
     }
     inherit_query_parameters_same_origin(parent_url, target_url);

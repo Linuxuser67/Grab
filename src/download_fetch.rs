@@ -299,6 +299,7 @@ async fn single_loop(
                 return;
             }
             Err(e) => {
+                // A path owned by another download is terminal; a retry must not adopt it.
                 if e == DEST_EXISTS {
                     ctx.tx.send(EngineMsg::Failed(e)).ok();
                     return;
@@ -308,6 +309,7 @@ async fn single_loop(
                     ctx.tx.send(EngineMsg::Failed(e)).ok();
                     return;
                 }
+                // Retryable transport failures use capped jittered backoff to spread reconnects.
                 failures += 1;
                 tokio::time::sleep(backoff_delay(failures)).await;
             }
@@ -657,6 +659,8 @@ async fn attempt_once(
             ));
         }
         send_last_modified(&ctx.tx, &resp);
+        // Keep one validator per transfer generation: a matching If-Range response
+        // must not replace it with metadata from a later response.
         let if_range_matched =
             ctx.if_range.get().is_some() && status == reqwest::StatusCode::PARTIAL_CONTENT;
         if !if_range_matched {
@@ -668,6 +672,8 @@ async fn attempt_once(
 
         let partial = start > 0 && status == reqwest::StatusCode::PARTIAL_CONTENT;
         if partial {
+            // A 206 must start at our requested offset; accepting another range
+            // would splice unrelated bytes into the owned partial file.
             let cr = resp
                 .headers()
                 .get(reqwest::header::CONTENT_RANGE)

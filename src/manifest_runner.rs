@@ -96,7 +96,7 @@ fn ensure_manifest_mux_space(
         ))
     })?;
     let available_bytes = stats.f_bavail.checked_mul(stats.f_frsize).ok_or_else(|| {
-        ManifestRunError::Failed("The available disk-space count overflowed".to_string())
+        ManifestRunError::Failed("The available disk-space byte count overflowed".to_string())
     })?;
     check_manifest_mux_space(available_bytes, staged_bytes)
 }
@@ -2895,7 +2895,7 @@ impl<'a> ResourceByteReservation<'a> {
         let next_reserved = self
             .reserved
             .checked_add(bytes)
-            .ok_or_else(|| "The stream resource byte count overflowed".to_string())?;
+            .ok_or_else(|| "The reserved stream resource byte count overflowed".to_string())?;
         let total = reserve_download_bytes(self.downloaded, bytes)?;
         self.reserved = next_reserved;
         Ok(total)

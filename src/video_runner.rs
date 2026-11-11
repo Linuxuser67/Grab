@@ -286,7 +286,7 @@ async fn run_video_playlist_download_inner(
         &libs.ffmpeg,
         &canonical_dest,
         &selected_indices,
-    );
+    )?;
     let guarded_proxy = crate::video_spawn::guard_untrusted_args(&argv)?;
     let mut cmd = ytdlp_command(&libs.youtube).await;
     cmd.args(&argv);

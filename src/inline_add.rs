@@ -1820,8 +1820,8 @@ fn push_playlist_items_page(
                 let dir = match gio::spawn_blocking(move || {
                     let dir = crate::file_names::collection_subdir(&base_dir, &title);
                     let path = std::path::Path::new(&dir);
-                    let metadata = std::fs::metadata(path)?;
-                    if !metadata.is_dir() {
+                    let metadata = std::fs::symlink_metadata(path)?;
+                    if metadata.file_type().is_symlink() || !metadata.is_dir() {
                         return Err(std::io::Error::from(std::io::ErrorKind::NotADirectory));
                     }
                     crate::video_staging::try_dir_file_names(path).map(|_| ())?;

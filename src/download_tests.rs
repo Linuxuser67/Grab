@@ -1884,6 +1884,14 @@ fn yt_dlp_fallback_corrects_an_auto_selected_ts_name_to_its_real_container() {
         ),
         None
     );
+    assert_eq!(
+        crate::video_argv::container_truth_name(
+            std::path::Path::new("/downloads/movie.mp4"),
+            std::path::Path::new("/staging/movie.ts"),
+        )
+        .as_deref(),
+        Some("movie.ts")
+    );
 }
 
 #[test]

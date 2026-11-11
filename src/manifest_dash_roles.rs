@@ -541,6 +541,20 @@ mod tests {
     }
 
     #[test]
+    fn records_invalid_dynamic_segment_list_numbers_without_rejecting_static_metadata() {
+        let invalid_offsets = br#"<MPD xmlns="urn:mpeg:dash:schema:mpd:2011"><Period><AdaptationSet><Other><SegmentList presentationTimeOffset="invalid"/></Other></AdaptationSet></Period></MPD>"#;
+        let invalid_start_number = br#"<MPD xmlns="urn:mpeg:dash:schema:mpd:2011"><Period><AdaptationSet><Other><SegmentList startNumber="invalid"/></Other></AdaptationSet></Period></MPD>"#;
+
+        let offset_metadata =
+            representation_metadata(invalid_offsets, 1).expect("bounded metadata scan");
+        assert!(offset_metadata.has_invalid_segment_list_presentation_time_offset);
+
+        let start_metadata =
+            representation_metadata(invalid_start_number, 1).expect("bounded metadata scan");
+        assert!(start_metadata.has_invalid_segment_list_start_number);
+    }
+
+    #[test]
     fn metadata_scan_rejects_excessive_xml_depth() {
         let nested_tags = format!(
             "{}{}",

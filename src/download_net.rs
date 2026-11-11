@@ -426,7 +426,7 @@ pub(crate) fn is_local_or_private_host(host: &str) -> bool {
 /// active cards, manifests, and transfers hold explicit references; only
 /// unreferenced provisional registrations expire. Redirects use a separate
 /// per-client resolver-only set.
-#[derive(Clone, Copy)]
+#[derive(Debug, Clone, Copy)]
 struct HandoffHostEntry {
     references: usize,
     last_seen: Instant,
@@ -476,7 +476,6 @@ impl PublicResolutionSet {
             self.leases.push(lease);
         }
     }
-
 }
 
 /// Maximum number of distinct child hosts one untrusted collection may add.

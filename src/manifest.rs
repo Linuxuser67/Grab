@@ -369,6 +369,8 @@ pub(crate) struct HlsContentSteering {
     /// Unfiltered master playlist, without Content Steering state, used to
     /// apply each new clone set without retaining stale clones.
     pub(crate) base_master: Option<Box<HlsMasterPlan>>,
+    /// Cross-origin steering hosts retained for the lifetime of this presentation.
+    pub(crate) public_host_leases: Vec<std::sync::Arc<crate::download_net::PublicResolutionLease>>,
 }
 
 fn redacted_steering_url(url: &Url) -> Url {
@@ -393,6 +395,7 @@ impl std::fmt::Debug for HlsContentSteering {
             .field("ttl", &self.ttl)
             .field("refresh_at", &self.refresh_at)
             .field("has_base_master", &self.base_master.is_some())
+            .field("public_host_lease_count", &self.public_host_leases.len())
             .finish()
     }
 }
@@ -408,6 +411,7 @@ impl HlsContentSteering {
             ttl: Duration::ZERO,
             refresh_at: None,
             base_master: None,
+            public_host_leases: Vec::new(),
         }
     }
 }

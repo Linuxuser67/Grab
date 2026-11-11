@@ -1280,7 +1280,7 @@ fn hls_steering_request_url(
 async fn fetch_hls_steering_manifest(
     client: &reqwest::Client,
     master_url: &Url,
-    steering: &crate::manifest::HlsContentSteering,
+    steering: &mut crate::manifest::HlsContentSteering,
     transport_policy: ManifestTransportPolicy,
     fetch_mode: ManifestFetchMode,
     proxy_configured: bool,
@@ -1298,20 +1298,31 @@ async fn fetch_hls_steering_manifest(
         ));
     }
 
-    // The master URL was selected by the user. A different SERVER-URI host
-    // came from untrusted playlist data, so register it before the resolver
-    // can connect and reject private/local destinations up front.
+    // SERVER-URI is untrusted playlist data when it changes origin. Acquire
+    // a lease before the resolver connects and keep it until this presentation
+    // drops, including after RELOAD-URI changes the steering server.
     if request_url.origin() != master_url.origin() {
         let host = request_url.host_str().ok_or_else(|| {
             ManifestIntakeError::Unsupported(
                 "The HLS Content Steering SERVER-URI has no hostname".to_string(),
             )
         })?;
-        if !crate::download_net::require_public_resolution(host) {
-            return Err(ManifestIntakeError::Unsupported(
-                "The HLS Content Steering SERVER-URI failed the public-host safety policy"
-                    .to_string(),
-            ));
+        if !steering.public_host_leases.iter().any(|lease| lease.host() == host) {
+            if steering.public_host_leases.len()
+                >= crate::download_net::MAX_GUARDED_CHILD_HOSTS_PER_COLLECTION
+            {
+                return Err(ManifestIntakeError::Unsupported(
+                    "The HLS Content Steering presentation references too many distinct hosts"
+                        .to_string(),
+                ));
+            }
+            let lease = crate::download_net::acquire_public_resolution(host).ok_or_else(|| {
+                ManifestIntakeError::Unsupported(
+                    "The HLS Content Steering SERVER-URI failed the public-host safety policy"
+                        .to_string(),
+                )
+            })?;
+            steering.public_host_leases.push(lease);
         }
     }
 
@@ -1510,7 +1521,7 @@ async fn apply_hls_content_steering(
         steering.proxy_configured = proxy_configured;
         crate::manifest::inherit_query_parameters_same_origin(master_url, &mut steering.reload_url);
     }
-    let Some(steering_snapshot) = master.content_steering.clone() else {
+    let Some(mut steering_snapshot) = master.content_steering.clone() else {
         return Ok(master);
     };
     validate_hls_content_steering_stable_ids(&master)?;
@@ -1525,7 +1536,7 @@ async fn apply_hls_content_steering(
     match fetch_hls_steering_manifest(
         client,
         master_url,
-        &steering_snapshot,
+        &mut steering_snapshot,
         transport_policy,
         fetch_mode,
         proxy_configured,
@@ -1572,6 +1583,9 @@ async fn apply_hls_content_steering(
         }
     }
 
+    if let Some(steering) = master.content_steering.as_mut() {
+        steering.public_host_leases = steering_snapshot.public_host_leases;
+    }
     select_hls_content_steering_pathway(&mut master, &priority)?;
     if let Some(steering) = master.content_steering.as_mut() {
         steering.active_pathway_id = master
@@ -1694,14 +1708,13 @@ async fn refresh_hls_content_steering_with_policy(
             return Ok(None);
         }
     };
-    let snapshot = steering.clone();
+    let mut snapshot = steering.clone();
     let mut master = base_master;
-    master.content_steering = Some(snapshot.clone());
 
     let response = fetch_hls_steering_manifest(
         client,
         &master_url,
-        &snapshot,
+        &mut snapshot,
         transport_policy,
         ManifestFetchMode::Download,
         proxy_configured,
@@ -1719,6 +1732,8 @@ async fn refresh_hls_content_steering_with_policy(
             return Ok(None);
         }
     };
+    steering.public_host_leases = snapshot.public_host_leases.clone();
+    master.content_steering = Some(snapshot.clone());
     let manifest = match parse_hls_steering_manifest(&body) {
         Ok(manifest) => manifest,
         Err(error) => {
@@ -4919,7 +4934,7 @@ video/variant.m3u8
         let error = fetch_hls_steering_manifest(
             &steering_test_client(),
             &master_url,
-            &steering,
+            &mut steering.clone(),
             ManifestTransportPolicy::HttpFixture,
             ManifestFetchMode::Preview,
             false,
@@ -4944,7 +4959,7 @@ video/variant.m3u8
         let error = fetch_hls_steering_manifest(
             &steering_test_client(),
             &master_url,
-            &steering,
+            &mut steering.clone(),
             ManifestTransportPolicy::HttpFixture,
             ManifestFetchMode::Preview,
             false,
@@ -4993,7 +5008,7 @@ video/variant.m3u8
         let error = fetch_hls_steering_manifest(
             &client,
             &master_url,
-            &steering,
+            &mut steering.clone(),
             ManifestTransportPolicy::HttpFixture,
             ManifestFetchMode::Preview,
             false,
@@ -5027,7 +5042,7 @@ video/variant.m3u8
         let error = fetch_hls_steering_manifest(
             &steering_test_client(),
             &master_url,
-            &steering,
+            &mut steering.clone(),
             ManifestTransportPolicy::HttpFixture,
             ManifestFetchMode::Preview,
             true,

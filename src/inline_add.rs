@@ -3575,6 +3575,7 @@ fn build_video_lookup_kicker(context: VideoLookupContext) -> VideoLookupKick {
                                         manager_b.clone(),
                                         dest_b.clone(),
                                         close_b.clone(),
+                                        Rc::clone(&step_b.public_host_leases),
                                         pl,
                                         scheduled_at_b.get(),
                                         false,
@@ -3906,6 +3907,7 @@ fn build_submit_handler(context: SubmitContext) -> SubmitHandler {
                                 m.clone(),
                                 dd.clone(),
                                 close_card.clone(),
+                                Rc::clone(&step2.public_host_leases),
                                 pl,
                                 scheduled_at.get(),
                                 false,
@@ -4957,6 +4959,9 @@ mod tests {
             Rc::clone(&manager),
             Rc::clone(&destination),
             Rc::clone(&close_card),
+            Rc::new(RefCell::new(Some(
+                crate::download_net::PublicResolutionSet::default(),
+            ))),
             crate::media_types::PlaylistInfo {
                 title: "Playlist".into(),
                 page_url: "https://example.com/playlist".into(),

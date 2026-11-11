@@ -5168,7 +5168,7 @@ segment-2.m4s
             subtitle_key: None,
             subtitle_language: None,
         };
-        let mut selected_hosts = std::collections::HashSet::new();
+        let mut selected_hosts = crate::download_net::PublicResolutionSet::default();
         let selected = resolve_tracks(
             &client,
             ManifestLookup {
@@ -5196,7 +5196,7 @@ segment-2.m4s
             subtitle_key: None,
             ..selected_source
         };
-        let mut automatic_hosts = std::collections::HashSet::new();
+        let mut automatic_hosts = crate::download_net::PublicResolutionSet::default();
         let automatic = resolve_tracks(
             &client,
             ManifestLookup {

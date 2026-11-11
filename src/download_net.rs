@@ -468,6 +468,10 @@ impl PublicResolutionSet {
         self.hosts.len()
     }
 
+    pub(crate) fn is_empty(&self) -> bool {
+        self.hosts.is_empty()
+    }
+
     pub(crate) fn contains(&self, host: &str) -> bool {
         self.hosts.contains(host)
     }

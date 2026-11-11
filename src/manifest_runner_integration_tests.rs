@@ -1255,7 +1255,7 @@ async fn saved_live_hls_capture_finalizes_without_contacting_the_origin() {
     let client = fixture_client();
     let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
     let downloaded = Arc::new(AtomicU64::new(0));
-    let mut guarded_child_hosts = std::collections::HashSet::new();
+    let mut guarded_child_hosts = crate::download_net::PublicResolutionSet::default();
     let (_stop_tx, mut abort) = tokio::sync::oneshot::channel();
     let outcome = run_live_hls_tracks(
         &client,
@@ -2064,7 +2064,7 @@ async fn live_hls_pause_keeps_the_last_committed_window() {
     finish_tx
         .send(crate::video::StopIntent::Finish)
         .expect("queue finish after pausing the committed capture");
-    let mut guarded_child_hosts = std::collections::HashSet::new();
+    let mut guarded_child_hosts = crate::download_net::PublicResolutionSet::default();
     let finished = run_live_hls_tracks(
         &client,
         "https://origin.example.test/live.m3u8",
@@ -2115,7 +2115,7 @@ async fn live_hls_runner_returns_paused_without_finalizing() {
     stop_tx
         .send(crate::video::StopIntent::Pause)
         .expect("queue pause before the first live HLS request");
-    let mut guarded_child_hosts = std::collections::HashSet::new();
+    let mut guarded_child_hosts = crate::download_net::PublicResolutionSet::default();
 
     let outcome = run_live_hls_tracks(
         &client,
@@ -2923,7 +2923,7 @@ async fn hls_fmp4_fixture_downloads_and_finalizes_with_audio_and_video() {
         assert!(crate::download_net::require_public_resolution(
             "manifest-origin.fixture.invalid"
         ));
-        let mut guarded_child_hosts = std::collections::HashSet::new();
+        let mut guarded_child_hosts = crate::download_net::PublicResolutionSet::default();
         let media_url = Url::parse(media_manifest_url).expect("HLS media manifest URL is valid");
         guard_manifest_child_url(source_url, &media_url, &mut guarded_child_hosts)
             .expect("the selected HLS media playlist host should be guarded");
@@ -3273,7 +3273,7 @@ async fn dash_fmp4_fixture_downloads_assembles_tracks_and_finalizes() {
         assert!(crate::download_net::require_public_resolution(
             "manifest-origin.fixture.invalid"
         ));
-        let mut guarded_child_hosts = std::collections::HashSet::new();
+        let mut guarded_child_hosts = crate::download_net::PublicResolutionSet::default();
         for resource in video_plan
             .resources
             .iter()
@@ -3540,7 +3540,7 @@ async fn dynamic_dash_fmp4_fixture_runs_live_capture_and_finalizes_playable_mp4(
     let downloaded = Arc::new(AtomicU64::new(0));
     let (_stop_tx, mut abort) = tokio::sync::oneshot::channel();
 
-    let mut guarded_child_hosts = std::collections::HashSet::new();
+    let mut guarded_child_hosts = crate::download_net::PublicResolutionSet::default();
     let capture = run_live_dash_tracks(
         &client,
         false,
@@ -3674,7 +3674,7 @@ async fn dynamic_dash_live_runner_pauses_and_retains_committed_window() {
             .expect("send pause after committed dynamic DASH window");
     });
 
-    let mut guarded_child_hosts = std::collections::HashSet::new();
+    let mut guarded_child_hosts = crate::download_net::PublicResolutionSet::default();
     let capture = run_live_dash_tracks(
         &client,
         false,

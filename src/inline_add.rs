@@ -34,7 +34,7 @@ use gtk4::prelude::*;
 use gtk4::{gio, glib};
 use libadwaita as adw;
 use std::cell::{Cell, RefCell};
-use std::collections::{HashMap, VecDeque};
+use std::collections::VecDeque;
 use std::sync::Arc;
 use std::rc::Rc;
 
@@ -1289,9 +1289,10 @@ fn inherit_public_resolution_for_card(
     let Some(lease) = crate::download_net::acquire_public_resolution(&child_host) else {
         return false;
     };
+    let canonical_host = lease.host().to_string();
     step.public_host_leases
         .borrow_mut()
-        .insert(child_host, lease);
+        .insert(canonical_host, lease);
     true
 }
 

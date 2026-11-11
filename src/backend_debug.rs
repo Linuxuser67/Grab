@@ -80,7 +80,7 @@ fn redact_extractor_args(text: &str) -> String {
 
 /// Redact query strings and fragments from URL-shaped argument tokens before
 /// writing diagnostics. Signed media URLs often act as bearer credentials.
-fn redact_query_tokens(text: &str) -> String {
+pub(crate) fn redact_query_tokens(text: &str) -> String {
     let is_special =
         |b: u8| b.is_ascii_whitespace() || matches!(b, b'"' | b'\'' | b'(' | b')' | b'[' | b']');
     let bytes = text.as_bytes();

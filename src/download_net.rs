@@ -1203,8 +1203,8 @@ mod tests {
         };
 
         let mut owner = PublicResolutionSet::default();
-        let lease = acquire_public_resolution("background-count.example")
-            .expect("public host lease");
+        let lease =
+            acquire_public_resolution("background-count.example").expect("public host lease");
         owner.insert(lease.host().to_string(), lease);
         let background = owner.clone_leases();
 

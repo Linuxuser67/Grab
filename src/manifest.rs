@@ -608,16 +608,18 @@ impl HlsPlan {
             return None;
         }
 
-        Some(if self
-            .local_playlist
-            .segments
-            .iter()
-            .any(|segment| segment.map.is_some())
-        {
-            "mp4"
-        } else {
-            "ts"
-        })
+        Some(
+            if self
+                .local_playlist
+                .segments
+                .iter()
+                .any(|segment| segment.map.is_some())
+            {
+                "mp4"
+            } else {
+                "ts"
+            },
+        )
     }
 
     /// Whether the playlist can be concatenated as a plain MPEG-TS byte stream.

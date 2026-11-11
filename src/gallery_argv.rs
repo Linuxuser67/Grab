@@ -360,6 +360,39 @@ pub struct GalleryJob {
     #[serde(default)]
     pub file_rows: Vec<GalleryFileState>,
 }
+ 
+impl GalleryJob {
+    /// Update a stored file row or append one while the persisted projection is below its cap.
+    ///
+    /// Returns the row index when the state is retained, or `None` when a new
+    /// row exceeds the persistence cap. Existing rows remain updateable at the cap.
+    pub(crate) fn upsert_file_state(
+        &mut self,
+        path: &str,
+        status: crate::download_store::DownloadStatus,
+        progress: f64,
+        existing_index: Option<usize>,
+    ) -> Option<usize> {
+        let index = match existing_index {
+            Some(index) => index,
+            None if self.file_rows.len() < MAX_GALLERY_PERSISTED_FILE_ROWS => {
+                let index = self.file_rows.len();
+                self.file_rows.push(GalleryFileState {
+                    path: path.to_string(),
+                    status,
+                    progress,
+                });
+                index
+            }
+            None => return None,
+        };
+        let state = self.file_rows.get_mut(index)?;
+        state.status = status;
+        state.progress = progress;
+        Some(index)
+    }
+}
+
 
 #[cfg(test)]
 mod tests {
@@ -452,6 +485,71 @@ mod tests {
         assert_eq!(mode["skip"], "@GRAB:test-run:SKIP:{}\n");
         assert_eq!(mode["progress"], "@GRAB:test-run:PROGRESS:?\n");
         assert_eq!(mode["progress-total"], "@GRAB:test-run:PROGRESS:{3}%\n");
+    }
+
+
+    #[test]
+    fn file_state_updates_remain_available_after_the_persistence_cap() {
+        let mut job = GalleryJob {
+            item_id: 1,
+            page_url: "https://example.test/gallery".to_string(),
+            title: "Gallery".to_string(),
+            file_count: None,
+            dest_dir: PathBuf::from("/tmp/gallery"),
+            filter: GalleryFilter::All,
+            cookies_browser: "none".to_string(),
+            speed_limit: None,
+            range: None,
+            file_rows: Vec::new(),
+        };
+
+        let first = job
+            .upsert_file_state(
+                "/tmp/gallery/first.jpg",
+                crate::download_store::DownloadStatus::Downloading,
+                0.25,
+                None,
+            )
+            .expect("first file state is retained");
+        assert_eq!(
+            job.upsert_file_state(
+                "/tmp/gallery/first.jpg",
+                crate::download_store::DownloadStatus::Done,
+                1.0,
+                Some(first),
+            ),
+            Some(first)
+        );
+        assert_eq!(
+            job.file_rows[first].status,
+            crate::download_store::DownloadStatus::Done
+        );
+
+        job.file_rows.resize_with(MAX_GALLERY_PERSISTED_FILE_ROWS, || GalleryFileState {
+            path: "/tmp/gallery/retained.jpg".to_string(),
+            status: crate::download_store::DownloadStatus::Queued,
+            progress: 0.0,
+        });
+        assert_eq!(
+            job.upsert_file_state(
+                "/tmp/gallery/overflow.jpg",
+                crate::download_store::DownloadStatus::Downloading,
+                0.0,
+                None,
+            ),
+            None
+        );
+        assert_eq!(job.file_rows.len(), MAX_GALLERY_PERSISTED_FILE_ROWS);
+        assert_eq!(
+            job.upsert_file_state(
+                "/tmp/gallery/first.jpg",
+                crate::download_store::DownloadStatus::Done,
+                1.0,
+                Some(first),
+            ),
+            Some(first),
+            "existing state remains updateable after the cap"
+        );
     }
 
     #[test]

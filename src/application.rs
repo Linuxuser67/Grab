@@ -312,6 +312,7 @@ async fn route_open_uri(
     add_card: crate::inline_add::AddCard,
     settings: AppSettings,
     uri: url::Url,
+    public_host_lease: Option<std::sync::Arc<crate::download_net::PublicResolutionLease>>,
 ) -> Routed {
     // Remote .torrent files: fetch the bytes and run the
     // torrent intake instead of saving the .torrent itself.
@@ -350,6 +351,9 @@ async fn route_open_uri(
     // like a pasted URL. Plain enqueue would save a raw page — or a manifest
     // — as a file.
     if handoff_goes_to_card(&uri) {
+        if let Some(lease) = public_host_lease {
+            add_card.retain_public_resolution_lease(lease);
+        }
         add_card.open(Some(uri.as_str().to_string()));
         return Routed::OpenedCard;
     }
@@ -404,6 +408,7 @@ fn dispatch_handoff(
     );
     // Only a browser handoff that skips confirmation is untrusted. Confirmed
     // handoffs and user-entered URLs retain the normal proxy/resolver behavior.
+    let mut public_host_lease = None;
     if via_grab
         && !requires_confirmation
         && let Some(host) = uri.host_str()
@@ -417,18 +422,29 @@ fn dispatch_handoff(
             answer_handoff(decision, crate::extension_server::HandoffOutcome::Failed);
             return;
         }
-        if !crate::download_net::require_public_resolution(host) {
+        let Some(lease) = crate::download_net::acquire_public_resolution(host) else {
             toasts.add_toast(adw::Toast::new(&gettext(
                 "This browser handoff cannot be accepted safely: the safe-host limit was reached.",
             )));
             answer_handoff(decision, crate::extension_server::HandoffOutcome::Failed);
             return;
-        }
+        };
+        public_host_lease = Some(lease);
     }
     if !requires_confirmation {
         // Route async (remote torrent fetch needs to complete before ack).
+        // The lease is transferred to an open card or held until enqueue has
+        // acquired the queue-row reference.
         glib::spawn_future_local(async move {
-            let routed = route_open_uri(manager, toasts, add_card, settings, uri).await;
+            let routed = route_open_uri(
+                manager,
+                toasts,
+                add_card,
+                settings,
+                uri,
+                public_host_lease,
+            )
+            .await;
             answer_handoff(decision, routed.into());
         });
         return;

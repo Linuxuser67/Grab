@@ -282,7 +282,7 @@ pub(crate) fn create_guarded_dir(base: &std::path::Path, name: &str) -> std::pat
     base.join(tried.pop().unwrap_or_else(|| name.to_string()))
 }
 
-/// Titled subfolder for a multi-item collection, created eagerly and reused
+/// Titled subfolder for a collection, created eagerly and reused
 /// when the collection is added again. Never follows a pre-existing symlink:
 /// a planted link — or any non-dir squatter — dedupes to a fresh name
 /// instead of redirecting downloads outside the download dir. The create is

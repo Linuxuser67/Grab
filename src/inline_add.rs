@@ -34,8 +34,12 @@ use gtk4::prelude::*;
 use gtk4::{gio, glib};
 use libadwaita as adw;
 use std::cell::{Cell, RefCell};
-use std::collections::VecDeque;
+use std::collections::{HashMap, VecDeque};
+use std::sync::Arc;
 use std::rc::Rc;
+
+type PublicHostLeases =
+    Rc<RefCell<HashMap<String, Arc<crate::download_net::PublicResolutionLease>>>>;
 
 /// Tokio detaches a task when its JoinHandle is dropped. Own the abort handle
 /// as well, so aborting the enclosing GLib lookup doesn't leave dual probes
@@ -733,6 +737,8 @@ pub(crate) struct VideoStep {
     /// The URL entry itself: its secondary icon is the lookup state machine
     /// (tick → spinner → none), shared with the helpers below.
     pub(crate) url_entry: gtk4::Entry,
+    /// Public-only hosts retained while this untrusted handoff card is open.
+    public_host_leases: PublicHostLeases,
     /// Spinner paintable for the entry's secondary icon slot: GTK4 entries
     /// take paintables, not widgets, as icons. Animated by the entry's own
     /// frame clock (the established AdwSpinnerPaintable API).
@@ -1255,6 +1261,44 @@ fn rebuild_format_options(step: &Rc<VideoStep>, info: &crate::video::VideoInfo, 
     step.format.set_selected(index as u32);
 }
 
+/// Retain public-only policy inherited from a browser handoff for as long
+/// as the Add card remains open. The child lease is acquired only after the
+/// existing inheritance validation has accepted its public destination.
+fn inherit_public_resolution_for_card(
+    step: &VideoStep,
+    parent_url: &str,
+    child_url: &str,
+) -> bool {
+    let parent_host = url::Url::parse(parent_url)
+        .ok()
+        .and_then(|url| url.host_str().map(str::to_string));
+    let inherited = parent_host
+        .as_deref()
+        .is_some_and(crate::download_net::is_untrusted_handoff_host);
+    if !crate::download_net::inherit_public_resolution(parent_url, child_url) {
+        return false;
+    }
+    if !inherited {
+        return true;
+    }
+    let Some(child_host) = url::Url::parse(child_url)
+        .ok()
+        .and_then(|url| url.host_str().map(str::to_string))
+    else {
+        return false;
+    };
+    if step.public_host_leases.borrow().contains_key(&child_host) {
+        return true;
+    }
+    let Some(lease) = crate::download_net::acquire_public_resolution(&child_host) else {
+        return false;
+    };
+    step.public_host_leases
+        .borrow_mut()
+        .insert(child_host, lease);
+    true
+}
+
 /// Whether the combo's current pick is the Audio only row.
 fn selected_audio_only(step: &VideoStep) -> bool {
     let selected = step.format.selected() as usize;
@@ -1275,7 +1319,7 @@ fn submit_probed_single(
     scheduled_at: Option<i64>,
 ) {
     let submitted_url = step.url_entry.text().to_string();
-    if !crate::download_net::inherit_public_resolution(&submitted_url, &v.page_url) {
+    if !inherit_public_resolution_for_card(step, &submitted_url, &v.page_url) {
         show_video_error(
             step,
             &gettext("The resolved media page could not be verified as a public destination."),
@@ -1380,7 +1424,7 @@ fn submit_probe(
             // Preserve the untrusted handoff policy if yt-dlp canonicalized
             // the collection URL to another hostname.
             let submitted_url = step.url_entry.text().to_string();
-            if !crate::download_net::inherit_public_resolution(&submitted_url, &pl.page_url) {
+            if !inherit_public_resolution_for_card(step, &submitted_url, &pl.page_url) {
                 show_video_error(
                     step,
                     &gettext(
@@ -1436,7 +1480,7 @@ fn submit_gallery_all(
         }
     };
     let submitted_url = step.url_entry.text().trim().to_string();
-    if !crate::download_net::inherit_public_resolution(&submitted_url, &page_url) {
+    if !inherit_public_resolution_for_card(step, &submitted_url, &page_url) {
         show_video_error(
             step,
             &gettext("The gallery could not be verified as a public destination."),
@@ -2264,6 +2308,7 @@ impl OpenState {
 pub struct AddCard {
     widget: gtk4::Widget,
     nav: adw::NavigationView,
+    public_host_leases: PublicHostLeases,
     open: Rc<dyn Fn(Option<String>)>,
     toggle: Rc<dyn Fn()>,
     open_torrent_picker: TorrentPickerOpener,
@@ -2305,6 +2350,18 @@ impl AddCard {
     /// every flip, whichever path caused it.
     pub fn set_on_state_changed(&self, cb: impl Fn(bool) + 'static) {
         self.state.set_on_flip(cb);
+    }
+
+    /// Transfer an untrusted browser-handoff host lease to this card.
+    /// It is released together with all other card leases on close/reset.
+    pub(crate) fn retain_public_resolution_lease(
+        &self,
+        lease: Arc<crate::download_net::PublicResolutionLease>,
+    ) {
+        self.public_host_leases
+            .borrow_mut()
+            .entry(lease.host().to_string())
+            .or_insert(lease);
     }
 
     /// Push the multi-file torrent picker for an already-read .torrent
@@ -2463,6 +2520,7 @@ fn build_video_preview(
     action_revealer: &gtk4::Revealer,
     select_files_btn: &gtk4::Button,
     add_btn: &gtk4::Button,
+    public_host_leases: PublicHostLeases,
 ) -> (Rc<VideoStep>, gtk4::Revealer, gtk4::Button, gtk4::Button) {
     // Video preview block: hidden until a lookup runs; exactly one state shows.
     // HIG AdwPreferencesGroup: title/description are built-in, rows get the
@@ -2586,6 +2644,7 @@ fn build_video_preview(
     video_revealer.set_child(Some(&video_group));
     let step = Rc::new(VideoStep {
         url_entry: url_entry.clone(),
+        public_host_leases,
         spinner_paintable,
         looking_up: Cell::new(false),
         action_revealer: action_revealer.clone(),
@@ -4235,12 +4294,14 @@ pub fn build_add_card(manager: Rc<DownloadManager>) -> AddCard {
     } = build_url_controls();
     form.append(&url_bar);
     form.append(&opts_revealer);
+    let public_host_leases = Rc::new(RefCell::new(HashMap::new()));
     let (step, video_revealer, video_install_btn, video_retry_btn) = build_video_preview(
         &url_entry,
         spinner_paintable,
         &action_revealer,
         &select_files_btn,
         &add_btn,
+        Rc::clone(&public_host_leases),
     );
     wire_video_preview(Rc::clone(&step));
 
@@ -4299,7 +4360,11 @@ pub fn build_add_card(manager: Rc<DownloadManager>) -> AddCard {
         let default_dir = manager.effective_download_dir();
         let scheduled_at = Rc::clone(&scheduled_at);
         let schedule_switch = schedule_switch.clone();
+        let public_host_leases = Rc::clone(&public_host_leases);
         Rc::new(move || {
+            // A closed card no longer has any outstanding requests or preview
+            // actions that need the browser-handoff DNS policy.
+            public_host_leases.borrow_mut().clear();
             open_state.set(false);
             // Cancel any in-flight probe and drop its state; the
             // generation bump discards the stale completion.
@@ -4552,6 +4617,7 @@ pub fn build_add_card(manager: Rc<DownloadManager>) -> AddCard {
     AddCard {
         widget: revealer.upcast(),
         nav: nav.clone(),
+        public_host_leases,
         open,
         toggle,
         open_torrent_picker,

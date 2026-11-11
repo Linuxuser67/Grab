@@ -1588,6 +1588,7 @@ async fn apply_hls_content_steering(
 /// Refresh the live master's Content Steering response once the advertised TTL expires.
 /// Failed or malformed optional responses preserve the current Pathway and schedule a
 /// later refresh without adding retries to media transfers.
+#[cfg(test)]
 pub(crate) async fn refresh_hls_content_steering(
     client: &reqwest::Client,
     master_url: &str,
@@ -4821,9 +4822,11 @@ video/variant.m3u8
         .expect("optional timeout should preserve the current pathway");
         assert!(result.is_none());
         assert_eq!(steering.active_pathway_id, previous_pathway);
-        assert!(steering
-            .refresh_at
-            .is_some_and(|deadline| deadline > Instant::now()));
+        assert!(
+            steering
+                .refresh_at
+                .is_some_and(|deadline| deadline > Instant::now())
+        );
 
         server.abort();
     }

@@ -1801,6 +1801,10 @@ fn push_playlist_items_page(
             let error_caption = error_caption.clone();
             let close_card = close_card.clone();
             let page_url = playlist.page_url.clone();
+            // Re-imports use the original owner folder even if the extractor's
+            // collection title has changed since the first selection.
+            let existing_destination =
+                manager.video_playlist_destination_for_url(&page_url);
             let add_btn = add_btn_guard.clone();
             let audio_only = audio_only.is_active();
             // The GTK clicked handler is an `Fn` and may run repeatedly;
@@ -1818,7 +1822,8 @@ fn push_playlist_items_page(
                 // Create one titled output folder per playlist. The listing
                 // runs off GTK because downloads may live on network mounts.
                 let dir = match gio::spawn_blocking(move || {
-                    let dir = crate::file_names::collection_subdir(&base_dir, &title);
+                    let dir = existing_destination
+                        .unwrap_or_else(|| crate::file_names::collection_subdir(&base_dir, &title));
                     let path = std::path::Path::new(&dir);
                     let metadata = std::fs::symlink_metadata(path)?;
                     if metadata.file_type().is_symlink() || !metadata.is_dir() {

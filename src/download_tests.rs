@@ -9739,6 +9739,268 @@ fn single_entry_playlist_staged_import_keeps_collection_owner() {
 }
 
 #[test]
+fn playlist_staged_import_extends_existing_owner_without_duplicate_children() {
+    let (_q, _l) = test_locks();
+    let _qf = test_queue_file("playlist-staged-extend");
+    let manager = DownloadManager::new(gio::ListStore::new::<DownloadItem>(), test_settings());
+    manager.shutdown_started.set(true);
+
+    let root = std::env::temp_dir().join(format!("grab-playlist-extend-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&root);
+    let destination = root.join("Shared playlist");
+    std::fs::create_dir_all(&destination).expect("create playlist destination");
+    let destination = destination.to_str().expect("UTF-8 temporary path");
+
+    let first = manager
+        .enqueue_video_playlist_staged(
+            "https://example.com/playlist",
+            "Shared playlist",
+            destination,
+            vec![crate::media_types::VideoPlaylistFile {
+                id: "first".to_string(),
+                title: "First entry".to_string(),
+                page_url: "https://example.com/playlist/first".to_string(),
+                status: DownloadStatus::Queued,
+                progress: 0.0,
+                path: None,
+            }],
+            "best".to_string(),
+            false,
+        )
+        .expect("first selection should enqueue");
+    let first_child = manager
+        .items()
+        .find(|item| item.collection_file_id() == "first")
+        .expect("first child row");
+    manager.upsert_video_playlist_file_row(
+        &first,
+        "first",
+        DownloadStatus::Done,
+        1.0,
+        "Finished",
+        None,
+    );
+    assert_eq!(first_child.status(), DownloadStatus::Done);
+    first.set_status(DownloadStatus::Done);
+
+    let second = manager
+        .enqueue_video_playlist_staged(
+            "https://example.com/playlist",
+            "Shared playlist",
+            destination,
+            vec![
+                crate::media_types::VideoPlaylistFile {
+                    id: "first".to_string(),
+                    title: "First entry".to_string(),
+                    page_url: "https://example.com/playlist/first".to_string(),
+                    status: DownloadStatus::Queued,
+                    progress: 0.0,
+                    path: None,
+                },
+                crate::media_types::VideoPlaylistFile {
+                    id: "second".to_string(),
+                    title: "Second entry".to_string(),
+                    page_url: "https://example.com/playlist/second".to_string(),
+                    status: DownloadStatus::Queued,
+                    progress: 0.0,
+                    path: None,
+                },
+            ],
+            "best".to_string(),
+            false,
+        )
+        .expect("second selection should extend the owner");
+
+    assert_eq!(first.id(), second.id(), "the same owner must be reused");
+    assert_eq!(second.gallery_file_count(), 2);
+    let children = manager
+        .items()
+        .filter(|item| item.is_collection_child())
+        .collect::<Vec<_>>();
+    assert_eq!(children.len(), 2);
+    assert_eq!(
+        children
+            .iter()
+            .filter(|item| item.status() == DownloadStatus::Done)
+            .count(),
+        1,
+        "the earlier completed child must remain completed",
+    );
+    assert!(
+        children
+            .iter()
+            .any(|item| item.collection_file_id() == "second"),
+        "the new entry must be represented by a child row",
+    );
+    assert_eq!(
+        manager
+            .video_playlist_destination_for_url("https://example.com/playlist")
+            .as_deref(),
+        Some(destination),
+        "re-imports must reuse the owner folder",
+    );
+
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[test]
+fn playlist_staged_import_restarts_a_downloading_owner_with_new_entries() {
+    let (_q, _l) = test_locks();
+    let _qf = test_queue_file("playlist-staged-restart");
+    let manager = DownloadManager::new(gio::ListStore::new::<DownloadItem>(), test_settings());
+    manager.shutdown_started.set(true);
+
+    let root = std::env::temp_dir().join(format!("grab-playlist-restart-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&root);
+    let destination = root.join("Restart playlist");
+    std::fs::create_dir_all(&destination).expect("create playlist destination");
+    let destination = destination.to_str().expect("UTF-8 temporary path");
+
+    let owner = manager
+        .enqueue_video_playlist_staged(
+            "https://example.com/restart-playlist",
+            "Restart playlist",
+            destination,
+            vec![crate::media_types::VideoPlaylistFile {
+                id: "active".to_string(),
+                title: "Active entry".to_string(),
+                page_url: "https://example.com/restart-playlist/active".to_string(),
+                status: DownloadStatus::Downloading,
+                progress: 0.25,
+                path: None,
+            }],
+            "best".to_string(),
+            false,
+        )
+        .expect("initial playlist selection");
+    owner.set_status(DownloadStatus::Downloading);
+    let active_child = manager
+        .items()
+        .find(|item| item.collection_file_id() == "active")
+        .expect("active child row");
+    active_child.set_status(DownloadStatus::Downloading);
+
+    let extended = manager
+        .enqueue_video_playlist_staged(
+            "https://example.com/restart-playlist",
+            "Restart playlist",
+            destination,
+            vec![crate::media_types::VideoPlaylistFile {
+                id: "new".to_string(),
+                title: "New entry".to_string(),
+                page_url: "https://example.com/restart-playlist/new".to_string(),
+                status: DownloadStatus::Queued,
+                progress: 0.0,
+                path: None,
+            }],
+            "best".to_string(),
+            false,
+        )
+        .expect("new selection should restart the owner");
+
+    assert_eq!(owner.id(), extended.id());
+    assert_eq!(extended.status(), DownloadStatus::Queued);
+    assert_eq!(extended.gallery_file_count(), 2);
+    assert!(
+        extended
+            .group()
+            .is_some_and(|group| group.id() == extended.id()),
+        "the original collection group must be retained",
+    );
+    let active_child = manager
+        .items()
+        .find(|item| item.collection_file_id() == "active")
+        .expect("active child remains");
+    assert_eq!(
+        active_child.status(),
+        DownloadStatus::Queued,
+        "the in-flight child is queued for the replacement invocation",
+    );
+    let new_child = manager
+        .items()
+        .find(|item| item.collection_file_id() == "new")
+        .expect("new child row");
+    assert_eq!(new_child.status(), DownloadStatus::Queued);
+
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[test]
+fn playlist_staged_import_requeues_a_failed_owner_with_new_entries() {
+    let (_q, _l) = test_locks();
+    let _qf = test_queue_file("playlist-staged-retry-failed-owner");
+    let manager = DownloadManager::new(gio::ListStore::new::<DownloadItem>(), test_settings());
+    manager.shutdown_started.set(true);
+
+    let root = tempfile::tempdir().expect("create playlist destination");
+    let destination = root.path().join("Failed playlist");
+    std::fs::create_dir(&destination).expect("create playlist folder");
+    let entry = |id: &str| crate::media_types::VideoPlaylistFile {
+        id: id.to_string(),
+        title: format!("Entry {id}"),
+        page_url: format!("https://example.com/failed-playlist/{id}"),
+        status: DownloadStatus::Queued,
+        progress: 0.0,
+        path: None,
+    };
+    let owner = manager
+        .enqueue_video_playlist_staged(
+            "https://example.com/failed-playlist",
+            "Failed playlist",
+            destination.to_str().expect("UTF-8 playlist folder"),
+            vec![entry("failed")],
+            "best".to_string(),
+            false,
+        )
+        .expect("initial selection");
+    manager.upsert_video_playlist_file_row(
+        &owner,
+        "failed",
+        DownloadStatus::Failed,
+        0.0,
+        "Extraction failed",
+        None,
+    );
+    owner.set_status(DownloadStatus::Failed);
+
+    let extended = manager
+        .enqueue_video_playlist_staged(
+            "https://example.com/failed-playlist",
+            "Failed playlist",
+            destination.to_str().expect("UTF-8 playlist folder"),
+            vec![entry("new")],
+            "best".to_string(),
+            false,
+        )
+        .expect("new entries should reactivate a failed owner");
+
+    assert_eq!(extended.id(), owner.id());
+    assert_eq!(extended.status(), DownloadStatus::Queued);
+    let Some(crate::media_types::VideoSource::Playlist { state, .. }) =
+        manager.video_source(owner.id())
+    else {
+        panic!("the reactivated owner must retain its playlist source");
+    };
+    assert_eq!(state.files.len(), 2);
+    assert!(
+        state
+            .files
+            .iter()
+            .all(|file| file.status == DownloadStatus::Queued)
+    );
+    let children = manager
+        .items()
+        .filter(DownloadItem::is_collection_child)
+        .collect::<Vec<_>>();
+    assert_eq!(children.len(), 2);
+    assert!(
+        children
+            .iter()
+            .all(|child| child.status() == DownloadStatus::Queued)
+    );
+}
+
+#[test]
 fn playlist_staged_import_does_not_duplicate_identical_entry() {
     let (_q, _l) = test_locks();
     let _qf = test_queue_file("playlist-dedupe");

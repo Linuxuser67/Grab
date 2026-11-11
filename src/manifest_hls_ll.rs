@@ -190,9 +190,61 @@ fn has_ll_hls_partial_segments(body: &[u8]) -> bool {
         .any(|line| line.starts_with(b"#EXT-X-PART:"))
 }
 
-fn has_hls_media_key_tag(body: &[u8]) -> bool {
-    body.split(|byte| *byte == b'\n')
-        .any(|line| line.starts_with(b"#EXT-X-KEY:"))
+fn trim_ascii_whitespace(mut value: &[u8]) -> &[u8] {
+    while value.first().is_some_and(u8::is_ascii_whitespace) {
+        value = &value[1..];
+    }
+    while value.last().is_some_and(u8::is_ascii_whitespace) {
+        value = &value[..value.len() - 1];
+    }
+    value
+}
+
+fn hls_key_method(attributes: &[u8]) -> Option<&[u8]> {
+    let mut attribute_start = 0;
+    let mut inside_quotes = false;
+
+    for index in 0..=attributes.len() {
+        let at_end = index == attributes.len();
+        if at_end || (attributes[index] == b',' && !inside_quotes) {
+            let attribute = trim_ascii_whitespace(&attributes[attribute_start..index]);
+            if let Some(separator) = attribute.iter().position(|byte| *byte == b'=')
+                && trim_ascii_whitespace(&attribute[..separator]).eq_ignore_ascii_case(b"METHOD")
+            {
+                return Some(trim_ascii_whitespace(&attribute[separator + 1..]));
+            }
+            attribute_start = index.saturating_add(1);
+        } else if attributes[index] == b'"' {
+            inside_quotes = !inside_quotes;
+        }
+    }
+
+    None
+}
+
+fn has_hls_encrypted_media_key_tag(body: &[u8]) -> bool {
+    body.split(|byte| *byte == b'\n').any(|line| {
+        let line = line.strip_suffix(b"\r").unwrap_or(line);
+        let Some(attributes) = line.strip_prefix(b"#EXT-X-KEY:") else {
+            return false;
+        };
+
+        // Missing or malformed METHOD values fail closed. METHOD=NONE only
+        // disables encryption; it must not divert an unencrypted LL-HLS
+        // playlist away from the low-latency planner.
+        hls_key_method(attributes).is_none_or(|method| !method.eq_ignore_ascii_case(b"NONE"))
+    })
+}
+
+fn is_hls_method_none_key_tag(tag: &str) -> bool {
+    let Some(attributes) = tag.as_bytes().strip_prefix(b"#EXT-X-KEY:") else {
+        return false;
+    };
+    // RFC 8216 permits no attributes other than METHOD when its value is
+    // NONE. Reject malformed or extended forms instead of silently ignoring
+    // an unexpected key declaration.
+    !attributes.contains(&b',')
+        && hls_key_method(attributes).is_some_and(|method| method.eq_ignore_ascii_case(b"NONE"))
 }
 
 fn has_ll_hls_delta_update(body: &[u8]) -> bool {
@@ -216,8 +268,9 @@ pub(crate) fn plan_hls_media_playlist(
     body: &[u8],
 ) -> Result<Option<HlsPlan>, ManifestError> {
     let has_partial_segments = has_ll_hls_partial_segments(body);
-    let use_standard_encryption_planner =
-        !has_partial_segments && has_hls_media_key_tag(body) && !has_ll_hls_delta_update(body);
+    let use_standard_encryption_planner = !has_partial_segments
+        && has_hls_encrypted_media_key_tag(body)
+        && !has_ll_hls_delta_update(body);
     if !has_ll_hls_tags(body) || use_standard_encryption_planner {
         // Keep complete-segment LL-HLS on the live planner unless it actually
         // carries media encryption. Only complete encrypted segments are
@@ -775,6 +828,9 @@ fn validate_playlist_tags(playlist: &LlMediaPlaylist) -> Result<(), ManifestErro
             ));
         }
         if tag.starts_with("#EXT-X-KEY:") {
+            if is_hls_method_none_key_tag(tag) {
+                continue;
+            }
             return Err(ManifestError::UnsupportedEncryption);
         }
         if tag.starts_with("#EXT-X-PROGRAM-DATE-TIME:") {
@@ -1571,6 +1627,33 @@ segment.ts
                 .expect("complete-segment LL-HLS playlist")
                 .is_none(),
             "complete encrypted segments are handled by the standard HLS planner"
+        );
+    }
+
+    #[test]
+    fn method_none_keeps_unencrypted_complete_segments_on_the_ll_hls_planner() {
+        let body = br#"#EXTM3U
+#EXT-X-TARGETDURATION:4
+#EXT-X-SERVER-CONTROL:CAN-BLOCK-RELOAD=YES,PART-HOLD-BACK=1.5
+#EXT-X-PART-INF:PART-TARGET=0.5
+#EXT-X-KEY:METHOD=NONE
+#EXTINF:4.0,
+segment.ts
+"#;
+        let plan = super::plan_hls_media_playlist(BASE, body)
+            .expect("unencrypted complete-segment LL-HLS playlist")
+            .expect("METHOD=NONE is not media encryption");
+        assert!(plan.is_live);
+        assert_eq!(
+            plan.resources
+                .iter()
+                .filter(|resource| resource.kind == HlsResourceKind::Segment)
+                .count(),
+            1
+        );
+        assert!(
+            plan.local_playlist.segments[0].key.is_none(),
+            "METHOD=NONE must not be serialized as an active encryption key"
         );
     }
 

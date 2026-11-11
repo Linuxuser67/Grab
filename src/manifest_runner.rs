@@ -4936,10 +4936,15 @@ segment-2.m4s
             Some("mp4")
         );
         assert_eq!(
-            crate::manifest_plan::dash_output_container_extension(Some("application/mp4; codecs=avc1")),
+            crate::manifest_plan::dash_output_container_extension(Some(
+                "application/mp4; codecs=avc1"
+            )),
             Some("mp4")
         );
-        assert_eq!(crate::manifest_plan::dash_output_container_extension(Some("video/webm")), None);
+        assert_eq!(
+            crate::manifest_plan::dash_output_container_extension(Some("video/webm")),
+            None
+        );
         assert_eq!(crate::manifest_plan::dash_output_container_extension(None), None);
     }
 
@@ -5271,7 +5276,7 @@ segment-2.m4s
             url: manifest_url.to_string(),
             kind: ManifestKind::Dash,
             representation_key: video_key.clone().into(),
-            output_extension: None,
+                output_extension: None,
             audio_key: Some(alternate_audio_key.into()),
             subtitle_key: None,
             subtitle_language: None,

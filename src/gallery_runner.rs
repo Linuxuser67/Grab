@@ -192,8 +192,8 @@ pub async fn run_gallery_download_with_proxy(
     // Python output must be flushed promptly so merged file and progress records
     // preserve the order observed by the runner.
     cmd.env("PYTHONUNBUFFERED", "1");
-    // The fixture process uses the same run identity embedded in gallery-dl's
-    // output templates; the nonce is not a credential and is not logged.
+    // The fixture process reads the same non-secret run identity embedded in
+    // gallery-dl's output templates.
     cmd.env("GRAB_GALLERY_EVENT_NONCE", &event_nonce);
     cmd.stdout(std::process::Stdio::piped());
     cmd.stderr(std::process::Stdio::null());

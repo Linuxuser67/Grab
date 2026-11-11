@@ -552,7 +552,7 @@ pub(crate) fn parse_dash_manifest_at(
     let mut previous_period_duration = Duration::ZERO;
 
     for (period_index, (period, period_metadata)) in
-        mpd.periods.iter().zip(&representation_metadata).enumerate()
+        mpd.periods.iter().zip(&role_metadata.periods).enumerate()
     {
         if period.href.is_some()
             || !period.ContentProtection.is_empty()

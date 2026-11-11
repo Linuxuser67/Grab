@@ -1307,7 +1307,19 @@ async fn fetch_hls_steering_manifest(
                 "The HLS Content Steering SERVER-URI has no hostname".to_string(),
             )
         })?;
-        if !steering.public_host_leases.iter().any(|lease| lease.host() == host) {
+        let lease = crate::download_net::acquire_public_resolution(host).ok_or_else(|| {
+            ManifestIntakeError::Unsupported(
+                "The HLS Content Steering SERVER-URI failed the public-host safety policy"
+                    .to_string(),
+            )
+        })?;
+        // Compare canonical host keys from the acquired lease so case,
+        // trailing dots, and IPv6 brackets cannot consume extra slots.
+        if !steering
+            .public_host_leases
+            .iter()
+            .any(|held| held.host() == lease.host())
+        {
             if steering.public_host_leases.len()
                 >= crate::download_net::MAX_GUARDED_CHILD_HOSTS_PER_COLLECTION
             {
@@ -1316,12 +1328,6 @@ async fn fetch_hls_steering_manifest(
                         .to_string(),
                 ));
             }
-            let lease = crate::download_net::acquire_public_resolution(host).ok_or_else(|| {
-                ManifestIntakeError::Unsupported(
-                    "The HLS Content Steering SERVER-URI failed the public-host safety policy"
-                        .to_string(),
-                )
-            })?;
             steering.public_host_leases.push(lease);
         }
     }

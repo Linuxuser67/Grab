@@ -1260,9 +1260,8 @@ fn rebuild_format_options(step: &Rc<VideoStep>, info: &crate::video::VideoInfo, 
     step.format.set_selected(index as u32);
 }
 
-/// Retain public-only policy inherited from a browser handoff for as long
-/// as the Add card remains open. The child lease is acquired only after the
-/// existing inheritance validation has accepted its public destination.
+/// Retain public-only policy for a resolved child of an untrusted handoff
+/// for as long as the Add card remains open.
 fn inherit_public_resolution_for_card(
     step: &VideoStep,
     parent_url: &str,
@@ -1288,10 +1287,6 @@ fn inherit_public_resolution_for_card(
     else {
         return false;
     };
-    let canonical_child_host = child_host.trim_end_matches('.').to_ascii_lowercase();
-    if hosts.contains(&canonical_child_host) {
-        return true;
-    }
     let Some(lease) = crate::download_net::acquire_public_resolution(&child_host) else {
         return false;
     };

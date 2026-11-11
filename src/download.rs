@@ -1531,10 +1531,7 @@ impl DownloadManager {
                     .borrow()
                     .get(&item.id())
                     .is_some_and(|source| {
-                        matches!(
-                            source,
-                            crate::media_types::VideoSource::Playlist { .. }
-                        )
+                        matches!(source, crate::media_types::VideoSource::Playlist { .. })
                     })
         }) {
             let (existing_quality, existing_audio_only, existing_dest_dir, existing_ids) = {
@@ -1580,7 +1577,9 @@ impl DownloadManager {
                 .filter(|file| !existing_ids.contains(&file.id))
                 .collect::<Vec<_>>();
             if additions.is_empty() {
-                return Err(gettext("The selected playlist entries are already in the collection"));
+                return Err(gettext(
+                    "The selected playlist entries are already in the collection",
+                ));
             }
 
             let batch = self.batch_guard();

@@ -9788,7 +9788,11 @@ fn second_staged_selection_extends_the_existing_playlist_owner() {
         panic!("the existing owner must retain its playlist source");
     };
     assert_eq!(
-        state.files.iter().map(|file| file.id.as_str()).collect::<Vec<_>>(),
+        state
+            .files
+            .iter()
+            .map(|file| file.id.as_str())
+            .collect::<Vec<_>>(),
         ["first", "second"],
     );
     let children = manager
@@ -9839,11 +9843,17 @@ fn second_staged_selection_rejects_entries_already_owned_by_the_collection() {
         .expect_err("an already-owned entry must not be duplicated");
     assert!(error.contains("already in the collection"));
     assert_eq!(
-        manager.items().filter(DownloadItem::is_collection_parent).count(),
+        manager
+            .items()
+            .filter(DownloadItem::is_collection_parent)
+            .count(),
         1,
     );
     assert_eq!(
-        manager.items().filter(DownloadItem::is_collection_child).count(),
+        manager
+            .items()
+            .filter(DownloadItem::is_collection_child)
+            .count(),
         1,
     );
 }

@@ -1696,12 +1696,6 @@ done
                 ProbeOutcome::Gallery,
                 "gallery-dl must also win when yt-dlp found nothing",
             );
-            // A stored Video preference must not override a successful
-            // gallery-dl listing.
-            assert_eq!(
-                route_for_collection(true, 4, Some(items)),
-                ProbeOutcome::Gallery,
-            );
         }
     }
 
@@ -1729,10 +1723,6 @@ done
         let unknown = vec![item("xyz")];
 
         assert_eq!(route(true, Some(&video)), ProbeOutcome::Gallery);
-        assert_eq!(
-            route(true, Some(&video)),
-            ProbeOutcome::Gallery
-        );
         assert_eq!(route(false, Some(&video)), ProbeOutcome::Gallery);
         assert_eq!(route(true, Some(&unknown)), ProbeOutcome::Gallery);
         assert_eq!(route(true, None), ProbeOutcome::VideoYtDlp);

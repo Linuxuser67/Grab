@@ -717,7 +717,7 @@ fn requires_public_dns_filter(host: &str, cache: &PublicDnsPolicy) -> bool {
 pub(crate) fn inherit_public_resolution_for_collection(
     parent_url: &str,
     child_url: &str,
-    seen_hosts: &mut std::collections::HashSet<String>,
+    seen_hosts: &mut PublicResolutionSet,
 ) -> Result<(), CollectionHostError> {
     let Some(parent) = url::Url::parse(parent_url)
         .ok()
@@ -735,14 +735,14 @@ pub(crate) fn inherit_public_resolution_for_collection(
         return Err(CollectionHostError::UnsafeDestination);
     };
     let key = host_key(&child);
-    if !seen_hosts.contains(&key) && seen_hosts.len() >= MAX_GUARDED_CHILD_HOSTS_PER_COLLECTION {
+    if seen_hosts.contains(&key) {
+        return Ok(());
+    }
+    if seen_hosts.len() >= MAX_GUARDED_CHILD_HOSTS_PER_COLLECTION {
         return Err(CollectionHostError::TooManyDistinctHosts);
     }
-    if !require_public_resolution(&child) {
-        return Err(CollectionHostError::UnsafeDestination);
-    }
-    // Insert only after the global handoff policy has accepted the hostname.
-    seen_hosts.insert(key);
+    let lease = acquire_public_resolution(&child).ok_or(CollectionHostError::UnsafeDestination)?;
+    seen_hosts.insert(key, lease);
     Ok(())
 }
 
@@ -783,12 +783,18 @@ pub(crate) fn inherit_public_resolution_for_manifest(
 /// Single-child convenience path for callers that are not expanding a
 /// collection; no collection-local limit applies.
 pub(crate) fn inherit_public_resolution(parent_url: &str, child_url: &str) -> bool {
-    inherit_public_resolution_for_collection(
-        parent_url,
-        child_url,
-        &mut std::collections::HashSet::new(),
-    )
-    .is_ok()
+    if !url::Url::parse(parent_url)
+        .ok()
+        .and_then(|url| url.host_str().map(str::to_string))
+        .as_deref()
+        .is_some_and(is_untrusted_handoff_host)
+    {
+        return true;
+    }
+    url::Url::parse(child_url)
+        .ok()
+        .and_then(|url| url.host_str().map(str::to_string))
+        .is_some_and(|host| require_public_resolution(&host))
 }
 
 /// Drop private addresses from a DNS answer; a mixed answer keeps its public part.

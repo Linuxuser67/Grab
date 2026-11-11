@@ -1714,7 +1714,9 @@ fn push_playlist_items_page(
     // Preserve this collection's accepted hosts across partial picker imports.
     // Otherwise repeatedly clicking Queue could reset the cap and eventually
     // register every host from a hostile playlist.
-    let guarded_child_hosts = Rc::new(RefCell::new(std::collections::HashSet::new()));
+    let guarded_child_hosts = Rc::new(RefCell::new(
+        crate::download_net::PublicResolutionSet::default(),
+    ));
 
     {
         let nav_on_error = nav.clone();

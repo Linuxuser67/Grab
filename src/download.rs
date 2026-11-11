@@ -1706,7 +1706,7 @@ impl DownloadManager {
             return (0, pl.total, 0);
         }
 
-        let mut guarded_child_hosts = HashSet::new();
+        let mut guarded_child_hosts = crate::download_net::PublicResolutionSet::default();
         let mut files = Vec::with_capacity(pl.items.len());
         let mut seen_ids = HashSet::new();
         let mut skipped_by_host_limit = 0usize;

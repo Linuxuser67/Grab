@@ -3537,7 +3537,8 @@ fn playlist_download_argv_uses_original_selected_indices_and_tagged_events() {
         std::path::Path::new("/usr/bin/ffmpeg"),
         std::path::Path::new("/tmp/grab-playlist"),
         &[0, 2, 6],
-    );
+    )
+    .expect("valid playlist selection");
 
     fn value_after<'a>(args: &'a [String], flag: &str) -> Option<&'a str> {
         args.iter()

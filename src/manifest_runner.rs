@@ -4945,7 +4945,10 @@ segment-2.m4s
             crate::manifest_plan::dash_output_container_extension(Some("video/webm")),
             None
         );
-        assert_eq!(crate::manifest_plan::dash_output_container_extension(None), None);
+        assert_eq!(
+            crate::manifest_plan::dash_output_container_extension(None),
+            None
+        );
     }
 
     #[test]
@@ -5276,7 +5279,7 @@ segment-2.m4s
             url: manifest_url.to_string(),
             kind: ManifestKind::Dash,
             representation_key: video_key.clone().into(),
-                output_extension: None,
+            output_extension: None,
             audio_key: Some(alternate_audio_key.into()),
             subtitle_key: None,
             subtitle_language: None,
@@ -5474,7 +5477,7 @@ segment-2.m4s
                 url: "https://cdn.example.test/master.m3u8".to_string(),
                 kind: ManifestKind::Hls,
                 representation_key: "hls-media".into(),
-            output_extension: None,
+                output_extension: None,
                 audio_key: None,
                 subtitle_key: None,
                 subtitle_language: None,

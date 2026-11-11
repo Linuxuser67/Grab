@@ -209,8 +209,7 @@ fn hls_key_method(attributes: &[u8]) -> Option<&[u8]> {
         if at_end || (attributes[index] == b',' && !inside_quotes) {
             let attribute = trim_ascii_whitespace(&attributes[attribute_start..index]);
             if let Some(separator) = attribute.iter().position(|byte| *byte == b'=')
-                && trim_ascii_whitespace(&attribute[..separator])
-                    .eq_ignore_ascii_case(b"METHOD")
+                && trim_ascii_whitespace(&attribute[..separator]).eq_ignore_ascii_case(b"METHOD")
             {
                 return Some(trim_ascii_whitespace(&attribute[separator + 1..]));
             }
@@ -233,8 +232,7 @@ fn has_hls_encrypted_media_key_tag(body: &[u8]) -> bool {
         // Missing or malformed METHOD values fail closed. METHOD=NONE only
         // disables encryption; it must not divert an unencrypted LL-HLS
         // playlist away from the low-latency planner.
-        hls_key_method(attributes)
-            .is_none_or(|method| !method.eq_ignore_ascii_case(b"NONE"))
+        hls_key_method(attributes).is_none_or(|method| !method.eq_ignore_ascii_case(b"NONE"))
     })
 }
 

@@ -820,7 +820,7 @@ pub fn build_window(
                             if group.row.parent().is_none() {
                                 target.append(&group.row);
                             }
-                            group.row.add_row(&row);
+                            group.add_row(&row);
                         } else {
                             target.append(&row);
                         }

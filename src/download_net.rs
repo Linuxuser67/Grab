@@ -10,6 +10,7 @@ use std::path::PathBuf;
 #[cfg(test)]
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
+use std::time::{Duration, Instant};
 
 #[derive(Debug, Clone, Default)]
 pub struct DownloadOptions {
@@ -421,14 +422,67 @@ pub(crate) fn is_local_or_private_host(host: &str) -> bool {
     }
 }
 
-/// Exact hostnames originating from untrusted browser handoffs, with the
-/// number of queue rows that still need the restriction. Entries with no rows
-/// (an open card) keep the host registered; the cap fails closed rather than
-/// evicting one that a card may still use. Redirects use a separate
-/// resolver-only set.
-static UNTRUSTED_HANDOFF_HOSTS: OnceLock<Mutex<std::collections::BTreeMap<String, usize>>> =
-    OnceLock::new();
+/// Exact hosts originating from untrusted browser handoffs. Queue rows and
+/// active cards, manifests, and transfers hold explicit references; only
+/// unreferenced provisional registrations expire. Redirects use a separate
+/// per-client resolver-only set.
+#[derive(Debug, Clone, Copy)]
+struct HandoffHostEntry {
+    references: usize,
+    last_seen: Instant,
+}
+
+static UNTRUSTED_HANDOFF_HOSTS: OnceLock<
+    Mutex<std::collections::BTreeMap<String, HandoffHostEntry>>,
+> = OnceLock::new();
 const UNTRUSTED_HANDOFF_HOSTS_CAP: usize = 4096;
+const UNREFERENCED_HANDOFF_HOST_TTL: Duration = Duration::from_secs(15 * 60);
+
+/// A public-only host registration held for one active owner.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) struct PublicResolutionLease {
+    host: String,
+}
+
+impl PublicResolutionLease {
+    pub(crate) fn host(&self) -> &str {
+        &self.host
+    }
+}
+
+impl Drop for PublicResolutionLease {
+    fn drop(&mut self) {
+        release_public_resolution(&self.host);
+    }
+}
+
+/// Per-operation child hosts; leases are released with the operation state.
+#[derive(Default)]
+pub(crate) struct PublicResolutionSet {
+    hosts: std::collections::HashSet<String>,
+    leases: Vec<Arc<PublicResolutionLease>>,
+}
+
+impl PublicResolutionSet {
+    pub(crate) fn len(&self) -> usize {
+        self.hosts.len()
+    }
+
+    pub(crate) fn contains(&self, host: &str) -> bool {
+        self.hosts.contains(host)
+    }
+
+    /// Clone leases for asynchronous work that may outlive the owning set.
+    pub(crate) fn clone_leases(&self) -> Vec<Arc<PublicResolutionLease>> {
+        self.leases.clone()
+    }
+
+    pub(crate) fn insert(&mut self, host: String, lease: Arc<PublicResolutionLease>) {
+        if self.hosts.insert(host) {
+            self.leases.push(lease);
+        }
+    }
+}
 
 /// Maximum number of distinct child hosts one untrusted collection may add.
 /// Keep this in the shared network-policy layer so the automatic and picker
@@ -449,7 +503,7 @@ pub(crate) fn lock_untrusted_handoff_policy_for_test() -> std::sync::MutexGuard<
 #[derive(Debug)]
 pub(crate) struct IsolatedUntrustedHandoffPolicy {
     _lock: std::sync::MutexGuard<'static, ()>,
-    previous: std::collections::BTreeMap<String, usize>,
+    previous: std::collections::BTreeMap<String, HandoffHostEntry>,
 }
 
 #[cfg(test)]
@@ -485,9 +539,14 @@ fn host_key(host: &str) -> String {
         .to_ascii_lowercase()
 }
 
-/// Register a hostname or public IP literal for public-only resolution.
-/// Private/local destinations are rejected here and must be handled only
-/// through the explicit-confirmation path.
+fn prune_unreferenced_handoff_hosts(
+    hosts: &mut std::collections::BTreeMap<String, HandoffHostEntry>,
+) {
+    hosts.retain(|_, entry| {
+        entry.references > 0 || entry.last_seen.elapsed() < UNREFERENCED_HANDOFF_HOST_TTL
+    });
+}
+
 /// Whether a hostname or IP literal is eligible for public-only resolution,
 /// without mutating the process-wide resolver policy.
 pub(crate) fn is_public_destination_host(host: &str) -> bool {
@@ -501,71 +560,113 @@ pub(crate) fn is_public_destination_host(host: &str) -> bool {
     }
 }
 
-/// Register a hostname or public IP literal for public-only resolution.
-/// Private/local destinations are rejected here and must be handled only
-/// through the separate explicit-confirmation path.
+/// Register a short-lived provisional policy entry. Production owners should
+/// acquire a lease or a queue-row reference; abandoned provisional entries
+/// age out rather than exhausting the process-wide cap.
 pub(crate) fn require_public_resolution(host: &str) -> bool {
     let key = host_key(host);
     if !is_public_destination_host(host) {
         return false;
     }
-    // Public IP literals are also recorded: the literal itself cannot rebind,
-    // but the extractor may follow links to other hosts and its whole request
-    // tree still needs the guarded proxy.
     let mut hosts = lock_recover(UNTRUSTED_HANDOFF_HOSTS.get_or_init(Default::default));
-    if policy_matches(&hosts, &key) {
+    prune_unreferenced_handoff_hosts(&mut hosts);
+    if let Some(entry) = hosts.get_mut(&key) {
+        entry.last_seen = Instant::now();
         return true;
     }
-    // Preserve existing restrictions at capacity. Fail closed: never evict an
-    // entry here, because a zero-reference entry may still belong to an open
-    // card that will consult this policy when the user adds its URL.
     if hosts.len() >= UNTRUSTED_HANDOFF_HOSTS_CAP {
         return false;
     }
-    hosts.insert(key, 0);
+    hosts.insert(
+        key,
+        HandoffHostEntry {
+            references: 0,
+            last_seen: Instant::now(),
+        },
+    );
     true
 }
 
-/// Associate one queued row with a host's public-only policy. The host must
-/// already have been accepted by `require_public_resolution`; retaining it
-/// again is harmless and keeps restored rows covered.
-pub(crate) fn retain_public_resolution(host: &str) {
+/// Acquire a lease for an untrusted public hostname. The caller retains the
+/// returned Arc for as long as requests may still use this host.
+pub(crate) fn acquire_public_resolution(host: &str) -> Option<Arc<PublicResolutionLease>> {
     let key = host_key(host);
-    if key.is_empty() {
-        return;
+    if !is_public_destination_host(host) {
+        return None;
     }
-    *lock_recover(UNTRUSTED_HANDOFF_HOSTS.get_or_init(Default::default))
-        .entry(key)
-        .or_insert(0) += 1;
+    let mut hosts = lock_recover(UNTRUSTED_HANDOFF_HOSTS.get_or_init(Default::default));
+    prune_unreferenced_handoff_hosts(&mut hosts);
+    if let Some(entry) = hosts.get_mut(&key) {
+        entry.references = entry.references.saturating_add(1);
+        entry.last_seen = Instant::now();
+    } else {
+        if hosts.len() >= UNTRUSTED_HANDOFF_HOSTS_CAP {
+            return None;
+        }
+        hosts.insert(
+            key.clone(),
+            HandoffHostEntry {
+                references: 1,
+                last_seen: Instant::now(),
+            },
+        );
+    }
+    Some(Arc::new(PublicResolutionLease { host: key }))
 }
 
-/// Release a row's reference. The entry stays registered (an open card or a
-/// concurrent row may still use it); the host cap fails closed rather than
-/// evicting it.
+/// Associate one queued row with a host's public-only policy.
+pub(crate) fn retain_public_resolution(host: &str) -> bool {
+    let key = host_key(host);
+    if key.is_empty() || !is_public_destination_host(&key) {
+        return false;
+    }
+    let mut hosts = lock_recover(UNTRUSTED_HANDOFF_HOSTS.get_or_init(Default::default));
+    prune_unreferenced_handoff_hosts(&mut hosts);
+    if let Some(entry) = hosts.get_mut(&key) {
+        entry.references = entry.references.saturating_add(1);
+        entry.last_seen = Instant::now();
+        return true;
+    }
+    if hosts.len() >= UNTRUSTED_HANDOFF_HOSTS_CAP {
+        return false;
+    }
+    hosts.insert(
+        key,
+        HandoffHostEntry {
+            references: 1,
+            last_seen: Instant::now(),
+        },
+    );
+    true
+}
+
+/// Release a row or lease reference. Zero-reference owned entries are removed
+/// immediately; unclaimed provisional entries are reclaimed by the TTL.
 pub(crate) fn release_public_resolution(host: &str) {
     let key = host_key(host);
     if key.is_empty() {
         return;
     }
     let mut hosts = lock_recover(UNTRUSTED_HANDOFF_HOSTS.get_or_init(Default::default));
-    if let Some(refs) = hosts.get_mut(&key) {
-        *refs = refs.saturating_sub(1);
+    if let Some(entry) = hosts.get_mut(&key) {
+        entry.references = entry.references.saturating_sub(1);
+        if entry.references == 0 {
+            hosts.remove(&key);
+        }
     }
 }
 
-/// Match only explicitly registered names. Canonicalized pages and
-/// queued collection children are registered via inherit_public_resolution;
-/// treating an entire parent domain as untrusted would also affect unrelated
-/// user-added rows on sibling subdomains.
-fn policy_matches(hosts: &std::collections::BTreeMap<String, usize>, host: &str) -> bool {
+fn policy_matches(
+    hosts: &std::collections::BTreeMap<String, HandoffHostEntry>,
+    host: &str,
+) -> bool {
     hosts.contains_key(host)
 }
 
 pub(crate) fn is_untrusted_handoff_host(host: &str) -> bool {
-    policy_matches(
-        &lock_recover(UNTRUSTED_HANDOFF_HOSTS.get_or_init(Default::default)),
-        &host_key(host),
-    )
+    let mut hosts = lock_recover(UNTRUSTED_HANDOFF_HOSTS.get_or_init(Default::default));
+    prune_unreferenced_handoff_hosts(&mut hosts);
+    policy_matches(&hosts, &host_key(host))
 }
 
 /// Resolver-only decisions for cross-host redirects live on one reqwest client.
@@ -617,7 +718,7 @@ fn requires_public_dns_filter(host: &str, cache: &PublicDnsPolicy) -> bool {
 pub(crate) fn inherit_public_resolution_for_collection(
     parent_url: &str,
     child_url: &str,
-    seen_hosts: &mut std::collections::HashSet<String>,
+    seen_hosts: &mut PublicResolutionSet,
 ) -> Result<(), CollectionHostError> {
     let Some(parent) = url::Url::parse(parent_url)
         .ok()
@@ -635,26 +736,49 @@ pub(crate) fn inherit_public_resolution_for_collection(
         return Err(CollectionHostError::UnsafeDestination);
     };
     let key = host_key(&child);
-    if !seen_hosts.contains(&key) && seen_hosts.len() >= MAX_GUARDED_CHILD_HOSTS_PER_COLLECTION {
+    if seen_hosts.contains(&key) {
+        return Ok(());
+    }
+    if seen_hosts.len() >= MAX_GUARDED_CHILD_HOSTS_PER_COLLECTION {
         return Err(CollectionHostError::TooManyDistinctHosts);
     }
-    if !require_public_resolution(&child) {
-        return Err(CollectionHostError::UnsafeDestination);
-    }
-    // Insert only after the global handoff policy has accepted the hostname.
-    seen_hosts.insert(key);
+    let lease = acquire_public_resolution(&child).ok_or(CollectionHostError::UnsafeDestination)?;
+    seen_hosts.insert(key, lease);
     Ok(())
 }
 
-/// Single-child convenience path for callers that are not expanding a
-/// collection; no collection-local limit applies.
-pub(crate) fn inherit_public_resolution(parent_url: &str, child_url: &str) -> bool {
-    inherit_public_resolution_for_collection(
-        parent_url,
-        child_url,
-        &mut std::collections::HashSet::new(),
-    )
-    .is_ok()
+/// Lease-based child registration for native HLS/DASH resources. The lease
+/// lifetime spans the transfer attempt, unlike picker-side provisional entries.
+pub(crate) fn inherit_public_resolution_for_manifest(
+    parent_url: &str,
+    child_url: &str,
+    seen_hosts: &mut PublicResolutionSet,
+) -> Result<(), CollectionHostError> {
+    let Some(parent) = url::Url::parse(parent_url)
+        .ok()
+        .and_then(|url| url.host_str().map(str::to_string))
+    else {
+        return Ok(());
+    };
+    if !is_untrusted_handoff_host(&parent) {
+        return Ok(());
+    }
+    let Some(child) = url::Url::parse(child_url)
+        .ok()
+        .and_then(|url| url.host_str().map(str::to_string))
+    else {
+        return Err(CollectionHostError::UnsafeDestination);
+    };
+    let key = host_key(&child);
+    if seen_hosts.contains(&key) {
+        return Ok(());
+    }
+    if seen_hosts.len() >= MAX_GUARDED_CHILD_HOSTS_PER_COLLECTION {
+        return Err(CollectionHostError::TooManyDistinctHosts);
+    }
+    let lease = acquire_public_resolution(&child).ok_or(CollectionHostError::UnsafeDestination)?;
+    seen_hosts.insert(key, lease);
+    Ok(())
 }
 
 /// Drop private addresses from a DNS answer; a mixed answer keeps its public part.
@@ -962,7 +1086,7 @@ pub(crate) fn clear_public_resolution_for_tests() {
 pub(crate) fn public_resolution_refs(host: &str) -> Option<usize> {
     lock_recover(UNTRUSTED_HANDOFF_HOSTS.get_or_init(Default::default))
         .get(&host_key(host))
-        .copied()
+        .map(|entry| entry.references)
 }
 
 #[cfg(test)]
@@ -1049,6 +1173,77 @@ mod tests {
     }
 
     #[test]
+    fn leases_keep_hosts_registered_until_the_last_clone_is_dropped() {
+        let _test_lock = lock_untrusted_handoff_policy_for_test();
+        let cache = UNTRUSTED_HANDOFF_HOSTS.get_or_init(Default::default);
+        let previous = {
+            let mut hosts = lock_recover(cache);
+            std::mem::take(&mut *hosts)
+        };
+
+        let lease = acquire_public_resolution("lease.example").expect("public host lease");
+        let clone = Arc::clone(&lease);
+        assert!(is_untrusted_handoff_host("lease.example"));
+        assert_eq!(public_resolution_refs("lease.example"), Some(1));
+        drop(lease);
+        assert!(is_untrusted_handoff_host("lease.example"));
+        drop(clone);
+        assert!(!is_untrusted_handoff_host("lease.example"));
+
+        *lock_recover(cache) = previous;
+    }
+
+    #[test]
+    fn cloned_set_leases_keep_hosts_registered_after_the_owner_drops() {
+        let _test_lock = lock_untrusted_handoff_policy_for_test();
+        let cache = UNTRUSTED_HANDOFF_HOSTS.get_or_init(Default::default);
+        let previous = {
+            let mut hosts = lock_recover(cache);
+            std::mem::take(&mut *hosts)
+        };
+
+        let mut owner = PublicResolutionSet::default();
+        let lease =
+            acquire_public_resolution("background-count.example").expect("public host lease");
+        owner.insert(lease.host().to_string(), lease);
+        let background = owner.clone_leases();
+
+        drop(owner);
+        assert!(
+            is_untrusted_handoff_host("background-count.example"),
+            "background work keeps the policy after its UI owner closes"
+        );
+        drop(background);
+        assert!(
+            !is_untrusted_handoff_host("background-count.example"),
+            "the policy is released when the final background owner completes"
+        );
+
+        *lock_recover(cache) = previous;
+    }
+
+    #[test]
+    fn expired_unreferenced_hosts_are_reclaimed_before_cap_check() {
+        let _test_lock = lock_untrusted_handoff_policy_for_test();
+        let cache = UNTRUSTED_HANDOFF_HOSTS.get_or_init(Default::default);
+        let previous = {
+            let mut hosts = lock_recover(cache);
+            std::mem::take(&mut *hosts)
+        };
+        lock_recover(cache).insert(
+            "stale.example".to_string(),
+            HandoffHostEntry {
+                references: 0,
+                last_seen: Instant::now() - UNREFERENCED_HANDOFF_HOST_TTL - Duration::from_secs(1),
+            },
+        );
+        assert!(require_public_resolution("fresh.example"));
+        assert!(!is_untrusted_handoff_host("stale.example"));
+        assert!(is_untrusted_handoff_host("fresh.example"));
+        *lock_recover(cache) = previous;
+    }
+
+    #[test]
     fn untrusted_policy_is_exact_and_children_are_registered_explicitly() {
         let _test_lock = lock_untrusted_handoff_policy_for_test();
         let cache = UNTRUSTED_HANDOFF_HOSTS.get_or_init(Default::default);
@@ -1060,11 +1255,16 @@ mod tests {
         assert!(is_untrusted_handoff_host("www.example.com"));
         assert!(!is_untrusted_handoff_host("example.com"));
         assert!(!is_untrusted_handoff_host("cdn.www.example.com"));
-        assert!(inherit_public_resolution(
+        let mut children = PublicResolutionSet::default();
+        inherit_public_resolution_for_collection(
             "https://www.example.com/list",
-            "https://example.com/video.mp4"
-        ));
+            "https://example.com/video.mp4",
+            &mut children,
+        )
+        .expect("cross-origin collection child should be leased");
         assert!(is_untrusted_handoff_host("example.com"));
+        drop(children);
+        assert!(!is_untrusted_handoff_host("example.com"));
         assert!(!is_untrusted_handoff_host("other-example.com"));
         *lock_recover(cache) = previous;
     }
@@ -1078,7 +1278,7 @@ mod tests {
             std::mem::take(&mut *set)
         };
         assert!(require_public_resolution("collection-limit.example"));
-        let mut seen = std::collections::HashSet::new();
+        let mut seen = PublicResolutionSet::default();
         for i in 0..MAX_GUARDED_CHILD_HOSTS_PER_COLLECTION {
             inherit_public_resolution_for_collection(
                 "https://collection-limit.example/list",
@@ -1106,6 +1306,10 @@ mod tests {
         )
         .expect("an already-counted host should remain accepted");
         assert_eq!(seen.len(), MAX_GUARDED_CHILD_HOSTS_PER_COLLECTION);
+        assert!(is_untrusted_handoff_host("child-0.example"));
+        drop(seen);
+        assert!(!is_untrusted_handoff_host("child-0.example"));
+        assert!(is_untrusted_handoff_host("collection-limit.example"));
         *lock_recover(cache) = previous;
     }
 
@@ -1148,15 +1352,24 @@ mod tests {
             std::mem::take(&mut *set)
         };
         assert!(require_public_resolution("collection.example"));
-        assert!(inherit_public_resolution(
+        let mut children = PublicResolutionSet::default();
+        inherit_public_resolution_for_collection(
             "https://collection.example/list",
-            "https://cdn.example/video.mp4"
-        ));
+            "https://cdn.example/video.mp4",
+            &mut children,
+        )
+        .expect("public child host should be leased");
         assert!(is_untrusted_handoff_host("cdn.example"));
-        assert!(!inherit_public_resolution(
-            "https://collection.example/list",
-            "http://127.0.0.1/admin"
-        ));
+        assert_eq!(
+            inherit_public_resolution_for_collection(
+                "https://collection.example/list",
+                "http://127.0.0.1/admin",
+                &mut children,
+            ),
+            Err(CollectionHostError::UnsafeDestination)
+        );
+        drop(children);
+        assert!(!is_untrusted_handoff_host("cdn.example"));
         *lock_recover(cache) = previous;
     }
 
@@ -1179,17 +1392,16 @@ mod tests {
             is_untrusted_handoff_host("test-0.example"),
             "an active row's policy must survive cap pressure"
         );
-        // Releasing a row does not free the entry at cap: a zero-reference
-        // entry may still belong to an open card, so eviction would be
-        // fail-open. New destinations stay refused until restart.
+        // Releasing the final owner frees the host slot without evicting any
+        // still-active registration.
         release_public_resolution("test-0.example");
-        assert!(!require_public_resolution("overflow.example"));
-        assert!(is_untrusted_handoff_host("test-0.example"));
+        assert!(!is_untrusted_handoff_host("test-0.example"));
+        assert!(require_public_resolution("overflow.example"));
         *lock_recover(cache) = previous;
     }
 
     #[test]
-    fn releasing_a_row_keeps_the_host_registered() {
+    fn releasing_the_last_row_reclaims_its_host_registration() {
         let _test_lock = lock_untrusted_handoff_policy_for_test();
         let cache = UNTRUSTED_HANDOFF_HOSTS.get_or_init(Default::default);
         let previous = {
@@ -1199,10 +1411,10 @@ mod tests {
         assert!(require_public_resolution("idle.example"));
         retain_public_resolution("idle.example");
         release_public_resolution("idle.example");
-        assert!(is_untrusted_handoff_host("idle.example"));
-        // A second release must not wrap or remove the entry.
+        assert!(!is_untrusted_handoff_host("idle.example"));
+        // A second release is harmless and cannot wrap the reference count.
         release_public_resolution("idle.example");
-        assert!(is_untrusted_handoff_host("idle.example"));
+        assert!(!is_untrusted_handoff_host("idle.example"));
         *lock_recover(cache) = previous;
     }
 

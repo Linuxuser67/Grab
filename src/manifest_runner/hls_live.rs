@@ -849,7 +849,7 @@ async fn poll_live_hls_track(
     tx: &tokio::sync::mpsc::UnboundedSender<EngineMsg>,
     downloaded: &Arc<AtomicU64>,
     abort: &mut tokio::sync::oneshot::Receiver<crate::video::StopIntent>,
-    guarded_child_hosts: &mut std::collections::HashSet<String>,
+    guarded_child_hosts: &mut crate::download_net::PublicResolutionSet,
     other_rendition_bytes: u64,
 ) -> Result<LiveHlsSnapshotOutcome, ManifestRunError> {
     let result = tokio::select! {
@@ -955,7 +955,7 @@ async fn refresh_live_hls_pathway(
     destination_dir: &Path,
     tx: &tokio::sync::mpsc::UnboundedSender<EngineMsg>,
     downloaded: &Arc<AtomicU64>,
-    guarded_child_hosts: &mut std::collections::HashSet<String>,
+    guarded_child_hosts: &mut crate::download_net::PublicResolutionSet,
     abort: &mut tokio::sync::oneshot::Receiver<crate::video::StopIntent>,
 ) -> Result<Option<crate::video::StopIntent>, ManifestRunError> {
     let previous_pathway = steering.active_pathway_id.clone();
@@ -1268,7 +1268,7 @@ pub(super) async fn run_live_hls_tracks(
     connections: usize,
     tx: &tokio::sync::mpsc::UnboundedSender<EngineMsg>,
     downloaded: &Arc<AtomicU64>,
-    guarded_child_hosts: &mut std::collections::HashSet<String>,
+    guarded_child_hosts: &mut crate::download_net::PublicResolutionSet,
     abort: &mut tokio::sync::oneshot::Receiver<crate::video::StopIntent>,
 ) -> Result<LiveHlsCapture, ManifestRunError> {
     let mut video = load_live_hls_track(video_plan, video_dir).await?;

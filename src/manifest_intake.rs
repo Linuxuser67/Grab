@@ -1280,7 +1280,7 @@ fn hls_steering_request_url(
 async fn fetch_hls_steering_manifest(
     client: &reqwest::Client,
     master_url: &Url,
-    steering: &crate::manifest::HlsContentSteering,
+    steering: &mut crate::manifest::HlsContentSteering,
     transport_policy: ManifestTransportPolicy,
     fetch_mode: ManifestFetchMode,
     proxy_configured: bool,
@@ -1298,20 +1298,37 @@ async fn fetch_hls_steering_manifest(
         ));
     }
 
-    // The master URL was selected by the user. A different SERVER-URI host
-    // came from untrusted playlist data, so register it before the resolver
-    // can connect and reject private/local destinations up front.
+    // SERVER-URI is untrusted playlist data when it changes origin. Acquire
+    // a lease before the resolver connects and keep it until this presentation
+    // drops, including after RELOAD-URI changes the steering server.
     if request_url.origin() != master_url.origin() {
         let host = request_url.host_str().ok_or_else(|| {
             ManifestIntakeError::Unsupported(
                 "The HLS Content Steering SERVER-URI has no hostname".to_string(),
             )
         })?;
-        if !crate::download_net::require_public_resolution(host) {
-            return Err(ManifestIntakeError::Unsupported(
+        let lease = crate::download_net::acquire_public_resolution(host).ok_or_else(|| {
+            ManifestIntakeError::Unsupported(
                 "The HLS Content Steering SERVER-URI failed the public-host safety policy"
                     .to_string(),
-            ));
+            )
+        })?;
+        // Compare canonical host keys from the acquired lease so case,
+        // trailing dots, and IPv6 brackets cannot consume extra slots.
+        if !steering
+            .public_host_leases
+            .iter()
+            .any(|held| held.host() == lease.host())
+        {
+            if steering.public_host_leases.len()
+                >= crate::download_net::MAX_GUARDED_CHILD_HOSTS_PER_COLLECTION
+            {
+                return Err(ManifestIntakeError::Unsupported(
+                    "The HLS Content Steering presentation references too many distinct hosts"
+                        .to_string(),
+                ));
+            }
+            steering.public_host_leases.push(lease);
         }
     }
 
@@ -1510,7 +1527,7 @@ async fn apply_hls_content_steering(
         steering.proxy_configured = proxy_configured;
         crate::manifest::inherit_query_parameters_same_origin(master_url, &mut steering.reload_url);
     }
-    let Some(steering_snapshot) = master.content_steering.clone() else {
+    let Some(mut steering_snapshot) = master.content_steering.clone() else {
         return Ok(master);
     };
     validate_hls_content_steering_stable_ids(&master)?;
@@ -1525,7 +1542,7 @@ async fn apply_hls_content_steering(
     match fetch_hls_steering_manifest(
         client,
         master_url,
-        &steering_snapshot,
+        &mut steering_snapshot,
         transport_policy,
         fetch_mode,
         proxy_configured,
@@ -1572,6 +1589,9 @@ async fn apply_hls_content_steering(
         }
     }
 
+    if let Some(steering) = master.content_steering.as_mut() {
+        steering.public_host_leases = steering_snapshot.public_host_leases;
+    }
     select_hls_content_steering_pathway(&mut master, &priority)?;
     if let Some(steering) = master.content_steering.as_mut() {
         steering.active_pathway_id = master
@@ -1694,14 +1714,13 @@ async fn refresh_hls_content_steering_with_policy(
             return Ok(None);
         }
     };
-    let snapshot = steering.clone();
+    let mut snapshot = steering.clone();
     let mut master = base_master;
-    master.content_steering = Some(snapshot.clone());
 
     let response = fetch_hls_steering_manifest(
         client,
         &master_url,
-        &snapshot,
+        &mut snapshot,
         transport_policy,
         ManifestFetchMode::Download,
         proxy_configured,
@@ -1719,6 +1738,8 @@ async fn refresh_hls_content_steering_with_policy(
             return Ok(None);
         }
     };
+    steering.public_host_leases = snapshot.public_host_leases.clone();
+    master.content_steering = Some(snapshot.clone());
     let manifest = match parse_hls_steering_manifest(&body) {
         Ok(manifest) => manifest,
         Err(error) => {
@@ -2015,25 +2036,21 @@ async fn resolve_dash_xlinks(
                 }
                 // A directly entered manifest is trusted as the user-selected
                 // origin, but a different host is still an untrusted remote
-                // link. Force public-only DNS for those children so a hostile
-                // MPD cannot turn XLink into a request to a private address.
-                if target.origin() != parent_url.origin()
-                    && !crate::download_net::require_public_resolution(host)
-                {
-                    return Err(ManifestIntakeError::Unsupported(
-                        "A DASH XLink target failed the public-host safety policy".to_string(),
-                    ));
-                }
-                crate::download_net::inherit_public_resolution_for_collection(
-                    parent_url.as_str(),
-                    target.as_str(),
-                    &mut seen_hosts,
-                )
-                .map_err(|_| {
-                    ManifestIntakeError::Unsupported(
-                        "A DASH XLink target failed the child-host safety policy".to_string(),
+                // link. Hold a public-only lease through the XLink request;
+                // expanded media resources receive their own transfer leases
+                // when the resulting MPD is planned.
+                let _target_lease = if target.origin() != parent_url.origin() {
+                    Some(
+                        crate::download_net::acquire_public_resolution(host).ok_or_else(|| {
+                            ManifestIntakeError::Unsupported(
+                                "A DASH XLink target failed the public-host safety policy"
+                                    .to_string(),
+                            )
+                        })?,
                     )
-                })?;
+                } else {
+                    None
+                };
                 seen_hosts.insert(host_key);
 
                 let remaining = MAX_MANIFEST_BYTES
@@ -4923,7 +4940,7 @@ video/variant.m3u8
         let error = fetch_hls_steering_manifest(
             &steering_test_client(),
             &master_url,
-            &steering,
+            &mut steering.clone(),
             ManifestTransportPolicy::HttpFixture,
             ManifestFetchMode::Preview,
             false,
@@ -4948,7 +4965,7 @@ video/variant.m3u8
         let error = fetch_hls_steering_manifest(
             &steering_test_client(),
             &master_url,
-            &steering,
+            &mut steering.clone(),
             ManifestTransportPolicy::HttpFixture,
             ManifestFetchMode::Preview,
             false,
@@ -4997,7 +5014,7 @@ video/variant.m3u8
         let error = fetch_hls_steering_manifest(
             &client,
             &master_url,
-            &steering,
+            &mut steering.clone(),
             ManifestTransportPolicy::HttpFixture,
             ManifestFetchMode::Preview,
             false,
@@ -5031,7 +5048,7 @@ video/variant.m3u8
         let error = fetch_hls_steering_manifest(
             &steering_test_client(),
             &master_url,
-            &steering,
+            &mut steering.clone(),
             ManifestTransportPolicy::HttpFixture,
             ManifestFetchMode::Preview,
             true,

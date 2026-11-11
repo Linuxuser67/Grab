@@ -9349,8 +9349,12 @@ fn restoring_public_only_row_reinstates_its_host_policy() {
     manager.remove(item.id());
     assert_eq!(
         crate::download_net::public_resolution_refs(host),
-        Some(0),
-        "removing the row must release its reference"
+        None,
+        "removing the row must drop the final registration"
+    );
+    assert!(
+        !crate::download_net::is_untrusted_handoff_host(host),
+        "removing the last owner must remove the host policy"
     );
 
     let _ = std::fs::remove_file(queue_file);

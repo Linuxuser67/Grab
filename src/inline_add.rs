@@ -36,6 +36,50 @@ use libadwaita as adw;
 use std::cell::{Cell, RefCell};
 use std::collections::VecDeque;
 use std::rc::Rc;
+use std::sync::Arc;
+
+#[derive(Default)]
+struct PublicHostLeaseScope {
+    generation: u64,
+    hosts: Option<crate::download_net::PublicResolutionSet>,
+}
+
+impl PublicHostLeaseScope {
+    fn activate(&mut self) {
+        if self.hosts.is_none() {
+            self.generation = self.generation.wrapping_add(1);
+            self.hosts = Some(crate::download_net::PublicResolutionSet::default());
+        }
+    }
+
+    fn close(&mut self) {
+        self.generation = self.generation.wrapping_add(1);
+        drop(self.hosts.take());
+    }
+
+    fn is_current(&self, generation: u64) -> bool {
+        self.generation == generation && self.hosts.is_some()
+    }
+
+    /// Keep active host policies alive for requests that outlive the card.
+    fn clone_leases(&self) -> Vec<std::sync::Arc<crate::download_net::PublicResolutionLease>> {
+        self.hosts
+            .as_ref()
+            .map(crate::download_net::PublicResolutionSet::clone_leases)
+            .unwrap_or_default()
+    }
+}
+
+type PublicHostLeases = Rc<RefCell<PublicHostLeaseScope>>;
+
+/// Card-owned lifetime for a playlist picker: selected children retain the
+/// card's guarded-host scope until queue rows take over their own references.
+#[derive(Clone)]
+struct PlaylistPickerOwner {
+    close_card: Rc<dyn Fn()>,
+    public_host_leases: PublicHostLeases,
+    generation: u64,
+}
 
 /// Tokio detaches a task when its JoinHandle is dropped. Own the abort handle
 /// as well, so aborting the enclosing GLib lookup doesn't leave dual probes
@@ -733,6 +777,8 @@ pub(crate) struct VideoStep {
     /// The URL entry itself: its secondary icon is the lookup state machine
     /// (tick → spinner → none), shared with the helpers below.
     pub(crate) url_entry: gtk4::Entry,
+    /// Public-only hosts retained while this untrusted handoff card is open.
+    public_host_leases: PublicHostLeases,
     /// Spinner paintable for the entry's secondary icon slot: GTK4 entries
     /// take paintables, not widgets, as icons. Animated by the entry's own
     /// frame clock (the established AdwSpinnerPaintable API).
@@ -1255,6 +1301,40 @@ fn rebuild_format_options(step: &Rc<VideoStep>, info: &crate::video::VideoInfo, 
     step.format.set_selected(index as u32);
 }
 
+/// Retain public-only policy for a resolved child of an untrusted handoff
+/// for as long as the Add card remains open.
+fn inherit_public_resolution_for_card(step: &VideoStep, parent_url: &str, child_url: &str) -> bool {
+    let mut lease_scope = step.public_host_leases.borrow_mut();
+    let Some(hosts) = lease_scope.hosts.as_mut() else {
+        // The card was closed while this lookup or picker was in flight.
+        return false;
+    };
+    let parent_host = url::Url::parse(parent_url)
+        .ok()
+        .and_then(|url| url.host_str().map(str::to_string));
+    let inherited = parent_host
+        .as_deref()
+        .is_some_and(crate::download_net::is_untrusted_handoff_host);
+    if !inherited {
+        return true;
+    }
+    let Some(child_host) = url::Url::parse(child_url)
+        .ok()
+        .and_then(|url| url.host_str().map(str::to_string))
+    else {
+        return false;
+    };
+    let Some(lease) = crate::download_net::acquire_public_resolution(&child_host) else {
+        return false;
+    };
+    let canonical_host = lease.host().to_string();
+    if hosts.contains(&canonical_host) {
+        return true;
+    }
+    hosts.insert(canonical_host, lease);
+    true
+}
+
 /// Whether the combo's current pick is the Audio only row.
 fn selected_audio_only(step: &VideoStep) -> bool {
     let selected = step.format.selected() as usize;
@@ -1275,7 +1355,7 @@ fn submit_probed_single(
     scheduled_at: Option<i64>,
 ) {
     let submitted_url = step.url_entry.text().to_string();
-    if !crate::download_net::inherit_public_resolution(&submitted_url, &v.page_url) {
+    if !inherit_public_resolution_for_card(step, &submitted_url, &v.page_url) {
         show_video_error(
             step,
             &gettext("The resolved media page could not be verified as a public destination."),
@@ -1380,7 +1460,7 @@ fn submit_probe(
             // Preserve the untrusted handoff policy if yt-dlp canonicalized
             // the collection URL to another hostname.
             let submitted_url = step.url_entry.text().to_string();
-            if !crate::download_net::inherit_public_resolution(&submitted_url, &pl.page_url) {
+            if !inherit_public_resolution_for_card(step, &submitted_url, &pl.page_url) {
                 show_video_error(
                     step,
                     &gettext(
@@ -1397,7 +1477,11 @@ fn submit_probe(
                 nav,
                 manager.clone(),
                 dest.clone(),
-                close_card.clone(),
+                PlaylistPickerOwner {
+                    close_card: close_card.clone(),
+                    public_host_leases: Rc::clone(&step.public_host_leases),
+                    generation: step.public_host_leases.borrow().generation,
+                },
                 pl,
                 scheduled_at,
                 queue_all,
@@ -1436,7 +1520,7 @@ fn submit_gallery_all(
         }
     };
     let submitted_url = step.url_entry.text().trim().to_string();
-    if !crate::download_net::inherit_public_resolution(&submitted_url, &page_url) {
+    if !inherit_public_resolution_for_card(step, &submitted_url, &page_url) {
         show_video_error(
             step,
             &gettext("The gallery could not be verified as a public destination."),
@@ -1578,7 +1662,7 @@ fn push_playlist_items_page(
     nav: &adw::NavigationView,
     manager: Rc<DownloadManager>,
     dest_dir: Rc<RefCell<String>>,
-    close_card: Rc<dyn Fn()>,
+    owner: PlaylistPickerOwner,
     playlist: crate::media_types::PlaylistInfo,
     scheduled_at: Option<i64>,
     queue_all: bool,
@@ -1667,17 +1751,15 @@ fn push_playlist_items_page(
         ngettext("_Queue {} item", "_Queue {} items", n as u32).replace("{}", &n.to_string())
     });
 
-    // Preserve this collection's accepted hosts across partial picker imports.
-    // Otherwise repeatedly clicking Queue could reset the cap and eventually
-    // register every host from a hostile playlist.
-    let guarded_child_hosts = Rc::new(RefCell::new(std::collections::HashSet::new()));
-
+    // The card owns these host leases so they are released with the picker,
+    // including when the card closes while a partial import is pending.
     {
         let nav_on_error = nav.clone();
         let picker_page_on_error = picker_page.clone();
-        let guarded_child_hosts = guarded_child_hosts.clone();
+        let guarded_child_hosts = Rc::clone(&owner.public_host_leases);
+        let owner_generation = owner.generation;
 
-        let close_card = close_card.clone();
+        let close_card = Rc::clone(&owner.close_card);
         let grid = grid.clone();
         let add_btn_click = add_btn.clone();
         let add_btn_guard = add_btn.clone();
@@ -1768,6 +1850,15 @@ fn push_playlist_items_page(
                         return;
                     }
                 };
+                // The card may have been closed while the blocking directory
+                // inspection ran. Its lease scope is set to None on close; do not
+                // let this stale picker enqueue or reacquire policy entries.
+                if !guarded_child_hosts
+                    .borrow()
+                    .is_current(owner_generation)
+                {
+                    return;
+                }
 
                 // Keep the import atomic: the one owner and all its passive
                 // children enter the queue together, then the scheduler sees
@@ -1783,12 +1874,23 @@ fn push_playlist_items_page(
                         crate::video_probe::story_segment_url(&page_url, &entry.id)
                             .unwrap_or_else(|| entry.page_url.to_string());
                     let inheritance = {
-                        let mut seen_hosts = guarded_child_hosts.borrow_mut();
-                        crate::download_net::inherit_public_resolution_for_collection(
-                            &page_url,
-                            &item_page_url,
-                            &mut seen_hosts,
-                        )
+                        let mut lease_scope = guarded_child_hosts.borrow_mut();
+                        if lease_scope.generation != owner_generation {
+                            Err(crate::download_net::CollectionHostError::UnsafeDestination)
+                        } else {
+                            match lease_scope.hosts.as_mut() {
+                                Some(seen_hosts) => {
+                                    crate::download_net::inherit_public_resolution_for_collection(
+                                        &page_url,
+                                        &item_page_url,
+                                        seen_hosts,
+                                    )
+                                }
+                                None => {
+                                    Err(crate::download_net::CollectionHostError::UnsafeDestination)
+                                }
+                            }
+                        }
                     };
                     match inheritance {
                         Ok(()) => {}
@@ -2264,6 +2366,7 @@ impl OpenState {
 pub struct AddCard {
     widget: gtk4::Widget,
     nav: adw::NavigationView,
+    public_host_leases: PublicHostLeases,
     open: Rc<dyn Fn(Option<String>)>,
     toggle: Rc<dyn Fn()>,
     open_torrent_picker: TorrentPickerOpener,
@@ -2286,6 +2389,7 @@ impl AddCard {
     /// Open With). An already-open card only gains focus — no reset;
     /// collapse always resets, so a reopened card starts fresh.
     pub fn open(&self, initial_url: Option<String>) {
+        self.public_host_leases.borrow_mut().activate();
         (self.open)(initial_url)
     }
 
@@ -2307,6 +2411,22 @@ impl AddCard {
         self.state.set_on_flip(cb);
     }
 
+    /// Transfer an untrusted browser-handoff host lease to this card.
+    /// It is released together with all other card leases on close/reset.
+    pub(crate) fn retain_public_resolution_lease(
+        &self,
+        lease: Arc<crate::download_net::PublicResolutionLease>,
+    ) {
+        let host = lease.host().to_string();
+        let mut scope = self.public_host_leases.borrow_mut();
+        scope.activate();
+        if let Some(hosts) = scope.hosts.as_mut()
+            && !hosts.contains(&host)
+        {
+            hosts.insert(host, lease);
+        }
+    }
+
     /// Push the multi-file torrent picker for an already-read .torrent
     /// (drag-and-drop / Open With), revealing the card first.
     pub fn open_torrent_picker(
@@ -2315,6 +2435,7 @@ impl AddCard {
         bytes: Vec<u8>,
         entries: Vec<crate::torrent::TorrentFileEntry>,
     ) {
+        self.public_host_leases.borrow_mut().activate();
         (self.open_torrent_picker)(file_name, bytes, entries)
     }
 }
@@ -2463,6 +2584,7 @@ fn build_video_preview(
     action_revealer: &gtk4::Revealer,
     select_files_btn: &gtk4::Button,
     add_btn: &gtk4::Button,
+    public_host_leases: PublicHostLeases,
 ) -> (Rc<VideoStep>, gtk4::Revealer, gtk4::Button, gtk4::Button) {
     // Video preview block: hidden until a lookup runs; exactly one state shows.
     // HIG AdwPreferencesGroup: title/description are built-in, rows get the
@@ -2586,6 +2708,7 @@ fn build_video_preview(
     video_revealer.set_child(Some(&video_group));
     let step = Rc::new(VideoStep {
         url_entry: url_entry.clone(),
+        public_host_leases,
         spinner_paintable,
         looking_up: Cell::new(false),
         action_revealer: action_revealer.clone(),
@@ -2658,6 +2781,7 @@ fn wire_video_preview(step: Rc<VideoStep>) {
     // Counts are internal now; no numeric count is shown in the UI.
     {
         let card_rc = step.gallery_card.clone();
+        let public_host_leases = Rc::clone(&step.public_host_leases);
         step.gallery_filter
             .connect_active_name_notify(move |toggle| {
                 let filter = match toggle.active_name().as_deref() {
@@ -2678,6 +2802,10 @@ fn wire_video_preview(step: Rc<VideoStep>) {
                     }
                 };
                 if needs_count {
+                    // The count can outlive the Add card. Give its Tokio task
+                    // independent lease clones so closing the card does not
+                    // relax DNS policy while gallery-dl is still running.
+                    let count_host_leases = public_host_leases.borrow().clone_leases();
                     let card_rc = card_rc.clone();
                     glib::spawn_future_local(async move {
                         let url_for_count = url.clone();
@@ -2689,6 +2817,7 @@ fn wire_video_preview(step: Rc<VideoStep>) {
                                 .proxy_config();
                         let count_result = crate::runtime::tokio_rt()
                             .spawn(async move {
+                                let _count_host_leases = count_host_leases;
                                 let proxy = match proxy {
                                     Ok(proxy) => proxy,
                                     Err(error) => {
@@ -3151,7 +3280,12 @@ fn build_video_lookup_kicker(context: VideoLookupContext) -> VideoLookupKick {
                 // outer card flow is polled by GLib, so run this entire backend
                 // lookup as a Tokio task and keep GTK updates on this context.
                 let lookup_url = url.clone();
+                // Keep the browser-handoff DNS policy alive until the detached
+                // Tokio lookup has actually stopped, even when card close
+                // aborts the outer GLib future.
+                let lookup_host_leases = step_b.public_host_leases.borrow().clone_leases();
                 let lookup_task = crate::runtime::tokio_rt().spawn(async move {
+                    let _lookup_host_leases = lookup_host_leases;
                     lookup_media(lookup_url, browser, newest_first, proxy).await
                 });
                 let _abort_lookup_on_drop = AbortTaskOnDrop(lookup_task.abort_handle());
@@ -3502,7 +3636,16 @@ fn build_video_lookup_kicker(context: VideoLookupContext) -> VideoLookupKick {
                                         &nav_b,
                                         manager_b.clone(),
                                         dest_b.clone(),
-                                        close_b.clone(),
+                                        PlaylistPickerOwner {
+                                            close_card: close_b.clone(),
+                                            public_host_leases: Rc::clone(
+                                                &step_b.public_host_leases,
+                                            ),
+                                            generation: step_b
+                                                .public_host_leases
+                                                .borrow()
+                                                .generation,
+                                        },
                                         pl,
                                         scheduled_at_b.get(),
                                         false,
@@ -3833,7 +3976,11 @@ fn build_submit_handler(context: SubmitContext) -> SubmitHandler {
                                 &nav2,
                                 m.clone(),
                                 dd.clone(),
-                                close_card.clone(),
+                                PlaylistPickerOwner {
+                                    close_card: close_card.clone(),
+                                    public_host_leases: Rc::clone(&step2.public_host_leases),
+                                    generation: step2.public_host_leases.borrow().generation,
+                                },
                                 pl,
                                 scheduled_at.get(),
                                 false,
@@ -4235,12 +4382,15 @@ pub fn build_add_card(manager: Rc<DownloadManager>) -> AddCard {
     } = build_url_controls();
     form.append(&url_bar);
     form.append(&opts_revealer);
+    let public_host_leases: PublicHostLeases =
+        Rc::new(RefCell::new(PublicHostLeaseScope::default()));
     let (step, video_revealer, video_install_btn, video_retry_btn) = build_video_preview(
         &url_entry,
         spinner_paintable,
         &action_revealer,
         &select_files_btn,
         &add_btn,
+        Rc::clone(&public_host_leases),
     );
     wire_video_preview(Rc::clone(&step));
 
@@ -4299,7 +4449,11 @@ pub fn build_add_card(manager: Rc<DownloadManager>) -> AddCard {
         let default_dir = manager.effective_download_dir();
         let scheduled_at = Rc::clone(&scheduled_at);
         let schedule_switch = schedule_switch.clone();
+        let public_host_leases = Rc::clone(&public_host_leases);
         Rc::new(move || {
+            // A closed card no longer has any outstanding requests or preview
+            // actions that need the browser-handoff DNS policy.
+            public_host_leases.borrow_mut().close();
             open_state.set(false);
             // Cancel any in-flight probe and drop its state; the
             // generation bump discards the stale completion.
@@ -4430,6 +4584,7 @@ pub fn build_add_card(manager: Rc<DownloadManager>) -> AddCard {
     let open = {
         let reveal = Rc::clone(&reveal);
         let open_state = Rc::clone(&open_state);
+        let public_host_leases = Rc::clone(&public_host_leases);
         let url_entry = url_entry.clone();
         let probe = Rc::clone(&probe);
         let pending_url = Rc::clone(&pending_url);
@@ -4443,6 +4598,7 @@ pub fn build_add_card(manager: Rc<DownloadManager>) -> AddCard {
             if saved.is_empty() { None } else { Some(saved) }
         }));
         Rc::new(move |initial_url: Option<String>| {
+            public_host_leases.borrow_mut().activate();
             let already = open_state.is_open();
             reveal();
             // Dropped/opened URLs land here pre-filled: setting the text syncs the form, and the
@@ -4552,6 +4708,7 @@ pub fn build_add_card(manager: Rc<DownloadManager>) -> AddCard {
     AddCard {
         widget: revealer.upcast(),
         nav: nav.clone(),
+        public_host_leases,
         open,
         toggle,
         open_torrent_picker,
@@ -4638,10 +4795,15 @@ fn make_gallery_picker_opener(
                 }
             };
             let url_c = url.clone();
+            // The enumeration is detached from the card's GLib future. Keep
+            // the current URL and inherited child-host leases alive until the
+            // gallery-dl request exits, including a close/abort race.
+            let enumeration_host_leases = step3.public_host_leases.borrow().clone_leases();
             let (items_tx, mut items_rx) = tokio::sync::mpsc::channel(
                 crate::gallery_probe::GALLERY_ENUMERATION_CHANNEL_CAPACITY,
             );
             let handle = crate::runtime::tokio_rt().spawn(async move {
+                let _enumeration_host_leases = enumeration_host_leases;
                 // Unified auth: handoff jar first, browser export as
                 // fallback (was handoff-only: auth-gated galleries could
                 // list nothing here but download fine).
@@ -4873,7 +5035,15 @@ mod tests {
             &nav,
             Rc::clone(&manager),
             Rc::clone(&destination),
-            Rc::clone(&close_card),
+            PlaylistPickerOwner {
+                close_card: Rc::clone(&close_card),
+                public_host_leases: {
+                    let scope = Rc::new(RefCell::new(PublicHostLeaseScope::default()));
+                    scope.borrow_mut().activate();
+                    scope
+                },
+                generation: 1,
+            },
             crate::media_types::PlaylistInfo {
                 title: "Playlist".into(),
                 page_url: "https://example.com/playlist".into(),
@@ -5181,6 +5351,31 @@ mod tests {
             is_live: false,
             fetchable: true,
         })
+    }
+
+    #[test]
+    fn card_lease_snapshot_survives_scope_close_until_background_work_finishes() {
+        let _policy = crate::download_net::isolate_untrusted_handoff_policy_for_test();
+        let mut scope = PublicHostLeaseScope::default();
+        scope.activate();
+
+        let lease = crate::download_net::acquire_public_resolution("card-count.example")
+            .expect("public card host lease");
+        scope
+            .hosts
+            .as_mut()
+            .expect("active card scope")
+            .insert(lease.host().to_string(), lease);
+        let background = scope.clone_leases();
+
+        scope.close();
+        assert!(crate::download_net::is_untrusted_handoff_host(
+            "card-count.example"
+        ));
+        drop(background);
+        assert!(!crate::download_net::is_untrusted_handoff_host(
+            "card-count.example"
+        ));
     }
 
     #[test]

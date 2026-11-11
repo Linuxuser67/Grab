@@ -539,7 +539,7 @@ struct ManifestPreparation {
     audio_dir: PathBuf,
     client: reqwest::Client,
     tracks: Tracks,
-    guarded_child_hosts: std::collections::HashSet<String>,
+    guarded_child_hosts: crate::download_net::PublicResolutionSet,
     has_audio: bool,
     live_hls: bool,
     live_dash: bool,
@@ -744,7 +744,7 @@ async fn prepare_manifest_attempt(
 struct ResolvedManifestTracks {
     client: reqwest::Client,
     tracks: Tracks,
-    guarded_child_hosts: std::collections::HashSet<String>,
+    guarded_child_hosts: crate::download_net::PublicResolutionSet,
     has_audio: bool,
 }
 
@@ -781,7 +781,7 @@ async fn resolve_manifest_tracks(
         }
     };
 
-    let mut guarded_child_hosts = std::collections::HashSet::new();
+    let mut guarded_child_hosts = crate::download_net::PublicResolutionSet::default();
     let tracks = if force_offline {
         offline_tracks.take().ok_or_else(|| {
             ManifestRunError::Failed(
@@ -1151,7 +1151,7 @@ struct ManifestLiveHlsFinalization<'a> {
     tx: &'a tokio::sync::mpsc::UnboundedSender<EngineMsg>,
     downloaded: &'a Arc<AtomicU64>,
     has_audio: bool,
-    guarded_child_hosts: &'a mut std::collections::HashSet<String>,
+    guarded_child_hosts: &'a mut crate::download_net::PublicResolutionSet,
     abort: &'a mut tokio::sync::oneshot::Receiver<crate::video::StopIntent>,
 }
 
@@ -1447,7 +1447,7 @@ struct ManifestLiveDashFinalization<'a> {
     concurrency: usize,
     tx: &'a tokio::sync::mpsc::UnboundedSender<EngineMsg>,
     downloaded: &'a Arc<AtomicU64>,
-    guarded_child_hosts: &'a mut std::collections::HashSet<String>,
+    guarded_child_hosts: &'a mut crate::download_net::PublicResolutionSet,
     abort: &'a mut tokio::sync::oneshot::Receiver<crate::video::StopIntent>,
 }
 
@@ -2107,7 +2107,7 @@ async fn resolve_tracks(
     client: &reqwest::Client,
     lookup: ManifestLookup,
     source: &ManifestSource,
-    guarded_child_hosts: &mut std::collections::HashSet<String>,
+    guarded_child_hosts: &mut crate::download_net::PublicResolutionSet,
 ) -> Result<Tracks, ManifestRunError> {
     use crate::manifest_plan::ManifestDownloadPlan;
 
@@ -2234,7 +2234,7 @@ async fn resolve_tracks(
 fn guard_hls_resources(
     parent_url: &str,
     plan: &HlsPlan,
-    seen_hosts: &mut std::collections::HashSet<String>,
+    seen_hosts: &mut crate::download_net::PublicResolutionSet,
 ) -> Result<(), ManifestChildUrlError> {
     for resource in plan.resources.iter() {
         guard_manifest_child_url(parent_url, &resource.url, seen_hosts)?;
@@ -2247,9 +2247,9 @@ fn guard_hls_resources(
 fn guard_manifest_child_url(
     parent_url: &str,
     child_url: &Url,
-    seen_hosts: &mut std::collections::HashSet<String>,
+    seen_hosts: &mut crate::download_net::PublicResolutionSet,
 ) -> Result<(), ManifestChildUrlError> {
-    match crate::download_net::inherit_public_resolution_for_collection(
+    match crate::download_net::inherit_public_resolution_for_manifest(
         parent_url,
         child_url.as_str(),
         seen_hosts,
@@ -5168,7 +5168,7 @@ segment-2.m4s
             subtitle_key: None,
             subtitle_language: None,
         };
-        let mut selected_hosts = std::collections::HashSet::new();
+        let mut selected_hosts = crate::download_net::PublicResolutionSet::default();
         let selected = resolve_tracks(
             &client,
             ManifestLookup {
@@ -5196,7 +5196,7 @@ segment-2.m4s
             subtitle_key: None,
             ..selected_source
         };
-        let mut automatic_hosts = std::collections::HashSet::new();
+        let mut automatic_hosts = crate::download_net::PublicResolutionSet::default();
         let automatic = resolve_tracks(
             &client,
             ManifestLookup {
@@ -5266,7 +5266,7 @@ segment-2.m4s
             subtitle_language: None,
         };
         let client = reqwest::Client::new();
-        let mut guarded_child_hosts = std::collections::HashSet::new();
+        let mut guarded_child_hosts = crate::download_net::PublicResolutionSet::default();
         let limit = crate::download_net::MAX_GUARDED_CHILD_HOSTS_PER_COLLECTION;
         let mut saw_host_limit = false;
 
@@ -5389,7 +5389,7 @@ segment-2.m4s
 
         let child_url = Url::parse("https://127.0.0.1/segment.m4s")
             .expect("private manifest child URL is valid");
-        let mut seen_hosts = std::collections::HashSet::new();
+        let mut seen_hosts = crate::download_net::PublicResolutionSet::default();
         let error = guard_manifest_child_url(parent_url, &child_url, &mut seen_hosts)
             .expect_err("untrusted manifests must not reach private hosts");
 
@@ -5398,8 +5398,9 @@ segment-2.m4s
             error.to_string(),
             "The stream manifest references a local or private network resource"
         );
-        assert!(
-            seen_hosts.is_empty(),
+        assert_eq!(
+            seen_hosts.len(),
+            0,
             "rejected hosts must not consume a slot"
         );
     }
@@ -5426,7 +5427,7 @@ segment-2.m4s
         let plan = crate::manifest::plan_hls_media_playlist(&media_url, media_body)
             .expect("parse HLS media playlist fixture");
         let child = &plan.resources[0].url;
-        let mut seen_hosts = std::collections::HashSet::new();
+        let mut seen_hosts = crate::download_net::PublicResolutionSet::default();
         guard_manifest_child_url(parent_url, child, &mut seen_hosts)
             .expect("register the manifest-derived segment host");
         assert_eq!(seen_hosts.len(), 1);
@@ -5482,7 +5483,7 @@ segment-2.m4s
             "manifest-limit-origin.fixture.invalid"
         ));
 
-        let mut seen_hosts = std::collections::HashSet::new();
+        let mut seen_hosts = crate::download_net::PublicResolutionSet::default();
         for index in 0..crate::download_net::MAX_GUARDED_CHILD_HOSTS_PER_COLLECTION {
             let child_url = Url::parse(&format!("https://cdn-{index}.fixture.invalid/segment.m4s"))
                 .expect("public manifest child URL is valid");

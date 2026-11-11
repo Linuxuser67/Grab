@@ -868,7 +868,7 @@ pub(super) async fn run_live_dash_tracks(
     connections: usize,
     tx: &tokio::sync::mpsc::UnboundedSender<EngineMsg>,
     downloaded: &Arc<AtomicU64>,
-    guarded_child_hosts: &mut std::collections::HashSet<String>,
+    guarded_child_hosts: &mut crate::download_net::PublicResolutionSet,
     abort: &mut tokio::sync::oneshot::Receiver<crate::video::StopIntent>,
 ) -> Result<DashLiveCapture, ManifestRunError> {
     let (mut video, video_bytes) = load_dash_live_track_for_destination(

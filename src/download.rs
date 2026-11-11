@@ -1706,7 +1706,7 @@ impl DownloadManager {
             return (0, pl.total, 0);
         }
 
-        let mut guarded_child_hosts = HashSet::new();
+        let mut guarded_child_hosts = crate::download_net::PublicResolutionSet::default();
         let mut files = Vec::with_capacity(pl.items.len());
         let mut seen_ids = HashSet::new();
         let mut skipped_by_host_limit = 0usize;
@@ -1986,8 +1986,8 @@ impl DownloadManager {
         }
     }
 
-    /// Drop the row's policy reference. The host stays registered so an open
-    /// card or another row on the same host keeps its protection.
+    /// Drop this row's policy reference. Any remaining card, transfer, or
+    /// queue-row lease keeps the host registered until its owner is done.
     fn release_public_policy(item: &DownloadItem) {
         if item.public_only()
             && let Some(host) = url::Url::parse(&item.url())

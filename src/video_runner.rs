@@ -203,7 +203,7 @@ async fn run_video_playlist_download_inner(
 
     // Refresh playlist positions by stable extractor ID. Never trust the old
     // index after a playlist has been edited or reordered.
-    let mut guarded_child_hosts = std::collections::HashSet::new();
+    let mut guarded_child_hosts = crate::download_net::PublicResolutionSet::default();
     let mut selected_indices = Vec::new();
     let mut missing_ids = Vec::new();
     for file in state

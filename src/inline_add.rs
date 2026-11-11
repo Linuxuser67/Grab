@@ -20,8 +20,6 @@
 
 use crate::download::DownloadManager;
 use crate::download_row::DownloadItem;
-#[cfg(test)]
-use crate::download_store::DownloadGroup;
 use crate::gallery_grid::GalleryGrid;
 use crate::window_rows::{
     apply_scheduled_at, default_name_for, picker_enter_confirms, picker_header,
@@ -288,26 +286,6 @@ fn inflight_suppresses(
     marker.as_ref().is_some_and(|(_, g, _)| *g == generation)
 }
 
-/// Attach newly queued playlist children to the same collection group.
-/// `group_id` is retained by the picker after partial imports so a later retry
-/// adds children to the original group rather than creating another one.
-#[cfg(test)]
-fn assign_playlist_group(
-    items: &[DownloadItem],
-    title: &str,
-    previous_group_id: Option<u64>,
-) -> Option<u64> {
-    if items.is_empty() {
-        return previous_group_id;
-    }
-    let group_id = previous_group_id.unwrap_or(items.first()?.id());
-    let group = DownloadGroup::try_new(group_id, title)?;
-    for item in items {
-        item.set_group(Some(group.clone()));
-    }
-    Some(group.id())
-}
-
 /// Item-count label for a probed collection, kind-aware ("3 stories"). The
 /// playlist picker reuses the count label; the error stays a plain caption.
 pub(crate) fn playlist_count_label(kind: crate::media_types::PlaylistKind, count: usize) -> String {
@@ -349,10 +327,6 @@ pub(crate) struct FormatOption {
     audio_only: bool,
 }
 
-/// The Video ⇄ Gallery switcher's Gallery side: the probe's items and the
-/// URL they came from.
-pub(crate) type ToggleItems = (Vec<crate::gallery_probe::GalleryItem>, String);
-
 /// Data returned by the backend lookup. It deliberately contains no GTK types:
 /// build_add_card owns all presentation and state transitions.
 struct VideoLookupResult {
@@ -362,7 +336,6 @@ struct VideoLookupResult {
         crate::video_tools::VideoError,
     >,
     gallery_error: Option<String>,
-    toggle_items: Option<ToggleItems>,
     native_fallback_reason: Option<String>,
 }
 
@@ -695,7 +668,6 @@ async fn lookup_extractors_inner(
         proxy.as_ref().map(|p| p.cli_url.clone()),
     );
 
-    let mut toggle_items: Option<ToggleItems> = None;
     let (ytdlp_result, gallery_error) = if let Some(tool) = gallery_tool {
         let probe_url = url.clone();
         let probe_browser = browser.clone();
@@ -733,12 +705,7 @@ async fn lookup_extractors_inner(
             None,
         );
         match routed {
-            crate::gallery_probe::ProbeOutcome::VideoYtDlp { gallery_toggle } => {
-                if gallery_toggle {
-                    toggle_items = gallery.ok().flatten().map(|items| (items, url.clone()));
-                }
-                (ytdlp, gallery_error)
-            }
+            crate::gallery_probe::ProbeOutcome::VideoYtDlp => (ytdlp, gallery_error),
             crate::gallery_probe::ProbeOutcome::Gallery => {
                 return Ok(MediaLookupOutcome::Gallery(
                     gallery.ok().flatten().unwrap_or_default(),
@@ -765,7 +732,6 @@ async fn lookup_extractors_inner(
         probe_json_key,
         ytdlp_result,
         gallery_error,
-        toggle_items,
         native_fallback_reason: None,
     })))
 }
@@ -823,15 +789,6 @@ pub(crate) struct VideoStep {
     pub(crate) gallery_filter: adw::ToggleGroup,
     /// Wrapper retained for the hidden internal filter control.
     pub(crate) gallery_filter_wrap: gtk4::Box,
-    /// Media-type switcher (Video ⇄ Gallery), the established AdwToggleGroup:
-    /// shown only when both backends are viable for the current decode
-    /// (yt-dlp video + gallery-dl images).
-    pub(crate) mode_toggle: adw::ToggleGroup,
-    /// Wrapper for the switcher (visibility control + accessible label).
-    pub(crate) mode_toggle_wrap: gtk4::Box,
-    /// Items backing the switcher's Gallery side: Some only while the choice
-    /// is live. Cleared when a lookup starts and on reset.
-    pub(crate) toggle_items: Rc<RefCell<Option<ToggleItems>>>,
     /// True when the current preview is a gallery (not a video).
     pub(crate) is_gallery: Rc<Cell<bool>>,
     /// The gallery card state (filter, items) when is_gallery is true.
@@ -977,7 +934,6 @@ pub(crate) fn hide_video_step(v: &VideoStep) {
     v.gallery_info.set_visible(false);
     v.select_files_btn.set_visible(false);
     v.gallery_filter_wrap.set_visible(false);
-    v.mode_toggle_wrap.set_visible(false);
     v.is_gallery.set(false);
     v.gallery_card.borrow_mut().take();
     // NOTE: the URL actions keep their current appearance while the revealer
@@ -1153,8 +1109,6 @@ fn reset_video_step(step: &VideoStep) {
     step.tools.set_subtitle("");
     step.error.set_subtitle("");
     hide_video_step(step);
-    // The media-type choice does not survive a close either.
-    arm_mode_toggle(step, None);
     // No lookup survives a close: clear the flag (and unlock the entry)
     // before the entry text is cleared below (its changed handler would
     // otherwise keep the spinner).
@@ -1164,27 +1118,11 @@ fn reset_video_step(step: &VideoStep) {
     step.action_revealer.set_reveal_child(false);
 }
 
-/// Reset the Video ⇄ Gallery switcher and arm its Gallery side: `items` is
-/// Some when the decode has both a yt-dlp video and gallery-dl images
-/// (route() → VideoYtDlp { gallery_toggle: true }). The active name resets
-/// to Video while the items are absent, so the notify that fires on the
-/// reset finds an unarmed switcher and is ignored.
-fn arm_mode_toggle(step: &VideoStep, items: Option<ToggleItems>) {
-    step.toggle_items.borrow_mut().take();
-    step.mode_toggle.set_active_name(Some("video"));
-    if let Some(items) = items {
-        *step.toggle_items.borrow_mut() = Some(items);
-    }
-}
-
 fn show_video_loading(v: &VideoStep) {
     hide_video_step(v);
     clear_manifest_preview(v);
     // A new lookup supersedes any in-flight file enumeration: kill it.
     abort_enumeration(v);
-    // A new lookup supersedes the previous media-type choice; the switcher
-    // re-arms at completion when both backends are viable.
-    v.toggle_items.borrow_mut().take();
     // The tick morphs into a spinner in place (browser-address-bar style):
     // no separate indicator beside the entry, no layout shift.
     set_looking_up(v, true);
@@ -1215,9 +1153,6 @@ fn show_video_ready(v: &VideoStep) {
     v.name.set_visible(true);
     v.revert.set_visible(true);
     v.format.set_visible(true);
-    // The switcher shows while both sides exist for this decode.
-    v.mode_toggle_wrap
-        .set_visible(v.toggle_items.borrow().is_some());
     // Reveal after the rows are shown: set_visible(true) first so the
     // SlideDown has a mapped widget to animate (see slide_down_revealer).
     v.group_revealer.set_visible(true);
@@ -2579,24 +2514,6 @@ fn build_video_preview(
     // HIG AdwPreferencesGroup: title/description are built-in, rows get the
     // 12px internal margins natively.
     let video_group = adw::PreferencesGroup::new();
-    // Media-type switcher (Video ⇄ Gallery): the established AdwToggleGroup,
-    // same pattern as the gallery filter below. Hidden until both backends
-    // are viable for a decode.
-    let mode_toggle = adw::ToggleGroup::new();
-    for (name, label) in [("video", gettext("Video")), ("gallery", gettext("Gallery"))] {
-        let toggle = adw::Toggle::builder().name(name).label(&label).build();
-        mode_toggle.add(toggle);
-    }
-    mode_toggle.set_active_name(Some("video"));
-    mode_toggle
-        .dynamic_cast_ref::<gtk4::Accessible>()
-        .expect("AdwToggleGroup implements GtkAccessible")
-        .update_property(&[gtk4::accessible::Property::Label(&gettext("Preview type"))]);
-    // The wrapper only provides layout and visibility.
-    let mode_toggle_wrap = gtk4::Box::new(gtk4::Orientation::Horizontal, 6);
-    mode_toggle_wrap.append(&mode_toggle);
-    mode_toggle_wrap.set_visible(false);
-    video_group.add(&mode_toggle_wrap);
     let video_name = adw::EntryRow::builder().title(gettext("File name")).build();
     let video_revert_btn = gtk4::Button::builder()
         .icon_name("edit-undo-symbolic")
@@ -2718,9 +2635,6 @@ fn build_video_preview(
         gallery_info,
         gallery_filter,
         gallery_filter_wrap: filter_wrap,
-        mode_toggle,
-        mode_toggle_wrap,
-        toggle_items: Rc::new(RefCell::new(None)),
         is_gallery: Rc::new(Cell::new(false)),
         gallery_card: Rc::new(RefCell::new(None)),
         select_files_btn: select_files_btn.clone(),
@@ -2848,30 +2762,6 @@ fn wire_video_preview(step: Rc<VideoStep>) {
                     });
                 }
             });
-    }
-    // Media-type switcher: flipping to Gallery builds the card from the
-    // already-probed items (no second gallery-dl run); flipping back shows
-    // the yt-dlp preview from the stored probe. Programmatic active-name
-    // resets run with the items absent and are ignored here.
-    {
-        let step2 = step.clone();
-        step.mode_toggle.connect_active_name_notify(move |toggle| {
-            let state = step2.toggle_items.borrow().clone();
-            let Some((items, url)) = state else {
-                return;
-            };
-            if toggle.active_name().as_deref() != Some("gallery") {
-                show_video_ready(&step2);
-                return;
-            }
-            let title = crate::gallery_probe::collection_title(&items, &url);
-            let card = crate::gallery_card::GalleryCard::new(
-                items,
-                Some(crate::gallery_probe::StickyMode::Gallery),
-                url,
-            );
-            show_gallery_ready(&step2, card, &title);
-        });
     }
 }
 
@@ -3312,105 +3202,98 @@ fn build_video_lookup_kicker(context: VideoLookupContext) -> VideoLookupKick {
                 if probe_b.borrow().generation != my {
                     return;
                 }
-                let (
-                    ytdlp_result,
-                    gallery_error,
-                    mut toggle_items,
-                    probe_json_key,
-                    native_fallback_reason,
-                ) = match outcome {
-                    MediaLookupOutcome::Manifest(manifest) => {
-                        let manifest = *manifest;
-                        let preferred_quality = settings_b.video_quality();
-                        let subtitle_language = settings_b.subtitle_language();
-                        let preferred_source =
-                            manifest.preferred_source(&preferred_quality, Some(&subtitle_language));
-                        show_manifest_ready(
-                            &step_b,
-                            &lookup_add_b,
-                            Some(manifest),
-                            &preferred_quality,
-                        );
+                let (ytdlp_result, gallery_error, probe_json_key, native_fallback_reason) =
+                    match outcome {
+                        MediaLookupOutcome::Manifest(manifest) => {
+                            let manifest = *manifest;
+                            let preferred_quality = settings_b.video_quality();
+                            let subtitle_language = settings_b.subtitle_language();
+                            let preferred_source = manifest
+                                .preferred_source(&preferred_quality, Some(&subtitle_language));
+                            show_manifest_ready(
+                                &step_b,
+                                &lookup_add_b,
+                                Some(manifest),
+                                &preferred_quality,
+                            );
 
-                        if submit_source.automatically_enqueues_manifest()
-                            && settings_b.auto_add_downloads()
-                        {
-                            if let Some(source) = preferred_source {
-                                let filename = step_b.name.text().trim().to_string();
-                                let enqueue_manager = Rc::clone(&manager_b);
-                                let error_step = Rc::clone(&step_b);
-                                let error_lookup_add = Rc::clone(&lookup_add_b);
-                                enqueue_and_close_async(
-                                    &dest_b,
-                                    &close_b,
-                                    scheduled_at_b.get(),
-                                    move |directory| async move {
-                                        enqueue_manager
-                                            .enqueue_manifest_async_batched(
-                                                source,
-                                                directory.as_deref(),
-                                                Some(&filename),
-                                            )
-                                            .await
-                                    },
-                                    move |error| {
-                                        show_video_error(&error_step, error);
-                                        set_lookup_add(&error_lookup_add, true);
-                                    },
-                                );
-                            } else {
-                                show_video_error(
-                                    &step_b,
-                                    &gettext(
-                                        "Could not identify a unique stream representation for automatic download.",
-                                    ),
-                                );
-                                set_lookup_add(&lookup_add_b, true);
+                            if submit_source.automatically_enqueues_manifest()
+                                && settings_b.auto_add_downloads()
+                            {
+                                if let Some(source) = preferred_source {
+                                    let filename = step_b.name.text().trim().to_string();
+                                    let enqueue_manager = Rc::clone(&manager_b);
+                                    let error_step = Rc::clone(&step_b);
+                                    let error_lookup_add = Rc::clone(&lookup_add_b);
+                                    enqueue_and_close_async(
+                                        &dest_b,
+                                        &close_b,
+                                        scheduled_at_b.get(),
+                                        move |directory| async move {
+                                            enqueue_manager
+                                                .enqueue_manifest_async_batched(
+                                                    source,
+                                                    directory.as_deref(),
+                                                    Some(&filename),
+                                                )
+                                                .await
+                                        },
+                                        move |error| {
+                                            show_video_error(&error_step, error);
+                                            set_lookup_add(&error_lookup_add, true);
+                                        },
+                                    );
+                                } else {
+                                    show_video_error(
+                                        &step_b,
+                                        &gettext(
+                                            "Could not identify a unique stream representation for automatic download.",
+                                        ),
+                                    );
+                                    set_lookup_add(&lookup_add_b, true);
+                                }
                             }
+                            return;
                         }
-                        return;
-                    }
-                    MediaLookupOutcome::Gallery(items) => {
-                        // Queue creation stays behind the full picker because
-                        // the dual probe may cap the file list.
-                        let card = crate::gallery_card::GalleryCard::new(
-                            items,
-                            Some(crate::gallery_probe::StickyMode::Gallery),
-                            url.clone(),
-                        );
-                        let title = crate::gallery_probe::collection_title(&card.items, &url);
-                        tracing::info!(
-                            files = card.file_count(),
-                            sticky = ?card.sticky_mode(),
-                            "gallery-dl items await user selection"
-                        );
-                        show_gallery_ready(&step_b, card, &title);
-                        set_lookup_add(&lookup_add_b, true);
-                        if settings_b.auto_add_downloads() {
-                            let opener = step_b.gallery_select_opener.borrow().clone();
-                            if let Some(open) = opener {
-                                open();
+                        MediaLookupOutcome::Gallery(items) => {
+                            // Queue creation stays behind the full picker because
+                            // the dual probe may cap the file list.
+                            let card = crate::gallery_card::GalleryCard::new(
+                                items,
+                                Some(crate::gallery_probe::StickyMode::Gallery),
+                                url.clone(),
+                            );
+                            let title = crate::gallery_probe::collection_title(&card.items, &url);
+                            tracing::info!(
+                                files = card.file_count(),
+                                sticky = ?card.sticky_mode(),
+                                "gallery-dl items await user selection"
+                            );
+                            show_gallery_ready(&step_b, card, &title);
+                            set_lookup_add(&lookup_add_b, true);
+                            if settings_b.auto_add_downloads() {
+                                let opener = step_b.gallery_select_opener.borrow().clone();
+                                if let Some(open) = opener {
+                                    open();
+                                }
                             }
+                            return;
                         }
-                        return;
-                    }
-                    MediaLookupOutcome::Video(result) => {
-                        let VideoLookupResult {
-                            probe_json_key,
-                            ytdlp_result,
-                            gallery_error,
-                            toggle_items,
-                            native_fallback_reason,
-                        } = *result;
-                        (
-                            ytdlp_result,
-                            gallery_error,
-                            toggle_items,
-                            probe_json_key,
-                            native_fallback_reason,
-                        )
-                    }
-                };
+                        MediaLookupOutcome::Video(result) => {
+                            let VideoLookupResult {
+                                probe_json_key,
+                                ytdlp_result,
+                                gallery_error,
+                                native_fallback_reason,
+                            } = *result;
+                            (
+                                ytdlp_result,
+                                gallery_error,
+                                probe_json_key,
+                                native_fallback_reason,
+                            )
+                        }
+                    };
                 match ytdlp_result {
                     Err(e) => {
                         if probe_b.borrow().generation != my {
@@ -3584,10 +3467,6 @@ fn build_video_lookup_kicker(context: VideoLookupContext) -> VideoLookupKick {
                                 // immediately with the pre-selected quality.
                                 probe_b.borrow_mut().info =
                                     Some(crate::video::ProbeResult::Single(v.clone()));
-                                // Both backends were viable (route() armed
-                                // the items): show the Video ⇄ Gallery
-                                // switcher with the preview.
-                                arm_mode_toggle(&step_b, toggle_items.take());
                                 if settings_b.auto_add_downloads() {
                                     submit_probed_single(
                                         &manager_b,
@@ -4950,10 +4829,6 @@ fn show_gallery_ready(v: &VideoStep, card: crate::gallery_card::GalleryCard, tit
     refresh_gallery_info(v, title);
     v.gallery_info.set_visible(false);
     v.gallery_filter_wrap.set_visible(false);
-    // The switcher is live while both sides are stored; flipping to Video
-    // restores the yt-dlp preview.
-    v.mode_toggle_wrap
-        .set_visible(v.toggle_items.borrow().is_some());
     // Reveal the block.
     v.action_revealer.set_visible(true);
     v.action_revealer.set_reveal_child(true);
@@ -4971,30 +4846,6 @@ fn refresh_gallery_info(v: &VideoStep, title: &str) {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn playlist_group_assignment_keeps_the_original_id_across_partial_imports() {
-        let first = DownloadItem::new(10, "https://example.com/one", "One.mp4", "/tmp");
-        let second = DownloadItem::new(11, "https://example.com/two", "Two.mp4", "/tmp");
-
-        let group_id = assign_playlist_group(std::slice::from_ref(&first), "Course playlist", None)
-            .expect("first successful child establishes the group");
-        assert_eq!(group_id, 10);
-        let group = first
-            .group()
-            .expect("first row belongs to a playlist group");
-        assert_eq!(group.id(), 10);
-        assert_eq!(group.title(), "Course playlist");
-
-        let retained_id = assign_playlist_group(
-            std::slice::from_ref(&second),
-            "Course playlist",
-            Some(group_id),
-        )
-        .expect("a later partial-import retry reuses the original group");
-        assert_eq!(retained_id, 10);
-        assert_eq!(second.group(), first.group());
-    }
 
     // This runs with the existing picker_grid Xvfb job. It exercises the
     // playlist and torrent picker pages and proves they wait for user input.

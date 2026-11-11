@@ -8469,7 +8469,7 @@ fn gallery_file_rows_are_persisted_with_owner_and_rehydrated() {
 
     let children = manager
         .items()
-        .filter(|item| item.is_gallery_child())
+        .filter(|item| item.is_collection_child())
         .collect::<Vec<_>>();
     assert_eq!(children.len(), 2);
     assert!(children.iter().any(|item| {
@@ -8518,7 +8518,7 @@ fn gallery_file_rows_are_persisted_with_owner_and_rehydrated() {
     restored.restore_gallery_file_rows(&restored_owner, &restored_job.file_rows);
     let restored_children = restored
         .items()
-        .filter(|item| item.is_gallery_child())
+        .filter(|item| item.is_collection_child())
         .collect::<Vec<_>>();
     assert_eq!(restored_children.len(), 2);
     assert!(restored_children.iter().any(|item| {

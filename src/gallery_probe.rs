@@ -91,7 +91,7 @@ pub fn url_is_direct_media(url: &str) -> bool {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ProbeOutcome {
     /// yt-dlp fallback when gallery-dl did not return any files.
-    VideoYtDlp { gallery_toggle: bool },
+    VideoYtDlp,
     /// gallery-dl returned one or more files, regardless of media type.
     Gallery,
     /// Neither probe found anything usable.
@@ -123,9 +123,7 @@ pub fn route(
     }
 
     if ytdlp_video {
-        ProbeOutcome::VideoYtDlp {
-            gallery_toggle: false,
-        }
+        ProbeOutcome::VideoYtDlp
     } else {
         ProbeOutcome::None
     }
@@ -146,9 +144,7 @@ pub(crate) fn route_for_collection(
     // A recognized yt-dlp playlist remains available when gallery-dl did
     // not return files, even if its metadata count is the only video signal.
     if ytdlp_playlist_entries > 0 {
-        return ProbeOutcome::VideoYtDlp {
-            gallery_toggle: false,
-        };
+        return ProbeOutcome::VideoYtDlp;
     }
 
     route(ytdlp_video, gallery_items, _host_sticky)
@@ -1729,15 +1725,11 @@ done
         // stable single-video and playlist paths.
         assert_eq!(
             route_for_collection(true, 3, None, None),
-            ProbeOutcome::VideoYtDlp {
-                gallery_toggle: false
-            }
+            ProbeOutcome::VideoYtDlp
         );
         assert_eq!(
             route_for_collection(true, 0, Some(&[]), None),
-            ProbeOutcome::VideoYtDlp {
-                gallery_toggle: false
-            }
+            ProbeOutcome::VideoYtDlp
         );
         assert_eq!(
             route_for_collection(false, 0, None, None),
@@ -1757,12 +1749,7 @@ done
         );
         assert_eq!(route(false, Some(&video), None), ProbeOutcome::Gallery);
         assert_eq!(route(true, Some(&unknown), None), ProbeOutcome::Gallery);
-        assert_eq!(
-            route(true, None, None),
-            ProbeOutcome::VideoYtDlp {
-                gallery_toggle: false
-            }
-        );
+        assert_eq!(route(true, None, None), ProbeOutcome::VideoYtDlp);
         assert_eq!(route(false, None, None), ProbeOutcome::None);
         assert_eq!(route(false, Some(&[]), None), ProbeOutcome::None);
     }

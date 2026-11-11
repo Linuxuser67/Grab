@@ -1359,12 +1359,19 @@ impl DownloadManager {
         // creating the queue row so its final filename matches its contents.
         let options = DownloadOptions::from_settings(&self.settings);
         let proxy = options.proxy_config()?;
-        let detected_extension = crate::manifest_runner::detect_output_extension(
-            &source,
-            &options.cookies_browser,
-            proxy.as_ref(),
-        )
-        .await;
+        let detection_source = source.clone();
+        let cookies_browser = options.cookies_browser.clone();
+        let detected_extension = crate::runtime::tokio_rt()
+            .spawn(async move {
+                crate::manifest_runner::detect_output_extension(
+                    &detection_source,
+                    &cookies_browser,
+                    proxy.as_ref(),
+                )
+                .await
+            })
+            .await
+            .map_err(|error| format!("Native stream format detection task failed: {error}"))?;
         let extension = detected_extension.unwrap_or("mkv");
         if detected_extension.is_none() {
             tracing::debug!(

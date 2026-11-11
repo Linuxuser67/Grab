@@ -1604,6 +1604,67 @@ pub(crate) async fn refresh_hls_content_steering(
     .await
 }
 
+/// Refresh steering metadata with a short budget in the live playlist loop.
+///
+/// A timeout leaves the current Pathway intact and schedules the next optional
+/// steering refresh. Media playlist and segment requests keep their own timeout
+/// and cancellation behavior.
+pub(crate) async fn refresh_hls_content_steering_with_timeout(
+    client: &reqwest::Client,
+    master_url: &str,
+    steering: &mut crate::manifest::HlsContentSteering,
+    timeout: Duration,
+) -> Result<Option<crate::manifest_types::ManifestLookup>, ManifestIntakeError> {
+    refresh_hls_content_steering_with_timeout_and_policy(
+        client,
+        master_url,
+        steering,
+        ManifestTransportPolicy::HttpsOnly,
+        timeout,
+    )
+    .await
+}
+
+async fn refresh_hls_content_steering_with_timeout_and_policy(
+    client: &reqwest::Client,
+    master_url: &str,
+    steering: &mut crate::manifest::HlsContentSteering,
+    transport_policy: ManifestTransportPolicy,
+    timeout: Duration,
+) -> Result<Option<crate::manifest_types::ManifestLookup>, ManifestIntakeError> {
+    let proxy_configured = steering.proxy_configured;
+    match tokio::time::timeout(
+        timeout,
+        refresh_hls_content_steering_with_policy(
+            client,
+            master_url,
+            steering,
+            transport_policy,
+            proxy_configured,
+        ),
+    )
+    .await
+    {
+        Ok(result) => result,
+        Err(_) => {
+            tracing::debug!(
+                host = %steering.reload_url.host_str().unwrap_or_default(),
+                ?timeout,
+                "HLS Content Steering refresh exceeded its live-loop budget; retaining current Pathway"
+            );
+            schedule_hls_steering_refresh(steering);
+            Ok(None)
+        }
+    }
+}
+
+/// Postpone optional Content Steering metadata refresh for this live capture.
+pub(crate) fn defer_hls_content_steering_refresh(
+    steering: &mut crate::manifest::HlsContentSteering,
+) {
+    schedule_hls_steering_refresh(steering);
+}
+
 async fn refresh_hls_content_steering_with_policy(
     client: &reqwest::Client,
     master_url: &str,
@@ -4702,6 +4763,69 @@ video/variant.m3u8
             refreshed_state.reload_url.as_str(),
             format!("http://{address}/next.json?token=rotated")
         );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn timed_out_live_steering_refresh_reschedules_without_changing_pathway() {
+        use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+
+        let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0))
+            .await
+            .expect("bind steering timeout fixture");
+        let address = listener.local_addr().expect("fixture address");
+        let steering_url =
+            Url::parse(&format!("http://{address}/steering.json")).expect("steering URL");
+        let server = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.expect("accept request");
+            let mut request = Vec::new();
+            loop {
+                let mut chunk = [0_u8; 1024];
+                let read = stream.read(&mut chunk).await.expect("read request");
+                assert_ne!(read, 0, "request ended before HTTP headers");
+                request.extend_from_slice(&chunk[..read]);
+                if request.windows(4).any(|window| window == b"\r\n\r\n") {
+                    break;
+                }
+            }
+            tokio::time::sleep(Duration::from_secs(1)).await;
+            let body = br#"{ "VERSION": 1, "TTL": 30, "PATHWAY-PRIORITY": ["cdn-b"] }"#;
+            let response = format!(
+                "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                body.len()
+            );
+            let _ = stream.write_all(response.as_bytes()).await;
+            let _ = stream.write_all(body).await;
+        });
+
+        let master_url = Url::parse(&format!("http://{address}/master.m3u8")).expect("master URL");
+        let mut selected = master();
+        let base_master = selected.clone();
+        let steering = selected
+            .content_steering
+            .as_mut()
+            .expect("master declares Content Steering");
+        steering.master_url = Some(master_url.clone());
+        steering.reload_url = steering_url;
+        steering.base_master = Some(Box::new(base_master));
+        steering.refresh_at = Some(Instant::now() - Duration::from_secs(1));
+        let previous_pathway = steering.active_pathway_id.clone();
+
+        let result = refresh_hls_content_steering_with_timeout_and_policy(
+            &steering_test_client(),
+            master_url.as_str(),
+            steering,
+            ManifestTransportPolicy::HttpFixture,
+            Duration::from_millis(100),
+        )
+        .await
+        .expect("optional timeout should preserve the current pathway");
+        assert!(result.is_none());
+        assert_eq!(steering.active_pathway_id, previous_pathway);
+        assert!(steering
+            .refresh_at
+            .is_some_and(|deadline| deadline > Instant::now()));
+
+        server.abort();
     }
 
     #[tokio::test(flavor = "current_thread")]

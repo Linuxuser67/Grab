@@ -200,11 +200,11 @@ pub fn download_argv_with_proxy(
         format!(
             "output.mode={}",
             serde_json::json!({
-                "start": format!("@GRAB:{event_nonce}:START:{{}}\\n"),
-                "success": format!("@GRAB:{event_nonce}:DONE:{{}}\\n"),
-                "skip": format!("@GRAB:{event_nonce}:SKIP:{{}}\\n"),
-                "progress": "?\\n",
-                "progress-total": "{3}%\\n",
+                "start": format!("@GRAB:{event_nonce}:START:{{}}\n"),
+                "success": format!("@GRAB:{event_nonce}:DONE:{{}}\n"),
+                "skip": format!("@GRAB:{event_nonce}:SKIP:{{}}\n"),
+                "progress": format!("@GRAB:{event_nonce}:PROGRESS:?\n"),
+                "progress-total": format!("@GRAB:{event_nonce}:PROGRESS:{{3}}%\n"),
             })
         ),
     ];

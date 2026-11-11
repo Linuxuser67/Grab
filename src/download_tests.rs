@@ -1715,12 +1715,9 @@ fn native_manifest_source_survives_queue_restore() {
 
     let id = {
         let manager = DownloadManager::new(gio::ListStore::new::<DownloadItem>(), test_settings());
-        let (item, guard) = glib::MainContext::default()
-            .block_on(manager.enqueue_manifest_async_batched(
-                source.clone(),
-                Some(&dest_string),
-                Some("Stream.mp4"),
-            ))
+        let guard = manager.batch_guard();
+        let item = manager
+            .enqueue_manifest_staged(source.clone(), &dest_string, Some("Stream.mkv"), &[])
             .expect("native manifest enqueue");
         item.set_status(DownloadStatus::Paused);
         let id = item.id();

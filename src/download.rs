@@ -51,6 +51,11 @@ use crate::download_pieces::SegmentState;
 /// Facade: segmented-piece math lives in [`download_pieces`](crate::download_pieces)
 /// now (no re-exports: the engine consumes it here, tests import it directly).
 use crate::download_pieces::{BLOCK_CELLS, MAX_SEGMENTED_TOTAL};
+
+/// Persist gallery file-state transitions in batches instead of serializing the
+/// entire collection after every start/complete/skip event.
+const GALLERY_QUEUE_PERSIST_EVENT_INTERVAL: usize = 32;
+
 /// Facade: rate parsing/pacing + progress text lives in
 /// [`download_rate`](crate::download_rate); the engine consumes it here, tests import it directly.
 use crate::download_rate::{fmt_eta, format_amounts, parse_rate, publish_rate_limit};
@@ -4203,29 +4208,39 @@ impl DownloadManager {
             let Some(job) = jobs.get_mut(&owner_id) else {
                 return;
             };
-            let index = existing_state_index.unwrap_or_else(|| {
-                let index = job.file_rows.len();
-                job.file_rows.push(crate::gallery_argv::GalleryFileState {
-                    path: path.to_string(),
-                    status,
-                    progress,
+            if existing_state_index.is_none()
+                && job.file_rows.len() >= crate::gallery_argv::MAX_GALLERY_PERSISTED_FILE_ROWS
+            {
+                // The owner still shows aggregate progress and the child remains
+                // visible in this session; only the persisted per-file projection
+                // is bounded. gallery-dl can announce files again after restore.
+                None
+            } else {
+                let index = existing_state_index.unwrap_or_else(|| {
+                    let index = job.file_rows.len();
+                    job.file_rows.push(crate::gallery_argv::GalleryFileState {
+                        path: path.to_string(),
+                        status,
+                        progress,
+                    });
+                    index
                 });
-                index
-            });
-            let Some(state) = job.file_rows.get_mut(index) else {
-                tracing::warn!(
-                    gallery_id = owner_id,
-                    path,
-                    state_index = index,
-                    "gallery file state index is stale; ignoring the update"
-                );
-                return;
-            };
-            state.status = status;
-            state.progress = progress;
-            index
+                let Some(state) = job.file_rows.get_mut(index) else {
+                    tracing::warn!(
+                        gallery_id = owner_id,
+                        path,
+                        state_index = index,
+                        "gallery file state index is stale; ignoring the update"
+                    );
+                    return;
+                };
+                state.status = status;
+                state.progress = progress;
+                Some(index)
+            }
         };
-        if existing_state_index.is_none()
+        if let Some(state_index) = state_index
+            && existing_state_index.is_none()
             && let Some(index) = self.gallery_file_row_index.borrow_mut().get_mut(&owner_id)
         {
             index.state_indices.insert(path.to_string(), state_index);
@@ -4752,6 +4767,7 @@ impl DownloadManager {
         let total = item.gallery_file_count();
         gtk4::glib::spawn_future_local(async move {
             let mut last_progress_refresh = Instant::now();
+            let mut gallery_events_since_persist = 0_usize;
             while let Some(msg) = rx.recv().await {
                 match msg {
                     GalleryMsg::Progress(update) => {
@@ -4843,10 +4859,14 @@ impl DownloadManager {
                             this.changed();
                             last_progress_refresh = Instant::now();
                         }
-                        // Persist file identity/status transitions, not every
-                        // high-frequency byte-progress update.
+                        // Persist file identity/status transitions in bounded
+                        // batches. Finish/pause/cancel paths still flush the final state.
                         if update.event.is_some() {
-                            this.persist_queue();
+                            gallery_events_since_persist += 1;
+                            if gallery_events_since_persist >= GALLERY_QUEUE_PERSIST_EVENT_INTERVAL {
+                                this.persist_queue();
+                                gallery_events_since_persist = 0;
+                            }
                         }
                     }
                     GalleryMsg::Finished(result) => {
@@ -7147,3 +7167,15 @@ impl DownloadManager {
 #[cfg(test)]
 #[path = "download_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+mod gallery_file_row_limit_tests {
+    use crate::gallery_argv::MAX_GALLERY_PERSISTED_FILE_ROWS;
+
+    #[test]
+    fn persisted_gallery_rows_have_a_hard_upper_bound() {
+        assert!(MAX_GALLERY_PERSISTED_FILE_ROWS > 0);
+        assert_eq!(MAX_GALLERY_PERSISTED_FILE_ROWS, 10_000);
+    }
+}
+

@@ -1749,10 +1749,7 @@ done
         );
         assert_eq!(route(false, Some(&video), None), ProbeOutcome::Gallery);
         assert_eq!(route(true, Some(&unknown), None), ProbeOutcome::Gallery);
-        assert_eq!(
-            route(true, None, None),
-            ProbeOutcome::VideoYtDlp
-        );
+        assert_eq!(route(true, None, None), ProbeOutcome::VideoYtDlp);
         assert_eq!(route(false, None, None), ProbeOutcome::None);
         assert_eq!(route(false, Some(&[]), None), ProbeOutcome::None);
     }

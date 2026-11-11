@@ -992,14 +992,21 @@ fn refresh_manifest_audio_picker(
         .set_visible(step.manifest_audio_choices.borrow().len() > 1);
 }
 
-/// Native HLS/DASH output uses Matroska to preserve broad codec and subtitle compatibility.
+/// Native HLS/DASH output defaults to Matroska and honors explicit supported suffixes.
 fn manifest_filename(filename: &str) -> String {
-    let stem = std::path::Path::new(filename)
+    let path = std::path::Path::new(filename);
+    let stem = path
         .file_stem()
         .and_then(|stem| stem.to_str())
         .filter(|stem| !stem.is_empty())
         .unwrap_or("Video");
-    format!("{stem}.mkv")
+    let extension = match path.extension().and_then(|extension| extension.to_str()) {
+        Some(extension) if extension.eq_ignore_ascii_case("mp4") => "mp4",
+        Some(extension) if extension.eq_ignore_ascii_case("mkv") => "mkv",
+        Some(extension) if extension.eq_ignore_ascii_case("ts") => "ts",
+        _ => "mkv",
+    };
+    format!("{stem}.{extension}")
 }
 
 /// Show a parsed manifest and enable Add for the validated representation.
@@ -5613,10 +5620,12 @@ mod manifest_filename_tests {
     use super::manifest_filename;
 
     #[test]
-    fn native_manifest_filename_always_uses_matroska() {
-        assert_eq!(manifest_filename("Stream.mp4"), "Stream.mkv");
+    fn native_manifest_filename_defaults_to_matroska_and_preserves_supported_extensions() {
+        assert_eq!(manifest_filename("Stream.mp4"), "Stream.mp4");
+        assert_eq!(manifest_filename("Stream.TS"), "Stream.ts");
         assert_eq!(manifest_filename("archive.part.MKV"), "archive.part.mkv");
         assert_eq!(manifest_filename("Stream"), "Stream.mkv");
+        assert_eq!(manifest_filename("Stream.webm"), "Stream.mkv");
         assert_eq!(manifest_filename(".hidden"), ".hidden.mkv");
     }
 }

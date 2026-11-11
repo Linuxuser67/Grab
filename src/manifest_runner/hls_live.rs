@@ -2,6 +2,8 @@
 
 use super::*;
 
+const LIVE_HLS_STEERING_REFRESH_TIMEOUT: Duration = Duration::from_secs(3);
+
 async fn read_local_live_hls_plan(
     source_url: &str,
     directory: &Path,
@@ -957,15 +959,25 @@ async fn refresh_live_hls_pathway(
     abort: &mut tokio::sync::oneshot::Receiver<crate::video::StopIntent>,
 ) -> Result<Option<crate::video::StopIntent>, ManifestRunError> {
     let previous_pathway = steering.active_pathway_id.clone();
+    if video.accumulator.is_ll_capture()
+        || audio
+            .as_ref()
+            .is_some_and(|track| track.accumulator.is_ll_capture())
+    {
+        tracing::debug!("HLS Content Steering refresh deferred during LL-HLS capture");
+        crate::manifest_intake::defer_hls_content_steering_refresh(steering);
+        return Ok(None);
+    }
     let refresh_result = tokio::select! {
         biased;
         stop = &mut *abort => return Ok(Some(
             stop.unwrap_or(crate::video::StopIntent::Discard)
         )),
-        result = crate::manifest_intake::refresh_hls_content_steering(
+        result = crate::manifest_intake::refresh_hls_content_steering_with_timeout(
             client,
             source_url,
             steering,
+            LIVE_HLS_STEERING_REFRESH_TIMEOUT,
         ) => result,
     };
     let lookup = match refresh_result {
@@ -1016,18 +1028,6 @@ async fn refresh_live_hls_pathway(
         tracing::debug!(
             "HLS Content Steering refresh changed both video and audio URLs; deferring a multi-track switch"
         );
-        steering.active_pathway_id = previous_pathway;
-        return Ok(None);
-    }
-
-    // LL-HLS tracks use part identities rather than media-sequence segment
-    // identities. Refresh metadata but do not switch their pathway here.
-    if video.accumulator.is_ll_capture()
-        || audio
-            .as_ref()
-            .is_some_and(|track| track.accumulator.is_ll_capture())
-    {
-        tracing::debug!("HLS Content Steering pathway switch deferred for LL-HLS capture");
         steering.active_pathway_id = previous_pathway;
         return Ok(None);
     }

@@ -887,11 +887,11 @@ pub(crate) fn build_download_group_row(
             child_revealer.set_reveal_child(expanded);
             inline_progress.set_visible(expanded && has_progress.get());
             collapsed_progress.set_visible(!expanded && has_progress.get());
-            chevron.set_icon_name(if expanded {
+            chevron.set_icon_name(Some(if expanded {
                 "pan-down-symbolic"
             } else {
                 "pan-end-symbolic"
-            });
+            }));
             let accessible_label = if expanded {
                 gettext("Collapse collection: {title}")
             } else {

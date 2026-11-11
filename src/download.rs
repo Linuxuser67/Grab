@@ -64,6 +64,13 @@ pub use crate::download_store::DownloadStatus;
 use crate::download_store::{QUEUE_VERSION, StoredItem, StoredQueue};
 use crate::video::AttemptGate;
 
+/// Runtime lookup cache for a gallery's persisted per-file states and transient GTK rows.
+#[derive(Default)]
+struct GalleryFileRowIndex {
+    state_indices: HashMap<String, usize>,
+    rows: HashMap<String, DownloadItem>,
+}
+
 /// A removal whose cleanup is still draining; `worker_abort` is absent when
 /// no worker had to be awaited.
 struct PendingDiscard {
@@ -403,6 +410,9 @@ pub struct DownloadManager {
     /// Gallery jobs by row id. Stored at enqueue time (carries the user's
     /// filter selection); consumed by spawn_gallery.
     gallery_jobs: RefCell<HashMap<u64, crate::gallery_argv::GalleryJob>>,
+    /// O(1) path-to-state and path-to-row lookups for high-frequency gallery progress.
+    /// Rebuilt lazily from the persisted job and discarded with its owner.
+    gallery_file_row_index: RefCell<HashMap<u64, GalleryFileRowIndex>>,
     /// Abort senders for resolver workers, by row. Signalled from pause/park/cancel so extractor streams stop promptly.
     video_abort: RefCell<HashMap<u64, tokio::sync::oneshot::Sender<crate::video::StopIntent>>>,
     /// Delivery decision per video attempt, by row. Manager and worker arbitrate on this one object.
@@ -726,6 +736,7 @@ impl DownloadManager {
             server_mtime: RefCell::new(HashMap::new()),
             video_sources: RefCell::new(HashMap::new()),
             gallery_jobs: RefCell::new(HashMap::new()),
+            gallery_file_row_index: RefCell::new(HashMap::new()),
             video_abort: RefCell::new(HashMap::new()),
             gates: RefCell::new(HashMap::new()),
             reservations: std::sync::Arc::new(std::sync::Mutex::new(Reservations::default())),
@@ -3920,6 +3931,36 @@ impl DownloadManager {
         self.pump(item, id, generation, rx);
     }
 
+    /// Populate the per-owner lookup cache once from the persisted job state.
+    fn ensure_gallery_file_row_index(&self, owner_id: u64) -> bool {
+        if self.gallery_file_row_index.borrow().contains_key(&owner_id) {
+            return true;
+        }
+        let Some(state_indices) = self
+            .gallery_jobs
+            .borrow()
+            .get(&owner_id)
+            .map(|job| {
+                job.file_rows
+                    .iter()
+                    .enumerate()
+                    .map(|(index, state)| (state.path.clone(), index))
+                    .collect::<HashMap<_, _>>()
+            })
+        else {
+            return false;
+        };
+
+        self.gallery_file_row_index
+            .borrow_mut()
+            .entry(owner_id)
+            .or_insert_with(|| GalleryFileRowIndex {
+                state_indices,
+                rows: HashMap::new(),
+            });
+        true
+    }
+
     /// Create or refresh a transient read-only child row for one file in a
     /// gallery collection. The path must remain inside gallery-dl's assigned
     /// output directory; extractor-controlled paths are never accepted as
@@ -3968,26 +4009,61 @@ impl DownloadManager {
         };
         let progress = progress.clamp(0.0, 1.0);
 
+        // Build the index once after restore, then update state and row by
+        // output path without walking either the persisted Vec or GTK store
+        // for every gallery-dl percentage line.
+        let owner_id = owner.id();
+        if !self.ensure_gallery_file_row_index(owner_id) {
+            return;
+        }
+        let existing_state_index = self
+            .gallery_file_row_index
+            .borrow()
+            .get(&owner_id)
+            .and_then(|index| index.state_indices.get(path))
+            .copied();
+
         // Keep the child projection in the single persisted GalleryJob. Its
         // row itself is transient and is omitted from StoredQueue.
-        if let Some(job) = self.gallery_jobs.borrow_mut().get_mut(&owner.id()) {
-            if let Some(state) = job.file_rows.iter_mut().find(|state| state.path == path) {
-                state.status = status;
-                state.progress = progress;
-            } else {
+        let state_index = {
+            let mut jobs = self.gallery_jobs.borrow_mut();
+            let Some(job) = jobs.get_mut(&owner_id) else {
+                return;
+            };
+            let index = existing_state_index.unwrap_or_else(|| {
+                let index = job.file_rows.len();
                 job.file_rows.push(crate::gallery_argv::GalleryFileState {
                     path: path.to_string(),
                     status,
                     progress,
                 });
-            }
-        } else {
-            return;
+                index
+            });
+            let Some(state) = job.file_rows.get_mut(index) else {
+                tracing::warn!(
+                    gallery_id = owner_id,
+                    path,
+                    state_index = index,
+                    "gallery file state index is stale; ignoring the update"
+                );
+                return;
+            };
+            state.status = status;
+            state.progress = progress;
+            index
+        };
+        if existing_state_index.is_none()
+            && let Some(index) = self.gallery_file_row_index.borrow_mut().get_mut(&owner_id)
+        {
+            index.state_indices.insert(path.to_string(), state_index);
         }
 
         if let Some(existing) = self
-            .items()
-            .find(|candidate| candidate.is_gallery_child() && candidate.gallery_file_path() == path)
+            .gallery_file_row_index
+            .borrow()
+            .get(&owner_id)
+            .and_then(|index| index.rows.get(path))
+            .cloned()
         {
             existing.set_progress(progress);
             existing.set_detail(detail.to_string());
@@ -4010,6 +4086,9 @@ impl DownloadManager {
         // Child rows describe the one gallery-dl process; they are not
         // independently scheduled or persisted as separate download jobs.
         self.store.append(&child);
+        if let Some(index) = self.gallery_file_row_index.borrow_mut().get_mut(&owner_id) {
+            index.rows.insert(path.to_string(), child);
+        }
     }
 
     /// Recreate child projections from the GalleryJob payload after queue
@@ -4499,6 +4578,7 @@ impl DownloadManager {
         let item_c = item.clone();
         let total = item.gallery_file_count();
         gtk4::glib::spawn_future_local(async move {
+            let mut last_progress_refresh = Instant::now();
             while let Some(msg) = rx.recv().await {
                 match msg {
                     GalleryMsg::Progress(update) => {
@@ -4581,7 +4661,15 @@ impl DownloadManager {
                                 "Gallery \u{2022} {done} files{file_progress}{file_part}"
                             ));
                         }
-                        this.changed();
+                        // Row and owner properties are updated immediately.
+                        // Recount and rebuild the grouped view at most 10 Hz;
+                        // lifecycle events still refresh synchronously.
+                        if update.event.is_some()
+                            || last_progress_refresh.elapsed() >= Duration::from_millis(100)
+                        {
+                            this.changed();
+                            last_progress_refresh = Instant::now();
+                        }
                         // Persist file identity/status transitions, not every
                         // high-frequency byte-progress update.
                         if update.event.is_some() {
@@ -5157,6 +5245,7 @@ impl DownloadManager {
             crate::extension_server::discard_handoff_cookies_async(&job.page_url);
         }
         self.gallery_jobs.borrow_mut().remove(&id);
+        self.gallery_file_row_index.borrow_mut().remove(&id);
         let released = self.find(id).filter(|item| item.public_only());
         if let Some(pos) = self.position_of(id) {
             self.store.remove(pos);
@@ -5660,6 +5749,7 @@ impl DownloadManager {
         }
         self.video_sources.borrow_mut().remove(&id);
         self.gallery_jobs.borrow_mut().remove(&id);
+        self.gallery_file_row_index.borrow_mut().remove(&id);
         self.epoch.borrow_mut().remove(&id);
         let released = self.find(id).filter(|item| item.public_only());
         if let Some(pos) = self.position_of(id) {

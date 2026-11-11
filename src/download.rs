@@ -4195,7 +4195,7 @@ impl DownloadManager {
             &filename,
             &output_dir.to_string_lossy(),
         );
-        child.set_is_gallery_child(true);
+        child.set_is_collection_child(true);
         child.set_gallery_file_path(path.to_string());
         child.set_group(Some(group));
         child.set_progress(progress);
@@ -4257,7 +4257,7 @@ impl DownloadManager {
         let children = self
             .items()
             .filter(|item| {
-                item.is_gallery_child()
+                item.is_collection_child()
                     && item.group().is_some_and(|group| group.id() == owner_id)
                     && matches!(
                         item.status(),
@@ -4281,7 +4281,7 @@ impl DownloadManager {
             }
         }
         if self.items().any(|item| {
-            item.is_gallery_child() && item.group().is_some_and(|group| group.id() == owner_id)
+            item.is_collection_child() && item.group().is_some_and(|group| group.id() == owner_id)
         }) {
             self.changed();
         }
@@ -4293,7 +4293,7 @@ impl DownloadManager {
         let children = self
             .items()
             .filter(|item| {
-                item.is_gallery_child()
+                item.is_collection_child()
                     && item.group().is_some_and(|group| group.id() == owner_id)
                     && item.status() == DownloadStatus::Downloading
             })
@@ -4323,7 +4323,7 @@ impl DownloadManager {
             }
         }
         if self.items().any(|item| {
-            item.is_gallery_child() && item.group().is_some_and(|group| group.id() == owner_id)
+            item.is_collection_child() && item.group().is_some_and(|group| group.id() == owner_id)
         }) {
             self.changed();
         }

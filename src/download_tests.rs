@@ -1844,13 +1844,13 @@ fn native_manifest_accepts_mp4_mkv_and_ts_but_rejects_other_containers() {
         .expect("MKV native manifest row");
     assert_eq!(mkv.filename(), "Stream.mkv");
     let ts = manager
-        .enqueue_manifest_staged(source.clone(), &directory, Some("Stream.ts"), &[])
+        .enqueue_manifest_staged(source.clone(), &directory, Some("Transport.ts"), &[])
         .expect("MPEG-TS native manifest row");
-    assert_eq!(ts.filename(), "Stream.ts");
+    assert_eq!(ts.filename(), "Transport.ts");
     let mp4 = manager
-        .enqueue_manifest_staged(source.clone(), &directory, Some("Stream.mp4"), &[])
+        .enqueue_manifest_staged(source.clone(), &directory, Some("Clip.mp4"), &[])
         .expect("MP4 native manifest row");
-    assert_eq!(mp4.filename(), "Stream.mp4");
+    assert_eq!(mp4.filename(), "Clip.mp4");
     let unsupported = manager.enqueue_manifest_staged(source, &directory, Some("Stream.webm"), &[]);
     assert!(unsupported.is_err());
     assert_eq!(manager.store().n_items(), 3);

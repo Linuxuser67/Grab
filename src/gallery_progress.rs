@@ -164,7 +164,7 @@ mod tests {
         assert_eq!(parse("@GRAB:test-run:PROGRESS:?"), ProgressLine::Progress(None));
         assert_eq!(
             parse("@GRAB:test-run:PROGRESS:101%"),
-            ProgressLine::Other("101%".to_string())
+            ProgressLine::Other("@GRAB:test-run:PROGRESS:101%".to_string())
         );
     }
 

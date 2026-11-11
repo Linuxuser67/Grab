@@ -443,10 +443,10 @@ fn build_plan(
             .part_hold_back
             .ok_or(ManifestError::InvalidDuration)?
             .get();
-        // RFC 8216bis requires at least two Part Targets; three is the
-        // recommended value, while Apple's authoring profile is stricter.
-        // Grab accepts any protocol-compliant LL-HLS server, not only streams
-        // authored for Apple clients.
+        // The HLS 2nd Edition draft sets a two-Part-Target minimum and
+        // recommends three; Apple's device authoring profile requires three.
+        // Grab accepts draft-compliant LL-HLS servers, not only Apple-profile
+        // streams.
         if !part_hold_back.is_finite() || part_hold_back < 2.0 * part_target.as_secs_f64() {
             return Err(ManifestError::InvalidDuration);
         }

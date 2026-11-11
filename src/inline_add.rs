@@ -711,7 +711,7 @@ async fn lookup_extractors_inner(
             None,
         );
         match routed {
-            crate::gallery_probe::ProbeOutcome::VideoYtDlp => (ytdlp, gallery_error)
+            crate::gallery_probe::ProbeOutcome::VideoYtDlp => (ytdlp, gallery_error),
             crate::gallery_probe::ProbeOutcome::Gallery => {
                 return Ok(MediaLookupOutcome::Gallery(
                     gallery.ok().flatten().unwrap_or_default(),

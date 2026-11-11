@@ -299,7 +299,7 @@ async fn single_loop(
                 return;
             }
             Err(e) => {
-                // A path owned by another download is terminal; a retry must not adopt it.
+                // A destination this transfer cannot prove it owns is terminal; retries must not adopt it.
                 if e == DEST_EXISTS {
                     ctx.tx.send(EngineMsg::Failed(e)).ok();
                     return;

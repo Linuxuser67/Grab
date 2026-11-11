@@ -1840,8 +1840,8 @@ mod group_row_tests {
 
         let first_row = gtk4::ListBoxRow::new();
         let second_row = gtk4::ListBoxRow::new();
-        group.row.add_row(&first_row);
-        group.row.add_row(&second_row);
+        group.add_row(&first_row);
+        group.add_row(&second_row);
         group.update(
             std::slice::from_ref(&first),
             &[first.clone(), second.clone()],

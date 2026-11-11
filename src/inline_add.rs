@@ -35,8 +35,8 @@ use gtk4::{gio, glib};
 use libadwaita as adw;
 use std::cell::{Cell, RefCell};
 use std::collections::VecDeque;
-use std::sync::Arc;
 use std::rc::Rc;
+use std::sync::Arc;
 
 type PublicHostLeases = Rc<RefCell<Option<crate::download_net::PublicResolutionSet>>>;
 
@@ -1296,6 +1296,9 @@ fn inherit_public_resolution_for_card(
         return false;
     };
     let canonical_host = lease.host().to_string();
+    if hosts.contains(&canonical_host) {
+        return true;
+    }
     hosts.insert(canonical_host, lease);
     true
 }
@@ -1812,6 +1815,12 @@ fn push_playlist_items_page(
                         return;
                     }
                 };
+                // The card may have been closed while the blocking directory
+                // inspection ran. Its lease scope is set to None on close; do not
+                // let this stale picker enqueue or reacquire policy entries.
+                if guarded_child_hosts.borrow().is_none() {
+                    return;
+                }
 
                 // Keep the import atomic: the one owner and all its passive
                 // children enter the queue together, then the scheduler sees

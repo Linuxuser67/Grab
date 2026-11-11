@@ -776,24 +776,6 @@ pub(crate) fn inherit_public_resolution_for_manifest(
     Ok(())
 }
 
-/// Single-child provisional registration for callers that do not expand a
-/// collection. The caller must acquire a lease or retain a queue-row reference
-/// before yielding control; otherwise the zero-reference entry expires.
-pub(crate) fn inherit_public_resolution(parent_url: &str, child_url: &str) -> bool {
-    if !url::Url::parse(parent_url)
-        .ok()
-        .and_then(|url| url.host_str().map(str::to_string))
-        .as_deref()
-        .is_some_and(is_untrusted_handoff_host)
-    {
-        return true;
-    }
-    url::Url::parse(child_url)
-        .ok()
-        .and_then(|url| url.host_str().map(str::to_string))
-        .is_some_and(|host| require_public_resolution(&host))
-}
-
 /// Drop private addresses from a DNS answer; a mixed answer keeps its public part.
 fn retain_public(addrs: Vec<SocketAddr>) -> Vec<SocketAddr> {
     addrs
@@ -1239,11 +1221,16 @@ mod tests {
         assert!(is_untrusted_handoff_host("www.example.com"));
         assert!(!is_untrusted_handoff_host("example.com"));
         assert!(!is_untrusted_handoff_host("cdn.www.example.com"));
-        assert!(inherit_public_resolution(
+        let mut children = PublicResolutionSet::default();
+        inherit_public_resolution_for_collection(
             "https://www.example.com/list",
-            "https://example.com/video.mp4"
-        ));
+            "https://example.com/video.mp4",
+            &mut children,
+        )
+        .expect("cross-origin collection child should be leased");
         assert!(is_untrusted_handoff_host("example.com"));
+        drop(children);
+        assert!(!is_untrusted_handoff_host("example.com"));
         assert!(!is_untrusted_handoff_host("other-example.com"));
         *lock_recover(cache) = previous;
     }
@@ -1331,15 +1318,24 @@ mod tests {
             std::mem::take(&mut *set)
         };
         assert!(require_public_resolution("collection.example"));
-        assert!(inherit_public_resolution(
+        let mut children = PublicResolutionSet::default();
+        inherit_public_resolution_for_collection(
             "https://collection.example/list",
-            "https://cdn.example/video.mp4"
-        ));
+            "https://cdn.example/video.mp4",
+            &mut children,
+        )
+        .expect("public child host should be leased");
         assert!(is_untrusted_handoff_host("cdn.example"));
-        assert!(!inherit_public_resolution(
-            "https://collection.example/list",
-            "http://127.0.0.1/admin"
-        ));
+        assert_eq!(
+            inherit_public_resolution_for_collection(
+                "https://collection.example/list",
+                "http://127.0.0.1/admin",
+                &mut children,
+            ),
+            Err(CollectionHostError::UnsafeDestination)
+        );
+        drop(children);
+        assert!(!is_untrusted_handoff_host("cdn.example"));
         *lock_recover(cache) = previous;
     }
 

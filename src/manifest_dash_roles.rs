@@ -336,7 +336,7 @@ mod tests {
 </MPD>"#;
 
         let metadata = representation_metadata(body, 3).expect("valid MPD representation metadata");
-        assert_eq!(metadata.len(), 1);
+        assert_eq!(metadata.periods.len(), 1);
         assert_eq!(metadata.periods[0].len(), 2);
         assert_eq!(metadata.periods[0][0][0].id.as_deref(), Some("first"));
         assert!(!metadata.periods[0][0][0].is_main);
@@ -562,7 +562,7 @@ mod tests {
   <Period><AdaptationSet><Representation id="second"/></AdaptationSet></Period>
 </MPD>"#;
         let metadata = representation_metadata(body, 2).expect("two-period metadata");
-        assert_eq!(metadata.len(), 2);
+        assert_eq!(metadata.periods.len(), 2);
         assert_eq!(metadata.periods[0][0][0].id.as_deref(), Some("first"));
         assert_eq!(metadata.periods[1][0][0].id.as_deref(), Some("second"));
     }

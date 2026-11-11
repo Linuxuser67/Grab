@@ -130,6 +130,16 @@ mod tests {
             parse_progress_line(event, "another-run"),
             ProgressLine::Other(event.to_string())
         );
+        let progress = "@GRAB:test-run:PROGRESS:42%";
+        assert_eq!(
+            parse_progress_line(progress, "another-run"),
+            ProgressLine::Other(progress.to_string())
+        );
+        let unscoped_percent = "42%";
+        assert_eq!(
+            parse(unscoped_percent),
+            ProgressLine::Other(unscoped_percent.to_string())
+        );
         let legacy = "@START:/tmp/a.jpg";
         assert_eq!(parse(legacy), ProgressLine::Other(legacy.to_string()));
     }

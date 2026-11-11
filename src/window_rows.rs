@@ -857,7 +857,7 @@ pub(crate) fn build_download_group_row(
                 .filter(|id| {
                     manager
                         .find(*id)
-                        .is_some_and(|item| item.is_gallery() || item.is_collection_owner())
+                        .is_some_and(|item| item.is_collection_parent())
                 });
             let removal_ids =
                 collection_owner_id.map_or_else(|| ids.clone(), |owner_id| vec![owner_id]);
@@ -942,7 +942,7 @@ impl DownloadGroupRow {
             .find(|item| item.is_collection_child())
             .and_then(DownloadItem::group)
             .and_then(|group| manager.find(group.id()))
-            .filter(|owner| owner.is_gallery() || owner.is_collection_owner());
+            .filter(|owner| owner.is_collection_parent());
         if let Some(owner) = collection_owner {
             if let Some(fraction) = collection_progress_fraction(&owner) {
                 self.progress.set_fraction(fraction);

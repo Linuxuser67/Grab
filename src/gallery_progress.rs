@@ -40,18 +40,18 @@ pub fn parse_progress_line(line: &str, run_nonce: &str) -> ProgressLine {
         if let Some(path) = event.strip_prefix("DONE:").filter(|path| !path.is_empty()) {
             return ProgressLine::Completed(path.to_string());
         }
-    }
-
-    let trimmed = line.trim();
-    if trimmed == "?" {
-        return ProgressLine::Progress(None);
-    }
-    if let Some(percent) = trimmed
-        .strip_suffix('%')
-        .and_then(|value| value.trim().parse::<u8>().ok())
-        .filter(|percent| *percent <= 100)
-    {
-        return ProgressLine::Progress(Some(percent));
+        if let Some(value) = event.strip_prefix("PROGRESS:") {
+            if value.trim() == "?" {
+                return ProgressLine::Progress(None);
+            }
+            if let Some(percent) = value
+                .strip_suffix('%')
+                .and_then(|value| value.trim().parse::<u8>().ok())
+                .filter(|percent| *percent <= 100)
+            {
+                return ProgressLine::Progress(Some(percent));
+            }
+        }
     }
 
     ProgressLine::Other(line.to_string())
@@ -137,7 +137,7 @@ mod tests {
     #[test]
     fn parse_started() {
         assert_eq!(
-            parse("@START:/tmp/dest/image.jpg"),
+            parse("@GRAB:test-run:START:/tmp/dest/image.jpg"),
             ProgressLine::Started("/tmp/dest/image.jpg".to_string())
         );
     }
@@ -145,7 +145,7 @@ mod tests {
     #[test]
     fn parse_completed() {
         assert_eq!(
-            parse("@DONE:/tmp/dest/image.jpg\n"),
+            parse("@GRAB:test-run:DONE:/tmp/dest/image.jpg\n"),
             ProgressLine::Completed("/tmp/dest/image.jpg".to_string())
         );
     }
@@ -153,17 +153,17 @@ mod tests {
     #[test]
     fn parse_skipped() {
         assert_eq!(
-            parse("@SKIP:/tmp/dest/image.jpg\n"),
+            parse("@GRAB:test-run:SKIP:/tmp/dest/image.jpg\n"),
             ProgressLine::Skipped("/tmp/dest/image.jpg".to_string())
         );
     }
 
     #[test]
     fn parse_progress_percent_and_unknown_total() {
-        assert_eq!(parse("42%"), ProgressLine::Progress(Some(42)));
-        assert_eq!(parse("?"), ProgressLine::Progress(None));
+        assert_eq!(parse("@GRAB:test-run:PROGRESS:42%"), ProgressLine::Progress(Some(42)));
+        assert_eq!(parse("@GRAB:test-run:PROGRESS:?"), ProgressLine::Progress(None));
         assert_eq!(
-            parse("101%"),
+            parse("@GRAB:test-run:PROGRESS:101%"),
             ProgressLine::Other("101%".to_string())
         );
     }
@@ -183,14 +183,14 @@ mod tests {
     #[test]
     fn feed_tracks_current_file_and_counts() {
         let mut p = GalleryProgress::new();
-        p.feed(parse("@START:/a.jpg"));
+        p.feed(parse("@GRAB:test-run:START:/a.jpg"));
         assert_eq!(p.current_file_path.as_deref(), Some("/a.jpg"));
-        p.feed(parse("42%"));
+        p.feed(parse("@GRAB:test-run:PROGRESS:42%"));
         assert_eq!(p.current_file_percent, Some(42));
-        p.feed(parse("@DONE:/a.jpg"));
+        p.feed(parse("@GRAB:test-run:DONE:/a.jpg"));
         assert_eq!(p.current_file_path, None);
         assert_eq!(p.current_file_percent, None);
-        p.feed(parse("@SKIP:/b.jpg"));
+        p.feed(parse("@GRAB:test-run:SKIP:/b.jpg"));
         assert_eq!(p.files_completed, 1);
         assert_eq!(p.files_skipped, 1);
         assert_eq!(p.files_done(), 2);

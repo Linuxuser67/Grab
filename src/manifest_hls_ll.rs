@@ -674,6 +674,7 @@ fn build_plan(
 
     Ok(HlsPlan {
         resources: resources.into_boxed_slice(),
+        requested_playlist_url: base_url.clone(),
         playlist_url: base_url,
         is_live: !end_list,
         end_list,

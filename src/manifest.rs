@@ -535,6 +535,7 @@ impl HlsPlan {
 
         Ok(Self {
             resources: Vec::new().into_boxed_slice(),
+            requested_playlist_url: playlist_url.clone(),
             playlist_url,
             is_live: false,
             end_list: true,

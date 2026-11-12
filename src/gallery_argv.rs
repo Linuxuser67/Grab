@@ -393,7 +393,6 @@ impl GalleryJob {
     }
 }
 
-
 #[cfg(test)]
 mod tests {
     use super::*;

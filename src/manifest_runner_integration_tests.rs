@@ -1364,7 +1364,10 @@ async fn saved_live_hls_capture_finalizes_without_contacting_the_origin() {
     .await
     .expect("resume a durable finish without polling the source");
     assert_eq!(finish_outcome.outcome, LiveHlsCaptureOutcome::Finish);
-    assert_eq!(finish_outcome.output, super::LiveHlsOutput::DestinationParts);
+    assert_eq!(
+        finish_outcome.output,
+        super::LiveHlsOutput::DestinationParts
+    );
     let final_playlist = m3u8_rs::parse_media_playlist_res(
         &tokio::fs::read(video_dir.join("local.m3u8"))
             .await

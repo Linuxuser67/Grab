@@ -383,8 +383,7 @@ mod tests {
         assert!(to_cached_playlist("key", &info).is_none());
 
         let mut info = playlist();
-        info.items[0].page_url =
-            "https://example.test/watch?delivery_key=opaque".into();
+        info.items[0].page_url = "https://example.test/watch?delivery_key=opaque".into();
         assert!(to_cached_playlist("key", &info).is_none());
     }
 
@@ -396,8 +395,7 @@ mod tests {
         assert!(from_cached_playlist(&key, stored).is_none());
 
         let mut stored = to_cached_playlist(&key, &playlist()).expect("complete playlist");
-        stored.entries[0].url =
-            "https://example.test/watch?signature=opaque".into();
+        stored.entries[0].url = "https://example.test/watch?signature=opaque".into();
         assert!(from_cached_playlist(&key, stored).is_none());
     }
 
@@ -409,8 +407,7 @@ mod tests {
             "https://www.youtube.com/watch?v=video123&list=PL123&index=1".into();
         assert!(to_cached_playlist("key", &info).is_some());
 
-        info.items[0].page_url =
-            "https://www.youtube.com/watch?v=video123&signature=opaque".into();
+        info.items[0].page_url = "https://www.youtube.com/watch?v=video123&signature=opaque".into();
         assert!(to_cached_playlist("key", &info).is_none());
     }
 

@@ -1346,7 +1346,10 @@ async fn saved_live_hls_capture_finalizes_without_contacting_the_origin() {
     .await
     .expect("resume a durable finish without polling the source");
     assert_eq!(finish_outcome.outcome, LiveHlsCaptureOutcome::Finish);
-    assert_eq!(finish_outcome.output, super::LiveHlsOutput::DestinationParts);
+    assert_eq!(
+        finish_outcome.output,
+        super::LiveHlsOutput::DestinationParts
+    );
     let final_playlist = m3u8_rs::parse_media_playlist_res(
         &tokio::fs::read(video_dir.join("local.m3u8"))
             .await
@@ -3805,12 +3808,7 @@ async fn live_hls_snapshot_appends_fetched_mpegts_fragments_to_visible_destinati
 
     let make_transport_stream = |seed: u8| {
         let mut bytes = vec![0xff; 188 * 3];
-        for (index, packet) in bytes
-            .as_chunks_mut::<188>()
-            .0
-            .iter_mut()
-            .enumerate()
-        {
+        for (index, packet) in bytes.as_chunks_mut::<188>().0.iter_mut().enumerate() {
             packet[0] = 0x47;
             packet[1] = 0;
             packet[2] = 0;

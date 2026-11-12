@@ -701,10 +701,7 @@ fn show_failure_dialog(
     parent: &gtk4::Widget,
     item: &crate::download::DownloadItem,
 ) -> adw::AlertDialog {
-    let dialog = adw::AlertDialog::new(
-        Some(&gettext("Download Failed")),
-        Some(&item.filename()),
-    );
+    let dialog = adw::AlertDialog::new(Some(&gettext("Download Failed")), Some(&item.filename()));
 
     let text = gtk4::TextView::builder()
         .editable(false)

@@ -1460,3 +1460,4 @@ fn preview_cache_key_only_matches_the_source_that_served_it() {
 
     assert!(handoff.matches_auth(ManifestClientAuth::Handoff));
     assert!(!handoff.matches_auth(ManifestClientAuth::Browser));
+    }

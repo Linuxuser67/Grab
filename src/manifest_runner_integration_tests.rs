@@ -4164,12 +4164,12 @@ program-after.ts
     let local = m3u8_rs::parse_media_playlist_res(&local_bytes)
         .expect("parse the ad-free local HLS playlist");
     assert_eq!(local.segments.len(), 3);
-    assert!(
-        local
-            .segments
-            .iter()
-            .any(|segment| segment.uri.contains("ad.ts"))
-    );
+    let planned_segments = plan
+        .resources
+        .iter()
+        .filter(|resource| resource.kind == crate::manifest::HlsResourceKind::Segment)
+        .collect::<Vec<_>>();
+    assert_eq!(local.segments[1].uri, planned_segments[1].filename);
     assert!(
         local
             .segments

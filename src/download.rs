@@ -1324,7 +1324,7 @@ impl DownloadManager {
     }
 
     /// Preserve the editable stem, but derive the media suffix from the selected rendition.
-    fn manifest_filename_for_extension(
+    pub(crate) fn manifest_filename_for_extension(
         filename: Option<&str>,
         source_url: &str,
         extension: &str,

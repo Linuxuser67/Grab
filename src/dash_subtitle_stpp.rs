@@ -17,7 +17,7 @@ use quick_xml::events::{BytesStart, Event};
 use quick_xml::name::ResolveResult;
 use quick_xml::reader::NsReader;
 
-use crate::mp4_validation::{BoundedReader, MAX_PARSER_READ_BYTES, ReadBudget};
+use crate::mp4_reader::{BoundedReader, MAX_PARSER_READ_BYTES, ReadBudget};
 
 use crate::dash_subtitle::{
     DashSubtitleError, MAX_CUE_COUNT, MAX_CUE_TEXT_BYTES, MAX_OUTPUT_BYTES, MAX_SAMPLE_BYTES,

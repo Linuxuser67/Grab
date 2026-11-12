@@ -320,7 +320,10 @@ pub(super) fn validate_iori_adts_pes(mut data: &[u8]) -> Result<(), String> {
     Ok(())
 }
 
-pub(super) fn hls_sample_aes_iv(iv: Option<&str>, media_sequence: u64) -> Result<[u8; 16], ManifestRunError> {
+pub(super) fn hls_sample_aes_iv(
+    iv: Option<&str>,
+    media_sequence: u64,
+) -> Result<[u8; 16], ManifestRunError> {
     let Some(iv) = iv else {
         return Ok(u128::from(media_sequence).to_be_bytes());
     };

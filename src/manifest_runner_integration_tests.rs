@@ -1250,6 +1250,9 @@ fn localize_live_plan_resources(plan: &mut HlsPlan, fixture_base: &Url) {
 #[tokio::test]
 async fn saved_live_hls_capture_finalizes_without_contacting_the_origin() {
     let root = TempRoot::new("live-offline");
+    let destination = root.path().join("recording.mp4");
+    crate::manifest_destination::ensure_plan(root.path(), &destination, 0, false, false)
+        .expect("persist saved live HLS destination plan");
     let video_dir = root.path().join("video");
     let audio_dir = root.path().join("audio");
     tokio::fs::create_dir_all(&video_dir)
@@ -1296,7 +1299,7 @@ async fn saved_live_hls_capture_finalizes_without_contacting_the_origin() {
         &client,
         "https://origin.example.test/master.m3u8",
         root.path(),
-        root.path(),
+        &destination,
         0,
         root.path(),
         &local_plan,
@@ -1314,7 +1317,7 @@ async fn saved_live_hls_capture_finalizes_without_contacting_the_origin() {
     .expect("finalize stored capture without a network request");
 
     assert_eq!(outcome.outcome, LiveHlsCaptureOutcome::Ended);
-    assert_eq!(outcome.output, super::LiveHlsOutput::LocalPlaylist);
+    assert_eq!(outcome.output, super::LiveHlsOutput::DestinationParts);
     assert_eq!(
         downloaded.load(Ordering::Relaxed),
         segment_bytes.len() as u64,
@@ -1326,7 +1329,7 @@ async fn saved_live_hls_capture_finalizes_without_contacting_the_origin() {
         &client,
         "https://origin.example.test/master.m3u8",
         root.path(),
-        root.path(),
+        &destination,
         0,
         root.path(),
         &local_plan,
@@ -1343,7 +1346,7 @@ async fn saved_live_hls_capture_finalizes_without_contacting_the_origin() {
     .await
     .expect("resume a durable finish without polling the source");
     assert_eq!(finish_outcome.outcome, LiveHlsCaptureOutcome::Finish);
-    assert_eq!(finish_outcome.output, super::LiveHlsOutput::LocalPlaylist);
+    assert_eq!(finish_outcome.output, super::LiveHlsOutput::DestinationParts);
     let final_playlist = m3u8_rs::parse_media_playlist_res(
         &tokio::fs::read(video_dir.join("local.m3u8"))
             .await
@@ -1643,7 +1646,7 @@ async fn llhls_live_capture_reuses_parts_when_complete_parent_segments_arrive() 
 }
 
 #[tokio::test]
-async fn llhls_mapless_parts_are_committed_only_after_mpegts_validation() {
+async fn llhls_mapless_parts_are_staged_for_ffmpeg_validation() {
     let root = TempRoot::new("llhls-mapless-ts");
     let video_dir = root.path().join("video");
     tokio::fs::create_dir_all(&video_dir)
@@ -1673,10 +1676,6 @@ async fn llhls_mapless_parts_are_committed_only_after_mpegts_validation() {
     let mut plan =
         crate::manifest::plan_hls_media_playlist("https://origin.example.test/live.m3u8", body)
             .expect("plan mapless LL-HLS MPEG-TS part");
-    let mapless_parts = plan.ll_parts_without_init_map().collect::<Vec<_>>();
-    assert_eq!(mapless_parts.len(), 1);
-    assert!(mapless_parts[0].starts_with("segment-ll-00000000000000000005-part-000000-"));
-
     let files = HashMap::from([("/5.0.ts".to_string(), transport_stream.clone())]);
     let (fixture_base, server) = spawn_fixture_server(files, 1).await;
     localize_live_plan_resources(&mut plan, &fixture_base);
@@ -1722,7 +1721,7 @@ async fn llhls_mapless_parts_are_committed_only_after_mpegts_validation() {
 }
 
 #[tokio::test]
-async fn llhls_mapless_non_transport_stream_part_is_rejected_before_commit() {
+async fn llhls_mapless_non_transport_stream_part_is_staged_for_ffmpeg_validation() {
     let root = TempRoot::new("llhls-mapless-invalid");
     let video_dir = root.path().join("video");
     tokio::fs::create_dir_all(&video_dir)
@@ -1754,7 +1753,7 @@ async fn llhls_mapless_non_transport_stream_part_is_rejected_before_commit() {
     let downloaded = Arc::new(AtomicU64::new(0));
     let (_stop_tx, mut abort) = tokio::sync::oneshot::channel();
 
-    assert!(matches!(
+    assert_eq!(
         apply_live_hls_snapshot(
             &client,
             &plan,
@@ -1765,15 +1764,24 @@ async fn llhls_mapless_non_transport_stream_part_is_rejected_before_commit() {
             &mut abort,
             0,
         )
-        .await,
-        Err(ManifestRunError::Unsupported(_))
-    ));
+        .await
+        .expect("stage a complete LL-HLS part for FFmpeg validation"),
+        LiveHlsSnapshotOutcome::Committed
+    );
     wait_for_fixture_server(server).await;
-    assert_eq!(track.accumulator.segment_count(), 0);
-    assert!(
-        tokio::fs::symlink_metadata(video_dir.join("local.m3u8"))
+    assert_eq!(track.accumulator.segment_count(), 1);
+    let local = m3u8_rs::parse_media_playlist_res(
+        &tokio::fs::read(video_dir.join("local.m3u8"))
             .await
-            .is_err()
+            .expect("read staged local playlist"),
+    )
+    .expect("parse staged local playlist");
+    assert_eq!(
+        tokio::fs::read(video_dir.join(&local.segments[0].uri))
+            .await
+            .expect("read staged mapless part"),
+        b"not an MPEG-TS fragment",
+        "the resource is staged; FFmpeg, not a per-part packet heuristic, owns demux validation"
     );
 }
 
@@ -2003,6 +2011,9 @@ async fn live_hls_sequence_gap_preserves_already_committed_media() {
 #[tokio::test]
 async fn live_hls_pause_keeps_the_last_committed_window() {
     let root = TempRoot::new("live-preserve");
+    let destination = root.path().join("recording.mp4");
+    crate::manifest_destination::ensure_plan(root.path(), &destination, 0, false, false)
+        .expect("persist paused live HLS destination plan");
     let video_dir = root.path().join("video");
     let audio_dir = root.path().join("audio");
     tokio::fs::create_dir_all(&audio_dir)
@@ -2099,7 +2110,7 @@ async fn live_hls_pause_keeps_the_last_committed_window() {
         &client,
         "https://origin.example.test/live.m3u8",
         root.path(),
-        root.path(),
+        &destination,
         0,
         root.path(),
         &first,
@@ -2116,7 +2127,7 @@ async fn live_hls_pause_keeps_the_last_committed_window() {
     .await
     .expect("finish the restored live HLS capture");
     assert_eq!(finished.outcome, LiveHlsCaptureOutcome::Finish);
-    assert_eq!(finished.output, super::LiveHlsOutput::LocalPlaylist);
+    assert_eq!(finished.output, super::LiveHlsOutput::DestinationParts);
 }
 
 #[tokio::test]
@@ -3795,7 +3806,7 @@ async fn live_hls_snapshot_appends_fetched_mpegts_fragments_to_visible_destinati
     let make_transport_stream = |seed: u8| {
         let mut bytes = vec![0xff; 188 * 3];
         for (index, packet) in bytes
-            .as_chunks_mut::<{ mpeg_ts::ts::TS_PACKET_SIZE }>()
+            .as_chunks_mut::<188>()
             .0
             .iter_mut()
             .enumerate()

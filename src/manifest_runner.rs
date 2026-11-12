@@ -26,7 +26,6 @@ use crate::manifest_intake::ManifestLookup;
 use crate::manifest_intake::NativeManifest;
 use crate::media_types::{ManifestKind, ManifestRepresentationKey, ManifestSource};
 use crate::mp4_validation::is_fmp4_resource as validate_fmp4_resource;
-use crate::mpeg_ts_validation::TransportStreamValidator;
 
 mod dash_live;
 mod hls_live;
@@ -3776,38 +3775,6 @@ async fn concat_dash_resource_names(
     Ok(true)
 }
 
-async fn is_mpegts_segment(path: &Path) -> Result<bool, ManifestRunError> {
-    const PACKET_SIZE: u64 = mpeg_ts::ts::TS_PACKET_SIZE as u64;
-    const PREFIX_PACKETS: u64 = 3;
-
-    let mut file = tokio::fs::File::open(path)
-        .await
-        .map_err(|error| manifest_storage_error("Could not open an HLS media fragment", error))?;
-    let metadata = file.metadata().await.map_err(|error| {
-        manifest_storage_error("Could not inspect an HLS media fragment", error)
-    })?;
-    let size = metadata.len();
-    if size < PACKET_SIZE || !size.is_multiple_of(PACKET_SIZE) {
-        return Ok(false);
-    }
-
-    // Keep the recovery-path probe bounded to the same three-packet prefix
-    // that was previously checked for sync-byte alignment.
-    let prefix_size = size.min(PACKET_SIZE * PREFIX_PACKETS);
-    let mut remaining = prefix_size;
-    let mut packet = [0_u8; mpeg_ts::ts::TS_PACKET_SIZE];
-    let mut validator = TransportStreamValidator::new();
-    while remaining > 0 {
-        file.read_exact(&mut packet).await.map_err(|error| {
-            manifest_storage_error("Could not inspect an HLS media fragment", error)
-        })?;
-        validator.observe(&packet);
-        remaining -= PACKET_SIZE;
-    }
-
-    Ok(validator.is_valid_prefix())
-}
-
 /// Whether a fetched resource is a structurally complete ISO BMFF init segment
 /// or fragmented media segment.
 async fn is_fmp4_resource(path: &Path) -> Result<bool, ManifestRunError> {
@@ -4119,57 +4086,6 @@ mod tests {
     #[test]
     fn sample_aes_iv_rejects_non_hexadecimal_bytes() {
         assert!(hls_sample_aes_iv(Some("éééééééééééééééé"), 0).is_err());
-    }
-
-    fn valid_transport_stream(packet_count: usize, continuity_seed: u8) -> Vec<u8> {
-        let mut bytes = vec![0xff; packet_count * mpeg_ts::ts::TS_PACKET_SIZE];
-        for (index, packet) in bytes
-            .as_chunks_mut::<{ mpeg_ts::ts::TS_PACKET_SIZE }>()
-            .0
-            .iter_mut()
-            .enumerate()
-        {
-            packet[0] = 0x47;
-            packet[1] = 0;
-            packet[2] = 0;
-            packet[3] = 0x10 | (continuity_seed.wrapping_add(index as u8) & 0x0f);
-        }
-        bytes
-    }
-
-    #[tokio::test]
-    async fn mpegts_fragment_validation_checks_complete_transport_packet_headers() {
-        let directory = tempfile::tempdir().expect("create fragment test directory");
-        let path = directory.path().join("segment.bin");
-        let mut bytes = valid_transport_stream(3, 0);
-        tokio::fs::write(&path, &bytes)
-            .await
-            .expect("write MPEG-TS fragment");
-        assert!(
-            is_mpegts_segment(&path)
-                .await
-                .expect("inspect MPEG-TS fragment")
-        );
-
-        // A malformed packet later in the checked prefix must be rejected.
-        bytes[188 + 3] = 0; // reserved adaptation_field_control
-        tokio::fs::write(&path, &bytes)
-            .await
-            .expect("write invalid transport fragment");
-        assert!(
-            !is_mpegts_segment(&path)
-                .await
-                .expect("inspect invalid transport fragment")
-        );
-
-        tokio::fs::write(&path, valid_transport_stream(1, 0)[..187].to_vec())
-            .await
-            .expect("write truncated transport fragment");
-        assert!(
-            !is_mpegts_segment(&path)
-                .await
-                .expect("inspect truncated transport fragment")
-        );
     }
 
     fn fmp4_box(kind: &[u8; 4], payload: &[u8]) -> Vec<u8> {

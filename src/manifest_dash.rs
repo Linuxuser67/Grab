@@ -10,20 +10,11 @@ use url::Url;
 use super::dash_roles::{self, DASH_ROLE_SCHEME};
 use super::{MAX_MANIFEST_BYTES, ManifestByteRange};
 
-#[path = "manifest_dash_sidx.rs"]
-mod sidx;
-
 #[path = "manifest_dash_ll.rs"]
 mod low_latency;
 #[cfg(test)]
 #[path = "manifest_dash_ll_tests.rs"]
 mod low_latency_tests;
-#[cfg(test)]
-pub(crate) use sidx::resolve_segment_base_index;
-pub(crate) use sidx::{
-    DashSidxEntry, MAX_DASH_SIDX_SEGMENTS, dash_sidx_media_resource, parse_child_segment_index,
-    parse_segment_base_index, validate_segment_base_sidx_ranges,
-};
 const MAX_REPRESENTATIONS: usize = 1_024;
 const MAX_SEGMENTS: usize = 100_000;
 const MIN_DYNAMIC_UPDATE_PERIOD: Duration = Duration::from_millis(500);
@@ -148,7 +139,7 @@ pub(crate) struct DashResource {
     pub(crate) range: Option<ManifestByteRange>,
     pub(crate) filename: String,
     pub(crate) kind: DashResourceKind,
-    /// SegmentTemplate Number, SegmentList index, or 0 for a single-file SegmentBase; initialization resources use None.
+    /// SegmentTemplate Number or SegmentList index; initialization resources use None.
     pub(crate) segment_number: Option<u64>,
 }
 
@@ -185,7 +176,6 @@ pub(crate) struct DashRepresentationPlan {
     pub(crate) duration: Duration,
     pub(crate) presentation: DashPresentation,
     pub(crate) resources: Box<[DashResource]>,
-    pub(crate) segment_base_index: Option<DashSegmentBaseIndex>,
     /// Maps the representation's sample timestamps onto the MPD presentation timeline.
     pub(crate) input_timestamp_offset: DashTimestampOffset,
     /// Whether the MPD advertises incomplete, progressively delivered media segments.
@@ -212,23 +202,6 @@ impl DashRepresentationPlan {
     }
 }
 
-/// Information needed to resolve a static SegmentBase index into media ranges.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) struct DashSegmentBaseIndex {
-    /// Media resource containing the referenced byte ranges.
-    pub(crate) url: Url,
-    /// Resource containing the SIDX box; this may differ from the media URL.
-    pub(crate) index_url: Url,
-    pub(crate) index_range: ManifestByteRange,
-    pub(crate) index_is_external: bool,
-    /// Initialization resource, which may be separate from the indexed media resource.
-    pub(crate) initialization_url: Url,
-    pub(crate) initialization_is_external: bool,
-    pub(crate) initialization_range: Option<ManifestByteRange>,
-    pub(crate) index_range_exact: bool,
-    pub(crate) timescale: Option<u64>,
-}
-
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct DashRepresentationSource {
     base_url: Url,
@@ -244,10 +217,6 @@ fn source_timestamp_offset(
             (template.timescale, template.presentation_time_offset)
         }
         DashAddressing::List(list) => (list.timescale, list.presentation_time_offset),
-        DashAddressing::Base(base) => (base.timescale, base.presentation_time_offset),
-        DashAddressing::IndexedBase(index) => {
-            (index.timescale.unwrap_or(1), index.presentation_time_offset)
-        }
     };
     if timescale == 0 {
         return Err(DashError::InvalidSegment);
@@ -271,27 +240,6 @@ fn source_timestamp_offset(
 enum DashAddressing {
     Template(DashTemplate),
     List(DashList),
-    /// A single media file addressed by `BaseURL` (SegmentBase).
-    Base(DashBase),
-    /// A static single-file representation whose SIDX describes byte ranges.
-    IndexedBase(DashBaseIndex),
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-struct DashBase {
-    timescale: u64,
-    presentation_time_offset: u64,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-struct DashBaseIndex {
-    index_range: ManifestByteRange,
-    index_url: Option<String>,
-    initialization_url: Option<String>,
-    initialization_range: Option<ManifestByteRange>,
-    index_range_exact: bool,
-    timescale: Option<u64>,
-    presentation_time_offset: u64,
 }
 
 #[derive(Clone, Copy)]
@@ -380,16 +328,11 @@ pub(crate) fn parse_dash_manifest(
 /// Dynamic support is limited to HTTPS SegmentTemplate presentations with a
 /// finite MPD update interval. The bounded LL-DASH profile also accepts
 /// SegmentTemplate availability offsets and chunked, incomplete media responses.
-/// Static SegmentBase supports
-/// either a single-file download or indexed byte-range resources described by a
-/// flat SIDX and an Initialization range. Single-file assets are still subject
-/// to the 1 GiB per-resource limit. Multiple static periods require explicit DASH-IF
-/// period-continuity signaling, stable adaptation/representation IDs, and contiguous timing.
-/// DRM, XLink, adaptation-set
-/// Subset/Preselection combinations, dynamic SegmentList, SegmentBase
-/// with an Initialization@sourceURL or non-zero presentation-time offset,
-/// hierarchical SIDX, BaseURL-level availability signalling, and WebM
-/// remain on yt-dlp fallback.
+/// Multiple static periods require explicit DASH-IF period-continuity signaling,
+/// stable adaptation/representation IDs, and contiguous timing. DRM, XLink,
+/// SegmentBase/SIDX, adaptation-set Subset/Preselection combinations, dynamic
+/// SegmentList, BaseURL-level availability signalling, and WebM remain on
+/// yt-dlp fallback.
 ///
 /// # Errors
 /// Returns an error when the MPD is malformed, exceeds the input limit, uses
@@ -720,17 +663,6 @@ pub(crate) fn parse_dash_manifest_at(
                             .and_then(|offset| offset.checked_add(base_url_offset))
                             .ok_or(DashError::UnsupportedAddressing)?;
                     }
-                    _ if !base_url_offset.is_zero() => {
-                        return Err(DashError::UnsupportedAddressing);
-                    }
-                    _ => {}
-                }
-                if matches!(
-                    &addressing,
-                    DashAddressing::Base(_) | DashAddressing::IndexedBase(_)
-                ) && !is_single_file_media_url(&representation_base, &manifest_url)
-                {
-                    return Err(DashError::UnsupportedAddressing);
                 }
                 let representation_id = representation.id.clone();
                 let bandwidth = representation.bandwidth;
@@ -1061,20 +993,6 @@ pub(crate) fn plan_dash_representation(
     sources.push(representation.source.clone());
     sources.append(&mut representation.additional_sources);
 
-    // Concatenating independently addressed SegmentBase files or SIDX indexes
-    // would require container-aware remapping. Multi-period native assembly is
-    // therefore limited to fragment-addressed resources with a shared init.
-    if sources.len() > 1
-        && sources.iter().any(|source| {
-            matches!(
-                &source.addressing,
-                DashAddressing::Base(_) | DashAddressing::IndexedBase(_)
-            )
-        })
-    {
-        return Err(DashError::UnsupportedAddressing);
-    }
-
     let mut resources: Vec<DashResource> = Vec::new();
     let mut segment_count = 0_usize;
     for (period_index, source) in sources.iter().enumerate() {
@@ -1086,18 +1004,6 @@ pub(crate) fn plan_dash_representation(
             }
             (DashPresentation::Dynamic(dynamic), DashAddressing::List(list)) => {
                 expand_dynamic_list(&period_representation, list, dynamic)?
-            }
-            (
-                DashPresentation::Dynamic(_),
-                DashAddressing::Base(_) | DashAddressing::IndexedBase(_),
-            ) => {
-                return Err(DashError::UnsupportedAddressing);
-            }
-            (DashPresentation::Static, DashAddressing::Base(_)) => {
-                expand_base(&period_representation)?
-            }
-            (DashPresentation::Static, DashAddressing::IndexedBase(index)) => {
-                expand_indexed_base(&period_representation, index)?
             }
             (DashPresentation::Static, DashAddressing::Template(template)) if live_selection => {
                 expand_static_live_template(
@@ -1177,43 +1083,15 @@ pub(crate) fn plan_dash_representation(
     } else {
         DashTimestampOffset { nanoseconds: 0 }
     };
-    let segment_base_index = match (&representation.source.addressing, sources.len()) {
-        (DashAddressing::IndexedBase(index), 1) => {
-            let index_url = index
-                .index_url
-                .as_deref()
-                .map(|raw| resolve_resource(&representation.source.base_url, raw))
-                .transpose()?
-                .unwrap_or_else(|| representation.source.base_url.clone());
-            let index_is_external = index_url != representation.source.base_url;
-            let initialization_url = index
-                .initialization_url
-                .as_deref()
-                .map(|raw| resolve_resource(&representation.source.base_url, raw))
-                .transpose()?
-                .unwrap_or_else(|| representation.source.base_url.clone());
-            let initialization_is_external = initialization_url != representation.source.base_url;
-            if !initialization_is_external && index.initialization_range.is_none() {
-                return Err(DashError::UnsupportedAddressing);
-            }
-            Some(DashSegmentBaseIndex {
-                url: representation.source.base_url.clone(),
-                index_url,
-                index_range: index.index_range,
-                index_is_external,
-                initialization_url,
-                initialization_is_external,
-                initialization_range: index.initialization_range,
-                index_range_exact: index.index_range_exact,
-                timescale: index.timescale,
-            })
-        }
-        (DashAddressing::IndexedBase(_), _) => return Err(DashError::UnsupportedAddressing),
-        _ => None,
-    };
+    if !matches!(&manifest.presentation, DashPresentation::Dynamic(_))
+        && !resources
+            .iter()
+            .any(|resource| resource.kind == DashResourceKind::Segment)
+    {
+        return Err(DashError::InvalidSegment);
+    }
 
     if !matches!(&manifest.presentation, DashPresentation::Dynamic(_))
-        && segment_base_index.is_none()
         && !resources
             .iter()
             .any(|resource| resource.kind == DashResourceKind::Segment)
@@ -1226,7 +1104,6 @@ pub(crate) fn plan_dash_representation(
         duration: manifest.duration,
         presentation: manifest.presentation.clone(),
         resources: resources.into_boxed_slice(),
-        segment_base_index,
         input_timestamp_offset,
         low_latency,
     })
@@ -1336,24 +1213,6 @@ fn stable_representation_key(identity: RepresentationIdentity<'_>) -> String {
                 hash_optional_number(&mut hasher, segment.duration);
             }
         }
-        DashAddressing::Base(_) => {
-            hasher.update(b"base");
-        }
-        DashAddressing::IndexedBase(index) => {
-            hasher.update(b"indexed-base");
-            hash_optional_range(&mut hasher, Some(index.index_range));
-            hash_optional_range(&mut hasher, index.initialization_range);
-            hash_optional_text(&mut hasher, index.index_url.as_deref());
-            // Keep the historical key byte-for-byte when Initialization uses
-            // an in-file range; only the newly supported addressing adds identity.
-            hash_separate_initialization_identity(
-                &mut hasher,
-                base_url,
-                index.initialization_url.as_deref(),
-            );
-            hasher.update([u8::from(index.index_range_exact)]);
-            hash_optional_number(&mut hasher, index.timescale);
-        }
     }
 
     let digest = hasher.finalize();
@@ -1453,22 +1312,6 @@ fn live_representation_key(
                 None => hasher.update(b"no-init"),
             }
         }
-        DashAddressing::Base(_) => {
-            hasher.update(b"base");
-        }
-        DashAddressing::IndexedBase(index) => {
-            hasher.update(b"indexed-base");
-            hash_optional_range(&mut hasher, Some(index.index_range));
-            hash_optional_range(&mut hasher, index.initialization_range);
-            hash_optional_text(&mut hasher, index.index_url.as_deref());
-            hash_separate_initialization_identity(
-                &mut hasher,
-                base_url,
-                index.initialization_url.as_deref(),
-            );
-            hasher.update([u8::from(index.index_range_exact)]);
-            hash_optional_number(&mut hasher, index.timescale);
-        }
     }
     let digest = hasher.finalize();
     let fingerprint: String = digest[..16]
@@ -1521,15 +1364,6 @@ fn hash_optional_range(hasher: &mut Sha256, range: Option<ManifestByteRange>) {
         }
         None => hasher.update([0]),
     }
-}
-
-/// A `SegmentBase` BaseURL must name a media file, not the MPD itself or a
-/// directory; otherwise the resolved URL cannot be the whole media resource.
-fn is_single_file_media_url(url: &Url, manifest_url: &Url) -> bool {
-    url.path_segments()
-        .and_then(|mut segments| segments.next_back())
-        .is_some_and(|segment| !segment.is_empty())
-        && url.path() != manifest_url.path()
 }
 
 /// Resolve exactly one BaseURL at each inheritance level. Choosing among CDNs
@@ -1668,113 +1502,13 @@ fn effective_addressing(
         adaptation.SegmentBase.as_ref(),
         representation.SegmentBase.as_ref(),
     ];
+    // FFmpeg's DASH demuxer does not implement SegmentBase/SIDX addressing.
+    if bases.iter().any(Option::is_some) {
+        return Err(DashError::UnsupportedAddressing);
+    }
 
     let has_template = templates.iter().any(Option::is_some);
     let has_list = lists.iter().any(Option::is_some);
-    if bases.iter().any(Option::is_some) {
-        if is_dynamic || has_template || has_list {
-            return Err(DashError::UnsupportedAddressing);
-        }
-        let mut index_range = None;
-        let mut initialization_range = None;
-        let mut initialization_source_url = None;
-        let mut index_range_exact = None;
-        let mut timescale = None;
-        let mut presentation_time_offset = None;
-        let mut index_source_url = None;
-        let mut has_representation_index = false;
-        for base in bases.iter().flatten() {
-            if base.timescale == Some(0)
-                || base
-                    .availabilityTimeOffset
-                    .is_some_and(|offset| offset != 0.0)
-                || base.availabilityTimeComplete == Some(false)
-                || base.eptDelta.is_some_and(|delta| delta != 0)
-                || base.pbDelta.is_some_and(|delta| delta != 0)
-                || base.failover_content.is_some()
-            {
-                return Err(DashError::UnsupportedAddressing);
-            }
-
-            index_range = base.indexRange.as_deref().or(index_range);
-            index_range_exact = base.indexRangeExact.or(index_range_exact);
-            timescale = base.timescale.or(timescale);
-            presentation_time_offset = base.presentationTimeOffset.or(presentation_time_offset);
-            if let Some(representation_index) = base.representation_index.as_ref() {
-                // Child elements replace inherited children rather than
-                // inheriting individual attributes from the parent element.
-                has_representation_index = true;
-                index_source_url = representation_index
-                    .sourceURL
-                    .as_deref()
-                    .map(str::trim)
-                    .filter(|source| !source.is_empty())
-                    .map(str::to_string);
-                if let Some(range) = representation_index.range.as_deref() {
-                    index_range = Some(range);
-                }
-            }
-            if let Some(initialization) = base.Initialization.as_ref() {
-                // An Initialization child replaces the inherited child; missing
-                // attributes must not silently reuse values from the parent.
-                let source_url = initialization.sourceURL.as_deref().map(str::trim);
-                if source_url.is_some_and(str::is_empty) {
-                    return Err(DashError::InvalidSegment);
-                }
-                initialization_source_url = source_url.map(str::to_string);
-                initialization_range = Some(initialization.range.as_deref());
-            }
-        }
-
-        if has_representation_index && index_range.is_none() {
-            // An index without an explicit bounded range would require an
-            // unbounded whole-resource fetch.
-            return Err(DashError::UnsupportedAddressing);
-        }
-        if index_range.is_none() && index_range_exact.is_some() {
-            return Err(DashError::UnsupportedAddressing);
-        }
-
-        if let Some(index_range) = index_range {
-            let index_range = parse_byte_range(index_range)?;
-            let initialization_range = initialization_range
-                .flatten()
-                .map(parse_byte_range)
-                .transpose()?;
-            if initialization_source_url.is_none() && initialization_range.is_none() {
-                return Err(DashError::UnsupportedAddressing);
-            }
-            if timescale == Some(0)
-                || (initialization_source_url.is_none()
-                    && index_source_url.is_none()
-                    && ranges_overlap(
-                        index_range,
-                        initialization_range.ok_or(DashError::UnsupportedAddressing)?,
-                    )?)
-            {
-                return Err(DashError::UnsupportedAddressing);
-            }
-            return Ok(DashAddressing::IndexedBase(DashBaseIndex {
-                index_range,
-                index_url: index_source_url,
-                initialization_url: initialization_source_url,
-                initialization_range,
-                index_range_exact: index_range_exact.unwrap_or(false),
-                timescale,
-                presentation_time_offset: presentation_time_offset.unwrap_or(0),
-            }));
-        }
-        if has_representation_index
-            || initialization_source_url.is_some()
-            || initialization_range.is_some()
-        {
-            return Err(DashError::UnsupportedAddressing);
-        }
-        return Ok(DashAddressing::Base(DashBase {
-            timescale: timescale.unwrap_or(1),
-            presentation_time_offset: presentation_time_offset.unwrap_or(0),
-        }));
-    }
 
     if is_dynamic && (has_template == has_list) {
         return Err(DashError::UnsupportedAddressing);
@@ -2943,46 +2677,6 @@ fn validate_media_url(url: &Url) -> Result<(), DashError> {
     Ok(())
 }
 
-/// A single-file `SegmentBase` representation: the `BaseURL` is the media file.
-fn expand_base(representation: &DashRepresentation) -> Result<Vec<DashResource>, DashError> {
-    // Retain the whole-file path for unindexed SegmentBase representations.
-    let url = representation.source.base_url.clone();
-    validate_media_url(&url)?;
-    let filename = super::resource_filename("dash-segment", Some(0), &url, None);
-    Ok(vec![DashResource {
-        url,
-        range: None,
-        filename,
-        kind: DashResourceKind::Segment,
-        segment_number: Some(0),
-    }])
-}
-
-fn expand_indexed_base(
-    representation: &DashRepresentation,
-    index: &DashBaseIndex,
-) -> Result<Vec<DashResource>, DashError> {
-    let media_url = representation.source.base_url.clone();
-    let url = index
-        .initialization_url
-        .as_deref()
-        .map(|raw| resolve_resource(&media_url, raw))
-        .transpose()?
-        .unwrap_or_else(|| media_url.clone());
-    validate_media_url(&url)?;
-    if url == media_url && index.initialization_range.is_none() {
-        return Err(DashError::UnsupportedAddressing);
-    }
-    let filename = super::resource_filename("dash-init", Some(0), &url, index.initialization_range);
-    Ok(vec![DashResource {
-        url,
-        range: index.initialization_range,
-        filename,
-        kind: DashResourceKind::Initialization,
-        segment_number: None,
-    }])
-}
-
 /// Return whether two checked half-open ranges overlap.
 fn ranges_overlap(left: ManifestByteRange, right: ManifestByteRange) -> Result<bool, DashError> {
     let left_end = left
@@ -3088,682 +2782,6 @@ mod tests {
             result,
             String::from_utf8(captured).expect("DASH diagnostic logs are UTF-8"),
         )
-    }
-
-    fn build_sidx_box(first_offset: u32, references: &[(u32, u32, u32)]) -> Vec<u8> {
-        let size = 32_u32 + u32::try_from(references.len()).expect("test reference count") * 12;
-        let mut bytes = Vec::with_capacity(usize::try_from(size).expect("test index size"));
-        bytes.extend_from_slice(&size.to_be_bytes());
-        bytes.extend_from_slice(b"sidx");
-        bytes.extend_from_slice(&[0, 0, 0, 0]);
-        bytes.extend_from_slice(&1_u32.to_be_bytes());
-        bytes.extend_from_slice(&1_000_u32.to_be_bytes());
-        bytes.extend_from_slice(&0_u32.to_be_bytes());
-        bytes.extend_from_slice(&first_offset.to_be_bytes());
-        bytes.extend_from_slice(&0_u16.to_be_bytes());
-        bytes.extend_from_slice(
-            &u16::try_from(references.len())
-                .expect("test reference count")
-                .to_be_bytes(),
-        );
-        for (reference, duration, sap) in references {
-            bytes.extend_from_slice(&reference.to_be_bytes());
-            bytes.extend_from_slice(&duration.to_be_bytes());
-            bytes.extend_from_slice(&sap.to_be_bytes());
-        }
-        bytes
-    }
-
-    fn test_range(bytes: &[u8]) -> ManifestByteRange {
-        ManifestByteRange {
-            offset: 100,
-            length: u64::try_from(bytes.len()).expect("test SIDX length"),
-        }
-    }
-
-    fn indexed_base_plan(
-        initialization_range: ManifestByteRange,
-        index_range: ManifestByteRange,
-        index_range_exact: bool,
-    ) -> DashSegmentBaseIndex {
-        DashSegmentBaseIndex {
-            url: Url::parse("https://cdn.example.test/path/media.mp4").expect("test media URL"),
-            index_url: Url::parse("https://cdn.example.test/path/media.mp4")
-                .expect("test index URL"),
-            index_range,
-            index_is_external: false,
-            initialization_url: Url::parse("https://cdn.example.test/path/media.mp4")
-                .expect("test initialization URL"),
-            initialization_is_external: false,
-            initialization_range: Some(initialization_range),
-            index_range_exact,
-            timescale: Some(1_000),
-        }
-    }
-
-    #[test]
-    fn plans_indexed_segment_base_with_initialization_range() {
-        let body = r#"<?xml version="1.0"?>
-<MPD xmlns="urn:mpeg:dash:schema:mpd:2011" type="static" mediaPresentationDuration="PT2S">
-  <BaseURL>media.mp4</BaseURL>
-  <Period duration="PT2S">
-    <AdaptationSet contentType="video" mimeType="video/mp4">
-      <Representation id="v1">
-        <SegmentBase timescale="1000" indexRange="100-143" indexRangeExact="true">
-          <Initialization range="0-99"/>
-        </SegmentBase>
-      </Representation>
-    </AdaptationSet>
-  </Period>
-</MPD>"#;
-        let manifest =
-            parse_dash_manifest(BASE_URL, body).expect("indexed SegmentBase should parse");
-        let representation = &manifest.video_representations[0];
-        let plan = plan_dash_representation(&manifest, &representation.key)
-            .expect("indexed SegmentBase should produce a deferred SIDX plan");
-
-        let index = plan
-            .segment_base_index
-            .as_ref()
-            .expect("deferred SIDX request");
-        assert_eq!(
-            index.index_range,
-            ManifestByteRange {
-                offset: 100,
-                length: 44,
-            }
-        );
-        assert_eq!(
-            index.initialization_range,
-            Some(ManifestByteRange {
-                offset: 0,
-                length: 100,
-            })
-        );
-        assert!(index.index_range_exact);
-        assert_eq!(index.timescale, Some(1_000));
-        assert_eq!(plan.resources.len(), 1);
-        assert_eq!(plan.resources[0].kind, DashResourceKind::Initialization);
-        assert_eq!(plan.resources[0].range, index.initialization_range);
-    }
-
-    #[test]
-    fn plans_segment_base_with_separate_initialization_url() {
-        let body = r#"<MPD xmlns="urn:mpeg:dash:schema:mpd:2011" type="static" mediaPresentationDuration="PT2S">
-  <BaseURL>media.mp4</BaseURL>
-  <Period duration="PT2S">
-    <AdaptationSet contentType="video" mimeType="video/mp4">
-      <Representation id="v1">
-        <SegmentBase timescale="1000" indexRange="100-143">
-          <Initialization sourceURL="init.mp4"/>
-        </SegmentBase>
-      </Representation>
-    </AdaptationSet>
-  </Period>
-</MPD>"#;
-        let manifest = parse_dash_manifest(BASE_URL, body).expect("separate init URL should parse");
-        let representation = &manifest.video_representations[0];
-        let plan = plan_dash_representation(&manifest, &representation.key)
-            .expect("separate init URL should be planned");
-
-        let index = plan
-            .segment_base_index
-            .as_ref()
-            .expect("deferred SIDX request");
-        assert!(index.initialization_is_external);
-        assert_eq!(
-            index.initialization_url.as_str(),
-            "https://cdn.example.test/path/init.mp4"
-        );
-        assert_eq!(index.initialization_range, None);
-        assert_eq!(plan.resources.len(), 1);
-        assert_eq!(plan.resources[0].kind, DashResourceKind::Initialization);
-        assert_eq!(plan.resources[0].url, index.initialization_url);
-        assert_eq!(plan.resources[0].range, None);
-    }
-
-    #[test]
-    fn plans_separate_initialization_url_with_a_bounded_range() {
-        let body = r#"<MPD xmlns="urn:mpeg:dash:schema:mpd:2011" type="static" mediaPresentationDuration="PT2S">
-  <BaseURL>media.mp4</BaseURL>
-  <Period duration="PT2S">
-    <AdaptationSet contentType="video" mimeType="video/mp4">
-      <Representation id="v1">
-        <SegmentBase timescale="1000" indexRange="100-143">
-          <Initialization sourceURL="init.mp4" range="20-119"/>
-        </SegmentBase>
-      </Representation>
-    </AdaptationSet>
-  </Period>
-</MPD>"#;
-        let manifest =
-            parse_dash_manifest(BASE_URL, body).expect("ranged separate init should parse");
-        let representation = &manifest.video_representations[0];
-        let plan = plan_dash_representation(&manifest, &representation.key)
-            .expect("ranged separate init should be planned");
-        let expected = ManifestByteRange {
-            offset: 20,
-            length: 100,
-        };
-        assert_eq!(plan.resources[0].range, Some(expected));
-        assert_eq!(
-            plan.resources[0].url.as_str(),
-            "https://cdn.example.test/path/init.mp4"
-        );
-        assert!(
-            plan.segment_base_index
-                .expect("indexed base")
-                .initialization_is_external
-        );
-    }
-
-    #[test]
-    fn separate_initialization_url_participates_in_representation_identity() {
-        let body = r#"<MPD xmlns="urn:mpeg:dash:schema:mpd:2011" type="static" mediaPresentationDuration="PT2S">
-  <BaseURL>media.mp4</BaseURL>
-  <Period duration="PT2S">
-    <AdaptationSet contentType="video" mimeType="video/mp4">
-      <Representation id="v1">
-        <SegmentBase timescale="1000" indexRange="100-143">
-          <Initialization sourceURL="init-one.mp4"/>
-        </SegmentBase>
-      </Representation>
-    </AdaptationSet>
-  </Period>
-</MPD>"#;
-        let second = body.replace("init-one.mp4", "init-two.mp4");
-        let first_manifest =
-            parse_dash_manifest(BASE_URL, body).expect("first initialization URL parses");
-        let second_manifest =
-            parse_dash_manifest(BASE_URL, &second).expect("second initialization URL parses");
-
-        assert_ne!(
-            first_manifest.video_representations[0].key,
-            second_manifest.video_representations[0].key
-        );
-    }
-
-    #[test]
-    fn rotating_initialization_signatures_do_not_change_representation_identity() {
-        let body = r#"<MPD xmlns="urn:mpeg:dash:schema:mpd:2011" type="static" mediaPresentationDuration="PT2S">
-  <BaseURL>media.mp4</BaseURL>
-  <Period duration="PT2S">
-    <AdaptationSet contentType="video" mimeType="video/mp4">
-      <Representation id="v1">
-        <SegmentBase timescale="1000" indexRange="100-143">
-          <Initialization sourceURL="init.mp4?sig=first"/>
-        </SegmentBase>
-      </Representation>
-    </AdaptationSet>
-  </Period>
-</MPD>"#;
-        let second = body.replace("sig=first", "sig=second");
-        let first_manifest =
-            parse_dash_manifest(BASE_URL, body).expect("first signed init URL parses");
-        let second_manifest =
-            parse_dash_manifest(BASE_URL, &second).expect("rotated signed init URL parses");
-
-        assert_eq!(
-            first_manifest.video_representations[0].key,
-            second_manifest.video_representations[0].key
-        );
-    }
-
-    #[test]
-    fn rejects_unbounded_in_file_initialization_resource() {
-        let body = r#"<MPD xmlns="urn:mpeg:dash:schema:mpd:2011" type="static" mediaPresentationDuration="PT2S">
-  <BaseURL>media.mp4</BaseURL>
-  <Period duration="PT2S">
-    <AdaptationSet contentType="video" mimeType="video/mp4">
-      <Representation id="v1">
-        <SegmentBase timescale="1000" indexRange="100-143">
-          <Initialization sourceURL="media.mp4"/>
-        </SegmentBase>
-      </Representation>
-    </AdaptationSet>
-  </Period>
-</MPD>"#;
-        let manifest = parse_dash_manifest(BASE_URL, body).expect("manifest syntax is valid");
-        let representation = &manifest.video_representations[0];
-        assert_eq!(
-            plan_dash_representation(&manifest, &representation.key).err(),
-            Some(DashError::UnsupportedAddressing)
-        );
-    }
-
-    #[test]
-    fn plans_external_representation_index_with_its_own_bounded_range() {
-        let body = r#"<?xml version="1.0"?>
-<MPD xmlns="urn:mpeg:dash:schema:mpd:2011" type="static" mediaPresentationDuration="PT2S">
-  <BaseURL>media.mp4</BaseURL>
-  <Period duration="PT2S">
-    <AdaptationSet contentType="video" mimeType="video/mp4">
-      <Representation id="v1">
-        <SegmentBase timescale="1000">
-          <Initialization range="0-99"/>
-          <RepresentationIndex sourceURL="index.sidx" range="0-43"/>
-        </SegmentBase>
-      </Representation>
-    </AdaptationSet>
-  </Period>
-</MPD>"#;
-        let manifest =
-            parse_dash_manifest(BASE_URL, body).expect("external RepresentationIndex should parse");
-        let representation = &manifest.video_representations[0];
-        let plan = plan_dash_representation(&manifest, &representation.key)
-            .expect("external RepresentationIndex should plan");
-
-        let index = plan
-            .segment_base_index
-            .as_ref()
-            .expect("external SIDX request");
-        assert_eq!(
-            index.index_url.as_str(),
-            "https://cdn.example.test/path/index.sidx"
-        );
-        assert_eq!(
-            index.url.as_str(),
-            "https://cdn.example.test/path/media.mp4"
-        );
-        assert!(index.index_is_external);
-        assert_eq!(
-            index.index_range,
-            ManifestByteRange {
-                offset: 0,
-                length: 44,
-            }
-        );
-    }
-
-    #[test]
-    fn representation_index_range_overrides_segment_base_index_range() {
-        let body = r#"<?xml version="1.0"?>
-<MPD xmlns="urn:mpeg:dash:schema:mpd:2011" type="static" mediaPresentationDuration="PT2S">
-  <BaseURL>media.mp4</BaseURL>
-  <Period duration="PT2S">
-    <AdaptationSet contentType="video" mimeType="video/mp4">
-      <Representation id="v1">
-        <SegmentBase timescale="1000" indexRange="100-143">
-          <Initialization range="0-99"/>
-          <RepresentationIndex sourceURL="media.mp4" range="200-243"/>
-        </SegmentBase>
-      </Representation>
-    </AdaptationSet>
-  </Period>
-</MPD>"#;
-        let manifest =
-            parse_dash_manifest(BASE_URL, body).expect("RepresentationIndex range should parse");
-        let representation = &manifest.video_representations[0];
-        let plan = plan_dash_representation(&manifest, &representation.key)
-            .expect("RepresentationIndex range should plan");
-        let index = plan.segment_base_index.as_ref().expect("indexed plan");
-
-        assert!(!index.index_is_external);
-        assert_eq!(
-            index.index_range,
-            ManifestByteRange {
-                offset: 200,
-                length: 44,
-            }
-        );
-    }
-
-    #[test]
-    fn representation_index_without_bounded_range_falls_back() {
-        let body = r#"<?xml version="1.0"?>
-<MPD xmlns="urn:mpeg:dash:schema:mpd:2011" type="static" mediaPresentationDuration="PT2S">
-  <BaseURL>media.mp4</BaseURL>
-  <Period duration="PT2S">
-    <AdaptationSet contentType="video" mimeType="video/mp4">
-      <Representation id="v1">
-        <SegmentBase timescale="1000">
-          <Initialization range="0-99"/>
-          <RepresentationIndex sourceURL="index.sidx"/>
-        </SegmentBase>
-      </Representation>
-    </AdaptationSet>
-  </Period>
-</MPD>"#;
-        assert_eq!(
-            parse_dash_manifest(BASE_URL, body).err(),
-            Some(DashError::UnsupportedAddressing)
-        );
-    }
-
-    #[test]
-    fn plans_static_segment_list_presentation_time_offset() {
-        let body = r#"<MPD xmlns="urn:mpeg:dash:schema:mpd:2011" type="static" mediaPresentationDuration="PT4S">
-  <Period start="PT2S" duration="PT2S">
-    <AdaptationSet contentType="video" mimeType="video/mp4">
-      <Representation id="v1">
-        <SegmentList timescale="1000" presentationTimeOffset="8100">
-          <SegmentURL media="segment.m4s"/>
-        </SegmentList>
-      </Representation>
-    </AdaptationSet>
-  </Period>
-</MPD>"#;
-        let manifest = parse_dash_manifest(BASE_URL, body).expect("static SegmentList PTO parses");
-        let representation = &manifest.video_representations[0];
-        let plan = plan_dash_representation(&manifest, &representation.key)
-            .expect("static SegmentList PTO is planned");
-        assert_eq!(
-            plan.input_timestamp_offset.ffmpeg_argument().as_deref(),
-            Some("-6.100000000")
-        );
-        assert_eq!(plan.resources.len(), 1);
-    }
-
-    #[test]
-    fn plans_nonzero_segment_base_presentation_time_offset() {
-        let body = r#"<?xml version="1.0"?>
-<MPD xmlns="urn:mpeg:dash:schema:mpd:2011" type="static" mediaPresentationDuration="PT4S">
-  <BaseURL>media.mp4</BaseURL>
-  <Period start="PT2S" duration="PT2S">
-    <AdaptationSet contentType="video" mimeType="video/mp4">
-      <Representation id="v1">
-        <SegmentBase timescale="1000" presentationTimeOffset="8100" indexRange="100-143">
-          <Initialization range="0-99"/>
-        </SegmentBase>
-      </Representation>
-    </AdaptationSet>
-  </Period>
-</MPD>"#;
-        let manifest =
-            parse_dash_manifest(BASE_URL, body).expect("static SegmentBase PTO should be planned");
-        let representation = &manifest.video_representations[0];
-        let plan = plan_dash_representation(&manifest, &representation.key)
-            .expect("non-zero SegmentBase PTO should produce a plan");
-        assert_eq!(
-            plan.input_timestamp_offset.ffmpeg_argument().as_deref(),
-            Some("-6.100000000")
-        );
-    }
-
-    #[test]
-    fn rejects_base_url_byte_range_alternative_request_templates() {
-        let body = r#"<?xml version="1.0"?>
-<MPD xmlns="urn:mpeg:dash:schema:mpd:2011" type="static" mediaPresentationDuration="PT2S">
-  <BaseURL byteRange="$base$-$first$-$last$">media.mp4</BaseURL>
-  <Period duration="PT2S">
-    <AdaptationSet contentType="video" mimeType="video/mp4">
-      <Representation id="v1">
-        <SegmentBase timescale="1000" indexRange="100-143">
-          <Initialization range="0-99"/>
-        </SegmentBase>
-      </Representation>
-    </AdaptationSet>
-  </Period>
-</MPD>"#;
-        assert_eq!(
-            parse_dash_manifest(BASE_URL, body).err(),
-            Some(DashError::UnsupportedAddressing)
-        );
-    }
-
-    #[test]
-    fn indexed_segment_base_without_initialization_range_falls_back() {
-        let body = r#"<?xml version="1.0"?>
-<MPD xmlns="urn:mpeg:dash:schema:mpd:2011" type="static" mediaPresentationDuration="PT2S">
-  <BaseURL>media.mp4</BaseURL>
-  <Period duration="PT2S">
-    <AdaptationSet contentType="video" mimeType="video/mp4">
-      <Representation id="v1">
-        <SegmentBase indexRange="100-143"/>
-      </Representation>
-    </AdaptationSet>
-  </Period>
-</MPD>"#;
-        assert_eq!(
-            parse_dash_manifest(BASE_URL, body).err(),
-            Some(DashError::UnsupportedAddressing)
-        );
-    }
-
-    #[test]
-    fn rejects_index_range_exact_without_an_effective_index_range() {
-        let body = r#"<?xml version="1.0"?>
-<MPD xmlns="urn:mpeg:dash:schema:mpd:2011" type="static" mediaPresentationDuration="PT2S">
-  <BaseURL>media.mp4</BaseURL>
-  <Period duration="PT2S">
-    <AdaptationSet contentType="video" mimeType="video/mp4">
-      <SegmentBase indexRangeExact="true"/>
-      <Representation id="v1"/>
-    </AdaptationSet>
-  </Period>
-</MPD>"#;
-        assert_eq!(
-            parse_dash_manifest(BASE_URL, body).err(),
-            Some(DashError::UnsupportedAddressing)
-        );
-    }
-
-    #[test]
-    fn rejects_zero_segment_base_timescale_without_an_index_range() {
-        let body = r#"<?xml version="1.0"?>
-<MPD xmlns="urn:mpeg:dash:schema:mpd:2011" type="static" mediaPresentationDuration="PT2S">
-  <BaseURL>media.mp4</BaseURL>
-  <Period duration="PT2S">
-    <AdaptationSet contentType="video" mimeType="video/mp4">
-      <SegmentBase timescale="0"/>
-      <Representation id="v1"/>
-    </AdaptationSet>
-  </Period>
-</MPD>"#;
-        assert_eq!(
-            parse_dash_manifest(BASE_URL, body).err(),
-            Some(DashError::UnsupportedAddressing)
-        );
-    }
-
-    #[test]
-    fn applies_sidx_first_offset_after_the_index_box() {
-        let bytes = build_sidx_box(8, &[(64, 1_000, 0x9000_0000)]);
-        let index = indexed_base_plan(
-            ManifestByteRange {
-                offset: 0,
-                length: 100,
-            },
-            test_range(&bytes),
-            true,
-        );
-        let resources = resolve_segment_base_index(&index, &bytes, 1_000)
-            .expect("first_offset should be applied to the end of SIDX");
-        assert_eq!(
-            resources[0].range,
-            Some(ManifestByteRange {
-                offset: 100 + u64::try_from(bytes.len()).expect("test SIDX length") + 8,
-                length: 64,
-            })
-        );
-    }
-
-    #[test]
-    fn resolves_flat_sidx_references_to_ordered_media_ranges() {
-        let bytes = build_sidx_box(0, &[(100, 2_000, 0x9000_0000), (200, 2_000, 0x9000_0000)]);
-        let index = indexed_base_plan(
-            ManifestByteRange {
-                offset: 0,
-                length: 100,
-            },
-            test_range(&bytes),
-            true,
-        );
-
-        let resources =
-            resolve_segment_base_index(&index, &bytes, 1_000).expect("flat SIDX should resolve");
-        assert_eq!(resources.len(), 2);
-        let first_media_offset = 100_u64
-            .checked_add(u64::try_from(bytes.len()).expect("test SIDX length"))
-            .expect("test media offset");
-        assert_eq!(
-            resources[0].range,
-            Some(ManifestByteRange {
-                offset: first_media_offset,
-                length: 100,
-            })
-        );
-        assert_eq!(
-            resources[1].range,
-            Some(ManifestByteRange {
-                offset: first_media_offset + 100,
-                length: 200,
-            })
-        );
-        assert_eq!(resources[0].segment_number, Some(0));
-        assert_eq!(resources[1].segment_number, Some(1));
-        assert!(
-            resources
-                .iter()
-                .all(|resource| resource.kind == DashResourceKind::Segment)
-        );
-    }
-
-    #[test]
-    fn resolves_sidx_inside_non_exact_index_range() {
-        let mut bytes = vec![0, 0, 0, 8, b'f', b'r', b'e', b'e'];
-        bytes.extend_from_slice(&build_sidx_box(0, &[(64, 1_000, 0x9000_0000)]));
-        let index = indexed_base_plan(
-            ManifestByteRange {
-                offset: 0,
-                length: 100,
-            },
-            test_range(&bytes),
-            false,
-        );
-
-        let resources = resolve_segment_base_index(&index, &bytes, 1_000)
-            .expect("non-exact index range may contain adjacent boxes");
-        assert_eq!(
-            resources[0].range,
-            Some(ManifestByteRange {
-                offset: 100 + u64::try_from(bytes.len()).expect("test SIDX length"),
-                length: 64,
-            })
-        );
-    }
-
-    #[test]
-    fn rejects_hierarchical_sidx_and_out_of_file_references() {
-        let hierarchical = build_sidx_box(0, &[(0x8000_0040, 1_000, 0x9000_0000)]);
-        let index = indexed_base_plan(
-            ManifestByteRange {
-                offset: 0,
-                length: 100,
-            },
-            test_range(&hierarchical),
-            true,
-        );
-        assert_eq!(
-            resolve_segment_base_index(&index, &hierarchical, 1_000).err(),
-            Some(DashError::UnsupportedAddressing)
-        );
-
-        let oversized = build_sidx_box(0, &[(0x7fff_ffff, 1_000, 0x9000_0000)]);
-        let oversized_index = indexed_base_plan(
-            ManifestByteRange {
-                offset: 0,
-                length: 100,
-            },
-            test_range(&oversized),
-            true,
-        );
-        assert_eq!(
-            resolve_segment_base_index(&oversized_index, &oversized, 500).err(),
-            Some(DashError::InvalidSegment)
-        );
-        assert_eq!(
-            resolve_segment_base_index(&oversized_index, &oversized, u64::MAX).err(),
-            Some(DashError::LimitExceeded)
-        );
-    }
-
-    #[test]
-    fn rejects_mismatched_sidx_timescale_and_truncated_index_bytes() {
-        let bytes = build_sidx_box(0, &[(64, 1_000, 0x9000_0000)]);
-        let mut index = indexed_base_plan(
-            ManifestByteRange {
-                offset: 0,
-                length: 100,
-            },
-            test_range(&bytes),
-            true,
-        );
-        index.timescale = Some(90_000);
-        assert_eq!(
-            resolve_segment_base_index(&index, &bytes, 1_000).err(),
-            Some(DashError::UnsupportedAddressing)
-        );
-
-        index.timescale = Some(1_000);
-        index.index_range_exact = true;
-        assert_eq!(
-            resolve_segment_base_index(&index, &bytes[..bytes.len() - 1], 1_000).err(),
-            Some(DashError::InvalidSegment)
-        );
-    }
-
-    #[test]
-    fn accepts_prefix_boxes_before_sidx_when_index_range_is_exact() {
-        let mut bytes = vec![0, 0, 0, 8, b'f', b'r', b'e', b'e'];
-        bytes.extend_from_slice(&build_sidx_box(0, &[(64, 1_000, 0x9000_0000)]));
-        let index = indexed_base_plan(
-            ManifestByteRange {
-                offset: 0,
-                length: 100,
-            },
-            test_range(&bytes),
-            true,
-        );
-        let resources = resolve_segment_base_index(&index, &bytes, 1_000)
-            .expect("indexRangeExact describes a prefix, not one box extent");
-        assert_eq!(resources.len(), 1);
-        assert_eq!(
-            resources[0].range,
-            Some(ManifestByteRange {
-                offset: 100 + u64::try_from(bytes.len()).expect("test SIDX length"),
-                length: 64,
-            })
-        );
-    }
-
-    #[test]
-    fn rejects_exact_index_prefix_when_first_media_range_starts_inside_it() {
-        let mut bytes = build_sidx_box(0, &[(64, 1_000, 0x9000_0000)]);
-        bytes.extend_from_slice(&[0, 0, 0, 8, b'f', b'r', b'e', b'e']);
-        let index = indexed_base_plan(
-            ManifestByteRange {
-                offset: 0,
-                length: 100,
-            },
-            test_range(&bytes),
-            true,
-        );
-        assert_eq!(
-            resolve_segment_base_index(&index, &bytes, 1_000).err(),
-            Some(DashError::UnsupportedAddressing)
-        );
-    }
-
-    #[test]
-    fn rejects_index_range_offset_overflow() {
-        let bytes = build_sidx_box(0, &[(64, 1_000, 0x9000_0000)]);
-        let mut index = indexed_base_plan(
-            ManifestByteRange {
-                offset: 0,
-                length: 100,
-            },
-            ManifestByteRange {
-                offset: u64::MAX - 10,
-                length: u64::try_from(bytes.len()).expect("test SIDX length"),
-            },
-            true,
-        );
-        index.index_range.length = 20;
-        assert_eq!(
-            resolve_segment_base_index(&index, &bytes, u64::MAX).err(),
-            Some(DashError::InvalidSegment)
-        );
     }
 
     #[test]
@@ -5609,127 +4627,30 @@ mod tests {
     }
 
     #[test]
-    fn expands_single_file_segment_base_as_one_media_resource() {
-        let body = r#"<?xml version="1.0"?>
-<MPD xmlns="urn:mpeg:dash:schema:mpd:2011" type="static" mediaPresentationDuration="PT4S">
-  <Period duration="PT4S">
-    <AdaptationSet contentType="video" mimeType="video/mp4">
-      <Representation id="v1" bandwidth="500000">
-        <BaseURL>video.mp4</BaseURL>
-        <SegmentBase/>
-      </Representation>
-    </AdaptationSet>
-  </Period>
-</MPD>"#;
-        let plan = parse_dash_manifest(BASE_URL, body).expect("SegmentBase MPD should parse");
-        let video = plan.video_representations.first().expect("video track");
-        let resources =
-            plan_dash_representation(&plan, &video.key).expect("SegmentBase should expand");
-
-        assert_eq!(resources.resources.len(), 1);
-        assert_eq!(resources.resources[0].kind, DashResourceKind::Segment);
-        assert_eq!(
-            resources.resources[0].url.as_str(),
-            "https://cdn.example.test/path/video.mp4"
-        );
-        assert_eq!(resources.resources[0].range, None);
-        assert_eq!(resources.resources[0].segment_number, Some(0));
-        assert!(resources.resources[0].filename.starts_with("dash-segment"));
+    fn segment_base_and_representation_index_are_unsupported() {
+        let cases = [
+            r#"<MPD xmlns="urn:mpeg:dash:schema:mpd:2011" type="static" mediaPresentationDuration="PT2S"><Period duration="PT2S"><AdaptationSet contentType="video" mimeType="video/mp4"><Representation id="v1"><BaseURL>video.mp4</BaseURL><SegmentBase/></Representation></AdaptationSet></Period></MPD>"#,
+            r#"<MPD xmlns="urn:mpeg:dash:schema:mpd:2011" type="static" mediaPresentationDuration="PT2S"><Period duration="PT2S"><AdaptationSet contentType="video" mimeType="video/mp4"><SegmentBase indexRange="0-99"/><Representation id="v1"/></AdaptationSet></Period></MPD>"#,
+            r#"<MPD xmlns="urn:mpeg:dash:schema:mpd:2011" type="static" mediaPresentationDuration="PT2S"><Period duration="PT2S"><AdaptationSet contentType="video" mimeType="video/mp4"><Representation id="v1"><SegmentBase><RepresentationIndex sourceURL="index.sidx" range="0-43"/></SegmentBase></Representation></AdaptationSet></Period></MPD>"#,
+            r#"<MPD xmlns="urn:mpeg:dash:schema:mpd:2011" type="static" mediaPresentationDuration="PT2S"><Period duration="PT2S"><AdaptationSet contentType="video" mimeType="video/mp4"><Representation id="v1"><BaseURL>folder/</BaseURL><SegmentBase indexRange="0-99"/></Representation></AdaptationSet></Period></MPD>"#,
+        ];
+        for body in cases {
+            assert_eq!(
+                parse_dash_manifest(BASE_URL, body).err(),
+                Some(DashError::UnsupportedAddressing),
+                "SegmentBase/SIDX must not enter the native path: {body}"
+            );
+        }
     }
 
     #[test]
-    fn segment_base_inherits_adaptation_set_base_url() {
-        let body = r#"<MPD xmlns="urn:mpeg:dash:schema:mpd:2011" type="static" mediaPresentationDuration="PT4S"><Period duration="PT4S"><AdaptationSet contentType="video" mimeType="video/mp4"><BaseURL>clip.mp4</BaseURL><Representation id="v1" bandwidth="500000"><SegmentBase/></Representation></AdaptationSet></Period></MPD>"#;
-        let plan = parse_dash_manifest(BASE_URL, body).expect("inherited SegmentBase should parse");
-        let resources = plan_dash_representation(&plan, &plan.video_representations[0].key)
-            .expect("inherited SegmentBase should expand");
-        assert_eq!(
-            resources.resources[0].url.as_str(),
-            "https://cdn.example.test/path/clip.mp4"
-        );
-    }
-
-    #[test]
-    fn segment_base_rejects_webm_base_url() {
-        let body = r#"<MPD xmlns="urn:mpeg:dash:schema:mpd:2011" type="static" mediaPresentationDuration="PT2S"><Period duration="PT2S"><AdaptationSet contentType="video" mimeType="video/mp4"><Representation id="v1" bandwidth="500000"><BaseURL>video.webm</BaseURL><SegmentBase/></Representation></AdaptationSet></Period></MPD>"#;
-        let plan = parse_dash_manifest(BASE_URL, body)
-            .expect("SegmentBase with WebM base URL should parse");
-        assert_eq!(
-            plan_dash_representation(&plan, &plan.video_representations[0].key).err(),
-            Some(DashError::UnsupportedPresentation)
-        );
-    }
-
-    #[test]
-    fn segment_base_requires_an_explicit_base_url() {
-        let body = r#"<MPD xmlns="urn:mpeg:dash:schema:mpd:2011" type="static" mediaPresentationDuration="PT2S"><Period duration="PT2S"><AdaptationSet contentType="video" mimeType="video/mp4"><SegmentBase indexRange="0-999"/><Representation id="v1"/></AdaptationSet></Period></MPD>"#;
-
-        assert_eq!(
-            parse_dash_manifest(BASE_URL, body).err(),
-            Some(DashError::UnsupportedAddressing)
-        );
-    }
-
-    #[test]
-    fn segment_base_rejects_dynamic_presentations() {
+    fn dynamic_segment_base_is_unsupported() {
         let dynamic = dynamic_mpd(
             r#"<BaseURL>video.mp4</BaseURL><SegmentBase indexRange="0-999"/>"#,
             "",
         );
         assert_eq!(
             parse_dash_manifest_at(BASE_URL, &dynamic, dynamic_test_clock(120)).err(),
-            Some(DashError::UnsupportedAddressing)
-        );
-    }
-
-    #[test]
-    fn segment_base_rejects_unsupported_availability_and_delta_attributes() {
-        let cases = [
-            r#"availabilityTimeOffset="1""#,
-            r#"availabilityTimeComplete="false""#,
-            r#"eptDelta="1""#,
-            r#"pdDelta="1""#,
-        ];
-        for attributes in cases {
-            let body = format!(
-                r#"<MPD xmlns="urn:mpeg:dash:schema:mpd:2011" type="static" mediaPresentationDuration="PT2S"><Period duration="PT2S"><AdaptationSet contentType="video" mimeType="video/mp4"><Representation id="v1"><BaseURL>video.mp4</BaseURL><SegmentBase {attributes}/></Representation></AdaptationSet></Period></MPD>"#,
-                attributes = attributes
-            );
-            assert_eq!(
-                parse_dash_manifest(BASE_URL, &body).err(),
-                Some(DashError::UnsupportedAddressing),
-                "{attributes}"
-            );
-        }
-    }
-
-    #[test]
-    fn segment_base_rejects_mixed_addressing() {
-        // SegmentTemplate on the parent plus SegmentBase on the representation.
-        let mixed_template = r#"<MPD xmlns="urn:mpeg:dash:schema:mpd:2011" type="static" mediaPresentationDuration="PT2S"><Period duration="PT2S"><AdaptationSet contentType="video" mimeType="video/mp4"><SegmentTemplate media="s-$Number$.m4s" duration="2"/><Representation id="v1"><BaseURL>video.mp4</BaseURL><SegmentBase indexRange="0-999"/></Representation></AdaptationSet></Period></MPD>"#;
-        assert_eq!(
-            parse_dash_manifest(BASE_URL, mixed_template).err(),
-            Some(DashError::UnsupportedAddressing)
-        );
-
-        // SegmentList on a parent plus SegmentBase on the representation.
-        let mixed_list = r#"<MPD xmlns="urn:mpeg:dash:schema:mpd:2011" type="static" mediaPresentationDuration="PT2S"><Period duration="PT2S"><AdaptationSet contentType="video" mimeType="video/mp4"><SegmentList><SegmentURL media="a.mp4"/></SegmentList><Representation id="v1"><BaseURL>video.mp4</BaseURL><SegmentBase indexRange="0-999"/></Representation></AdaptationSet></Period></MPD>"#;
-        assert_eq!(
-            parse_dash_manifest(BASE_URL, mixed_list).err(),
-            Some(DashError::UnsupportedAddressing)
-        );
-
-        // A BaseURL that points at a directory resolves without a file name.
-        let directory = r#"<MPD xmlns="urn:mpeg:dash:schema:mpd:2011" type="static" mediaPresentationDuration="PT2S"><Period duration="PT2S"><AdaptationSet contentType="video" mimeType="video/mp4"><Representation id="v1"><BaseURL>folder/</BaseURL><SegmentBase indexRange="0-999"/></Representation></AdaptationSet></Period></MPD>"#;
-        assert_eq!(
-            parse_dash_manifest(BASE_URL, directory).err(),
-            Some(DashError::UnsupportedAddressing)
-        );
-
-        // A BaseURL that is the MPD URL itself names the manifest, not media.
-        let manifest = r#"<MPD xmlns="urn:mpeg:dash:schema:mpd:2011" type="static" mediaPresentationDuration="PT2S"><Period duration="PT2S"><AdaptationSet contentType="video" mimeType="video/mp4"><Representation id="v1"><BaseURL>manifest.mpd</BaseURL><SegmentBase indexRange="0-999"/></Representation></AdaptationSet></Period></MPD>"#;
-        assert_eq!(
-            parse_dash_manifest(BASE_URL, manifest).err(),
             Some(DashError::UnsupportedAddressing)
         );
     }

@@ -357,12 +357,12 @@ fn representation_key_survives_manifest_order_changes() {
 
     let reordered_body = TEMPLATE_MPD.replace(
         concat!(
-            "      <Representation id=\"v1\" bandwidth=\"1000000\" width=\"1280\" height=\"720\" codecs=\"avc1.64001f\"/>\n",
-            "      <Representation id=\"v2\" bandwidth=\"2500000\" width=\"1920\" height=\"1080\" codecs=\"avc1.640028\"/>"
+            "  <Representation id=\"v1\" bandwidth=\"1000000\" width=\"1280\" height=\"720\" codecs=\"avc1.64001f\"/>\n",
+            "  <Representation id=\"v2\" bandwidth=\"2500000\" width=\"1920\" height=\"1080\" codecs=\"avc1.640028\"/>"
         ),
         concat!(
-            "      <Representation id=\"v2\" bandwidth=\"2500000\" width=\"1920\" height=\"1080\" codecs=\"avc1.640028\"/>\n",
-            "      <Representation id=\"v1\" bandwidth=\"1000000\" width=\"1280\" height=\"720\" codecs=\"avc1.64001f\"/>"
+            "  <Representation id=\"v2\" bandwidth=\"2500000\" width=\"1920\" height=\"1080\" codecs=\"avc1.640028\"/>\n",
+            "  <Representation id=\"v1\" bandwidth=\"1000000\" width=\"1280\" height=\"720\" codecs=\"avc1.64001f\"/>"
         ),
     );
     assert_ne!(

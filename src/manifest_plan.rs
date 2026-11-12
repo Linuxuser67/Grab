@@ -5,7 +5,7 @@ use sha2::{Digest, Sha256};
 use url::Url;
 
 use crate::manifest::{
-    HlsAudioRendition, HlsContentSteering, HlsPlan, HlsSubtitleRendition, HlsVariant,
+    HlsAudioRendition, HlsPlan, HlsSubtitleRendition, HlsVariant,
     dash::{DashPresentation, DashRepresentationPlan},
 };
 use crate::manifest_types::{
@@ -23,7 +23,6 @@ pub(crate) struct HlsMasterDownloadPlan {
     pub(crate) subtitle_url: Option<Url>,
     pub(crate) subtitle_language: Option<String>,
     pub(crate) inherited_variables: Box<[(String, String)]>,
-    pub(crate) content_steering: Option<HlsContentSteering>,
 }
 
 #[derive(Debug)]
@@ -556,7 +555,6 @@ pub(crate) fn download_plan(
                             })
                     }),
                     inherited_variables: master.inherited_variables.clone(),
-                    content_steering: master.content_steering.clone(),
                 },
             )))
         }

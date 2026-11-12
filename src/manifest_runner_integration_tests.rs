@@ -1247,21 +1247,8 @@ fn localize_live_plan_resources(plan: &mut HlsPlan, fixture_base: &Url) {
     }
 }
 
-fn live_hls_test_source(url: &str) -> crate::media_types::ManifestSource {
-    crate::media_types::ManifestSource {
-        url: url.to_string(),
-        kind: crate::media_types::ManifestKind::Hls,
-        representation_key: "live-hls-test".into(),
-        output_extension: None,
-        audio_key: None,
-        subtitle_key: None,
-        subtitle_language: None,
-    }
-}
-
 #[tokio::test]
 async fn saved_live_hls_capture_finalizes_without_contacting_the_origin() {
-    let source = live_hls_test_source("https://origin.example.test/master.m3u8");
     let root = TempRoot::new("live-offline");
     let video_dir = root.path().join("video");
     let audio_dir = root.path().join("audio");
@@ -1308,8 +1295,6 @@ async fn saved_live_hls_capture_finalizes_without_contacting_the_origin() {
     let outcome = run_live_hls_tracks(
         &client,
         "https://origin.example.test/master.m3u8",
-        &source,
-        None,
         root.path(),
         root.path(),
         0,
@@ -1340,8 +1325,6 @@ async fn saved_live_hls_capture_finalizes_without_contacting_the_origin() {
     let finish_outcome = run_live_hls_tracks(
         &client,
         "https://origin.example.test/master.m3u8",
-        &source,
-        None,
         root.path(),
         root.path(),
         0,
@@ -2019,7 +2002,6 @@ async fn live_hls_sequence_gap_preserves_already_committed_media() {
 
 #[tokio::test]
 async fn live_hls_pause_keeps_the_last_committed_window() {
-    let source = live_hls_test_source("https://origin.example.test/live.m3u8");
     let root = TempRoot::new("live-preserve");
     let video_dir = root.path().join("video");
     let audio_dir = root.path().join("audio");
@@ -2116,8 +2098,6 @@ async fn live_hls_pause_keeps_the_last_committed_window() {
     let finished = run_live_hls_tracks(
         &client,
         "https://origin.example.test/live.m3u8",
-        &source,
-        None,
         root.path(),
         root.path(),
         0,
@@ -2141,7 +2121,6 @@ async fn live_hls_pause_keeps_the_last_committed_window() {
 
 #[tokio::test]
 async fn live_hls_runner_returns_paused_without_finalizing() {
-    let source = live_hls_test_source("https://origin.example.test/live.m3u8");
     let root = TempRoot::new("live-pause-runner");
     let video_dir = root.path().join("video");
     let audio_dir = root.path().join("audio");
@@ -2168,8 +2147,6 @@ async fn live_hls_runner_returns_paused_without_finalizing() {
     let outcome = run_live_hls_tracks(
         &client,
         "https://origin.example.test/live.m3u8",
-        &source,
-        None,
         root.path(),
         root.path(),
         0,

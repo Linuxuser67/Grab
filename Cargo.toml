@@ -25,7 +25,7 @@ m3u8-rs = "6.0.1"
 broadcast-hls = "=0.4.0"
 # SAMPLE-AES preflight reassembles PES/Raw packets with the API also used by iori-ssa.
 mpeg2ts = "=0.3.1"
-# Parse ISO BMFF box trees for structural validation of native fMP4 resources.
+# Parse bounded fragmented-MP4 sample tables for DASH subtitle extraction.
 mp4box = { version = "=0.14.0", default-features = false }
 # Keep this exact pin: the ADTS safety guard is audited against iori-ssa 0.2.1 parser behavior.
 iori-ssa = "=0.2.1"

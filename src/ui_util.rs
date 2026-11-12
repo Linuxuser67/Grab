@@ -2,11 +2,9 @@
 
 use gtk4::glib;
 
-/// Escape user-controlled text before it is interpolated into a markup-parsing
-/// widget (`AdwToast` titles and `AdwAlertDialog` heading/body both take Pango
-/// markup): filenames, paths, URLs and backend error strings routinely contain
-/// `&`, `<` or `>`, which would otherwise abort the whole label with a
-/// Gtk-WARNING and leave it blank.
+/// Escape user-controlled text before it is interpolated into an `AdwToast`.
+/// Toasts parse Pango markup by default; AlertDialog headings and bodies are
+/// plain text unless markup is explicitly enabled.
 pub(crate) fn esc_markup(s: &str) -> String {
     glib::markup_escape_text(s).into()
 }

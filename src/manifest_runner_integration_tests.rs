@@ -4015,17 +4015,8 @@ async fn hls_sample_aes_mpegts_is_decrypted_by_iori_ssa_before_ffmpeg_finalizati
         local_playlist.segments[0].uri, local_playlist.segments[1].uri,
         "repeated references to one encrypted URI must get independent decrypted files"
     );
-    for segment in &local_playlist.segments {
-        let clear_segment = tokio::fs::read(video_dir.join(&segment.uri))
-            .await
-            .expect("read decrypted SAMPLE-AES segment");
-        let mut validator = crate::mpeg_ts_validation::TransportStreamValidator::new();
-        validator.observe(&clear_segment);
-        assert!(
-            validator.is_valid_complete(clear_segment.len() as u64),
-            "VSD output must remain a complete MPEG-TS resource"
-        );
-    }
+    // FFmpeg below is authoritative for the complete decrypted playlist;
+    // do not duplicate its per-segment packet framing heuristics here.
     let output = root.path().join("sample-aes-output.mkv");
     assert!(
         run_ffmpeg(

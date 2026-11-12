@@ -381,7 +381,7 @@ pub struct DownloadManager {
     running: RefCell<HashMap<u64, tokio::task::JoinHandle<()>>>,
     /// Aborted workers whose task has not finished dropping its owned resources yet.
     /// These rows cannot be restarted, but do not consume a global download slot.
-    stopping: RefCell<HashSet<u64>>,
+    stopping: std::sync::Arc<std::sync::Mutex<HashSet<u64>>>,
     /// Rows whose filesystem preparation is in flight; these consume scheduler slots too.
     preparing: RefCell<HashSet<u64>>,
     /// Filesystem-preparation task handles; abort them on manager drop so thread-bound GLib futures cannot leak into another test's context.
@@ -722,7 +722,7 @@ impl DownloadManager {
             store,
             settings,
             running: RefCell::new(HashMap::new()),
-            stopping: RefCell::new(HashSet::new()),
+            stopping: std::sync::Arc::new(std::sync::Mutex::new(HashSet::new())),
             preparing: RefCell::new(HashSet::new()),
             preparation_handles: RefCell::new(HashMap::new()),
             pump_handles: RefCell::new(HashMap::new()),
@@ -2306,13 +2306,18 @@ impl DownloadManager {
             .borrow_mut()
             .retain(|_, pending| !pending.finalizer.is_finished());
         while self.running.borrow().len() + self.preparing.borrow().len() < self.max_concurrent() {
+            let stopping = self
+                .stopping
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .clone();
             let next = self
                 .items()
                 // A discard still tearing down owns its destination: the row stays Queued until the reservation clears.
                 .find(|it| {
                     !it.is_collection_child()
                         && it.status() == DownloadStatus::Queued
-                        && !self.stopping.borrow().contains(&it.id())
+                        && !stopping.contains(&it.id())
                         && !self.dest_reserved(&it.file_path())
                 });
             match next {
@@ -5110,15 +5115,22 @@ impl DownloadManager {
             // row until the aborted task has actually been dropped. The row
             // does not occupy a global slot while it stops, so other queued
             // downloads can proceed.
-            self.stopping.borrow_mut().insert(id);
+            let stopping = std::sync::Arc::clone(&self.stopping);
+            stopping
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .insert(id);
             handle.abort();
-            let manager_weak = MANAGER_WEAK.with(|weak| weak.borrow().clone());
-            glib::spawn_future_local(async move {
+            // Join aborted workers on Tokio rather than creating a GLib-local
+            // continuation. The latter is thread-bound and can be reaped by a
+            // different test thread when the main context is reused.
+            crate::runtime::tokio_rt().spawn(async move {
                 let _ = handle.await;
-                if let Some(manager) = manager_weak.and_then(|weak| weak.upgrade()) {
-                    manager.stopping.borrow_mut().remove(&id);
-                    manager.start_next();
-                }
+                stopping
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .remove(&id);
+                wake_queue();
             });
         }
         true

@@ -72,6 +72,7 @@ impl TransportStreamValidator {
     /// Whether one downloaded segment is a complete aligned MPEG-TS resource.
     /// This remains for SAMPLE-AES integration checks; FFmpeg handles ordinary
     /// HLS track demuxing and recovery.
+    #[cfg(test)]
     #[must_use]
     pub(crate) fn is_valid_complete(&self, expected_size: u64) -> bool {
         self.is_valid_prefix()

@@ -11,6 +11,13 @@ case "$out1" in
   *) out1="$PWD/$out1" ;;
 esac
 cd "$src"
+# Meson passes its translated AppStream output so the embedded About dialog
+# and the installed metainfo use the same localized catalog.
+if [ "$#" -ge 4 ]; then
+  export GRAB_METAINFO_FILE="$4"
+else
+  unset GRAB_METAINFO_FILE
+fi
 export CARGO_HOME="${CARGO_HOME:-$HOME/.cargo}"
 export PATH="$CARGO_HOME/bin:$PATH"
 # NOTE: cargo has no "--profile debug"; the dev profile is the default.

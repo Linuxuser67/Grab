@@ -7,6 +7,7 @@ use sha2::{Digest, Sha256};
 use thiserror::Error;
 use url::Url;
 
+use crate::manifest_types::MAX_DASH_SEGMENTS;
 use super::dash_roles::{self, DASH_ROLE_SCHEME};
 use super::{MAX_MANIFEST_BYTES, ManifestByteRange};
 
@@ -16,7 +17,6 @@ mod low_latency;
 #[path = "manifest_dash_ll_tests.rs"]
 mod low_latency_tests;
 const MAX_REPRESENTATIONS: usize = 1_024;
-use crate::manifest_types::MAX_DASH_SEGMENTS;
 const MIN_DYNAMIC_UPDATE_PERIOD: Duration = Duration::from_millis(500);
 const MAX_DYNAMIC_UPDATE_PERIOD: Duration = Duration::from_secs(300);
 // DASH-IF's current HTTPS identifier, the HTTP identifier emitted by FFmpeg,

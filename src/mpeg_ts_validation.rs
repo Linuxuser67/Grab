@@ -68,7 +68,6 @@ impl TransportStreamValidator {
     pub(crate) fn is_valid_prefix(&self) -> bool {
         self.valid && self.saw_packet && self.packet_len == 0
     }
-
 }
 
 fn is_valid_packet(bytes: &[u8; TS_PACKET_SIZE]) -> bool {

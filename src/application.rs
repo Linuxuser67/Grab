@@ -917,7 +917,7 @@ fn confirm_download(
 ) {
     let dialog = adw::AlertDialog::builder()
         .heading(gettext("Add this download?"))
-        .body(crate::ui_util::esc_markup(uri.as_str()))
+        .body(uri.as_str())
         .build();
     dialog.add_response("cancel", &gettext("Cancel"));
     dialog.add_response("download", &gettext("Download"));

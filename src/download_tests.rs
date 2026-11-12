@@ -302,7 +302,11 @@ fn drain_engine(manager: &DownloadManager, id: u64) {
     // Also wait for finished-row sizings: `set_finished_detail` spawns one
     // per completion, and it outlives the engine that triggered it.
     while (manager.running.borrow().contains_key(&id)
-        || manager.stopping.borrow().contains(&id)
+        || manager
+            .stopping
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .contains(&id)
         || manager.preparing.borrow().contains(&id)
         || manager.preparation_handles.borrow().contains_key(&id)
         || manager.pump_handles.borrow().contains_key(&id)
@@ -3739,7 +3743,11 @@ fn immediate_resume_waits_for_aborted_worker_to_exit() {
     manager.resume(64);
 
     assert!(
-        manager.stopping.borrow().contains(&64),
+        manager
+            .stopping
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .contains(&64),
         "the previous worker must remain reserved while its aborted task is being dropped"
     );
     assert!(

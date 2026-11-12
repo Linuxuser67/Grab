@@ -1,25 +1,24 @@
-install_data('io.github.linuxuser67.Grab.desktop.in',
-  rename: 'io.github.linuxuser67.Grab.desktop',
+desktop_file = i18n.merge_file(
+  input: 'io.github.linuxuser67.Grab.desktop.in',
+  output: 'io.github.linuxuser67.Grab.desktop',
+  type: 'desktop',
+  po_dir: '../po',
+  install: true,
   install_dir: get_option('datadir') / 'applications',
 )
 
 desktop_utils = find_program('desktop-file-validate', required: false)
 if desktop_utils.found()
   test('Validate desktop file', desktop_utils,
-    args: [meson.current_source_dir() / 'io.github.linuxuser67.Grab.desktop.in'],
+    args: [desktop_file],
   )
 endif
-
-install_data('io.github.linuxuser67.Grab.metainfo.xml.in',
-  rename: 'io.github.linuxuser67.Grab.metainfo.xml',
-  install_dir: get_option('datadir') / 'metainfo',
-)
 
 appstreamcli = find_program('appstreamcli', required: false)
 if appstreamcli.found()
   test('Validate appstream file', appstreamcli,
     args: ['validate', '--no-net', '--explain',
-      meson.current_source_dir() / 'io.github.linuxuser67.Grab.metainfo.xml.in'],
+      appstream_metainfo],
   )
 endif
 

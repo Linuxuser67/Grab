@@ -10,6 +10,8 @@ src/install_help.rs
 src/install_progress.rs
 src/inline_add.rs
 src/inline_gallery.rs
+src/manifest_intake.rs
+src/manifest_plan.rs
 src/preferences.rs
 src/torrent.rs
 src/video.rs
@@ -20,5 +22,8 @@ src/video_runner.rs
 src/video_spawn.rs
 src/video_staging.rs
 src/video_tools.rs
+src/video_argv.rs
 src/window.rs
 src/window_rows.rs
+data/io.github.linuxuser67.Grab.desktop.in
+data/io.github.linuxuser67.Grab.metainfo.xml.in

@@ -98,7 +98,7 @@ fn ensure_gap_css() {
     if ONCE.set(()).is_ok() {
         let provider = gtk4::CssProvider::new();
         provider.load_from_bytes(&glib::Bytes::from_static(
-            b"gridview > child { margin: 3px; }",
+            b".grab-gallery-grid > child { margin: 3px; }",
         ));
         gtk4::style_context_add_provider_for_display(
             &gdk::Display::default().expect("grid gap CSS: no display"),
@@ -261,6 +261,7 @@ impl GalleryGrid {
         }
 
         let view = gtk4::GridView::builder()
+            .css_classes(["grab-gallery-grid"])
             .model(&selection)
             .factory(&factory)
             // Start at one column for the empty model. `append` raises this

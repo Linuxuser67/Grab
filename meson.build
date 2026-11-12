@@ -14,8 +14,20 @@ i18n = import('i18n')
 
 cargo_sh = files('build-aux/cargo.sh')
 
-subdir('data')
 subdir('po')
+
+# Install and embed the same translated AppStream document. The About dialog
+# reads this metadata from the GResource compiled by build.rs.
+appstream_metainfo = i18n.merge_file(
+  input: 'data/io.github.linuxuser67.Grab.metainfo.xml.in',
+  output: 'io.github.linuxuser67.Grab.metainfo.xml',
+  type: 'xml',
+  po_dir: 'po',
+  install: true,
+  install_dir: get_option('datadir') / 'metainfo',
+)
+
+subdir('data')
 subdir('src')
 
 gnome.post_install(

@@ -527,13 +527,13 @@ pub fn show(
                             error = %error,
                             "could not regenerate browser extension pairing code"
                         );
-                        let body = crate::ui_util::esc_markup(&error);
+                        let body = error;
                         let alert = adw::AlertDialog::new(
                             Some(&gettext("Could not generate a new pairing code")),
                             Some(&body),
                         );
-                        alert.add_response("ok", &gettext("OK"));
-                        alert.set_close_response("ok");
+                        alert.add_response("close", &gettext("Close"));
+                        alert.set_close_response("close");
                         let root = button.root().and_downcast::<gtk4::Window>();
                         alert.present(root.as_ref());
                     }

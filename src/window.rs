@@ -258,20 +258,27 @@ pub fn build_window(
         .placeholder_text(gettext("Search downloads"))
         .hexpand(true)
         .build();
-    // In a PreferencesGroup like the torrent/save cards: same 12px internal
-    // padding, same card styling, automatic alignment.
+    // Keep the search controls in a simple Adwaita card, not a settings group.
     let search_close = gtk4::Button::builder()
         .icon_name("window-close-symbolic")
         .css_classes(["flat", "circular"])
         .valign(gtk4::Align::Center)
         .tooltip_text(gettext("Close search"))
         .build();
+    search_close.update_property(&[gtk4::accessible::Property::Label(&gettext("Close search"))]);
     let search_row = gtk4::Box::new(gtk4::Orientation::Horizontal, 12);
     search_row.append(&search);
     search_row.append(&search_close);
-    let search_group = adw::PreferencesGroup::new();
-    search_group.add(&search_row);
-    let search_bar = gtk4::SearchBar::builder().child(&search_group).build();
+    let search_card = gtk4::Box::new(gtk4::Orientation::Vertical, 0);
+    search_card.add_css_class("card");
+    search_row.set_margin_top(6);
+    search_row.set_margin_bottom(6);
+    search_row.set_margin_start(12);
+    search_row.set_margin_end(12);
+    search_card.append(&search_row);
+    let search_bar = gtk4::SearchBar::builder().child(&search_card).build();
+    search_bar.connect_entry(&search);
+    search_bar.set_key_capture_widget(Some(&window));
     // Same 600px clamp as the New Download card.
     let search_clamp = adw::Clamp::builder()
         .maximum_size(600)
@@ -293,7 +300,7 @@ pub fn build_window(
     let section2 = gio::Menu::new();
     section2.append(Some(&gettext("Preferences")), Some("app.preferences"));
     section2.append(Some(&gettext("Keyboard Shortcuts")), Some("app.shortcuts"));
-    section2.append(Some(&gettext("About")), Some("app.about"));
+    section2.append(Some(&gettext("About Grab")), Some("app.about"));
     menu.append_section(None, &section2);
     let menu_btn = gtk4::MenuButton::builder()
         .icon_name("open-menu-symbolic")
@@ -303,9 +310,6 @@ pub fn build_window(
         .build();
     menu_btn.set_widget_name("main-menu-button");
     menu_btn.update_property(&[gtk4::accessible::Property::Label(&gettext("Main Menu"))]);
-    // Keep the primary menu on the leading edge, as in the original header layout.
-    header.pack_start(&menu_btn);
-
     let search_toggle = gtk4::ToggleButton::builder()
         .icon_name("system-search-symbolic")
         .tooltip_text(gettext("Search (Ctrl+F)"))
@@ -342,8 +346,9 @@ pub fn build_window(
             }
         });
     }
-    // Keep the primary New Download action on the trailing edge.
+    // Keep the primary menu at the trailing edge, with New Download beside it.
     header.pack_end(&add_btn);
+    header.pack_end(&menu_btn);
     header.pack_start(&search_toggle);
 
     let content_stack = gtk4::Stack::new();
@@ -547,19 +552,7 @@ pub fn build_window(
             }
         });
     }
-    {
-        let toggle = search_toggle.clone();
-        let esc = gtk4::EventControllerKey::new();
-        esc.connect_key_pressed(move |_, keyval, _, _| {
-            if keyval == gtk4::gdk::Key::Escape {
-                toggle.set_active(false);
-                glib::Propagation::Stop
-            } else {
-                glib::Propagation::Proceed
-            }
-        });
-        search.add_controller(esc);
-    }
+    // GtkSearchBar handles Escape and keyboard-triggered search itself.
     // Custom close button exits search mode via the toggle.
     {
         let toggle = search_toggle.clone();

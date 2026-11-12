@@ -50,8 +50,7 @@ pub fn show(parent: &impl glib::object::IsA<gtk4::Widget>, on_check: impl Fn() +
     );
 
     let loading = gtk4::Box::new(gtk4::Orientation::Vertical, 12);
-    let spinner = gtk4::Spinner::new();
-    spinner.start();
+    let spinner = adw::Spinner::new();
     spinner.set_halign(gtk4::Align::Center);
     loading.append(&spinner);
     dialog.set_extra_child(Some(&loading));

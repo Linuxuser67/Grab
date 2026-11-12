@@ -45,10 +45,6 @@ pub(crate) enum DashError {
     Parse,
     #[error("DASH presentation uses an unsupported period layout")]
     UnsupportedPresentation,
-    #[error(
-        "DASH presentation contains SCTE-35 ad signaling that native download cannot safely remove"
-    )]
-    AdSignaling,
     #[error("DASH addressing or resource URL is unsupported")]
     UnsupportedAddressing,
     #[error("DASH segment description is invalid")]
@@ -379,32 +375,6 @@ pub(crate) fn parse_dash_manifest(
     parse_dash_manifest_at(manifest_url, body, SystemTime::now())
 }
 
-fn period_has_scte35_ad_signaling(period: &dash_mpd_core::Period) -> bool {
-    fn is_scte35_scheme(scheme: &str) -> bool {
-        scheme
-            .trim()
-            .to_ascii_lowercase()
-            .starts_with("urn:scte:scte35:")
-    }
-
-    period
-        .event_streams
-        .iter()
-        .any(|stream| is_scte35_scheme(&stream.schemeIdUri))
-        || period.adaptations.iter().any(|adaptation| {
-            adaptation
-                .InbandEventStream
-                .iter()
-                .any(|stream| is_scte35_scheme(&stream.schemeIdUri))
-                || adaptation.representations.iter().any(|representation| {
-                    representation
-                        .InbandEventStream
-                        .iter()
-                        .any(|stream| is_scte35_scheme(&stream.schemeIdUri))
-                })
-        })
-}
-
 /// Parse static period-continuous or bounded single-period dynamic DASH into selectable representations.
 ///
 /// Dynamic support is limited to HTTPS SegmentTemplate presentations with a
@@ -442,9 +412,6 @@ pub(crate) fn parse_dash_manifest_at(
     // does not restrict native download planning. ContentProtection remains
     // explicitly rejected below because it signals protected media.
     let mpd = dash_mpd_core::parse(body).map_err(|_| DashError::Parse)?;
-    if mpd.periods.iter().any(period_has_scte35_ad_signaling) {
-        return Err(DashError::AdSignaling);
-    }
     let mut presentation = match mpd.mpdtype.as_deref() {
         None | Some("static") => {
             if mpd.minimumUpdatePeriod.is_some()
@@ -5846,15 +5813,14 @@ mod tests {
     }
 
     #[test]
-    fn rejects_scte35_ad_signaling_in_period_and_inband_event_streams() {
+    fn accepts_scte35_event_metadata_without_filtering_media() {
         let period_event = r#"<MPD xmlns="urn:mpeg:dash:schema:mpd:2011" type="static" mediaPresentationDuration="PT2S"><Period duration="PT2S"><EventStream schemeIdUri="urn:scte:scte35:2013:xml"><Event id="1" presentationTime="0" duration="2"/></EventStream><AdaptationSet contentType="video" mimeType="video/mp4"><SegmentTemplate media="v-$Number$.m4s" duration="2"/><Representation id="v1" bandwidth="500000"/></AdaptationSet></Period></MPD>"#;
         let inband_event = r#"<MPD xmlns="urn:mpeg:dash:schema:mpd:2011" type="static" mediaPresentationDuration="PT2S"><Period duration="PT2S"><AdaptationSet contentType="video" mimeType="video/mp4"><InbandEventStream schemeIdUri="urn:scte:scte35:2013:bin"/><SegmentTemplate media="v-$Number$.m4s" duration="2"/><Representation id="v1" bandwidth="500000"/></AdaptationSet></Period></MPD>"#;
 
         for body in [period_event, inband_event] {
-            assert_eq!(
-                parse_dash_manifest(BASE_URL, body).err(),
-                Some(DashError::AdSignaling),
-                "SCTE-35 ad signaling must fail closed: {body}"
+            assert!(
+                parse_dash_manifest(BASE_URL, body).is_ok(),
+                "SCTE-35 metadata must not cause media segments to be filtered: {body}"
             );
         }
     }

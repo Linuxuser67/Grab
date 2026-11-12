@@ -3,9 +3,6 @@
 use std::collections::{HashMap, HashSet};
 use std::time::{Duration, SystemTime};
 
-use quick_xml::events::{BytesStart, Event};
-use quick_xml::name::ResolveResult;
-use quick_xml::reader::NsReader;
 use sha2::{Digest, Sha256};
 use thiserror::Error;
 use url::Url;
@@ -20,9 +17,6 @@ mod low_latency;
 mod low_latency_tests;
 const MAX_REPRESENTATIONS: usize = 1_024;
 const MAX_SEGMENTS: usize = 100_000;
-const MAX_XLINK_SCAN_DEPTH: usize = 32;
-const MAX_XLINK_SCAN_ELEMENTS: usize = 20_000;
-const XLINK_NAMESPACE: &str = "http://www.w3.org/1999/xlink";
 const MIN_DYNAMIC_UPDATE_PERIOD: Duration = Duration::from_millis(500);
 const MAX_DYNAMIC_UPDATE_PERIOD: Duration = Duration::from_secs(300);
 // DASH-IF's current HTTPS identifier, the HTTP identifier emitted by FFmpeg,
@@ -32,73 +26,6 @@ const DASH_TRICK_MODE_SCHEMES: [&str; 3] = [
     "http://dashif.org/guidelines/trickmode",
     "urn:mpeg:dash:trickmode:2016",
 ];
-
-/// Detect actual XLink attributes without rejecting a harmless namespace declaration.
-fn has_xlink_attributes(body: &str) -> Result<bool, DashError> {
-    let mut reader = NsReader::from_reader(body.as_bytes());
-    let mut buffer = Vec::new();
-    let mut depth = 0_usize;
-    let mut elements = 0_usize;
-
-    loop {
-        let (_, event) = reader
-            .read_resolved_event_into(&mut buffer)
-            .map_err(|_| DashError::Parse)?;
-        match event {
-            Event::Start(start) => {
-                elements = elements
-                    .checked_add(1)
-                    .filter(|count| *count <= MAX_XLINK_SCAN_ELEMENTS)
-                    .ok_or(DashError::LimitExceeded)?;
-                depth = depth
-                    .checked_add(1)
-                    .filter(|depth| *depth <= MAX_XLINK_SCAN_DEPTH)
-                    .ok_or(DashError::LimitExceeded)?;
-                if element_has_xlink_attribute(&reader, &start)? {
-                    return Ok(true);
-                }
-            }
-            Event::Empty(start) => {
-                elements = elements
-                    .checked_add(1)
-                    .filter(|count| *count <= MAX_XLINK_SCAN_ELEMENTS)
-                    .ok_or(DashError::LimitExceeded)?;
-                if element_has_xlink_attribute(&reader, &start)? {
-                    return Ok(true);
-                }
-            }
-            Event::End(_) => {
-                depth = depth.checked_sub(1).ok_or(DashError::Parse)?;
-            }
-            Event::DocType(_) => return Err(DashError::Parse),
-            Event::Eof => break,
-            _ => {}
-        }
-        buffer.clear();
-    }
-
-    if depth != 0 {
-        return Err(DashError::Parse);
-    }
-    Ok(false)
-}
-
-fn element_has_xlink_attribute<R: std::io::BufRead>(
-    reader: &NsReader<R>,
-    element: &BytesStart<'_>,
-) -> Result<bool, DashError> {
-    for attribute in element.attributes() {
-        let attribute = attribute.map_err(|_| DashError::Parse)?;
-        let (namespace, _) = reader.resolver().resolve_attribute(attribute.key);
-        if matches!(
-            namespace,
-            ResolveResult::Bound(namespace) if namespace.into_inner() == XLINK_NAMESPACE
-        ) {
-            return Ok(true);
-        }
-    }
-    Ok(false)
-}
 
 /// Errors returned when a DASH MPD is outside Grab's native v1 subset.
 #[derive(Debug, Error, PartialEq, Eq)]
@@ -427,11 +354,6 @@ pub(crate) fn parse_dash_manifest_at(
     // downloads the encoded resources and does not render them, so this descriptor
     // does not restrict native download planning. ContentProtection remains
     // explicitly rejected below because it signals protected media.
-    // FFmpeg's DASH demuxer does not resolve XLink. Reject actual XLink
-    // attributes, but allow packagers to declare the namespace without using it.
-    if has_xlink_attributes(body)? {
-        return Err(DashError::UnsupportedPresentation);
-    }
     let mpd = dash_mpd_core::parse(body).map_err(|_| DashError::Parse)?;
     let mut presentation = match mpd.mpdtype.as_deref() {
         None | Some("static") => {
@@ -492,6 +414,11 @@ pub(crate) fn parse_dash_manifest_at(
     // representation metadata and SegmentList compatibility flags.
     let role_metadata = dash_roles::representation_metadata(body.as_bytes(), MAX_REPRESENTATIONS)
         .ok_or(DashError::Parse)?;
+    // The bounded metadata pass recognizes actual XLink attributes by
+    // namespace; a declaration without any XLink attributes is harmless.
+    if role_metadata.has_xlink_attributes {
+        return Err(DashError::UnsupportedPresentation);
+    }
     if role_metadata.has_unsupported_segment_list_timing_attributes {
         return Err(DashError::UnsupportedAddressing);
     }

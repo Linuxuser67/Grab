@@ -24,9 +24,6 @@ pub(crate) mod dash;
 #[path = "manifest_hls_ll.rs"]
 pub(crate) mod hls_ll;
 
-#[path = "manifest_hls_ads.rs"]
-mod hls_ads;
-
 #[path = "manifest_hls_gaps.rs"]
 mod hls_gaps;
 
@@ -65,8 +62,6 @@ pub(crate) enum ManifestError {
     UnsupportedSessionKeyMethod,
     #[error("unsupported HLS session key format")]
     UnsupportedSessionKeyFormat,
-    #[error("unsupported HLS ad insertion marker: {0}")]
-    UnsupportedAdInsertion(String),
     #[error("unsupported HLS resource url")]
     UnsupportedResourceUrl,
     #[error("HLS byte range has no usable offset")]
@@ -1769,7 +1764,7 @@ pub(crate) fn parse_hls_master_playlist(
 /// playlist points FFmpeg at the staged key file; other encryption methods are
 /// deliberately rejected. Ordinary live playlists and the supported LL-HLS
 /// part/blocking-reload path are accepted for incremental capture. Delta updates
-/// are reconstructed against committed state; unsupported encryption, ad/date
+/// are reconstructed against committed state; unsupported encryption, date-range
 /// markers, or incomplete continuity remain on yt-dlp fallback.
 ///
 /// # Errors
@@ -1931,7 +1926,6 @@ fn build_hls_plan(base_url: Url, mut playlist: MediaPlaylist) -> Result<HlsPlan,
     let mut pending_method_none_reset = false;
     let mut pending_discontinuity = false;
 
-    let ad_removal = hls_ads::plan_ad_removal(&playlist, is_live)?;
     let gap_removal = hls_gaps::plan_gap_removal(&playlist, is_live)?;
 
     for (index, segment) in playlist.segments.iter_mut().enumerate() {
@@ -1940,7 +1934,7 @@ fn build_hls_plan(base_url: Url, mut playlist: MediaPlaylist) -> Result<HlsPlan,
             .media_sequence
             .checked_add(sequence_index)
             .ok_or(ManifestError::DurationOverflow)?;
-        // Use source positions for durable staging names. Omitted segments must not
+        // Use source positions for durable staging names. Omitted gap segments must not
         // renumber the surviving resources in an EVENT/sequence-based playlist.
         let stable_live_identity = is_live
             || (playlist.playlist_type != Some(MediaPlaylistType::Vod)
@@ -1950,17 +1944,10 @@ fn build_hls_plan(base_url: Url, mut playlist: MediaPlaylist) -> Result<HlsPlan,
         } else {
             index
         };
-        let disposition = ad_removal.segments[index];
-        let skip_ad_segment = disposition == hls_ads::AdSegmentDisposition::Remove;
         let skip_gap_segment = gap_removal.segments[index];
-        let skip_segment = skip_ad_segment || skip_gap_segment;
+        let skip_segment = skip_gap_segment;
         if segment.unknown_tags.iter().any(|tag| tag.tag == "X-KEY") {
             return Err(ManifestError::UnsupportedEncryption);
-        }
-        if disposition != hls_ads::AdSegmentDisposition::Keep {
-            segment
-                .unknown_tags
-                .retain(|tag| !hls_ads::is_ad_marker_tag(tag));
         }
         if skip_gap_segment {
             segment.unknown_tags.retain(|tag| tag.tag != "X-GAP");
@@ -1975,12 +1962,18 @@ fn build_hls_plan(base_url: Url, mut playlist: MediaPlaylist) -> Result<HlsPlan,
                 "X-PART-INF",
                 "X-PRELOAD-HINT",
                 "X-RENDITION-REPORT",
+                // Preserve ad markers as inert metadata; no ad intervals are removed.
+                "X-CUE-OUT",
+                "X-CUE-OUT-CONT",
+                "X-CUE-IN",
+                "OATCLS-SCTE35",
+                "X-ASSET",
             ],
         )?;
         segment.unknown_tags.retain(|tag| !is_benign_hls_tag(tag));
 
         // Preserve the first METHOD=NONE reset on the next kept program
-        // segment if its original boundary was inside an omitted interval.
+        // segment if its original boundary was inside an omitted gap.
         if let Some(key) = segment.key.take() {
             if key.method == KeyMethod::None {
                 if !method_none_active {
@@ -2037,7 +2030,7 @@ fn build_hls_plan(base_url: Url, mut playlist: MediaPlaylist) -> Result<HlsPlan,
             // A discontinuity attached to an omitted segment still separates
             // the next retained segment from the previous retained segment.
             pending_discontinuity |= segment.discontinuity;
-            // Omitted resources are not fetched, so do not apply the native
+            // Gap resources are not fetched, so do not apply the native
             // same-origin guard to their URLs. Preserve byte-range continuation
             // only when the source URL and range can be parsed safely.
             previous_segment_range = match segment.byte_range.as_ref() {
@@ -2201,13 +2194,8 @@ fn build_hls_plan(base_url: Url, mut playlist: MediaPlaylist) -> Result<HlsPlan,
     }
 
     let mut retained_segments = Vec::with_capacity(playlist.segments.len());
-    for (index, (segment, disposition)) in playlist
-        .segments
-        .into_iter()
-        .zip(ad_removal.segments)
-        .enumerate()
-    {
-        if disposition != hls_ads::AdSegmentDisposition::Remove && !gap_removal.segments[index] {
+    for (index, segment) in playlist.segments.into_iter().enumerate() {
+        if !gap_removal.segments[index] {
             retained_segments.push(segment);
         }
     }

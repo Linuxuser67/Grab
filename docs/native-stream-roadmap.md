@@ -39,19 +39,12 @@ destination-part fast path supplies raw concatenated rendition tracks. Program
 date-time metadata remains in the local media playlists; it is not treated as
 an instruction to rewrite media timestamps.
 
-For complete static VOD/EVENT playlists, paired `EXT-X-CUE-OUT` /
-`EXT-X-CUE-IN` boundaries omit every segment in the marked ad break from
-native resource planning and from the local FFmpeg playlist. Valid
-`EXT-X-CUE-OUT-CONT` markers are checked against elapsed media duration and
-must retain one consistent declared break duration. The first segment after
-`CUE-IN` remains program content. Ad-only keys and initialization resources
-are not fetched, surviving resource names retain their source segment indices,
-and implicit byte-range offsets advance across removed source segments.
-`METHOD=NONE` resets are preserved when their original boundary is inside an
-omitted ad. Live playlists with ad markers, ad intervals containing a
-discontinuity, ambiguous or incomplete cues,
-and all `EXT-X-DATERANGE` playlists remain on yt-dlp fallback until
-date-time ranges can be mapped unambiguously to individual media segments.
+HLS ad-insertion metadata is not used to filter content. `EXT-X-CUE-OUT`,
+`EXT-X-CUE-OUT-CONT`, `EXT-X-CUE-IN`, OATCLS-SCTE35 and asset markers are
+inert while planning native media resources: every listed media segment remains
+in the fetch plan and the local FFmpeg playlist. The regenerated local playlist
+does not promise to preserve the original opaque cue metadata. DASH SCTE-35
+event metadata is likewise not used to reject or remove media segments.
 
 This is a deliberately bounded profile, not a claim of support for every HLS
 extension. Unknown parser tags and unsupported resource-affecting extensions

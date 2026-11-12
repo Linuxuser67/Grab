@@ -2010,18 +2010,10 @@ async fn lookup_with_client_policy(
             })?;
             let plan =
                 crate::manifest::dash::parse_dash_manifest_at(final_url.as_str(), body, server_now)
-                    .map_err(|error| match error {
-                        crate::manifest::dash::DashError::AdSignaling => {
-                            // Do not route ad-marked DASH through yt-dlp: until
-                            // cue-aware removal exists, failing closed is safer
-                            // than downloading the signaled insertion interval.
-                            ManifestIntakeError::Failed(
-                                "DASH SCTE-35 ad signaling was detected; this presentation was not downloaded because ad intervals cannot yet be removed safely".to_string(),
-                            )
-                        }
-                        error => ManifestIntakeError::Unsupported(format!(
+                    .map_err(|error| {
+                        ManifestIntakeError::Unsupported(format!(
                             "The DASH presentation is not supported: {error}"
-                        )),
+                        ))
                     })?;
             NativeManifest::Dash(plan)
         }

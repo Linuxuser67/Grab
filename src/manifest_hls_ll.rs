@@ -820,15 +820,6 @@ fn validate_playlist_tags(playlist: &LlMediaPlaylist) -> Result<(), ManifestErro
                     .flat_map(|segment| segment.pre_tags.iter()),
             ),
     ) {
-        let upper = tag.to_ascii_uppercase();
-        if ["DATERANGE", "CUE-", "SCTE35", "X-ASSET", "INTERSTITIAL"]
-            .iter()
-            .any(|marker| upper.contains(marker))
-        {
-            return Err(ManifestError::UnsupportedAdInsertion(
-                tag.split(':').next().unwrap_or(tag).to_string(),
-            ));
-        }
         if tag.starts_with("#EXT-X-KEY:") {
             if is_hls_method_none_key_tag(tag) {
                 continue;
@@ -853,7 +844,21 @@ fn validate_playlist_tags(playlist: &LlMediaPlaylist) -> Result<(), ManifestErro
             }
             continue;
         }
-        if tag.starts_with("#EXT-X-ALLOW-CACHE:") || tag.starts_with("#EXT-X-BITRATE:") {
+        // Ad-insertion markers are inert metadata in native planning. Keep
+        // DATERANGE/interstitial tags on fallback because their timing semantics
+        // are not mapped to exact media units.
+        if [
+            "#EXT-X-CUE-OUT",
+            "#EXT-X-CUE-OUT-CONT",
+            "#EXT-X-CUE-IN",
+            "#EXT-OATCLS-SCTE35",
+            "#EXT-X-ASSET:",
+        ]
+        .iter()
+        .any(|marker| tag.starts_with(marker))
+            || tag.starts_with("#EXT-X-ALLOW-CACHE:")
+            || tag.starts_with("#EXT-X-BITRATE:")
+        {
             continue;
         }
         return Err(ManifestError::UnsupportedPlaylistFeature(
@@ -1692,7 +1697,7 @@ segment.ts
     }
 
     #[test]
-    fn rejects_delta_gap_ad_and_encrypted_part_playlists() {
+    fn rejects_delta_gap_and_encrypted_part_playlists() {
         let prefix = "#EXTM3U\n#EXT-X-TARGETDURATION:2\n#EXT-X-MEDIA-SEQUENCE:7\n#EXT-X-MAP:URI=\"init.mp4\"\n#EXT-X-SERVER-CONTROL:CAN-BLOCK-RELOAD=NO,PART-HOLD-BACK=1.5\n#EXT-X-PART-INF:PART-TARGET=0.5\n";
         let delta = format!(
             "{prefix}#EXT-X-SKIP:SKIPPED-SEGMENTS=2\n#EXT-X-PART:DURATION=0.5,URI=\"7.0.m4s\"\n"
@@ -1706,13 +1711,11 @@ segment.ts
             plan_hls_media_playlist(BASE, gap.as_bytes()),
             Err(ManifestError::UnsupportedPlaylistFeature(_))
         ));
-        let ad = format!(
-            "{prefix}#EXT-X-DATERANGE:ID=\"ad\",CLASS=\"com.apple.hls.interstitial\",START-DATE=\"2026-01-01T00:00:00Z\"\n#EXT-X-PART:DURATION=0.5,URI=\"7.0.m4s\"\n"
+        let ad = format!("{prefix}#EXT-X-CUE-OUT:8\n#EXT-X-PART:DURATION=0.5,URI=\"7.0.m4s\"\n");
+        assert!(
+            plan_hls_media_playlist(BASE, ad.as_bytes()).is_ok(),
+            "ad-insertion cue markers must be inert in LL-HLS media planning"
         );
-        assert!(matches!(
-            plan_hls_media_playlist(BASE, ad.as_bytes()),
-            Err(ManifestError::UnsupportedAdInsertion(_))
-        ));
         let encrypted = format!(
             "{prefix}#EXT-X-KEY:METHOD=AES-128,URI=\"key.bin\"\n#EXT-X-PART:DURATION=0.5,URI=\"7.0.m4s\"\n"
         );

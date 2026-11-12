@@ -4076,11 +4076,11 @@ async fn hls_sample_aes_mpegts_is_decrypted_by_iori_ssa_before_ffmpeg_finalizati
 }
 
 #[tokio::test]
-async fn hls_ad_break_segments_are_not_fetched_or_written_to_the_local_playlist() {
-    let root = TempRoot::new("hls-ad-removal");
+async fn hls_cue_markers_do_not_remove_media_segments() {
+    let root = TempRoot::new("hls-cue-markers");
     let fixture_dir = root.path().join("fixture");
-    std::fs::create_dir_all(&fixture_dir).expect("create HLS ad-removal fixture directory");
-    for filename in ["program-before.ts", "program-after.ts"] {
+    std::fs::create_dir_all(&fixture_dir).expect("create HLS cue-marker fixture directory");
+    for filename in ["program-before.ts", "ad.ts", "program-after.ts"] {
         std::fs::write(
             fixture_dir.join(filename),
             format!("fixture bytes for {filename}"),
@@ -4094,7 +4094,7 @@ async fn hls_ad_break_segments_are_not_fetched_or_written_to_the_local_playlist(
 program-before.ts
 #EXT-X-CUE-OUT:4
 #EXTINF:4,
-https://ads.fixture.invalid/ad.ts
+ad.ts
 #EXT-X-CUE-IN
 #EXTINF:4,
 program-after.ts
@@ -4102,7 +4102,7 @@ program-after.ts
 "#;
     let media_manifest_url = "https://cdn.fixture.invalid/ad-break.m3u8";
     let mut plan = crate::manifest::plan_hls_media_playlist(media_manifest_url, manifest)
-        .expect("plan an explicitly marked static ad break");
+        .expect("plan a static playlist carrying ad cue markers");
 
     let segment_urls = plan
         .resources
@@ -4114,14 +4114,9 @@ program-after.ts
         segment_urls,
         vec![
             "https://cdn.fixture.invalid/program-before.ts".to_string(),
+            "https://cdn.fixture.invalid/ad.ts".to_string(),
             "https://cdn.fixture.invalid/program-after.ts".to_string(),
         ]
-    );
-    assert!(
-        plan.resources
-            .iter()
-            .all(|resource| resource.url.host_str() != Some("ads.fixture.invalid")),
-        "ad-origin resources must not enter the native fetch plan"
     );
 
     let urls = plan
@@ -4138,7 +4133,7 @@ program-after.ts
     let video_dir = root.path().join("staging/video");
     tokio::fs::create_dir_all(&video_dir)
         .await
-        .expect("create HLS ad-removal staging directory");
+        .expect("create HLS cue-marker staging directory");
     let client = fixture_client();
     let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
     let downloaded = Arc::new(AtomicU64::new(0));
@@ -4154,27 +4149,27 @@ program-after.ts
             &mut abort,
         )
         .await
-        .expect("fetch only the retained program resources"),
-        "HLS ad-removal fixture fetch unexpectedly aborted"
+        .expect("fetch all media segments, including the marked interval"),
+        "HLS cue-marker fixture fetch unexpectedly aborted"
     );
     wait_for_fixture_server(server).await;
     assert!(downloaded.load(Ordering::Relaxed) > 0);
 
     write_playlist(&video_dir, &plan)
         .await
-        .expect("write the ad-free local HLS playlist");
+        .expect("write the complete local HLS playlist");
     let local_bytes = tokio::fs::read(video_dir.join("local.m3u8"))
         .await
-        .expect("read the ad-free local HLS playlist");
+        .expect("read the complete local HLS playlist");
     let local = m3u8_rs::parse_media_playlist_res(&local_bytes)
-        .expect("parse the ad-free local HLS playlist");
-    assert_eq!(local.segments.len(), 2);
-    assert!(
-        local
-            .segments
-            .iter()
-            .all(|segment| !segment.uri.contains("ad.ts"))
-    );
+        .expect("parse the complete local HLS playlist");
+    assert_eq!(local.segments.len(), 3);
+    let planned_segments = plan
+        .resources
+        .iter()
+        .filter(|resource| resource.kind == crate::manifest::HlsResourceKind::Segment)
+        .collect::<Vec<_>>();
+    assert_eq!(local.segments[1].uri, planned_segments[1].filename);
     for resource in &plan.resources {
         assert!(
             tokio::fs::metadata(video_dir.join(&resource.filename))

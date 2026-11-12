@@ -171,8 +171,8 @@ fn subtitle_mux_unsupported(log: &str) -> bool {
 fn ffmpeg_rejected_input(log: &str) -> bool {
     let log = log.to_ascii_lowercase();
     ["invalid data found when processing input"]
-    .iter()
-    .any(|needle| log.contains(needle))
+        .iter()
+        .any(|needle| log.contains(needle))
 }
 
 /// Classify a failed FFmpeg pass: unsupported source media falls back to yt-dlp,

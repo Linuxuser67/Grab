@@ -26,9 +26,7 @@ fn main() {
     // from_appdata, which needs a GResource path. The bundle is embedded
     // into the binary with include_bytes!, so a failure here must fail the
     // build loudly instead of shipping an About dialog that aborts on open.
-    let manifest_dir = std::path::PathBuf::from(
-        std::env::var("CARGO_MANIFEST_DIR").unwrap(),
-    );
+    let manifest_dir = std::path::PathBuf::from(std::env::var("CARGO_MANIFEST_DIR").unwrap());
     let metainfo_file = std::env::var_os("GRAB_METAINFO_FILE")
         .map(std::path::PathBuf::from)
         .unwrap_or_else(|| manifest_dir.join("data/io.github.linuxuser67.Grab.metainfo.xml.in"));

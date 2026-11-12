@@ -89,11 +89,16 @@ pub(super) fn representation_metadata(
 
     loop {
         let (namespace, event) = reader.read_resolved_event_into(&mut buffer).ok()?;
+        let in_mpd_namespace = matches!(
+            &namespace,
+            ResolveResult::Bound(namespace) if namespace.into_inner() == DASH_MPD_NAMESPACE
+        );
+        drop(namespace);
         match event {
             Event::Start(start) => push_element(
                 &reader,
                 &start,
-                &namespace,
+                in_mpd_namespace,
                 &mut stack,
                 &mut periods,
                 max_representations,
@@ -103,7 +108,7 @@ pub(super) fn representation_metadata(
                 push_element(
                     &reader,
                     &start,
-                    &namespace,
+                    in_mpd_namespace,
                     &mut stack,
                     &mut periods,
                     max_representations,
@@ -141,7 +146,7 @@ pub(super) fn representation_metadata(
 fn push_element<R: BufRead>(
     reader: &NsReader<R>,
     start: &BytesStart<'_>,
-    namespace: &ResolveResult<'_>,
+    in_mpd_namespace: bool,
     stack: &mut Vec<Element>,
     periods: &mut Vec<PeriodRepresentationMetadata>,
     max_representations: usize,
@@ -163,11 +168,6 @@ fn push_element<R: BufRead>(
             state.has_xlink_attributes = true;
         }
     }
-    let in_mpd_namespace = matches!(
-        namespace,
-        ResolveResult::Bound(namespace) if namespace.into_inner() == DASH_MPD_NAMESPACE
-    );
-
     // Collect compatibility flags while the representation metadata pass is
     // already visiting each XML node. These checks deliberately cover every
     // DASH SegmentList, not only the locations modeled for inheritance below.

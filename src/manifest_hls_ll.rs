@@ -1526,7 +1526,6 @@ mod tests {
         assert_eq!(plan.resources.len(), 1);
         assert_eq!(plan.resources[0].kind, HlsResourceKind::Segment);
         assert!(plan.local_playlist.segments[0].map.is_none());
-
     }
 
     #[test]

@@ -3792,7 +3792,10 @@ fn immediate_resume_waits_for_aborted_worker_to_exit() {
     while !started.load(Ordering::SeqCst) && std::time::Instant::now() < deadline {
         std::thread::sleep(Duration::from_millis(1));
     }
-    assert!(started.load(Ordering::SeqCst), "stand-in worker did not start");
+    assert!(
+        started.load(Ordering::SeqCst),
+        "stand-in worker did not start"
+    );
 
     manager.pause(64);
     manager.resume(64);

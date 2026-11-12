@@ -139,7 +139,10 @@ mod tests {
 
         assert!(reader.seek(SeekFrom::Start(start - 1)).is_err());
         assert!(reader.seek(SeekFrom::End(1)).is_err());
-        assert_eq!(reader.seek(SeekFrom::End(0)).expect("seek to resource end"), end);
+        assert_eq!(
+            reader.seek(SeekFrom::End(0)).expect("seek to resource end"),
+            end
+        );
     }
 
     #[test]
@@ -148,7 +151,9 @@ mod tests {
         let mut buffer = [0_u8; 5];
 
         assert_eq!(reader.read(&mut buffer).expect("read budgeted bytes"), 3);
-        let error = reader.read(&mut buffer).expect_err("budget must be exhausted");
+        let error = reader
+            .read(&mut buffer)
+            .expect_err("budget must be exhausted");
         assert_eq!(error.kind(), std::io::ErrorKind::UnexpectedEof);
     }
 

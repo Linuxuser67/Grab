@@ -3734,26 +3734,95 @@ fn immediate_resume_waits_for_aborted_worker_to_exit() {
     let item = DownloadItem::new(64, "http://127.0.0.1:9/a.bin", "a.bin", "/tmp/dl");
     item.set_status(DownloadStatus::Downloading);
     manager.store().append(&item);
-    let holder = tokio_rt().spawn(async {
+
+    // Hold the aborted task inside its destructor so the test can prove that
+    // resume is gated on worker teardown, not merely on JoinHandle::abort().
+    struct ReleaseGate(Arc<(std::sync::Mutex<bool>, std::sync::Condvar)>);
+    impl ReleaseGate {
+        fn release(&self) {
+            let (lock, wake) = &*self.0;
+            *lock
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner) = true;
+            wake.notify_all();
+        }
+    }
+    impl Drop for ReleaseGate {
+        fn drop(&mut self) {
+            self.release();
+        }
+    }
+    struct WorkerDropGate {
+        release: Arc<(std::sync::Mutex<bool>, std::sync::Condvar)>,
+        entered: Arc<std::sync::atomic::AtomicBool>,
+    }
+    impl Drop for WorkerDropGate {
+        fn drop(&mut self) {
+            self.entered.store(true, Ordering::SeqCst);
+            let (lock, wake) = &*self.release;
+            let mut released = lock
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            while !*released {
+                released = wake
+                    .wait(released)
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+            }
+        }
+    }
+
+    let release = Arc::new((std::sync::Mutex::new(false), std::sync::Condvar::new()));
+    let release_on_test_drop = ReleaseGate(Arc::clone(&release));
+    let drop_entered = Arc::new(AtomicBool::new(false));
+    let worker_entered = Arc::clone(&drop_entered);
+    let worker_release = Arc::clone(&release);
+    let started = Arc::new(AtomicBool::new(false));
+    let worker_started = Arc::clone(&started);
+    let holder = tokio_rt().spawn(async move {
+        let _drop_gate = WorkerDropGate {
+            release: worker_release,
+            entered: worker_entered,
+        };
+        worker_started.store(true, Ordering::SeqCst);
         tokio::time::sleep(Duration::from_secs(3600)).await;
     });
     manager.running.borrow_mut().insert(64, holder);
 
+    let deadline = std::time::Instant::now() + Duration::from_secs(10);
+    while !started.load(Ordering::SeqCst) && std::time::Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(1));
+    }
+    assert!(started.load(Ordering::SeqCst), "stand-in worker did not start");
+
     manager.pause(64);
     manager.resume(64);
 
+    let deadline = std::time::Instant::now() + Duration::from_secs(10);
+    while !drop_entered.load(Ordering::SeqCst) && std::time::Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(1));
+    }
+    assert!(
+        drop_entered.load(Ordering::SeqCst),
+        "the aborted worker did not reach its teardown barrier"
+    );
     assert!(
         manager
             .stopping
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .contains(&64),
-        "the previous worker must remain reserved while its aborted task is being dropped"
+        "the previous worker must remain reserved while its destructor is still running"
     );
     assert!(
         !manager.running.borrow().contains_key(&64),
-        "a stopped task must not consume a global scheduler slot"
+        "a stopping task must not consume a global scheduler slot"
     );
+    assert!(
+        !manager.started.borrow().contains(&64),
+        "resume must not start a replacement while the previous worker is still dropping"
+    );
+
+    release_on_test_drop.release();
     assert!(
         wait_for_started(&manager, 64, Duration::from_secs(10)),
         "the resumed row should start after the previous worker has exited"

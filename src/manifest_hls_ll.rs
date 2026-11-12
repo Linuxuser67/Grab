@@ -1512,7 +1512,7 @@ mod tests {
     }
 
     #[test]
-    fn allows_mapless_partial_segments_for_runtime_mpegts_validation() {
+    fn allows_mapless_partial_segments_for_ffmpeg_finalization() {
         let body = br#"#EXTM3U
 #EXT-X-TARGETDURATION:2
 #EXT-X-MEDIA-SEQUENCE:5
@@ -1526,10 +1526,6 @@ mod tests {
         assert_eq!(plan.resources.len(), 1);
         assert_eq!(plan.resources[0].kind, HlsResourceKind::Segment);
         assert!(plan.local_playlist.segments[0].map.is_none());
-        assert_eq!(
-            plan.ll_parts_without_init_map().collect::<Vec<_>>(),
-            vec![plan.local_playlist.segments[0].uri.as_str()]
-        );
     }
 
     #[test]

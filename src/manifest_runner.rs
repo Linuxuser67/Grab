@@ -169,12 +169,9 @@ fn subtitle_mux_unsupported(log: &str) -> bool {
 /// Whether FFmpeg rejected the input presentation rather than its output destination.
 fn ffmpeg_rejected_input(log: &str) -> bool {
     let log = log.to_ascii_lowercase();
-    [
-        "invalid data found when processing input",
-        "does not contain any stream",
-    ]
-    .iter()
-    .any(|needle| log.contains(needle))
+    ["invalid data found when processing input"]
+        .iter()
+        .any(|needle| log.contains(needle))
 }
 
 /// Classify a failed FFmpeg pass: unsupported source media falls back to yt-dlp,
@@ -4393,10 +4390,7 @@ mod tests {
             mux_failure_error("Error opening input: Invalid data found when processing input"),
             ManifestRunError::Unsupported(_)
         ));
-        assert!(matches!(
-            mux_failure_error("Output file #0 does not contain any stream"),
-            ManifestRunError::Unsupported(_)
-        ));
+
     }
 
     #[test]
@@ -4407,6 +4401,10 @@ mod tests {
         ));
         assert!(matches!(
             mux_failure_error("No space left on device"),
+            ManifestRunError::Failed(_)
+        ));
+        assert!(matches!(
+            mux_failure_error("Output file #0 does not contain any stream"),
             ManifestRunError::Failed(_)
         ));
     }
@@ -4991,7 +4989,7 @@ segment-2.m4s
 
     #[test]
     fn mux_failure_preserves_the_staged_capture_for_retry() {
-        let error = mux_failure_error("Invalid data found when processing input");
+        let error = mux_failure_error("Could not write header: Permission denied");
         assert!(matches!(
             &error,
             ManifestRunError::Failed(message)

@@ -3,6 +3,8 @@
 //! The main MPD parser owns validation and resource planning. This bounded,
 //! streaming pass retains only representation-level main-role flags.
 
+use std::io::BufRead;
+
 use quick_xml::XmlVersion;
 use quick_xml::events::{BytesStart, Event};
 use quick_xml::name::ResolveResult;
@@ -10,6 +12,7 @@ use quick_xml::reader::NsReader;
 
 /// DASH MPD elements are identified by this namespace, regardless of prefix.
 const DASH_MPD_NAMESPACE: &str = "urn:mpeg:dash:schema:mpd:2011";
+const XLINK_NAMESPACE: &str = "http://www.w3.org/1999/xlink";
 /// Maximum XML nesting accepted by this small metadata pass.
 const MAX_ELEMENT_DEPTH: usize = 32;
 /// Bound period metadata retained from an untrusted MPD.
@@ -41,6 +44,8 @@ pub(super) struct RepresentationMetadata {
     pub(super) has_invalid_segment_list_presentation_time_offset: bool,
     pub(super) has_nondefault_segment_list_start_number: bool,
     pub(super) has_invalid_segment_list_start_number: bool,
+    /// Whether an actual attribute uses the XLink namespace (not just its declaration).
+    pub(super) has_xlink_attributes: bool,
 }
 
 #[derive(Default)]
@@ -56,6 +61,7 @@ struct MetadataState {
     has_invalid_segment_list_presentation_time_offset: bool,
     has_nondefault_segment_list_start_number: bool,
     has_invalid_segment_list_start_number: bool,
+    has_xlink_attributes: bool,
 }
 
 #[derive(Clone, Copy)]
@@ -83,10 +89,16 @@ pub(super) fn representation_metadata(
 
     loop {
         let (namespace, event) = reader.read_resolved_event_into(&mut buffer).ok()?;
+        let in_mpd_namespace = matches!(
+            &namespace,
+            ResolveResult::Bound(namespace) if namespace.into_inner() == DASH_MPD_NAMESPACE
+        );
+        drop(namespace);
         match event {
             Event::Start(start) => push_element(
+                &reader,
                 &start,
-                &namespace,
+                in_mpd_namespace,
                 &mut stack,
                 &mut periods,
                 max_representations,
@@ -94,8 +106,9 @@ pub(super) fn representation_metadata(
             )?,
             Event::Empty(start) => {
                 push_element(
+                    &reader,
                     &start,
-                    &namespace,
+                    in_mpd_namespace,
                     &mut stack,
                     &mut periods,
                     max_representations,
@@ -126,12 +139,14 @@ pub(super) fn representation_metadata(
             .has_invalid_segment_list_presentation_time_offset,
         has_nondefault_segment_list_start_number: state.has_nondefault_segment_list_start_number,
         has_invalid_segment_list_start_number: state.has_invalid_segment_list_start_number,
+        has_xlink_attributes: state.has_xlink_attributes,
     })
 }
 
-fn push_element(
+fn push_element<R: BufRead>(
+    reader: &NsReader<R>,
     start: &BytesStart<'_>,
-    namespace: &ResolveResult<'_>,
+    in_mpd_namespace: bool,
     stack: &mut Vec<Element>,
     periods: &mut Vec<PeriodRepresentationMetadata>,
     max_representations: usize,
@@ -143,11 +158,16 @@ fn push_element(
 
     let local_name = start.name().local_name();
     let name = local_name.as_ref();
-    let in_mpd_namespace = matches!(
-        namespace,
-        ResolveResult::Bound(namespace) if namespace.into_inner() == DASH_MPD_NAMESPACE
-    );
-
+    for attribute in start.attributes() {
+        let attribute = attribute.ok()?;
+        let (attribute_namespace, _) = reader.resolver().resolve_attribute(attribute.key);
+        if matches!(
+            attribute_namespace,
+            ResolveResult::Bound(namespace) if namespace.into_inner() == XLINK_NAMESPACE
+        ) {
+            state.has_xlink_attributes = true;
+        }
+    }
     // Collect compatibility flags while the representation metadata pass is
     // already visiting each XML node. These checks deliberately cover every
     // DASH SegmentList, not only the locations modeled for inheritance below.
@@ -333,6 +353,23 @@ fn is_main_role(start: &BytesStart<'_>) -> Option<bool> {
 #[cfg(test)]
 mod tests {
     use super::representation_metadata;
+
+    #[test]
+    fn detects_xlink_attributes_without_rejecting_namespace_declarations() {
+        let declaration_only = br#"<MPD xmlns="urn:mpeg:dash:schema:mpd:2011" xmlns:xlink="http://www.w3.org/1999/xlink"><Period><AdaptationSet><Representation id="video"/></AdaptationSet></Period></MPD>"#;
+        let linked = br#"<MPD xmlns="urn:mpeg:dash:schema:mpd:2011" xmlns:link="http://www.w3.org/1999/xlink"><Period link:href="period.xml" link:actuate="onLoad"><AdaptationSet><Representation id="video"/></AdaptationSet></Period></MPD>"#;
+
+        assert!(
+            !representation_metadata(declaration_only, 1)
+                .expect("valid MPD with an unused XLink namespace declaration")
+                .has_xlink_attributes
+        );
+        assert!(
+            representation_metadata(linked, 1)
+                .expect("valid MPD with an XLink reference")
+                .has_xlink_attributes
+        );
+    }
 
     #[test]
     fn maps_representation_roles_in_source_order() {

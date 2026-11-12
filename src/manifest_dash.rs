@@ -414,6 +414,11 @@ pub(crate) fn parse_dash_manifest_at(
     // representation metadata and SegmentList compatibility flags.
     let role_metadata = dash_roles::representation_metadata(body.as_bytes(), MAX_REPRESENTATIONS)
         .ok_or(DashError::Parse)?;
+    // The bounded metadata pass recognizes actual XLink attributes by
+    // namespace; a declaration without any XLink attributes is harmless.
+    if role_metadata.has_xlink_attributes {
+        return Err(DashError::UnsupportedPresentation);
+    }
     if role_metadata.has_unsupported_segment_list_timing_attributes {
         return Err(DashError::UnsupportedAddressing);
     }
@@ -2782,6 +2787,28 @@ mod tests {
             result,
             String::from_utf8(captured).expect("DASH diagnostic logs are UTF-8"),
         )
+    }
+
+    #[test]
+    fn accepts_an_unused_xlink_namespace_declaration() {
+        let body = include_str!("../tests/fixtures/dash/static-segment-template.mpd")
+            .replace(
+                r#"<MPD xmlns="urn:mpeg:dash:schema:mpd:2011""#,
+                r#"<MPD xmlns="urn:mpeg:dash:schema:mpd:2011" xmlns:xlink="http://www.w3.org/1999/xlink""#,
+            );
+        assert!(
+            parse_dash_manifest(BASE_URL, &body).is_ok(),
+            "an unused XLink namespace declaration is not an XLink reference"
+        );
+    }
+
+    #[test]
+    fn rejects_xlink_mpd_without_following_external_references() {
+        let body = r#"<MPD xmlns="urn:mpeg:dash:schema:mpd:2011" xmlns:xlink="http://www.w3.org/1999/xlink" type="static" mediaPresentationDuration="PT2S"><Period xlink:href="period.xml" xlink:actuate="onLoad"/></MPD>"#;
+        assert_eq!(
+            parse_dash_manifest(BASE_URL, body).err(),
+            Some(DashError::UnsupportedPresentation)
+        );
     }
 
     #[test]

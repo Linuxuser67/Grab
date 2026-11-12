@@ -957,7 +957,7 @@ pub fn build_window(
         banner.connect_button_clicked(move |_| {
             let n = m.retry_failed();
             if n > 0 {
-                t.add_toast(adw::Toast::new(&ngettext_count(
+                t.add_toast(crate::ui_util::plain_toast(&ngettext_count(
                     "Retrying failed download",
                     "Retrying {n} failed downloads",
                     n,

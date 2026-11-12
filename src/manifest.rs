@@ -524,7 +524,7 @@ pub(crate) const MAX_HLS_LIVE_SEGMENTS: usize = 100_000;
 /// LL-HLS parts are finer-grained than media segments, so give them a separate unit ceiling.
 pub(crate) const MAX_HLS_LIVE_UNITS: usize = 250_000;
 pub(crate) const MAX_HLS_LOCAL_PLAYLIST_BYTES: usize = 32 * 1024 * 1024;
-pub(crate) const MAX_HLS_LIVE_CAPTURE_BYTES: u64 = 1 << 40;
+pub(crate) const MAX_HLS_LIVE_CAPTURE_BYTES: u64 = crate::manifest_types::MAX_MANIFEST_RESOURCE_BYTES;
 
 struct BoundedPlaylistWriter {
     bytes: Vec<u8>,

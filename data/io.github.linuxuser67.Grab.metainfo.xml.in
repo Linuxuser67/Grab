@@ -30,6 +30,14 @@
     <category>Network</category>
     <category>Utility</category>
   </categories>
+  <requires>
+    <display_length compare="ge">360</display_length>
+  </requires>
+  <supports>
+    <control>keyboard</control>
+    <control>pointing</control>
+    <control>touch</control>
+  </supports>
   <content_rating type="oars-1.1"/>
   <screenshots>
     <screenshot type="default">

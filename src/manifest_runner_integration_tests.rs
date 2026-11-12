@@ -1252,6 +1252,7 @@ fn live_hls_test_source(url: &str) -> crate::media_types::ManifestSource {
         url: url.to_string(),
         kind: crate::media_types::ManifestKind::Hls,
         representation_key: "live-hls-test".into(),
+        output_extension: None,
         audio_key: None,
         subtitle_key: None,
         subtitle_language: None,

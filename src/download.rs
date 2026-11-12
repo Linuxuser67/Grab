@@ -1358,31 +1358,11 @@ impl DownloadManager {
         .map_err(|error| format!("Could not inspect download folder: {error:?}"))?
         .map_err(|error| format!("Could not inspect download folder: {error}"))?;
 
-        // The URL suffix identifies the manifest protocol, not the media
-        // container. Resolve the selected media playlist/representation before
-        // creating the queue row so its final filename matches its contents.
-        let options = DownloadOptions::from_settings(&self.settings);
-        let proxy = options.proxy_config()?;
-        let detection_source = source.clone();
-        let cookies_browser = options.cookies_browser.clone();
-        let detected_extension = crate::runtime::tokio_rt()
-            .spawn(async move {
-                crate::manifest_runner::detect_output_extension(
-                    &detection_source,
-                    &cookies_browser,
-                    proxy.as_ref(),
-                )
-                .await
-            })
-            .await
-            .map_err(|error| format!("Native stream format detection task failed: {error}"))?;
-        let extension = detected_extension.unwrap_or("mkv");
-        if detected_extension.is_none() {
-            tracing::debug!(
-                kind = ?source.kind,
-                "could not determine native manifest container; keeping the Matroska default"
-            );
-        }
+        // Reuse format metadata already present in the Add-card preview. HLS
+        // master child playlists are intentionally not fetched here; their
+        // conservative Matroska default avoids a second, potentially one-shot
+        // manifest request before the queue row appears.
+        let extension = source.output_extension.as_deref().unwrap_or("mkv");
         let requested_name =
             Self::manifest_filename_for_extension(filename, &source.url, extension);
 

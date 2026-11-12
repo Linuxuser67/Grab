@@ -37,6 +37,22 @@ pub(crate) enum ManifestDownloadPlan {
     },
 }
 
+/// Infer a supported output container from a DASH representation MIME type.
+pub(crate) fn dash_output_container_extension(mime_type: Option<&str>) -> Option<&'static str> {
+    let mime_type = mime_type?.split(';').next()?.trim();
+    if mime_type.eq_ignore_ascii_case("video/mp2t")
+        || mime_type.eq_ignore_ascii_case("application/mp2t")
+    {
+        Some("ts")
+    } else if mime_type.eq_ignore_ascii_case("video/mp4")
+        || mime_type.eq_ignore_ascii_case("application/mp4")
+    {
+        Some("mp4")
+    } else {
+        None
+    }
+}
+
 /// Select the closest representation to the configured video-quality preference.
 #[must_use]
 pub(crate) fn preferred_choice_index(choices: &[ManifestChoice], quality: &str) -> usize {
@@ -407,10 +423,27 @@ impl ManifestLookup {
             .and_then(|choice| choice.language)
             .as_deref()
             .and_then(normalize_subtitle_language);
+        // The preview already contains the complete media playlist for direct
+        // HLS and the selected representation MIME type for DASH. HLS master
+        // children are not fetched here, so keep their output conservative
+        // rather than performing a second network lookup during Add.
+        let output_extension = match &self.manifest {
+            NativeManifest::HlsMaster(_) => None,
+            NativeManifest::HlsMedia(plan) => plan.output_container_extension().map(str::to_owned),
+            NativeManifest::Dash(dash) => dash
+                .video_representations
+                .iter()
+                .find(|representation| representation.matches_key(representation_key.as_str()))
+                .and_then(|representation| {
+                    dash_output_container_extension(representation.mime_type.as_deref())
+                })
+                .map(str::to_owned),
+        };
         Some(ManifestSource {
             url: self.source_url.clone(),
             kind,
             representation_key: representation_key.clone(),
+            output_extension,
             audio_key: audio_key.cloned(),
             subtitle_key: subtitle_key.cloned(),
             subtitle_language,
@@ -1264,6 +1297,7 @@ video/720.m3u8
         let source = lookup
             .selected_source(&video_key, None, Some(&subtitle_key))
             .expect("selected DASH subtitle should be validated");
+        assert_eq!(source.output_extension.as_deref(), Some("mp4"));
         let plan = download_plan(lookup, &source).expect("selected DASH subtitle plan");
         let ManifestDownloadPlan::Dash {
             subtitle: Some(subtitle),
@@ -1296,6 +1330,45 @@ video/720.m3u8
     }
 
     #[test]
+    fn dash_output_container_uses_the_selected_representation_mime_type() {
+        assert_eq!(
+            dash_output_container_extension(Some("video/mp2t")),
+            Some("ts")
+        );
+        assert_eq!(
+            dash_output_container_extension(Some("video/mp4")),
+            Some("mp4")
+        );
+        assert_eq!(
+            dash_output_container_extension(Some("application/mp4; codecs=avc1")),
+            Some("mp4")
+        );
+        assert_eq!(dash_output_container_extension(Some("video/webm")), None);
+        assert_eq!(dash_output_container_extension(None), None);
+    }
+
+    #[test]
+    fn direct_hls_media_source_carries_its_preview_container() {
+        let body = br#"#EXTM3U
+#EXT-X-TARGETDURATION:6
+#EXTINF:6,
+segment.ts
+#EXT-X-ENDLIST
+"#;
+        let source_url = "https://cdn.example.test/stream.m3u8";
+        let plan = crate::manifest::plan_hls_media_playlist(source_url, body)
+            .expect("valid direct HLS media playlist");
+        let lookup = ManifestLookup {
+            source_url: source_url.to_string(),
+            manifest: NativeManifest::HlsMedia(Box::new(plan)),
+        };
+        let source = lookup
+            .selected_source(&ManifestRepresentationKey::from("hls-media"), None, None)
+            .expect("direct HLS source");
+        assert_eq!(source.output_extension.as_deref(), Some("ts"));
+    }
+
+    #[test]
     fn hls_download_plan_uses_the_selected_stable_video_and_audio_ids() {
         let body = br#"#EXTM3U
 #EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID="audio",NAME="English",LANGUAGE="en",STABLE-RENDITION-ID="rendition-en",URI="audio/en.m3u8"
@@ -1324,6 +1397,10 @@ video/720.m3u8
         let source = lookup
             .selected_source(&video_key, Some(&audio_key), None)
             .expect("valid stable track selection");
+        assert_eq!(
+            source.output_extension, None,
+            "HLS master children are not fetched during preview; use the safe Matroska default"
+        );
 
         let plan = download_plan(lookup, &source).expect("valid selected download plan");
         let ManifestDownloadPlan::HlsMaster(plan) = plan else {
@@ -1361,6 +1438,7 @@ video/720.m3u8
             url: lookup.source_url.clone(),
             kind: ManifestKind::Hls,
             representation_key: "hls-variant-00000000000000000000000000000000".into(),
+            output_extension: None,
             audio_key: None,
             subtitle_key: None,
             subtitle_language: None,

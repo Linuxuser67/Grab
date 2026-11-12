@@ -253,8 +253,8 @@ async fn manifest_preview_budget_cancels_a_slow_server_request() {
         tokio::time::sleep(Duration::from_millis(100)).await;
         drop(socket);
     });
-    let url = Url::parse(&format!("http://127.0.0.1:{port}/master.m3u8"))
-        .expect("fixture manifest URL");
+    let url =
+        Url::parse(&format!("http://127.0.0.1:{port}/master.m3u8")).expect("fixture manifest URL");
     let started = tokio::time::Instant::now();
 
     let result = fetch_bounded_preview_manifest_with_limits(
@@ -312,11 +312,9 @@ high.m3u8
 #EXT-X-STREAM-INF:BANDWIDTH=3500000,RESOLUTION=2560x1440,STABLE-VARIANT-ID="fixture-variant-3"
 highest.m3u8
 "#;
-    let master = crate::manifest::parse_hls_master_playlist(
-        "https://cdn.example.test/master.m3u8",
-        body,
-    )
-    .expect("valid HLS master playlist");
+    let master =
+        crate::manifest::parse_hls_master_playlist("https://cdn.example.test/master.m3u8", body)
+            .expect("valid HLS master playlist");
     let lookup = ManifestLookup {
         source_url: "https://cdn.example.test/master.m3u8".to_string(),
         manifest: NativeManifest::HlsMaster(Box::new(master)),
@@ -361,11 +359,9 @@ higher-bandwidth.m3u8
 #EXT-X-STREAM-INF:BANDWIDTH=1800000,RESOLUTION=1920x1080,STABLE-VARIANT-ID="fixture-variant-7"
 second.m3u8
 "#;
-    let master = crate::manifest::parse_hls_master_playlist(
-        "https://cdn.example.test/master.m3u8",
-        body,
-    )
-    .expect("valid HLS master playlist");
+    let master =
+        crate::manifest::parse_hls_master_playlist("https://cdn.example.test/master.m3u8", body)
+            .expect("valid HLS master playlist");
     let original_keys = hls_variant_keys(&master.variants);
     let lookup = ManifestLookup {
         source_url: "https://cdn.example.test/master.m3u8".to_string(),
@@ -435,11 +431,9 @@ video/en.m3u8
 #EXT-X-STREAM-INF:BANDWIDTH=900000,RESOLUTION=1280x720,AUDIO="audio-es",STABLE-VARIANT-ID="fixture-variant-9"
 video/es.m3u8
 "#;
-    let master = crate::manifest::parse_hls_master_playlist(
-        "https://cdn.example.test/master.m3u8",
-        body,
-    )
-    .expect("valid HLS master playlist");
+    let master =
+        crate::manifest::parse_hls_master_playlist("https://cdn.example.test/master.m3u8", body)
+            .expect("valid HLS master playlist");
     let video_keys = hls_variant_keys(&master.variants);
     let lookup = ManifestLookup {
         source_url: "https://cdn.example.test/master.m3u8".to_string(),
@@ -559,11 +553,9 @@ fn dash_audio_choices_include_every_track_and_pin_the_main_role() {
     </AdaptationSet>
   </Period>
 </MPD>"#;
-    let dash = crate::manifest::dash::parse_dash_manifest(
-        "https://cdn.example.test/manifest.mpd",
-        body,
-    )
-    .expect("valid static DASH presentation");
+    let dash =
+        crate::manifest::dash::parse_dash_manifest("https://cdn.example.test/manifest.mpd", body)
+            .expect("valid static DASH presentation");
     let video_key = crate::media_types::ManifestRepresentationKey::from(
         dash.video_representations[0].key.clone(),
     );
@@ -599,13 +591,12 @@ fn dash_audio_choices_include_every_track_and_pin_the_main_role() {
 
 #[test]
 fn manifest_source_audio_key_is_optional_and_validated() {
-    let legacy: crate::media_types::ManifestSource =
-        serde_json::from_value(serde_json::json!({
-            "url": "https://cdn.example.test/master.m3u8",
-            "kind": "Hls",
-            "representation_key": "hls-media"
-        }))
-        .expect("legacy manifest source without an audio key remains compatible");
+    let legacy: crate::media_types::ManifestSource = serde_json::from_value(serde_json::json!({
+        "url": "https://cdn.example.test/master.m3u8",
+        "kind": "Hls",
+        "representation_key": "hls-media"
+    }))
+    .expect("legacy manifest source without an audio key remains compatible");
     assert_eq!(legacy.audio_key, None);
     assert_eq!(legacy.subtitle_key, None);
     assert_eq!(legacy.subtitle_language, None);
@@ -904,11 +895,9 @@ fn selected_source_rejects_url_derived_hls_keys() {
 #EXT-X-STREAM-INF:BANDWIDTH=1000000,RESOLUTION=1280x720,AUDIO="audio",STABLE-VARIANT-ID="variant-720"
 video/720.m3u8
 "#;
-    let master = crate::manifest::parse_hls_master_playlist(
-        "https://cdn.example.test/master.m3u8",
-        body,
-    )
-    .expect("valid HLS master playlist");
+    let master =
+        crate::manifest::parse_hls_master_playlist("https://cdn.example.test/master.m3u8", body)
+            .expect("valid HLS master playlist");
     let current_video_key = hls_variant_keys(&master.variants)[0]
         .as_deref()
         .expect("stable video key")
@@ -938,9 +927,7 @@ video/720.m3u8
     assert!(
         lookup
             .selected_source(
-                &crate::media_types::ManifestRepresentationKey::from(
-                    current_video_key.as_str()
-                ),
+                &crate::media_types::ManifestRepresentationKey::from(current_video_key.as_str()),
                 Some(&crate::media_types::ManifestAudioKey::from(
                     "hls-audio-00000000000000000000000000000000",
                 )),
@@ -957,11 +944,9 @@ fn hls_master_rejects_duplicate_track_identities() {
 #EXT-X-STREAM-INF:BANDWIDTH=1000000,AUDIO="audio",STABLE-VARIANT-ID="variant-720"
 video/720.m3u8
 "#;
-    let mut master = crate::manifest::parse_hls_master_playlist(
-        "https://cdn.example.test/master.m3u8",
-        body,
-    )
-    .expect("valid HLS master playlist");
+    let mut master =
+        crate::manifest::parse_hls_master_playlist("https://cdn.example.test/master.m3u8", body)
+            .expect("valid HLS master playlist");
     assert!(validate_hls_stable_track_ids(&master).is_ok());
 
     let duplicate = master.variants[0].clone();
@@ -1013,8 +998,7 @@ fn hls_master_supports_tracks_without_stable_ids() {
     )
     .expect("valid HLS master playlist");
 
-    validate_hls_stable_track_ids(&master)
-        .expect("attribute-less masters stay on the native path");
+    validate_hls_stable_track_ids(&master).expect("attribute-less masters stay on the native path");
     let keys = hls_variant_keys(&master.variants);
     assert!(
         keys.iter().all(Option::is_some),
@@ -1039,11 +1023,9 @@ fn hls_master_supports_subtitle_renditions_without_stable_ids() {
 #EXT-X-STREAM-INF:BANDWIDTH=1000000,SUBTITLES="subs",STABLE-VARIANT-ID="variant-720"
 video/720.m3u8
 "#;
-    let master = crate::manifest::parse_hls_master_playlist(
-        "https://cdn.example.test/master.m3u8",
-        body,
-    )
-    .expect("HLS parser retains subtitle metadata");
+    let master =
+        crate::manifest::parse_hls_master_playlist("https://cdn.example.test/master.m3u8", body)
+            .expect("HLS parser retains subtitle metadata");
     assert!(
         validate_hls_stable_track_ids(&master).is_ok(),
         "subtitle renditions without Apple stable IDs fall back to content identities"
@@ -1175,8 +1157,7 @@ async fn manifest_lookup_follows_signed_redirect_with_proxy_and_cookie_scope() {
             .unwrap_or("<missing request line>")
     );
     assert!(
-        requests[1]
-            .starts_with("GET http://manifest.example.test/signed/master.m3u8?sig=rotated "),
+        requests[1].starts_with("GET http://manifest.example.test/signed/master.m3u8?sig=rotated "),
         "redirect request should use the refreshed signed URL: {}",
         requests[1]
             .lines()

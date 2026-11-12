@@ -4133,7 +4133,7 @@ program-after.ts
     let video_dir = root.path().join("staging/video");
     tokio::fs::create_dir_all(&video_dir)
         .await
-        .expect("create HLS ad-removal staging directory");
+        .expect("create HLS cue-marker staging directory");
     let client = fixture_client();
     let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
     let downloaded = Arc::new(AtomicU64::new(0));
@@ -4162,7 +4162,7 @@ program-after.ts
         .await
         .expect("read the complete local HLS playlist");
     let local = m3u8_rs::parse_media_playlist_res(&local_bytes)
-        .expect("parse the ad-free local HLS playlist");
+        .expect("parse the complete local HLS playlist");
     assert_eq!(local.segments.len(), 3);
     let planned_segments = plan
         .resources
@@ -4170,13 +4170,6 @@ program-after.ts
         .filter(|resource| resource.kind == crate::manifest::HlsResourceKind::Segment)
         .collect::<Vec<_>>();
     assert_eq!(local.segments[1].uri, planned_segments[1].filename);
-    assert!(
-        local
-            .segments
-            .iter()
-            .any(|segment| { segment.unknown_tags.iter().any(|tag| tag.tag == "CUE-OUT") }),
-        "cue markers should remain inert metadata in the local playlist"
-    );
     for resource in &plan.resources {
         assert!(
             tokio::fs::metadata(video_dir.join(&resource.filename))

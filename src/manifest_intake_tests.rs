@@ -1461,4 +1461,3 @@ segment.ts?f=418899&srv=server&i=0.4&sp=500&p1=one&p2=two&asn=327934
         assert!(handoff.matches_auth(ManifestClientAuth::Handoff));
         assert!(!handoff.matches_auth(ManifestClientAuth::Browser));
     }
-}

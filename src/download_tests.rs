@@ -2745,6 +2745,9 @@ fn magnet_delete_trashes_recorded_subfolder() {
     let _ = std::fs::remove_dir_all(&dir);
     // Teardown BEFORE restoring keys (see rejects_relative_download_dir).
     manager.cancel_all();
+    // The Done status schedules a finished-row sizing task. Drain it before
+    // releasing MAIN_LOOP_LOCK so another test thread cannot reap its GLib future.
+    drain_sizing(&manager);
     let _ = std::fs::remove_dir_all(&dir);
     settings.set_int("max-concurrent", 3).unwrap();
 }

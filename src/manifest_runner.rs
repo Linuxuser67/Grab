@@ -50,7 +50,7 @@ const MAX_RESOURCE_BYTES: u64 = crate::manifest_writer::MAX_RESOURCE_BYTES;
 /// limit is intentionally much smaller than the general staged-resource cap.
 const MAX_SAMPLE_AES_SEGMENT_BYTES: usize = 32 * 1024 * 1024;
 /// Aggregate resource ceiling, matching the regular segmented downloader's 1 TiB trust limit.
-const MAX_MANIFEST_DOWNLOAD_BYTES: u64 = 1 << 40;
+const MAX_MANIFEST_DOWNLOAD_BYTES: u64 = crate::manifest_types::MAX_MANIFEST_RESOURCE_BYTES;
 /// Idle budget for receiving a response body; progressing transfers are not wall-clock limited.
 const RESOURCE_IDLE_TIMEOUT: Duration = Duration::from_secs(30);
 /// Bound parallel manifest requests to the same range as the regular HTTP engine.
@@ -60,7 +60,7 @@ const HLS_STATIC_RESOURCE_CONNECTIONS: usize = 1;
 /// Keep only a small diagnostic tail from FFmpeg.
 const FFMPEG_LOG_LINES: usize = 32;
 /// Upper bound on the persisted dynamic DASH segment index.
-const MAX_DASH_LIVE_SEGMENTS: usize = 100_000;
+const MAX_DASH_LIVE_SEGMENTS: usize = crate::manifest_types::MAX_DASH_SEGMENTS;
 /// Bound for a serialized dynamic DASH resume index.
 const MAX_DASH_LIVE_STATE_BYTES: usize = 16 * 1024 * 1024;
 

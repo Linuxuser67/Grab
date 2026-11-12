@@ -506,22 +506,6 @@ impl HlsPlan {
         Ok(())
     }
 
-    /// Confirmed LL-HLS part resources without an EXT-X-MAP initialization section.
-    ///
-    /// These are only valid for MPEG-TS parts; the runner validates their bytes
-    /// before committing them. CMAF parts without a known map are unsupported.
-    pub(crate) fn ll_parts_without_init_map(&self) -> impl Iterator<Item = &str> {
-        self.ll_unit_ids
-            .as_deref()
-            .into_iter()
-            .flatten()
-            .zip(&self.local_playlist.segments)
-            .filter_map(|(id, segment)| {
-                (matches!(id, hls_ll::HlsLiveUnitId::Part { .. }) && segment.map.is_none())
-                    .then_some(segment.uri.as_str())
-            })
-    }
-
     /// Rebuild a completed local HLS plan from a previously committed live capture.
     ///
     /// The local playlist is validated as Grab-owned staging metadata and its

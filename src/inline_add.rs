@@ -1019,22 +1019,40 @@ fn refresh_manifest_audio_picker(
         .set_visible(step.manifest_audio_choices.borrow().len() > 1);
 }
 
-/// Provisional filename for the Add card; enqueue replaces its suffix with
-/// container metadata captured by the selected manifest preview.
-fn manifest_filename(filename: &str) -> String {
-    let path = std::path::Path::new(filename);
-    let stem = path
-        .file_stem()
-        .and_then(|stem| stem.to_str())
-        .filter(|stem| !stem.is_empty())
-        .unwrap_or("Video");
-    let extension = match path.extension().and_then(|extension| extension.to_str()) {
-        Some(extension) if extension.eq_ignore_ascii_case("mp4") => "mp4",
-        Some(extension) if extension.eq_ignore_ascii_case("mkv") => "mkv",
-        Some(extension) if extension.eq_ignore_ascii_case("ts") => "ts",
-        _ => "mkv",
+/// Infer the selected video representation's container using the same transient
+/// metadata that enqueue uses to rewrite the destination filename.
+fn selected_manifest_output_extension(step: &VideoStep) -> Option<String> {
+    let manifest = step.manifest.borrow();
+    let selection = step.manifest_selection.borrow();
+    let audio = step.manifest_audio_selection.borrow();
+    let manifest = manifest.as_ref()?;
+    let selection = selection.as_ref()?;
+    manifest
+        .selected_source(selection, audio.as_ref(), None)
+        .and_then(|source| source.output_extension)
+}
+
+/// Keep the preview filename synchronized with the selected manifest variant.
+/// HLS master playlists intentionally have no child-container hint during
+/// preview, so they retain the same Matroska default used by enqueue.
+fn refresh_manifest_filename(step: &VideoStep) {
+    let source_url = step
+        .manifest
+        .borrow()
+        .as_ref()
+        .map(|manifest| manifest.source_url.clone());
+    let Some(source_url) = source_url else {
+        return;
     };
-    format!("{stem}.{extension}")
+    let extension = selected_manifest_output_extension(step);
+    let filename = step.name.text();
+    let filename = filename.trim();
+    let requested_name = crate::download::DownloadManager::manifest_filename_for_extension(
+        (!filename.is_empty()).then_some(filename),
+        &source_url,
+        extension.as_deref().unwrap_or("mkv"),
+    );
+    step.name.set_text(&requested_name);
 }
 
 /// Show a parsed manifest and enable Add for the validated representation.
@@ -1053,7 +1071,7 @@ fn show_manifest_ready(
     let Some(manifest) = manifest_state.as_ref() else {
         return;
     };
-    let suggested_title = crate::file_names::title_from_manifest_url(&manifest.source_url);
+    let source_url = manifest.source_url.clone();
     let choices = manifest.choices();
     let selected_index =
         crate::manifest_intake::preferred_choice_index(&choices, preferred_quality);
@@ -1075,11 +1093,7 @@ fn show_manifest_ready(
     step.manifest_format.set_visible(true);
     drop(manifest_state);
     refresh_manifest_audio_picker(step, selected_video_key.as_ref());
-    if step.name.text().trim().is_empty() {
-        step.name.set_text(&format!("{suggested_title}.mkv"));
-    }
-    let filename = step.name.text().trim().to_string();
-    step.name.set_text(&manifest_filename(&filename));
+    refresh_manifest_filename(step);
     step.name.set_visible(true);
     // The existing revert action is tied to yt-dlp title metadata.
     step.revert.set_visible(false);
@@ -2697,6 +2711,7 @@ fn wire_video_preview(step: Rc<VideoStep>) {
             selection.replace(selected_key.clone());
             if let Some(step) = step_weak.upgrade() {
                 refresh_manifest_audio_picker(&step, selected_key.as_ref());
+                refresh_manifest_filename(&step);
             }
         });
     }
@@ -3749,7 +3764,7 @@ fn build_submit_handler(context: SubmitContext) -> SubmitHandler {
                         })
                 };
                 if let Some(source) = selected_source {
-                    let filename = manifest_filename(step2.name.text().trim());
+                    let filename = step2.name.text().trim().to_string();
                     let enqueue_manager = Rc::clone(&m);
                     let error_step = Rc::clone(&step2);
                     let error_lookup_add = Rc::clone(&lookup_add_submit);
@@ -5674,15 +5689,30 @@ mod tests {
 
 #[cfg(test)]
 mod manifest_filename_tests {
-    use super::manifest_filename;
+    use crate::download::DownloadManager;
+
+    const SOURCE_URL: &str = "https://cdn.example.test/stream.m3u8";
+
+    fn manifest_filename(filename: &str, extension: Option<&str>) -> String {
+        DownloadManager::manifest_filename_for_extension(
+            Some(filename),
+            SOURCE_URL,
+            extension.unwrap_or("mkv"),
+        )
+    }
 
     #[test]
-    fn native_manifest_filename_defaults_to_matroska_and_preserves_supported_extensions() {
-        assert_eq!(manifest_filename("Stream.mp4"), "Stream.mp4");
-        assert_eq!(manifest_filename("Stream.TS"), "Stream.ts");
-        assert_eq!(manifest_filename("archive.part.MKV"), "archive.part.mkv");
-        assert_eq!(manifest_filename("Stream"), "Stream.mkv");
-        assert_eq!(manifest_filename("Stream.webm"), "Stream.mkv");
-        assert_eq!(manifest_filename(".hidden"), ".hidden.mkv");
+    fn preview_uses_the_same_selected_container_suffix_as_enqueue() {
+        assert_eq!(manifest_filename("Stream.mkv", Some("ts")), "Stream.ts");
+        assert_eq!(manifest_filename("Stream.mkv", Some("mp4")), "Stream.mp4");
+        assert_eq!(manifest_filename("Stream.mkv", None), "Stream.mkv");
+    }
+
+    #[test]
+    fn manifest_container_suffix_does_not_follow_a_stale_or_user_typed_extension() {
+        assert_eq!(manifest_filename("Stream.ts", Some("mp4")), "Stream.mp4");
+        assert_eq!(manifest_filename("Stream.mp4", Some("ts")), "Stream.ts");
+        assert_eq!(manifest_filename("Stream.webm", None), "Stream.mkv");
+        assert_eq!(manifest_filename("archive.part.MKV", Some("ts")), "archive.part.ts");
     }
 }

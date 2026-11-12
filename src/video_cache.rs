@@ -598,6 +598,36 @@ pub(crate) fn has_known_rotating_auth_query(url: &url::Url) -> bool {
     })
 }
 
+/// Reject query-bearing page URLs from caches unless every parameter is a
+/// known, stable YouTube page identifier. Unknown names may be signed CDN or
+/// session tokens, so a blocklist of conventional auth names is insufficient.
+pub(crate) fn has_untrusted_cache_query(url: &url::Url) -> bool {
+    if has_known_rotating_auth_query(url) {
+        return true;
+    }
+
+    if url.query().is_none_or(str::is_empty) {
+        return false;
+    }
+
+    let is_youtube_page = matches!(
+        url.host_str().map(str::to_ascii_lowercase).as_deref(),
+        Some(
+            "youtube.com" | "www.youtube.com" | "m.youtube.com" | "music.youtube.com" | "youtu.be"
+        )
+    );
+    if !is_youtube_page {
+        return true;
+    }
+
+    url.query_pairs().any(|(name, _)| {
+        !matches!(
+            name.to_ascii_lowercase().as_str(),
+            "v" | "list" | "index" | "start_radio"
+        )
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::{

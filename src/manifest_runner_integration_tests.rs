@@ -4164,11 +4164,17 @@ program-after.ts
     let local = m3u8_rs::parse_media_playlist_res(&local_bytes)
         .expect("parse the ad-free local HLS playlist");
     assert_eq!(local.segments.len(), 3);
-    assert!(local.segments.iter().any(|segment| segment.uri.contains("ad.ts")));
     assert!(
-        local.segments.iter().any(|segment| {
-            segment.unknown_tags.iter().any(|tag| tag.tag == "CUE-OUT")
-        }),
+        local
+            .segments
+            .iter()
+            .any(|segment| segment.uri.contains("ad.ts"))
+    );
+    assert!(
+        local
+            .segments
+            .iter()
+            .any(|segment| { segment.unknown_tags.iter().any(|tag| tag.tag == "CUE-OUT") }),
         "cue markers should remain inert metadata in the local playlist"
     );
     for resource in &plan.resources {

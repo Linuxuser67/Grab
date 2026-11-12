@@ -4390,7 +4390,6 @@ mod tests {
             mux_failure_error("Error opening input: Invalid data found when processing input"),
             ManifestRunError::Unsupported(_)
         ));
-
     }
 
     #[test]

@@ -1,6 +1,5 @@
 use super::*;
 
-
 const BASE_URL: &str = "https://cdn.example.test/path/manifest.mpd";
 #[derive(Clone)]
 struct SharedLogWriter(std::sync::Arc<std::sync::Mutex<Vec<u8>>>);
@@ -49,11 +48,10 @@ fn capture_dash_warnings(
 
 #[test]
 fn accepts_an_unused_xlink_namespace_declaration() {
-    let body = include_str!("../tests/fixtures/dash/static-segment-template.mpd")
-        .replace(
-            r#"<MPD xmlns="urn:mpeg:dash:schema:mpd:2011""#,
-            r#"<MPD xmlns="urn:mpeg:dash:schema:mpd:2011" xmlns:xlink="http://www.w3.org/1999/xlink""#,
-        );
+    let body = include_str!("../tests/fixtures/dash/static-segment-template.mpd").replace(
+        r#"<MPD xmlns="urn:mpeg:dash:schema:mpd:2011""#,
+        r#"<MPD xmlns="urn:mpeg:dash:schema:mpd:2011" xmlns:xlink="http://www.w3.org/1999/xlink""#,
+    );
     assert!(
         parse_dash_manifest(BASE_URL, &body).is_ok(),
         "an unused XLink namespace declaration is not an XLink reference"
@@ -159,11 +157,7 @@ fn warns_when_the_typed_dash_model_ignores_vendor_extensions() {
     );
 }
 
-fn mpd_with_trick_mode_property(
-    on_adaptation: bool,
-    element: &str,
-    scheme_id_uri: &str,
-) -> String {
+fn mpd_with_trick_mode_property(on_adaptation: bool, element: &str, scheme_id_uri: &str) -> String {
     let property = format!(r#"<{element} schemeIdUri="{scheme_id_uri}" value="0"/>"#);
     let adaptation_property = if on_adaptation { &property } else { "" };
     let representation_property = if on_adaptation { "" } else { &property };
@@ -332,8 +326,8 @@ fn representation_level_main_role_selects_the_declared_audio_track() {
 
 #[test]
 fn parses_video_and_audio_representations_and_selects_main_audio() {
-    let plan = parse_dash_manifest(BASE_URL, TEMPLATE_MPD)
-        .expect("static single-period MPD should parse");
+    let plan =
+        parse_dash_manifest(BASE_URL, TEMPLATE_MPD).expect("static single-period MPD should parse");
 
     assert_eq!(plan.duration, Duration::from_secs(10));
     assert_eq!(plan.video_representations.len(), 2);
@@ -353,8 +347,7 @@ fn parses_video_and_audio_representations_and_selects_main_audio() {
 
 #[test]
 fn representation_key_survives_manifest_order_changes() {
-    let original =
-        parse_dash_manifest(BASE_URL, TEMPLATE_MPD).expect("original MPD should parse");
+    let original = parse_dash_manifest(BASE_URL, TEMPLATE_MPD).expect("original MPD should parse");
     let original_v1 = original
         .video_representations
         .iter()
@@ -902,8 +895,8 @@ fn dynamic_representation_key_survives_timeline_growth_and_static_finalization()
 </MPD>"#;
     let live = parse_dash_manifest_at(BASE_URL, &dynamic, dynamic_test_clock(120))
         .expect("parse dynamic representation");
-    let finalized = parse_dash_manifest(BASE_URL, static_mpd)
-        .expect("parse equivalent static presentation");
+    let finalized =
+        parse_dash_manifest(BASE_URL, static_mpd).expect("parse equivalent static presentation");
     let live_representation = &live.video_representations[0];
     let static_representation = &finalized.video_representations[0];
     assert_eq!(live_representation.live_key, static_representation.live_key);
@@ -1344,8 +1337,8 @@ fn expands_duration_template_with_initialization_and_padded_numbers() {
     let plan =
         parse_dash_manifest(BASE_URL, TEMPLATE_MPD).expect("valid template MPD should parse");
     let video = &plan.video_representations[0];
-    let resources = plan_dash_representation(&plan, &video.key)
-        .expect("selected representation should expand");
+    let resources =
+        plan_dash_representation(&plan, &video.key).expect("selected representation should expand");
 
     assert_eq!(resources.resources.len(), 4);
     assert_eq!(
@@ -1384,8 +1377,7 @@ fn expands_timeline_with_explicit_start_and_bounded_negative_repeat() {
 </MPD>"#;
     let plan = parse_dash_manifest(BASE_URL, body).expect("timeline MPD should parse");
     let video = &plan.video_representations[0];
-    let resources =
-        plan_dash_representation(&plan, &video.key).expect("timeline should expand");
+    let resources = plan_dash_representation(&plan, &video.key).expect("timeline should expand");
 
     let urls = resources
         .resources
@@ -1423,8 +1415,8 @@ fn expands_static_timeline_using_presentation_time_offset() {
 </MPD>"#;
     let plan = parse_dash_manifest(BASE_URL, body).expect("non-zero PTO timeline should parse");
     let video = &plan.video_representations[0];
-    let resources = plan_dash_representation(&plan, &video.key)
-        .expect("PTO-aligned timeline should expand");
+    let resources =
+        plan_dash_representation(&plan, &video.key).expect("PTO-aligned timeline should expand");
 
     let urls = resources
         .resources
@@ -1559,8 +1551,7 @@ fn resolves_presentation_time_offset_with_representation_precedence() {
 </AdaptationSet>
   </Period>
 </MPD>"#;
-    let plan =
-        parse_dash_manifest(BASE_URL, inherited).expect("inherited templates should parse");
+    let plan = parse_dash_manifest(BASE_URL, inherited).expect("inherited templates should parse");
     let resources = plan_dash_representation(&plan, &plan.video_representations[0].key)
         .expect("the most specific PTO should be used");
     assert_eq!(resources.resources[0].url.path(), "/path/seg-300.m4s");
@@ -1577,8 +1568,8 @@ fn resolves_presentation_time_offset_with_representation_precedence() {
 </AdaptationSet>
   </Period>
 </MPD>"#;
-    let plan = parse_dash_manifest(BASE_URL, explicit_zero)
-        .expect("explicit zero should override PTO");
+    let plan =
+        parse_dash_manifest(BASE_URL, explicit_zero).expect("explicit zero should override PTO");
     let resources = plan_dash_representation(&plan, &plan.video_representations[0].key)
         .expect("explicit zero PTO should be honored");
     assert_eq!(resources.resources[0].url.path(), "/path/seg-0.m4s");
@@ -1814,8 +1805,8 @@ fn negative_timeline_repeat_uses_ceiling_to_period_end() {
 
 #[test]
 fn video_and_audio_resource_filenames_are_representation_scoped() {
-    let plan = parse_dash_manifest(BASE_URL, TEMPLATE_MPD)
-        .expect("static video/audio MPD should parse");
+    let plan =
+        parse_dash_manifest(BASE_URL, TEMPLATE_MPD).expect("static video/audio MPD should parse");
     let video = plan_dash_representation(&plan, &plan.video_representations[0].key)
         .expect("video representation should expand");
     let audio = plan_dash_representation(&plan, &plan.audio_representations[0].key)
@@ -1866,8 +1857,7 @@ fn expands_segment_list_with_initialization_and_byte_ranges() {
 </MPD>"#;
     let plan = parse_dash_manifest(BASE_URL, body).expect("SegmentList MPD should parse");
     let video = &plan.video_representations[0];
-    let resources =
-        plan_dash_representation(&plan, &video.key).expect("SegmentList should expand");
+    let resources = plan_dash_representation(&plan, &video.key).expect("SegmentList should expand");
 
     assert_eq!(resources.resources.len(), 3);
     assert_eq!(
@@ -1991,10 +1981,7 @@ fn rejects_unknown_templates_and_invalid_byte_ranges() {
 
     assert_eq!(
         parse_dash_manifest(BASE_URL, unknown)
-            .and_then(|plan| plan_dash_representation(
-                &plan,
-                &plan.video_representations[0].key
-            ))
+            .and_then(|plan| plan_dash_representation(&plan, &plan.video_representations[0].key))
             .err(),
         Some(DashError::UnsupportedAddressing)
     );

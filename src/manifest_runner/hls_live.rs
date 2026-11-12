@@ -1324,7 +1324,7 @@ mod destination_part_tests {
     fn transport_stream(seed: u8) -> Vec<u8> {
         let mut bytes = vec![0xff; 188 * 3];
         for (index, packet) in bytes
-            .as_chunks_mut::<{ mpeg_ts::ts::TS_PACKET_SIZE }>()
+            .as_chunks_mut::<188>()
             .0
             .iter_mut()
             .enumerate()

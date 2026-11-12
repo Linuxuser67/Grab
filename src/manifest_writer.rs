@@ -13,7 +13,7 @@ use tokio::io::{AsyncReadExt as _, AsyncSeekExt as _, AsyncWriteExt as _};
 const CHECKPOINT_VERSION: u32 = 3;
 const PREVIOUS_CHECKPOINT_VERSION: u32 = 2;
 const LEGACY_CHECKPOINT_VERSION: u32 = 1;
-const MAX_TRACK_BYTES: u64 = 1 << 40;
+const MAX_TRACK_BYTES: u64 = crate::manifest_types::MAX_MANIFEST_RESOURCE_BYTES;
 /// Maximum size of one staged manifest resource.
 pub(crate) const MAX_RESOURCE_BYTES: u64 = 1024 * 1024 * 1024;
 const MAX_CHECKPOINT_BYTES: u64 = 1024 * 1024;

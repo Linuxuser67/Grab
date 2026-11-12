@@ -565,23 +565,12 @@ pub(super) async fn apply_live_hls_snapshot(
     if full_resource_verification_due {
         track.last_full_resource_verification = Instant::now();
     }
-    for filename in plan.ll_parts_without_init_map() {
-        if !super::is_mpegts_segment(&track.directory.join(filename)).await? {
-            if track.accumulator.segment_count() > 0 {
-                return Ok(LiveHlsSnapshotOutcome::ContinuityLost);
-            }
-            return Err(ManifestRunError::Unsupported(
-                "A Low-Latency HLS part without EXT-X-MAP is not a valid MPEG-TS fragment"
-                    .to_string(),
-            ));
-        }
-    }
+    // Do not parse transport packets one part at a time. FFmpeg's HLS demuxer
+    // must see the complete local playlist and can resynchronize across packet
+    // boundaries or inspect the surrounding program before accepting a stream.
     if track.destination_part.is_some() {
         for resource in &update.resources {
-            if resource.kind != HlsResourceKind::Segment
-                || resource.range.is_some()
-                || !super::is_mpegts_segment(&track.directory.join(&resource.filename)).await?
-            {
+            if resource.kind != HlsResourceKind::Segment || resource.range.is_some() {
                 if track.accumulator.segment_count() > 0 {
                     return Ok(LiveHlsSnapshotOutcome::Stopped(
                         crate::video::StopIntent::Finish,
@@ -695,18 +684,10 @@ fn apply_rendition_report(source: &LiveHlsTrack, peer: &mut LiveHlsTrack) -> boo
     true
 }
 
-async fn live_hls_track_has_only_mpegts_resources(
-    track: &LiveHlsTrack,
-) -> Result<bool, ManifestRunError> {
-    let Some(resources) = track.accumulator.plain_mpegts_resource_names() else {
-        return Ok(false);
-    };
-    for filename in resources {
-        if !super::is_mpegts_segment(&track.directory.join(filename)).await? {
-            return Ok(false);
-        }
-    }
-    Ok(true)
+fn live_hls_track_uses_plain_mpegts_resource_plan(track: &LiveHlsTrack) -> bool {
+    // This selects only the byte-concatenation optimization. The final FFmpeg
+    // demux pass validates the assembled transport stream with full context.
+    track.accumulator.plain_mpegts_resource_names().is_some()
 }
 
 async fn append_live_hls_destination_part(
@@ -745,17 +726,6 @@ async fn append_live_hls_destination_part(
     };
 
     while writer.next_resource_index() < resources.len() {
-        let index = writer.next_resource_index();
-        let filename = resources.get(index).ok_or_else(|| {
-            ManifestRunError::Failed(
-                "The live HLS destination-part checkpoint exceeds its resource plan".to_string(),
-            )
-        })?;
-        if !super::is_mpegts_segment(&track.directory.join(filename)).await? {
-            return Err(ManifestRunError::Failed(
-                "A staged live HLS segment is not a compatible MPEG-TS fragment".to_string(),
-            ));
-        }
         match writer
             .append_next_outcome(abort)
             .await
@@ -966,9 +936,9 @@ pub(super) async fn run_live_hls_tracks(
     let mut use_destination_parts = video_plan.is_plain_mpegts_presentation()
         && audio_plan.is_none_or(HlsPlan::is_plain_mpegts_presentation);
     if use_destination_parts {
-        use_destination_parts = live_hls_track_has_only_mpegts_resources(&video).await?;
+        use_destination_parts = live_hls_track_uses_plain_mpegts_resource_plan(&video);
         if use_destination_parts && let Some(track) = audio.as_ref() {
-            use_destination_parts = live_hls_track_has_only_mpegts_resources(track).await?;
+            use_destination_parts = live_hls_track_uses_plain_mpegts_resource_plan(track);
         }
     }
     if use_destination_parts {

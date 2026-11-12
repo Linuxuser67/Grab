@@ -323,6 +323,46 @@ fn diagnostic_url(url: &Url) -> String {
     origin
 }
 
+/// Number of leading response bytes retained solely for a non-sensitive format hint.
+const HLS_RESPONSE_DIAGNOSTIC_PREFIX_BYTES: usize = 3 * 204 + 8;
+
+/// Classify an HLS response prefix for diagnostics only. This is never a
+/// media acceptance gate: FFmpeg remains responsible for demuxing completed tracks.
+fn hls_response_payload_kind(prefix: &[u8]) -> &'static str {
+    let prefix = prefix
+        .iter()
+        .position(|byte| !byte.is_ascii_whitespace())
+        .map_or(prefix, |start| &prefix[start..]);
+
+    if prefix.starts_with(b"{") || prefix.starts_with(b"[") {
+        return "json";
+    }
+    if prefix.starts_with(b"<") {
+        return "markup";
+    }
+
+    if prefix.get(4..8).is_some_and(|kind| {
+        matches!(
+            kind,
+            b"ftyp" | b"styp" | b"moof" | b"moov" | b"mdat" | b"sidx"
+        )
+    }) {
+        return "fmp4";
+    }
+
+    for (stride, sync_offset, kind) in [
+        (188, 0, "mpegts188"),
+        (192, 4, "mpegts192"),
+        (204, 0, "mpegts204"),
+    ] {
+        if (0..3).all(|packet| prefix.get(sync_offset + packet * stride) == Some(&0x47)) {
+            return kind;
+        }
+    }
+
+    "unknown"
+}
+
 /// Result of one native manifest attempt.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum ManifestOutcome {
@@ -3791,6 +3831,12 @@ async fn fetch_hls_resource_to_writer(
             }
         };
         let status = response.status();
+        let declared_size = response.content_length();
+        let content_type = response
+            .headers()
+            .get(reqwest::header::CONTENT_TYPE)
+            .and_then(|value| value.to_str().ok())
+            .map(str::to_string);
         if status == reqwest::StatusCode::PARTIAL_CONTENT {
             return Err(ManifestRunError::Failed(
                 "The stream server returned partial content for a complete HLS fragment".to_string(),
@@ -3813,6 +3859,8 @@ async fn fetch_hls_resource_to_writer(
 
         let mut stream = response.bytes_stream();
         let mut size = 0_u64;
+        let mut diagnostic_prefix =
+            Vec::with_capacity(HLS_RESPONSE_DIAGNOSTIC_PREFIX_BYTES);
         let staging = writer.staging_directory().ok_or_else(|| {
             ManifestRunError::Failed(
                 "The HLS destination writer has no private staging directory".to_string(),
@@ -3850,6 +3898,9 @@ async fn fetch_hls_resource_to_writer(
                 .ok_or_else(|| {
                     ManifestRunError::Failed("An HLS fragment exceeds the 1 GiB limit".to_string())
                 })?;
+            let prefix_remaining =
+                HLS_RESPONSE_DIAGNOSTIC_PREFIX_BYTES.saturating_sub(diagnostic_prefix.len());
+            diagnostic_prefix.extend_from_slice(&chunk[..chunk.len().min(prefix_remaining)]);
             validator.observe(&chunk).await?;
             writer
                 .write_streamed_chunk(&chunk)
@@ -3870,6 +3921,16 @@ async fn fetch_hls_resource_to_writer(
             )
             .await;
         }
+
+        tracing::debug!(
+            resource_origin = %diagnostic_url(&resource.url),
+            http_status = status.as_u16(),
+            content_type = content_type.as_deref().unwrap_or("unknown"),
+            declared_bytes = ?declared_size,
+            received_bytes = size,
+            payload_kind = hls_response_payload_kind(&diagnostic_prefix),
+            "HLS resource response diagnostics"
+        );
 
         if size == 0 {
             return Err(ManifestRunError::Failed(
@@ -4383,6 +4444,38 @@ async fn run_ffmpeg_with_offsets(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn hls_response_diagnostics_identify_common_payloads_without_rejecting_them() {
+        assert_eq!(
+            hls_response_payload_kind(b"  <!doctype html><html>"),
+            "markup"
+        );
+        assert_eq!(hls_response_payload_kind(b" {\"error\":true}"), "json");
+
+        let mut ts188 = vec![0xff; 188 * 3];
+        for packet in ts188.as_chunks_mut::<188>().0.iter_mut() {
+            packet[0] = 0x47;
+        }
+        assert_eq!(hls_response_payload_kind(&ts188), "mpegts188");
+
+        let mut m2ts192 = vec![0xff; 192 * 3];
+        for packet in m2ts192.as_chunks_mut::<192>().0.iter_mut() {
+            packet[4] = 0x47;
+        }
+        assert_eq!(hls_response_payload_kind(&m2ts192), "mpegts192");
+
+        let mut rs204 = vec![0xff; 204 * 3];
+        for packet in rs204.as_chunks_mut::<204>().0.iter_mut() {
+            packet[0] = 0x47;
+        }
+        assert_eq!(hls_response_payload_kind(&rs204), "mpegts204");
+
+        assert_eq!(
+            hls_response_payload_kind(b"not a recognized media prefix"),
+            "unknown"
+        );
+    }
 
     #[test]
     fn ffmpeg_input_rejection_is_eligible_for_extractor_fallback() {

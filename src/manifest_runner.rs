@@ -3348,15 +3348,8 @@ async fn fetch_and_write_hls_track(
     };
 
     for resource in resources.into_iter().skip(writer.next_resource_index()) {
-        match fetch_hls_resource_to_writer(
-            client,
-            &resource,
-            &mut writer,
-            tx,
-            downloaded,
-            abort,
-        )
-        .await
+        match fetch_hls_resource_to_writer(client, &resource, &mut writer, tx, downloaded, abort)
+            .await
         {
             Ok(true) => {}
             Ok(false) => return Ok(false),
@@ -4318,7 +4311,9 @@ segment-2.m4s
         expected.extend_from_slice(&first);
         expected.extend_from_slice(&second);
         assert_eq!(
-            tokio::fs::read(&part).await.expect("read visible fMP4 part"),
+            tokio::fs::read(&part)
+                .await
+                .expect("read visible fMP4 part"),
             expected,
             "all HTTP-200 resources are assembled without per-resource MP4 validation"
         );

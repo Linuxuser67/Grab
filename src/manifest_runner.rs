@@ -12,7 +12,7 @@ use std::time::{Duration, Instant};
 use thiserror::Error;
 
 use futures_util::{StreamExt as _, TryStreamExt as _};
-use tokio::io::{AsyncBufReadExt as _, AsyncReadExt as _, AsyncWriteExt as _};
+use tokio::io::{AsyncBufReadExt as _, AsyncWriteExt as _};
 use url::Url;
 
 use crate::content_range::{ParsedContentRange, parse_content_range};
@@ -4086,6 +4086,23 @@ mod tests {
     #[test]
     fn sample_aes_iv_rejects_non_hexadecimal_bytes() {
         assert!(hls_sample_aes_iv(Some("éééééééééééééééé"), 0).is_err());
+    }
+
+    fn valid_transport_stream(packet_count: usize, continuity_seed: u8) -> Vec<u8> {
+        const PACKET_SIZE: usize = 188;
+        let mut bytes = vec![0xff; packet_count * PACKET_SIZE];
+        for (index, packet) in bytes
+            .as_chunks_mut::<PACKET_SIZE>()
+            .0
+            .iter_mut()
+            .enumerate()
+        {
+            packet[0] = 0x47;
+            packet[1] = 0;
+            packet[2] = 0;
+            packet[3] = 0x10 | (continuity_seed.wrapping_add(index as u8) & 0x0f);
+        }
+        bytes
     }
 
     fn fmp4_box(kind: &[u8; 4], payload: &[u8]) -> Vec<u8> {

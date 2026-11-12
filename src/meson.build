@@ -9,5 +9,7 @@ cargo_build = custom_target('cargo-build',
   command: [
     cargo_sh, meson.project_source_root(), '@OUTPUT0@',
     get_option('buildtype') == 'release' ? 'release' : 'debug',
+    appstream_metainfo.full_path(),
   ],
+  depends: [appstream_metainfo],
 )

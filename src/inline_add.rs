@@ -301,6 +301,30 @@ pub(crate) fn playlist_count_label(kind: crate::media_types::PlaylistKind, count
     template.replace("{}", &count.to_string())
 }
 
+/// Collection-row count label for a gallery: total, plus the image/video
+/// split when the gallery mixes both. Unknown extensions count in the total.
+fn gallery_count_label(items: &[crate::gallery_probe::GalleryItem]) -> String {
+    let total = items.len();
+    let mut images = 0usize;
+    let mut videos = 0usize;
+    for item in items {
+        match crate::gallery_probe::GalleryContent::from_extension(&item.extension) {
+            crate::gallery_probe::GalleryContent::Image => images += 1,
+            crate::gallery_probe::GalleryContent::Video => videos += 1,
+            crate::gallery_probe::GalleryContent::Unknown => {}
+        }
+    }
+    let files = ngettext("{} file", "{} files", total as u32).replace("{}", &total.to_string());
+    if images == 0 || videos == 0 {
+        return files;
+    }
+    let images =
+        ngettext("{} image", "{} images", images as u32).replace("{}", &images.to_string());
+    let videos =
+        ngettext("{} video", "{} videos", videos as u32).replace("{}", &videos.to_string());
+    format!("{files} · {images} · {videos}")
+}
+
 /// Seconds as M:SS / H:MM:SS. Test-only since subtitles were dropped from
 /// playlist rows (window_tests keeps the formatting pinned).
 #[cfg(test)]
@@ -781,13 +805,16 @@ pub(crate) struct VideoStep {
     pub(crate) options: Rc<RefCell<Vec<FormatOption>>>,
     pub(crate) tools: adw::ActionRow,
     pub(crate) error: adw::ActionRow,
-    /// Hidden gallery title/error row. It is only revealed for a picker
-    /// enumeration error; normal gallery previews do not add a title row.
+    /// Collection row under the URL bar: title, count subtitle, and the
+    /// gallery media-type filter. Also carries picker enumeration errors.
     pub(crate) gallery_info: adw::ActionRow,
-    /// Internal filter state, kept at All; no type-filter control is shown.
+    /// Gallery media-type filter (All/Images/Videos), shown in the
+    /// collection row for gallery-dl results only.
     pub(crate) gallery_filter: adw::ToggleGroup,
-    /// Wrapper retained for the hidden internal filter control.
+    /// Wrapper for the filter control; hidden for non-gallery previews.
     pub(crate) gallery_filter_wrap: gtk4::Box,
+    /// Card holding the collection row directly under the URL bar.
+    pub(crate) collection_group: adw::PreferencesGroup,
     /// True when the current preview is a gallery (not a video).
     pub(crate) is_gallery: Rc<Cell<bool>>,
     /// The gallery card state (filter, items) when is_gallery is true.
@@ -930,6 +957,7 @@ pub(crate) fn hide_video_step(v: &VideoStep) {
     v.manifest_audio_format.set_visible(false);
     v.tools.set_visible(false);
     v.error.set_visible(false);
+    v.collection_group.set_visible(false);
     v.gallery_info.set_visible(false);
     v.select_files_btn.set_visible(false);
     v.gallery_filter_wrap.set_visible(false);
@@ -2577,17 +2605,15 @@ fn build_video_preview(
     video_error.add_suffix(&video_retry_btn);
     video_error.set_visible(false);
     video_group.add(&video_error);
-    // Retained as a diagnostic row for file-enumeration failures only;
-    // a normal gallery preview never shows its collection name.
+    // Collection row under the URL bar: the gallery title and its file
+    // counts, with the media-type filter beside them. Hidden for videos.
     let gallery_info = adw::ActionRow::builder()
         .title(gettext("Gallery"))
         .use_markup(false)
         .build();
-    // File selection is in the URL action row; this row carries the title only.
     gallery_info.set_visible(false);
-    video_group.add(&gallery_info);
-    // Internal gallery filter state. The preview no longer exposes
-    // All / Images / Videos; gallery queueing always uses All.
+    // Gallery-dl filter (All/Images/Videos): queue-all and the file picker
+    // both read the card's filter, so this control only exposes that state.
     let gallery_filter = adw::ToggleGroup::new();
     for (name, label) in [
         ("all", gettext("All")),
@@ -2598,23 +2624,21 @@ fn build_video_preview(
         gallery_filter.add(toggle);
     }
     gallery_filter.set_active_name(Some("all"));
-    // Span the section width: the segmented control reads as one control
-    // across the card instead of a floating pill row.
-    gallery_filter.set_hexpand(true);
     gallery_filter
         .dynamic_cast_ref::<gtk4::Accessible>()
         .expect("AdwToggleGroup implements GtkAccessible")
         .update_property(&[gtk4::accessible::Property::Label(&gettext(
             "Filter gallery by type",
         ))]);
-    // The wrapper owns layout and visibility; the group stays visible inside it.
+    // The wrapper owns visibility; the group stays visible inside it.
     let filter_wrap = gtk4::Box::new(gtk4::Orientation::Horizontal, 6);
-    // Keep the filter above the boxed list's bare row separator.
-    filter_wrap.set_margin_top(6);
-    filter_wrap.set_hexpand(true);
+    filter_wrap.set_valign(gtk4::Align::Center);
     filter_wrap.append(&gallery_filter);
     filter_wrap.set_visible(false);
-    video_group.add(&filter_wrap);
+    gallery_info.add_suffix(&filter_wrap);
+    let collection_group = adw::PreferencesGroup::new();
+    collection_group.add(&gallery_info);
+    collection_group.set_visible(false);
     // The preview block slides down like the options section: the revealer
     // owns show/hide.
     let video_revealer = slide_down_revealer();
@@ -2642,6 +2666,7 @@ fn build_video_preview(
         gallery_info,
         gallery_filter,
         gallery_filter_wrap: filter_wrap,
+        collection_group,
         is_gallery: Rc::new(Cell::new(false)),
         gallery_card: Rc::new(RefCell::new(None)),
         select_files_btn: select_files_btn.clone(),
@@ -2688,7 +2713,8 @@ fn wire_video_preview(step: Rc<VideoStep>) {
             });
     }
     // Keep the progress denominator current for the selected gallery filter.
-    // Counts are internal now; no numeric count is shown in the UI.
+    // The row subtitle shows the probe-time breakdown; these counts drive
+    // queue progress for the active filter.
     {
         let card_rc = step.gallery_card.clone();
         let public_host_leases = Rc::clone(&step.public_host_leases);
@@ -4236,9 +4262,9 @@ pub fn build_add_card(manager: Rc<DownloadManager>) -> AddCard {
     card.append(&clamp);
     revealer.set_child(Some(&card));
 
-    // Form page: URL row (entry + Add), the video preview block, then the
-    // file / torrent / destination rows. Each AdwPreferencesGroup is its
-    // own card; the 12px form spacing separates the cards (HIG).
+    // Form page: URL row (entry + Add), the gallery collection row, the
+    // gear options, then the video preview block. Each AdwPreferencesGroup
+    // is its own card; the 12px form spacing separates the cards (HIG).
     let form = gtk4::Box::new(gtk4::Orientation::Vertical, 12);
     let UrlControls {
         url_bar,
@@ -4251,7 +4277,6 @@ pub fn build_add_card(manager: Rc<DownloadManager>) -> AddCard {
         opts_revealer,
     } = build_url_controls();
     form.append(&url_bar);
-    form.append(&opts_revealer);
     let public_host_leases: PublicHostLeases =
         Rc::new(RefCell::new(PublicHostLeaseScope::default()));
     let (step, video_revealer, video_install_btn, video_retry_btn) = build_video_preview(
@@ -4263,7 +4288,9 @@ pub fn build_add_card(manager: Rc<DownloadManager>) -> AddCard {
         Rc::clone(&public_host_leases),
     );
     wire_video_preview(Rc::clone(&step));
-
+    // Collection row sits directly under the URL bar, above the gear options.
+    form.append(&step.collection_group);
+    form.append(&opts_revealer);
     form.append(&video_revealer);
 
     let DownloadOptionsUi {
@@ -4637,11 +4664,10 @@ fn make_gallery_picker_opener(
                 step3.select_files_btn.set_sensitive(true);
                 step3.select_files_btn.set_label(&orig_label);
             };
-            // Keep the collection title out of the normal preview. Reuse
-            // the hidden row only for an enumeration error when no picker
-            // page was opened to display the failure.
+            // The collection row is normally visible; an enumeration
+            // failure replaces its count subtitle with the error.
             let show_error = |msg: &str| {
-                step3.gallery_info.set_title("");
+                step3.collection_group.set_visible(true);
                 step3.gallery_info.set_subtitle(msg);
                 step3.gallery_info.set_visible(true);
             };
@@ -4808,6 +4834,7 @@ fn show_gallery_ready(v: &VideoStep, card: crate::gallery_card::GalleryCard, tit
     hide_video_step(v);
     set_looking_up(v, false);
     v.is_gallery.set(true);
+    let count_label = gallery_count_label(&card.items);
     // Store the card first so the filter handler can access it.
     *v.gallery_card.borrow_mut() = Some(card);
     // A superseded enumeration can leave the button on "Loading…"; every
@@ -4824,13 +4851,13 @@ fn show_gallery_ready(v: &VideoStep, card: crate::gallery_card::GalleryCard, tit
         .update_property(&[gtk4::accessible::Property::Label(&gettext(
             "Queue all files",
         ))]);
-    // Gallery downloads now use the complete gallery-dl collection.
-    // Keep its title in the hidden state for the queued job, but do not show
-    // a gallery-name row or an All/Images/Videos filter beneath the URL bar.
+    // The collection row under the URL bar carries the title and counts;
+    // the filter chooses what Queue all and Select files enqueue.
     v.gallery_filter.set_active_name(Some("all"));
-    refresh_gallery_info(v, title);
-    v.gallery_info.set_visible(false);
-    v.gallery_filter_wrap.set_visible(false);
+    refresh_gallery_info(v, title, &count_label);
+    v.collection_group.set_visible(true);
+    v.gallery_info.set_visible(true);
+    v.gallery_filter_wrap.set_visible(true);
     // Reveal the block.
     v.action_revealer.set_visible(true);
     v.action_revealer.set_reveal_child(true);
@@ -4839,15 +4866,50 @@ fn show_gallery_ready(v: &VideoStep, card: crate::gallery_card::GalleryCard, tit
     sync_entry_icon(v);
 }
 
-/// Retain the collection title for the gallery job without showing a row.
-fn refresh_gallery_info(v: &VideoStep, title: &str) {
+/// Fill the collection row: title for the queued job, counts as subtitle.
+fn refresh_gallery_info(v: &VideoStep, title: &str, count_label: &str) {
     v.gallery_info.set_title(title);
-    v.gallery_info.set_subtitle("");
+    v.gallery_info.set_subtitle(count_label);
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn gallery_item(extension: &str) -> crate::gallery_probe::GalleryItem {
+        crate::gallery_probe::GalleryItem {
+            filename: format!("item.{extension}"),
+            extension: extension.to_string(),
+            category: String::new(),
+            extra: serde_json::Map::new(),
+        }
+    }
+
+    #[test]
+    fn gallery_count_label_reports_the_mixed_type_breakdown() {
+        let items = vec![
+            gallery_item("jpg"),
+            gallery_item("png"),
+            gallery_item("mp4"),
+        ];
+        assert_eq!(gallery_count_label(&items), "3 files · 2 images · 1 video");
+    }
+
+    #[test]
+    fn gallery_count_label_stays_total_only_for_one_type() {
+        let items = vec![gallery_item("jpg"), gallery_item("png")];
+        assert_eq!(gallery_count_label(&items), "2 files");
+    }
+
+    #[test]
+    fn gallery_count_label_counts_unknown_extensions_in_the_total() {
+        let items = vec![
+            gallery_item("jpg"),
+            gallery_item("mp4"),
+            gallery_item("xyz"),
+        ];
+        assert_eq!(gallery_count_label(&items), "3 files · 1 image · 1 video");
+    }
 
     // This runs with the existing picker_grid Xvfb job. It exercises the
     // playlist and torrent picker pages and proves they wait for user input.

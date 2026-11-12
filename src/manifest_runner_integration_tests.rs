@@ -1660,7 +1660,7 @@ async fn llhls_live_capture_reuses_parts_when_complete_parent_segments_arrive() 
 }
 
 #[tokio::test]
-async fn llhls_mapless_parts_are_committed_only_after_mpegts_validation() {
+async fn llhls_mapless_parts_are_staged_for_ffmpeg_validation() {
     let root = TempRoot::new("llhls-mapless-ts");
     let video_dir = root.path().join("video");
     tokio::fs::create_dir_all(&video_dir)

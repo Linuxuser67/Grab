@@ -1071,7 +1071,6 @@ fn show_manifest_ready(
     let Some(manifest) = manifest_state.as_ref() else {
         return;
     };
-    let source_url = manifest.source_url.clone();
     let choices = manifest.choices();
     let selected_index =
         crate::manifest_intake::preferred_choice_index(&choices, preferred_quality);

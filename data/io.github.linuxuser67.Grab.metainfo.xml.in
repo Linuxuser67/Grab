@@ -1756,6 +1756,11 @@
         <p>First beta: native HTTP backend with pause/resume, segmented downloads, download history, and HIG-compliant UI.</p>
       </description>
     </release>
+    <release version="0.2.1" date="2026-09-07">
+      <description>
+        <p>Native HTTP backend with pause/resume, background downloads, and download history.</p>
+      </description>
+    </release>
     <release version="0.2.1~alpha.13" date="2026-09-08">
       <description>
         <p>Security hardening: capped split sizes, failed engine tasks report instead of stalling, stricter filenames.</p>
@@ -1814,11 +1819,6 @@
     <release version="0.2.1~alpha.2" date="2026-09-07">
       <description>
         <p>HIG compliance pass: failure banner, undo for removals, keyboard shortcuts, screen-reader labels, and release hardening.</p>
-      </description>
-    </release>
-    <release version="0.2.1" date="2026-09-07">
-      <description>
-        <p>Native HTTP backend with pause/resume, background downloads, and download history.</p>
       </description>
     </release>
     <release version="0.1.0" date="2026-09-05">

@@ -1,8 +1,11 @@
-//! Validation of MPEG-2 transport-stream packets used by native HLS downloads.
+//! Bounded validation of MPEG-TS packet prefixes used while an LL-HLS
+//! recording is being staged. Completed tracks are demuxed by FFmpeg.
 
 use mpeg_ts::ts::{AdaptationFieldControl, TS_PACKET_SIZE, TsPacket};
 
-/// Incrementally validates aligned MPEG-TS packets without retaining the segment.
+/// Incrementally validates complete, aligned 188-byte packets without retaining
+/// the resource. This is only used as an early live-capture prefix guard; FFmpeg
+/// owns validation of the completed recording.
 pub(crate) struct TransportStreamValidator {
     packet: [u8; TS_PACKET_SIZE],
     packet_len: usize,
@@ -18,7 +21,7 @@ impl Default for TransportStreamValidator {
 }
 
 impl TransportStreamValidator {
-    /// Create a validator for one complete transport-stream resource.
+    /// Create a validator for one packet prefix.
     #[must_use]
     pub(crate) fn new() -> Self {
         Self {
@@ -60,12 +63,11 @@ impl TransportStreamValidator {
         }
     }
 
-    /// Whether all observed bytes consist of one or more complete valid packets.
+    /// Whether all complete packets observed so far have valid MPEG-TS headers.
     #[must_use]
     pub(crate) fn is_valid_prefix(&self) -> bool {
         self.valid && self.saw_packet && self.packet_len == 0
     }
-
 }
 
 fn is_valid_packet(bytes: &[u8; TS_PACKET_SIZE]) -> bool {
@@ -105,20 +107,6 @@ fn is_valid_packet(bytes: &[u8; TS_PACKET_SIZE]) -> bool {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::TransportStreamValidator;
-    use mpeg_ts::ts::TS_PACKET_SIZE;
-
-    fn packet() -> [u8; TS_PACKET_SIZE] {
-        let mut packet = [0xff; TS_PACKET_SIZE];
-        packet[0] = 0x47;
-        packet[1] = 0;
-        packet[2] = 0;
-        packet[3] = 0x10;
-        packet
-    }
-
-    fn validate_chunks(bytes: &[u8], chunk_size: usize) -> bool {#[cfg(test)]
 mod tests {
     use super::TransportStreamValidator;
     use mpeg_ts::ts::TS_PACKET_SIZE;

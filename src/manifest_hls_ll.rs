@@ -844,7 +844,21 @@ fn validate_playlist_tags(playlist: &LlMediaPlaylist) -> Result<(), ManifestErro
             }
             continue;
         }
-        if tag.starts_with("#EXT-X-ALLOW-CACHE:") || tag.starts_with("#EXT-X-BITRATE:") {
+        // Ad-insertion markers are inert metadata in native planning. Keep
+        // DATERANGE/interstitial tags on fallback because their timing semantics
+        // are not mapped to exact media units.
+        if [
+            "#EXT-X-CUE-OUT",
+            "#EXT-X-CUE-OUT-CONT",
+            "#EXT-X-CUE-IN",
+            "#EXT-OATCLS-SCTE35",
+            "#EXT-X-ASSET:",
+        ]
+        .iter()
+        .any(|marker| tag.starts_with(marker))
+            || tag.starts_with("#EXT-X-ALLOW-CACHE:")
+            || tag.starts_with("#EXT-X-BITRATE:")
+        {
             continue;
         }
         return Err(ManifestError::UnsupportedPlaylistFeature(
@@ -1698,11 +1712,11 @@ segment.ts
             Err(ManifestError::UnsupportedPlaylistFeature(_))
         ));
         let ad = format!(
-            "{prefix}#EXT-X-DATERANGE:ID=\"ad\",CLASS=\"com.apple.hls.interstitial\",START-DATE=\"2026-01-01T00:00:00Z\"\n#EXT-X-PART:DURATION=0.5,URI=\"7.0.m4s\"\n"
+            "{prefix}#EXT-X-CUE-OUT:8\n#EXT-X-PART:DURATION=0.5,URI=\"7.0.m4s\"\n"
         );
         assert!(
             plan_hls_media_playlist(BASE, ad.as_bytes()).is_ok(),
-            "ad-insertion metadata must not filter or reject LL-HLS media"
+            "ad-insertion cue markers must be inert in LL-HLS media planning"
         );
         let encrypted = format!(
             "{prefix}#EXT-X-KEY:METHOD=AES-128,URI=\"key.bin\"\n#EXT-X-PART:DURATION=0.5,URI=\"7.0.m4s\"\n"

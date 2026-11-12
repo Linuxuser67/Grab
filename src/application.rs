@@ -831,6 +831,7 @@ pub fn setup(app: &adw::Application) {
 
             app.set_accels_for_action("app.add-download", &["<Control>n"]);
             app.set_accels_for_action("app.search", &["<Control>f"]);
+            app.set_accels_for_action("app.close-window", &["<Control>w"]);
             app.set_accels_for_action("app.quit", &["<Control>q"]);
             app.set_accels_for_action("app.preferences", &["<Control>comma"]);
             app.set_accels_for_action("app.shortcuts", &["<Control>question"]);
@@ -996,6 +997,18 @@ fn register_actions(
                 .activate(move |_, _, _| {
                     if let Some(s) = st.borrow().as_ref() {
                         s.search_toggle.set_active(!s.search_toggle.is_active());
+                    }
+                })
+                .build()
+        },
+        {
+            let st = Rc::clone(st);
+            gio::ActionEntry::builder("close-window")
+                .activate(move |_, _, _| {
+                    if let Some(s) = st.borrow().as_ref() {
+                        // Match the titlebar close button: active transfers
+                        // keep running in the background; otherwise the app quits.
+                        s.window.close();
                     }
                 })
                 .build()
@@ -1195,6 +1208,10 @@ fn register_actions(
                         section2.add(adw::ShortcutsItem::from_action(
                             &gettext("Preferences"),
                             "app.preferences",
+                        ));
+                        section2.add(adw::ShortcutsItem::new(
+                            &gettext("Close Window"),
+                            "<Control>w",
                         ));
                         section2.add(adw::ShortcutsItem::new(&gettext("Quit"), "<Control>q"));
                         dialog.add(section2);

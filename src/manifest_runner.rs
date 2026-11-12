@@ -4226,7 +4226,7 @@ segment-2.ts
                     &second_response
                 };
                 let header = format!(
-                    "HTTP/1.1 200 OK\\r\\nContent-Length: {}\\r\\nConnection: close\\r\\n\\r\\n",
+                    "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
                     payload.len()
                 );
                 socket

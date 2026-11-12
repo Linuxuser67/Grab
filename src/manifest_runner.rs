@@ -167,10 +167,28 @@ fn subtitle_mux_unsupported(log: &str) -> bool {
     .any(|needle| log.contains(needle))
 }
 
+/// Whether FFmpeg rejected the input presentation rather than its output destination.
+fn ffmpeg_rejected_input(log: &str) -> bool {
+    let log = log.to_ascii_lowercase();
+    [
+        "invalid data found when processing input",
+        "does not contain any stream",
+    ]
+    .iter()
+    .any(|needle| log.contains(needle))
+}
+
+/// Classify a failed FFmpeg pass: unsupported source media falls back to yt-dlp,
+/// while local output/storage failures remain terminal and preserve staged inputs.
 fn mux_failure_error(log: &str) -> ManifestRunError {
     if ffmpeg_log_indicates_storage_full(log) {
         return ManifestRunError::Failed(
             "Not enough free disk space to finalize this stream".to_string(),
+        );
+    }
+    if ffmpeg_rejected_input(log) {
+        return ManifestRunError::Unsupported(
+            "FFmpeg could not demux the selected stream".to_string(),
         );
     }
 
@@ -2563,16 +2581,9 @@ async fn decrypt_hls_sample_aes_segments(
                 "iori-ssa returned an incomplete HLS SAMPLE-AES segment".to_string(),
             ));
         }
-        let mut validator = TransportStreamValidator::new();
-        validator.observe(&decrypted);
-        let decrypted_size = u64::try_from(decrypted.len()).map_err(|_| {
-            ManifestRunError::Failed("The decrypted HLS segment is too large".to_string())
-        })?;
-        if !validator.is_valid_complete(decrypted_size) {
-            return Err(ManifestRunError::Unsupported(
-                "iori-ssa produced an invalid MPEG-TS SAMPLE-AES segment".to_string(),
-            ));
-        }
+        // The encrypted input has already passed the bounded SAMPLE-AES/PES
+        // preflight. Let FFmpeg validate the complete decrypted playlist after
+        // all segments are localized; individual segments may need demux context.
 
         // Write each decrypted occurrence to a distinct staged file. Keep
         // encrypted source resources untouched until the whole playlist succeeds.
@@ -3637,10 +3648,13 @@ async fn fetch_and_write_hls_track(
         .iter()
         .map(|resource| resource.filename.clone())
         .collect::<Vec<_>>();
+    // Do not pre-validate MPEG-TS one segment at a time. Some valid streams
+    // need FFmpeg's demuxer to resynchronize or inspect the assembled program
+    // before it can recognize the tracks. The final FFmpeg pass is authoritative.
     let format = if plan.is_single_init_fmp4_presentation() {
         OrderedTrackFormat::Fmp4
     } else {
-        OrderedTrackFormat::MpegTs
+        OrderedTrackFormat::Any
     };
     let (writer, committed_bytes) =
         crate::manifest_writer::OrderedTrackWriter::open_destination_part(
@@ -3701,15 +3715,13 @@ async fn fetch_and_write_hls_track(
 
 enum HlsResourceValidator {
     Any,
-    MpegTs(TransportStreamValidator),
     Fmp4(tokio::fs::File),
 }
 
 impl HlsResourceValidator {
     fn new(format: OrderedTrackFormat, staging: &Path) -> Result<Self, ManifestRunError> {
         match format {
-            OrderedTrackFormat::Any => Ok(Self::Any),
-            OrderedTrackFormat::MpegTs => Ok(Self::MpegTs(TransportStreamValidator::new())),
+            OrderedTrackFormat::Any | OrderedTrackFormat::MpegTs => Ok(Self::Any),
             OrderedTrackFormat::Fmp4 => {
                 let file = tempfile::tempfile_in(staging).map_err(|error| {
                     ManifestRunError::Failed(format!(
@@ -3724,10 +3736,6 @@ impl HlsResourceValidator {
     async fn observe(&mut self, chunk: &[u8]) -> Result<(), ManifestRunError> {
         match self {
             Self::Any => Ok(()),
-            Self::MpegTs(validator) => {
-                validator.observe(chunk);
-                Ok(())
-            }
             Self::Fmp4(file) => file.write_all(chunk).await.map_err(|error| {
                 manifest_storage_error("Could not stage an HLS fMP4 resource for validation", error)
             }),
@@ -3737,7 +3745,6 @@ impl HlsResourceValidator {
     async fn validate(self, size: u64) -> Result<bool, ManifestRunError> {
         match self {
             Self::Any => Ok(true),
-            Self::MpegTs(validator) => Ok(validator.is_valid_complete(size)),
             Self::Fmp4(mut file) => {
                 file.flush().await.map_err(|error| {
                     manifest_storage_error("Could not flush an HLS fMP4 validation resource", error)
@@ -3874,13 +3881,9 @@ async fn fetch_hls_resource_to_writer(
             ));
         }
         if !validator.validate(size).await? {
-            let message = match format {
-                OrderedTrackFormat::Fmp4 => {
-                    "The HLS media resource is not a compatible fMP4 fragment"
-                }
-                _ => "The HLS media segment is not a compatible MPEG-TS fragment",
-            };
-            return Err(ManifestRunError::Unsupported(message.to_string()));
+            return Err(ManifestRunError::Unsupported(
+                "The HLS media resource is not a compatible fMP4 fragment".to_string(),
+            ));
         }
 
         Ok(true)
@@ -4427,6 +4430,30 @@ async fn run_ffmpeg_with_offsets(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn ffmpeg_input_rejection_is_eligible_for_extractor_fallback() {
+        assert!(matches!(
+            mux_failure_error("Error opening input: Invalid data found when processing input"),
+            ManifestRunError::Unsupported(_)
+        ));
+        assert!(matches!(
+            mux_failure_error("Output file #0 does not contain any stream"),
+            ManifestRunError::Unsupported(_)
+        ));
+    }
+
+    #[test]
+    fn ffmpeg_output_failures_remain_terminal() {
+        assert!(matches!(
+            mux_failure_error("Could not write header: Permission denied"),
+            ManifestRunError::Failed(_)
+        ));
+        assert!(matches!(
+            mux_failure_error("No space left on device"),
+            ManifestRunError::Failed(_)
+        ));
+    }
 
     #[test]
     fn vsd_adts_validation_rejects_zero_length_frames() {

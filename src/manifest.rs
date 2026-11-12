@@ -62,8 +62,6 @@ pub(crate) enum ManifestError {
     UnsupportedSessionKeyMethod,
     #[error("unsupported HLS session key format")]
     UnsupportedSessionKeyFormat,
-    #[error("unsupported HLS ad insertion marker: {0}")]
-    UnsupportedAdInsertion(String),
     #[error("unsupported HLS resource url")]
     UnsupportedResourceUrl,
     #[error("HLS byte range has no usable offset")]
@@ -1766,7 +1764,7 @@ pub(crate) fn parse_hls_master_playlist(
 /// playlist points FFmpeg at the staged key file; other encryption methods are
 /// deliberately rejected. Ordinary live playlists and the supported LL-HLS
 /// part/blocking-reload path are accepted for incremental capture. Delta updates
-/// are reconstructed against committed state; unsupported encryption, ad/date
+/// are reconstructed against committed state; unsupported encryption, date-range
 /// markers, or incomplete continuity remain on yt-dlp fallback.
 ///
 /// # Errors

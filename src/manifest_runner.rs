@@ -53,9 +53,6 @@ use hls_live::{
 
 /// Upper bound for one media resource, independent of a server-supplied length.
 const MAX_RESOURCE_BYTES: u64 = crate::manifest_writer::MAX_RESOURCE_BYTES;
-/// Maximum encrypted SAMPLE-AES segment size accepted by the in-memory decoder.
-/// The decoder and MPEG-TS preflight both need whole-segment buffers, so this
-/// limit is intentionally much smaller than the general staged-resource cap.
 /// Aggregate resource ceiling, matching the regular segmented downloader's 1 TiB trust limit.
 const MAX_MANIFEST_DOWNLOAD_BYTES: u64 = crate::manifest_types::MAX_MANIFEST_RESOURCE_BYTES;
 /// Idle budget for receiving a response body; progressing transfers are not wall-clock limited.

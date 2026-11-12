@@ -1264,6 +1264,9 @@ fn live_hls_test_source(url: &str) -> crate::media_types::ManifestSource {
 async fn saved_live_hls_capture_finalizes_without_contacting_the_origin() {
     let source = live_hls_test_source("https://origin.example.test/master.m3u8");
     let root = TempRoot::new("live-offline");
+    let destination = root.path().join("recording.mp4");
+    crate::manifest_destination::ensure_plan(root.path(), &destination, 0, false, false)
+        .expect("persist saved live HLS destination plan");
     let video_dir = root.path().join("video");
     let audio_dir = root.path().join("audio");
     tokio::fs::create_dir_all(&video_dir)
@@ -1312,7 +1315,7 @@ async fn saved_live_hls_capture_finalizes_without_contacting_the_origin() {
         &source,
         None,
         root.path(),
-        root.path(),
+        &destination,
         0,
         root.path(),
         &local_plan,
@@ -1330,7 +1333,7 @@ async fn saved_live_hls_capture_finalizes_without_contacting_the_origin() {
     .expect("finalize stored capture without a network request");
 
     assert_eq!(outcome.outcome, LiveHlsCaptureOutcome::Ended);
-    assert_eq!(outcome.output, super::LiveHlsOutput::LocalPlaylist);
+    assert_eq!(outcome.output, super::LiveHlsOutput::DestinationParts);
     assert_eq!(
         downloaded.load(Ordering::Relaxed),
         segment_bytes.len() as u64,
@@ -1344,7 +1347,7 @@ async fn saved_live_hls_capture_finalizes_without_contacting_the_origin() {
         &source,
         None,
         root.path(),
-        root.path(),
+        &destination,
         0,
         root.path(),
         &local_plan,
@@ -1361,7 +1364,7 @@ async fn saved_live_hls_capture_finalizes_without_contacting_the_origin() {
     .await
     .expect("resume a durable finish without polling the source");
     assert_eq!(finish_outcome.outcome, LiveHlsCaptureOutcome::Finish);
-    assert_eq!(finish_outcome.output, super::LiveHlsOutput::LocalPlaylist);
+    assert_eq!(finish_outcome.output, super::LiveHlsOutput::DestinationParts);
     let final_playlist = m3u8_rs::parse_media_playlist_res(
         &tokio::fs::read(video_dir.join("local.m3u8"))
             .await
@@ -2028,6 +2031,9 @@ async fn live_hls_sequence_gap_preserves_already_committed_media() {
 async fn live_hls_pause_keeps_the_last_committed_window() {
     let source = live_hls_test_source("https://origin.example.test/live.m3u8");
     let root = TempRoot::new("live-preserve");
+    let destination = root.path().join("recording.mp4");
+    crate::manifest_destination::ensure_plan(root.path(), &destination, 0, false, false)
+        .expect("persist paused live HLS destination plan");
     let video_dir = root.path().join("video");
     let audio_dir = root.path().join("audio");
     tokio::fs::create_dir_all(&audio_dir)
@@ -2126,7 +2132,7 @@ async fn live_hls_pause_keeps_the_last_committed_window() {
         &source,
         None,
         root.path(),
-        root.path(),
+        &destination,
         0,
         root.path(),
         &first,
@@ -2143,7 +2149,7 @@ async fn live_hls_pause_keeps_the_last_committed_window() {
     .await
     .expect("finish the restored live HLS capture");
     assert_eq!(finished.outcome, LiveHlsCaptureOutcome::Finish);
-    assert_eq!(finished.output, super::LiveHlsOutput::LocalPlaylist);
+    assert_eq!(finished.output, super::LiveHlsOutput::DestinationParts);
 }
 
 #[tokio::test]

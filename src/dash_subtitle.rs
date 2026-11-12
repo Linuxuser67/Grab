@@ -9,7 +9,7 @@ use std::fs::{self, File, OpenOptions};
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::Path;
 
-use crate::mp4_validation::{BoundedReader, MAX_PARSER_READ_BYTES, ReadBudget};
+use crate::mp4_reader::{BoundedReader, MAX_PARSER_READ_BYTES, ReadBudget};
 
 /// Caps the assembled track before parsing its MP4 box tree.
 pub(super) const MAX_TRACK_BYTES: u64 = 64 * 1024 * 1024;

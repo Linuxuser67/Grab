@@ -612,7 +612,9 @@ pub(crate) fn has_untrusted_cache_query(url: &url::Url) -> bool {
 
     let is_youtube_page = matches!(
         url.host_str().map(str::to_ascii_lowercase).as_deref(),
-        Some("youtube.com" | "www.youtube.com" | "m.youtube.com" | "music.youtube.com" | "youtu.be")
+        Some(
+            "youtube.com" | "www.youtube.com" | "m.youtube.com" | "music.youtube.com" | "youtu.be"
+        )
     );
     if !is_youtube_page {
         return true;

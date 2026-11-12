@@ -1711,9 +1711,7 @@ segment.ts
             plan_hls_media_playlist(BASE, gap.as_bytes()),
             Err(ManifestError::UnsupportedPlaylistFeature(_))
         ));
-        let ad = format!(
-            "{prefix}#EXT-X-CUE-OUT:8\n#EXT-X-PART:DURATION=0.5,URI=\"7.0.m4s\"\n"
-        );
+        let ad = format!("{prefix}#EXT-X-CUE-OUT:8\n#EXT-X-PART:DURATION=0.5,URI=\"7.0.m4s\"\n");
         assert!(
             plan_hls_media_playlist(BASE, ad.as_bytes()).is_ok(),
             "ad-insertion cue markers must be inert in LL-HLS media planning"

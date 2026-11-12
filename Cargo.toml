@@ -24,10 +24,7 @@ m3u8-rs = "6.0.1"
 # parser upgrade has reviewed the new untrusted-input behavior against fixtures.
 broadcast-hls = "=0.4.0"
 # SAMPLE-AES preflight reassembles PES/Raw packets with the API also used by iori-ssa.
-# Post-decryption transport-stream validation uses the separate mpeg-ts parser.
 mpeg2ts = "=0.3.1"
-# Parse and validate MPEG-2 transport packets in native HLS segments.
-mpeg-ts = { version = "=0.6.2", default-features = false, features = ["std"] }
 # Parse ISO BMFF box trees for structural validation of native fMP4 resources.
 mp4box = { version = "=0.14.0", default-features = false }
 # Keep this exact pin: the ADTS safety guard is audited against iori-ssa 0.2.1 parser behavior.

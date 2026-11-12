@@ -1690,9 +1690,6 @@ async fn llhls_mapless_parts_are_committed_only_after_mpegts_validation() {
     let mut plan =
         crate::manifest::plan_hls_media_playlist("https://origin.example.test/live.m3u8", body)
             .expect("plan mapless LL-HLS MPEG-TS part");
-    let mapless_parts = plan.ll_parts_without_init_map().collect::<Vec<_>>();
-    assert_eq!(mapless_parts.len(), 1);
-    assert!(mapless_parts[0].starts_with("segment-ll-00000000000000000005-part-000000-"));
 
     let files = HashMap::from([("/5.0.ts".to_string(), transport_stream.clone())]);
     let (fixture_base, server) = spawn_fixture_server(files, 1).await;
@@ -1739,7 +1736,7 @@ async fn llhls_mapless_parts_are_committed_only_after_mpegts_validation() {
 }
 
 #[tokio::test]
-async fn llhls_mapless_non_transport_stream_part_is_rejected_before_commit() {
+async fn llhls_mapless_non_transport_stream_part_is_staged_for_ffmpeg_validation() {
     let root = TempRoot::new("llhls-mapless-invalid");
     let video_dir = root.path().join("video");
     tokio::fs::create_dir_all(&video_dir)
@@ -1771,7 +1768,7 @@ async fn llhls_mapless_non_transport_stream_part_is_rejected_before_commit() {
     let downloaded = Arc::new(AtomicU64::new(0));
     let (_stop_tx, mut abort) = tokio::sync::oneshot::channel();
 
-    assert!(matches!(
+    assert_eq!(
         apply_live_hls_snapshot(
             &client,
             &plan,
@@ -1782,15 +1779,24 @@ async fn llhls_mapless_non_transport_stream_part_is_rejected_before_commit() {
             &mut abort,
             0,
         )
-        .await,
-        Err(ManifestRunError::Unsupported(_))
-    ));
+        .await
+        .expect("stage a complete LL-HLS part for FFmpeg validation"),
+        LiveHlsSnapshotOutcome::Committed
+    );
     wait_for_fixture_server(server).await;
-    assert_eq!(track.accumulator.segment_count(), 0);
-    assert!(
-        tokio::fs::symlink_metadata(video_dir.join("local.m3u8"))
+    assert_eq!(track.accumulator.segment_count(), 1);
+    let local = m3u8_rs::parse_media_playlist_res(
+        &tokio::fs::read(video_dir.join("local.m3u8"))
             .await
-            .is_err()
+            .expect("read staged local playlist"),
+    )
+    .expect("parse staged local playlist");
+    assert_eq!(
+        tokio::fs::read(video_dir.join(&local.segments[0].uri))
+            .await
+            .expect("read staged mapless part"),
+        b"not an MPEG-TS fragment",
+        "the resource is staged; FFmpeg, not a per-part packet heuristic, owns demux validation"
     );
 }
 

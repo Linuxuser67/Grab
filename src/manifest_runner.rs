@@ -4341,7 +4341,7 @@ segment-2.m4s
         .await
         .expect_err("FFmpeg must reject the assembled invalid fMP4 track");
         assert!(
-            matches!(error, ManifestRunError::Unsupported(message) if message.contains("FFmpeg could not demux")),
+            matches!(&error, ManifestRunError::Unsupported(message) if message.contains("FFmpeg could not demux")),
             "format rejection must come from FFmpeg input demux, got {error:?}"
         );
         assert!(

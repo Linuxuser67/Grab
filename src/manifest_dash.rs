@@ -354,6 +354,12 @@ pub(crate) fn parse_dash_manifest_at(
     // downloads the encoded resources and does not render them, so this descriptor
     // does not restrict native download planning. ContentProtection remains
     // explicitly rejected below because it signals protected media.
+    // FFmpeg's DASH demuxer does not resolve XLink. Reject MPDs using the
+    // standard namespace instead of following references or planning an
+    // incomplete presentation from the unresolved element.
+    if body.contains("http://www.w3.org/1999/xlink") {
+        return Err(DashError::UnsupportedPresentation);
+    }
     let mpd = dash_mpd_core::parse(body).map_err(|_| DashError::Parse)?;
     let mut presentation = match mpd.mpdtype.as_deref() {
         None | Some("static") => {
@@ -2782,6 +2788,15 @@ mod tests {
             result,
             String::from_utf8(captured).expect("DASH diagnostic logs are UTF-8"),
         )
+    }
+
+    #[test]
+    fn rejects_xlink_mpd_without_following_external_references() {
+        let body = r#"<MPD xmlns="urn:mpeg:dash:schema:mpd:2011" xmlns:xlink="http://www.w3.org/1999/xlink" type="static" mediaPresentationDuration="PT2S"><Period xlink:href="period.xml" xlink:actuate="onLoad"/></MPD>"#;
+        assert_eq!(
+            parse_dash_manifest(BASE_URL, body).err(),
+            Some(DashError::UnsupportedPresentation)
+        );
     }
 
     #[test]

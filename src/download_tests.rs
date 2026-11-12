@@ -302,6 +302,11 @@ fn drain_engine(manager: &DownloadManager, id: u64) {
     // Also wait for finished-row sizings: `set_finished_detail` spawns one
     // per completion, and it outlives the engine that triggered it.
     while (manager.running.borrow().contains_key(&id)
+        || manager
+            .stopping
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .contains(&id)
         || manager.preparing.borrow().contains(&id)
         || manager.preparation_handles.borrow().contains_key(&id)
         || manager.pump_handles.borrow().contains_key(&id)
@@ -2744,6 +2749,9 @@ fn magnet_delete_trashes_recorded_subfolder() {
     let _ = std::fs::remove_dir_all(&dir);
     // Teardown BEFORE restoring keys (see rejects_relative_download_dir).
     manager.cancel_all();
+    // The Done status schedules a finished-row sizing task. Drain it before
+    // releasing MAIN_LOOP_LOCK so another test thread cannot reap its GLib future.
+    drain_sizing(&manager);
     let _ = std::fs::remove_dir_all(&dir);
     settings.set_int("max-concurrent", 3).unwrap();
 }
@@ -3714,6 +3722,43 @@ fn pause_starts_next_queued() {
     drain_engine(&manager, 62);
     assert!(!manager.running.borrow().contains_key(&62));
     assert_eq!(b.status(), DownloadStatus::Failed);
+}
+
+#[test]
+fn immediate_resume_waits_for_aborted_worker_to_exit() {
+    let (_lock, _loop) = test_locks();
+    let _qf = test_queue_file("resume-after-abort");
+    let settings = test_settings();
+    settings.set_int("max-concurrent", 1).unwrap();
+    let manager = DownloadManager::new(gio::ListStore::new::<DownloadItem>(), settings);
+    let item = DownloadItem::new(64, "http://127.0.0.1:9/a.bin", "a.bin", "/tmp/dl");
+    item.set_status(DownloadStatus::Downloading);
+    manager.store().append(&item);
+    let holder = tokio_rt().spawn(async {
+        tokio::time::sleep(Duration::from_secs(3600)).await;
+    });
+    manager.running.borrow_mut().insert(64, holder);
+
+    manager.pause(64);
+    manager.resume(64);
+
+    assert!(
+        manager
+            .stopping
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .contains(&64),
+        "the previous worker must remain reserved while its aborted task is being dropped"
+    );
+    assert!(
+        !manager.running.borrow().contains_key(&64),
+        "a stopped task must not consume a global scheduler slot"
+    );
+    assert!(
+        wait_for_started(&manager, 64, Duration::from_secs(10)),
+        "the resumed row should start after the previous worker has exited"
+    );
+    drain_engine(&manager, 64);
 }
 
 #[test]

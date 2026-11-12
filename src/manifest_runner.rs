@@ -3721,7 +3721,7 @@ enum HlsResourceValidator {
 impl HlsResourceValidator {
     fn new(format: OrderedTrackFormat, staging: &Path) -> Result<Self, ManifestRunError> {
         match format {
-            OrderedTrackFormat::Any | OrderedTrackFormat::MpegTs => Ok(Self::Any),
+            OrderedTrackFormat::Any => Ok(Self::Any),
             OrderedTrackFormat::Fmp4 => {
                 let file = tempfile::tempfile_in(staging).map_err(|error| {
                     ManifestRunError::Failed(format!(
@@ -3922,7 +3922,6 @@ async fn fetch_hls_resource_to_writer(
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum OrderedTrackFormat {
     Any,
-    MpegTs,
     Fmp4,
 }
 
@@ -4026,24 +4025,14 @@ async fn fetch_and_write_ordered_track(
                                     directory.join(&resource_names[next_resource_index]);
                                 let compatible = match format {
                                     OrderedTrackFormat::Any => true,
-                                    OrderedTrackFormat::MpegTs => {
-                                        is_mpegts_segment(&resource_path).await?
-                                    }
                                     OrderedTrackFormat::Fmp4 => {
                                         is_fmp4_resource(&resource_path).await?
                                     }
                                 };
                                 if !compatible {
-                                    let message = match format {
-                                        OrderedTrackFormat::Fmp4 => {
-                                            "The HLS media resource is not a compatible fMP4 fragment"
-                                        }
-                                        _ => {
-                                            "The HLS media segment is not a compatible MPEG-TS fragment"
-                                        }
-                                    };
                                     break 'window Err(ManifestRunError::Unsupported(
-                                        message.to_string(),
+                                        "The media resource is not a compatible fMP4 fragment"
+                                            .to_string(),
                                     ));
                                 }
                                 match writer.append_next(abort).await {

@@ -5,6 +5,14 @@ use crate::media_types::{
     ManifestAudioKey, ManifestKind, ManifestRepresentationKey, ManifestSubtitleKey,
 };
 
+/// Shared cap for the number of media segments in static and live DASH plans.
+pub(crate) const MAX_DASH_SEGMENTS: usize = 100_000;
+
+/// Shared 1 TiB ceiling used by manifest track writers and live-capture accounting.
+/// Callers retain their own scope-specific counters; this constant prevents the
+/// coupled limits from drifting apart.
+pub(crate) const MAX_MANIFEST_RESOURCE_BYTES: u64 = 1 << 40;
+
 /// One selectable video choice from a parsed native manifest.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct ManifestChoice {

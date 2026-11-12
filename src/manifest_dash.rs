@@ -9,6 +9,7 @@ use url::Url;
 
 use super::dash_roles::{self, DASH_ROLE_SCHEME};
 use super::{MAX_MANIFEST_BYTES, ManifestByteRange};
+use crate::manifest_types::MAX_DASH_SEGMENTS;
 
 #[path = "manifest_dash_ll.rs"]
 mod low_latency;
@@ -16,7 +17,6 @@ mod low_latency;
 #[path = "manifest_dash_ll_tests.rs"]
 mod low_latency_tests;
 const MAX_REPRESENTATIONS: usize = 1_024;
-const MAX_SEGMENTS: usize = 100_000;
 const MIN_DYNAMIC_UPDATE_PERIOD: Duration = Duration::from_millis(500);
 const MAX_DYNAMIC_UPDATE_PERIOD: Duration = Duration::from_secs(300);
 // DASH-IF's current HTTPS identifier, the HTTP identifier emitted by FFmpeg,
@@ -1074,7 +1074,7 @@ pub(crate) fn plan_dash_representation(
         }
         segment_count = segment_count
             .checked_add(period_segment_count)
-            .filter(|count| *count <= MAX_SEGMENTS)
+            .filter(|count| *count <= MAX_DASH_SEGMENTS)
             .ok_or(DashError::LimitExceeded)?;
         for resource in period_resources {
             if period_index > 0 && resource.kind == DashResourceKind::Initialization {
@@ -1757,8 +1757,8 @@ fn effective_list(
     }
 
     let segment_urls = segment_urls.ok_or(DashError::InvalidSegment)?;
-    if segment_urls.is_empty() || segment_urls.len() > MAX_SEGMENTS {
-        return Err(if segment_urls.len() > MAX_SEGMENTS {
+    if segment_urls.is_empty() || segment_urls.len() > MAX_DASH_SEGMENTS {
+        return Err(if segment_urls.len() > MAX_DASH_SEGMENTS {
             DashError::LimitExceeded
         } else {
             DashError::InvalidSegment
@@ -2205,7 +2205,7 @@ fn dynamic_segment_times(
                     .end_number
                     .map_or(u64::MAX, |end| end.saturating_sub(number).saturating_add(1)),
             );
-            if total_count > MAX_SEGMENTS as u64 {
+            if total_count > MAX_DASH_SEGMENTS as u64 {
                 return Err(DashError::LimitExceeded);
             }
 
@@ -2219,7 +2219,7 @@ fn dynamic_segment_times(
                     .ok_or(DashError::InvalidSegment)?;
                 if end <= elapsed_ticks && end > window_start_ticks {
                     available.push((number, time));
-                    if available.len() > MAX_SEGMENTS {
+                    if available.len() > MAX_DASH_SEGMENTS {
                         return Err(DashError::LimitExceeded);
                     }
                 }
@@ -2254,7 +2254,7 @@ fn dynamic_segment_times(
             .ok_or(DashError::InvalidSegment)?;
         let mut index = start_index;
         while index < bounded_count {
-            if available.len() >= MAX_SEGMENTS {
+            if available.len() >= MAX_DASH_SEGMENTS {
                 return Err(DashError::LimitExceeded);
             }
             let time = index
@@ -2299,8 +2299,8 @@ fn expand_template(
             return Err(DashError::UnsupportedPresentation);
         }
     }
-    if segments.is_empty() || segments.len() > MAX_SEGMENTS {
-        return Err(if segments.len() > MAX_SEGMENTS {
+    if segments.is_empty() || segments.len() > MAX_DASH_SEGMENTS {
+        return Err(if segments.len() > MAX_DASH_SEGMENTS {
             DashError::LimitExceeded
         } else {
             DashError::InvalidSegment
@@ -2419,7 +2419,7 @@ fn expand_segment_times(template: &DashTemplate) -> Result<Vec<(u64, u64, u64)>,
                 }
                 expanded_count = expanded_count
                     .checked_add(1)
-                    .filter(|count| *count <= MAX_SEGMENTS)
+                    .filter(|count| *count <= MAX_DASH_SEGMENTS)
                     .ok_or(DashError::LimitExceeded)?;
 
                 // S@t is on the sample timeline and remains the value used for
@@ -2475,8 +2475,8 @@ fn expand_segment_times(template: &DashTemplate) -> Result<Vec<(u64, u64, u64)>,
         .ok_or(DashError::InvalidSegment)?;
     let count = ceil_div_u128(numerator, denominator)?;
     let count = usize::try_from(count).map_err(|_| DashError::LimitExceeded)?;
-    if count == 0 || count > MAX_SEGMENTS {
-        return Err(if count > MAX_SEGMENTS {
+    if count == 0 || count > MAX_DASH_SEGMENTS {
+        return Err(if count > MAX_DASH_SEGMENTS {
             DashError::LimitExceeded
         } else {
             DashError::InvalidSegment

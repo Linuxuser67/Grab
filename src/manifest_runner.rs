@@ -30,7 +30,6 @@ use crate::manifest_intake::ManifestLookup;
 #[cfg(test)]
 use crate::manifest_intake::NativeManifest;
 use crate::media_types::{ManifestKind, ManifestRepresentationKey, ManifestSource};
-use crate::mp4_validation::is_fmp4_resource as validate_fmp4_resource;
 
 mod dash_live;
 mod hls_live;
@@ -3605,7 +3604,6 @@ async fn fetch_and_write_dash_track(
         tx,
         downloaded,
         abort,
-        format: OrderedTrackFormat::Any,
     })
     .await
 }
@@ -3645,14 +3643,8 @@ async fn fetch_and_write_hls_track(
         .iter()
         .map(|resource| resource.filename.clone())
         .collect::<Vec<_>>();
-    // Do not pre-validate MPEG-TS one segment at a time. Some valid streams
-    // need FFmpeg's demuxer to resynchronize or inspect the assembled program
-    // before it can recognize the tracks. The final FFmpeg pass is authoritative.
-    let format = if plan.is_single_init_fmp4_presentation() {
-        OrderedTrackFormat::Fmp4
-    } else {
-        OrderedTrackFormat::Any
-    };
+    // Stage resources in playlist order. FFmpeg validates the complete track
+    // with its initialization context during finalization.
     let (writer, committed_bytes) =
         crate::manifest_writer::OrderedTrackWriter::open_destination_part(
             resource_names,
@@ -3675,16 +3667,8 @@ async fn fetch_and_write_hls_track(
     };
 
     for resource in resources.into_iter().skip(writer.next_resource_index()) {
-        match fetch_hls_resource_to_writer(
-            client,
-            &resource,
-            format,
-            &mut writer,
-            tx,
-            downloaded,
-            abort,
-        )
-        .await
+        match fetch_hls_resource_to_writer(client, &resource, &mut writer, tx, downloaded, abort)
+            .await
         {
             Ok(true) => {}
             Ok(false) => return Ok(false),
@@ -3710,60 +3694,10 @@ async fn fetch_and_write_hls_track(
     Ok(true)
 }
 
-enum HlsResourceValidator {
-    Any,
-    Fmp4(tokio::fs::File),
-}
-
-impl HlsResourceValidator {
-    fn new(format: OrderedTrackFormat, staging: &Path) -> Result<Self, ManifestRunError> {
-        match format {
-            OrderedTrackFormat::Any => Ok(Self::Any),
-            OrderedTrackFormat::Fmp4 => {
-                let file = tempfile::tempfile_in(staging).map_err(|error| {
-                    ManifestRunError::Failed(format!(
-                        "Could not create private fMP4 validation staging: {error}"
-                    ))
-                })?;
-                Ok(Self::Fmp4(tokio::fs::File::from_std(file)))
-            }
-        }
-    }
-
-    async fn observe(&mut self, chunk: &[u8]) -> Result<(), ManifestRunError> {
-        match self {
-            Self::Any => Ok(()),
-            Self::Fmp4(file) => file.write_all(chunk).await.map_err(|error| {
-                manifest_storage_error("Could not stage an HLS fMP4 resource for validation", error)
-            }),
-        }
-    }
-
-    async fn validate(self, size: u64) -> Result<bool, ManifestRunError> {
-        match self {
-            Self::Any => Ok(true),
-            Self::Fmp4(mut file) => {
-                file.flush().await.map_err(|error| {
-                    manifest_storage_error("Could not flush an HLS fMP4 validation resource", error)
-                })?;
-                let mut file = file.into_std().await;
-                tokio::task::spawn_blocking(move || validate_fmp4_resource(&mut file, 0, size))
-                    .await
-                    .map_err(|error| {
-                        ManifestRunError::Failed(format!(
-                            "Could not validate an HLS fMP4 resource: {error}"
-                        ))
-                    })
-            }
-        }
-    }
-}
-
 /// Fetch exactly one static HLS resource into the owned destination part.
 async fn fetch_hls_resource_to_writer(
     client: &reqwest::Client,
     resource: &Resource,
-    format: OrderedTrackFormat,
     writer: &mut crate::manifest_writer::OrderedTrackWriter,
     tx: &tokio::sync::mpsc::UnboundedSender<EngineMsg>,
     downloaded: &AtomicU64,
@@ -3814,12 +3748,6 @@ async fn fetch_hls_resource_to_writer(
 
         let mut stream = response.bytes_stream();
         let mut size = 0_u64;
-        let staging = writer.staging_directory().ok_or_else(|| {
-            ManifestRunError::Failed(
-                "The HLS destination writer has no private staging directory".to_string(),
-            )
-        })?;
-        let mut validator = HlsResourceValidator::new(format, staging)?;
         let pace_start = Instant::now();
         let mut paced = 0_u64;
         let mut last_progress = Instant::now();
@@ -3851,7 +3779,6 @@ async fn fetch_hls_resource_to_writer(
                 .ok_or_else(|| {
                     ManifestRunError::Failed("An HLS fragment exceeds the 1 GiB limit".to_string())
                 })?;
-            validator.observe(&chunk).await?;
             writer
                 .write_streamed_chunk(&chunk)
                 .await
@@ -3877,12 +3804,6 @@ async fn fetch_hls_resource_to_writer(
                 "The stream server returned an empty HLS fragment".to_string(),
             ));
         }
-        if !validator.validate(size).await? {
-            return Err(ManifestRunError::Unsupported(
-                "The HLS media resource is not a compatible fMP4 fragment".to_string(),
-            ));
-        }
-
         Ok(true)
     }
     .await;
@@ -3916,12 +3837,6 @@ async fn fetch_hls_resource_to_writer(
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum OrderedTrackFormat {
-    Any,
-    Fmp4,
-}
-
 struct ManifestOrderedTrackTransfer<'a> {
     client: &'a reqwest::Client,
     staging: &'a Path,
@@ -3935,7 +3850,6 @@ struct ManifestOrderedTrackTransfer<'a> {
     tx: &'a tokio::sync::mpsc::UnboundedSender<EngineMsg>,
     downloaded: &'a Arc<AtomicU64>,
     abort: &'a mut tokio::sync::oneshot::Receiver<crate::video::StopIntent>,
-    format: OrderedTrackFormat,
 }
 
 async fn fetch_and_write_ordered_track(
@@ -3954,7 +3868,6 @@ async fn fetch_and_write_ordered_track(
         tx,
         downloaded,
         abort,
-        format,
     } = context;
     let resource_names = resources
         .iter()
@@ -4018,20 +3931,6 @@ async fn fetch_and_write_ordered_track(
                         Some(Ok(index)) => {
                             completed.insert(index);
                             while completed.remove(&next_resource_index) {
-                                let resource_path =
-                                    directory.join(&resource_names[next_resource_index]);
-                                let compatible = match format {
-                                    OrderedTrackFormat::Any => true,
-                                    OrderedTrackFormat::Fmp4 => {
-                                        is_fmp4_resource(&resource_path).await?
-                                    }
-                                };
-                                if !compatible {
-                                    break 'window Err(ManifestRunError::Unsupported(
-                                        "The media resource is not a compatible fMP4 fragment"
-                                            .to_string(),
-                                    ));
-                                }
                                 match writer.append_next(abort).await {
                                     Ok(true) => next_resource_index += 1,
                                     Ok(false) => break 'window Ok(false),
@@ -4053,9 +3952,7 @@ async fn fetch_and_write_ordered_track(
             Err(error) => {
                 tx.send(progress_message(downloaded.load(Ordering::Relaxed)))
                     .ok();
-                if format != OrderedTrackFormat::Any
-                    && matches!(&error, ManifestRunError::Unsupported(_))
-                {
+                if matches!(&error, ManifestRunError::Unsupported(_)) {
                     drop(writer);
                     crate::manifest_writer::cleanup_destination_part(
                         staging,
@@ -4133,30 +4030,6 @@ async fn concat_dash_resource_names(
         crate::manifest_writer::cleanup_committed_resources(resources, directory, filename).await?;
     }
     Ok(true)
-}
-
-/// Whether a fetched resource is a structurally complete ISO BMFF init segment
-/// or fragmented media segment.
-async fn is_fmp4_resource(path: &Path) -> Result<bool, ManifestRunError> {
-    let path = path.to_path_buf();
-    tokio::task::spawn_blocking(move || {
-        let mut file = std::fs::File::open(&path).map_err(|error| {
-            format!(
-                "Could not open an HLS media fragment at {}: {error}",
-                path.display()
-            )
-        })?;
-        let size = file
-            .metadata()
-            .map_err(|error| format!("Could not inspect an HLS media fragment: {error}"))?
-            .len();
-        Ok(validate_fmp4_resource(&mut file, 0, size))
-    })
-    .await
-    .map_err(|error| {
-        ManifestRunError::Failed(format!("Could not validate an HLS fMP4 resource: {error}"))
-    })?
-    .map_err(ManifestRunError::Failed)
 }
 
 async fn remove_regular_file_if_present(path: &Path) -> Result<(), String> {
@@ -4484,76 +4357,6 @@ mod tests {
         let moof = fmp4_box(b"moof", &mfhd);
         let mdat = fmp4_box(b"mdat", media_data);
         [moof, mdat].concat()
-    }
-
-    #[tokio::test]
-    async fn fmp4_fragment_validation_checks_complete_box_structure() {
-        let directory = tempfile::tempdir().expect("create fragment test directory");
-        let path = directory.path().join("segment.bin");
-        let bytes = valid_fmp4_media_segment(1, &[0x12, 0x34]);
-
-        tokio::fs::write(&path, &bytes)
-            .await
-            .expect("write fMP4 fragment");
-        assert!(
-            is_fmp4_resource(&path)
-                .await
-                .expect("inspect fMP4 fragment")
-        );
-
-        let mut malformed = bytes;
-        malformed[8..12].copy_from_slice(&u32::MAX.to_be_bytes());
-        tokio::fs::write(&path, malformed)
-            .await
-            .expect("write malformed fMP4 fragment");
-        assert!(
-            !is_fmp4_resource(&path)
-                .await
-                .expect("inspect malformed fMP4 fragment")
-        );
-
-        tokio::fs::write(&path, b"<!DOCTYPE html>")
-            .await
-            .expect("write HTML error page");
-        assert!(
-            !is_fmp4_resource(&path)
-                .await
-                .expect("inspect HTML error page")
-        );
-    }
-
-    #[tokio::test]
-    async fn streamed_fmp4_validation_spools_without_buffering_the_resource() {
-        let staging = tempfile::tempdir().expect("create fMP4 validation staging");
-        let bytes = valid_fmp4_media_segment(1, &[0x12, 0x34]);
-        let mut validator = HlsResourceValidator::new(OrderedTrackFormat::Fmp4, staging.path())
-            .expect("create fMP4 resource validator");
-
-        for chunk in bytes.chunks(5) {
-            validator
-                .observe(chunk)
-                .await
-                .expect("stage fMP4 resource chunk");
-        }
-        assert!(
-            validator
-                .validate(bytes.len() as u64)
-                .await
-                .expect("validate staged fMP4 resource")
-        );
-
-        let mut invalid = HlsResourceValidator::new(OrderedTrackFormat::Fmp4, staging.path())
-            .expect("create second fMP4 resource validator");
-        invalid
-            .observe(b"<!DOCTYPE html>")
-            .await
-            .expect("stage invalid fMP4 response");
-        assert!(
-            !invalid
-                .validate(15)
-                .await
-                .expect("reject invalid fMP4 response")
-        );
     }
 
     #[tokio::test]

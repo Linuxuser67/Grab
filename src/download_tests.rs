@@ -7514,7 +7514,7 @@ fn a_finalizer_releases_the_reservation_after_the_worker() {
 }
 
 #[test]
-fn removing_a_never_spawned_video_row_releases_synchronously() {
+fn removing_a_never_spawned_video_row_releases_after_finalizer() {
     // No worker in flight: reclaim runs inline, reservation already gone at return.
     let (_q, _l) = test_locks();
     let _qf = test_queue_file("reserve-release-sync");
@@ -7547,9 +7547,17 @@ fn removing_a_never_spawned_video_row_releases_synchronously() {
         },
     );
     manager.remove(id);
+
+    // Video cleanup runs in the tracked finalizer even when no worker was spawned.
+    // Observe the reservation rather than its task handle: a fast finalizer may
+    // be reaped before this test regains control.
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    while manager.dest_reserved(&dest) && std::time::Instant::now() < deadline {
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
     assert!(
         !manager.dest_reserved(&dest),
-        "the inline reclaim must release the destination before remove returns"
+        "the finalizer must release the destination after cleanup"
     );
     let _ = std::fs::remove_dir_all(&dest_dir);
 }

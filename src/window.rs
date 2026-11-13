@@ -251,41 +251,23 @@ pub fn build_window(
     // Inline New Download card, pinned under the header above the list (and
     // the empty state). The queue stays usable underneath it.
     let add_card = crate::inline_add::build_add_card(Rc::clone(&manager));
-    // HIG search: the toggle button lives in the header; the search bar
-    // slides down below it (GtkSearchBar's built-in animation), sized to
-    // match the inline New Download card (12px margins).
+    // Use GTK's standard GNOME search bar: it reveals below the header,
+    // owns its close button, and captures unhandled window typing.
     let search = gtk4::SearchEntry::builder()
         .placeholder_text(gettext("Search downloads"))
         .hexpand(true)
         .build();
-    // Keep the search controls in a simple Adwaita card, not a settings group.
-    let search_close = gtk4::Button::builder()
-        .icon_name("window-close-symbolic")
-        .css_classes(["flat", "circular"])
-        .valign(gtk4::Align::Center)
-        .tooltip_text(gettext("Close search"))
+    let search_bar = gtk4::SearchBar::builder()
+        .child(&search)
+        .show_close_button(true)
         .build();
-    search_close.update_property(&[gtk4::accessible::Property::Label(&gettext("Close search"))]);
-    let search_row = gtk4::Box::new(gtk4::Orientation::Horizontal, 12);
-    search_row.append(&search);
-    search_row.append(&search_close);
-    let search_card = gtk4::Box::new(gtk4::Orientation::Vertical, 0);
-    search_card.add_css_class("card");
-    search_row.set_margin_top(6);
-    search_row.set_margin_bottom(6);
-    search_row.set_margin_start(12);
-    search_row.set_margin_end(12);
-    search_card.append(&search_row);
-    let search_bar = gtk4::SearchBar::builder().child(&search_card).build();
+    search_bar.set_widget_name("download-search-bar");
     search_bar.connect_entry(&search);
     search_bar.set_key_capture_widget(Some(&window));
-    // Same 600px clamp as the New Download card.
-    let search_clamp = adw::Clamp::builder()
-        .maximum_size(600)
-        .margin_start(12)
-        .margin_end(12)
-        .build();
-    search_clamp.set_child(Some(&search_bar));
+    search_bar.set_margin_top(12);
+    search_bar.set_margin_bottom(12);
+    search_bar.set_margin_start(12);
+    search_bar.set_margin_end(12);
 
     let menu = gio::Menu::new();
     let section = gio::Menu::new();
@@ -346,9 +328,10 @@ pub fn build_window(
             }
         });
     }
-    // Keep the primary menu at the trailing edge, with New Download beside it.
-    header.pack_end(&add_btn);
+    // GtkHeaderBar prepends pack_end children: the menu is nearest the
+    // window controls, with New Download immediately to its left.
     header.pack_end(&menu_btn);
+    header.pack_end(&add_btn);
     header.pack_start(&search_toggle);
 
     let content_stack = gtk4::Stack::new();
@@ -552,21 +535,12 @@ pub fn build_window(
             }
         });
     }
-    // GtkSearchBar handles Escape and keyboard-triggered search itself.
-    // Custom close button exits search mode via the toggle.
-    {
-        let toggle = search_toggle.clone();
-        search_close.connect_clicked(move |_| {
-            toggle.set_active(false);
-        });
-    }
-    // Keep the toggle in sync when Escape exits search mode.
+    // Keep the header toggle synchronized whether search is opened by the
+    // button, type-to-search, Ctrl+F, or GTK's built-in close/Escape behavior.
     {
         let toggle = search_toggle.clone();
         search_bar.connect_search_mode_enabled_notify(move |bar| {
-            if !bar.is_search_mode() {
-                toggle.set_active(false);
-            }
+            toggle.set_active(bar.is_search_mode());
         });
     }
     content.append(&active_section);
@@ -1025,7 +999,7 @@ pub fn build_window(
 
     let toolbar = adw::ToolbarView::new();
     toolbar.add_top_bar(&header);
-    toolbar.add_top_bar(&search_clamp);
+    toolbar.add_top_bar(&search_bar);
     toolbar.add_top_bar(&banner);
     toolbar.add_bottom_bar(&switcher_bar);
     // The add card's gallery/playlist picker pages can be much taller than

@@ -4450,12 +4450,7 @@ mod tests {
 
     fn valid_transport_stream(packet_count: usize, continuity_seed: u8) -> Vec<u8> {
         let mut bytes = vec![0xff; packet_count * 188];
-        for (index, packet) in bytes
-            .as_chunks_mut::<188>()
-            .0
-            .iter_mut()
-            .enumerate()
-        {
+        for (index, packet) in bytes.as_chunks_mut::<188>().0.iter_mut().enumerate() {
             packet[0] = 0x47;
             packet[1] = 0;
             packet[2] = 0;

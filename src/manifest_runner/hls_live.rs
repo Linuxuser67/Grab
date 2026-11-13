@@ -857,7 +857,7 @@ async fn poll_live_hls_track(
         biased;
         stop = &mut *abort => {
             return Ok(LiveHlsSnapshotOutcome::Stopped(
-                stop.unwrap_or(crate::video::StopIntent::Discard),
+                crate::video::stop_intent_or_pause(stop),
             ));
         }
         result = crate::manifest_intake::lookup_hls_live_media(
@@ -972,7 +972,7 @@ async fn refresh_live_hls_pathway(
     let refresh_result = tokio::select! {
         biased;
         stop = &mut *abort => return Ok(Some(
-            stop.unwrap_or(crate::video::StopIntent::Discard)
+            crate::video::stop_intent_or_pause(stop)
         )),
         result = crate::manifest_intake::refresh_hls_content_steering_with_timeout(
             client,
@@ -1047,7 +1047,7 @@ async fn refresh_live_hls_pathway(
         let lookup = tokio::select! {
             biased;
             stop = &mut *abort => return Ok(Some(
-                stop.unwrap_or(crate::video::StopIntent::Discard)
+                crate::video::stop_intent_or_pause(stop)
             )),
             result = crate::manifest_intake::lookup_hls_media_with_variables(
                 client,
@@ -1092,7 +1092,7 @@ async fn refresh_live_hls_pathway(
             let lookup = tokio::select! {
                 biased;
                 stop = &mut *abort => return Ok(Some(
-                    stop.unwrap_or(crate::video::StopIntent::Discard)
+                    crate::video::stop_intent_or_pause(stop)
                 )),
                 result = crate::manifest_intake::lookup_hls_media_with_variables(
                     client,
@@ -1528,7 +1528,7 @@ pub(super) async fn run_live_hls_tracks(
             biased;
             stop = &mut *abort => {
                 return Ok(LiveHlsCapture::new(
-                    match stop.unwrap_or(crate::video::StopIntent::Discard) {
+                    match crate::video::stop_intent_or_pause(stop) {
                         crate::video::StopIntent::Pause => LiveHlsCaptureOutcome::Paused,
                         crate::video::StopIntent::Finish => LiveHlsCaptureOutcome::Finish,
                         crate::video::StopIntent::Discard => LiveHlsCaptureOutcome::Discard,

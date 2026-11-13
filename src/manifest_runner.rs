@@ -12,7 +12,7 @@ use std::time::{Duration, Instant};
 use thiserror::Error;
 
 use futures_util::{StreamExt as _, TryStreamExt as _};
-use tokio::io::{AsyncBufReadExt as _, AsyncReadExt as _, AsyncWriteExt as _};
+use tokio::io::{AsyncBufReadExt as _, AsyncWriteExt as _};
 use url::Url;
 
 use crate::content_range::{ParsedContentRange, parse_content_range};

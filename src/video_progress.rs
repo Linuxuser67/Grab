@@ -339,6 +339,18 @@ mod playlist_event_tests {
     use super::{YtdlpPlaylistEvent, parse_ytdlp_playlist_event};
 
     #[test]
+    fn rejects_playlist_events_from_other_invocations_and_unscoped_output() {
+        assert_eq!(
+            parse_ytdlp_playlist_event("@GRAB:othernonce:DONE;abc123;4;/tmp/a.mp4", "testnonce"),
+            None
+        );
+        assert_eq!(
+            parse_ytdlp_playlist_event("[GrabPlaylistDone];abc123;4;/tmp/a.mp4", "testnonce"),
+            None
+        );
+    }
+
+    #[test]
     fn parses_tagged_playlist_file_events() {
         assert_eq!(
             parse_ytdlp_playlist_event("@GRAB:testnonce:START;abc123;4;/tmp/004 - title.mp4", "testnonce"),

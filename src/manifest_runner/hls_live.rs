@@ -2060,7 +2060,7 @@ mod live_hls_outcome_tests {
         steering.active_pathway_id = Some("backup".to_string());
         let previous_pathway = Some("primary".to_string());
 
-        restore_previous_active_pathway(&mut steering, &previous_pathway);
+        restore_previous_active_pathway(&mut steering, previous_pathway.clone());
 
         assert_eq!(steering.active_pathway_id, previous_pathway);
     }

@@ -138,8 +138,7 @@ struct GalleryPreviewCacheKey {
     proxy: Option<String>,
 }
 
-type GalleryPreviewItems = Option<Vec<crate::gallery_probe::GalleryItem>>;
-type GalleryPreviewCacheMap = HashMap<GalleryPreviewCacheKey, (Instant, GalleryPreviewItems)>;
+type GalleryPreviewCacheMap = HashMap<GalleryPreviewCacheKey, (Instant, Vec<crate::gallery_probe::GalleryItem>)>;
 type GalleryPreviewCache = Mutex<GalleryPreviewCacheMap>;
 
 static GALLERY_PREVIEW_CACHE: LazyLock<GalleryPreviewCache> =
@@ -172,8 +171,10 @@ fn gallery_preview_cache_key(
     })
 }
 
-/// `Some(None)` is a cached "no items" result; `None` is a miss.
-fn gallery_preview_cache_get(key: &GalleryPreviewCacheKey) -> Option<GalleryPreviewItems> {
+/// Only non-empty gallery listings are cached; `None` is always a cache miss.
+fn gallery_preview_cache_get(
+    key: &GalleryPreviewCacheKey,
+) -> Option<Vec<crate::gallery_probe::GalleryItem>> {
     let mut cache = GALLERY_PREVIEW_CACHE.lock().ok()?;
     let expired = cache
         .get(key)
@@ -185,7 +186,10 @@ fn gallery_preview_cache_get(key: &GalleryPreviewCacheKey) -> Option<GalleryPrev
     cache.get(key).map(|(_, items)| items.clone())
 }
 
-fn gallery_preview_cache_insert(key: GalleryPreviewCacheKey, items: &GalleryPreviewItems) {
+fn gallery_preview_cache_insert(
+    key: GalleryPreviewCacheKey,
+    items: &[crate::gallery_probe::GalleryItem],
+) {
     let Ok(mut cache) = GALLERY_PREVIEW_CACHE.lock() else {
         return;
     };
@@ -195,12 +199,12 @@ fn gallery_preview_cache_insert(key: GalleryPreviewCacheKey, items: &GalleryPrev
 fn insert_gallery_preview(
     cache: &mut GalleryPreviewCacheMap,
     key: GalleryPreviewCacheKey,
-    items: &GalleryPreviewItems,
+    items: &[crate::gallery_probe::GalleryItem],
     now: Instant,
 ) {
-    // Empty and absent listings are negative results: do not let a transient
-    // empty preview suppress a later lookup for the same page.
-    if items.as_ref().is_none_or(Vec::is_empty) {
+    // Empty listings may be transient; keep them out of the cache so Retry
+    // always performs a fresh probe.
+    if items.is_empty() {
         return;
     }
 
@@ -216,7 +220,7 @@ fn insert_gallery_preview(
             cache.remove(&oldest_key);
         }
     }
-    cache.insert(key, (now, items.clone()));
+    cache.insert(key, (now, items.to_vec()));
 }
 
 /// Probe both backends for one URL, concurrently: yt-dlp's video check and
@@ -251,7 +255,7 @@ pub(crate) async fn dual_probe(ctx: DualProbeCtx<'_>) -> DualProbeOutcome {
         let cached = cache_key.as_ref().and_then(gallery_preview_cache_get);
         let r = if let Some(items) = cached {
             tracing::debug!(url_host = %host, "gallery-dl preview cache hit");
-            Ok(items)
+            Ok(Some(items))
         } else {
             let r = crate::gallery_probe::probe_gallery_with_proxy(
                 &ctx.tool,
@@ -266,7 +270,7 @@ pub(crate) async fn dual_probe(ctx: DualProbeCtx<'_>) -> DualProbeOutcome {
             // after the probe: a replaced or removed jar must not store its
             // result under the old credentials' key.
             let unchanged = gallery_preview_cache_key(&url, &auth, ctx.proxy.as_ref()) == cache_key;
-            if let Ok(items) = &r
+            if let Ok(Some(items)) = &r
                 && let Some(key) = cache_key
                 && unchanged
             {
@@ -657,12 +661,12 @@ mod tests {
             user_agent: None,
             proxy: None,
         };
-        let items = Some(vec![crate::gallery_probe::GalleryItem {
+        let items = vec![crate::gallery_probe::GalleryItem {
             filename: "one.jpg".to_string(),
             extension: "jpg".to_string(),
             category: "image".to_string(),
             extra: serde_json::Map::new(),
-        }]);
+        }];
         gallery_preview_cache_insert(key.clone(), &items);
         let cached = gallery_preview_cache_get(&key).expect("cache hit");
         assert_eq!(cached.as_ref().map(|items| items.len()), Some(1));
@@ -687,22 +691,19 @@ mod tests {
             user_agent: None,
             proxy: None,
         };
-        let no_items: GalleryPreviewItems = None;
-        let empty_items: GalleryPreviewItems = Some(Vec::new());
         let start = Instant::now();
         let empty_key = key("empty");
-        insert_gallery_preview(&mut cache, empty_key.clone(), &no_items, start);
-        insert_gallery_preview(&mut cache, empty_key.clone(), &empty_items, start);
+        insert_gallery_preview(&mut cache, empty_key.clone(), &[], start);
         assert!(!cache.contains_key(&empty_key));
 
-        let items: GalleryPreviewItems = Some(vec![crate::gallery_probe::GalleryItem {
+        let items = vec![crate::gallery_probe::GalleryItem {
             filename: "one.jpg".to_string(),
             extension: "jpg".to_string(),
             category: "image".to_string(),
             extra: serde_json::Map::new(),
-        }]);
+        }];
         for index in 0..GALLERY_PREVIEW_CACHE_CAPACITY {
-            let inserted_at = start + Duration::from_secs(index as u64);
+            let inserted_at = start + Duration::from_secs(u64::try_from(index).expect("cache index fits u64"));
             insert_gallery_preview(
                 &mut cache,
                 key(&format!("item-{index}")),
@@ -713,7 +714,7 @@ mod tests {
         assert_eq!(cache.len(), GALLERY_PREVIEW_CACHE_CAPACITY);
 
         let overflow_key = key("overflow");
-        let inserted_at = start + Duration::from_secs(GALLERY_PREVIEW_CACHE_CAPACITY as u64);
+        let inserted_at = start + Duration::from_secs(u64::try_from(GALLERY_PREVIEW_CACHE_CAPACITY).expect("cache capacity fits u64"));
         insert_gallery_preview(&mut cache, overflow_key.clone(), &items, inserted_at);
 
         assert_eq!(cache.len(), GALLERY_PREVIEW_CACHE_CAPACITY);

@@ -4946,25 +4946,25 @@ segment-2.m4s
     #[test]
     fn dash_output_container_follows_the_selected_video_mime_type() {
         assert_eq!(
-            crate::manifest_plan::dash_output_container_extension(Some("video/mp2t")),
-            Some("ts")
+            crate::manifest_plan::dash_output_container(Some("video/mp2t")),
+            Some(crate::media_types::ManifestContainer::Ts)
         );
         assert_eq!(
-            crate::manifest_plan::dash_output_container_extension(Some("video/mp4")),
-            Some("mp4")
+            crate::manifest_plan::dash_output_container(Some("video/mp4")),
+            Some(crate::media_types::ManifestContainer::Mp4)
         );
         assert_eq!(
-            crate::manifest_plan::dash_output_container_extension(Some(
+            crate::manifest_plan::dash_output_container(Some(
                 "application/mp4; codecs=avc1"
             )),
-            Some("mp4")
+            Some(crate::media_types::ManifestContainer::Mp4)
         );
         assert_eq!(
-            crate::manifest_plan::dash_output_container_extension(Some("video/webm")),
+            crate::manifest_plan::dash_output_container(Some("video/webm")),
             None
         );
         assert_eq!(
-            crate::manifest_plan::dash_output_container_extension(None),
+            crate::manifest_plan::dash_output_container(None),
             None
         );
     }

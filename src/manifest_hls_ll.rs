@@ -234,7 +234,6 @@ fn hls_key_method(attributes: &[u8]) -> Option<&[u8]> {
     None
 }
 
-
 fn is_hls_method_none_key_tag(tag: &str) -> bool {
     let Some(attributes) = tag.as_bytes().strip_prefix(b"#EXT-X-KEY:") else {
         return false;

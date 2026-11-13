@@ -2003,6 +2003,7 @@ async fn lookup_with_client_policy(
                 &body,
                 transport_policy,
                 proxy_configured,
+                fetch_mode,
             )
             .await?;
             let body = std::str::from_utf8(&body).map_err(|error| {
@@ -2043,6 +2044,32 @@ async fn lookup_with_http_fixture_client(
 
 /// Resolve one bounded layer of DASH XLink onLoad references before MPD parsing.
 async fn resolve_dash_xlinks(
+    client: &reqwest::Client,
+    parent_url: &Url,
+    body: &[u8],
+    transport_policy: ManifestTransportPolicy,
+    proxy_configured: bool,
+    fetch_mode: ManifestFetchMode,
+) -> Result<Vec<u8>, ManifestIntakeError> {
+    // Bound cumulative latency across sequential XLinks, in addition to
+    // the per-request timeout, so 16 links cannot multiply it unchecked.
+    let total_budget = match fetch_mode {
+        ManifestFetchMode::Preview => MANIFEST_LOOKUP_BUDGET,
+        ManifestFetchMode::Download => MANIFEST_REQUEST_TIMEOUT.saturating_mul(2),
+    };
+    tokio::time::timeout(
+        total_budget,
+        resolve_dash_xlinks_inner(client, parent_url, body, transport_policy, proxy_configured),
+    )
+    .await
+    .map_err(|_| {
+        ManifestIntakeError::Retryable(
+            "DASH XLink expansion exceeded its total time budget".to_string(),
+        )
+    })?
+}
+
+async fn resolve_dash_xlinks_inner(
     client: &reqwest::Client,
     parent_url: &Url,
     body: &[u8],
@@ -2706,6 +2733,7 @@ video.m3u8
             body,
             ManifestTransportPolicy::HttpFixture,
             false,
+            ManifestFetchMode::Download,
         )
         .await
         .expect("bounded Period XLink resolution");
@@ -2727,6 +2755,7 @@ video.m3u8
             body,
             ManifestTransportPolicy::HttpsOnly,
             true,
+            ManifestFetchMode::Download,
         )
         .await
         .expect_err("proxied XLinks must fail before fetching");
@@ -2750,6 +2779,7 @@ video.m3u8
                 body.as_bytes(),
                 ManifestTransportPolicy::HttpsOnly,
                 false,
+                ManifestFetchMode::Download,
             )
             .await
             .expect_err("off-origin private XLink target must be rejected before fetching");

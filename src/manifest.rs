@@ -598,7 +598,7 @@ impl HlsPlan {
     /// fMP4/CMAF playlists carry an EXT-X-MAP initialization section; ordinary
     /// MPEG-TS playlists do not. This deliberately does not use the manifest
     /// URL suffix, because both formats are commonly served through .m3u8 URLs.
-    pub(crate) fn output_container_extension(&self) -> Option<&'static str> {
+    pub(crate) fn output_container(&self) -> Option<crate::media_types::ManifestContainer> {
         if self.local_playlist.segments.is_empty() {
             return None;
         }
@@ -610,9 +610,9 @@ impl HlsPlan {
                 .iter()
                 .any(|segment| segment.map.is_some())
             {
-                "mp4"
+                crate::media_types::ManifestContainer::Mp4
             } else {
-                "ts"
+                crate::media_types::ManifestContainer::MpegTs
             },
         )
     }

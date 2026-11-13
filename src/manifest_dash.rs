@@ -279,11 +279,15 @@ impl DashRepresentationSource {
                     || initialization_has_query(template.initialization.as_ref())
             }
             DashAddressing::List(list) => {
-                initialization_has_query(list.initialization.as_ref())
-                    || list
-                        .segments
-                        .iter()
-                        .any(|segment| resource_reference_has_query(&self.base_url, &segment.media))
+                let segment_has_query = match &list.segments {
+                    DashListSegments::Static(segments) => segments.iter().any(|segment| {
+                        resource_reference_has_query(&self.base_url, &segment.media)
+                    }),
+                    DashListSegments::Dynamic(segments) => segments.iter().any(|segment| {
+                        resource_reference_has_query(&self.base_url, &segment.media)
+                    }),
+                };
+                initialization_has_query(list.initialization.as_ref()) || segment_has_query
             }
             DashAddressing::Base(_) => false,
             DashAddressing::IndexedBase(index) => {

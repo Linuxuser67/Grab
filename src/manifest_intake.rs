@@ -4981,7 +4981,6 @@ video/variant.m3u8
             false,
         )
         .await
-        .expect("TTL refresh should succeed")
         .expect("expired steering state should be refreshed");
         let requests = server.await.expect("steering refresh fixture task");
         assert!(

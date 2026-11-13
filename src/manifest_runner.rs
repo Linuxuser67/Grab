@@ -29,7 +29,9 @@ use crate::manifest::{
 use crate::manifest_intake::ManifestLookup;
 #[cfg(test)]
 use crate::manifest_intake::NativeManifest;
-use crate::media_types::{ManifestContainer, ManifestKind, ManifestRepresentationKey, ManifestSource};
+use crate::media_types::{
+    ManifestContainer, ManifestKind, ManifestRepresentationKey, ManifestSource,
+};
 
 mod dash_live;
 mod hls_live;

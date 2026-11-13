@@ -55,18 +55,14 @@ pub(crate) fn parse_ytdlp_template(line: &str) -> Option<YtProgress> {
 pub(crate) enum YtdlpPlaylistEvent {
     Started {
         file_id: String,
-        playlist_index: usize,
-        filename: String,
     },
     Progress {
         file_id: String,
-        playlist_index: usize,
         downloaded: Option<u64>,
         total: Option<u64>,
     },
     Finished {
         file_id: String,
-        playlist_index: usize,
         path: String,
     },
 }
@@ -80,46 +76,34 @@ pub(crate) fn parse_ytdlp_playlist_event(
     let line = line.trim_end_matches(['\r', '\n']);
     let marker = format!("@GRAB:{event_nonce}:");
     let line = line.strip_prefix(&marker)?;
-    let parse_index = |raw: &str| raw.parse::<usize>().ok();
     let parse_bytes = |raw: Option<&str>| {
         raw.filter(|value| *value != "NA")
             .and_then(|value| value.parse::<u64>().ok())
     };
 
     if let Some(rest) = line.strip_prefix("START;") {
-        let mut fields = rest.splitn(3, ';');
-        let file_id = fields.next()?.to_string();
-        let playlist_index = parse_index(fields.next()?)?;
-        let filename = fields.next()?.to_string();
-        if file_id.is_empty() {
+        if rest.is_empty() {
             return None;
         }
         return Some(YtdlpPlaylistEvent::Started {
-            file_id,
-            playlist_index,
-            filename,
+            file_id: rest.to_string(),
         });
     }
 
     if let Some(rest) = line.strip_prefix("DONE;") {
-        let mut fields = rest.splitn(3, ';');
-        let file_id = fields.next()?.to_string();
-        let playlist_index = parse_index(fields.next()?)?;
-        let path = fields.next()?.to_string();
+        let (file_id, path) = rest.split_once(';')?;
         if file_id.is_empty() || path.is_empty() {
             return None;
         }
         return Some(YtdlpPlaylistEvent::Finished {
-            file_id,
-            playlist_index,
-            path,
+            file_id: file_id.to_string(),
+            path: path.to_string(),
         });
     }
 
     if let Some(rest) = line.strip_prefix("PROGRESS;") {
-        let mut fields = rest.splitn(6, ';');
+        let mut fields = rest.splitn(5, ';');
         let file_id = fields.next()?.to_string();
-        let playlist_index = parse_index(fields.next()?)?;
         let status = fields.next()?;
         if file_id.is_empty() || status == "error" {
             return None;
@@ -128,7 +112,6 @@ pub(crate) fn parse_ytdlp_playlist_event(
         let total = parse_bytes(fields.next()).or_else(|| parse_bytes(fields.next()));
         return Some(YtdlpPlaylistEvent::Progress {
             file_id,
-            playlist_index,
             downloaded,
             total,
         });
@@ -344,54 +327,47 @@ mod playlist_event_tests {
     #[test]
     fn rejects_playlist_events_from_other_invocations_and_unscoped_output() {
         assert_eq!(
-            parse_ytdlp_playlist_event("@GRAB:othernonce:DONE;abc123;4;/tmp/a.mp4", "testnonce"),
+            parse_ytdlp_playlist_event("@GRAB:othernonce:DONE;abc123;/tmp/a.mp4", "testnonce"),
             None
         );
         assert_eq!(
-            parse_ytdlp_playlist_event("[GrabPlaylistDone];abc123;4;/tmp/a.mp4", "testnonce"),
+            parse_ytdlp_playlist_event("[GrabPlaylistDone];abc123;/tmp/a.mp4", "testnonce"),
             None
         );
     }
 
     #[test]
-    fn parses_tagged_playlist_file_events() {
+    fn parses_minimal_tagged_playlist_events() {
         assert_eq!(
-            parse_ytdlp_playlist_event(
-                "@GRAB:testnonce:START;abc123;4;/tmp/004 - title.mp4",
-                "testnonce"
-            ),
+            parse_ytdlp_playlist_event("@GRAB:testnonce:START;abc123", "testnonce"),
             Some(YtdlpPlaylistEvent::Started {
                 file_id: "abc123".to_string(),
-                playlist_index: 4,
-                filename: "/tmp/004 - title.mp4".to_string(),
             })
         );
         assert_eq!(
             parse_ytdlp_playlist_event(
-                "@GRAB:testnonce:PROGRESS;abc123;4;downloading;512;1024;NA",
+                "@GRAB:testnonce:PROGRESS;abc123;downloading;512;1024;NA",
                 "testnonce"
             ),
             Some(YtdlpPlaylistEvent::Progress {
                 file_id: "abc123".to_string(),
-                playlist_index: 4,
                 downloaded: Some(512),
                 total: Some(1024),
             })
         );
         assert_eq!(
             parse_ytdlp_playlist_event(
-                "@GRAB:testnonce:DONE;abc123;4;/tmp/a;final.mp4",
+                "@GRAB:testnonce:DONE;abc123;/tmp/a;final.mp4",
                 "testnonce"
             ),
             Some(YtdlpPlaylistEvent::Finished {
                 file_id: "abc123".to_string(),
-                playlist_index: 4,
                 path: "/tmp/a;final.mp4".to_string(),
             })
         );
         assert_eq!(
             parse_ytdlp_playlist_event(
-                "@GRAB:testnonce:PROGRESS;abc123;4;error;NA;NA;NA",
+                "@GRAB:testnonce:PROGRESS;abc123;error;NA;NA;NA",
                 "testnonce"
             ),
             None

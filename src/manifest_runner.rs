@@ -236,6 +236,8 @@ impl std::error::Error for ManifestRunError {}
 enum ManifestChildUrlError {
     #[error("The stream manifest exceeds the limit of {0} distinct resource hosts")]
     TooManyDistinctHosts(usize),
+    #[error("Grab reached its limit for simultaneously protected public download hosts")]
+    PolicyCapReached,
     #[error("The stream manifest references a local or private network resource")]
     UnsafeDestination,
 }
@@ -2280,16 +2282,15 @@ fn guard_manifest_child_url(
     child_url: &Url,
     seen_hosts: &mut crate::download_net::PublicResolutionSet,
 ) -> Result<(), ManifestChildUrlError> {
-    match crate::download_net::inherit_public_resolution_for_manifest(
-        parent_url,
-        child_url.as_str(),
-        seen_hosts,
-    ) {
+    match seen_hosts.inherit(parent_url, child_url.as_str()) {
         Ok(()) => Ok(()),
         Err(crate::download_net::CollectionHostError::TooManyDistinctHosts) => {
             Err(ManifestChildUrlError::TooManyDistinctHosts(
                 crate::download_net::MAX_GUARDED_CHILD_HOSTS_PER_COLLECTION,
             ))
+        }
+        Err(crate::download_net::CollectionHostError::PolicyCapReached) => {
+            Err(ManifestChildUrlError::PolicyCapReached)
         }
         Err(crate::download_net::CollectionHostError::UnsafeDestination) => {
             Err(ManifestChildUrlError::UnsafeDestination)

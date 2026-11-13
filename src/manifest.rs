@@ -598,7 +598,7 @@ impl HlsPlan {
     /// fMP4/CMAF playlists carry an EXT-X-MAP initialization section; ordinary
     /// MPEG-TS playlists do not. This deliberately does not use the manifest
     /// URL suffix, because both formats are commonly served through .m3u8 URLs.
-    pub(crate) fn output_container_extension(&self) -> Option<&'static str> {
+    pub(crate) fn output_container(&self) -> Option<crate::media_types::ManifestContainer> {
         if self.local_playlist.segments.is_empty() {
             return None;
         }
@@ -610,9 +610,9 @@ impl HlsPlan {
                 .iter()
                 .any(|segment| segment.map.is_some())
             {
-                "mp4"
+                crate::media_types::ManifestContainer::Mp4
             } else {
-                "ts"
+                crate::media_types::ManifestContainer::Ts
             },
         )
     }
@@ -2471,7 +2471,10 @@ segment-2.ts
         let plan = plan_hls_media_playlist(BASE_URL, plain)
             .expect("plain static HLS playlist should be accepted");
         assert!(plan.is_plain_mpegts_presentation());
-        assert_eq!(plan.output_container_extension(), Some("ts"));
+        assert_eq!(
+            plan.output_container(),
+            Some(crate::media_types::ManifestContainer::Ts)
+        );
 
         let fragmented_mp4 = br#"#EXTM3U
 #EXT-X-VERSION:6
@@ -2484,7 +2487,10 @@ segment-1.m4s
         let plan = plan_hls_media_playlist(BASE_URL, fragmented_mp4)
             .expect("fMP4 HLS playlist should be accepted for FFmpeg");
         assert!(!plan.is_plain_mpegts_presentation());
-        assert_eq!(plan.output_container_extension(), Some("mp4"));
+        assert_eq!(
+            plan.output_container(),
+            Some(crate::media_types::ManifestContainer::Mp4)
+        );
 
         let encrypted = br#"#EXTM3U
 #EXT-X-VERSION:3
@@ -2497,7 +2503,10 @@ segment-1.ts
         let plan = plan_hls_media_playlist(BASE_URL, encrypted)
             .expect("AES-128 HLS playlist should be accepted for FFmpeg");
         assert!(!plan.is_plain_mpegts_presentation());
-        assert_eq!(plan.output_container_extension(), Some("ts"));
+        assert_eq!(
+            plan.output_container(),
+            Some(crate::media_types::ManifestContainer::Ts)
+        );
 
         let discontinuous = br#"#EXTM3U
 #EXT-X-VERSION:3
@@ -2512,7 +2521,10 @@ segment-2.ts
         let plan = plan_hls_media_playlist(BASE_URL, discontinuous)
             .expect("discontinuous HLS playlist should be accepted for FFmpeg");
         assert!(!plan.is_plain_mpegts_presentation());
-        assert_eq!(plan.output_container_extension(), Some("ts"));
+        assert_eq!(
+            plan.output_container(),
+            Some(crate::media_types::ManifestContainer::Ts)
+        );
     }
 
     #[test]

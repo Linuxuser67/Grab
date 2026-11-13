@@ -721,8 +721,7 @@ video.m3u8
         );
         assert_eq!(plan.inherited_variables.as_ref(), inherited.as_slice());
         assert_eq!(
-            plan
-                .low_latency
+            plan.low_latency
                 .as_ref()
                 .map(|low_latency| low_latency.unit_ids.len()),
             Some(1),

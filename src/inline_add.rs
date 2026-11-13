@@ -1023,7 +1023,7 @@ fn refresh_manifest_audio_picker(
 /// metadata that enqueue uses to rewrite the destination filename.
 fn selected_manifest_output_container(
     step: &VideoStep,
-) -> Option<ManifestContainer> {
+) -> Option<crate::media_types::ManifestContainer> {
     let manifest = step.manifest.borrow();
     let selection = step.manifest_selection.borrow();
     let audio = step.manifest_audio_selection.borrow();
@@ -1047,7 +1047,7 @@ fn refresh_manifest_filename(step: &VideoStep) {
         return;
     };
     let container = selected_manifest_output_container(step)
-        .unwrap_or(ManifestContainer::Mkv);
+        .unwrap_or(crate::media_types::ManifestContainer::Mkv);
     let filename = step.name.text();
     let filename = filename.trim();
     let requested_name = crate::download::DownloadManager::manifest_filename_for_container(
@@ -5671,7 +5671,7 @@ mod tests {
 #[cfg(test)]
 mod manifest_filename_tests {
     use crate::download::DownloadManager;
-    use ManifestContainer;
+    use crate::media_types::ManifestContainer;
 
     const SOURCE_URL: &str = "https://cdn.example.test/stream.m3u8";
 

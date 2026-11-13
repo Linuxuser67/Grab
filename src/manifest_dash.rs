@@ -3124,7 +3124,7 @@ fn expand_list(
         return Err(DashError::UnsupportedAddressing);
     };
     let base_url = &representation.source.base_url;
-    let initialization_count = usize::from(list.initialization.is_some());
+    let initialization_count = if list.initialization.is_some() { 1 } else { 0 };
     let mut resources = Vec::with_capacity(segments.len() + initialization_count);
 
     if let Some(initialization) = &list.initialization {

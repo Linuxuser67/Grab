@@ -1393,11 +1393,7 @@ pub(super) async fn run_live_hls_tracks(
     if use_destination_parts {
         if let Some(intent) = append_live_hls_destination_part(&video, abort).await? {
             return Ok(LiveHlsCapture::new(
-                match intent {
-                    crate::video::StopIntent::Pause => LiveHlsCaptureOutcome::Paused,
-                    crate::video::StopIntent::Finish => LiveHlsCaptureOutcome::Finish,
-                    crate::video::StopIntent::Discard => LiveHlsCaptureOutcome::Discard,
-                },
+                capture_outcome_for_stop(intent, false),
                 output,
             ));
         }
@@ -1405,11 +1401,7 @@ pub(super) async fn run_live_hls_tracks(
             && let Some(intent) = append_live_hls_destination_part(audio, abort).await?
         {
             return Ok(LiveHlsCapture::new(
-                match intent {
-                    crate::video::StopIntent::Pause => LiveHlsCaptureOutcome::Paused,
-                    crate::video::StopIntent::Finish => LiveHlsCaptureOutcome::FinishVideoOnly,
-                    crate::video::StopIntent::Discard => LiveHlsCaptureOutcome::Discard,
-                },
+                capture_outcome_for_stop(intent, true),
                 output,
             ));
         }
@@ -1544,11 +1536,7 @@ pub(super) async fn run_live_hls_tracks(
             biased;
             stop = &mut *abort => {
                 return Ok(LiveHlsCapture::new(
-                    match crate::video::stop_intent_or_pause(stop) {
-                        crate::video::StopIntent::Pause => LiveHlsCaptureOutcome::Paused,
-                        crate::video::StopIntent::Finish => LiveHlsCaptureOutcome::Finish,
-                        crate::video::StopIntent::Discard => LiveHlsCaptureOutcome::Discard,
-                    },
+                    capture_outcome_for_stop(crate::video::stop_intent_or_pause(stop), false),
                     output,
                 ));
             }
@@ -1576,11 +1564,7 @@ pub(super) async fn run_live_hls_tracks(
             .await?
         {
             return Ok(LiveHlsCapture::new(
-                match intent {
-                    crate::video::StopIntent::Pause => LiveHlsCaptureOutcome::Paused,
-                    crate::video::StopIntent::Finish => LiveHlsCaptureOutcome::Finish,
-                    crate::video::StopIntent::Discard => LiveHlsCaptureOutcome::Discard,
-                },
+                capture_outcome_for_stop(intent, false),
                 output,
             ));
         }

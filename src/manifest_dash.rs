@@ -25,7 +25,7 @@ pub(crate) use sidx::{
     parse_segment_base_index, validate_segment_base_sidx_ranges,
 };
 const MAX_REPRESENTATIONS: usize = 1_024;
-const MAX_SEGMENTS: usize = 100_000;
+const MAX_SEGMENTS: usize = crate::manifest_types::MAX_MANIFEST_SEGMENTS;
 const MIN_DYNAMIC_UPDATE_PERIOD: Duration = Duration::from_millis(500);
 const MAX_DYNAMIC_UPDATE_PERIOD: Duration = Duration::from_secs(300);
 // DASH-IF's current HTTPS identifier, the HTTP identifier emitted by FFmpeg,

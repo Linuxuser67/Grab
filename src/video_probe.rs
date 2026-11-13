@@ -437,6 +437,12 @@ pub(crate) fn playlist_truncated(pl: &crate::media_types::PlaylistInfo) -> bool 
 }
 
 /// Non-empty string field, borrowed.
+/// Convert a zero-based fallback position to yt-dlp's one-based playlist index
+/// without narrowing when a playlist exceeds u32 capacity.
+pub(crate) fn fallback_playlist_index(position: usize) -> u32 {
+    u32::try_from(position.saturating_add(1)).unwrap_or(u32::MAX)
+}
+
 fn json_str<'a>(value: &'a serde_json::Value, key: &str) -> Option<&'a str> {
     value
         .get(key)
@@ -468,7 +474,7 @@ fn parse_playlist_item(
         .and_then(serde_json::Value::as_u64)
         .and_then(|index| u32::try_from(index).ok())
         .filter(|index| *index > 0)
-        .unwrap_or_else(|| (position.saturating_add(1)).min(u32::MAX as usize) as u32);
+        .unwrap_or_else(|| fallback_playlist_index(position));
     let title = ["title", "fulltitle", "alt_title"]
         .iter()
         .find_map(|key| {

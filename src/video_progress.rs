@@ -73,7 +73,10 @@ pub(crate) enum YtdlpPlaylistEvent {
 
 /// Parse one tagged playlist event. File paths are the final, unsplit field:
 /// a semicolon in a legitimate filename must not change event identity.
-pub(crate) fn parse_ytdlp_playlist_event(line: &str, event_nonce: &str) -> Option<YtdlpPlaylistEvent> {
+pub(crate) fn parse_ytdlp_playlist_event(
+    line: &str,
+    event_nonce: &str,
+) -> Option<YtdlpPlaylistEvent> {
     let line = line.trim_end_matches(['\r', '\n']);
     let marker = format!("@GRAB:{event_nonce}:");
     let line = line.strip_prefix(&marker)?;
@@ -353,7 +356,10 @@ mod playlist_event_tests {
     #[test]
     fn parses_tagged_playlist_file_events() {
         assert_eq!(
-            parse_ytdlp_playlist_event("@GRAB:testnonce:START;abc123;4;/tmp/004 - title.mp4", "testnonce"),
+            parse_ytdlp_playlist_event(
+                "@GRAB:testnonce:START;abc123;4;/tmp/004 - title.mp4",
+                "testnonce"
+            ),
             Some(YtdlpPlaylistEvent::Started {
                 file_id: "abc123".to_string(),
                 playlist_index: 4,
@@ -361,7 +367,10 @@ mod playlist_event_tests {
             })
         );
         assert_eq!(
-            parse_ytdlp_playlist_event("@GRAB:testnonce:PROGRESS;abc123;4;downloading;512;1024;NA", "testnonce"),
+            parse_ytdlp_playlist_event(
+                "@GRAB:testnonce:PROGRESS;abc123;4;downloading;512;1024;NA",
+                "testnonce"
+            ),
             Some(YtdlpPlaylistEvent::Progress {
                 file_id: "abc123".to_string(),
                 playlist_index: 4,
@@ -370,7 +379,10 @@ mod playlist_event_tests {
             })
         );
         assert_eq!(
-            parse_ytdlp_playlist_event("@GRAB:testnonce:DONE;abc123;4;/tmp/a;final.mp4", "testnonce"),
+            parse_ytdlp_playlist_event(
+                "@GRAB:testnonce:DONE;abc123;4;/tmp/a;final.mp4",
+                "testnonce"
+            ),
             Some(YtdlpPlaylistEvent::Finished {
                 file_id: "abc123".to_string(),
                 playlist_index: 4,
@@ -378,7 +390,10 @@ mod playlist_event_tests {
             })
         );
         assert_eq!(
-            parse_ytdlp_playlist_event("@GRAB:testnonce:PROGRESS;abc123;4;error;NA;NA;NA", "testnonce"),
+            parse_ytdlp_playlist_event(
+                "@GRAB:testnonce:PROGRESS;abc123;4;error;NA;NA;NA",
+                "testnonce"
+            ),
             None
         );
     }

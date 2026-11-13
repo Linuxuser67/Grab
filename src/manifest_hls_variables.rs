@@ -160,7 +160,9 @@ fn query_parameter(url: &Url, name: &str) -> Result<String, ManifestError> {
             .map_err(|_| unsupported("EXT-X-DEFINE query parameter value is not valid UTF-8"))?
             .into_owned();
         if value.is_empty() {
-            return Err(unsupported("EXT-X-DEFINE query parameter has an empty value"));
+            return Err(unsupported(
+                "EXT-X-DEFINE query parameter has an empty value",
+            ));
         }
         if found.replace(value).is_some() {
             return Err(unsupported("EXT-X-DEFINE query parameter is ambiguous"));

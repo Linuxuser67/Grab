@@ -201,12 +201,7 @@ fn push_element(
         }
         (Some(Element::Period), "SegmentList", true) => {
             let attributes = segment_list.as_ref()?;
-            if let Some(offset) = attributes
-                .presentation_time_offset
-                .as_ref()
-                .ok()?
-                .as_ref()
-            {
+            if let Some(offset) = attributes.presentation_time_offset.as_ref().ok()?.as_ref() {
                 state.period_list_pto = Some(*offset);
             }
             if let Some(offset) = &attributes.availability_time_offset {
@@ -216,12 +211,7 @@ fn push_element(
         }
         (Some(Element::AdaptationSet), "SegmentList", true) => {
             let attributes = segment_list.as_ref()?;
-            if let Some(offset) = attributes
-                .presentation_time_offset
-                .as_ref()
-                .ok()?
-                .as_ref()
-            {
+            if let Some(offset) = attributes.presentation_time_offset.as_ref().ok()?.as_ref() {
                 state.adaptation_list_pto = Some(*offset);
             }
             if let Some(offset) = &attributes.availability_time_offset {
@@ -232,12 +222,7 @@ fn push_element(
         (Some(Element::Representation), "SegmentList", true) => {
             let attributes = segment_list.as_ref()?;
             let metadata = periods.last_mut()?.last_mut()?.last_mut()?;
-            if let Some(offset) = attributes
-                .presentation_time_offset
-                .as_ref()
-                .ok()?
-                .as_ref()
-            {
+            if let Some(offset) = attributes.presentation_time_offset.as_ref().ok()?.as_ref() {
                 metadata.segment_list_presentation_time_offset = Some(*offset);
             }
             if let Some(offset) = &attributes.availability_time_offset {
@@ -307,7 +292,9 @@ fn segment_list_attributes(start: &BytesStart<'_>) -> Option<SegmentListAttribut
                             .has_nondefault_segment_list_start_number |= number != 1;
                     }
                     Err(_) => {
-                        attributes.compatibility.has_invalid_segment_list_start_number = true;
+                        attributes
+                            .compatibility
+                            .has_invalid_segment_list_start_number = true;
                     }
                 }
             }
@@ -327,8 +314,7 @@ impl SegmentListCompatibility {
             other.has_invalid_segment_list_presentation_time_offset;
         self.has_nondefault_segment_list_start_number |=
             other.has_nondefault_segment_list_start_number;
-        self.has_invalid_segment_list_start_number |=
-            other.has_invalid_segment_list_start_number;
+        self.has_invalid_segment_list_start_number |= other.has_invalid_segment_list_start_number;
     }
 }
 
@@ -479,21 +465,24 @@ mod tests {
                 r#"<MPD xmlns="urn:mpeg:dash:schema:mpd:2011"><Period><AdaptationSet><SegmentList {attribute}/></AdaptationSet></Period></MPD>"#
             );
             assert_eq!(
-                super::representation_metadata(body.as_bytes(), 1)
-                    .map(|metadata| metadata.segment_list.has_unsupported_segment_list_timing_attributes),
+                super::representation_metadata(body.as_bytes(), 1).map(|metadata| metadata
+                    .segment_list
+                    .has_unsupported_segment_list_timing_attributes),
                 Some(true),
                 "{attribute}"
             );
         }
         assert_eq!(
-            super::representation_metadata(supported, 1)
-                .map(|metadata| metadata.segment_list.has_unsupported_segment_list_timing_attributes),
+            super::representation_metadata(supported, 1).map(|metadata| metadata
+                .segment_list
+                .has_unsupported_segment_list_timing_attributes),
             Some(false)
         );
         let finite_availability_offset = br#"<MPD xmlns="urn:mpeg:dash:schema:mpd:2011"><Period><AdaptationSet><SegmentList availabilityTimeOffset="1"/></AdaptationSet></Period></MPD>"#;
         assert_eq!(
-            super::representation_metadata(finite_availability_offset, 1)
-                .map(|metadata| metadata.segment_list.has_unsupported_segment_list_timing_attributes),
+            super::representation_metadata(finite_availability_offset, 1).map(|metadata| metadata
+                .segment_list
+                .has_unsupported_segment_list_timing_attributes),
             Some(false)
         );
     }
@@ -503,13 +492,15 @@ mod tests {
         let default_number = br#"<MPD xmlns="urn:mpeg:dash:schema:mpd:2011"><Period><AdaptationSet><SegmentList startNumber="1"/></AdaptationSet></Period></MPD>"#;
         let nondefault_number = br#"<mpd:MPD xmlns:mpd="urn:mpeg:dash:schema:mpd:2011"><mpd:Period><mpd:AdaptationSet><mpd:SegmentList startNumber="42"/></mpd:AdaptationSet></mpd:Period></mpd:MPD>"#;
         assert_eq!(
-            super::representation_metadata(default_number, 1)
-                .map(|metadata| metadata.segment_list.has_nondefault_segment_list_start_number),
+            super::representation_metadata(default_number, 1).map(|metadata| metadata
+                .segment_list
+                .has_nondefault_segment_list_start_number),
             Some(false)
         );
         assert_eq!(
-            super::representation_metadata(nondefault_number, 1)
-                .map(|metadata| metadata.segment_list.has_nondefault_segment_list_start_number),
+            super::representation_metadata(nondefault_number, 1).map(|metadata| metadata
+                .segment_list
+                .has_nondefault_segment_list_start_number),
             Some(true)
         );
     }
@@ -568,22 +559,25 @@ mod tests {
     fn detects_nonzero_segment_list_presentation_time_offsets() {
         let nonzero = br#"<MPD xmlns="urn:mpeg:dash:schema:mpd:2011"><Period><AdaptationSet><SegmentList presentationTimeOffset="9000"/></AdaptationSet></Period></MPD>"#;
         assert_eq!(
-            super::representation_metadata(nonzero, 1)
-                .map(|metadata| metadata.segment_list.has_nonzero_segment_list_presentation_time_offset),
+            super::representation_metadata(nonzero, 1).map(|metadata| metadata
+                .segment_list
+                .has_nonzero_segment_list_presentation_time_offset),
             Some(true)
         );
 
         let zero = br#"<MPD xmlns="urn:mpeg:dash:schema:mpd:2011"><Period><AdaptationSet><SegmentList presentationTimeOffset="0"/></AdaptationSet></Period></MPD>"#;
         assert_eq!(
-            super::representation_metadata(zero, 1)
-                .map(|metadata| metadata.segment_list.has_nonzero_segment_list_presentation_time_offset),
+            super::representation_metadata(zero, 1).map(|metadata| metadata
+                .segment_list
+                .has_nonzero_segment_list_presentation_time_offset),
             Some(false)
         );
 
         let foreign = br#"<MPD xmlns="urn:mpeg:dash:schema:mpd:2011" xmlns:foreign="urn:example:foreign"><Period><AdaptationSet><foreign:SegmentList presentationTimeOffset="9000"/></AdaptationSet></Period></MPD>"#;
         assert_eq!(
-            super::representation_metadata(foreign, 1)
-                .map(|metadata| metadata.segment_list.has_nonzero_segment_list_presentation_time_offset),
+            super::representation_metadata(foreign, 1).map(|metadata| metadata
+                .segment_list
+                .has_nonzero_segment_list_presentation_time_offset),
             Some(false)
         );
     }
@@ -601,11 +595,19 @@ mod tests {
 
         let offset_metadata =
             representation_metadata(invalid_offsets, 1).expect("bounded metadata scan");
-        assert!(offset_metadata.segment_list.has_invalid_segment_list_presentation_time_offset);
+        assert!(
+            offset_metadata
+                .segment_list
+                .has_invalid_segment_list_presentation_time_offset
+        );
 
         let start_metadata =
             representation_metadata(invalid_start_number, 1).expect("bounded metadata scan");
-        assert!(start_metadata.segment_list.has_invalid_segment_list_start_number);
+        assert!(
+            start_metadata
+                .segment_list
+                .has_invalid_segment_list_start_number
+        );
     }
 
     #[test]
@@ -621,8 +623,9 @@ mod tests {
         );
 
         assert_eq!(
-            super::representation_metadata(nested.as_bytes(), 1)
-                .map(|metadata| metadata.segment_list.has_nonzero_segment_list_presentation_time_offset),
+            super::representation_metadata(nested.as_bytes(), 1).map(|metadata| metadata
+                .segment_list
+                .has_nonzero_segment_list_presentation_time_offset),
             None
         );
     }

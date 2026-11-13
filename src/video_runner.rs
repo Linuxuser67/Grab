@@ -920,10 +920,10 @@ async fn run_video_download_inner(
         total: if single {
             audio_sel.size
         } else {
-            match (video_sel.as_ref().and_then(|s| s.size), audio_sel.size) {
-                (Some(v), Some(a)) => Some(v + a),
-                _ => None,
-            }
+            combined_media_size(
+                video_sel.as_ref().and_then(|selection| selection.size),
+                audio_sel.size,
+            )
         },
     };
     let plan = resume_plan(&query);
@@ -1037,6 +1037,13 @@ async fn run_video_download_inner(
         }
         other => other,
     }
+}
+
+/// Add the selected video and audio sizes without allowing metadata overflow.
+fn combined_media_size(video: Option<u64>, audio: Option<u64>) -> Option<u64> {
+    video
+        .zip(audio)
+        .and_then(|(video, audio)| video.checked_add(audio))
 }
 
 static DASH_MERGE_TEMP_DIR_COUNTER: AtomicU64 = AtomicU64::new(0);

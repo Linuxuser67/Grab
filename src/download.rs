@@ -6218,11 +6218,9 @@ impl DownloadManager {
         self.owners()
             .filter(|it| {
                 matches!(
-                        it.status(),
-                        DownloadStatus::Queued
-                            | DownloadStatus::Downloading
-                            | DownloadStatus::Paused
-                    )
+                    it.status(),
+                    DownloadStatus::Queued | DownloadStatus::Downloading | DownloadStatus::Paused
+                )
             })
             .count()
     }

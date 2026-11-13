@@ -169,7 +169,8 @@ impl HlsLiveIndex {
             return None;
         };
         let run = self.part_runs.get(sequence)?;
-        let duration_matches = (run.duration - f64::from(parent.duration)).abs() <= 0.02;
+        let duration_matches =
+            (run.duration - f64::from(parent.duration)).abs() <= PART_DURATION_TOLERANCE;
         (run.contiguous
             && run.first_part_index == 0
             && run.first_discontinuity == parent.discontinuity
@@ -190,14 +191,30 @@ fn has_ll_hls_partial_segments(body: &[u8]) -> bool {
         .any(|line| line.starts_with(b"#EXT-X-PART:"))
 }
 
-fn trim_ascii_whitespace(mut value: &[u8]) -> &[u8] {
-    while value.first().is_some_and(u8::is_ascii_whitespace) {
-        value = &value[1..];
-    }
-    while value.last().is_some_and(u8::is_ascii_whitespace) {
-        value = &value[..value.len() - 1];
-    }
-    value
+fn trim_ascii_whitespace(value: &[u8]) -> &[u8] {
+    value.trim_ascii()
+}
+
+const PART_DURATION_TOLERANCE: f64 = 0.02;
+
+#[expect(
+    clippy::cast_precision_loss,
+    reason = "HLS target durations are integer seconds compared with fractional durations"
+)]
+fn target_duration_seconds(seconds: u64) -> f64 {
+    seconds as f64
+}
+
+#[expect(
+    clippy::cast_possible_truncation,
+    reason = "m3u8-rs stores segment durations as f32; validation is performed in f64 first"
+)]
+fn media_segment_duration(duration: Duration) -> f32 {
+    duration.as_secs_f64() as f32
+}
+
+fn has_required_unknown_attributes<T>(attributes: &[(String, T)]) -> bool {
+    attributes.iter().any(|(name, _)| name.starts_with("REQ-"))
 }
 
 fn hls_key_method(attributes: &[u8]) -> Option<&[u8]> {
@@ -312,22 +329,12 @@ pub(crate) fn plan_hls_media_playlist(
     .map(Some)
 }
 
-fn open_segment_program_date_time(
-    open: &broadcast_hls::OpenSegment,
-) -> Result<Option<m3u8_rs::MediaSegment>, ManifestError> {
-    let mut date_tags = open
-        .pre_tags
-        .iter()
-        .filter(|tag| tag.starts_with("#EXT-X-PROGRAM-DATE-TIME:"));
-    let Some(tag) = date_tags.next() else {
-        return Ok(None);
-    };
-    if date_tags.next().is_some() || tag.len() > 128 || tag.contains('\r') || tag.contains('\n') {
+fn parse_program_date_time_tag(tag: &str) -> Result<m3u8_rs::MediaSegment, ManifestError> {
+    if tag.len() > 128 || tag.contains(['\r', '\n']) {
         return Err(ManifestError::UnsupportedPlaylist);
     }
-
     let probe = format!(
-        "#EXTM3U\n#EXT-X-TARGETDURATION:1\n{tag}\n#EXTINF:1,\nopen-ll-hls-pdt-probe.ts\n#EXT-X-ENDLIST\n"
+        "#EXTM3U\n#EXT-X-TARGETDURATION:1\n{tag}\n#EXTINF:1,\npdt-validation-probe.ts\n#EXT-X-ENDLIST\n"
     );
     let parsed = m3u8_rs::parse_media_playlist_res(probe.as_bytes())
         .map_err(|error| hls_parse_error(probe.as_bytes(), error))?;
@@ -339,7 +346,23 @@ fn open_segment_program_date_time(
     if segment.program_date_time.is_none() {
         return Err(ManifestError::UnsupportedPlaylist);
     }
-    Ok(Some(segment))
+    Ok(segment)
+}
+
+fn open_segment_program_date_time(
+    open: &broadcast_hls::OpenSegment,
+) -> Result<Option<m3u8_rs::MediaSegment>, ManifestError> {
+    let mut date_tags = open
+        .pre_tags
+        .iter()
+        .filter(|tag| tag.starts_with("#EXT-X-PROGRAM-DATE-TIME:"));
+    let Some(tag) = date_tags.next() else {
+        return Ok(None);
+    };
+    if date_tags.next().is_some() {
+        return Err(ManifestError::UnsupportedPlaylist);
+    }
+    parse_program_date_time_tag(tag).map(Some)
 }
 
 fn has_trailing_open_discontinuity(body: &[u8]) -> bool {
@@ -351,12 +374,11 @@ fn has_trailing_open_discontinuity(body: &[u8]) -> bool {
     body[tail_start..]
         .split(|byte| *byte == b'\n')
         .any(|raw_line| {
-            let line = raw_line.strip_suffix(b"\r").unwrap_or(raw_line);
-            let start = line
-                .iter()
-                .position(|byte| !byte.is_ascii_whitespace())
-                .unwrap_or(line.len());
-            &line[start..] == b"#EXT-X-DISCONTINUITY"
+            raw_line
+                .strip_suffix(b"\r")
+                .unwrap_or(raw_line)
+                .trim_ascii_start()
+                == b"#EXT-X-DISCONTINUITY"
         })
 }
 
@@ -385,10 +407,7 @@ fn build_plan(
     if let Some(skip) = playlist.skip.as_ref()
         && (low_latency_can_skip_until(&playlist).is_none()
             || !skip.recently_removed_daterange_ids.is_empty()
-            || skip
-                .extra_attrs
-                .iter()
-                .any(|(name, _)| name.starts_with("REQ-")))
+            || has_required_unknown_attributes(&skip.extra_attrs))
     {
         return Err(ManifestError::UnsupportedPlaylistFeature(
             "#EXT-X-SKIP metadata cannot be reconstructed safely".to_string(),
@@ -403,18 +422,9 @@ fn build_plan(
         .low_latency
         .as_ref()
         .ok_or(ManifestError::UnsupportedPlaylist)?;
-    if low_latency
-        .sc_extra_attrs
-        .iter()
-        .any(|(name, _)| name.starts_with("REQ-"))
-        || low_latency
-            .pi_extra_attrs
-            .iter()
-            .any(|(name, _)| name.starts_with("REQ-"))
-        || low_latency
-            .ph_extra_attrs
-            .iter()
-            .any(|(name, _)| name.starts_with("REQ-"))
+    if has_required_unknown_attributes(&low_latency.sc_extra_attrs)
+        || has_required_unknown_attributes(&low_latency.pi_extra_attrs)
+        || has_required_unknown_attributes(&low_latency.ph_extra_attrs)
     {
         return Err(ManifestError::UnsupportedPlaylist);
     }
@@ -422,7 +432,10 @@ fn build_plan(
         .part_target
         .map(|target| {
             let seconds = target.get();
-            if !seconds.is_finite() || seconds <= 0.0 || seconds >= source_target_duration as f64 {
+            if !seconds.is_finite()
+                || seconds <= 0.0
+                || seconds >= target_duration_seconds(source_target_duration)
+            {
                 return Err(ManifestError::InvalidDuration);
             }
             Duration::try_from_secs_f64(seconds).map_err(|_| ManifestError::InvalidDuration)
@@ -453,11 +466,13 @@ fn build_plan(
     }
     if let Some(hold_back) = low_latency.hold_back {
         let seconds = hold_back.get();
-        if !seconds.is_finite() || seconds < 3.0 * source_target_duration as f64 {
+        if !seconds.is_finite() || seconds < 3.0 * target_duration_seconds(source_target_duration) {
             return Err(ManifestError::InvalidDuration);
         }
     }
-    if can_skip_until.is_some_and(|skip| skip.as_secs_f64() < 6.0 * source_target_duration as f64) {
+    if can_skip_until.is_some_and(|skip| {
+        skip.as_secs_f64() < 6.0 * target_duration_seconds(source_target_duration)
+    }) {
         return Err(ManifestError::InvalidDuration);
     }
     validate_start_point(&playlist)?;
@@ -523,9 +538,9 @@ fn build_plan(
                         .to_string(),
                 ));
             }
-            let _duration = checked_duration(segment.duration.get(), source_target_duration)?;
+            checked_duration(segment.duration.get(), source_target_duration)?;
             let url = resolve_hls_media_resource_url(&base_url, &segment.uri)?;
-            let _range = plan_range(segment.byte_range.as_ref(), &url, &mut previous_range)?;
+            plan_range(segment.byte_range.as_ref(), &url, &mut previous_range)?;
             pending_discontinuity |= segment.discontinuous;
             continue;
         }
@@ -550,7 +565,7 @@ fn build_plan(
             });
             local_segments.push(LocalSegment {
                 uri: filename,
-                duration: duration.as_secs_f64() as f32,
+                duration: media_segment_duration(duration),
                 discontinuity,
                 map,
                 program_date_time,
@@ -568,7 +583,7 @@ fn build_plan(
             }
             Ok(total + duration)
         })?;
-        if (parts_duration - parent_duration.as_secs_f64()).abs() > 0.02 {
+        if (parts_duration - parent_duration.as_secs_f64()).abs() > PART_DURATION_TOLERANCE {
             return Err(ManifestError::LivePartDurationMismatch);
         }
         let first_part_position = local_segments.len();
@@ -659,7 +674,7 @@ fn build_plan(
     };
 
     let mut local_playlist = MediaPlaylist {
-        version: Some(6),
+        version: None,
         target_duration: source_target_duration,
         media_sequence: 0,
         discontinuity_sequence: playlist.discontinuity_sequence,
@@ -746,7 +761,7 @@ fn append_part_units(
         });
         local_segments.push(LocalSegment {
             uri: filename,
-            duration: duration.as_secs_f64() as f32,
+            duration: media_segment_duration(duration),
             discontinuity: discontinuity && part_index == 0,
             map: map.clone(),
             ..Default::default()
@@ -766,11 +781,7 @@ fn parse_rendition_reports(
     reports
         .iter()
         .map(|report| {
-            if report
-                .extra_attrs
-                .iter()
-                .any(|(name, _)| name.starts_with("REQ-"))
-            {
+            if has_required_unknown_attributes(&report.extra_attrs) {
                 return Err(ManifestError::UnsupportedPlaylist);
             }
             Ok(HlsRenditionReport {
@@ -827,21 +838,7 @@ fn validate_playlist_tags(playlist: &LlMediaPlaylist) -> Result<(), ManifestErro
             return Err(ManifestError::UnsupportedEncryption);
         }
         if tag.starts_with("#EXT-X-PROGRAM-DATE-TIME:") {
-            if tag.len() > 128 || tag.contains('\r') || tag.contains('\n') {
-                return Err(ManifestError::UnsupportedPlaylist);
-            }
-            let probe = format!(
-                "#EXTM3U\n#EXT-X-TARGETDURATION:1\n{tag}\n#EXTINF:1,\npdt-validation-probe.ts\n#EXT-X-ENDLIST\n"
-            );
-            let parsed = m3u8_rs::parse_media_playlist_res(probe.as_bytes())
-                .map_err(|error| hls_parse_error(probe.as_bytes(), error))?;
-            if parsed
-                .segments
-                .first()
-                .is_none_or(|segment| segment.program_date_time.is_none())
-            {
-                return Err(ManifestError::UnsupportedPlaylist);
-            }
+            parse_program_date_time_tag(tag)?;
             continue;
         }
         // Ad-insertion markers are inert metadata in native planning. Keep
@@ -861,9 +858,9 @@ fn validate_playlist_tags(playlist: &LlMediaPlaylist) -> Result<(), ManifestErro
         {
             continue;
         }
-        return Err(ManifestError::UnsupportedPlaylistFeature(
-            tag.split(':').next().unwrap_or(tag).to_string(),
-        ));
+        let feature = tag.split_once(':').map_or(tag.as_str(), |(name, _)| name);
+        let feature = feature.chars().take(64).collect::<String>();
+        return Err(ManifestError::UnsupportedPlaylistFeature(feature));
     }
     Ok(())
 }
@@ -878,11 +875,7 @@ fn validate_start_point(playlist: &LlMediaPlaylist) -> Result<(), ManifestError>
     if !start.time_offset.get().is_finite() {
         return Err(ManifestError::InvalidDuration);
     }
-    if start
-        .extra_attrs
-        .iter()
-        .any(|(name, _)| name.starts_with("REQ-"))
-    {
+    if has_required_unknown_attributes(&start.extra_attrs) {
         return Err(ManifestError::UnsupportedPlaylist);
     }
     Ok(())
@@ -894,18 +887,17 @@ fn validate_part(part: &LlPartSpec) -> Result<(), ManifestError> {
             "#EXT-X-PART GAP resources cannot be fetched".to_string(),
         ));
     }
-    if part
-        .extra_attrs
-        .iter()
-        .any(|(name, _)| name.starts_with("REQ-"))
-    {
+    if has_required_unknown_attributes(&part.extra_attrs) {
         return Err(ManifestError::UnsupportedPlaylist);
     }
     Ok(())
 }
 
 fn checked_duration(seconds: f64, target_duration: u64) -> Result<Duration, ManifestError> {
-    if !seconds.is_finite() || seconds <= 0.0 || seconds.round() > target_duration as f64 {
+    if !seconds.is_finite()
+        || seconds <= 0.0
+        || seconds.round() > target_duration_seconds(target_duration)
+    {
         return Err(ManifestError::InvalidDuration);
     }
     Duration::try_from_secs_f64(seconds).map_err(|_| ManifestError::InvalidDuration)
@@ -958,11 +950,7 @@ fn plan_map(
     let Some(map) = map else {
         return Ok(None);
     };
-    if map
-        .extra_attrs
-        .iter()
-        .any(|(name, _)| name.starts_with("REQ-"))
-    {
+    if has_required_unknown_attributes(&map.extra_attrs) {
         return Err(ManifestError::UnsupportedPlaylist);
     }
     let url = resolve_hls_media_resource_url(base_url, &map.uri)?;

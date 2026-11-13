@@ -2257,10 +2257,7 @@ async fn resolve_tracks(
 }
 
 /// Whether the selected subtitle rendition can be embedded in the chosen container.
-fn embed_manifest_subtitles(
-    embed_requested: bool,
-    output_container: ManifestContainer,
-) -> bool {
+fn embed_manifest_subtitles(embed_requested: bool, output_container: ManifestContainer) -> bool {
     embed_requested && output_container != ManifestContainer::Ts
 }
 
@@ -4106,10 +4103,7 @@ async fn run_ffmpeg_with_offsets(
     abort: &mut tokio::sync::oneshot::Receiver<crate::video::StopIntent>,
 ) -> Result<bool, ManifestRunError> {
     let output_container = output_container_from_path(output)?;
-    if output_container == ManifestContainer::Ts
-        && subtitles.input.is_some()
-        && subtitles.embed
-    {
+    if output_container == ManifestContainer::Ts && subtitles.input.is_some() && subtitles.embed {
         return Err(mpegts_embedded_subtitle_error());
     }
 
@@ -4640,19 +4634,10 @@ segment-2.m4s
 
     #[test]
     fn mpegts_subtitles_use_a_sidecar_when_embedding_was_requested() {
-        assert!(!embed_manifest_subtitles(
-            true,
-            ManifestContainer::Ts
-        ));
-        assert!(!embed_manifest_subtitles(
-            false,
-            ManifestContainer::Mp4
-        ));
+        assert!(!embed_manifest_subtitles(true, ManifestContainer::Ts));
+        assert!(!embed_manifest_subtitles(false, ManifestContainer::Mp4));
         assert!(embed_manifest_subtitles(true, ManifestContainer::Mp4));
-        assert!(embed_manifest_subtitles(
-            true,
-            ManifestContainer::Mkv
-        ));
+        assert!(embed_manifest_subtitles(true, ManifestContainer::Mkv));
     }
 
     #[test]

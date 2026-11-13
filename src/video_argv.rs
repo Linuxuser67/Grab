@@ -283,8 +283,6 @@ pub(crate) fn unified_download_argv(
     args
 }
 
-/// Machine-readable per-file progress for an owning yt-dlp playlist process.
-
 
 /// Output template for a collection. The extractor ID disambiguates duplicate
 /// titles and keeps filenames stable if the playlist is reordered between
@@ -354,7 +352,11 @@ fn replace_arg_value(args: &mut [String], flag: &str, value: String) -> Result<(
     Ok(())
 }
 
-fn replace_print_template(args: &mut [String], current: &str, replacement: String) -> Result<(), VideoError> {
+fn replace_print_template(
+    args: &mut [String],
+    current: &str,
+    replacement: String,
+) -> Result<(), VideoError> {
     let Some(argument) = args.iter_mut().find(|argument| argument.as_str() == current) else {
         return Err(VideoError::Fetch(format!(
             "Could not locate yt-dlp print template {current}"
@@ -362,6 +364,12 @@ fn replace_print_template(args: &mut [String], current: &str, replacement: Strin
     };
     *argument = replacement;
     Ok(())
+}
+
+/// Per-invocation identity and selection for one yt-dlp playlist run.
+pub(crate) struct PlaylistRunSelection<'a> {
+    pub(crate) indices: &'a [usize],
+    pub(crate) event_nonce: &'a str,
 }
 
 /// yt-dlp argv for one parent-owned playlist process. A single invocation
@@ -374,8 +382,7 @@ pub(crate) fn playlist_download_argv(
     merge_ext: &str,
     ffmpeg_bin: &Path,
     dest_dir: &Path,
-    playlist_indices: &[usize],
-    event_nonce: &str,
+    selection: PlaylistRunSelection<'_>,
 ) -> Result<Vec<String>, VideoError> {
     let mut args = unified_download_argv(
         job,
@@ -386,32 +393,32 @@ pub(crate) fn playlist_download_argv(
         Path::new("playlist-placeholder.%(ext)s"),
         None,
     );
-    replace_playlist_scope(&mut args, playlist_indices)?;
+    replace_playlist_scope(&mut args, selection.indices)?;
 
     replace_arg_value(&mut args, "-o", playlist_output_template(dest_dir))?;
     replace_arg_value(
         &mut args,
         "--progress-template",
         format!(
-            "download:@GRAB:{event_nonce}:PROGRESS;%(info.id)s;%(info.playlist_index)s;%(progress.status)s;%(progress.downloaded_bytes)s;%(progress.total_bytes)s;%(progress.total_bytes_estimate)s"
+            "download:@GRAB:{selection.event_nonce}:PROGRESS;%(info.id)s;%(info.playlist_index)s;%(progress.status)s;%(progress.downloaded_bytes)s;%(progress.total_bytes)s;%(progress.total_bytes_estimate)s"
         ),
     )?;
     replace_print_template(
         &mut args,
         "after_move:filepath",
-        format!("after_move:@GRAB:{event_nonce}:DONE;%(id)s;%(playlist_index)s;%(filepath)s"),
+        format!("after_move:@GRAB:{selection.event_nonce}:DONE;%(id)s;%(playlist_index)s;%(filepath)s"),
     )?;
     let separator = args
         .iter()
         .position(|arg| arg == "--")
-        .ok_or_else(|| VideoError::Fetch("Could not locate yt-dlp's positional URL separator".to_string()))?;
+        .ok_or_else(|| {
+            VideoError::Fetch("Could not locate yt-dlp's positional URL separator".to_string())
+        })?;
     args.splice(
         separator..separator,
         [
             "--print".to_string(),
-            format!(
-                "before_dl:@GRAB:{event_nonce}:START;%(id)s;%(playlist_index)s;%(filename)s"
-            ),
+            format!("before_dl:@GRAB:{selection.event_nonce}:START;%(id)s;%(playlist_index)s;%(filename)s"),
         ],
     );
     Ok(args)

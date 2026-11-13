@@ -4,7 +4,7 @@
 //! body into validated remote resources and a local playlist description.
 
 use std::collections::{HashMap, HashSet};
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use m3u8_rs::{AlternativeMediaType, KeyMethod, MediaPlaylist, MediaPlaylistType, Playlist};
 use sha2::{Digest, Sha256};
@@ -13,7 +13,7 @@ use url::Url;
 
 /// Maximum response body accepted by the native manifest intake.
 pub(crate) const MAX_MANIFEST_BYTES: usize = 4 * 1024 * 1024;
-/// Maximum video variants retained from an HLS master, including pathway clones.
+/// Maximum video variants retained from an HLS master.
 pub(crate) const MAX_HLS_MASTER_VARIANTS: usize = 4_096;
 /// Maximum combined audio and subtitle renditions retained from an HLS master.
 pub(crate) const MAX_HLS_MASTER_RENDITIONS: usize = 4_096;
@@ -92,7 +92,7 @@ pub(crate) enum ManifestError {
 
 /// Unknown tags that do not affect resource selection or timing.
 fn is_benign_hls_tag(tag: &m3u8_rs::ExtTag) -> bool {
-    matches!(tag.tag.as_str(), "X-ALLOW-CACHE" | "X-BITRATE")
+    matches!(tag.tag.as_str(), "X-ALLOW-CACHE" | "X-BITRATE" | "X-CONTENT-STEERING")
 }
 
 /// Accept only identity AES-128 session keys; media-playlist keys remain authoritative.
@@ -309,15 +309,11 @@ pub(crate) struct HlsVariant {
     pub(crate) video_rendition_group: Option<String>,
     /// Original EXT-X-STREAM-INF playlist path, kept separate from the selected angle URL.
     pub(crate) video_variant_path: Option<String>,
-    /// Original EXT-X-STREAM-INF URL, retained for Content Steering replacements.
-    pub(crate) video_variant_url: Option<Url>,
     pub(crate) video_rendition_name: Option<String>,
     /// Apple HLS STABLE-RENDITION-ID for the selected VIDEO rendition.
     pub(crate) stable_video_rendition_id: Option<String>,
     /// Apple HLS STABLE-VARIANT-ID, when the origin provides one.
     pub(crate) stable_variant_id: Option<String>,
-    /// HLS Content Steering Pathway; absent wire attributes belong to ".".
-    pub(crate) pathway_id: String,
 }
 
 /// An alternate audio rendition advertised by an HLS master playlist.
@@ -351,74 +347,6 @@ pub(crate) struct HlsSubtitleRendition {
     pub(crate) stable_rendition_id: Option<String>,
 }
 
-/// Runtime Content Steering state for one selected HLS multivariant playlist.
-#[derive(Clone, PartialEq)]
-pub(crate) struct HlsContentSteering {
-    /// Effective multivariant playlist URL, including its final redirect and query.
-    pub(crate) master_url: Option<Url>,
-    /// Whether this attempt uses an upstream proxy that bypasses local DNS guards.
-    pub(crate) proxy_configured: bool,
-    /// URI used for the next steering refresh, updated by RELOAD-URI.
-    pub(crate) reload_url: Url,
-    pub(crate) initial_pathway_id: Option<String>,
-    /// Current applied pathway sent as _HLS_pathway on refresh requests.
-    pub(crate) active_pathway_id: Option<String>,
-    pub(crate) ttl: Duration,
-    pub(crate) refresh_at: Option<Instant>,
-    /// Exponential delay for retrying an optional failed Content Steering refresh.
-    pub(crate) refresh_failure_backoff: Duration,
-    /// Unfiltered master playlist, without Content Steering state, used to
-    /// apply each new clone set without retaining stale clones.
-    pub(crate) base_master: Option<Box<HlsMasterPlan>>,
-    /// Cross-origin steering hosts retained for the lifetime of this presentation.
-    pub(crate) public_host_leases: Vec<std::sync::Arc<crate::download_net::PublicResolutionLease>>,
-}
-
-fn redacted_steering_url(url: &Url) -> Url {
-    let mut redacted = url.clone();
-    redacted.set_query(None);
-    redacted.set_fragment(None);
-    redacted
-}
-
-impl std::fmt::Debug for HlsContentSteering {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        formatter
-            .debug_struct("HlsContentSteering")
-            .field(
-                "master_url",
-                &self.master_url.as_ref().map(redacted_steering_url),
-            )
-            .field("proxy_configured", &self.proxy_configured)
-            .field("reload_url", &redacted_steering_url(&self.reload_url))
-            .field("initial_pathway_id", &self.initial_pathway_id)
-            .field("active_pathway_id", &self.active_pathway_id)
-            .field("ttl", &self.ttl)
-            .field("refresh_at", &self.refresh_at)
-            .field("refresh_failure_backoff", &self.refresh_failure_backoff)
-            .field("has_base_master", &self.base_master.is_some())
-            .field("public_host_lease_count", &self.public_host_leases.len())
-            .finish()
-    }
-}
-
-impl HlsContentSteering {
-    pub(crate) fn new(server_url: Url, initial_pathway_id: Option<String>) -> Self {
-        Self {
-            master_url: None,
-            proxy_configured: false,
-            reload_url: server_url,
-            active_pathway_id: initial_pathway_id.clone(),
-            initial_pathway_id,
-            ttl: Duration::ZERO,
-            refresh_at: None,
-            refresh_failure_backoff: Duration::ZERO,
-            base_master: None,
-            public_host_leases: Vec::new(),
-        }
-    }
-}
-
 /// Master-playlist choices in manifest order; no variant is silently selected.
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) struct HlsMasterPlan {
@@ -427,7 +355,6 @@ pub(crate) struct HlsMasterPlan {
     pub(crate) subtitle_renditions: Box<[HlsSubtitleRendition]>,
     /// Variables defined by this multivariant playlist for explicit child IMPORT.
     pub(crate) inherited_variables: Box<[(String, String)]>,
-    pub(crate) content_steering: Option<HlsContentSteering>,
 }
 
 /// Validated low-latency metadata for an HLS media playlist.
@@ -459,54 +386,6 @@ pub(crate) struct HlsPlan {
 }
 
 impl HlsPlan {
-    /// Trim a refreshed non-LL-HLS playlist to the next uncommitted sequence.
-    ///
-    /// Content Steering may move a live rendition to a CDN whose segment URIs
-    /// differ from the previous pathway. Only the already-committed prefix is
-    /// discarded; the new pathway must still advertise the exact next sequence.
-    ///
-    /// # Errors
-    /// Returns an error for LL-HLS, ended playlists, or a missing next sequence.
-    pub(crate) fn trim_live_snapshot_to_sequence(
-        &mut self,
-        next_sequence: u64,
-    ) -> Result<(), ManifestError> {
-        if self.low_latency.is_some() || !self.is_live || self.end_list {
-            return Err(ManifestError::LiveSequenceGap);
-        }
-        let first_sequence = self.local_playlist.media_sequence;
-        let skipped = next_sequence
-            .checked_sub(first_sequence)
-            .and_then(|count| usize::try_from(count).ok())
-            .ok_or(ManifestError::LiveSequenceGap)?;
-        if skipped >= self.local_playlist.segments.len()
-            || self.local_playlist.segments[..skipped]
-                .iter()
-                .any(|segment| segment.discontinuity)
-        {
-            return Err(ManifestError::LiveSequenceGap);
-        }
-        self.local_playlist.segments.drain(..skipped);
-        self.local_playlist.media_sequence = next_sequence;
-
-        let mut retained_resources = HashSet::new();
-        for segment in &self.local_playlist.segments {
-            retained_resources.extend(
-                segment_resource_filenames(segment)
-                    .into_iter()
-                    .map(str::to_string),
-            );
-        }
-        self.resources = self
-            .resources
-            .iter()
-            .filter(|resource| retained_resources.contains(&resource.filename))
-            .cloned()
-            .collect::<Vec<_>>()
-            .into_boxed_slice();
-        Ok(())
-    }
-
     /// Identify confirmed LL-HLS part resources without an EXT-X-MAP.
     ///
     /// This planner detail is retained for unit tests. Production capture stages
@@ -1224,23 +1103,6 @@ impl HlsLiveAccumulator {
         self.segment_identities.len()
     }
 
-    /// Sequence number expected from the next live media segment.
-    #[must_use]
-    pub(crate) fn next_sequence(&self) -> Option<u64> {
-        self.next_sequence
-    }
-
-    /// Whether a candidate playlist retains the committed discontinuity timeline.
-    #[must_use]
-    pub(crate) fn pathway_switch_preserves_discontinuity_sequence(
-        &self,
-        snapshot: &HlsPlan,
-    ) -> bool {
-        self.local_playlist.as_ref().is_some_and(|playlist| {
-            playlist.discontinuity_sequence == snapshot.local_playlist.discontinuity_sequence
-        })
-    }
-
     /// Last committed LL-HLS media unit, if this is a part-aware recording.
     #[must_use]
     pub(crate) fn last_ll_unit(&self) -> Option<&hls_ll::HlsLiveUnitId> {
@@ -1311,61 +1173,6 @@ fn hls_segment_identity(segment: &m3u8_rs::MediaSegment) -> String {
     } else {
         identity
     }
-}
-
-/// A Pathway ID is a non-empty ASCII token from the Content Steering alphabet.
-pub(crate) fn is_valid_hls_pathway_id(value: &str) -> bool {
-    !value.is_empty()
-        && value
-            .bytes()
-            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'-' | b'_'))
-}
-
-fn parse_hls_content_steering(
-    base_url: &Url,
-    body: &[u8],
-) -> Result<Option<HlsContentSteering>, ManifestError> {
-    let tag_count = body
-        .split(|byte| *byte == b'\n')
-        .map(|line| line.strip_suffix(b"\r").unwrap_or(line))
-        .filter(|line| line.starts_with(b"#EXT-X-CONTENT-STEERING:"))
-        .count();
-    if tag_count == 0 {
-        return Ok(None);
-    }
-    if tag_count != 1 {
-        return Err(ManifestError::UnsupportedPlaylist);
-    }
-
-    let text = std::str::from_utf8(body)
-        .map_err(|error| ManifestError::Parse(format!("HLS playlist is not UTF-8: {error}")))?;
-    let parsed = broadcast_hls::MasterPlaylist::parse(text).map_err(|error| {
-        ManifestError::Parse(format!(
-            "could not parse HLS Content Steering declaration: {error}"
-        ))
-    })?;
-    let steering = parsed
-        .content_steering
-        .ok_or(ManifestError::UnsupportedPlaylist)?;
-    if steering
-        .extra_attrs
-        .iter()
-        .any(|(name, _)| name.starts_with("REQ-"))
-    {
-        return Err(ManifestError::UnsupportedPlaylist);
-    }
-    if steering
-        .pathway_id
-        .as_deref()
-        .is_some_and(|pathway_id| !is_valid_hls_pathway_id(pathway_id))
-    {
-        return Err(ManifestError::UnsupportedPlaylist);
-    }
-    let server_url = resolve_resource_url(base_url, &steering.server_uri)?;
-    Ok(Some(HlsContentSteering::new(
-        server_url,
-        steering.pathway_id,
-    )))
 }
 
 /// Validate rendition-group rules needed for deterministic language and track selection.
@@ -1473,20 +1280,10 @@ pub(crate) fn parse_hls_master_playlist(
         return Err(ManifestError::ExpectedMasterPlaylist);
     };
 
-    let content_steering = parse_hls_content_steering(&base_url, expanded)?;
     // Session keys are optional preloading hints, not media-key substitutes.
     // Never fetch them; the selected media playlist's EXT-X-KEY remains authoritative.
     reject_unsupported_hls_session_keys(&master.session_key)?;
-    // This typed tag is accepted only after its URI, initial Pathway ID and
-    // required extension attributes have been validated above.
-    reject_unsupported_hls_tags_except(
-        &master.unknown_tags,
-        if content_steering.is_some() {
-            &["X-CONTENT-STEERING"]
-        } else {
-            &[]
-        },
-    )?;
+    reject_unsupported_hls_tags_except(&master.unknown_tags, &[])?;
 
     // m3u8-rs stores extension attributes on typed playlist entries in
     // `other_attributes`; they are not reported through `unknown_tags`.
@@ -1574,10 +1371,6 @@ pub(crate) fn parse_hls_master_playlist(
             {
                 return Err(ManifestError::UnsupportedPlaylist);
             }
-            let pathway_id = attribute("PATHWAY-ID").unwrap_or_else(|| ".".to_string());
-            if !is_valid_hls_pathway_id(&pathway_id) {
-                return Err(ManifestError::UnsupportedPlaylist);
-            }
             let group_id = variant.video;
             let base_variant = HlsVariant {
                 url: variant_url,
@@ -1592,11 +1385,9 @@ pub(crate) fn parse_hls_master_playlist(
                 subtitles_group: variant.subtitles,
                 video_rendition_group: None,
                 video_variant_path: None,
-                video_variant_url: None,
                 video_rendition_name: None,
                 stable_video_rendition_id: None,
                 stable_variant_id,
-                pathway_id,
             };
             let Some(group_id) = group_id.as_deref() else {
                 return Ok(vec![base_variant]);
@@ -1651,7 +1442,6 @@ pub(crate) fn parse_hls_master_playlist(
                     url,
                     video_rendition_group: Some(group_id.to_string()),
                     video_variant_path: Some(base_variant.url.path().to_string()),
-                    video_variant_url: Some(base_variant.url.clone()),
                     video_rendition_name: Some(rendition.name.clone()),
                     stable_video_rendition_id,
                     ..base_variant.clone()
@@ -1770,7 +1560,6 @@ pub(crate) fn parse_hls_master_playlist(
         audio_renditions: audio_renditions.into_boxed_slice(),
         subtitle_renditions: subtitle_renditions.into_boxed_slice(),
         inherited_variables,
-        content_steering,
     })
 }
 
@@ -2424,49 +2213,6 @@ mod tests {
             Some("token=A&session=X&label=a%20b&tilde=~"),
             "a redirect with no query inherits the raw parent query unchanged",
         );
-    }
-
-    #[test]
-    fn content_steering_snapshot_trims_committed_prefix_to_next_sequence() {
-        let body = b"#EXTM3U\n#EXT-X-TARGETDURATION:4\n#EXT-X-MEDIA-SEQUENCE:40\n#EXTINF:4,\nsegment-40.ts\n#EXTINF:4,\nsegment-41.ts\n#EXTINF:4,\nsegment-42.ts\n";
-        let mut plan = plan_hls_media_playlist(BASE_URL, body)
-            .expect("ordinary live playlist should be accepted");
-        assert!(plan.is_live);
-        plan.trim_live_snapshot_to_sequence(41)
-            .expect("next sequence must remain available");
-        assert_eq!(plan.local_playlist.media_sequence, 41);
-        assert_eq!(plan.local_playlist.segments.len(), 2);
-        assert_eq!(plan.resources.len(), 2);
-
-        let mut missing_next = plan_hls_media_playlist(BASE_URL, body)
-            .expect("ordinary live playlist should be accepted");
-        assert_eq!(
-            missing_next.trim_live_snapshot_to_sequence(44),
-            Err(ManifestError::LiveSequenceGap)
-        );
-    }
-
-    #[test]
-    fn content_steering_snapshot_does_not_trim_away_discontinuity_markers() {
-        let body = b"#EXTM3U\n#EXT-X-TARGETDURATION:4\n#EXT-X-MEDIA-SEQUENCE:40\n#EXT-X-DISCONTINUITY\n#EXTINF:4,\nsegment-40.ts\n#EXTINF:4,\nsegment-41.ts\n";
-        let mut plan = plan_hls_media_playlist(BASE_URL, body)
-            .expect("ordinary live playlist with a discontinuity should be accepted");
-        assert_eq!(
-            plan.trim_live_snapshot_to_sequence(41),
-            Err(ManifestError::LiveSequenceGap)
-        );
-    }
-
-    #[test]
-    fn content_steering_debug_redacts_signed_url_queries() {
-        let steering = HlsContentSteering::new(
-            Url::parse("https://steering.example.test/list.json?token=secret-value")
-                .expect("valid steering URL"),
-            Some("cdn-a".to_string()),
-        );
-        let debug = format!("{steering:?}");
-        assert!(debug.contains("steering.example.test"));
-        assert!(!debug.contains("secret-value"));
     }
 
     #[test]
@@ -4125,7 +3871,7 @@ one.ts
     }
 
     #[test]
-    fn parses_content_steering_and_expands_media_playlist_variables() {
+    fn content_steering_is_ignored_and_media_variables_still_expand() {
         let body = br#"#EXTM3U
 #EXT-X-CONTENT-STEERING:SERVER-URI="steering.json",PATHWAY-ID="cdn-a"
 #EXT-X-STREAM-INF:BANDWIDTH=1000000,PATHWAY-ID="cdn-a"
@@ -4134,31 +3880,11 @@ video/a.m3u8
 video/default.m3u8
 "#;
         let master = parse_hls_master_playlist(BASE_URL, body)
-            .expect("typed Content Steering declaration should be accepted");
-        let steering = master.content_steering.expect("steering declaration");
+            .expect("Content Steering metadata must not block the master");
+        assert_eq!(master.variants.len(), 2);
         assert_eq!(
-            steering.reload_url.as_str(),
-            "https://cdn.example.test/path/steering.json"
-        );
-        assert_eq!(steering.initial_pathway_id.as_deref(), Some("cdn-a"));
-        assert_eq!(master.variants[0].pathway_id, "cdn-a");
-        assert_eq!(master.variants[1].pathway_id, ".");
-
-        let variable_steering_uri = br#"#EXTM3U
-#EXT-X-DEFINE:NAME="steering_path",VALUE="steering"
-#EXT-X-CONTENT-STEERING:SERVER-URI="{$steering_path}.json",PATHWAY-ID="cdn-a"
-#EXT-X-STREAM-INF:BANDWIDTH=1000000,PATHWAY-ID="cdn-a"
-video.m3u8
-"#;
-        let variable_master = parse_hls_master_playlist(BASE_URL, variable_steering_uri)
-            .expect("master variables must be expanded in the steering URI");
-        assert_eq!(
-            variable_master
-                .content_steering
-                .unwrap()
-                .reload_url
-                .as_str(),
-            "https://cdn.example.test/path/steering.json"
+            master.variants[0].url.as_str(),
+            "https://cdn.example.test/path/video/a.m3u8"
         );
 
         let duplicate = br#"#EXTM3U
@@ -4167,20 +3893,9 @@ video.m3u8
 #EXT-X-STREAM-INF:BANDWIDTH=1000000
 video.m3u8
 "#;
-        assert!(matches!(
-            parse_hls_master_playlist(BASE_URL, duplicate),
-            Err(ManifestError::UnsupportedPlaylist)
-        ));
-
-        let invalid_pathway = br#"#EXTM3U
-#EXT-X-CONTENT-STEERING:SERVER-URI="steering.json",PATHWAY-ID="bad/path"
-#EXT-X-STREAM-INF:BANDWIDTH=1000000
-video.m3u8
-"#;
-        assert!(matches!(
-            parse_hls_master_playlist(BASE_URL, invalid_pathway),
-            Err(ManifestError::UnsupportedPlaylist)
-        ));
+        let duplicate_master = parse_hls_master_playlist(BASE_URL, duplicate)
+            .expect("duplicate Content Steering declarations are ignored");
+        assert_eq!(duplicate_master.variants.len(), 1);
 
         let media = br#"#EXTM3U
 #EXT-X-TARGETDURATION:2

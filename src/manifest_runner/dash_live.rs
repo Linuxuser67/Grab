@@ -854,7 +854,6 @@ pub(super) async fn apply_dash_live_snapshot(
 )]
 pub(super) async fn run_live_dash_tracks(
     client: &reqwest::Client,
-    proxy_configured: bool,
     source_url: &str,
     destination_dir: &Path,
     destination: &Path,
@@ -1138,11 +1137,7 @@ pub(super) async fn run_live_dash_tracks(
                     crate::video::StopIntent::Discard => DashLiveCaptureOutcome::Discard,
                 });
             }
-            result = crate::manifest_intake::lookup_with_client(
-                client,
-                source_url,
-                proxy_configured,
-            ) => result,
+            result = crate::manifest_intake::lookup_with_client(client, source_url) => result,
         };
         let lookup = match lookup {
             Ok(Some(lookup)) if lookup.kind() == ManifestKind::Dash => lookup,

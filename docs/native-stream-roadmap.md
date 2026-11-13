@@ -64,20 +64,11 @@ integration fixtures cover AVC/AAC SDR, HEVC/E-AC-3 PQ and AVC/AC-3 fallback
 when the corresponding encoders are present on the test host. This matrix does
 not claim Dolby Vision, AV1, or spatial-video verification.
 
-HLS Content Steering retains the unfiltered master and applies each refreshed
-clone set afresh. Ordinary live HLS follows the response TTL and relative
-RELOAD-URI, preserving signed query parameters and sending the active
-_HLS_pathway. A route change requires the selected stable track identities
-to remain valid and the refreshed playlist to continue at the exact next
-uncommitted media sequence. A change that requires switching both separate
-audio and video playlists together is deferred rather than committed
-non-atomically. LL-HLS refreshes steering metadata but defers pathway switches
-because its part identities need a separate cross-pathway reconciliation
-model.
 For ordinary HLS, `EXT-X-START` is ignored during recording: all listed
 segments are retained and the playback hint is omitted from the local playlist.
-Ad-marked playlists that also use `EXT-X-START` remain on fallback because
-omitting tagged segments would invalidate the source playback hint.
+`EXT-X-CONTENT-STEERING` is accepted as benign metadata: Grab does not fetch
+the steering manifest, does not select a Pathway, and downloads the variants
+the master advertises. Pathway-driven host or URI rewriting is not applied.
 Media-playlist NAME/VALUE and QUERYPARAM variable substitution is supported
 for ordinary HLS and LL-HLS. Master-playlist
 NAME/VALUE and QUERYPARAM variables are expanded in variant and rendition

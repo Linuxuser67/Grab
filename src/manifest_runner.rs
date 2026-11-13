@@ -18,8 +18,7 @@ use url::Url;
 use crate::content_range::{ParsedContentRange, parse_content_range};
 use crate::engine_msg::EngineMsg;
 use crate::manifest::{
-    HlsContentSteering, HlsLiveAccumulator, HlsPlan, HlsResource, HlsResourceKind,
-    ManifestByteRange,
+    HlsLiveAccumulator, HlsPlan, HlsResource, HlsResourceKind, ManifestByteRange,
     dash::{
         DashPresentation, DashRepresentationPlan, DashResource, DashResourceKind,
         DashSegmentBaseIndex, DashSidxEntry, MAX_DASH_SIDX_SEGMENTS, dash_sidx_media_resource,
@@ -346,7 +345,6 @@ enum Tracks {
         audio: Option<Box<HlsPlan>>,
         subtitle: Option<Box<HlsPlan>>,
         subtitle_language: Option<String>,
-        content_steering: Option<Box<HlsContentSteering>>,
     },
     Dash {
         video: Box<DashRepresentationPlan>,
@@ -378,8 +376,6 @@ impl Tracks {
 struct LiveHlsTrack {
     /// Effective post-redirect playlist URL used for resource resolution and polling.
     playlist_url: Url,
-    /// URL advertised by the selected master pathway, before media-playlist redirects.
-    requested_playlist_url: Url,
     inherited_variables: Box<[(String, String)]>,
     directory: PathBuf,
     accumulator: HlsLiveAccumulator,
@@ -830,13 +826,7 @@ async fn resolve_manifest_tracks(
             )
         })?
     } else {
-        match crate::manifest_intake::lookup_with_client(
-            &client,
-            &job.source.url,
-            job.proxy.is_some(),
-        )
-        .await
-        {
+        match crate::manifest_intake::lookup_with_client(&client, &job.source.url).await {
             Ok(Some(lookup)) if lookup.kind() == job.source.kind => {
                 match resolve_tracks(&client, lookup, &job.source, &mut guarded_child_hosts).await {
                     Ok(tracks) => tracks,
@@ -1184,8 +1174,6 @@ struct ManifestLiveHlsFinalization<'a> {
     finish_only: bool,
     video: &'a HlsPlan,
     audio: Option<&'a HlsPlan>,
-    source: &'a ManifestSource,
-    content_steering: Option<&'a mut HlsContentSteering>,
     video_dir: &'a Path,
     audio_dir: &'a Path,
     concurrency: usize,
@@ -1331,8 +1319,6 @@ async fn prepare_live_hls_finalization(
         finish_only,
         video,
         audio,
-        source,
-        content_steering,
         video_dir,
         audio_dir,
         concurrency,
@@ -1346,8 +1332,6 @@ async fn prepare_live_hls_finalization(
     let capture = run_live_hls_tracks(
         client,
         source_url,
-        source,
-        content_steering,
         dest_dir,
         destination,
         item_id,
@@ -1473,7 +1457,6 @@ async fn prepare_live_hls_finalization(
 /// Inputs for capturing live DASH tracks and preparing their local track files.
 struct ManifestLiveDashFinalization<'a> {
     client: &'a reqwest::Client,
-    proxy_configured: bool,
     source_url: &'a str,
     dest_dir: &'a Path,
     destination: &'a Path,
@@ -1498,7 +1481,6 @@ async fn prepare_live_dash_finalization(
 ) -> Result<LiveCapturePreparation, ManifestRunError> {
     let ManifestLiveDashFinalization {
         client,
-        proxy_configured,
         source_url,
         dest_dir,
         destination,
@@ -1519,7 +1501,6 @@ async fn prepare_live_dash_finalization(
 
     let capture = run_live_dash_tracks(
         client,
-        proxy_configured,
         source_url,
         dest_dir,
         destination,
@@ -1645,13 +1626,7 @@ pub(crate) async fn run_manifest_download(
     let static_destination_parts = !live_hls && !live_dash && tracks.uses_destination_parts();
     let mut live_destination_parts = live_dash;
     if live_hls {
-        let Tracks::Hls {
-            video,
-            audio,
-            content_steering,
-            ..
-        } = &mut tracks
-        else {
+        let Tracks::Hls { video, audio, .. } = &mut tracks else {
             return Err(ManifestRunError::Failed(
                 "Live HLS capture requires HLS media tracks".to_string(),
             ));
@@ -1666,8 +1641,6 @@ pub(crate) async fn run_manifest_download(
             finish_only: finish_requested,
             video: video.as_ref(),
             audio: audio.as_deref(),
-            source: &job.source,
-            content_steering: content_steering.as_deref_mut(),
             video_dir: &video_dir,
             audio_dir: &audio_dir,
             concurrency,
@@ -1717,7 +1690,6 @@ pub(crate) async fn run_manifest_download(
         };
         match prepare_live_dash_finalization(ManifestLiveDashFinalization {
             client: &client,
-            proxy_configured: job.proxy.is_some(),
             source_url: &job.source.url,
             dest_dir: &dest_dir,
             destination: &job.dest,
@@ -2171,7 +2143,6 @@ async fn resolve_tracks(
                 audio: None,
                 subtitle: None,
                 subtitle_language: None,
-                content_steering: None,
             })
         }
         ManifestDownloadPlan::HlsMaster(plan) => {
@@ -2181,7 +2152,6 @@ async fn resolve_tracks(
                 subtitle_url,
                 subtitle_language,
                 inherited_variables,
-                content_steering,
             } = *plan;
             guard_manifest_child_url(&source.url, &video_url, guarded_child_hosts)?;
             if let Some(audio_url) = audio_url.as_ref() {
@@ -2238,7 +2208,6 @@ async fn resolve_tracks(
                 audio: audio.map(Box::new),
                 subtitle,
                 subtitle_language,
-                content_steering: content_steering.map(Box::new),
             })
         }
         ManifestDownloadPlan::Dash {

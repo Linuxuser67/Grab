@@ -39,10 +39,27 @@ impl DownloadStatus {
 pub(crate) const QUEUE_VERSION: u32 = 4;
 
 /// One multi-item source collection shared by its child downloads.
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
 pub(crate) struct DownloadGroup {
     id: u64,
     title: String,
+}
+
+#[derive(serde::Deserialize)]
+struct RawDownloadGroup {
+    id: u64,
+    title: String,
+}
+
+fn deserialize_optional_group<'de, D>(deserializer: D) -> Result<Option<DownloadGroup>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    use serde::Deserialize as _;
+    let raw = Option::<serde_json::Value>::deserialize(deserializer)?;
+    Ok(raw
+        .and_then(|value| serde_json::from_value::<RawDownloadGroup>(value).ok())
+        .and_then(|group| DownloadGroup::try_new(group.id, &group.title)))
 }
 
 impl DownloadGroup {
@@ -63,10 +80,6 @@ impl DownloadGroup {
 
     pub(crate) fn title(&self) -> &str {
         &self.title
-    }
-
-    pub(crate) fn is_valid(&self) -> bool {
-        self.id > 0 && !self.title.trim().is_empty()
     }
 }
 
@@ -121,7 +134,7 @@ pub(crate) struct StoredItem {
     #[serde(default)]
     pub(crate) gallery: Option<serde_json::Value>,
     /// Optional collection identity shared by multi-row child downloads.
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_optional_group")]
     pub(crate) group: Option<DownloadGroup>,
 }
 
@@ -168,6 +181,43 @@ mod public_only_metadata_tests {
 #[cfg(test)]
 mod group_metadata_tests {
     use super::StoredItem;
+
+    #[test]
+    fn invalid_collection_group_metadata_is_ignored_without_rejecting_the_queue_item() {
+        for group in [
+            serde_json::json!({"id": 0, "title": "Invalid id"}),
+            serde_json::json!({"id": 41, "title": "   "}),
+        ] {
+            let item: StoredItem = serde_json::from_value(serde_json::json!({
+                "url": "https://example.com/video/one",
+                "dest_dir": "/tmp/downloads",
+                "filename": "one.mp4",
+                "status": "queued",
+                "group": group
+            }))
+            .expect("invalid optional group must not reject its queue item");
+            assert_eq!(item.group, None);
+        }
+    }
+
+    #[test]
+    fn malformed_collection_group_metadata_is_ignored_without_rejecting_the_queue_item() {
+        for group in [
+            serde_json::json!("not an object"),
+            serde_json::json!({"id": "not a number", "title": "Course playlist"}),
+            serde_json::json!({"id": 41}),
+        ] {
+            let item: StoredItem = serde_json::from_value(serde_json::json!({
+                "url": "https://example.com/video/one",
+                "dest_dir": "/tmp/downloads",
+                "filename": "one.mp4",
+                "status": "queued",
+                "group": group
+            }))
+            .expect("malformed optional group must not reject its queue item");
+            assert_eq!(item.group, None);
+        }
+    }
 
     #[test]
     fn collection_group_metadata_round_trips() {

@@ -12,7 +12,8 @@ use crate::manifest_types::{
     ManifestAudioChoice, ManifestChoice, ManifestLookup, ManifestSubtitleChoice, NativeManifest,
 };
 use crate::media_types::{
-    ManifestAudioKey, ManifestKind, ManifestRepresentationKey, ManifestSource, ManifestSubtitleKey,
+    ManifestAudioKey, ManifestContainer, ManifestKind, ManifestRepresentationKey, ManifestSource,
+    ManifestSubtitleKey,
 };
 
 /// A validated protocol plan ready for the runner to materialize and execute.
@@ -38,16 +39,16 @@ pub(crate) enum ManifestDownloadPlan {
 }
 
 /// Infer a supported output container from a DASH representation MIME type.
-pub(crate) fn dash_output_container_extension(mime_type: Option<&str>) -> Option<&'static str> {
+pub(crate) fn dash_output_container(mime_type: Option<&str>) -> Option<ManifestContainer> {
     let mime_type = mime_type?.split(';').next()?.trim();
     if mime_type.eq_ignore_ascii_case("video/mp2t")
         || mime_type.eq_ignore_ascii_case("application/mp2t")
     {
-        Some("ts")
+        Some(ManifestContainer::MpegTs)
     } else if mime_type.eq_ignore_ascii_case("video/mp4")
         || mime_type.eq_ignore_ascii_case("application/mp4")
     {
-        Some("mp4")
+        Some(ManifestContainer::Mp4)
     } else {
         None
     }
@@ -429,13 +430,13 @@ impl ManifestLookup {
         // rather than performing a second network lookup during Add.
         let output_extension = match &self.manifest {
             NativeManifest::HlsMaster(_) => None,
-            NativeManifest::HlsMedia(plan) => plan.output_container_extension().map(str::to_owned),
+            NativeManifest::HlsMedia(plan) => plan.output_container(),
             NativeManifest::Dash(dash) => dash
                 .video_representations
                 .iter()
                 .find(|representation| representation.matches_key(representation_key.as_str()))
                 .and_then(|representation| {
-                    dash_output_container_extension(representation.mime_type.as_deref())
+                    dash_output_container(representation.mime_type.as_deref())
                 })
                 .map(str::to_owned),
         };

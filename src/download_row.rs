@@ -100,7 +100,10 @@ glib::wrapper! {
 impl DownloadItem {
     /// Whether this row owns the queue entry for a gallery or video collection.
     pub(crate) fn is_collection_parent(&self) -> bool {
-        matches!(self.role(), DownloadRowRole::GalleryOwner | DownloadRowRole::PlaylistOwner)
+        matches!(
+            self.role(),
+            DownloadRowRole::GalleryOwner | DownloadRowRole::PlaylistOwner
+        )
     }
 
     pub fn is_gallery(&self) -> bool {

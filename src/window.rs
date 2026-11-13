@@ -251,16 +251,13 @@ pub fn build_window(
     // Inline New Download card, pinned under the header above the list (and
     // the empty state). The queue stays usable underneath it.
     let add_card = crate::inline_add::build_add_card(Rc::clone(&manager));
-    // Use GTK's standard GNOME search bar: it reveals below the header,
-    // owns its close button, and captures unhandled window typing.
+    // Use GTK's standard GNOME search bar: it reveals below the header
+    // and captures unhandled window typing; the header toggle dismisses it.
     let search = gtk4::SearchEntry::builder()
         .placeholder_text(gettext("Search downloads"))
         .hexpand(true)
         .build();
-    let search_bar = gtk4::SearchBar::builder()
-        .child(&search)
-        .show_close_button(true)
-        .build();
+    let search_bar = gtk4::SearchBar::builder().child(&search).build();
     search_bar.set_widget_name("download-search-bar");
     search_bar.connect_entry(&search);
     search_bar.set_key_capture_widget(Some(&window));

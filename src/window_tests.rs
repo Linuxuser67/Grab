@@ -628,8 +628,8 @@ fn status_views_use_gnome_adaptive_view_switcher() {
             "GtkSearchBar contains GtkSearchEntry directly rather than a custom card"
         );
         assert!(
-            search_bar.property::<bool>("show-close-button"),
-            "the stock GtkSearchBar close control is enabled"
+            !search_bar.property::<bool>("show-close-button"),
+            "the search bar does not add a separate close control"
         );
         let search_toggle = find_widget_by_name(window.upcast_ref(), "search-downloads-button")
             .expect("header search toggle exists")

@@ -1501,6 +1501,12 @@ fn stall_elapsed(last_progress: &std::sync::Mutex<std::time::Instant>) -> std::t
 /// output instead of forwarding it, so a merge is silent on both streams — a
 /// stall deadline there would kill legitimate long merges, but a truly hung
 /// ffmpeg must not park the row forever either.
+async fn await_ytdlp_group_quiescence(pgid: Option<i32>) {
+    if let Some(pgid) = pgid {
+        crate::video_spawn::await_group_quiescence(pgid).await;
+    }
+}
+
 pub(crate) async fn await_child(
     child: &mut tokio::process::Child,
     merging: bool,
@@ -2627,6 +2633,7 @@ pub(crate) async fn run_live_ytdlp(
                 biased;
                 intent = &mut abort => {
                     reap_child(&mut child, &mut group).await;
+                    await_ytdlp_group_quiescence(pgid).await;
                     break match intent {
                         Ok(StopIntent::Finish | StopIntent::Pause) => (true, false),
                         Ok(StopIntent::Discard) => (true, true),
@@ -2641,6 +2648,7 @@ pub(crate) async fn run_live_ytdlp(
                     match waited {
                         Ok(Ok(status)) => {
                             group.disarm();
+                            await_ytdlp_group_quiescence(pgid).await;
                             if !status.success() {
                                 progress.abort();
                                 let log_tail = join_drain(logs).await.unwrap_or_default();
@@ -2689,23 +2697,18 @@ pub(crate) async fn run_live_ytdlp(
                             break (false, false);
                         }
                         Ok(Err(e)) => {
-                            // Reap, then reclaim — never the other way round. The
-                            // sweep keeps a finished recording, taking only scratch.
                             progress.abort();
                             logs.abort();
-                            reap_then_sweep(
-                                reap_child(&mut child, &mut group),
-                                || {
-                                    sweep_live_capture(
-                                        &out,
-                                        &part,
-                                        &state,
-                                        staging,
-                                        None,
-                                        Staging::Sweep,
-                                        Exit::CaptureWaitFailed,
-                                    )
-                                },
+                            reap_child(&mut child, &mut group).await;
+                            await_ytdlp_group_quiescence(pgid).await;
+                            sweep_live_capture(
+                                &out,
+                                &part,
+                                &state,
+                                staging,
+                                None,
+                                Staging::Sweep,
+                                Exit::CaptureWaitFailed,
                             )
                             .await;
                             return Err(VideoError::runtime(format!(
@@ -2718,8 +2721,10 @@ pub(crate) async fn run_live_ytdlp(
                         // killing a live capture on a race.
                         Err(_) if stall_elapsed(&last_progress) < timeout => {}
                         Err(_) => {
-                            // A stalled live capture still yields what it got.
+                            // A stalled live capture still yields what it got,
+                            // but only after every process that could write it exits.
                             reap_child(&mut child, &mut group).await;
+                            await_ytdlp_group_quiescence(pgid).await;
                             break (false, false);
                         }
                     }
@@ -2734,18 +2739,7 @@ pub(crate) async fn run_live_ytdlp(
         // since sweeping from inside a running task is the race being avoided.
         if discarded {
             logs.abort();
-            // The guard only *signalled* the group, so a descendant may still be
-            // writing when the manager reclaims the scratch: wait for the group
-            // and report rather than assume. Five seconds, not the attempt
-            // timeout -- the reap already killed everything real, so this is
-            // grace for stragglers only, and the attempt timeout would park
-            // the discard path (and a runtime thread) for minutes.
-            if let Some(pgid) = pgid {
-                // The manager's discard finalizer sweeps staging as soon as
-                // this worker returns. Do not return while a descendant may
-                // still hold a file descriptor into that directory.
-                crate::video_spawn::await_group_quiescence(pgid).await;
-            }
+            // The process group was already confirmed quiescent in the abort arm.
             return Ok(None);
         }
         let log_tail = join_drain(logs).await.unwrap_or_default();

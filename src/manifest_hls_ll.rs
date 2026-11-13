@@ -217,13 +217,16 @@ fn scan_ll_hls_tag_flags(body: &[u8]) -> LlHlsTagFlags {
             // Missing or malformed METHOD values fail closed. METHOD=NONE
             // only disables encryption and must not divert unencrypted
             // LL-HLS away from the low-latency planner.
-            flags.encrypted_media_key |=
-                hls_key_method(attributes).is_none_or(|method| !method.eq_ignore_ascii_case(b"NONE"));
+            flags.encrypted_media_key |= hls_key_method(attributes)
+                .is_none_or(|method| !method.eq_ignore_ascii_case(b"NONE"));
         }
 
         // Preserve the old "from the last EXTINF onward" rule, including the
         // no-EXTINF case (where the whole body was inspected).
-        if raw_line.windows(EXTINF.len()).any(|window| window == EXTINF) {
+        if raw_line
+            .windows(EXTINF.len())
+            .any(|window| window == EXTINF)
+        {
             flags.trailing_open_discontinuity = false;
         }
         if line.trim_ascii_start() == DISCONTINUITY {
@@ -274,15 +277,13 @@ mod ll_hls_tag_flag_tests {
     }
 }
 
-
 pub(crate) fn plan_hls_media_playlist(
     manifest_url: &str,
     body: &[u8],
 ) -> Result<Option<HlsPlan>, ManifestError> {
     let tag_flags = scan_ll_hls_tag_flags(body);
-    let use_standard_encryption_planner = !tag_flags.partial_segments
-        && tag_flags.encrypted_media_key
-        && !tag_flags.delta_update;
+    let use_standard_encryption_planner =
+        !tag_flags.partial_segments && tag_flags.encrypted_media_key && !tag_flags.delta_update;
     if !tag_flags.has_ll_hls_tags || use_standard_encryption_planner {
         // Keep complete-segment LL-HLS on the live planner unless it actually
         // carries media encryption. Only complete encrypted segments are

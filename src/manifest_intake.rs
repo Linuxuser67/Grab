@@ -2547,10 +2547,6 @@ pub(crate) fn valid_source(source: &crate::media_types::ManifestSource) -> bool 
     if !is_native_manifest_candidate(&url, ManifestTransportPolicy::HttpsOnly)
         || native_manifest_kind(&url).is_some_and(|kind| kind != source.kind)
         || source.representation_key.is_empty()
-        || source
-            .output_extension
-            .as_deref()
-            .is_some_and(|extension| !matches!(extension, "mp4" | "mkv" | "ts"))
     {
         return false;
     }
@@ -3374,31 +3370,34 @@ video/es.m3u8
         );
 
         let mut preview_source = legacy_with_tracks.clone();
-        preview_source.output_extension = Some("ts".to_string());
+        preview_source.output_container = Some(crate::media_types::ManifestContainer::Ts);
         let preview_encoded =
             serde_json::to_value(&preview_source).expect("serialize preview metadata");
         assert!(
-            preview_encoded.get("output_extension").is_none(),
+            preview_encoded.get("output_container").is_none(),
             "preview-only format hints must not become stale persisted metadata"
         );
         let restored_preview: crate::media_types::ManifestSource =
             serde_json::from_value(preview_encoded).expect("restore persisted source");
-        assert_eq!(restored_preview.output_extension, None);
+        assert_eq!(restored_preview.output_container, None);
 
         let mut source = crate::media_types::ManifestSource {
             url: "https://cdn.example.test/master.m3u8".to_string(),
             kind: crate::media_types::ManifestKind::Hls,
             representation_key: "hls-variant-0123456789abcdef0123456789abcdef".into(),
-            output_extension: None,
+            output_container: None,
             audio_key: Some("hls-audio-0123456789abcdef0123456789abcdef".into()),
             subtitle_key: None,
             subtitle_language: None,
         };
         assert!(valid_source(&source));
-        source.output_extension = Some("../unexpected".to_string());
-        assert!(!valid_source(&source));
-        source.output_extension = None;
+        source.output_container = Some(crate::media_types::ManifestContainer::Ts);
         assert!(valid_source(&source));
+        source.output_container = Some(crate::media_types::ManifestContainer::Mp4);
+        assert!(valid_source(&source));
+        source.output_container = Some(crate::media_types::ManifestContainer::Mkv);
+        assert!(valid_source(&source));
+        source.output_container = None;
         source.url = "https://cdn.example.test/master".to_string();
         assert!(
             valid_source(&source),

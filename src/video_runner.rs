@@ -92,9 +92,7 @@ impl<R: tokio::io::AsyncRead + Unpin> YtdlpStdoutReader<R> {
                     let newline = buffer.iter().position(|byte| *byte == b'\n');
                     let record_bytes = newline.unwrap_or(buffer.len());
                     if !discarding_oversized {
-                        if line.len().saturating_add(record_bytes)
-                            <= MAX_YTDLP_STDOUT_LINE_BYTES
-                        {
+                        if line.len().saturating_add(record_bytes) <= MAX_YTDLP_STDOUT_LINE_BYTES {
                             line.extend_from_slice(&buffer[..record_bytes]);
                         } else {
                             line.clear();

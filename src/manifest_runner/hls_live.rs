@@ -326,12 +326,10 @@ async fn fetched_hls_resource_bytes(
     for resource in resources {
         let path = directory.join(&resource.filename);
         let metadata = tokio::fs::symlink_metadata(&path).await.map_err(|error| {
-            ManifestRunError::Failed(format!(
-                "Could not inspect a fetched live HLS resource: {error}"
-            ))
+            manifest_storage_error("Could not inspect a fetched live HLS resource", error)
         })?;
         if metadata.file_type().is_symlink() || !metadata.is_file() {
-            return Err(ManifestRunError::Failed(
+            return Err(ManifestRunError::Unsupported(
                 "A fetched live HLS resource is not a regular file".to_string(),
             ));
         }
@@ -341,18 +339,40 @@ async fn fetched_hls_resource_bytes(
             || resource.range.is_some_and(|range| size != range.length)
             || (resource.kind == HlsResourceKind::Key && size != 16)
         {
-            return Err(ManifestRunError::Failed(
+            return Err(ManifestRunError::Unsupported(
                 "A fetched live HLS resource has an invalid size".to_string(),
             ));
         }
         total = total.checked_add(size).ok_or_else(|| {
-            ManifestRunError::Failed("The live HLS resource byte total overflowed".to_string())
+            ManifestRunError::Unsupported(
+                "The live HLS resource byte total exceeds its supported limit".to_string(),
+            )
         })?;
     }
     Ok(total)
 }
 
 const LIVE_HLS_FULL_RESOURCE_VERIFY_INTERVAL: Duration = Duration::from_secs(60);
+
+/// Preserve previously committed segments when a newly observed playlist or
+/// resource no longer satisfies the native live-capture contract.
+fn preserve_captured_or_fail(
+    track: &LiveHlsTrack,
+    playlist_url: &Url,
+    context: &'static str,
+    error: ManifestRunError,
+) -> Result<LiveHlsSnapshotOutcome, ManifestRunError> {
+    if track.accumulator.segment_count() > 0 {
+        tracing::warn!(
+            playlist = %diagnostic_url(playlist_url),
+            error = %error,
+            "{context}; preserving captured media"
+        );
+        Ok(LiveHlsSnapshotOutcome::ContinuityLost)
+    } else {
+        Err(error)
+    }
+}
 
 async fn verify_live_hls_resource_files<'a>(
     directory: &Path,
@@ -505,13 +525,13 @@ pub(super) async fn apply_live_hls_snapshot(
         .await
     };
     let fetch_outcome = match fetch_outcome {
-        Err(ManifestRunError::Unsupported(error)) if track.accumulator.segment_count() > 0 => {
-            tracing::warn!(
-                playlist = %diagnostic_url(&playlist_url),
-                error = %error,
-                "live HLS resource update is no longer supported; preserving captured media"
+        Err(error @ ManifestRunError::Unsupported(_)) => {
+            return preserve_captured_or_fail(
+                track,
+                &playlist_url,
+                "live HLS resource update is no longer supported",
+                error,
             );
-            return Ok(LiveHlsSnapshotOutcome::ContinuityLost);
         }
         Err(error) => return Err(error),
         Ok(outcome) => outcome,
@@ -531,30 +551,36 @@ pub(super) async fn apply_live_hls_snapshot(
         .cloned()
         .collect::<Vec<_>>();
     let added_resource_bytes =
-        fetched_hls_resource_bytes(&track.directory, &newly_accounted_resources).await?;
+        match fetched_hls_resource_bytes(&track.directory, &newly_accounted_resources).await {
+            Ok(bytes) => bytes,
+            Err(error @ ManifestRunError::Unsupported(_)) => {
+                return preserve_captured_or_fail(
+                    track,
+                    &playlist_url,
+                    "a newly fetched live HLS resource is invalid",
+                    error,
+                );
+            }
+            Err(error) => return Err(error),
+        };
     // The full staged set is verified on restore, periodically, and on ENDLIST.
     // The steady-state poll path checks only the resources referenced by this snapshot.
     let full_resource_verification_due = end_list
         || track.last_full_resource_verification.elapsed()
             >= LIVE_HLS_FULL_RESOURCE_VERIFY_INTERVAL;
-    let verification = if full_resource_verification_due {
-        verify_live_hls_resource_files(
-            &track.directory,
-            track
-                .accumulator
-                .resource_names()
-                .chain(update.referenced_resource_names()),
-            track.accumulator.segment_count() > 0,
-        )
-        .await
-    } else {
-        verify_live_hls_resource_files(
-            &track.directory,
-            update.referenced_resource_names(),
-            track.accumulator.segment_count() > 0,
-        )
-        .await
-    };
+    let mut verification_names = update
+        .referenced_resource_names()
+        .map(str::to_string)
+        .collect::<HashSet<_>>();
+    if full_resource_verification_due {
+        verification_names.extend(track.accumulator.resource_names().map(str::to_string));
+    }
+    let verification = verify_live_hls_resource_files(
+        &track.directory,
+        verification_names.iter().map(String::as_str),
+        track.accumulator.segment_count() > 0,
+    )
+    .await;
     if let Err(ManifestRunError::Unsupported(error)) = &verification
         && track.accumulator.segment_count() > 0
     {
@@ -569,7 +595,10 @@ pub(super) async fn apply_live_hls_snapshot(
     if full_resource_verification_due {
         track.last_full_resource_verification = Instant::now();
     }
-    for filename in plan.ll_parts_without_init_map() {
+    for filename in plan
+        .ll_parts_without_init_map()
+        .filter(|filename| new_resource_names.contains(*filename))
+    {
         if !super::is_mpegts_segment(&track.directory.join(filename)).await? {
             if track.accumulator.segment_count() > 0 {
                 return Ok(LiveHlsSnapshotOutcome::ContinuityLost);
@@ -581,7 +610,7 @@ pub(super) async fn apply_live_hls_snapshot(
         }
     }
     if track.destination_part.is_some() {
-        for resource in &update.resources {
+        for resource in &newly_accounted_resources {
             if resource.kind != HlsResourceKind::Segment
                 || resource.range.is_some()
                 || !super::is_mpegts_segment(&track.directory.join(&resource.filename)).await?

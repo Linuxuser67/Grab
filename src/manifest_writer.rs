@@ -582,14 +582,6 @@ impl OrderedTrackWriter {
         self.next_resource_index
     }
 
-    /// Return the private XDG staging directory associated with a destination writer.
-    #[must_use]
-    pub(crate) fn staging_directory(&self) -> Option<&Path> {
-        self.destination_part
-            .as_ref()
-            .map(|part| part.staging.as_path())
-    }
-
     #[must_use]
     pub(crate) fn committed_offset(&self) -> u64 {
         self.committed_offset

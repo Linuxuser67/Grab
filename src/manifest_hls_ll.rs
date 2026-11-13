@@ -2113,7 +2113,7 @@ segment.ts
 #EXT-X-DISCONTINUITY
 "#;
         let flags = scan_ll_hls_tags(body);
-        assert!(flags.has_partial_segments == false);
+        assert!(!flags.has_partial_segments);
         assert!(flags.has_encrypted_media_key_tag);
         assert!(flags.has_delta_update);
         assert!(flags.has_ll_hls_tags);

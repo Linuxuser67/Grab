@@ -186,6 +186,11 @@ pub(crate) fn validate_live_unit_ids(ids: &[HlsLiveUnitId]) -> bool {
     ids.windows(2).all(|pair| pair[1].is_successor_of(&pair[0]))
 }
 
+fn has_ll_hls_partial_segments(body: &[u8]) -> bool {
+    body.split(|byte| *byte == b'\n')
+        .any(|line| line.starts_with(b"#EXT-X-PART:"))
+}
+
 fn trim_ascii_whitespace(value: &[u8]) -> &[u8] {
     value.trim_ascii()
 }
@@ -234,6 +239,20 @@ fn hls_key_method(attributes: &[u8]) -> Option<&[u8]> {
     None
 }
 
+fn has_hls_encrypted_media_key_tag(body: &[u8]) -> bool {
+    body.split(|byte| *byte == b'\n').any(|line| {
+        let line = line.strip_suffix(b"\r").unwrap_or(line);
+        let Some(attributes) = line.strip_prefix(b"#EXT-X-KEY:") else {
+            return false;
+        };
+
+        // Missing or malformed METHOD values fail closed. METHOD=NONE only
+        // disables encryption; it must not divert an unencrypted LL-HLS
+        // playlist away from the low-latency planner.
+        hls_key_method(attributes).is_none_or(|method| !method.eq_ignore_ascii_case(b"NONE"))
+    })
+}
+
 fn is_hls_method_none_key_tag(tag: &str) -> bool {
     let Some(attributes) = tag.as_bytes().strip_prefix(b"#EXT-X-KEY:") else {
         return false;
@@ -245,101 +264,31 @@ fn is_hls_method_none_key_tag(tag: &str) -> bool {
         && hls_key_method(attributes).is_some_and(|method| method.eq_ignore_ascii_case(b"NONE"))
 }
 
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-struct LlHlsTagFlags {
-    partial_segments: bool,
-    encrypted_media_key: bool,
-    delta_update: bool,
-    has_ll_hls_tags: bool,
-    trailing_open_discontinuity: bool,
+fn has_ll_hls_delta_update(body: &[u8]) -> bool {
+    body.split(|byte| *byte == b'\n')
+        .any(|line| line.starts_with(b"#EXT-X-SKIP:"))
 }
 
-/// Read the untrusted playlist body once and collect the raw-tag facts used
-/// to route and construct an LL-HLS plan.
-fn scan_ll_hls_tag_flags(body: &[u8]) -> LlHlsTagFlags {
-    const EXTINF: &[u8] = b"#EXTINF:";
-    const DISCONTINUITY: &[u8] = b"#EXT-X-DISCONTINUITY";
-    let mut flags = LlHlsTagFlags::default();
-
-    for raw_line in body.split(|byte| *byte == b'\n') {
-        let line = raw_line.strip_suffix(b"\r").unwrap_or(raw_line);
-        flags.partial_segments |= raw_line.starts_with(b"#EXT-X-PART:");
-        flags.delta_update |= raw_line.starts_with(b"#EXT-X-SKIP:");
-        flags.has_ll_hls_tags |= raw_line.starts_with(b"#EXT-X-SERVER-CONTROL:")
-            || raw_line.starts_with(b"#EXT-X-PART-INF:")
-            || raw_line.starts_with(b"#EXT-X-PART:")
-            || raw_line.starts_with(b"#EXT-X-PRELOAD-HINT:")
-            || raw_line.starts_with(b"#EXT-X-RENDITION-REPORT:")
-            || raw_line.starts_with(b"#EXT-X-SKIP:");
-
-        if let Some(attributes) = line.strip_prefix(b"#EXT-X-KEY:") {
-            // Missing or malformed METHOD values fail closed. METHOD=NONE
-            // only disables encryption and must not divert unencrypted
-            // LL-HLS away from the low-latency planner.
-            flags.encrypted_media_key |= hls_key_method(attributes)
-                .is_none_or(|method| !method.eq_ignore_ascii_case(b"NONE"));
-        }
-
-        // Preserve the old "from the last EXTINF onward" rule, including the
-        // no-EXTINF case (where the whole body was inspected).
-        if raw_line
-            .windows(EXTINF.len())
-            .any(|window| window == EXTINF)
-        {
-            flags.trailing_open_discontinuity = false;
-        }
-        if line.trim_ascii_start() == DISCONTINUITY {
-            flags.trailing_open_discontinuity = true;
-        }
-    }
-
-    flags
-}
-
-#[cfg(test)]
-mod ll_hls_tag_flag_tests {
-    use super::*;
-
-    #[test]
-    fn scans_all_ll_hls_dispatch_flags_together() {
-        let flags = scan_ll_hls_tag_flags(
-            b"#EXTM3U\r\n#EXT-X-SERVER-CONTROL:CAN-BLOCK-RELOAD=YES\r\n#EXT-X-PART:URI=part.m4s,DURATION=0.2\r\n#EXT-X-SKIP:SKIPPED-SEGMENTS=1\r\n#EXT-X-KEY:METHOD=AES-128,URI=key.bin\r\n#EXTINF:1,\r\n#EXT-X-DISCONTINUITY\r\n",
-        );
-
-        assert!(flags.partial_segments);
-        assert!(flags.encrypted_media_key);
-        assert!(flags.delta_update);
-        assert!(flags.has_ll_hls_tags);
-        assert!(flags.trailing_open_discontinuity);
-    }
-
-    #[test]
-    fn latest_extinf_resets_trailing_discontinuity_state() {
-        let flags = scan_ll_hls_tag_flags(
-            b"#EXTM3U\n#EXTINF:1,\n#EXT-X-DISCONTINUITY\n#EXTINF:1,\n#EXT-X-PART:URI=part.m4s,DURATION=0.2\n",
-        );
-
-        assert!(!flags.trailing_open_discontinuity);
-    }
-
-    #[test]
-    fn malformed_key_method_fails_closed_and_method_none_is_unencrypted() {
-        let encrypted = scan_ll_hls_tag_flags(b"#EXT-X-KEY:URI=key.bin\n");
-        let unencrypted = scan_ll_hls_tag_flags(b"#EXT-X-KEY:METHOD=NONE\n");
-
-        assert!(encrypted.encrypted_media_key);
-        assert!(!unencrypted.encrypted_media_key);
-    }
+pub(crate) fn has_ll_hls_tags(body: &[u8]) -> bool {
+    body.split(|byte| *byte == b'\n').any(|line| {
+        line.starts_with(b"#EXT-X-SERVER-CONTROL:")
+            || line.starts_with(b"#EXT-X-PART-INF:")
+            || line.starts_with(b"#EXT-X-PART:")
+            || line.starts_with(b"#EXT-X-PRELOAD-HINT:")
+            || line.starts_with(b"#EXT-X-RENDITION-REPORT:")
+            || line.starts_with(b"#EXT-X-SKIP:")
+    })
 }
 
 pub(crate) fn plan_hls_media_playlist(
     manifest_url: &str,
     body: &[u8],
 ) -> Result<Option<HlsPlan>, ManifestError> {
-    let tag_flags = scan_ll_hls_tag_flags(body);
-    let use_standard_encryption_planner =
-        !tag_flags.partial_segments && tag_flags.encrypted_media_key && !tag_flags.delta_update;
-    if !tag_flags.has_ll_hls_tags || use_standard_encryption_planner {
+    let has_partial_segments = has_ll_hls_partial_segments(body);
+    let use_standard_encryption_planner = !has_partial_segments
+        && has_hls_encrypted_media_key_tag(body)
+        && !has_ll_hls_delta_update(body);
+    if !has_ll_hls_tags(body) || use_standard_encryption_planner {
         // Keep complete-segment LL-HLS on the live planner unless it actually
         // carries media encryption. Only complete encrypted segments are
         // delegated to the ordinary HLS planner, which already owns key
@@ -370,10 +319,11 @@ pub(crate) fn plan_hls_media_playlist(
     } else {
         None
     };
+    let open_segment_discontinuity = has_trailing_open_discontinuity(body);
     build_plan(
         manifest_url,
         playlist,
-        tag_flags.trailing_open_discontinuity,
+        open_segment_discontinuity,
         source_segments.as_deref(),
     )
     .map(Some)
@@ -413,6 +363,23 @@ fn open_segment_program_date_time(
         return Err(ManifestError::UnsupportedPlaylist);
     }
     parse_program_date_time_tag(tag).map(Some)
+}
+
+fn has_trailing_open_discontinuity(body: &[u8]) -> bool {
+    const EXTINF: &[u8] = b"#EXTINF:";
+    let tail_start = body
+        .windows(EXTINF.len())
+        .rposition(|window| window == EXTINF)
+        .unwrap_or(0);
+    body[tail_start..]
+        .split(|byte| *byte == b'\n')
+        .any(|raw_line| {
+            raw_line
+                .strip_suffix(b"\r")
+                .unwrap_or(raw_line)
+                .trim_ascii_start()
+                == b"#EXT-X-DISCONTINUITY"
+        })
 }
 
 fn build_plan(
@@ -1017,139 +984,6 @@ fn plan_map(
     }))
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum LiveUnitClass {
-    Existing(usize),
-    ParentAlias(usize),
-    New,
-}
-
-#[derive(Default)]
-struct LiveUnitDelta {
-    new_segments: Vec<LocalSegment>,
-    new_ids: Vec<HlsLiveUnitId>,
-    referenced_resources: Vec<String>,
-}
-
-fn resolve_live_update_segments(
-    existing_segments: &[LocalSegment],
-    snapshot_segments: &[LocalSegment],
-) -> Vec<LocalSegment> {
-    // Delta and sliding-window playlists may omit the MAP line that established
-    // the current initialization section. Carry the last committed map forward
-    // before deriving identities and local resource references.
-    let mut active_map = existing_segments
-        .last()
-        .and_then(|segment| segment.map.clone());
-    snapshot_segments
-        .iter()
-        .map(|segment| {
-            let mut resolved = segment.clone();
-            if let Some(map) = resolved.map.as_ref() {
-                active_map = Some(map.clone());
-            } else if active_map.is_some() {
-                resolved.map = active_map.clone();
-            }
-            resolved
-        })
-        .collect()
-}
-
-fn classify_live_update_units(
-    ids: &[HlsLiveUnitId],
-    segments: &[LocalSegment],
-    existing_index: Option<&HlsLiveIndex>,
-) -> Vec<LiveUnitClass> {
-    ids.iter()
-        .zip(segments)
-        .map(|(id, segment)| {
-            if let Some(index) = existing_index.and_then(|existing| existing.position(id)) {
-                LiveUnitClass::Existing(index)
-            } else if let Some(alias_end) =
-                existing_index.and_then(|existing| existing.completed_parent_alias(id, segment))
-            {
-                LiveUnitClass::ParentAlias(alias_end)
-            } else {
-                LiveUnitClass::New
-            }
-        })
-        .collect()
-}
-
-fn collect_live_unit_delta(
-    accumulator: &HlsLiveAccumulator,
-    existing_ids: &[HlsLiveUnitId],
-    ids: &[HlsLiveUnitId],
-    segments: &[LocalSegment],
-    classes: &[LiveUnitClass],
-    first_index: usize,
-) -> Result<LiveUnitDelta, ManifestError> {
-    let mut delta = LiveUnitDelta::default();
-    let mut saw_new = false;
-    let mut last_existing_index = None;
-    let mut referenced_resource_set = HashSet::new();
-
-    for ((id, segment), class) in ids.iter().zip(segments).zip(classes).skip(first_index) {
-        match *class {
-            LiveUnitClass::Existing(index) => {
-                if saw_new || last_existing_index.is_some_and(|previous| index <= previous) {
-                    return Err(ManifestError::LiveUnitOrderChanged);
-                }
-                if accumulator.segment_identities.get(index) != Some(&hls_segment_identity(segment))
-                {
-                    return Err(ManifestError::LiveUnitIdentityChanged);
-                }
-                last_existing_index = Some(index);
-            }
-            LiveUnitClass::ParentAlias(alias_end) => {
-                if saw_new || last_existing_index.is_some_and(|previous| alias_end <= previous) {
-                    return Err(ManifestError::LiveUnitOrderChanged);
-                }
-                last_existing_index = Some(alias_end);
-                // The complete parent URI replaces the parts; it is not
-                // another resource in the already committed recording.
-                continue;
-            }
-            LiveUnitClass::New => {
-                let predecessor = delta
-                    .new_ids
-                    .last()
-                    .or_else(|| last_existing_index.and_then(|index| existing_ids.get(index)))
-                    .or_else(|| existing_ids.last());
-                if !existing_ids.is_empty()
-                    && last_existing_index.is_some_and(|index| index + 1 != existing_ids.len())
-                {
-                    return Err(ManifestError::LiveUnitOrderChanged);
-                }
-                if let Some(predecessor) = predecessor
-                    && !id.is_successor_of(predecessor)
-                {
-                    return Err(ManifestError::LiveSequenceGap);
-                }
-                saw_new = true;
-                delta.new_ids.push(id.clone());
-                delta.new_segments.push(segment.clone());
-            }
-        }
-
-        for filename in segment_resource_filenames(segment) {
-            let filename = filename.to_string();
-            if referenced_resource_set.insert(filename.clone()) {
-                delta.referenced_resources.push(filename);
-            }
-        }
-    }
-
-    if existing_ids.is_empty() && delta.new_segments.len() != ids.len() {
-        return Err(ManifestError::LiveUnitIdentityInvalid);
-    }
-    if existing_ids.len().saturating_add(delta.new_segments.len()) > MAX_HLS_LIVE_UNITS {
-        return Err(ManifestError::LiveCaptureLimit);
-    }
-
-    Ok(delta)
-}
-
 pub(super) fn prepare_live_update(
     accumulator: &HlsLiveAccumulator,
     snapshot: &HlsPlan,
@@ -1197,15 +1031,47 @@ pub(super) fn prepare_live_update(
         return Err(ManifestError::LiveUnitIdentityInvalid);
     }
 
-    let resolved_segments =
-        resolve_live_update_segments(existing_segments, &snapshot.local_playlist.segments);
-    let classes = classify_live_update_units(ids, &resolved_segments, existing_index);
-    let first_overlap = classes
-        .iter()
-        .position(|class| !matches!(class, LiveUnitClass::New));
+    // Delta and sliding-window playlists may omit the MAP line that established
+    // the current initialization section. Carry the last committed map forward
+    // before deriving identities and local resource references.
+    let mut active_map = existing_segments
+        .last()
+        .and_then(|segment| segment.map.clone());
+    let mut resolved_segments = Vec::with_capacity(snapshot.local_playlist.segments.len());
+    for segment in &snapshot.local_playlist.segments {
+        let mut resolved = segment.clone();
+        if let Some(map) = resolved.map.as_ref() {
+            active_map = Some(map.clone());
+        } else if active_map.is_some() {
+            resolved.map = active_map.clone();
+        }
+        resolved_segments.push(resolved);
+    }
 
-    // Ignore a stale prefix before the first retained segment. A snapshot with
-    // no overlap must begin exactly after the retained tail.
+    let parent_aliases = ids
+        .iter()
+        .zip(&resolved_segments)
+        .map(|(id, segment)| {
+            existing_index.and_then(|index| index.completed_parent_alias(id, segment))
+        })
+        .collect::<Vec<_>>();
+    let first_overlap = ids.iter().enumerate().find_map(|(index, id)| {
+        existing_index
+            .is_some_and(|existing| existing.position(id).is_some())
+            .then_some(index)
+            .or_else(|| parent_aliases[index].map(|_| index))
+    });
+
+    let mut saw_new = false;
+    let mut last_existing_index = None;
+    let mut new_segments = Vec::new();
+    let mut new_ids = Vec::new();
+    let mut referenced_resources = Vec::new();
+    let mut referenced_resource_set = HashSet::new();
+
+    // Ignore a stale prefix that predates the first segment this recording
+    // retained. If the snapshot does not overlap, it must start exactly after
+    // the retained tail; otherwise media would be silently skipped.
     let first_index = if existing_ids.is_empty() {
         0
     } else if let Some(index) = first_overlap {
@@ -1218,14 +1084,63 @@ pub(super) fn prepare_live_update(
         0
     };
 
-    let delta = collect_live_unit_delta(
-        accumulator,
-        existing_ids,
-        ids,
-        &resolved_segments,
-        &classes,
-        first_index,
-    )?;
+    for (id, segment, parent_alias) in ids
+        .iter()
+        .zip(&resolved_segments)
+        .zip(parent_aliases.iter())
+        .map(|((id, segment), alias)| (id, segment, alias))
+        .skip(first_index)
+    {
+        if let Some(index) = existing_index.and_then(|existing| existing.position(id)) {
+            if saw_new || last_existing_index.is_some_and(|previous| index <= previous) {
+                return Err(ManifestError::LiveUnitOrderChanged);
+            }
+            if accumulator.segment_identities.get(index) != Some(&hls_segment_identity(segment)) {
+                return Err(ManifestError::LiveUnitIdentityChanged);
+            }
+            last_existing_index = Some(index);
+        } else if let Some(alias_end) = *parent_alias {
+            if saw_new || last_existing_index.is_some_and(|previous| alias_end <= previous) {
+                return Err(ManifestError::LiveUnitOrderChanged);
+            }
+            last_existing_index = Some(alias_end);
+            // The complete parent URI is a replacement for the parts, not an
+            // additional resource. They are already present in the recording.
+            continue;
+        } else {
+            let predecessor = new_ids
+                .last()
+                .or_else(|| last_existing_index.and_then(|index| existing_ids.get(index)))
+                .or_else(|| existing_ids.last());
+            if !existing_ids.is_empty()
+                && last_existing_index.is_some_and(|index| index + 1 != existing_ids.len())
+            {
+                return Err(ManifestError::LiveUnitOrderChanged);
+            }
+            if let Some(predecessor) = predecessor
+                && !id.is_successor_of(predecessor)
+            {
+                return Err(ManifestError::LiveSequenceGap);
+            }
+            saw_new = true;
+            new_ids.push(id.clone());
+            new_segments.push(segment.clone());
+        }
+
+        for filename in segment_resource_filenames(segment) {
+            let filename = filename.to_string();
+            if referenced_resource_set.insert(filename.clone()) {
+                referenced_resources.push(filename);
+            }
+        }
+    }
+
+    if existing_ids.is_empty() && new_segments.len() != ids.len() {
+        return Err(ManifestError::LiveUnitIdentityInvalid);
+    }
+    if existing_ids.len().saturating_add(new_segments.len()) > MAX_HLS_LIVE_UNITS {
+        return Err(ManifestError::LiveCaptureLimit);
+    }
 
     let resources_by_name: HashMap<&str, &HlsResource> = snapshot
         .resources
@@ -1234,7 +1149,7 @@ pub(super) fn prepare_live_update(
         .collect();
     let mut resources = Vec::new();
     let mut new_resource_names = Vec::new();
-    for filename in &delta.referenced_resources {
+    for filename in &referenced_resources {
         if let Some(resource) = resources_by_name.get(filename.as_str()) {
             resources.push((*resource).clone());
             if !accumulator.seen_resources.contains(filename) {
@@ -1247,19 +1162,19 @@ pub(super) fn prepare_live_update(
 
     Ok(HlsLiveUpdate {
         resources,
-        changed: !delta.new_segments.is_empty(),
+        changed: !new_segments.is_empty(),
         end_list: snapshot.end_list,
         initial_playlist: accumulator
             .local_playlist
             .is_none()
             .then(|| snapshot.local_playlist.clone()),
-        new_segments: delta.new_segments,
-        referenced_resources: delta.referenced_resources,
+        new_segments,
+        referenced_resources,
         new_resource_names,
         media_sequence: 0,
         target_duration: snapshot.source_target_duration,
         ll_update: true,
-        ll_new_unit_ids: delta.new_ids,
+        ll_new_unit_ids: new_ids,
     })
 }
 

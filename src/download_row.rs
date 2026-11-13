@@ -186,6 +186,20 @@ mod tests {
     use super::DownloadItem;
 
     #[test]
+    fn collection_role_is_mutually_exclusive() {
+        let item = DownloadItem::new(1, "https://example.com/collection", "Collection", "/tmp");
+        item.set_is_gallery(true);
+        item.set_is_collection_owner(true);
+        assert!(!item.is_gallery());
+        assert!(item.is_collection_owner());
+        assert!(!item.is_collection_child());
+
+        item.set_is_collection_child(true);
+        assert!(!item.is_collection_owner());
+        assert!(item.is_collection_child());
+    }
+
+    #[test]
     fn collection_parent_includes_gallery_and_video_owners_only() {
         let gallery = DownloadItem::new(1, "https://example.com/gallery", "Gallery", "/tmp");
         gallery.set_is_gallery(true);

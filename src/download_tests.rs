@@ -7547,9 +7547,21 @@ fn removing_a_never_spawned_video_row_releases_synchronously() {
         },
     );
     manager.remove(id);
+
+    // Video cleanup runs in the tracked finalizer even when no worker was spawned.
+    // Await it so the test checks release after cleanup, not synchronously on the
+    // GTK call stack.
+    let finalizer = manager
+        .discards
+        .borrow_mut()
+        .remove(&id)
+        .expect("remove tracks an async finalizer for a never-spawned video row")
+        .finalizer;
+    crate::runtime::tokio_rt().block_on(finalizer).expect("discard finalizer");
+
     assert!(
         !manager.dest_reserved(&dest),
-        "the inline reclaim must release the destination before remove returns"
+        "the finalizer must release the destination after cleanup"
     );
     let _ = std::fs::remove_dir_all(&dest_dir);
 }

@@ -3370,7 +3370,8 @@ video/es.m3u8
         );
 
         let mut preview_source = legacy_with_tracks.clone();
-        preview_source.output_extension = Some("ts".to_string());
+        preview_source.output_extension =
+            Some(crate::media_types::ManifestContainer::MpegTs);
         let preview_encoded =
             serde_json::to_value(&preview_source).expect("serialize preview metadata");
         assert!(

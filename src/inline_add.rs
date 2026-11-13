@@ -944,7 +944,7 @@ pub(crate) fn sync_entry_icon(v: &VideoStep) {
             let tooltip = v
                 .add_btn
                 .tooltip_text()
-                .unwrap_or_else(|| gettext("Queue all files"));
+                .unwrap_or_else(|| gettext("Queue all files").into());
             v.url_entry
                 .set_icon_tooltip_text(pos, Some(tooltip.as_str()));
         }
@@ -5254,43 +5254,79 @@ mod tests {
         // While a lookup is in flight the tick morphs into a spinner in
         // place, regardless of text, Add visibility, collection state, or
         // error state.
-        assert_eq!(entry_icon_for(true, true, false, false, false), EntryIcon::Spinner);
-        assert_eq!(entry_icon_for(true, true, true, false, true), EntryIcon::Spinner);
-        assert_eq!(entry_icon_for(false, true, false, true, false), EntryIcon::Spinner);
+        assert_eq!(
+            entry_icon_for(true, true, false, false, false),
+            EntryIcon::Spinner
+        );
+        assert_eq!(
+            entry_icon_for(true, true, true, false, true),
+            EntryIcon::Spinner
+        );
+        assert_eq!(
+            entry_icon_for(false, true, false, true, false),
+            EntryIcon::Spinner
+        );
     }
 
     #[test]
     fn entry_icon_tick_only_when_idle_with_text_and_no_add() {
         // The tick submits: idle, non-empty, and no Add button yet.
-        assert_eq!(entry_icon_for(true, false, false, false, false), EntryIcon::Tick);
+        assert_eq!(
+            entry_icon_for(true, false, false, false, false),
+            EntryIcon::Tick
+        );
         // Empty entry: nothing to submit.
-        assert_eq!(entry_icon_for(false, false, false, false, false), EntryIcon::None);
+        assert_eq!(
+            entry_icon_for(false, false, false, false, false),
+            EntryIcon::None
+        );
     }
 
     #[test]
     fn entry_icon_cleared_once_add_appears() {
         // Once Add appears beside the entry, the entry carries no icon —
         // the button owns the action.
-        assert_eq!(entry_icon_for(true, false, true, false, false), EntryIcon::None);
-        assert_eq!(entry_icon_for(false, false, true, false, false), EntryIcon::None);
+        assert_eq!(
+            entry_icon_for(true, false, true, false, false),
+            EntryIcon::None
+        );
+        assert_eq!(
+            entry_icon_for(false, false, true, false, false),
+            EntryIcon::None
+        );
     }
 
     #[test]
     fn entry_icon_cleared_on_error_or_tools_state() {
         // On lookup failure the error row's Retry (or the tools row's
         // Install) owns recovery: no entry icon, even for a collection.
-        assert_eq!(entry_icon_for(true, false, false, true, false), EntryIcon::None);
-        assert_eq!(entry_icon_for(true, false, true, true, false), EntryIcon::None);
-        assert_eq!(entry_icon_for(true, false, true, true, true), EntryIcon::None);
+        assert_eq!(
+            entry_icon_for(true, false, false, true, false),
+            EntryIcon::None
+        );
+        assert_eq!(
+            entry_icon_for(true, false, true, true, false),
+            EntryIcon::None
+        );
+        assert_eq!(
+            entry_icon_for(true, false, true, true, true),
+            EntryIcon::None
+        );
     }
 
     #[test]
     fn entry_icon_arrow_queues_all_for_collections() {
         // A resolved collection replaces the circular button with the
         // entry's arrow; Select files keeps the actions row revealed.
-        assert_eq!(entry_icon_for(true, false, true, false, true), EntryIcon::QueueAll);
+        assert_eq!(
+            entry_icon_for(true, false, true, false, true),
+            EntryIcon::QueueAll
+        );
         // The arrow wins over the idle tick.
-        assert_eq!(entry_icon_for(true, false, false, false, true), EntryIcon::QueueAll);
+        assert_eq!(
+            entry_icon_for(true, false, false, false, true),
+            EntryIcon::QueueAll
+        );
     }
 
     fn dummy_probe() -> crate::video::ProbeResult {

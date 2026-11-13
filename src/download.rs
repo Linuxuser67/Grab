@@ -871,10 +871,8 @@ impl DownloadManager {
         // persisted owner once so a 100-file playlist never inflates the
         // global queued count or the scheduler's concurrency model.
         self.queued.set(
-            self.items()
-                .filter(|item| {
-                    !item.is_collection_child() && item.status() == DownloadStatus::Queued
-                })
+            self.owners()
+                .filter(|item| item.status() == DownloadStatus::Queued)
                 .count(),
         );
         if let Some(refresh) = self.scheduler_refresh.borrow().as_ref() {
@@ -937,6 +935,37 @@ impl DownloadManager {
     fn items(&self) -> impl Iterator<Item = DownloadItem> + '_ {
         let store = &self.store;
         (0..store.n_items()).filter_map(|i| store.item(i).and_downcast::<DownloadItem>())
+    }
+
+    /// Queue owners are the schedulable and countable downloads. Collection
+    /// children are passive projections and must not participate independently.
+    fn owners(&self) -> impl Iterator<Item = DownloadItem> + '_ {
+        self.items().filter(|item| !item.is_collection_child())
+    }
+
+    /// Remove every passive child row belonging to the supplied collection
+    /// owners with one ListStore walk and reverse-order removals.
+    fn remove_collection_child_rows(&self, owner_ids: &HashSet<u64>) {
+        if owner_ids.is_empty() {
+            return;
+        }
+        let positions = (0..self.store.n_items())
+            .filter_map(|position| {
+                self.store
+                    .item(position)
+                    .and_downcast::<DownloadItem>()
+                    .filter(|item| {
+                        item.is_collection_child()
+                            && item
+                                .group()
+                                .is_some_and(|group| owner_ids.contains(&group.id()))
+                    })
+                    .map(|_| position)
+            })
+            .collect::<Vec<_>>();
+        for position in positions.into_iter().rev() {
+            self.store.remove(position);
+        }
     }
 
     /// Whether a non-finished row already owns this normalized URL.
@@ -2321,11 +2350,10 @@ impl DownloadManager {
                 .unwrap_or_else(std::sync::PoisonError::into_inner)
                 .clone();
             let next = self
-                .items()
+                .owners()
                 // A discard still tearing down owns its destination: the row stays Queued until the reservation clears.
                 .find(|it| {
-                    !it.is_collection_child()
-                        && it.status() == DownloadStatus::Queued
+                    it.status() == DownloadStatus::Queued
                         && !stopping.contains(&it.id())
                         && !self.dest_reserved(&it.file_path())
                 });
@@ -5576,18 +5604,7 @@ impl DownloadManager {
             .find(id)
             .is_some_and(|item| item.is_collection_parent())
         {
-            let children = self
-                .items()
-                .filter(|item| {
-                    item.is_collection_child() && item.group().is_some_and(|group| group.id() == id)
-                })
-                .map(|item| item.id())
-                .collect::<Vec<_>>();
-            for child_id in children {
-                if let Some(position) = self.position_of(child_id) {
-                    self.store.remove(position);
-                }
-            }
+            self.remove_collection_child_rows(&HashSet::from([id]));
         }
         self.epoch.borrow_mut().remove(&id);
         self.started.borrow_mut().remove(&id);
@@ -6027,10 +6044,12 @@ impl DownloadManager {
     pub fn clear_finished(self: &Rc<Self>) -> usize {
         let before = self.store.n_items();
         let visible_finished = self.finished_count();
-        self.for_matching(
-            |s| matches!(s, DownloadStatus::Done),
-            |m, id| m.drop_finished_row(id),
-        );
+        let finished_owners = self
+            .owners()
+            .filter(|item| item.status() == DownloadStatus::Done)
+            .map(|item| item.id())
+            .collect::<Vec<_>>();
+        self.drop_finished_rows(&finished_owners);
         let removed_rows = (before - self.store.n_items()) as usize;
         if removed_rows > 0 {
             // Same hygiene as a restart: drop archives and selections no remaining row references.
@@ -6049,32 +6068,41 @@ impl DownloadManager {
 
     /// Finished rows (for the clear-finished confirm and toast counts).
     pub fn finished_count(&self) -> usize {
-        self.items()
+        let items = self.items().collect::<Vec<_>>();
+        let done_owner_ids = items
+            .iter()
+            .filter(|item| !item.is_collection_child() && item.status() == DownloadStatus::Done)
+            .map(DownloadItem::id)
+            .collect::<HashSet<_>>();
+        let owners_with_children = items
+            .iter()
+            .filter(|item| item.is_collection_child())
+            .filter_map(|item| item.group().map(|group| group.id()))
+            .collect::<HashSet<_>>();
+
+        let finished_owners = items
+            .iter()
+            .filter(|item| !item.is_collection_child() && item.status() == DownloadStatus::Done)
             .filter(|item| {
-                if item.status() != DownloadStatus::Done {
-                    return false;
-                }
-                if item.is_collection_child() {
-                    return item
-                        .group()
-                        .and_then(|group| self.find(group.id()))
-                        .is_some_and(|owner| owner.status() == DownloadStatus::Done);
-                }
-                if item.is_collection_parent() {
-                    return !self.items().any(|child| {
-                        child.is_collection_child()
-                            && child.group().is_some_and(|group| group.id() == item.id())
-                    });
-                }
-                true
+                !item.is_collection_parent() || !owners_with_children.contains(&item.id())
             })
-            .count()
+            .count();
+        let finished_children = items
+            .iter()
+            .filter(|item| item.is_collection_child() && item.status() == DownloadStatus::Done)
+            .filter(|item| {
+                item.group()
+                    .is_some_and(|group| done_owner_ids.contains(&group.id()))
+            })
+            .count();
+
+        finished_owners + finished_children
     }
 
     /// Snapshots of every finished row, in list order, for Clear Finished's Undo.
     pub fn finished_snapshots(&self) -> Vec<RemovedSnapshot> {
-        self.items()
-            .filter(|it| it.status() == DownloadStatus::Done && !it.is_collection_child())
+        self.owners()
+            .filter(|it| it.status() == DownloadStatus::Done)
             .map(|it| RemovedSnapshot {
                 url: it.url().to_string(),
                 dest_dir: it.dest_dir().to_string(),
@@ -6093,40 +6121,57 @@ impl DownloadManager {
             .collect()
     }
 
-    /// Drop one finished row: files stay on disk. Unlike `remove` there is nothing to cancel, snapshot or clean.
-    fn drop_finished_row(&self, id: u64) {
-        if let Some(item) = self.find(id)
-            && item.is_collection_parent()
-        {
-            let children = self
-                .items()
-                .filter(|child| {
-                    child.is_collection_child()
-                        && child.group().is_some_and(|group| group.id() == id)
-                })
-                .map(|child| child.id())
-                .collect::<Vec<_>>();
-            for child_id in children {
-                if let Some(position) = self.position_of(child_id) {
-                    self.store.remove(position);
-                }
+    /// Drop finished owners and all their passive child rows with one
+    /// ListStore walk. Destination files remain untouched.
+    fn drop_finished_rows(&self, owner_ids: &[u64]) {
+        let owner_ids = owner_ids.iter().copied().collect::<HashSet<_>>();
+        if owner_ids.is_empty() {
+            return;
+        }
+
+        let owner_items = self
+            .owners()
+            .filter(|item| owner_ids.contains(&item.id()))
+            .map(|item| (item.id(), item))
+            .collect::<HashMap<_, _>>();
+        for item in owner_items.values() {
+            if crate::torrent::is_torrent(&item.url()) {
+                crate::torrent::forget_download(item.id());
             }
         }
-        if let Some(item) = self.find(id)
-            && crate::torrent::is_torrent(&item.url())
-        {
-            crate::torrent::forget_download(id);
+
+        let released = owner_items
+            .values()
+            .filter(|item| item.public_only())
+            .cloned()
+            .collect::<Vec<_>>();
+
+        for id in &owner_ids {
+            self.video_sources.borrow_mut().remove(id);
+            self.gallery_jobs.borrow_mut().remove(id);
+            self.gallery_file_row_index.borrow_mut().remove(id);
+            self.video_playlist_file_row_index.borrow_mut().remove(id);
+            self.epoch.borrow_mut().remove(id);
         }
-        self.video_sources.borrow_mut().remove(&id);
-        self.gallery_jobs.borrow_mut().remove(&id);
-        self.gallery_file_row_index.borrow_mut().remove(&id);
-        self.video_playlist_file_row_index.borrow_mut().remove(&id);
-        self.epoch.borrow_mut().remove(&id);
-        let released = self.find(id).filter(|item| item.public_only());
-        if let Some(pos) = self.position_of(id) {
-            self.store.remove(pos);
+
+        let positions = (0..self.store.n_items())
+            .filter_map(|position| {
+                self.store
+                    .item(position)
+                    .and_downcast::<DownloadItem>()
+                    .filter(|item| {
+                        owner_ids.contains(&item.id())
+                            || (item.is_collection_child()
+                                && item.group().is_some_and(|group| owner_ids.contains(&group.id())))
+                    })
+                    .map(|_| position)
+            })
+            .collect::<Vec<_>>();
+        for position in positions.into_iter().rev() {
+            self.store.remove(position);
         }
-        if let Some(item) = released {
+
+        for item in released {
             Self::release_public_policy(&item);
         }
     }
@@ -6137,8 +6182,8 @@ impl DownloadManager {
         mut op: impl FnMut(&Rc<Self>, u64),
     ) {
         let ids: Vec<u64> = self
-            .items()
-            .filter(|it| !it.is_collection_child() && matches(it.status()))
+            .owners()
+            .filter(|it| matches(it.status()))
             .map(|it| it.id())
             .collect();
         for id in ids {
@@ -6163,10 +6208,9 @@ impl DownloadManager {
 
     /// Rows `cancel_all` would touch (queued, downloading, paused).
     pub fn active_count(&self) -> usize {
-        self.items()
+        self.owners()
             .filter(|it| {
-                !it.is_collection_child()
-                    && matches!(
+                matches!(
                         it.status(),
                         DownloadStatus::Queued
                             | DownloadStatus::Downloading
@@ -6192,8 +6236,7 @@ impl DownloadManager {
     }
 
     fn any_status(&self, pred: impl Fn(DownloadStatus) -> bool) -> bool {
-        self.items()
-            .any(|it| !it.is_collection_child() && pred(it.status()))
+        self.owners().any(|it| pred(it.status()))
     }
 
     fn queue_file() -> std::path::PathBuf {

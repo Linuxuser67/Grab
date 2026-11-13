@@ -759,6 +759,15 @@ async fn lookup_extractors_inner(
     })))
 }
 
+/// The action represented by the URL entry's secondary icon.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum UrlEntryAction {
+    /// Submit the URL for a media lookup.
+    Submit,
+    /// Queue every file represented by the current collection.
+    QueueAll,
+}
+
 /// The video preview block inside the form: exactly one state shows at a
 /// time (ready rows, tools row, or the centered error card), driven by the
 /// probe below.
@@ -843,12 +852,23 @@ pub(crate) struct VideoStep {
     /// closes: dropping the task kills its probe children (kill_on_drop)
     /// instead of letting them run out their timeouts on a dead URL.
     pub(crate) lookup_abort: Rc<RefCell<Option<glib::JoinHandle<()>>>>,
-    /// True while the URL row represents a collection: the entry's arrow
-    /// queues all instead of submitting the lookup.
-    pub(crate) queue_all_action: Cell<bool>,
+    /// Action performed by the URL entry's secondary icon.
+    pub(crate) step_action: Cell<UrlEntryAction>,
     /// Queue-all action for collections; reused as the labeled Add action
     /// for single-media results.
     pub(crate) add_btn: gtk4::Button,
+}
+
+/// Pair the collection's hidden button with the URL-entry queue-all action.
+fn set_queue_all_action(step: &VideoStep) {
+    step.add_btn.set_visible(false);
+    step.step_action.set(UrlEntryAction::QueueAll);
+}
+
+/// Pair a visible Add button with ordinary URL submission.
+fn set_submit_action(step: &VideoStep) {
+    step.add_btn.set_visible(true);
+    step.step_action.set(UrlEntryAction::Submit);
 }
 
 /// The URL entry's secondary icon: exactly one state shows at a time.
@@ -865,22 +885,25 @@ enum EntryIcon {
     None,
 }
 
-/// Derive the entry icon from the card state. Pure so it's unit-testable
-/// (widget creation segfaults headless, so CI can't cover the GTK calls).
-fn entry_icon_for(
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct EntryIconState {
     has_text: bool,
     looking_up: bool,
     add_shown: bool,
     blocked: bool,
-    queue_all: bool,
-) -> EntryIcon {
-    if looking_up {
+    action: UrlEntryAction,
+}
+
+/// Derive the entry icon from named card state. Pure so it's unit-testable
+/// (widget creation segfaults headless, so CI can't cover the GTK calls).
+fn entry_icon_for(state: EntryIconState) -> EntryIcon {
+    if state.looking_up {
         EntryIcon::Spinner
-    } else if blocked {
+    } else if state.blocked {
         EntryIcon::None
-    } else if queue_all {
+    } else if state.action == UrlEntryAction::QueueAll {
         EntryIcon::QueueAll
-    } else if has_text && !add_shown {
+    } else if state.has_text && !state.add_shown {
         EntryIcon::Tick
     } else {
         EntryIcon::None
@@ -920,13 +943,13 @@ fn set_looking_up(v: &VideoStep, looking_up: bool) {
 
 /// Apply the derived icon state to the URL entry.
 pub(crate) fn sync_entry_icon(v: &VideoStep) {
-    let icon = entry_icon_for(
-        !v.url_entry.text().trim().is_empty(),
-        v.looking_up.get(),
-        v.action_revealer.reveals_child(),
-        v.error.is_visible() || v.tools.is_visible(),
-        v.queue_all_action.get(),
-    );
+    let icon = entry_icon_for(EntryIconState {
+        has_text: !v.url_entry.text().trim().is_empty(),
+        looking_up: v.looking_up.get(),
+        add_shown: v.action_revealer.reveals_child(),
+        blocked: v.error.is_visible() || v.tools.is_visible(),
+        action: v.step_action.get(),
+    });
     let pos = gtk4::EntryIconPosition::Secondary;
     match icon {
         EntryIcon::Tick => {
@@ -988,7 +1011,7 @@ pub(crate) fn hide_video_step(v: &VideoStep) {
     v.select_files_btn.set_visible(false);
     v.gallery_filter_wrap.set_visible(false);
     v.is_gallery.set(false);
-    v.queue_all_action.set(false);
+    v.step_action.set(UrlEntryAction::Submit);
     v.gallery_card.borrow_mut().take();
     // NOTE: the URL actions keep their current appearance while the revealer
     // slides out; resetting their styles here would flash a different icon
@@ -1137,7 +1160,7 @@ fn show_manifest_ready(
     step.add_btn
         .update_property(&[gtk4::accessible::Property::Label(&gettext("Add download"))]);
     step.add_btn.set_label(&gettext("Add"));
-    step.add_btn.set_visible(true);
+    set_submit_action(step);
     set_looking_up(step, false);
     set_lookup_add(lookup_add, true);
 
@@ -1229,7 +1252,7 @@ fn show_video_ready(v: &VideoStep) {
     v.add_btn
         .update_property(&[gtk4::accessible::Property::Label(&gettext("Add download"))]);
     v.add_btn.set_label(&gettext("Add"));
-    v.add_btn.set_visible(true);
+    set_submit_action(v);
     v.name.set_visible(true);
     v.revert.set_visible(true);
     v.format.set_visible(true);
@@ -2325,8 +2348,7 @@ fn show_video_playlist(v: &VideoStep, playlist: &crate::media_types::PlaylistInf
     v.add_btn.set_tooltip_text(Some(&queue_label));
     v.add_btn
         .update_property(&[gtk4::accessible::Property::Label(&queue_label)]);
-    v.add_btn.set_visible(false);
-    v.queue_all_action.set(true);
+    set_queue_all_action(v);
     v.action_revealer.set_visible(true);
     v.action_revealer.set_reveal_child(true);
     sync_entry_icon(v);
@@ -2720,7 +2742,7 @@ fn build_video_preview(
         gallery_filter_wrap: filter_wrap,
         collection_group,
         is_gallery: Rc::new(Cell::new(false)),
-        queue_all_action: Cell::new(false),
+        step_action: Cell::new(UrlEntryAction::Submit),
         gallery_card: Rc::new(RefCell::new(None)),
         select_files_btn: select_files_btn.clone(),
         gallery_select_opener: Rc::new(RefCell::new(None)),
@@ -4010,7 +4032,7 @@ fn wire_url_entry(
                 add_btn.set_sensitive(true);
                 select_files_btn.set_sensitive(true);
                 sync_entry_icon(&step);
-            } else if step.queue_all_action.get() {
+            } else if step.step_action.get() == UrlEntryAction::QueueAll {
                 s(SubmitSource::Button);
             } else {
                 s(SubmitSource::Enter);
@@ -4117,8 +4139,7 @@ fn wire_url_entry(
                     .update_property(&[gtk4::accessible::Property::Label(&gettext(
                         "Queue all files",
                     ))]);
-                step2.add_btn.set_visible(false);
-                step2.queue_all_action.set(true);
+                set_queue_all_action(&step2);
                 step2.action_revealer.set_visible(true);
                 step2.action_revealer.set_reveal_child(true);
             }
@@ -4913,8 +4934,7 @@ fn show_gallery_ready(v: &VideoStep, card: crate::gallery_card::GalleryCard, tit
         .update_property(&[gtk4::accessible::Property::Label(&gettext(
             "Queue all files",
         ))]);
-    v.add_btn.set_visible(false);
-    v.queue_all_action.set(true);
+    set_queue_all_action(v);
     // The collection row under the URL bar carries the title and counts;
     // the filter chooses what Queue all and Select files enqueue.
     v.gallery_filter.set_active_name(Some("all"));
@@ -5284,15 +5304,33 @@ mod tests {
         // place, regardless of text, Add visibility, collection state, or
         // error state.
         assert_eq!(
-            entry_icon_for(true, true, false, false, false),
+            entry_icon_for(EntryIconState {
+                has_text: true,
+                looking_up: true,
+                add_shown: false,
+                blocked: false,
+                action: UrlEntryAction::Submit,
+            }),
             EntryIcon::Spinner
         );
         assert_eq!(
-            entry_icon_for(true, true, true, false, true),
+            entry_icon_for(EntryIconState {
+                has_text: true,
+                looking_up: true,
+                add_shown: true,
+                blocked: false,
+                action: UrlEntryAction::QueueAll,
+            }),
             EntryIcon::Spinner
         );
         assert_eq!(
-            entry_icon_for(false, true, false, true, false),
+            entry_icon_for(EntryIconState {
+                has_text: false,
+                looking_up: true,
+                add_shown: false,
+                blocked: true,
+                action: UrlEntryAction::Submit,
+            }),
             EntryIcon::Spinner
         );
     }
@@ -5301,12 +5339,24 @@ mod tests {
     fn entry_icon_tick_only_when_idle_with_text_and_no_add() {
         // The tick submits: idle, non-empty, and no Add button yet.
         assert_eq!(
-            entry_icon_for(true, false, false, false, false),
+            entry_icon_for(EntryIconState {
+                has_text: true,
+                looking_up: false,
+                add_shown: false,
+                blocked: false,
+                action: UrlEntryAction::Submit,
+            }),
             EntryIcon::Tick
         );
         // Empty entry: nothing to submit.
         assert_eq!(
-            entry_icon_for(false, false, false, false, false),
+            entry_icon_for(EntryIconState {
+                has_text: false,
+                looking_up: false,
+                add_shown: false,
+                blocked: false,
+                action: UrlEntryAction::Submit,
+            }),
             EntryIcon::None
         );
     }
@@ -5316,11 +5366,23 @@ mod tests {
         // Once Add appears beside the entry, the entry carries no icon —
         // the button owns the action.
         assert_eq!(
-            entry_icon_for(true, false, true, false, false),
+            entry_icon_for(EntryIconState {
+                has_text: true,
+                looking_up: false,
+                add_shown: true,
+                blocked: false,
+                action: UrlEntryAction::Submit,
+            }),
             EntryIcon::None
         );
         assert_eq!(
-            entry_icon_for(false, false, true, false, false),
+            entry_icon_for(EntryIconState {
+                has_text: false,
+                looking_up: false,
+                add_shown: true,
+                blocked: false,
+                action: UrlEntryAction::Submit,
+            }),
             EntryIcon::None
         );
     }
@@ -5330,15 +5392,33 @@ mod tests {
         // On lookup failure the error row's Retry (or the tools row's
         // Install) owns recovery: no entry icon, even for a collection.
         assert_eq!(
-            entry_icon_for(true, false, false, true, false),
+            entry_icon_for(EntryIconState {
+                has_text: true,
+                looking_up: false,
+                add_shown: false,
+                blocked: true,
+                action: UrlEntryAction::Submit,
+            }),
             EntryIcon::None
         );
         assert_eq!(
-            entry_icon_for(true, false, true, true, false),
+            entry_icon_for(EntryIconState {
+                has_text: true,
+                looking_up: false,
+                add_shown: true,
+                blocked: true,
+                action: UrlEntryAction::Submit,
+            }),
             EntryIcon::None
         );
         assert_eq!(
-            entry_icon_for(true, false, true, true, true),
+            entry_icon_for(EntryIconState {
+                has_text: true,
+                looking_up: false,
+                add_shown: true,
+                blocked: true,
+                action: UrlEntryAction::QueueAll,
+            }),
             EntryIcon::None
         );
     }
@@ -5348,12 +5428,24 @@ mod tests {
         // A resolved collection replaces the circular button with the
         // entry's arrow; Select files keeps the actions row revealed.
         assert_eq!(
-            entry_icon_for(true, false, true, false, true),
+            entry_icon_for(EntryIconState {
+                has_text: true,
+                looking_up: false,
+                add_shown: true,
+                blocked: false,
+                action: UrlEntryAction::QueueAll,
+            }),
             EntryIcon::QueueAll
         );
         // The arrow wins over the idle tick.
         assert_eq!(
-            entry_icon_for(true, false, false, false, true),
+            entry_icon_for(EntryIconState {
+                has_text: true,
+                looking_up: false,
+                add_shown: false,
+                blocked: false,
+                action: UrlEntryAction::QueueAll,
+            }),
             EntryIcon::QueueAll
         );
     }

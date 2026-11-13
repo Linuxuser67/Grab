@@ -5,6 +5,13 @@ use crate::media_types::{
     ManifestAudioKey, ManifestKind, ManifestRepresentationKey, ManifestSubtitleKey,
 };
 
+/// Shared ceilings for manifest parsing and persisted live state. Keeping the
+/// coupled parser/runner limits here prevents a manifest being accepted by one
+/// layer and rejected by another solely because their caps drifted.
+pub(crate) const MAX_MANIFEST_SEGMENTS: usize = 100_000;
+pub(crate) const MAX_MANIFEST_TOTAL_BYTES: u64 = 1 << 40;
+pub(crate) const MAX_DASH_SIDX_BYTES: u64 = 1024 * 1024;
+
 /// One selectable video choice from a parsed native manifest.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct ManifestChoice {

@@ -4415,7 +4415,6 @@ impl DownloadManager {
 
         let group = owner
             .group()
-            .filter(|group| group.is_valid())
             .or_else(|| crate::download_store::DownloadGroup::try_new(owner.id(), &title));
         let filename = file
             .path

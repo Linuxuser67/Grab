@@ -1963,7 +1963,6 @@ fn build_hls_plan(base_url: Url, mut playlist: MediaPlaylist) -> Result<HlsPlan,
             index
         };
         let skip_gap_segment = gap_removal.segments[index];
-        let skip_segment = skip_gap_segment;
         if segment.unknown_tags.iter().any(|tag| tag.tag == "X-KEY") {
             return Err(ManifestError::UnsupportedEncryption);
         }
@@ -1995,13 +1994,13 @@ fn build_hls_plan(base_url: Url, mut playlist: MediaPlaylist) -> Result<HlsPlan,
         if let Some(key) = segment.key.take() {
             if key.method == KeyMethod::None {
                 if !method_none_active {
-                    if skip_segment {
+                    if skip_gap_segment {
                         pending_method_none_reset = true;
                     } else {
                         segment.key = Some(key);
                         pending_method_none_reset = false;
                     }
-                } else if pending_method_none_reset && !skip_segment {
+                } else if pending_method_none_reset && !skip_gap_segment {
                     segment.key = Some(key);
                     pending_method_none_reset = false;
                 }
@@ -2015,7 +2014,7 @@ fn build_hls_plan(base_url: Url, mut playlist: MediaPlaylist) -> Result<HlsPlan,
             }
         } else {
             segment.key = active_key.clone();
-            if !skip_segment && pending_method_none_reset {
+            if !skip_gap_segment && pending_method_none_reset {
                 segment.key = Some(m3u8_rs::Key {
                     method: KeyMethod::None,
                     uri: None,
@@ -2044,7 +2043,7 @@ fn build_hls_plan(base_url: Url, mut playlist: MediaPlaylist) -> Result<HlsPlan,
             return Err(ManifestError::InvalidDuration);
         }
 
-        if skip_segment {
+        if skip_gap_segment {
             // A discontinuity attached to an omitted segment still separates
             // the next retained segment from the previous retained segment.
             pending_discontinuity |= segment.discontinuity;

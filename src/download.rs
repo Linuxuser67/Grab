@@ -213,9 +213,7 @@ fn restored_collection_child_status(
     match (kind, owner_status, child_status) {
         (_, Done, _) => Done,
         (CollectionProjectionKind::Gallery, Failed, Queued | Paused | Downloading) => Failed,
-        (CollectionProjectionKind::Gallery, Cancelled, Queued | Paused | Downloading) => {
-            Cancelled
-        }
+        (CollectionProjectionKind::Gallery, Cancelled, Queued | Paused | Downloading) => Cancelled,
         (CollectionProjectionKind::Gallery, Paused, Queued | Downloading) => Paused,
         (CollectionProjectionKind::Gallery, Queued, Downloading | Paused) => Queued,
         (CollectionProjectionKind::Playlist, Failed, Downloading) => Failed,
@@ -253,28 +251,18 @@ mod collection_projection_tests {
 
     #[test]
     fn restore_status_policy_preserves_gallery_and_playlist_semantics() {
-        use DownloadStatus::{
-            Cancelled, Done, Downloading, Failed, Paused, Queued,
-        };
+        use DownloadStatus::{Cancelled, Done, Downloading, Failed, Paused, Queued};
 
         assert_eq!(
             restored_collection_child_status(CollectionProjectionKind::Gallery, Failed, Queued),
             Failed
         );
         assert_eq!(
-            restored_collection_child_status(
-                CollectionProjectionKind::Gallery,
-                Paused,
-                Queued
-            ),
+            restored_collection_child_status(CollectionProjectionKind::Gallery, Paused, Queued),
             Paused
         );
         assert_eq!(
-            restored_collection_child_status(
-                CollectionProjectionKind::Playlist,
-                Failed,
-                Queued
-            ),
+            restored_collection_child_status(CollectionProjectionKind::Playlist, Failed, Queued),
             Queued
         );
         assert_eq!(
@@ -286,11 +274,7 @@ mod collection_projection_tests {
             Failed
         );
         assert_eq!(
-            restored_collection_child_status(
-                CollectionProjectionKind::Gallery,
-                Done,
-                Cancelled
-            ),
+            restored_collection_child_status(CollectionProjectionKind::Gallery, Done, Cancelled),
             Done
         );
     }
@@ -303,12 +287,7 @@ mod collection_projection_tests {
             progress_sum: 1.75,
         };
 
-        summary.update(
-            DownloadStatus::Downloading,
-            0.25,
-            DownloadStatus::Done,
-            1.0,
-        );
+        summary.update(DownloadStatus::Downloading, 0.25, DownloadStatus::Done, 1.0);
 
         assert_eq!(summary.done, 2);
         assert!((summary.progress_sum - 2.5).abs() < f64::EPSILON);
@@ -4560,8 +4539,7 @@ impl DownloadManager {
                 owner.status(),
                 state.status,
             );
-            let detail =
-                collection_child_status_detail(CollectionProjectionKind::Gallery, status);
+            let detail = collection_child_status_detail(CollectionProjectionKind::Gallery, status);
             self.upsert_gallery_file_row(owner, &state.path, status, state.progress, &detail);
         }
         if !file_rows.is_empty() {
@@ -4621,10 +4599,8 @@ impl DownloadManager {
                 item.set_progress(1.0);
                 item.set_detail(gettext("Finished"));
             } else {
-                let detail = collection_child_status_detail(
-                    CollectionProjectionKind::Gallery,
-                    status,
-                );
+                let detail =
+                    collection_child_status_detail(CollectionProjectionKind::Gallery, status);
                 item.set_detail(detail);
             }
             item.set_status(status);
@@ -4868,8 +4844,7 @@ impl DownloadManager {
                 owner.status(),
                 file.status,
             );
-            let detail =
-                collection_child_status_detail(CollectionProjectionKind::Playlist, status);
+            let detail = collection_child_status_detail(CollectionProjectionKind::Playlist, status);
             self.upsert_video_playlist_file_row(
                 owner,
                 &file.id,

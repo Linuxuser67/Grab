@@ -116,6 +116,7 @@ mod tests {
     #[test]
     fn bounded_reader_cannot_escape_its_resource_range() {
         let mut inner = Cursor::new(b"prefixpayloadsuffix".to_vec());
+        inner.set_position(6);
         let mut reader = BoundedReader::new(&mut inner, 6, 13);
         let mut buffer = [0_u8; 32];
 

@@ -6145,6 +6145,11 @@ impl DownloadManager {
             .filter(|item| item.public_only())
             .cloned()
             .collect::<Vec<_>>();
+        let collection_owner_ids = owner_items
+            .values()
+            .filter(|item| item.is_collection_parent())
+            .map(DownloadItem::id)
+            .collect::<HashSet<_>>();
 
         for id in &owner_ids {
             self.video_sources.borrow_mut().remove(id);
@@ -6162,7 +6167,9 @@ impl DownloadManager {
                     .filter(|item| {
                         owner_ids.contains(&item.id())
                             || (item.is_collection_child()
-                                && item.group().is_some_and(|group| owner_ids.contains(&group.id())))
+                                && item.group().is_some_and(|group| {
+                                    collection_owner_ids.contains(&group.id())
+                                }))
                     })
                     .map(|_| position)
             })

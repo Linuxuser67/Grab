@@ -153,23 +153,98 @@ pub use crate::download_store::DownloadStatus;
 use crate::download_store::{QUEUE_VERSION, StoredItem, StoredQueue};
 use crate::video::AttemptGate;
 
-/// Runtime lookup cache for a gallery's persisted per-file states and transient GTK rows.
+/// Shared runtime projection index for collection-owned files and transient GTK rows.
+/// Persisted records stay in their owning GalleryJob or VideoPlaylistState.
 #[derive(Default)]
-struct GalleryFileRowIndex {
+struct CollectionProjectionIndex {
     state_indices: HashMap<String, usize>,
     rows: HashMap<String, DownloadItem>,
+    /// Only playlists maintain a progress aggregate; gallery progress comes from gallery-dl.
+    summary: Option<CollectionProjectionSummary>,
 }
 
-/// Runtime index for one yt-dlp playlist's persisted entry states and passive
-/// GTK child rows. Aggregate counters are maintained alongside state changes,
-/// so a byte-progress event does not rescan the playlist.
-#[derive(Default)]
-struct VideoPlaylistFileRowIndex {
-    state_indices: HashMap<String, usize>,
-    rows: HashMap<String, DownloadItem>,
+/// Incremental aggregate for a playlist's persisted file state.
+#[derive(Clone, Copy, Debug, Default)]
+struct CollectionProjectionSummary {
     total: usize,
     done: usize,
     progress_sum: f64,
+}
+
+impl CollectionProjectionSummary {
+    fn update(
+        &mut self,
+        old_status: DownloadStatus,
+        old_progress: f64,
+        new_status: DownloadStatus,
+        new_progress: f64,
+    ) {
+        self.done = self
+            .done
+            .saturating_sub(usize::from(old_status == DownloadStatus::Done))
+            .saturating_add(usize::from(new_status == DownloadStatus::Done));
+        self.progress_sum = (self.progress_sum - old_progress.clamp(0.0, 1.0)
+            + new_progress.clamp(0.0, 1.0))
+        .max(0.0);
+    }
+
+    fn fraction(self) -> f64 {
+        if self.total == 0 {
+            0.0
+        } else {
+            (self.progress_sum / self.total as f64).clamp(0.0, 1.0)
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum CollectionProjectionKind {
+    Gallery,
+    Playlist,
+}
+
+fn restored_collection_child_status(
+    kind: CollectionProjectionKind,
+    owner_status: DownloadStatus,
+    child_status: DownloadStatus,
+) -> DownloadStatus {
+    use DownloadStatus::{Cancelled, Done, Downloading, Failed, Paused, Queued};
+
+    match (kind, owner_status, child_status) {
+        (_, Done, _) => Done,
+        (CollectionProjectionKind::Gallery, Failed, Queued | Paused | Downloading) => Failed,
+        (CollectionProjectionKind::Gallery, Cancelled, Queued | Paused | Downloading) => {
+            Cancelled
+        }
+        (CollectionProjectionKind::Gallery, Paused, Queued | Downloading) => Paused,
+        (CollectionProjectionKind::Gallery, Queued, Downloading | Paused) => Queued,
+        (CollectionProjectionKind::Playlist, Failed, Downloading) => Failed,
+        (CollectionProjectionKind::Playlist, Cancelled, Downloading) => Cancelled,
+        (CollectionProjectionKind::Playlist, Paused, Downloading) => Paused,
+        (CollectionProjectionKind::Playlist, Queued, Downloading) => Queued,
+        (_, _, status) => status,
+    }
+}
+
+fn collection_child_status_detail(
+    kind: CollectionProjectionKind,
+    status: DownloadStatus,
+) -> String {
+    match (kind, status) {
+        (CollectionProjectionKind::Gallery, DownloadStatus::Queued) => gettext("Queued"),
+        (CollectionProjectionKind::Playlist, DownloadStatus::Queued) => {
+            gettext("Waiting in collection")
+        }
+        (_, DownloadStatus::Downloading) => gettext("Downloading"),
+        (_, DownloadStatus::Paused) => gettext("Paused"),
+        (_, DownloadStatus::Done) => gettext("Finished"),
+        (CollectionProjectionKind::Gallery, DownloadStatus::Failed) => {
+            gettext("Gallery file failed")
+        }
+        (CollectionProjectionKind::Playlist, DownloadStatus::Failed) => gettext("Failed"),
+        (_, DownloadStatus::Cancelled) => gettext("Cancelled"),
+        (_, DownloadStatus::Scheduled) => gettext("Scheduled"),
+    }
 }
 
 /// A removal whose cleanup is still draining; `worker_abort` is absent when
@@ -516,10 +591,10 @@ pub struct DownloadManager {
     gallery_jobs: RefCell<HashMap<u64, crate::gallery_argv::GalleryJob>>,
     /// O(1) path-to-state and path-to-row lookups for high-frequency gallery progress.
     /// Rebuilt lazily from the persisted job and discarded with its owner.
-    gallery_file_row_index: RefCell<HashMap<u64, GalleryFileRowIndex>>,
+    gallery_file_row_index: RefCell<HashMap<u64, CollectionProjectionIndex>>,
     /// O(1) playlist-entry and child-row lookup plus incremental summary counters.
     /// Rebuilt lazily from owner state and discarded with that owner.
-    video_playlist_file_row_index: RefCell<HashMap<u64, VideoPlaylistFileRowIndex>>,
+    video_playlist_file_row_index: RefCell<HashMap<u64, CollectionProjectionIndex>>,
     /// Abort senders for resolver workers, by row. Signalled from pause/park/cancel so extractor streams stop promptly.
     video_abort: RefCell<HashMap<u64, tokio::sync::oneshot::Sender<crate::video::StopIntent>>>,
     /// Delivery decision per video attempt, by row. Manager and worker arbitrate on this one object.
@@ -4264,9 +4339,10 @@ impl DownloadManager {
         self.gallery_file_row_index
             .borrow_mut()
             .entry(owner_id)
-            .or_insert_with(|| GalleryFileRowIndex {
+            .or_insert_with(|| CollectionProjectionIndex {
                 state_indices,
                 rows: HashMap::new(),
+                summary: None,
             });
         true
     }
@@ -4410,33 +4486,13 @@ impl DownloadManager {
         file_rows: &[crate::gallery_argv::GalleryFileState],
     ) {
         for state in file_rows {
-            let status = match (owner.status(), state.status) {
-                (DownloadStatus::Done, _) => DownloadStatus::Done,
-                (
-                    DownloadStatus::Failed,
-                    DownloadStatus::Queued | DownloadStatus::Paused | DownloadStatus::Downloading,
-                ) => DownloadStatus::Failed,
-                (
-                    DownloadStatus::Cancelled,
-                    DownloadStatus::Queued | DownloadStatus::Paused | DownloadStatus::Downloading,
-                ) => DownloadStatus::Cancelled,
-                (DownloadStatus::Paused, DownloadStatus::Queued | DownloadStatus::Downloading) => {
-                    DownloadStatus::Paused
-                }
-                (DownloadStatus::Queued, DownloadStatus::Downloading | DownloadStatus::Paused) => {
-                    DownloadStatus::Queued
-                }
-                (_, status) => status,
-            };
-            let detail = match status {
-                DownloadStatus::Queued => gettext("Queued"),
-                DownloadStatus::Downloading => gettext("Downloading"),
-                DownloadStatus::Paused => gettext("Paused"),
-                DownloadStatus::Done => gettext("Finished"),
-                DownloadStatus::Failed => gettext("Gallery file failed"),
-                DownloadStatus::Cancelled => gettext("Cancelled"),
-                DownloadStatus::Scheduled => gettext("Scheduled"),
-            };
+            let status = restored_collection_child_status(
+                CollectionProjectionKind::Gallery,
+                owner.status(),
+                state.status,
+            );
+            let detail =
+                collection_child_status_detail(CollectionProjectionKind::Gallery, status);
             self.upsert_gallery_file_row(owner, &state.path, status, state.progress, &detail);
         }
         if !file_rows.is_empty() {
@@ -4496,11 +4552,10 @@ impl DownloadManager {
                 item.set_progress(1.0);
                 item.set_detail(gettext("Finished"));
             } else {
-                let detail = match status {
-                    DownloadStatus::Paused => gettext("Paused"),
-                    DownloadStatus::Cancelled => gettext("Cancelled"),
-                    _ => gettext("Gallery file failed"),
-                };
+                let detail = collection_child_status_detail(
+                    CollectionProjectionKind::Gallery,
+                    status,
+                );
                 item.set_detail(detail);
             }
             item.set_status(status);
@@ -4569,12 +4624,14 @@ impl DownloadManager {
         self.video_playlist_file_row_index
             .borrow_mut()
             .entry(owner_id)
-            .or_insert_with(|| VideoPlaylistFileRowIndex {
+            .or_insert_with(|| CollectionProjectionIndex {
                 state_indices,
                 rows,
-                total,
-                done,
-                progress_sum,
+                summary: Some(CollectionProjectionSummary {
+                    total,
+                    done,
+                    progress_sum,
+                }),
             });
         true
     }
@@ -4587,18 +4644,13 @@ impl DownloadManager {
         new_status: DownloadStatus,
         new_progress: f64,
     ) {
-        if let Some(index) = self
+        if let Some(summary) = self
             .video_playlist_file_row_index
             .borrow_mut()
             .get_mut(&owner_id)
+            .and_then(|index| index.summary.as_mut())
         {
-            index.done = index
-                .done
-                .saturating_sub(usize::from(old_status == DownloadStatus::Done))
-                .saturating_add(usize::from(new_status == DownloadStatus::Done));
-            index.progress_sum = (index.progress_sum - old_progress.clamp(0.0, 1.0)
-                + new_progress.clamp(0.0, 1.0))
-            .max(0.0);
+            summary.update(old_status, old_progress, new_status, new_progress);
         }
     }
 
@@ -4742,25 +4794,13 @@ impl DownloadManager {
         files: &[crate::media_types::VideoPlaylistFile],
     ) {
         for file in files {
-            let status = match (owner.status(), file.status) {
-                (DownloadStatus::Done, _) => DownloadStatus::Done,
-                (DownloadStatus::Failed, DownloadStatus::Downloading) => DownloadStatus::Failed,
-                (DownloadStatus::Cancelled, DownloadStatus::Downloading) => {
-                    DownloadStatus::Cancelled
-                }
-                (DownloadStatus::Paused, DownloadStatus::Downloading) => DownloadStatus::Paused,
-                (DownloadStatus::Queued, DownloadStatus::Downloading) => DownloadStatus::Queued,
-                (_, status) => status,
-            };
-            let detail = match status {
-                DownloadStatus::Queued => gettext("Waiting in collection"),
-                DownloadStatus::Downloading => gettext("Downloading"),
-                DownloadStatus::Paused => gettext("Paused"),
-                DownloadStatus::Done => gettext("Finished"),
-                DownloadStatus::Failed => gettext("Failed"),
-                DownloadStatus::Cancelled => gettext("Cancelled"),
-                DownloadStatus::Scheduled => gettext("Scheduled"),
-            };
+            let status = restored_collection_child_status(
+                CollectionProjectionKind::Playlist,
+                owner.status(),
+                file.status,
+            );
+            let detail =
+                collection_child_status_detail(CollectionProjectionKind::Playlist, status);
             self.upsert_video_playlist_file_row(
                 owner,
                 &file.id,
@@ -4868,11 +4908,10 @@ impl DownloadManager {
                     child.set_progress(1.0);
                     child.set_detail(gettext("Finished"));
                 } else {
-                    child.set_detail(match status {
-                        DownloadStatus::Paused => gettext("Paused"),
-                        DownloadStatus::Cancelled => gettext("Cancelled"),
-                        _ => gettext("Failed"),
-                    });
+                    child.set_detail(collection_child_status_detail(
+                        CollectionProjectionKind::Playlist,
+                        status,
+                    ));
                 }
                 child.set_status(status);
             }
@@ -4887,26 +4926,21 @@ impl DownloadManager {
         if !self.ensure_video_playlist_file_row_index(owner_id) {
             return;
         }
-        let Some((total, done, progress_sum)) = self
+        let Some(summary) = self
             .video_playlist_file_row_index
             .borrow()
             .get(&owner_id)
-            .map(|index| (index.total, index.done, index.progress_sum))
+            .and_then(|index| index.summary)
         else {
             return;
         };
-        let fraction = if total == 0 {
-            0.0
-        } else {
-            progress_sum / total as f64
-        };
-        owner.set_gallery_file_count(total.min(u32::MAX as usize) as u32);
-        owner.set_gallery_files_done(done.min(u32::MAX as usize) as u32);
-        owner.set_progress(fraction.clamp(0.0, 1.0));
+        owner.set_gallery_file_count(summary.total.min(u32::MAX as usize) as u32);
+        owner.set_gallery_files_done(summary.done.min(u32::MAX as usize) as u32);
+        owner.set_progress(summary.fraction());
         owner.set_detail(
             gettext("Playlist • {done}/{total} files")
-                .replace("{done}", &done.to_string())
-                .replace("{total}", &total.to_string()),
+                .replace("{done}", &summary.done.to_string())
+                .replace("{total}", &summary.total.to_string()),
         );
     }
 

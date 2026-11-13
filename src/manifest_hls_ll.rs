@@ -190,10 +190,6 @@ fn trim_ascii_whitespace(value: &[u8]) -> &[u8] {
     value.trim_ascii()
 }
 
-fn trim_ascii_whitespace(value: &[u8]) -> &[u8] {
-    value.trim_ascii()
-}
-
 const PART_DURATION_TOLERANCE: f64 = 0.02;
 
 #[expect(
@@ -259,7 +255,7 @@ fn scan_ll_hls_tags(body: &[u8]) -> LlHlsTagFlags {
     const SKIP: &[u8] = b"#EXT-X-SKIP:";
 
     let mut flags = LlHlsTagFlags::default();
-    for raw_line in body.split(|byte| *byte == b'\\n') {
+    for raw_line in body.split(|byte| *byte == b'\n') {
         // The previous implementation searched for the last EXTINF byte
         // sequence, then scanned only its suffix for a discontinuity. Resetting
         // on every line containing EXTINF preserves that ordering in one pass.
@@ -267,7 +263,7 @@ fn scan_ll_hls_tags(body: &[u8]) -> LlHlsTagFlags {
             flags.trailing_open_discontinuity = false;
         }
 
-        let line = raw_line.strip_suffix(b"\\r").unwrap_or(raw_line);
+        let line = raw_line.strip_suffix(b"\r").unwrap_or(raw_line);
         let is_part = line.starts_with(PART);
         let is_skip = line.starts_with(SKIP);
 

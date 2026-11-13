@@ -253,7 +253,7 @@ mod tests {
             url: "https://origin.example.test/master.m3u8?token=secret".to_string(),
             kind: ManifestKind::Hls,
             representation_key: "hls-variant-stable".into(),
-            output_extension: None,
+            output_container: None,
             audio_key: Some("hls-audio-stable".into()),
             subtitle_key: Some("hls-subtitle-stable".into()),
             subtitle_language: Some("en".to_string()),

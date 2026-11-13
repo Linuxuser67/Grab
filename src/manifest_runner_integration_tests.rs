@@ -1660,25 +1660,15 @@ async fn llhls_live_capture_reuses_parts_when_complete_parent_segments_arrive() 
 }
 
 #[tokio::test]
-async fn llhls_mapless_parts_are_committed_only_after_mpegts_validation() {
+async fn llhls_mapless_parts_are_staged_without_packet_sniffing() {
     let root = TempRoot::new("llhls-mapless-ts");
     let video_dir = root.path().join("video");
     tokio::fs::create_dir_all(&video_dir)
         .await
         .expect("create mapless LL-HLS staging");
 
-    let mut transport_stream = vec![0xff; 188 * 3];
-    for (index, packet) in transport_stream
-        .as_chunks_mut::<188>()
-        .0
-        .iter_mut()
-        .enumerate()
-    {
-        packet[0] = 0x47;
-        packet[1] = 0;
-        packet[2] = 0;
-        packet[3] = 0x10 | (index as u8 & 0x0f);
-    }
+    // Packet validation is deferred until FFmpeg processes the completed assembled track.
+    let media_part = b"upstream response is not a complete transport stream".to_vec();
 
     let body = br#"#EXTM3U
 #EXT-X-TARGETDURATION:2
@@ -1690,11 +1680,8 @@ async fn llhls_mapless_parts_are_committed_only_after_mpegts_validation() {
     let mut plan =
         crate::manifest::plan_hls_media_playlist("https://origin.example.test/live.m3u8", body)
             .expect("plan mapless LL-HLS MPEG-TS part");
-    let mapless_parts = plan.ll_parts_without_init_map().collect::<Vec<_>>();
-    assert_eq!(mapless_parts.len(), 1);
-    assert!(mapless_parts[0].starts_with("segment-ll-00000000000000000005-part-000000-"));
 
-    let files = HashMap::from([("/5.0.ts".to_string(), transport_stream.clone())]);
+    let files = HashMap::from([("/5.0.ts".to_string(), media_part.clone())]);
     let (fixture_base, server) = spawn_fixture_server(files, 1).await;
     localize_live_plan_resources(&mut plan, &fixture_base);
     let mut track = load_live_hls_track(&plan, &video_dir)
@@ -1717,7 +1704,7 @@ async fn llhls_mapless_parts_are_committed_only_after_mpegts_validation() {
             0,
         )
         .await
-        .expect("validate and commit mapless MPEG-TS part"),
+        .expect("stage mapless LL-HLS media part"),
         LiveHlsSnapshotOutcome::Committed
     );
     wait_for_fixture_server(server).await;
@@ -1732,10 +1719,10 @@ async fn llhls_mapless_parts_are_committed_only_after_mpegts_validation() {
     assert_eq!(
         tokio::fs::read(video_dir.join(&local.segments[0].uri))
             .await
-            .expect("read committed mapless TS part"),
-        transport_stream
+            .expect("read staged mapless media part"),
+        media_part
     );
-    assert_eq!(downloaded.load(Ordering::Relaxed), 188 * 3);
+    assert_eq!(downloaded.load(Ordering::Relaxed), media_part.len() as u64);
 }
 
 #[tokio::test]
@@ -3818,7 +3805,7 @@ async fn live_hls_snapshot_appends_fetched_mpegts_fragments_to_visible_destinati
     let make_transport_stream = |seed: u8| {
         let mut bytes = vec![0xff; 188 * 3];
         for (index, packet) in bytes
-            .as_chunks_mut::<{ mpeg_ts::ts::TS_PACKET_SIZE }>()
+            .as_chunks_mut::<{ 188 }>()
             .0
             .iter_mut()
             .enumerate()

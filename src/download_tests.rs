@@ -7549,10 +7549,8 @@ fn removing_a_never_spawned_video_row_releases_after_finalizer() {
     manager.remove(id);
 
     // Video cleanup runs in the tracked finalizer even when no worker was spawned.
-    // Await it so the test checks release after cleanup, not synchronously on the
-    // GTK call stack.
-    // The finalizer may complete and be reaped before this assertion runs.
-    // Observe the reservation itself, which remains held until cleanup finishes.
+    // Observe the reservation rather than its task handle: a fast finalizer may
+    // be reaped before this test regains control.
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
     while manager.dest_reserved(&dest) && std::time::Instant::now() < deadline {
         std::thread::sleep(std::time::Duration::from_millis(10));

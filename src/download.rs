@@ -17,6 +17,43 @@ use std::time::{Duration, Instant, SystemTime};
 /// temp paths unique across writers in the same process.
 static QUEUE_TMP_COUNTER: AtomicU64 = AtomicU64::new(0);
 
+/// Tracks fire-and-forget final-path sizing even when its GLib future is
+/// cancelled during shutdown.
+struct SizingGuard(Rc<Cell<usize>>);
+
+impl SizingGuard {
+    fn new(inflight: Rc<Cell<usize>>) -> Self {
+        inflight.set(inflight.get().saturating_add(1));
+        Self(inflight)
+    }
+}
+
+impl Drop for SizingGuard {
+    fn drop(&mut self) {
+        self.0.set(self.0.get().saturating_sub(1));
+    }
+}
+
+#[cfg(test)]
+mod sizing_guard_tests {
+    use super::*;
+
+    #[test]
+    fn sizing_guard_balances_the_counter_when_dropped() {
+        let inflight = Rc::new(Cell::new(0));
+        let guard = SizingGuard::new(Rc::clone(&inflight));
+        assert_eq!(inflight.get(), 1);
+
+        let second = SizingGuard::new(Rc::clone(&inflight));
+        assert_eq!(inflight.get(), 2);
+
+        drop(guard);
+        assert_eq!(inflight.get(), 1);
+        drop(second);
+        assert_eq!(inflight.get(), 0);
+    }
+}
+
 /// Re-register the network restriction persisted for a guarded queue row.
 /// Keep the download and gallery restore paths identical as the policy evolves.
 fn recheck_public_host(url: &str, kind: &str) -> Result<(), String> {
@@ -2237,15 +2274,12 @@ impl DownloadManager {
         });
         let weak = item.downgrade();
         let path = item.file_path();
-        let inflight = Rc::clone(&self.sizing_inflight);
-        inflight.set(inflight.get() + 1);
+        let sizing_guard = SizingGuard::new(Rc::clone(&self.sizing_inflight));
         glib::spawn_future_local(async move {
+            let _sizing_guard = sizing_guard;
             let measured = crate::file_names::path_size_async(path)
                 .await
                 .filter(|m| *m > 0);
-            // Balance the counter before any early return: the row may be
-            // gone or the path missing, but the task still finished.
-            inflight.set(inflight.get() - 1);
             let (Some(item), Some(measured)) = (weak.upgrade(), measured) else {
                 return;
             };

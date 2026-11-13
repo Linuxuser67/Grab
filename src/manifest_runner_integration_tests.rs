@@ -1248,17 +1248,6 @@ fn localize_live_plan_resources(plan: &mut HlsPlan, fixture_base: &Url) {
     }
 }
 
-fn live_hls_test_source(url: &str) -> crate::media_types::ManifestSource {
-    crate::media_types::ManifestSource {
-        url: url.to_string(),
-        kind: crate::media_types::ManifestKind::Hls,
-        representation_key: "live-hls-test".into(),
-        output_container: None,
-        audio_key: None,
-        subtitle_key: None,
-        subtitle_language: None,
-    }
-}
 #[tokio::test]
 async fn saved_live_hls_capture_finalizes_without_contacting_the_origin() {
     let root = TempRoot::new("live-offline");

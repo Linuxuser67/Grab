@@ -10,7 +10,6 @@ use crate::media_types::{
 /// layer and rejected by another solely because their caps drifted.
 pub(crate) const MAX_MANIFEST_SEGMENTS: usize = 100_000;
 pub(crate) const MAX_MANIFEST_TOTAL_BYTES: u64 = 1 << 40;
-pub(crate) const MAX_DASH_SIDX_BYTES: u64 = 1024 * 1024;
 
 /// One selectable video choice from a parsed native manifest.
 #[derive(Clone, Debug, PartialEq, Eq)]

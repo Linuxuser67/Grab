@@ -1,5 +1,7 @@
 //! HLS live-capture staging, polling, and recovery.
 
+use std::collections::HashSet;
+
 use super::*;
 
 async fn read_local_live_hls_plan(

@@ -186,11 +186,6 @@ pub(crate) fn validate_live_unit_ids(ids: &[HlsLiveUnitId]) -> bool {
     ids.windows(2).all(|pair| pair[1].is_successor_of(&pair[0]))
 }
 
-fn has_ll_hls_partial_segments(body: &[u8]) -> bool {
-    body.split(|byte| *byte == b'\n')
-        .any(|line| line.starts_with(b"#EXT-X-PART:"))
-}
-
 fn trim_ascii_whitespace(value: &[u8]) -> &[u8] {
     value.trim_ascii()
 }
@@ -239,18 +234,63 @@ fn hls_key_method(attributes: &[u8]) -> Option<&[u8]> {
     None
 }
 
-fn has_hls_encrypted_media_key_tag(body: &[u8]) -> bool {
-    body.split(|byte| *byte == b'\n').any(|line| {
-        let line = line.strip_suffix(b"\r").unwrap_or(line);
-        let Some(attributes) = line.strip_prefix(b"#EXT-X-KEY:") else {
-            return false;
-        };
+#[derive(Default)]
+struct LlHlsTagFlags {
+    has_partial_segments: bool,
+    has_encrypted_media_key_tag: bool,
+    has_delta_update: bool,
+    has_ll_hls_tags: bool,
+    trailing_open_discontinuity: bool,
+}
 
-        // Missing or malformed METHOD values fail closed. METHOD=NONE only
-        // disables encryption; it must not divert an unencrypted LL-HLS
-        // playlist away from the low-latency planner.
-        hls_key_method(attributes).is_none_or(|method| !method.eq_ignore_ascii_case(b"NONE"))
-    })
+fn scan_ll_hls_tags(body: &[u8]) -> LlHlsTagFlags {
+    const EXTINF: &[u8] = b"#EXTINF:";
+    const DISCONTINUITY: &[u8] = b"#EXT-X-DISCONTINUITY";
+    const KEY: &[u8] = b"#EXT-X-KEY:";
+    const PART: &[u8] = b"#EXT-X-PART:";
+    const PART_INF: &[u8] = b"#EXT-X-PART-INF:";
+    const SERVER_CONTROL: &[u8] = b"#EXT-X-SERVER-CONTROL:";
+    const PRELOAD_HINT: &[u8] = b"#EXT-X-PRELOAD-HINT:";
+    const RENDITION_REPORT: &[u8] = b"#EXT-X-RENDITION-REPORT:";
+    const SKIP: &[u8] = b"#EXT-X-SKIP:";
+
+    let mut flags = LlHlsTagFlags::default();
+    for raw_line in body.split(|byte| *byte == b'\n') {
+        // The previous implementation searched for the last EXTINF byte
+        // sequence, then scanned only its suffix for a discontinuity. Resetting
+        // on every line containing EXTINF preserves that ordering in one pass.
+        if raw_line
+            .windows(EXTINF.len())
+            .any(|window| window == EXTINF)
+        {
+            flags.trailing_open_discontinuity = false;
+        }
+
+        let line = raw_line.strip_suffix(b"\r").unwrap_or(raw_line);
+        let is_part = line.starts_with(PART);
+        let is_skip = line.starts_with(SKIP);
+
+        flags.has_partial_segments |= is_part;
+        flags.has_delta_update |= is_skip;
+        flags.has_ll_hls_tags |= is_part
+            || is_skip
+            || line.starts_with(SERVER_CONTROL)
+            || line.starts_with(PART_INF)
+            || line.starts_with(PRELOAD_HINT)
+            || line.starts_with(RENDITION_REPORT);
+
+        if let Some(attributes) = line.strip_prefix(KEY) {
+            // Missing or malformed METHOD values fail closed. METHOD=NONE only
+            // disables encryption; it must not divert ordinary unencrypted
+            // LL-HLS away from the low-latency planner.
+            flags.has_encrypted_media_key_tag |= hls_key_method(attributes)
+                .is_none_or(|method| !method.eq_ignore_ascii_case(b"NONE"));
+        }
+        if line.trim_ascii_start() == DISCONTINUITY {
+            flags.trailing_open_discontinuity = true;
+        }
+    }
+    flags
 }
 
 fn is_hls_method_none_key_tag(tag: &str) -> bool {
@@ -264,31 +304,15 @@ fn is_hls_method_none_key_tag(tag: &str) -> bool {
         && hls_key_method(attributes).is_some_and(|method| method.eq_ignore_ascii_case(b"NONE"))
 }
 
-fn has_ll_hls_delta_update(body: &[u8]) -> bool {
-    body.split(|byte| *byte == b'\n')
-        .any(|line| line.starts_with(b"#EXT-X-SKIP:"))
-}
-
-pub(crate) fn has_ll_hls_tags(body: &[u8]) -> bool {
-    body.split(|byte| *byte == b'\n').any(|line| {
-        line.starts_with(b"#EXT-X-SERVER-CONTROL:")
-            || line.starts_with(b"#EXT-X-PART-INF:")
-            || line.starts_with(b"#EXT-X-PART:")
-            || line.starts_with(b"#EXT-X-PRELOAD-HINT:")
-            || line.starts_with(b"#EXT-X-RENDITION-REPORT:")
-            || line.starts_with(b"#EXT-X-SKIP:")
-    })
-}
-
 pub(crate) fn plan_hls_media_playlist(
     manifest_url: &str,
     body: &[u8],
 ) -> Result<Option<HlsPlan>, ManifestError> {
-    let has_partial_segments = has_ll_hls_partial_segments(body);
-    let use_standard_encryption_planner = !has_partial_segments
-        && has_hls_encrypted_media_key_tag(body)
-        && !has_ll_hls_delta_update(body);
-    if !has_ll_hls_tags(body) || use_standard_encryption_planner {
+    let tag_flags = scan_ll_hls_tags(body);
+    let use_standard_encryption_planner = !tag_flags.has_partial_segments
+        && tag_flags.has_encrypted_media_key_tag
+        && !tag_flags.has_delta_update;
+    if !tag_flags.has_ll_hls_tags || use_standard_encryption_planner {
         // Keep complete-segment LL-HLS on the live planner unless it actually
         // carries media encryption. Only complete encrypted segments are
         // delegated to the ordinary HLS planner, which already owns key
@@ -319,7 +343,7 @@ pub(crate) fn plan_hls_media_playlist(
     } else {
         None
     };
-    let open_segment_discontinuity = has_trailing_open_discontinuity(body);
+    let open_segment_discontinuity = tag_flags.trailing_open_discontinuity;
     build_plan(
         manifest_url,
         playlist,
@@ -363,23 +387,6 @@ fn open_segment_program_date_time(
         return Err(ManifestError::UnsupportedPlaylist);
     }
     parse_program_date_time_tag(tag).map(Some)
-}
-
-fn has_trailing_open_discontinuity(body: &[u8]) -> bool {
-    const EXTINF: &[u8] = b"#EXTINF:";
-    let tail_start = body
-        .windows(EXTINF.len())
-        .rposition(|window| window == EXTINF)
-        .unwrap_or(0);
-    body[tail_start..]
-        .split(|byte| *byte == b'\n')
-        .any(|raw_line| {
-            raw_line
-                .strip_suffix(b"\r")
-                .unwrap_or(raw_line)
-                .trim_ascii_start()
-                == b"#EXT-X-DISCONTINUITY"
-        })
 }
 
 fn build_plan(
@@ -2092,6 +2099,31 @@ segment.ts
             .expect("rendition report without a partial segment")
             .expect("LL-HLS detected");
         assert_eq!(plan.rendition_reports[0].next_reload(), Some((32, None)));
+    }
+
+    #[test]
+    fn one_pass_tag_scan_collects_ll_hls_flags_and_trailing_discontinuity() {
+        let body = br#"#EXTM3U
+#EXT-X-SERVER-CONTROL:CAN-BLOCK-RELOAD=YES
+#EXT-X-PART-INF:PART-TARGET=0.5
+#EXT-X-KEY:METHOD=AES-128,URI="key.bin"
+#EXT-X-SKIP:SKIPPED-SEGMENTS=2
+#EXTINF:1.0,
+#EXT-X-DISCONTINUITY
+"#;
+        let flags = scan_ll_hls_tags(body);
+        assert!(!flags.has_partial_segments);
+        assert!(flags.has_encrypted_media_key_tag);
+        assert!(flags.has_delta_update);
+        assert!(flags.has_ll_hls_tags);
+        assert!(flags.trailing_open_discontinuity);
+
+        let closed = br#"#EXTM3U
+#EXT-X-DISCONTINUITY
+#EXTINF:1.0,
+segment.ts
+"#;
+        assert!(!scan_ll_hls_tags(closed).trailing_open_discontinuity);
     }
 
     #[test]

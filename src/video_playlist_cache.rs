@@ -12,6 +12,7 @@ use yt_dlp::cache::{CacheConfig, PlaylistCache};
 use yt_dlp::model::playlist::{Playlist, PlaylistEntry};
 
 use crate::media_types::{PlaylistInfo, PlaylistKind};
+use crate::video_probe::fallback_playlist_index;
 
 const PLAYLIST_CACHE_TTL: Duration = Duration::from_secs(15 * 60);
 const CLEAN_INTERVAL: Duration = Duration::from_secs(5 * 60);
@@ -193,7 +194,7 @@ fn from_cached_playlist(key: &str, playlist: Playlist) -> Option<PlaylistInfo> {
                 .index
                 .and_then(|index| u32::try_from(index).ok())
                 .filter(|index| *index > 0)
-                .unwrap_or_else(|| (position.saturating_add(1)).min(u32::MAX as usize) as u32);
+                .unwrap_or_else(|| fallback_playlist_index(position));
             Some(crate::media_types::PlaylistItem {
                 id: entry.id.into_boxed_str(),
                 title: entry.title.into_boxed_str(),

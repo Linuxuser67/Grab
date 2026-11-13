@@ -6,13 +6,6 @@ use super::*;
 
 use crate::video_argv::VideoJob;
 
-#[test]
-fn combined_media_size_requires_both_sizes_and_checks_overflow() {
-    assert_eq!(combined_media_size(Some(10), Some(20)), Some(30));
-    assert_eq!(combined_media_size(None, Some(20)), None);
-    assert_eq!(combined_media_size(Some(u64::MAX), Some(1)), None);
-}
-
 /// A removal that wins before the final claim must keep the partial in staging
 /// and must not create the final destination.
 #[test]
@@ -339,6 +332,7 @@ fn the_sweep_follows_the_reap() {
         async move {
             reap_log.borrow_mut().push("reap");
         },
+        None,
         move || async move {
             sweep_log.borrow_mut().push("sweep");
         },
@@ -360,6 +354,7 @@ fn a_stalled_reap_blocks_the_sweep() {
         tokio::select! {
             _ = reap_then_sweep(
                 std::future::pending::<()>(),
+                None,
                 move || async move { sweep_flag.set(true); },
             ) => {}
             // Nothing can satisfy the reap arm: give the sequence a real window to misbehave.

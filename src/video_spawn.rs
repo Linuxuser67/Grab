@@ -682,28 +682,71 @@ pub(crate) async fn reap_child(child: &mut tokio::process::Child, group: &mut Pr
     group.disarm();
 }
 
-/// Wait until no process remains in `pgid`, bounded (`false` = treat a writer as possibly still present).
+/// Whether a Linux process-group member can still execute.
 #[cfg(target_os = "linux")]
-pub(crate) async fn await_group_quiescence(pgid: i32, timeout: std::time::Duration) -> bool {
-    let deadline = std::time::Instant::now() + timeout;
-    loop {
-        // SAFETY: signal 0 performs error checking only; a constant signal.
-        let alive = unsafe { libc::killpg(pgid, 0) } == 0
-            || std::io::Error::last_os_error().raw_os_error() == Some(libc::EPERM);
-        if !alive {
+fn process_group_has_live_members(pgid: libc::pid_t) -> bool {
+    let Ok(processes) = std::fs::read_dir("/proc") else {
+        // Cleanup must fail closed: without procfs, do not assume the group is empty.
+        return true;
+    };
+
+    for process in processes {
+        let Ok(process) = process else {
+            return true;
+        };
+        if !process
+            .file_name()
+            .to_str()
+            .is_some_and(|name| !name.is_empty() && name.bytes().all(|byte| byte.is_ascii_digit()))
+        {
+            continue;
+        }
+        let stat = match std::fs::read_to_string(process.path().join("stat")) {
+            Ok(stat) => stat,
+            // The process exited between read_dir and opening stat.
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+            // Other users' processes may be hidden by procfs policy; group
+            // descendants inherit this process's real UID and remain visible.
+            Err(error) if error.kind() == std::io::ErrorKind::PermissionDenied => continue,
+            Err(_) => return true,
+        };
+        let Some((member_group, state)) = process_group_and_state(&stat) else {
+            // A malformed stat entry cannot prove quiescence.
+            return true;
+        };
+        if member_group == pgid && !matches!(state, 'Z' | 'X' | 'x') {
             return true;
         }
-        if std::time::Instant::now() >= deadline {
-            return false;
-        }
-        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+
+    false
+}
+
+/// Read the process group and scheduler state from Linux's /proc/<pid>/stat.
+#[cfg(target_os = "linux")]
+fn process_group_and_state(stat: &str) -> Option<(libc::pid_t, char)> {
+    // comm is parenthesized and may contain spaces or parentheses; the fields
+    // after its final ')' have stable positions: state, ppid, then pgrp.
+    let (_, fields) = stat.rsplit_once(')')?;
+    let mut fields = fields.split_whitespace();
+    let state = fields.next()?.chars().next()?;
+    let _parent = fields.next()?;
+    let process_group = fields.next()?.parse().ok()?;
+    Some((process_group, state))
+}
+
+/// Wait until no live process remains in the process group. Zombie/dead entries no longer
+/// execute or write, so they do not delay discard cleanup. The caller must keep
+/// staging alive while any live descendant remains in the process group.
+#[cfg(target_os = "linux")]
+pub(crate) async fn await_group_quiescence(pgid: i32) {
+    while process_group_has_live_members(pgid) {
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
     }
 }
 
 #[cfg(not(target_os = "linux"))]
-pub(crate) async fn await_group_quiescence(_pgid: i32, _timeout: std::time::Duration) -> bool {
-    true
-}
+pub(crate) async fn await_group_quiescence(_pgid: i32) {}
 
 /// Join a pipe-drain with a grace period (orphaned grandchildren can hold pipes open; falls back to abort).
 pub(crate) async fn join_drain<T>(task: tokio::task::JoinHandle<T>) -> Option<T> {

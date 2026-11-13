@@ -284,7 +284,7 @@ pub(crate) fn unified_download_argv(
 }
 
 /// Machine-readable per-file progress for an owning yt-dlp playlist process.
-pub(crate) const YTDLP_PLAYLIST_PROGRESS_TEMPLATE: &str = "download:[GrabPlaylist];%(info.id)s;%(info.playlist_index)s;%(progress.status)s;%(progress.downloaded_bytes)s;%(progress.total_bytes)s;%(progress.total_bytes_estimate)s";
+
 
 /// Output template for a collection. The extractor ID disambiguates duplicate
 /// titles and keeps filenames stable if the playlist is reordered between

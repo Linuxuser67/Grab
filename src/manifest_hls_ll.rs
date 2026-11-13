@@ -186,6 +186,55 @@ pub(crate) fn validate_live_unit_ids(ids: &[HlsLiveUnitId]) -> bool {
     ids.windows(2).all(|pair| pair[1].is_successor_of(&pair[0]))
 }
 
+fn trim_ascii_whitespace(value: &[u8]) -> &[u8] {
+    value.trim_ascii()
+}
+
+const PART_DURATION_TOLERANCE: f64 = 0.02;
+
+#[expect(
+    clippy::cast_precision_loss,
+    reason = "HLS target durations are integer seconds compared with fractional durations"
+)]
+fn target_duration_seconds(seconds: u64) -> f64 {
+    seconds as f64
+}
+
+#[expect(
+    clippy::cast_possible_truncation,
+    reason = "m3u8-rs stores segment durations as f32; validation is performed in f64 first"
+)]
+fn media_segment_duration(duration: Duration) -> f32 {
+    duration.as_secs_f64() as f32
+}
+
+fn has_required_unknown_attributes<T>(attributes: &[(String, T)]) -> bool {
+    attributes.iter().any(|(name, _)| name.starts_with("REQ-"))
+}
+
+fn hls_key_method(attributes: &[u8]) -> Option<&[u8]> {
+    let mut attribute_start = 0;
+    let mut inside_quotes = false;
+
+    for index in 0..=attributes.len() {
+        let at_end = index == attributes.len();
+        if at_end || (attributes[index] == b',' && !inside_quotes) {
+            let attribute = trim_ascii_whitespace(&attributes[attribute_start..index]);
+            if let Some(separator) = attribute.iter().position(|byte| *byte == b'=')
+                && trim_ascii_whitespace(&attribute[..separator]).eq_ignore_ascii_case(b"METHOD")
+            {
+                return Some(trim_ascii_whitespace(&attribute[separator + 1..]));
+            }
+            attribute_start = index.saturating_add(1);
+        } else if attributes[index] == b'"' {
+            inside_quotes = !inside_quotes;
+        }
+    }
+
+    None
+}
+
+
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 struct LlHlsTagFlags {
     partial_segments: bool,

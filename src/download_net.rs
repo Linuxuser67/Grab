@@ -504,10 +504,6 @@ impl PublicResolutionSet {
         Ok(())
     }
 
-    pub(crate) fn len(&self) -> usize {
-        self.hosts.len()
-    }
-
     pub(crate) fn contains(&self, host: &str) -> bool {
         self.hosts.contains(host)
     }

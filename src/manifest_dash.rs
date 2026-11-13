@@ -2249,7 +2249,7 @@ fn effective_list(
         timescale,
         presentation_time_offset,
         availability_time_offset: Duration::ZERO,
-        segments: segments.into_boxed_slice(),
+        segments,
     })
 }
 
@@ -2313,11 +2313,7 @@ fn expand_dynamic_list(
     let window_start_ticks =
         duration_to_ticks(elapsed.saturating_sub(window_depth), list.timescale)?;
 
-    let initialization_url = url
-        .as_deref()
-        .map(|raw| resolve_resource(&representation.source.base_url, raw))
-        .transpose()?
-        .unwrap_or_else(|| representation.source.base_url.clone());
+    let initialization_url = resolve_resource(&representation.source.base_url, url)?;
     let initialization_filename =
         super::resource_filename("dash-live-init", None, &initialization_url, *range);
     let mut resources = Vec::with_capacity(segments.len().saturating_add(1));

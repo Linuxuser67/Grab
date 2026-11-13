@@ -2547,10 +2547,6 @@ pub(crate) fn valid_source(source: &crate::media_types::ManifestSource) -> bool 
     if !is_native_manifest_candidate(&url, ManifestTransportPolicy::HttpsOnly)
         || native_manifest_kind(&url).is_some_and(|kind| kind != source.kind)
         || source.representation_key.is_empty()
-        || source
-            .output_extension
-            .as_deref()
-            .is_some_and(|extension| !matches!(extension, "mp4" | "mkv" | "ts"))
     {
         return false;
     }
@@ -3395,8 +3391,8 @@ video/es.m3u8
             subtitle_language: None,
         };
         assert!(valid_source(&source));
-        source.output_extension = Some("../unexpected".to_string());
-        assert!(!valid_source(&source));
+        source.output_extension = Some(crate::media_types::ManifestContainer::MpegTs);
+        assert!(valid_source(&source));
         source.output_extension = None;
         assert!(valid_source(&source));
         source.url = "https://cdn.example.test/master".to_string();

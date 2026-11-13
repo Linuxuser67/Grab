@@ -247,6 +247,75 @@ fn collection_child_status_detail(
     }
 }
 
+#[cfg(test)]
+mod collection_projection_tests {
+    use super::*;
+
+    #[test]
+    fn restore_status_policy_preserves_gallery_and_playlist_semantics() {
+        use DownloadStatus::{
+            Cancelled, Done, Downloading, Failed, Paused, Queued,
+        };
+
+        assert_eq!(
+            restored_collection_child_status(CollectionProjectionKind::Gallery, Failed, Queued),
+            Failed
+        );
+        assert_eq!(
+            restored_collection_child_status(
+                CollectionProjectionKind::Gallery,
+                Paused,
+                Queued
+            ),
+            Paused
+        );
+        assert_eq!(
+            restored_collection_child_status(
+                CollectionProjectionKind::Playlist,
+                Failed,
+                Queued
+            ),
+            Queued
+        );
+        assert_eq!(
+            restored_collection_child_status(
+                CollectionProjectionKind::Playlist,
+                Failed,
+                Downloading
+            ),
+            Failed
+        );
+        assert_eq!(
+            restored_collection_child_status(
+                CollectionProjectionKind::Gallery,
+                Done,
+                Cancelled
+            ),
+            Done
+        );
+    }
+
+    #[test]
+    fn playlist_projection_summary_updates_done_and_progress_incrementally() {
+        let mut summary = CollectionProjectionSummary {
+            total: 3,
+            done: 1,
+            progress_sum: 1.75,
+        };
+
+        summary.update(
+            DownloadStatus::Downloading,
+            0.25,
+            DownloadStatus::Done,
+            1.0,
+        );
+
+        assert_eq!(summary.done, 2);
+        assert!((summary.progress_sum - 2.5).abs() < f64::EPSILON);
+        assert!((summary.fraction() - (2.5 / 3.0)).abs() < f64::EPSILON);
+    }
+}
+
 /// A removal whose cleanup is still draining; `worker_abort` is absent when
 /// no worker had to be awaited.
 struct PendingDiscard {

@@ -636,3 +636,60 @@ fn live_remux_retries_known_mp4_timestamp_mux_failures_only() {
         "unrelated output failures must not trigger another full remux"
     );
 }
+
+#[tokio::test]
+async fn ytdlp_stdout_reader_lossily_decodes_and_continues_after_invalid_utf8() {
+    let bytes = b"before\ninvalid:\xff\nafter\n".to_vec();
+    let mut reader = super::YtdlpStdoutReader::new(std::io::Cursor::new(bytes));
+
+    assert_eq!(
+        reader.next_line().await.unwrap(),
+        super::YtdlpStdoutLine::Line("before".to_string())
+    );
+    assert_eq!(
+        reader.next_line().await.unwrap(),
+        super::YtdlpStdoutLine::Line("invalid:\u{fffd}".to_string())
+    );
+    assert_eq!(
+        reader.next_line().await.unwrap(),
+        super::YtdlpStdoutLine::Line("after".to_string())
+    );
+    assert_eq!(
+        reader.next_line().await.unwrap(),
+        super::YtdlpStdoutLine::Eof
+    );
+}
+
+#[tokio::test]
+async fn ytdlp_stdout_reader_discards_oversized_records_and_keeps_draining() {
+    let mut bytes = vec![b'x'; super::MAX_YTDLP_STDOUT_LINE_BYTES + 1];
+    bytes.extend_from_slice(b"\nvalid\n");
+    let mut reader = super::YtdlpStdoutReader::new(std::io::Cursor::new(bytes));
+
+    assert_eq!(
+        reader.next_line().await.unwrap(),
+        super::YtdlpStdoutLine::SkippedOversized
+    );
+    assert_eq!(
+        reader.next_line().await.unwrap(),
+        super::YtdlpStdoutLine::Line("valid".to_string())
+    );
+    assert_eq!(
+        reader.next_line().await.unwrap(),
+        super::YtdlpStdoutLine::Eof
+    );
+}
+
+#[tokio::test]
+async fn ytdlp_stdout_reader_emits_a_final_record_without_a_newline() {
+    let mut reader = super::YtdlpStdoutReader::new(std::io::Cursor::new(b"final".to_vec()));
+
+    assert_eq!(
+        reader.next_line().await.unwrap(),
+        super::YtdlpStdoutLine::Line("final".to_string())
+    );
+    assert_eq!(
+        reader.next_line().await.unwrap(),
+        super::YtdlpStdoutLine::Eof
+    );
+}

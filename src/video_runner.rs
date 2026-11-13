@@ -40,6 +40,105 @@ use std::time::Duration;
 use tokio::sync::oneshot;
 use yt_dlp::model::Video;
 
+const MAX_YTDLP_STDOUT_LINE_BYTES: usize = 64 * 1024;
+
+#[derive(Debug, PartialEq, Eq)]
+enum YtdlpStdoutLine {
+    Line(String),
+    SkippedOversized,
+    Eof,
+}
+
+/// Bounded, lossy line reader for yt-dlp's stdout.
+///
+/// Paths printed by yt-dlp can contain non-UTF-8 bytes. Decoding each record
+/// lossily keeps one malformed path from terminating the pipe reader and
+/// blocking yt-dlp before it can print later progress or completion records.
+struct YtdlpStdoutReader<R> {
+    reader: tokio::io::BufReader<R>,
+    eof: bool,
+}
+
+impl<R: tokio::io::AsyncRead> YtdlpStdoutReader<R> {
+    fn new(reader: R) -> Self {
+        Self {
+            reader: tokio::io::BufReader::new(reader),
+            eof: false,
+        }
+    }
+}
+
+impl<R: tokio::io::AsyncRead + Unpin> YtdlpStdoutReader<R> {
+    async fn next_line(&mut self) -> std::io::Result<YtdlpStdoutLine> {
+        use tokio::io::AsyncBufReadExt as _;
+
+        if self.eof {
+            return Ok(YtdlpStdoutLine::Eof);
+        }
+
+        let mut line = Vec::with_capacity(256);
+        let mut discarding_oversized = false;
+
+        loop {
+            let (consumed, ended_line, reached_eof) = {
+                let buffer = match self.reader.fill_buf().await {
+                    Ok(buffer) => buffer,
+                    Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
+                    Err(error) => return Err(error),
+                };
+                if buffer.is_empty() {
+                    (0, false, true)
+                } else {
+                    let newline = buffer.iter().position(|byte| *byte == b'\n');
+                    let record_bytes = newline.unwrap_or(buffer.len());
+                    if !discarding_oversized {
+                        if line.len().saturating_add(record_bytes) <= MAX_YTDLP_STDOUT_LINE_BYTES {
+                            line.extend_from_slice(&buffer[..record_bytes]);
+                        } else {
+                            line.clear();
+                            discarding_oversized = true;
+                        }
+                    }
+                    (
+                        if newline.is_some() {
+                            record_bytes + 1
+                        } else {
+                            record_bytes
+                        },
+                        newline.is_some(),
+                        false,
+                    )
+                }
+            };
+
+            if reached_eof {
+                self.eof = true;
+                return Ok(if discarding_oversized {
+                    YtdlpStdoutLine::SkippedOversized
+                } else if line.is_empty() {
+                    YtdlpStdoutLine::Eof
+                } else {
+                    YtdlpStdoutLine::Line(lossy_stdout_record(&line))
+                });
+            }
+
+            self.reader.consume(consumed);
+            if ended_line {
+                return Ok(if discarding_oversized {
+                    YtdlpStdoutLine::SkippedOversized
+                } else {
+                    YtdlpStdoutLine::Line(lossy_stdout_record(&line))
+                });
+            }
+        }
+    }
+}
+
+fn lossy_stdout_record(bytes: &[u8]) -> String {
+    let bytes = bytes.strip_suffix(b"\r").unwrap_or(bytes);
+    String::from_utf8_lossy(bytes).into_owned()
+}
+
 /// What a stop means for the attempt it reaches. The worker applies the intent (only it knows whether it is capturing live); a bare oneshot could not say *how* to stop, so removal once delivered a file with no row behind it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum StopIntent {
@@ -314,12 +413,24 @@ async fn run_video_playlist_download_inner(
     let tx_reader = tx.clone();
     let expected_root = canonical_dest.clone();
     let progress = tokio::spawn(async move {
-        use tokio::io::AsyncBufReadExt as _;
-        let mut lines = tokio::io::BufReader::new(stdout).lines();
+        let mut stdout_reader = YtdlpStdoutReader::new(stdout);
         let mut summary = PlaylistStreamSummary::default();
         let mut current_file: Option<String> = None;
 
-        while let Ok(Some(line)) = lines.next_line().await {
+        loop {
+            let line = match stdout_reader.next_line().await {
+                Ok(YtdlpStdoutLine::Line(line)) => line,
+                Ok(YtdlpStdoutLine::SkippedOversized) => {
+                    *lock_recover(&last_progress_reader) = std::time::Instant::now();
+                    tracing::warn!("discarded oversized yt-dlp stdout record");
+                    continue;
+                }
+                Ok(YtdlpStdoutLine::Eof) => break,
+                Err(error) => {
+                    tracing::warn!(error = %error, "could not continue reading yt-dlp stdout");
+                    break;
+                }
+            };
             *lock_recover(&last_progress_reader) = std::time::Instant::now();
             if is_ytdlp_merge_line(&line) {
                 merging_reader.store(true, std::sync::atomic::Ordering::SeqCst);
@@ -1411,7 +1522,6 @@ async fn run_ytdlp_attempt(
     abort: &mut oneshot::Receiver<StopIntent>,
     timeout: Duration,
 ) -> Result<(Option<()>, Option<String>, Option<StopIntent>), VideoError> {
-    use tokio::io::AsyncBufReadExt as _;
     let guarded_argv = argv.to_vec();
     let guarded_proxy = crate::video_spawn::guard_untrusted_args(&guarded_argv)?;
     let mut cmd = ytdlp_command(youtube_bin).await;
@@ -1428,12 +1538,25 @@ async fn run_ytdlp_attempt(
     let merging = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
     let merging_p = merging.clone();
     let progress = tokio::spawn(async move {
-        let mut lines = tokio::io::BufReader::new(stdout).lines();
+        let mut stdout_reader = YtdlpStdoutReader::new(stdout);
         // `downloaded_bytes` resets per leg, so bank each leg's max on its `finished` line and report the running sum; the caller caps against its metadata total.
         let (mut banked, mut leg_max, mut total) = (0u64, 0u64, 0u64);
         let mut after_move = None::<String>;
         let mut merged = false;
-        while let Ok(Some(line)) = lines.next_line().await {
+        loop {
+            let line = match stdout_reader.next_line().await {
+                Ok(YtdlpStdoutLine::Line(line)) => line,
+                Ok(YtdlpStdoutLine::SkippedOversized) => {
+                    *lock_recover(&last_progress_p) = std::time::Instant::now();
+                    tracing::warn!("discarded oversized yt-dlp stdout record");
+                    continue;
+                }
+                Ok(YtdlpStdoutLine::Eof) => break,
+                Err(error) => {
+                    tracing::warn!(error = %error, "could not continue reading yt-dlp stdout");
+                    break;
+                }
+            };
             *lock_recover(&last_progress_p) = std::time::Instant::now();
             if !merged && is_ytdlp_merge_line(&line) {
                 merged = true;
@@ -2301,7 +2424,6 @@ pub(crate) async fn run_live_ytdlp(
     playlist_index: Option<usize>,
 ) -> Result<Option<u64>, VideoError> {
     use crate::engine_msg::EngineMsg;
-    use tokio::io::AsyncBufReadExt as _;
     // Fresh capture: a crashed run's live file must never be resumed into (append-only stream) nor adopted as an empty fresh capture.
     let ext = if job.audio_only { "m4a" } else { "mp4" };
     // Capture inside the row's staging dir: the `.part` shell stays hidden while
@@ -2450,11 +2572,24 @@ pub(crate) async fn run_live_ytdlp(
             out.clone(),
         ));
         let progress = tokio::spawn(async move {
-            let mut lines = tokio::io::BufReader::new(stdout).lines();
+            let mut stdout_reader = YtdlpStdoutReader::new(stdout);
             let mut have = 0u64;
             // Announce once recording is confirmed (same "Recording…" the file watcher sends, so whichever fires first wins).
             let mut announced = false;
-            while let Ok(Some(line)) = lines.next_line().await {
+            loop {
+                let line = match stdout_reader.next_line().await {
+                    Ok(YtdlpStdoutLine::Line(line)) => line,
+                    Ok(YtdlpStdoutLine::SkippedOversized) => {
+                        *lock_recover(&last_progress_p) = std::time::Instant::now();
+                        tracing::warn!("discarded oversized yt-dlp stdout record");
+                        continue;
+                    }
+                    Ok(YtdlpStdoutLine::Eof) => break,
+                    Err(error) => {
+                        tracing::warn!(error = %error, "could not continue reading yt-dlp stdout");
+                        break;
+                    }
+                };
                 // Any stdout line proves the recorder is alive.
                 *lock_recover(&last_progress_p) = std::time::Instant::now();
                 if let Some(p) = parse_ytdlp_template(&line) {
@@ -2830,7 +2965,6 @@ pub(crate) async fn run_hls_ytdlp(
     playlist_index: Option<usize>,
 ) -> Result<Option<u64>, VideoError> {
     use crate::engine_msg::EngineMsg;
-    use tokio::io::AsyncBufReadExt as _;
     tokio::fs::create_dir_all(staging)
         .await
         .map_err(VideoError::staging)?;
@@ -2866,7 +3000,7 @@ pub(crate) async fn run_hls_ytdlp(
     let merging = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
     let merging_p = merging.clone();
     let progress = tokio::spawn(async move {
-        let mut lines = tokio::io::BufReader::new(stdout).lines();
+        let mut stdout_reader = YtdlpStdoutReader::new(stdout);
         // One canonical fraction for bar and grid: cumulative across legs.
         // HLS rows render the fraction-derived grid (see piece_bitmap's
         // prefix fill), so unlike segmented rows this leg sends no
@@ -2874,7 +3008,20 @@ pub(crate) async fn run_hls_ytdlp(
         let mut hls_progress = HlsProgress::default();
         let mut after_move = None::<String>;
         let mut merged = false;
-        while let Ok(Some(line)) = lines.next_line().await {
+        loop {
+            let line = match stdout_reader.next_line().await {
+                Ok(YtdlpStdoutLine::Line(line)) => line,
+                Ok(YtdlpStdoutLine::SkippedOversized) => {
+                    *lock_recover(&last_progress_p) = std::time::Instant::now();
+                    tracing::warn!("discarded oversized yt-dlp stdout record");
+                    continue;
+                }
+                Ok(YtdlpStdoutLine::Eof) => break,
+                Err(error) => {
+                    tracing::warn!(error = %error, "could not continue reading yt-dlp stdout");
+                    break;
+                }
+            };
             *lock_recover(&last_progress_p) = std::time::Instant::now();
             if is_ytdlp_merge_line(&line) && !merged {
                 merged = true;

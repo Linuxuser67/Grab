@@ -235,6 +235,17 @@ fn hls_key_method(attributes: &[u8]) -> Option<&[u8]> {
 }
 
 
+fn is_hls_method_none_key_tag(tag: &str) -> bool {
+    let Some(attributes) = tag.as_bytes().strip_prefix(b"#EXT-X-KEY:") else {
+        return false;
+    };
+    // RFC 8216 permits no attributes other than METHOD when its value is
+    // NONE. Reject malformed or extended forms instead of silently ignoring
+    // an unexpected key declaration.
+    !attributes.contains(&b',')
+        && hls_key_method(attributes).is_some_and(|method| method.eq_ignore_ascii_case(b"NONE"))
+}
+
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 struct LlHlsTagFlags {
     partial_segments: bool,

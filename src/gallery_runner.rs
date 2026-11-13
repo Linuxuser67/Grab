@@ -14,7 +14,7 @@ use crate::gallery_progress::{GalleryProgress, ProgressLine, parse_progress_line
 use crate::gallery_tools::GalleryError;
 use crate::video_spawn::ProcessGroupGuard;
 
-fn gallery_event_nonce() -> Result<String, GalleryError> {
+pub(crate) fn gallery_event_nonce() -> Result<String, GalleryError> {
     let mut bytes = [0_u8; 16];
     getrandom::fill(&mut bytes).map_err(|error| {
         GalleryError::runtime(format!("couldn't generate gallery event nonce: {error}"))

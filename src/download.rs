@@ -3486,6 +3486,7 @@ impl DownloadManager {
                                 );
                                 this.persist_queue();
                                 this.changed();
+                                last_playlist_progress_refresh = Some(Instant::now());
                             }
                         }
                     },

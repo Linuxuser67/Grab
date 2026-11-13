@@ -606,7 +606,7 @@ pub(super) async fn apply_live_hls_snapshot(
                     ));
                 }
                 return Err(ManifestRunError::Unsupported(
-                    "A live HLS segment is not a compatible MPEG-TS fragment".to_string(),
+                    "A live HLS resource no longer matches the MPEG-TS destination-part layout".to_string(),
                 ));
             }
         }
@@ -715,7 +715,7 @@ fn apply_rendition_report(source: &LiveHlsTrack, peer: &mut LiveHlsTrack) -> boo
 
 fn live_hls_track_uses_plain_mpegts_resource_plan(track: &LiveHlsTrack) -> bool {
     // This selects only the byte-concatenation optimization. FFmpeg validates
-    // the assembled transport stream with the complete local HLS playlist.
+    // the assembled transport stream when the complete track is finalized.
     track.accumulator.plain_mpegts_resource_names().is_some()
 }
 
@@ -1678,7 +1678,7 @@ mod destination_part_tests {
     fn transport_stream(seed: u8) -> Vec<u8> {
         let mut bytes = vec![0xff; 188 * 3];
         for (index, packet) in bytes
-            .as_chunks_mut::<{ 188 }>()
+            .as_chunks_mut::<188>()
             .0
             .iter_mut()
             .enumerate()

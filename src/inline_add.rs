@@ -1292,30 +1292,7 @@ fn inherit_public_resolution_for_card(step: &VideoStep, parent_url: &str, child_
         // The card was closed while this lookup or picker was in flight.
         return false;
     };
-    let parent_host = url::Url::parse(parent_url)
-        .ok()
-        .and_then(|url| url.host_str().map(str::to_string));
-    let inherited = parent_host
-        .as_deref()
-        .is_some_and(crate::download_net::is_untrusted_handoff_host);
-    if !inherited {
-        return true;
-    }
-    let Some(child_host) = url::Url::parse(child_url)
-        .ok()
-        .and_then(|url| url.host_str().map(str::to_string))
-    else {
-        return false;
-    };
-    let Some(lease) = crate::download_net::acquire_public_resolution(&child_host) else {
-        return false;
-    };
-    let canonical_host = lease.host().to_string();
-    if hosts.contains(&canonical_host) {
-        return true;
-    }
-    hosts.insert(canonical_host, lease);
-    true
+    hosts.inherit(parent_url, child_url).is_ok()
 }
 
 /// Whether the combo's current pick is the Audio only row.
@@ -1879,11 +1856,7 @@ fn push_playlist_items_page(
                         } else {
                             match lease_scope.hosts.as_mut() {
                                 Some(seen_hosts) => {
-                                    crate::download_net::inherit_public_resolution_for_collection(
-                                        &page_url,
-                                        &item_page_url,
-                                        seen_hosts,
-                                    )
+                                    seen_hosts.inherit(&page_url, &item_page_url)
                                 }
                                 None => {
                                     Err(crate::download_net::CollectionHostError::UnsafeDestination)
@@ -1896,6 +1869,12 @@ fn push_playlist_items_page(
                         Err(crate::download_net::CollectionHostError::TooManyDistinctHosts) => {
                             skipped_by_host_limit += 1;
                             continue;
+                        }
+                        Err(crate::download_net::CollectionHostError::PolicyCapReached) => {
+                            failed = Some(gettext(
+                                "Grab reached its limit for simultaneously protected public download hosts. Retry after another transfer finishes.",
+                            ));
+                            break;
                         }
                         Err(crate::download_net::CollectionHostError::UnsafeDestination) => {
                             failed = Some(gettext(

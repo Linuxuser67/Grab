@@ -2340,11 +2340,11 @@ impl DownloadManager {
                     item.set_gallery_url(url.clone());
                     item.set_gallery_file_count(saturating_u32(state.files.len()));
                     item.set_gallery_files_done(saturating_u32(
-state
+                        state
                             .files
                             .iter()
                             .filter(|file| file.status == DownloadStatus::Done)
-                            .count()
+                            .count(),
                     ));
                     playlist_file_rows = Some(state.files.clone());
                 }
@@ -6048,12 +6048,12 @@ impl DownloadManager {
                 item.set_gallery_url(item.url());
                 item.set_gallery_file_count(saturating_u32(state.files.len()));
                 item.set_gallery_files_done(saturating_u32(
-state
+                    state
                         .files
                         .iter()
                         .filter(|file| file.status == DownloadStatus::Done)
-                        .count()
-                    ));
+                        .count(),
+                ));
                 playlist_file_rows = Some(state.files.clone());
             }
             self.video_sources.borrow_mut().insert(item.id(), src);
@@ -6351,7 +6351,7 @@ state
     pub fn finished_snapshots(&self) -> Vec<RemovedSnapshot> {
         self.owners()
             .filter(|it| it.status() == DownloadStatus::Done)
-            .map(|item| RemovedSnapshot::capture(self, item))
+            .map(|item| RemovedSnapshot::capture(self, &item))
             .collect()
     }
 

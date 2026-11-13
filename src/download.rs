@@ -1925,7 +1925,7 @@ impl DownloadManager {
         item.set_is_collection_owner(true);
         item.set_group(crate::download_store::DownloadGroup::try_new(id, title));
         item.set_gallery_url(url.clone());
-        saturating_u32(item.set_gallery_file_count(state.files.len()));
+        item.set_gallery_file_count(saturating_u32(state.files.len()));
         item.set_gallery_files_done(0);
         item.set_detail(pending_resolve_detail(audio_only));
 
@@ -2226,7 +2226,7 @@ impl DownloadManager {
         current.set_is_collection_owner(true);
         current.set_group(group);
         current.set_gallery_url(item.url());
-        saturating_u32(current.set_gallery_file_count(state.files.len()));
+        current.set_gallery_file_count(saturating_u32(state.files.len()));
         current.set_gallery_files_done(0);
         current.set_progress(0.0);
         current.set_detail(gettext("Playlist • waiting for a download slot"));
@@ -2338,15 +2338,14 @@ impl DownloadManager {
                             .or_else(|| stored.group.clone()),
                     );
                     item.set_gallery_url(url.clone());
-                    saturating_u32(item.set_gallery_file_count(state.files.len()));
-                    item.set_gallery_files_done(
-                        state
+                    item.set_gallery_file_count(saturating_u32(state.files.len()));
+                    item.set_gallery_files_done(saturating_u32(
+state
                             .files
                             .iter()
                             .filter(|file| file.status == DownloadStatus::Done)
                             .count()
-                            .min(u32::MAX as usize) as u32,
-                    );
+                    ));
                     playlist_file_rows = Some(state.files.clone());
                 }
                 item.set_detail(pending_resolve_detail(audio_only));
@@ -5016,8 +5015,8 @@ impl DownloadManager {
         else {
             return;
         };
-        saturating_u32(owner.set_gallery_file_count(summary.total));
-        saturating_u32(owner.set_gallery_files_done(summary.done));
+        owner.set_gallery_file_count(saturating_u32(summary.total));
+        owner.set_gallery_files_done(saturating_u32(summary.done));
         owner.set_progress(summary.fraction());
         owner.set_detail(
             gettext("Playlist • {done}/{total} files")
@@ -6047,15 +6046,14 @@ impl DownloadManager {
                     &state.title,
                 ));
                 item.set_gallery_url(item.url());
-                saturating_u32(item.set_gallery_file_count(state.files.len()));
-                item.set_gallery_files_done(
-                    state
+                item.set_gallery_file_count(saturating_u32(state.files.len()));
+                item.set_gallery_files_done(saturating_u32(
+state
                         .files
                         .iter()
                         .filter(|file| file.status == DownloadStatus::Done)
                         .count()
-                        .min(u32::MAX as usize) as u32,
-                );
+                    ));
                 playlist_file_rows = Some(state.files.clone());
             }
             self.video_sources.borrow_mut().insert(item.id(), src);

@@ -1689,16 +1689,16 @@ pub(crate) async fn refresh_hls_content_steering(
     client: &reqwest::Client,
     master_url: &str,
     steering: &mut crate::manifest::HlsContentSteering,
-) -> Result<Option<crate::manifest_types::ManifestLookup>, ManifestIntakeError> {
+) -> Option<crate::manifest_types::ManifestLookup> {
     let proxy_configured = steering.proxy_configured;
-    Ok(refresh_hls_content_steering_with_policy(
+    refresh_hls_content_steering_with_policy(
         client,
         master_url,
         steering,
         ManifestTransportPolicy::HttpsOnly,
         proxy_configured,
     )
-    .await)
+    .await
 }
 
 /// Refresh steering metadata with a short budget in the live playlist loop.
@@ -1711,7 +1711,7 @@ pub(crate) async fn refresh_hls_content_steering_with_timeout(
     master_url: &str,
     steering: &mut crate::manifest::HlsContentSteering,
     timeout: Duration,
-) -> Result<Option<crate::manifest_types::ManifestLookup>, ManifestIntakeError> {
+) -> Option<crate::manifest_types::ManifestLookup> {
     refresh_hls_content_steering_with_timeout_and_policy(
         client,
         master_url,
@@ -1728,7 +1728,7 @@ async fn refresh_hls_content_steering_with_timeout_and_policy(
     steering: &mut crate::manifest::HlsContentSteering,
     transport_policy: ManifestTransportPolicy,
     timeout: Duration,
-) -> Result<Option<crate::manifest_types::ManifestLookup>, ManifestIntakeError> {
+) -> Option<crate::manifest_types::ManifestLookup> {
     let proxy_configured = steering.proxy_configured;
     match tokio::time::timeout(
         timeout,
@@ -1742,7 +1742,7 @@ async fn refresh_hls_content_steering_with_timeout_and_policy(
     )
     .await
     {
-        Ok(result) => Ok(result),
+        Ok(result) => result,
         Err(_) => {
             tracing::debug!(
                 host = %steering.reload_url.host_str().unwrap_or_default(),
@@ -1750,7 +1750,7 @@ async fn refresh_hls_content_steering_with_timeout_and_policy(
                 "HLS Content Steering refresh exceeded its live-loop budget; retaining current Pathway"
             );
             schedule_hls_steering_retry(steering);
-            Ok(None)
+            None
         }
     }
 }
@@ -5146,8 +5146,7 @@ video/variant.m3u8
             master_url.as_str(),
             &mut steering,
         )
-        .await
-        .expect("proxy-backed refresh should fall back to the active pathway");
+        .await;
         assert!(refreshed.is_none());
         assert!(
             tokio::time::timeout(Duration::from_millis(50), listener.accept())

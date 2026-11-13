@@ -1548,52 +1548,50 @@ pub(crate) fn parse_hls_master_playlist(
                 .resolution
                 .map(|resolution| (Some(resolution.width), Some(resolution.height)))
                 .unwrap_or((None, None));
-            let stable_variant_id = variant
-                .other_attributes
-                .as_ref()
-                .and_then(|attributes| attributes.get("STABLE-VARIANT-ID"))
-                .map(|value| value.as_str().to_string())
+            let variant_attribute = |name: &str| {
+                variant
+                    .other_attributes
+                    .as_ref()
+                    .and_then(|attributes| attributes.get(name))
+                    .map(|value| value.as_str().to_string())
+            };
+            let stable_variant_id = variant_attribute("STABLE-VARIANT-ID")
                 .filter(|value| !value.is_empty());
-            let video_range = variant
-                .other_attributes
-                .as_ref()
-                .and_then(|attributes| attributes.get("VIDEO-RANGE"))
-                .map(|value| value.as_str().to_string());
+            let video_range = variant_attribute("VIDEO-RANGE");
             if video_range
                 .as_deref()
                 .is_some_and(|range| !matches!(range, "SDR" | "HLG" | "PQ"))
             {
                 return Err(ManifestError::UnsupportedPlaylist);
             }
-            let pathway_id = variant
-                .other_attributes
-                .as_ref()
-                .and_then(|attributes| attributes.get("PATHWAY-ID"))
-                .map(|value| value.as_str().to_string())
-                .unwrap_or_else(|| ".".to_string());
+            let pathway_id = variant_attribute("PATHWAY-ID").unwrap_or_else(|| ".".to_string());
             if !is_valid_hls_pathway_id(&pathway_id) {
                 return Err(ManifestError::UnsupportedPlaylist);
             }
+
+            // Common stream metadata is identical for every rendition in this
+            // VIDEO group. Build it once and override only rendition fields.
+            let base_variant = HlsVariant {
+                url: variant_url.clone(),
+                bandwidth: variant.bandwidth,
+                average_bandwidth: variant.average_bandwidth,
+                width,
+                height,
+                codecs: variant.codecs,
+                video_range,
+                frame_rate: variant.frame_rate,
+                audio_group: variant.audio,
+                subtitles_group: variant.subtitles,
+                video_rendition_group: None,
+                video_variant_path: None,
+                video_variant_url: None,
+                video_rendition_name: None,
+                stable_video_rendition_id: None,
+                stable_variant_id,
+                pathway_id,
+            };
             let Some(group_id) = variant.video.as_deref() else {
-                return Ok(vec![HlsVariant {
-                    url: variant_url,
-                    bandwidth: variant.bandwidth,
-                    average_bandwidth: variant.average_bandwidth,
-                    width,
-                    height,
-                    codecs: variant.codecs,
-                    video_range: video_range.clone(),
-                    frame_rate: variant.frame_rate,
-                    audio_group: variant.audio,
-                    subtitles_group: variant.subtitles,
-                    video_rendition_group: None,
-                    video_variant_path: None,
-                    video_variant_url: None,
-                    video_rendition_name: None,
-                    stable_video_rendition_id: None,
-                    stable_variant_id,
-                    pathway_id,
-                }]);
+                return Ok(vec![base_variant]);
             };
 
             if group_id.trim().is_empty() {
@@ -1643,22 +1641,12 @@ pub(crate) fn parse_hls_master_playlist(
                 }
                 choices.push(HlsVariant {
                     url,
-                    bandwidth: variant.bandwidth,
-                    average_bandwidth: variant.average_bandwidth,
-                    width,
-                    height,
-                    codecs: variant.codecs.clone(),
-                    video_range: video_range.clone(),
-                    frame_rate: variant.frame_rate,
-                    audio_group: variant.audio.clone(),
-                    subtitles_group: variant.subtitles.clone(),
                     video_rendition_group: Some(group_id.to_string()),
                     video_variant_path: Some(variant_url.path().to_string()),
                     video_variant_url: Some(variant_url.clone()),
                     video_rendition_name: Some(rendition.name.clone()),
                     stable_video_rendition_id,
-                    stable_variant_id: stable_variant_id.clone(),
-                    pathway_id: pathway_id.clone(),
+                    ..base_variant.clone()
                 });
             }
             Ok(choices)

@@ -1733,7 +1733,9 @@ impl DownloadManager {
         };
         // Rebuild once from the extended source while retaining row objects
         // already present in the GTK store.
-        self.video_playlist_file_row_index.borrow_mut().remove(&owner.id());
+        self.video_playlist_file_row_index
+            .borrow_mut()
+            .remove(&owner.id());
 
         if previous_status == DownloadStatus::Downloading {
             // The active yt-dlp process has already captured its playlist-index
@@ -4405,7 +4407,11 @@ impl DownloadManager {
 
     /// Build the playlist-entry and child-row indexes once per owner.
     fn ensure_video_playlist_file_row_index(&self, owner_id: u64) -> bool {
-        if self.video_playlist_file_row_index.borrow().contains_key(&owner_id) {
+        if self
+            .video_playlist_file_row_index
+            .borrow()
+            .contains_key(&owner_id)
+        {
             return true;
         }
         let Some((state_indices, total, done, progress_sum)) = self
@@ -4509,7 +4515,17 @@ impl DownloadManager {
             return;
         };
 
-        let (page_url, file_title, dest_dir, title, audio_only, stored_path, old_status, old_progress, new_progress) = {
+        let (
+            page_url,
+            file_title,
+            dest_dir,
+            title,
+            audio_only,
+            stored_path,
+            old_status,
+            old_progress,
+            new_progress,
+        ) = {
             let mut sources = self.video_sources.borrow_mut();
             let Some(crate::media_types::VideoSource::Playlist {
                 audio_only, state, ..
@@ -4517,7 +4533,11 @@ impl DownloadManager {
             else {
                 return;
             };
-            let Some(file) = state.files.get_mut(state_index).filter(|file| file.id == file_id) else {
+            let Some(file) = state
+                .files
+                .get_mut(state_index)
+                .filter(|file| file.id == file_id)
+            else {
                 tracing::warn!(
                     owner_id,
                     file_id,
@@ -4588,7 +4608,11 @@ impl DownloadManager {
             child.set_detail(detail.to_string());
             child.set_status(status);
             self.store.append(&child);
-            if let Some(index) = self.video_playlist_file_row_index.borrow_mut().get_mut(&owner_id) {
+            if let Some(index) = self
+                .video_playlist_file_row_index
+                .borrow_mut()
+                .get_mut(&owner_id)
+            {
                 index.rows.insert(file_id.to_string(), child);
             }
         }

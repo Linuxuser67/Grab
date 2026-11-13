@@ -5675,10 +5675,7 @@ mod manifest_filename_tests {
 
     const SOURCE_URL: &str = "https://cdn.example.test/stream.m3u8";
 
-    fn manifest_filename(
-        filename: &str,
-        container: Option<ManifestContainer>,
-    ) -> String {
+    fn manifest_filename(filename: &str, container: Option<ManifestContainer>) -> String {
         DownloadManager::manifest_filename_for_container(
             Some(filename),
             SOURCE_URL,
@@ -5688,27 +5685,15 @@ mod manifest_filename_tests {
 
     #[test]
     fn preview_uses_the_same_selected_container_suffix_as_enqueue() {
-        assert_eq!(
-            manifest_filename("Stream.mkv", Some(ManifestContainer::Ts)),
-            "Stream.ts"
-        );
-        assert_eq!(
-            manifest_filename("Stream.mkv", Some(ManifestContainer::Mp4)),
-            "Stream.mp4"
-        );
+        assert_eq!(manifest_filename("Stream.mkv", Some(ManifestContainer::Ts)), "Stream.ts");
+        assert_eq!(manifest_filename("Stream.mkv", Some(ManifestContainer::Mp4)), "Stream.mp4");
         assert_eq!(manifest_filename("Stream.mkv", None), "Stream.mkv");
     }
 
     #[test]
     fn manifest_container_suffix_does_not_follow_a_stale_or_user_typed_extension() {
-        assert_eq!(
-            manifest_filename("Stream.ts", Some(ManifestContainer::Mp4)),
-            "Stream.mp4"
-        );
-        assert_eq!(
-            manifest_filename("Stream.mp4", Some(ManifestContainer::Ts)),
-            "Stream.ts"
-        );
+        assert_eq!(manifest_filename("Stream.ts", Some(ManifestContainer::Mp4)), "Stream.mp4");
+        assert_eq!(manifest_filename("Stream.mp4", Some(ManifestContainer::Ts)), "Stream.ts");
         assert_eq!(manifest_filename("Stream.webm", None), "Stream.mkv");
         assert_eq!(
             manifest_filename(

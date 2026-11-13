@@ -51,9 +51,8 @@ pub(super) fn expand_media_playlist_with_imports(
     })?;
     let playlist_url = Url::parse(manifest_url).map_err(|_| ManifestError::InvalidManifestUrl)?;
     let variables = resolve_defines(parsed.defines, &playlist_url, Some(inherited_variables))?;
-    let expanded = expand_playlist_lines(text, &variables, |line| {
-        line.starts_with("#EXT-X-DEFINE:")
-    })?;
+    let expanded =
+        expand_playlist_lines(text, &variables, |line| line.starts_with("#EXT-X-DEFINE:"))?;
     Ok(Some(expanded.into_bytes()))
 }
 

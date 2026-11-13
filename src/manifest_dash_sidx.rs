@@ -9,7 +9,7 @@ use super::{
     ManifestByteRange, ranges_overlap,
 };
 
-const MAX_SEGMENT_INDEX_BYTES: u64 = 1024 * 1024;
+const MAX_SEGMENT_INDEX_BYTES: u64 = crate::manifest_types::MAX_DASH_SIDX_BYTES;
 pub(crate) const MAX_DASH_SIDX_SEGMENTS: usize = MAX_SEGMENTS;
 
 /// One ordered entry from a parsed Segment Index box.

@@ -1266,6 +1266,9 @@ async fn saved_live_hls_capture_finalizes_without_contacting_the_origin() {
     let root = TempRoot::new("live-offline");
     let video_dir = root.path().join("video");
     let audio_dir = root.path().join("audio");
+    let destination = root.path().join("recording.mp4");
+    crate::manifest_destination::ensure_plan(root.path(), &destination, 0, false, false)
+        .expect("persist saved live HLS destination plan");
     tokio::fs::create_dir_all(&video_dir)
         .await
         .expect("create offline live video staging");
@@ -1312,7 +1315,7 @@ async fn saved_live_hls_capture_finalizes_without_contacting_the_origin() {
         &source,
         None,
         root.path(),
-        root.path(),
+        &destination,
         0,
         root.path(),
         &local_plan,
@@ -1330,7 +1333,7 @@ async fn saved_live_hls_capture_finalizes_without_contacting_the_origin() {
     .expect("finalize stored capture without a network request");
 
     assert_eq!(outcome.outcome, LiveHlsCaptureOutcome::Ended);
-    assert_eq!(outcome.output, super::LiveHlsOutput::LocalPlaylist);
+    assert_eq!(outcome.output, super::LiveHlsOutput::DestinationParts);
     assert_eq!(
         downloaded.load(Ordering::Relaxed),
         segment_bytes.len() as u64,
@@ -1344,7 +1347,7 @@ async fn saved_live_hls_capture_finalizes_without_contacting_the_origin() {
         &source,
         None,
         root.path(),
-        root.path(),
+        &destination,
         0,
         root.path(),
         &local_plan,
@@ -1361,7 +1364,7 @@ async fn saved_live_hls_capture_finalizes_without_contacting_the_origin() {
     .await
     .expect("resume a durable finish without polling the source");
     assert_eq!(finish_outcome.outcome, LiveHlsCaptureOutcome::Finish);
-    assert_eq!(finish_outcome.output, super::LiveHlsOutput::LocalPlaylist);
+    assert_eq!(finish_outcome.output, super::LiveHlsOutput::DestinationParts);
     let final_playlist = m3u8_rs::parse_media_playlist_res(
         &tokio::fs::read(video_dir.join("local.m3u8"))
             .await
@@ -1374,6 +1377,17 @@ async fn saved_live_hls_capture_finalizes_without_contacting_the_origin() {
         tokio::fs::read(video_dir.join(&final_playlist.segments[0].uri))
             .await
             .expect("read original committed segment"),
+        segment_bytes
+    );
+    let video_part = crate::manifest_destination::part_path(
+        root.path(),
+        &destination,
+        0,
+        crate::manifest_destination::TrackKind::Video,
+    )
+    .expect("resolve saved live HLS destination part");
+    assert_eq!(
+        tokio::fs::read(video_part).await.expect("read saved destination part"),
         segment_bytes
     );
 }
@@ -2024,6 +2038,9 @@ async fn live_hls_pause_keeps_the_last_committed_window() {
     let root = TempRoot::new("live-preserve");
     let video_dir = root.path().join("video");
     let audio_dir = root.path().join("audio");
+    let destination = root.path().join("recording.mp4");
+    crate::manifest_destination::ensure_plan(root.path(), &destination, 0, false, false)
+        .expect("persist paused live HLS destination plan");
     tokio::fs::create_dir_all(&audio_dir)
         .await
         .expect("create live HLS audio staging");
@@ -2120,7 +2137,7 @@ async fn live_hls_pause_keeps_the_last_committed_window() {
         &source,
         None,
         root.path(),
-        root.path(),
+        &destination,
         0,
         root.path(),
         &first,
@@ -2137,7 +2154,18 @@ async fn live_hls_pause_keeps_the_last_committed_window() {
     .await
     .expect("finish the restored live HLS capture");
     assert_eq!(finished.outcome, LiveHlsCaptureOutcome::Finish);
-    assert_eq!(finished.output, super::LiveHlsOutput::LocalPlaylist);
+    assert_eq!(finished.output, super::LiveHlsOutput::DestinationParts);
+    let video_part = crate::manifest_destination::part_path(
+        root.path(),
+        &destination,
+        0,
+        crate::manifest_destination::TrackKind::Video,
+    )
+    .expect("resolve paused live HLS destination part");
+    assert_eq!(
+        tokio::fs::read(video_part).await.expect("read paused destination part"),
+        b"committed-segment"
+    );
 }
 
 #[tokio::test]

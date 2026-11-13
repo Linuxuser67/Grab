@@ -551,7 +551,7 @@ fn build_plan(
         if segment.parts.is_empty() {
             let duration = checked_duration(segment.duration.get(), source_target_duration)?;
             let url = resolve_hls_media_resource_url(&base_url, &segment.uri)?;
-            let range = plan_range(segment.byte_range.as_ref(), &url, &mut previous_range)?;
+            let range = plan_range(segment.byte_range.as_ref(), &url, &mut plan.previous_range)?;
             let filename = ll_resource_filename(media_sequence, None, &url, range);
             plan.resources.push(HlsResource {
                 url,
@@ -582,7 +582,7 @@ fn build_plan(
         if (parts_duration - parent_duration.as_secs_f64()).abs() > PART_DURATION_TOLERANCE {
             return Err(ManifestError::LivePartDurationMismatch);
         }
-        let first_part_position = plan.plan.local_segments.len();
+        let first_part_position = plan.local_segments.len();
         plan.append_parts(
             &PartPlanContext {
                 base_url: &base_url,
@@ -611,13 +611,13 @@ fn build_plan(
         let map = plan_map(
             &base_url,
             active_map.as_ref(),
-            &mut resources,
+            &mut plan.resources,
             &mut map_filenames,
         )?;
         let discontinuity = open_segment_discontinuity;
         let open_date_time =
             open_segment_program_date_time(open)?.and_then(|segment| segment.program_date_time);
-        let first_part_position = plan.plan.local_segments.len();
+        let first_part_position = plan.local_segments.len();
         plan.append_parts(
             &PartPlanContext {
                 base_url: &base_url,
@@ -636,7 +636,7 @@ fn build_plan(
 
     if plan.local_segments.is_empty()
         || plan.local_segments.len() > MAX_HLS_LIVE_UNITS
-        || (!end_list && !validate_live_unit_ids(&unit_ids))
+        || (!end_list && !validate_live_unit_ids(&plan.unit_ids))
         || plan.local_segments
             .iter()
             .any(|segment| !segment.duration.is_finite() || segment.duration <= 0.0)

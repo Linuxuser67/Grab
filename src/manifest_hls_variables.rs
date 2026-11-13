@@ -49,91 +49,11 @@ pub(super) fn expand_media_playlist_with_imports(
             "could not parse HLS variable declarations: {error}"
         ))
     })?;
-    if parsed.defines.len() > MAX_VARIABLES {
-        return Err(unsupported("playlist has too many variable declarations"));
-    }
-
     let playlist_url = Url::parse(manifest_url).map_err(|_| ManifestError::InvalidManifestUrl)?;
-    let mut variables = HashMap::with_capacity(parsed.defines.len());
-    let mut total_variable_bytes = 0_usize;
-    for definition in parsed.defines {
-        let (name, value) = match definition {
-            Define::Name {
-                name,
-                value,
-                extra_attrs,
-            } => {
-                if !extra_attrs.is_empty() {
-                    return Err(unsupported(
-                        "EXT-X-DEFINE has unsupported required attributes",
-                    ));
-                }
-                let value = substitute(&value, &variables)?;
-                (name, value)
-            }
-            Define::QueryParam { name, extra_attrs } => {
-                if !extra_attrs.is_empty() {
-                    return Err(unsupported(
-                        "EXT-X-DEFINE has unsupported required attributes",
-                    ));
-                }
-                let value = query_parameter(&playlist_url, &name)?;
-                (name, value)
-            }
-            Define::Import { name, extra_attrs } => {
-                if !extra_attrs.is_empty() {
-                    return Err(unsupported(
-                        "EXT-X-DEFINE IMPORT has unsupported required attributes",
-                    ));
-                }
-                let value = inherited_variables
-                    .iter()
-                    .find_map(|(parent_name, value)| (parent_name == &name).then_some(value))
-                    .cloned()
-                    .ok_or_else(|| {
-                        unsupported(
-                            "IMPORT variable is not defined by the parent multivariant playlist",
-                        )
-                    })?;
-                (name, value)
-            }
-            _ => return Err(unsupported("unsupported EXT-X-DEFINE declaration")),
-        };
-        validate_value(&value)?;
-        total_variable_bytes = total_variable_bytes
-            .checked_add(name.len())
-            .and_then(|total| total.checked_add(value.len()))
-            .ok_or_else(|| unsupported("aggregate HLS variable size overflow"))?;
-        if total_variable_bytes > MAX_MANIFEST_BYTES {
-            return Err(unsupported(
-                "aggregate HLS variable values exceed their supported size limit",
-            ));
-        }
-        if variables.insert(name, value).is_some() {
-            return Err(unsupported("duplicate EXT-X-DEFINE variable"));
-        }
-    }
-
-    let mut expanded = String::with_capacity(text.len());
-    for line in text.split_inclusive('\n') {
-        let line_content = line.trim_end_matches(['\r', '\n']);
-        if line_content.starts_with("#EXT-X-DEFINE:") {
-            expanded.push_str(&line[line_content.len()..]);
-            continue;
-        }
-        expanded.push_str(&substitute_playlist_line(line_content, &variables)?);
-        expanded.push_str(&line[line_content.len()..]);
-        if expanded.len() > MAX_MANIFEST_BYTES {
-            return Err(unsupported(
-                "expanded playlist exceeds its supported size limit",
-            ));
-        }
-    }
-    if expanded.len() > MAX_MANIFEST_BYTES {
-        return Err(unsupported(
-            "expanded playlist exceeds its supported size limit",
-        ));
-    }
+    let variables = resolve_defines(parsed.defines, &playlist_url, Some(inherited_variables))?;
+    let expanded = expand_playlist_lines(text, &variables, |line| {
+        line.starts_with("#EXT-X-DEFINE:")
+    })?;
     Ok(Some(expanded.into_bytes()))
 }
 
@@ -170,6 +90,113 @@ fn query_parameter(url: &Url, name: &str) -> Result<String, ManifestError> {
         }
     }
     found.ok_or_else(|| unsupported("EXT-X-DEFINE query parameter is missing"))
+}
+
+
+/// Resolve all EXT-X-DEFINE declarations once for both master and media
+/// playlists. `inherited_variables` is Some for media playlists and None for
+/// master playlists, where IMPORT has no parent scope.
+fn resolve_defines(
+    definitions: Vec<Define>,
+    playlist_url: &Url,
+    inherited_variables: Option<&[(String, String)]>,
+) -> Result<HashMap<String, String>, ManifestError> {
+    if definitions.len() > MAX_VARIABLES {
+        return Err(unsupported("playlist has too many variable declarations"));
+    }
+
+    let mut variables = HashMap::with_capacity(definitions.len());
+    let mut total_variable_bytes = 0_usize;
+    for definition in definitions {
+        let (name, value) = match definition {
+            Define::Name {
+                name,
+                value,
+                extra_attrs,
+            } => {
+                if !extra_attrs.is_empty() {
+                    return Err(unsupported(
+                        "EXT-X-DEFINE has unsupported required attributes",
+                    ));
+                }
+                (name, substitute(&value, &variables)?)
+            }
+            Define::QueryParam { name, extra_attrs } => {
+                if !extra_attrs.is_empty() {
+                    return Err(unsupported(
+                        "EXT-X-DEFINE has unsupported required attributes",
+                    ));
+                }
+                (name.clone(), query_parameter(playlist_url, &name)?)
+            }
+            Define::Import { name, extra_attrs } => {
+                if !extra_attrs.is_empty() {
+                    return Err(unsupported(
+                        "EXT-X-DEFINE IMPORT has unsupported required attributes",
+                    ));
+                }
+                let inherited = inherited_variables.ok_or_else(|| {
+                    unsupported("master-playlist IMPORT declarations have no parent playlist")
+                })?;
+                let value = inherited
+                    .iter()
+                    .find_map(|(parent_name, value)| (parent_name == &name).then_some(value))
+                    .cloned()
+                    .ok_or_else(|| {
+                        unsupported(
+                            "IMPORT variable is not defined by the parent multivariant playlist",
+                        )
+                    })?;
+                (name, value)
+            }
+            _ => return Err(unsupported("unsupported EXT-X-DEFINE declaration")),
+        };
+        validate_value(&value)?;
+        total_variable_bytes = total_variable_bytes
+            .checked_add(name.len())
+            .and_then(|total| total.checked_add(value.len()))
+            .ok_or_else(|| unsupported("aggregate HLS variable size overflow"))?;
+        if total_variable_bytes > MAX_MANIFEST_BYTES {
+            return Err(unsupported(
+                "aggregate HLS variable values exceed their supported size limit",
+            ));
+        }
+        if variables.insert(name, value).is_some() {
+            return Err(unsupported("duplicate EXT-X-DEFINE variable"));
+        }
+    }
+    Ok(variables)
+}
+
+/// Expand playlist lines with one non-recursive substitution pass. The caller
+/// supplies the DEFINE-line predicate because master playlists permit leading
+/// indentation while media playlists preserve their stricter parser behavior.
+fn expand_playlist_lines(
+    text: &str,
+    variables: &HashMap<String, String>,
+    is_define_line: impl Fn(&str) -> bool,
+) -> Result<String, ManifestError> {
+    let mut expanded = String::with_capacity(text.len());
+    for line in text.split_inclusive('\n') {
+        let line_content = line.trim_end_matches(['\r', '\n']);
+        if is_define_line(line_content) {
+            expanded.push_str(&line[line_content.len()..]);
+            continue;
+        }
+        expanded.push_str(&substitute_playlist_line(line_content, variables)?);
+        expanded.push_str(&line[line_content.len()..]);
+        if expanded.len() > MAX_MANIFEST_BYTES {
+            return Err(unsupported(
+                "expanded playlist exceeds its supported size limit",
+            ));
+        }
+    }
+    if expanded.len() > MAX_MANIFEST_BYTES {
+        return Err(unsupported(
+            "expanded playlist exceeds its supported size limit",
+        ));
+    }
+    Ok(expanded)
 }
 
 fn contains_variable_reference(text: &str) -> bool {
@@ -318,81 +345,11 @@ pub(super) fn expand_master_playlist_with_variables(
             "could not parse HLS master-playlist variable declarations: {error}"
         ))
     })?;
-    if parsed.defines.len() != definitions.len() {
-        return Err(unsupported(
-            "master-playlist DEFINE declarations could not be represented exactly",
-        ));
-    }
-
     let playlist_url = Url::parse(manifest_url).map_err(|_| ManifestError::InvalidManifestUrl)?;
-    let mut variables = HashMap::with_capacity(parsed.defines.len());
-    let mut total_variable_bytes = 0_usize;
-    for definition in parsed.defines {
-        let (name, value) = match definition {
-            Define::Name {
-                name,
-                value,
-                extra_attrs,
-            } => {
-                if !extra_attrs.is_empty() {
-                    return Err(unsupported(
-                        "EXT-X-DEFINE has unsupported required attributes",
-                    ));
-                }
-                let value = substitute(&value, &variables)?;
-                (name, value)
-            }
-            Define::QueryParam { name, extra_attrs } => {
-                if !extra_attrs.is_empty() {
-                    return Err(unsupported(
-                        "EXT-X-DEFINE has unsupported required attributes",
-                    ));
-                }
-                let value = query_parameter(&playlist_url, &name)?;
-                (name, value)
-            }
-            Define::Import { .. } => {
-                return Err(unsupported(
-                    "master-playlist IMPORT declarations have no parent playlist",
-                ));
-            }
-            _ => return Err(unsupported("unsupported EXT-X-DEFINE declaration")),
-        };
-        validate_value(&value)?;
-        total_variable_bytes = total_variable_bytes
-            .checked_add(name.len())
-            .and_then(|total| total.checked_add(value.len()))
-            .ok_or_else(|| unsupported("aggregate HLS variable size overflow"))?;
-        if total_variable_bytes > MAX_MANIFEST_BYTES {
-            return Err(unsupported(
-                "aggregate HLS variable values exceed their supported size limit",
-            ));
-        }
-        if variables.insert(name, value).is_some() {
-            return Err(unsupported("duplicate EXT-X-DEFINE variable"));
-        }
-    }
-
-    let mut expanded = String::with_capacity(text.len());
-    for line in text.split_inclusive('\n') {
-        let line_content = line.trim_end_matches(['\r', '\n']);
-        if line_content.trim_start().starts_with("#EXT-X-DEFINE:") {
-            expanded.push_str(&line[line_content.len()..]);
-            continue;
-        }
-        expanded.push_str(&substitute_playlist_line(line_content, &variables)?);
-        expanded.push_str(&line[line_content.len()..]);
-        if expanded.len() > MAX_MANIFEST_BYTES {
-            return Err(unsupported(
-                "expanded playlist exceeds its supported size limit",
-            ));
-        }
-    }
-    if expanded.len() > MAX_MANIFEST_BYTES {
-        return Err(unsupported(
-            "expanded playlist exceeds its supported size limit",
-        ));
-    }
+    let variables = resolve_defines(parsed.defines, &playlist_url, None)?;
+    let expanded = expand_playlist_lines(text, &variables, |line| {
+        line.trim_start().starts_with("#EXT-X-DEFINE:")
+    })?;
     if contains_master_variable_reference(&expanded) {
         return Err(unsupported(
             "master-playlist variable reference was not expanded",

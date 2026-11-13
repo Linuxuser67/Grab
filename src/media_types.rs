@@ -47,6 +47,26 @@ pub(crate) enum ManifestKind {
     Dash,
 }
 
+/// Preview-only output container selected from the native representation.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum ManifestContainer {
+    Mp4,
+    Mkv,
+    Ts,
+}
+
+impl ManifestContainer {
+    /// Canonical filename suffix for this supported output container.
+    #[must_use]
+    pub(crate) const fn extension(self) -> &'static str {
+        match self {
+            Self::Mp4 => "mp4",
+            Self::Mkv => "mkv",
+            Self::Ts => "ts",
+        }
+    }
+}
+
 macro_rules! manifest_key {
     ($name:ident, $description:literal) => {
         #[doc = $description]
@@ -103,9 +123,9 @@ pub(crate) struct ManifestSource {
     pub(crate) url: String,
     pub(crate) kind: ManifestKind,
     pub(crate) representation_key: ManifestRepresentationKey,
-    /// Transient container hint from the Add-card preview; never part of persisted source identity.
+    /// Transient typed container hint from the Add-card preview; never persisted.
     #[serde(skip)]
-    pub(crate) output_extension: Option<String>,
+    pub(crate) output_container: Option<ManifestContainer>,
     /// Missing values preserve the automatic default/first-track behavior of
     /// queue entries created before audio selection was introduced.
     #[serde(default, skip_serializing_if = "Option::is_none")]

@@ -430,6 +430,17 @@ pub(crate) struct HlsMasterPlan {
     pub(crate) content_steering: Option<HlsContentSteering>,
 }
 
+/// Validated low-latency metadata for an HLS media playlist.
+#[derive(Clone, Debug)]
+pub(crate) struct HlsLowLatencyPlan {
+    pub(crate) unit_ids: Box<[hls_ll::HlsLiveUnitId]>,
+    pub(crate) part_target: Option<Duration>,
+    pub(crate) can_skip_until: Option<Duration>,
+    pub(crate) blocking_reload: Option<(u64, Option<u64>)>,
+    pub(crate) first_part_independent: Option<bool>,
+    pub(crate) rendition_reports: Box<[hls_ll::HlsRenditionReport]>,
+}
+
 /// Validated HLS media playlist, ordered resources, and local FFmpeg input.
 #[derive(Clone, Debug)]
 pub(crate) struct HlsPlan {
@@ -441,12 +452,7 @@ pub(crate) struct HlsPlan {
     pub(crate) is_live: bool,
     pub(crate) end_list: bool,
     pub(crate) source_target_duration: u64,
-    pub(crate) ll_unit_ids: Option<Box<[hls_ll::HlsLiveUnitId]>>,
-    pub(crate) part_target: Option<Duration>,
-    pub(crate) can_skip_until: Option<Duration>,
-    pub(crate) blocking_reload: Option<(u64, Option<u64>)>,
-    pub(crate) ll_first_part_independent: Option<bool>,
-    pub(crate) rendition_reports: Box<[hls_ll::HlsRenditionReport]>,
+    pub(crate) low_latency: Option<HlsLowLatencyPlan>,
     /// Parent multivariant variables available to subsequent live playlist reloads.
     pub(crate) inherited_variables: Box<[(String, String)]>,
     local_playlist: MediaPlaylist,
@@ -465,7 +471,7 @@ impl HlsPlan {
         &mut self,
         next_sequence: u64,
     ) -> Result<(), ManifestError> {
-        if self.ll_unit_ids.is_some() || !self.is_live || self.end_list {
+        if self.low_latency.is_some() || !self.is_live || self.end_list {
             return Err(ManifestError::LiveSequenceGap);
         }
         let first_sequence = self.local_playlist.media_sequence;
@@ -507,8 +513,9 @@ impl HlsPlan {
     /// the bytes and lets FFmpeg validate the completed assembled track.
     #[cfg(test)]
     pub(crate) fn ll_parts_without_init_map(&self) -> impl Iterator<Item = &str> {
-        self.ll_unit_ids
-            .as_deref()
+        self.low_latency
+            .as_ref()
+            .map(|state| state.unit_ids.as_ref())
             .into_iter()
             .flatten()
             .zip(&self.local_playlist.segments)
@@ -544,12 +551,7 @@ impl HlsPlan {
             is_live: false,
             end_list: true,
             source_target_duration: local_playlist.target_duration,
-            ll_unit_ids: None,
-            part_target: None,
-            can_skip_until: None,
-            blocking_reload: None,
-            ll_first_part_independent: None,
-            rendition_reports: Vec::new().into_boxed_slice(),
+            low_latency: None,
             inherited_variables: Vec::new().into_boxed_slice(),
             local_playlist,
         })
@@ -697,6 +699,12 @@ impl std::io::Write for BoundedPlaylistWriter {
     }
 }
 
+#[derive(Debug, Default)]
+struct HlsLiveAccumulatorLowLatency {
+    unit_ids: Vec<hls_ll::HlsLiveUnitId>,
+    index: hls_ll::HlsLiveIndex,
+}
+
 /// Accumulated, locally rewritten playlist for one live HLS rendition.
 #[derive(Debug, Default)]
 pub(crate) struct HlsLiveAccumulator {
@@ -705,11 +713,19 @@ pub(crate) struct HlsLiveAccumulator {
     next_sequence: Option<u64>,
     target_duration: Option<u64>,
     segment_identities: Vec<String>,
-    ll_unit_ids: Option<Vec<hls_ll::HlsLiveUnitId>>,
-    ll_index: Option<hls_ll::HlsLiveIndex>,
+    low_latency: Option<HlsLiveAccumulatorLowLatency>,
     seen_resources: HashSet<String>,
     seen_key_resources: HashSet<String>,
     total_resource_bytes: u64,
+}
+
+/// Whether a live HLS update uses ordinary segments or LL-HLS units.
+#[derive(Debug)]
+enum HlsLiveUpdateKind {
+    Standard,
+    LowLatency {
+        new_unit_ids: Vec<hls_ll::HlsLiveUnitId>,
+    },
 }
 
 /// A validated playlist update whose media is committed only after its resources finish fetching.
@@ -724,8 +740,7 @@ pub(crate) struct HlsLiveUpdate {
     new_resource_names: Vec<String>,
     media_sequence: u64,
     target_duration: u64,
-    ll_update: bool,
-    ll_new_unit_ids: Vec<hls_ll::HlsLiveUnitId>,
+    kind: HlsLiveUpdateKind,
 }
 
 impl HlsLiveUpdate {
@@ -842,21 +857,24 @@ impl HlsLiveAccumulator {
             .segments
             .iter()
             .any(|segment| segment.uri.starts_with("segment-ll-"));
-        let ll_unit_ids = if contains_ll_units {
-            let ids = playlist
+        let low_latency = if contains_ll_units {
+            let unit_ids = playlist
                 .segments
                 .iter()
                 .map(|segment| hls_ll::HlsLiveUnitId::from_staged_name(&segment.uri))
                 .collect::<Option<Vec<_>>>()
                 .ok_or(ManifestError::UnsupportedPlaylist)?;
-            if !hls_ll::validate_live_unit_ids(&ids) {
+            if !hls_ll::validate_live_unit_ids(&unit_ids) {
                 return Err(ManifestError::UnsupportedPlaylist);
             }
-            Some(ids)
+            Some(HlsLiveAccumulatorLowLatency {
+                index: hls_ll::HlsLiveIndex::from_units(&unit_ids, &playlist.segments),
+                unit_ids,
+            })
         } else {
             None
         };
-        let segment_limit = if contains_ll_units {
+        let segment_limit = if low_latency.is_some() {
             MAX_HLS_LIVE_UNITS
         } else {
             MAX_HLS_LIVE_SEGMENTS
@@ -864,9 +882,6 @@ impl HlsLiveAccumulator {
         if playlist.segments.len() > segment_limit {
             return Err(ManifestError::LiveCaptureLimit);
         }
-        let ll_index = ll_unit_ids
-            .as_deref()
-            .map(|ids| hls_ll::HlsLiveIndex::from_units(ids, &playlist.segments));
 
         Ok(Self {
             local_playlist: Some(playlist),
@@ -874,8 +889,7 @@ impl HlsLiveAccumulator {
             next_sequence: Some(next_sequence),
             target_duration: Some(target_duration),
             segment_identities,
-            ll_unit_ids,
-            ll_index,
+            low_latency,
             seen_resources,
             seen_key_resources,
             total_resource_bytes: 0,
@@ -895,10 +909,10 @@ impl HlsLiveAccumulator {
         &self,
         snapshot: &HlsPlan,
     ) -> Result<HlsLiveUpdate, ManifestError> {
-        if snapshot.ll_unit_ids.is_some() {
+        if snapshot.low_latency.is_some() {
             return hls_ll::prepare_live_update(self, snapshot);
         }
-        if self.ll_unit_ids.is_some() {
+        if self.low_latency.is_some() {
             return Err(ManifestError::LiveSequenceGap);
         }
         let target_duration = snapshot.source_target_duration;
@@ -1000,8 +1014,7 @@ impl HlsLiveAccumulator {
             new_resource_names,
             media_sequence: snapshot.local_playlist.media_sequence,
             target_duration,
-            ll_update: false,
-            ll_new_unit_ids: Vec::new(),
+            kind: HlsLiveUpdateKind::Standard,
         })
     }
 
@@ -1043,10 +1056,10 @@ impl HlsLiveAccumulator {
             }
         };
 
-        let segment_limit = if update.ll_update || self.ll_unit_ids.is_some() {
-            MAX_HLS_LIVE_UNITS
-        } else {
-            MAX_HLS_LIVE_SEGMENTS
+        let segment_limit = match &update.kind {
+            HlsLiveUpdateKind::LowLatency { .. } => MAX_HLS_LIVE_UNITS,
+            HlsLiveUpdateKind::Standard if self.low_latency.is_some() => MAX_HLS_LIVE_UNITS,
+            HlsLiveUpdateKind::Standard => MAX_HLS_LIVE_SEGMENTS,
         };
         if playlist
             .segments
@@ -1093,18 +1106,15 @@ impl HlsLiveAccumulator {
         self.local_playlist = Some(playlist);
         self.segment_identities
             .extend(update.new_segments.iter().map(hls_segment_identity));
-        if update.ll_update {
-            let first_new_index = self.ll_unit_ids.as_ref().map_or(0, Vec::len);
-            self.ll_index
-                .get_or_insert_with(hls_ll::HlsLiveIndex::default)
-                .extend(
-                    &update.ll_new_unit_ids,
-                    &update.new_segments,
-                    first_new_index,
-                );
-            self.ll_unit_ids
-                .get_or_insert_with(Vec::new)
-                .extend(update.ll_new_unit_ids);
+        if let HlsLiveUpdateKind::LowLatency { new_unit_ids } = update.kind {
+            let state = self
+                .low_latency
+                .get_or_insert_with(HlsLiveAccumulatorLowLatency::default);
+            let first_new_index = state.unit_ids.len();
+            state
+                .index
+                .extend(&new_unit_ids, &update.new_segments, first_new_index);
+            state.unit_ids.extend(new_unit_ids);
         }
         self.seen_resources.extend(update.referenced_resources);
         self.seen_key_resources = key_resources;
@@ -1234,13 +1244,13 @@ impl HlsLiveAccumulator {
     /// Last committed LL-HLS media unit, if this is a part-aware recording.
     #[must_use]
     pub(crate) fn last_ll_unit(&self) -> Option<&hls_ll::HlsLiveUnitId> {
-        self.ll_unit_ids.as_ref()?.last()
+        self.low_latency.as_ref()?.unit_ids.last()
     }
 
     /// Whether this accumulator has committed LL-HLS media-unit identities.
     #[must_use]
     pub(crate) fn is_ll_capture(&self) -> bool {
-        self.ll_unit_ids.is_some()
+        self.low_latency.is_some()
     }
 }
 
@@ -2245,12 +2255,7 @@ fn build_hls_plan(base_url: Url, mut playlist: MediaPlaylist) -> Result<HlsPlan,
         is_live,
         end_list,
         source_target_duration,
-        ll_unit_ids: None,
-        part_target: None,
-        can_skip_until: None,
-        blocking_reload: None,
-        ll_first_part_independent: None,
-        rendition_reports: Vec::new().into_boxed_slice(),
+        low_latency: None,
         inherited_variables: Vec::new().into_boxed_slice(),
         local_playlist: playlist,
     })
@@ -3318,7 +3323,12 @@ media.mp4
 "#;
         let plan = plan_hls_media_playlist(BASE_URL, blocking)
             .expect("blocking reload playlist should be accepted");
-        assert_eq!(plan.blocking_reload, Some((1, None)));
+        assert_eq!(
+            plan.low_latency
+                .as_ref()
+                .and_then(|state| state.blocking_reload),
+            Some((1, None))
+        );
         assert_eq!(plan.resources.len(), 1);
 
         let partial = br#"#EXTM3U
@@ -3398,7 +3408,7 @@ segment.ts
         let plan = plan_hls_media_playlist(BASE_URL, body)
             .expect("encrypted complete-segment LL-HLS playlist");
         assert!(plan.is_live);
-        assert!(plan.ll_unit_ids.is_none());
+        assert!(plan.low_latency.is_none());
         assert_eq!(
             plan.resources
                 .iter()
@@ -3438,7 +3448,9 @@ segment.ts
         let plan = plan_hls_media_playlist(BASE_URL, body)
             .expect("supported delta playlist should be accepted");
         assert_eq!(
-            plan.ll_unit_ids.as_ref().map(|ids| ids[0].clone()),
+            plan.low_latency
+                .as_ref()
+                .map(|state| state.unit_ids[0].clone()),
             Some(hls_ll::HlsLiveUnitId::Segment(1006))
         );
         assert_eq!(plan.resources.len(), 1);
@@ -3447,7 +3459,12 @@ segment.ts
                 .filename
                 .starts_with("segment-ll-00000000000000001006-full-")
         );
-        assert_eq!(plan.can_skip_until, Some(Duration::from_secs(24)));
+        assert_eq!(
+            plan.low_latency
+                .as_ref()
+                .and_then(|state| state.can_skip_until),
+            Some(Duration::from_secs(24))
+        );
     }
 
     #[test]

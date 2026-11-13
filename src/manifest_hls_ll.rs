@@ -810,12 +810,14 @@ impl LlHlsPlanBuilder {
             end_list: validated.end_list,
             source_target_duration: validated.source_target_duration,
             local_playlist,
-            ll_unit_ids: Some(unit_ids.into_boxed_slice()),
-            part_target: validated.part_target,
-            can_skip_until: validated.can_skip_until,
-            blocking_reload,
-            ll_first_part_independent: first_part_independent,
-            rendition_reports,
+            low_latency: Some(crate::manifest::HlsLowLatencyPlan {
+                unit_ids: unit_ids.into_boxed_slice(),
+                part_target: validated.part_target,
+                can_skip_until: validated.can_skip_until,
+                blocking_reload,
+                first_part_independent,
+                rendition_reports,
+            }),
             inherited_variables: Vec::new().into_boxed_slice(),
         })
     }
@@ -1258,23 +1260,24 @@ pub(super) fn prepare_live_update(
     accumulator: &HlsLiveAccumulator,
     snapshot: &HlsPlan,
 ) -> Result<HlsLiveUpdate, ManifestError> {
-    let ids = snapshot
-        .ll_unit_ids
-        .as_deref()
+    let low_latency = snapshot
+        .low_latency
+        .as_ref()
         .ok_or(ManifestError::UnsupportedPlaylist)?;
+    let ids = low_latency.unit_ids.as_ref();
     if ids.len() != snapshot.local_playlist.segments.len() || !validate_live_unit_ids(ids) {
         return Err(ManifestError::LiveUnitIdentityInvalid);
     }
     if accumulator.local_playlist.is_none()
         && let Some(HlsLiveUnitId::Part { part_index, .. }) = ids.first()
-        && (*part_index != 0 || snapshot.ll_first_part_independent != Some(true))
+        && (*part_index != 0 || low_latency.first_part_independent != Some(true))
     {
         return Err(ManifestError::UnsupportedPlaylistFeature(
             "the first captured LL-HLS part must be part zero and independently decodable"
                 .to_string(),
         ));
     }
-    if accumulator.local_playlist.is_some() && accumulator.ll_unit_ids.is_none() {
+    if accumulator.local_playlist.is_some() && accumulator.low_latency.is_none() {
         return Err(ManifestError::LiveUnitIdentityInvalid);
     }
     if accumulator
@@ -1284,19 +1287,22 @@ pub(super) fn prepare_live_update(
         return Err(ManifestError::LiveTargetDurationChanged);
     }
     if accumulator
-        .ll_unit_ids
+        .low_latency
         .as_ref()
-        .is_some_and(|existing| existing.len() != accumulator.segment_identities.len())
+        .is_some_and(|state| state.unit_ids.len() != accumulator.segment_identities.len())
     {
         return Err(ManifestError::LiveUnitIdentityInvalid);
     }
 
-    let existing_ids = accumulator.ll_unit_ids.as_deref().unwrap_or_default();
+    let existing_ids = accumulator
+        .low_latency
+        .as_ref()
+        .map_or(&[][..], |state| state.unit_ids.as_slice());
     let existing_segments = accumulator
         .local_playlist
         .as_ref()
         .map_or(&[][..], |playlist| playlist.segments.as_slice());
-    let existing_index = accumulator.ll_index.as_ref();
+    let existing_index = accumulator.low_latency.as_ref().map(|state| &state.index);
     if !existing_ids.is_empty() && existing_index.is_none() {
         return Err(ManifestError::LiveUnitIdentityInvalid);
     }
@@ -1362,8 +1368,9 @@ pub(super) fn prepare_live_update(
         new_resource_names,
         media_sequence: 0,
         target_duration: snapshot.source_target_duration,
-        ll_update: true,
-        ll_new_unit_ids: delta.new_ids,
+        kind: HlsLiveUpdateKind::LowLatency {
+            new_unit_ids: delta.new_ids,
+        },
     })
 }
 
@@ -1485,9 +1492,17 @@ mod tests {
 
         assert!(!plan.is_live);
         assert!(plan.end_list);
-        assert_eq!(plan.blocking_reload, None);
+        assert_eq!(
+            plan.low_latency
+                .as_ref()
+                .and_then(|state| state.blocking_reload),
+            None
+        );
         assert_eq!(plan.resources.len(), 2);
-        assert_eq!(plan.ll_unit_ids.as_ref().map(|ids| ids.len()), Some(2));
+        assert_eq!(
+            plan.low_latency.as_ref().map(|state| state.unit_ids.len()),
+            Some(2)
+        );
     }
 
     #[test]
@@ -1509,7 +1524,10 @@ mod tests {
         assert!(plan.is_live);
         assert_eq!(plan.resources.len(), 2);
         assert_eq!(plan.local_playlist.segments.len(), 2);
-        assert_eq!(plan.ll_unit_ids.as_ref().map(|ids| ids.len()), Some(2));
+        assert_eq!(
+            plan.low_latency.as_ref().map(|state| state.unit_ids.len()),
+            Some(2)
+        );
         assert!(
             plan.local_playlist.start.is_none(),
             "the local recording playlist must not retain the source playback hint"
@@ -1543,8 +1561,16 @@ mod tests {
             3
         );
         assert_eq!(plan.local_playlist.segments.len(), 3);
-        assert_eq!(plan.ll_unit_ids.as_ref().map(|ids| ids.len()), Some(3));
-        assert_eq!(plan.blocking_reload, Some((101, Some(1))));
+        assert_eq!(
+            plan.low_latency.as_ref().map(|state| state.unit_ids.len()),
+            Some(3)
+        );
+        assert_eq!(
+            plan.low_latency
+                .as_ref()
+                .and_then(|state| state.blocking_reload),
+            Some((101, Some(1)))
+        );
         assert!(
             !plan
                 .resources
@@ -1779,7 +1805,10 @@ mod tests {
         assert_eq!(plan.local_playlist.segments.len(), 2);
         assert!(!plan.local_playlist.segments[0].discontinuity);
         assert!(plan.local_playlist.segments[1].discontinuity);
-        assert_eq!(plan.ll_unit_ids.as_ref().map(|ids| ids.len()), Some(2));
+        assert_eq!(
+            plan.low_latency.as_ref().map(|state| state.unit_ids.len()),
+            Some(2)
+        );
     }
 
     #[test]
@@ -1860,9 +1889,9 @@ segment.ts
             .expect("full-segment HLS plan");
         assert!(plan.is_live);
         assert!(
-            plan.ll_unit_ids
+            plan.low_latency
                 .as_ref()
-                .is_some_and(|unit_ids| unit_ids.len() == 1),
+                .is_some_and(|state| state.unit_ids.len() == 1),
             "the confirmed complete segment retains its live identity"
         );
         assert!(
@@ -1967,9 +1996,12 @@ segment.ts
                 .iter()
                 .any(|resource| resource.kind == HlsResourceKind::InitMap)
         );
+        let HlsLiveUpdateKind::LowLatency { new_unit_ids } = &next_update.kind else {
+            panic!("the delta snapshot must remain an LL-HLS update");
+        };
         assert_eq!(
-            next_update.ll_new_unit_ids,
-            vec![HlsLiveUnitId::Part {
+            new_unit_ids,
+            &vec![HlsLiveUnitId::Part {
                 media_sequence: 8,
                 part_index: 0,
             }]
@@ -2090,10 +2122,20 @@ segment.ts
             .expect("initial LL-HLS plan")
             .expect("LL-HLS detected");
         assert_eq!(
-            initial_plan.ll_unit_ids.as_ref().expect("unit ids")[0],
+            initial_plan
+                .low_latency
+                .as_ref()
+                .map(|state| &state.unit_ids)
+                .expect("unit ids")[0],
             HlsLiveUnitId::Segment(100)
         );
-        assert!(initial_plan.can_skip_until.is_some());
+        assert!(
+            initial_plan
+                .low_latency
+                .as_ref()
+                .and_then(|state| state.can_skip_until)
+                .is_some()
+        );
 
         let mut accumulator = HlsLiveAccumulator::new();
         let first_update = accumulator
@@ -2117,16 +2159,23 @@ segment.ts
             .expect("delta playlist plan")
             .expect("LL-HLS detected");
         assert_eq!(
-            delta_plan.ll_unit_ids.as_ref().expect("unit ids")[0],
+            delta_plan
+                .low_latency
+                .as_ref()
+                .map(|state| &state.unit_ids)
+                .expect("unit ids")[0],
             HlsLiveUnitId::Segment(102)
         );
         let update = accumulator
             .prepare_update(&delta_plan)
             .expect("restore the omitted prefix from the committed capture");
         assert_eq!(update.new_segments.len(), 2);
+        let HlsLiveUpdateKind::LowLatency { new_unit_ids } = &update.kind else {
+            panic!("the delta snapshot must remain an LL-HLS update");
+        };
         assert_eq!(
-            update.ll_new_unit_ids,
-            vec![HlsLiveUnitId::Segment(102), HlsLiveUnitId::Segment(103)]
+            new_unit_ids,
+            &vec![HlsLiveUnitId::Segment(102), HlsLiveUnitId::Segment(103)]
         );
     }
 
@@ -2260,6 +2309,9 @@ segment.ts
             .expect("rendition report plan")
             .expect("LL-HLS detected");
         let report = plan
+            .low_latency
+            .as_ref()
+            .expect("LL metadata")
             .rendition_reports
             .first()
             .expect("one rendition report");
@@ -2280,7 +2332,14 @@ segment.ts
         let plan = plan_hls_media_playlist(BASE, without_part)
             .expect("rendition report without a partial segment")
             .expect("LL-HLS detected");
-        assert_eq!(plan.rendition_reports[0].next_reload(), Some((32, None)));
+        assert_eq!(
+            plan.low_latency
+                .as_ref()
+                .expect("LL metadata")
+                .rendition_reports[0]
+                .next_reload(),
+            Some((32, None))
+        );
     }
 
     #[test]

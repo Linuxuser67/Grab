@@ -5712,6 +5712,9 @@ mod manifest_filename_tests {
         assert_eq!(manifest_filename("Stream.ts", Some("mp4")), "Stream.mp4");
         assert_eq!(manifest_filename("Stream.mp4", Some("ts")), "Stream.ts");
         assert_eq!(manifest_filename("Stream.webm", None), "Stream.mkv");
-        assert_eq!(manifest_filename("archive.part.MKV", Some("ts")), "archive.part.ts");
+        assert_eq!(
+            manifest_filename("archive.part.MKV", Some("ts")),
+            "archive.part.ts"
+        );
     }
 }

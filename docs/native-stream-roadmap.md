@@ -115,15 +115,15 @@ enforces Apple's authoring-profile minimum `PART-HOLD-BACK >= 3 * PART-TARGET`.
 
 This LL-HLS profile remains deliberately bounded. The first captured part must
 be independently decodable (or covered by EXT-X-INDEPENDENT-SEGMENTS).
-CMAF part capture without a known EXT-X-MAP, mapless parts that fail
-MPEG-TS validation, unsupported encryption for partial/delta LL-HLS (complete
-segment playlists without parts can use the ordinary AES-128 path), incomplete
-continuity, GAP, unknown required attributes, and ad/date-range markers remain
-on yt-dlp fallback.
+CMAF part capture without a known EXT-X-MAP, unsupported encryption
+for partial/delta LL-HLS (complete segment playlists without parts can use the
+ordinary AES-128 path), incomplete continuity, GAP, unknown required
+attributes, and ad/date-range markers remain on yt-dlp fallback.
 EXT-X-START is treated as a playback-position hint: LL-HLS recording retains
 the full advertised live window rather than trimming media units to that hint.
-Mapless parts are accepted only when their fetched bytes pass the existing
-MPEG-TS validation path. Native LL-HLS does not strip ad markers or
+Mapless parts are identified from playlist structure and passed to FFmpeg
+as part of the completed assembled transport stream; Grab does not inspect
+transport packets per resource. Native LL-HLS does not strip ad markers or
 schedule ad-marked media. DRM, license acquisition, and CDM support remain
 unplanned.
 

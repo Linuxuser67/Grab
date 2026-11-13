@@ -991,6 +991,34 @@ fn plan_map(
     }))
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum LiveUnitClass {
+    Existing(usize),
+    ParentAlias(usize),
+    New,
+}
+
+fn classify_live_units(
+    ids: &[HlsLiveUnitId],
+    segments: &[LocalSegment],
+    existing_index: Option<&HlsLiveIndex>,
+) -> Vec<LiveUnitClass> {
+    ids.iter()
+        .zip(segments)
+        .map(|(id, segment)| {
+            if let Some(index) = existing_index.and_then(|index| index.position(id)) {
+                LiveUnitClass::Existing(index)
+            } else if let Some(end_index) =
+                existing_index.and_then(|index| index.completed_parent_alias(id, segment))
+            {
+                LiveUnitClass::ParentAlias(end_index)
+            } else {
+                LiveUnitClass::New
+            }
+        })
+        .collect()
+}
+
 pub(super) fn prepare_live_update(
     accumulator: &HlsLiveAccumulator,
     snapshot: &HlsPlan,
@@ -1055,19 +1083,10 @@ pub(super) fn prepare_live_update(
         resolved_segments.push(resolved);
     }
 
-    let parent_aliases = ids
+    let classes = classify_live_units(ids, &resolved_segments, existing_index);
+    let first_overlap = classes
         .iter()
-        .zip(&resolved_segments)
-        .map(|(id, segment)| {
-            existing_index.and_then(|index| index.completed_parent_alias(id, segment))
-        })
-        .collect::<Vec<_>>();
-    let first_overlap = ids.iter().enumerate().find_map(|(index, id)| {
-        existing_index
-            .is_some_and(|existing| existing.position(id).is_some())
-            .then_some(index)
-            .or_else(|| parent_aliases[index].map(|_| index))
-    });
+        .position(|class| !matches!(class, LiveUnitClass::New));
 
     let mut saw_new = false;
     let mut last_existing_index = None;
@@ -1091,47 +1110,52 @@ pub(super) fn prepare_live_update(
         0
     };
 
-    for (id, segment, parent_alias) in ids
+    for ((id, segment), class) in ids
         .iter()
         .zip(&resolved_segments)
-        .zip(parent_aliases.iter())
-        .map(|((id, segment), alias)| (id, segment, alias))
+        .zip(&classes)
         .skip(first_index)
     {
-        if let Some(index) = existing_index.and_then(|existing| existing.position(id)) {
-            if saw_new || last_existing_index.is_some_and(|previous| index <= previous) {
-                return Err(ManifestError::LiveUnitOrderChanged);
+        match class {
+            LiveUnitClass::Existing(index) => {
+                if saw_new || last_existing_index.is_some_and(|previous| *index <= previous) {
+                    return Err(ManifestError::LiveUnitOrderChanged);
+                }
+                if accumulator.segment_identities.get(*index)
+                    != Some(&hls_segment_identity(segment))
+                {
+                    return Err(ManifestError::LiveUnitIdentityChanged);
+                }
+                last_existing_index = Some(*index);
             }
-            if accumulator.segment_identities.get(index) != Some(&hls_segment_identity(segment)) {
-                return Err(ManifestError::LiveUnitIdentityChanged);
+            LiveUnitClass::ParentAlias(alias_end) => {
+                if saw_new || last_existing_index.is_some_and(|previous| *alias_end <= previous) {
+                    return Err(ManifestError::LiveUnitOrderChanged);
+                }
+                last_existing_index = Some(*alias_end);
+                // The complete parent URI is a replacement for the parts, not an
+                // additional resource. They are already present in the recording.
+                continue;
             }
-            last_existing_index = Some(index);
-        } else if let Some(alias_end) = *parent_alias {
-            if saw_new || last_existing_index.is_some_and(|previous| alias_end <= previous) {
-                return Err(ManifestError::LiveUnitOrderChanged);
+            LiveUnitClass::New => {
+                let predecessor = new_ids
+                    .last()
+                    .or_else(|| last_existing_index.and_then(|index| existing_ids.get(index)))
+                    .or_else(|| existing_ids.last());
+                if !existing_ids.is_empty()
+                    && last_existing_index.is_some_and(|index| index + 1 != existing_ids.len())
+                {
+                    return Err(ManifestError::LiveUnitOrderChanged);
+                }
+                if let Some(predecessor) = predecessor
+                    && !id.is_successor_of(predecessor)
+                {
+                    return Err(ManifestError::LiveSequenceGap);
+                }
+                saw_new = true;
+                new_ids.push(id.clone());
+                new_segments.push(segment.clone());
             }
-            last_existing_index = Some(alias_end);
-            // The complete parent URI is a replacement for the parts, not an
-            // additional resource. They are already present in the recording.
-            continue;
-        } else {
-            let predecessor = new_ids
-                .last()
-                .or_else(|| last_existing_index.and_then(|index| existing_ids.get(index)))
-                .or_else(|| existing_ids.last());
-            if !existing_ids.is_empty()
-                && last_existing_index.is_some_and(|index| index + 1 != existing_ids.len())
-            {
-                return Err(ManifestError::LiveUnitOrderChanged);
-            }
-            if let Some(predecessor) = predecessor
-                && !id.is_successor_of(predecessor)
-            {
-                return Err(ManifestError::LiveSequenceGap);
-            }
-            saw_new = true;
-            new_ids.push(id.clone());
-            new_segments.push(segment.clone());
         }
 
         for filename in segment_resource_filenames(segment) {

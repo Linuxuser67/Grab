@@ -293,10 +293,6 @@ fn scan_ll_hls_tags(body: &[u8]) -> LlHlsTagFlags {
     flags
 }
 
-pub(crate) fn has_ll_hls_tags(body: &[u8]) -> bool {
-    scan_ll_hls_tags(body).has_ll_hls_tags
-}
-
 fn is_hls_method_none_key_tag(tag: &str) -> bool {
     let Some(attributes) = tag.as_bytes().strip_prefix(b"#EXT-X-KEY:") else {
         return false;
@@ -2121,7 +2117,6 @@ segment.ts
         assert!(flags.has_delta_update);
         assert!(flags.has_ll_hls_tags);
         assert!(flags.trailing_open_discontinuity);
-        assert!(has_ll_hls_tags(body));
 
         let closed = br#"#EXTM3U
 #EXT-X-DISCONTINUITY

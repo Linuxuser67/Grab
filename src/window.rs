@@ -14,9 +14,16 @@ use crate::window_rows::build_row;
 pub use crate::window_rows::launch_path;
 use crate::window_rows::ngettext_count;
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+enum QueueSection {
+    Active,
+    Done,
+    Queued,
+}
+
 #[derive(Clone, Copy, PartialEq, Eq)]
 struct RowPlacement {
-    section: u32,
+    section: QueueSection,
     group_id: Option<u64>,
 }
 
@@ -550,19 +557,20 @@ pub fn build_window(
         }
     }
 
-    fn section_bucket(status: crate::download::DownloadStatus) -> u32 {
+    fn section_bucket(status: crate::download::DownloadStatus) -> QueueSection {
         if status == crate::download::DownloadStatus::Done {
-            2
+            QueueSection::Done
         } else if status == crate::download::DownloadStatus::Queued {
-            3
+            QueueSection::Queued
         } else {
-            1
+            QueueSection::Active
         }
     }
 
     let rows: Rc<RefCell<HashMap<u64, gtk4::ListBoxRow>>> = Rc::new(RefCell::new(HashMap::new()));
-    let group_rows: Rc<RefCell<HashMap<(u64, u32), crate::window_rows::DownloadGroupRow>>> =
-        Rc::new(RefCell::new(HashMap::new()));
+    let group_rows: Rc<
+        RefCell<HashMap<(u64, QueueSection), crate::window_rows::DownloadGroupRow>>,
+    > = Rc::new(RefCell::new(HashMap::new()));
     let row_placements: Rc<RefCell<HashMap<u64, RowPlacement>>> =
         Rc::new(RefCell::new(HashMap::new()));
     let sync: Rc<dyn Fn()> = {
@@ -606,7 +614,7 @@ pub fn build_window(
             let collection_owner_ids = items
                 .iter()
                 .filter(|item| item.is_collection_child())
-                .filter_map(|item| item.group().map(|group| group.id()))
+                .filter_map(|item| item.group_id())
                 .collect::<HashSet<_>>();
             let collection_owners = items
                 .iter()
@@ -615,8 +623,8 @@ pub fn build_window(
                 .collect::<HashMap<_, _>>();
             let effective_status = |item: &crate::download::DownloadItem| {
                 if item.is_collection_child() {
-                    item.group()
-                        .and_then(|group| collection_owners.get(&group.id()))
+                    item.group_id()
+                        .and_then(|group_id| collection_owners.get(&group_id))
                         .map_or(item.status(), |owner| owner.status())
                 } else {
                     item.status()
@@ -630,8 +638,8 @@ pub fn build_window(
                 if item.is_collection_parent() && collection_owner_ids.contains(&item.id()) {
                     continue;
                 }
-                if let Some(group) = item.group() {
-                    *group_sizes.entry(group.id()).or_default() += 1;
+                if let Some(group_id) = item.group_id() {
+                    *group_sizes.entry(group_id).or_default() += 1;
                 }
             }
             let is_group_member = |item: &crate::download::DownloadItem, group_id: u64| {
@@ -643,16 +651,17 @@ pub fn build_window(
                 if item.is_collection_parent() && collection_owner_ids.contains(&item.id()) {
                     continue;
                 }
-                if let Some(group) = item
-                    .group()
-                    .filter(|group| is_group_member(item, group.id()))
+                if let Some(group_id) = item
+                    .group_id()
+                    .filter(|group_id| is_group_member(item, *group_id))
                 {
-                    all_groups.entry(group.id()).or_default().push(item.clone());
+                    all_groups.entry(group_id).or_default().push(item.clone());
                 }
             }
 
             let mut present = HashSet::with_capacity(items.len());
-            let mut grouped = HashMap::<(u64, u32), Vec<crate::download::DownloadItem>>::new();
+            let mut grouped =
+                HashMap::<(u64, QueueSection), Vec<crate::download::DownloadItem>>::new();
             let mut ordered_groups = Vec::new();
             let mut seen_groups = HashSet::new();
             let mut visible_groups = HashSet::new();
@@ -671,9 +680,9 @@ pub fn build_window(
                 let bucket = effective_bucket(item);
                 let status = effective_status(item);
                 let group_key = item
-                    .group()
-                    .filter(|group| is_group_member(item, group.id()))
-                    .map(|group| (group.id(), bucket));
+                    .group_id()
+                    .filter(|group_id| is_group_member(item, *group_id))
+                    .map(|group_id| (group_id, bucket));
 
                 let mut shown = sel == 0 || status_filter_bucket(status) == sel;
                 if shown && !q.is_empty() && !item.filename().to_lowercase().contains(q.as_str()) {
@@ -681,8 +690,8 @@ pub fn build_window(
                 }
                 if shown {
                     if item.is_collection_child() {
-                        if let Some(group) = item.group()
-                            && counted_collections.insert(group.id())
+                        if let Some(group_id) = item.group_id()
+                            && counted_collections.insert(group_id)
                         {
                             if status == crate::download_store::DownloadStatus::Done {
                                 n_downloaded += 1;
@@ -725,8 +734,7 @@ pub fn build_window(
                 };
                 let title = members
                     .first()
-                    .and_then(crate::download::DownloadItem::group)
-                    .map(|group| group.title().to_string())
+                    .and_then(crate::download::DownloadItem::group_title)
                     .unwrap_or_default();
                 let group = {
                     let mut groups = groups.borrow_mut();
@@ -756,14 +764,14 @@ pub fn build_window(
                 let bucket = effective_bucket(item);
                 let status = effective_status(item);
                 let target = match bucket {
-                    2 => &l_downloaded,
-                    3 => &l_queued,
-                    _ => &l_active,
+                    QueueSection::Done => &l_downloaded,
+                    QueueSection::Queued => &l_queued,
+                    QueueSection::Active => &l_active,
                 };
                 let group_key = item
-                    .group()
-                    .filter(|group| is_group_member(item, group.id()))
-                    .map(|group| (group.id(), bucket));
+                    .group_id()
+                    .filter(|group_id| is_group_member(item, *group_id))
+                    .map(|group_id| (group_id, bucket));
                 let location = RowPlacement {
                     section: bucket,
                     group_id: group_key.map(|(group_id, _)| group_id),

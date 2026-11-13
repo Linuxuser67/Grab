@@ -148,6 +148,20 @@ impl DownloadItem {
         });
     }
 
+    /// Identifier of the collection this row belongs to, without cloning its title.
+    pub(crate) fn group_id(&self) -> Option<u64> {
+        self.imp().group.borrow().as_ref().map(DownloadGroup::id)
+    }
+
+    /// Collection title used when creating a grouped-row heading.
+    pub(crate) fn group_title(&self) -> Option<String> {
+        self.imp()
+            .group
+            .borrow()
+            .as_ref()
+            .map(|group| group.title().to_string())
+    }
+
     /// The collection this child belongs to, if it was queued from a multi-item source.
     pub(crate) fn group(&self) -> Option<DownloadGroup> {
         self.imp().group.borrow().clone()
@@ -186,7 +200,7 @@ impl DownloadItem {
 
 #[cfg(test)]
 mod tests {
-    use super::DownloadItem;
+    use super::{DownloadGroup, DownloadItem};
 
     #[test]
     fn collection_role_is_mutually_exclusive() {
@@ -200,6 +214,17 @@ mod tests {
         item.set_is_collection_child(true);
         assert!(!item.is_collection_owner());
         assert!(item.is_collection_child());
+    }
+
+    #[test]
+    fn collection_metadata_accessors_read_without_cloning_the_group() {
+        let item = DownloadItem::new(5, "https://example.com/child", "Child", "/tmp");
+        item.set_group(DownloadGroup::try_new(42, "A collection"));
+        assert_eq!(item.group_id(), Some(42));
+        assert_eq!(item.group_title().as_deref(), Some("A collection"));
+        item.set_group(None);
+        assert_eq!(item.group_id(), None);
+        assert_eq!(item.group_title(), None);
     }
 
     #[test]

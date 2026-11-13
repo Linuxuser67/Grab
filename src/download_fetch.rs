@@ -1396,7 +1396,7 @@ const PIECE_TRIES: u32 = 3;
 
 #[cfg(test)]
 mod destination_ownership_tests {
-    use super::{FetchCtx, FileIdentity, attempt_once, ensure_sized, single_loop};
+    use super::{DestinationClaim, FetchCtx, FileIdentity, attempt_once, ensure_sized, single_loop};
     use crate::download_net::{DEFAULT_USER_AGENT, DownloadOptions};
     use std::time::Duration;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -1543,8 +1543,8 @@ mod destination_ownership_tests {
             destination.clone(),
             tx,
         );
-        let mut identity = None;
-        let error = attempt_once(&context, None, &mut identity)
+        let mut claim = DestinationClaim::default();
+        let error = attempt_once(&context, None, &mut claim)
             .await
             .expect_err("an unowned file must be rejected before networking");
         assert_eq!(error, crate::engine_msg::DEST_EXISTS);

@@ -940,6 +940,13 @@ async fn poll_live_hls_track(
     .await
 }
 
+fn restore_previous_active_pathway(
+    steering: &mut crate::manifest::HlsContentSteering,
+    previous_pathway: &Option<String>,
+) {
+    steering.active_pathway_id.clone_from(previous_pathway);
+}
+
 #[expect(
     clippy::too_many_arguments,
     reason = "the paired live renditions share one bounded capture session and cancellation signal"
@@ -1178,7 +1185,10 @@ async fn refresh_live_hls_pathway(
                     downloaded.load(Ordering::Relaxed),
                 )?;
             }
-            Ok(LiveHlsSnapshotOutcome::Stopped(intent)) => return Ok(Some(intent)),
+            Ok(LiveHlsSnapshotOutcome::Stopped(intent)) => {
+                restore_previous_active_pathway(steering, &previous_pathway);
+                return Ok(Some(intent));
+            },
             Ok(LiveHlsSnapshotOutcome::RetryScheduled | LiveHlsSnapshotOutcome::ContinuityLost) => {
                 tracing::debug!(
                     "refreshed HLS video Pathway could not be committed; retaining current route"
@@ -1220,12 +1230,14 @@ async fn refresh_live_hls_pathway(
             }
             Ok(LiveHlsSnapshotOutcome::Stopped(intent)) => return Ok(Some(intent)),
             Ok(LiveHlsSnapshotOutcome::RetryScheduled | LiveHlsSnapshotOutcome::ContinuityLost) => {
+                restore_previous_active_pathway(steering, &previous_pathway);
                 tracing::warn!(
                     playlist = %diagnostic_url(&next.playlist_url),
                     "HLS audio Pathway refresh could not be committed; preserving the existing audio route"
                 );
             }
             Err(error) => {
+                restore_previous_active_pathway(steering, &previous_pathway);
                 tracing::warn!(
                     playlist = %diagnostic_url(&next.playlist_url),
                     error = %error,
@@ -2035,6 +2047,20 @@ mod destination_part_tests {
 #[cfg(test)]
 mod live_hls_outcome_tests {
     use super::*;
+
+    #[test]
+    fn an_uncommitted_pathway_switch_restores_the_previous_active_pathway() {
+        let mut steering = crate::manifest::HlsContentSteering::new(
+            Url::parse("https://cdn.example.test/steering.json").expect("valid steering URL"),
+            Some("primary".to_string()),
+        );
+        steering.active_pathway_id = Some("backup".to_string());
+        let previous_pathway = Some("primary".to_string());
+
+        restore_previous_active_pathway(&mut steering, &previous_pathway);
+
+        assert_eq!(steering.active_pathway_id, previous_pathway);
+    }
 
     #[test]
     fn stop_intents_map_to_track_specific_capture_outcomes() {

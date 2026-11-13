@@ -501,6 +501,23 @@ impl HlsPlan {
         Ok(())
     }
 
+    /// Identify confirmed LL-HLS part resources without an EXT-X-MAP.
+    ///
+    /// This planner detail is retained for unit tests. Production capture stages
+    /// the bytes and lets FFmpeg validate the completed assembled track.
+    #[cfg(test)]
+    pub(crate) fn ll_parts_without_init_map(&self) -> impl Iterator<Item = &str> {
+        self.ll_unit_ids
+            .as_deref()
+            .into_iter()
+            .flatten()
+            .zip(&self.local_playlist.segments)
+            .filter_map(|(id, segment)| {
+                (matches!(id, hls_ll::HlsLiveUnitId::Part { .. }) && segment.map.is_none())
+                    .then_some(segment.uri.as_str())
+            })
+    }
+
     /// Rebuild a completed local HLS plan from a previously committed live capture.
     ///
     /// The local playlist is validated as Grab-owned staging metadata and its

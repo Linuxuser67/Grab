@@ -153,18 +153,14 @@ pub use crate::download_store::DownloadStatus;
 use crate::download_store::{QUEUE_VERSION, StoredItem, StoredQueue};
 use crate::video::AttemptGate;
 
-/// Runtime lookup cache for a gallery's persisted per-file states and transient GTK rows.
+/// Shared per-owner index for persisted collection entries and transient GTK rows.
+///
+/// Gallery and yt-dlp playlist entries use different persisted models and keys
+/// (gallery paths versus playlist entry IDs), but both need the same O(1)
+/// state-index and child-row maps. Playlist summary counters live here too so
+/// progress updates do not rescan the persisted entry list.
 #[derive(Default)]
-struct GalleryFileRowIndex {
-    state_indices: HashMap<String, usize>,
-    rows: HashMap<String, DownloadItem>,
-}
-
-/// Runtime index for one yt-dlp playlist's persisted entry states and passive
-/// GTK child rows. Aggregate counters are maintained alongside state changes,
-/// so a byte-progress event does not rescan the playlist.
-#[derive(Default)]
-struct VideoPlaylistFileRowIndex {
+struct CollectionProjectionIndex {
     state_indices: HashMap<String, usize>,
     rows: HashMap<String, DownloadItem>,
     total: usize,
@@ -516,10 +512,10 @@ pub struct DownloadManager {
     gallery_jobs: RefCell<HashMap<u64, crate::gallery_argv::GalleryJob>>,
     /// O(1) path-to-state and path-to-row lookups for high-frequency gallery progress.
     /// Rebuilt lazily from the persisted job and discarded with its owner.
-    gallery_file_row_index: RefCell<HashMap<u64, GalleryFileRowIndex>>,
+    collection_projection_index: RefCell<HashMap<u64, CollectionProjectionIndex>>,
     /// O(1) playlist-entry and child-row lookup plus incremental summary counters.
     /// Rebuilt lazily from owner state and discarded with that owner.
-    video_playlist_file_row_index: RefCell<HashMap<u64, VideoPlaylistFileRowIndex>>,
+    collection_projection_index: RefCell<HashMap<u64, CollectionProjectionIndex>>,
     /// Abort senders for resolver workers, by row. Signalled from pause/park/cancel so extractor streams stop promptly.
     video_abort: RefCell<HashMap<u64, tokio::sync::oneshot::Sender<crate::video::StopIntent>>>,
     /// Delivery decision per video attempt, by row. Manager and worker arbitrate on this one object.
@@ -844,8 +840,8 @@ impl DownloadManager {
             server_mtime: RefCell::new(HashMap::new()),
             video_sources: RefCell::new(HashMap::new()),
             gallery_jobs: RefCell::new(HashMap::new()),
-            gallery_file_row_index: RefCell::new(HashMap::new()),
-            video_playlist_file_row_index: RefCell::new(HashMap::new()),
+            collection_projection_index: RefCell::new(HashMap::new()),
+            collection_projection_index: RefCell::new(HashMap::new()),
             video_abort: RefCell::new(HashMap::new()),
             gates: RefCell::new(HashMap::new()),
             reservations: std::sync::Arc::new(std::sync::Mutex::new(Reservations::default())),
@@ -1853,7 +1849,7 @@ impl DownloadManager {
         };
         // Rebuild once from the extended source while retaining row objects
         // already present in the GTK store.
-        self.video_playlist_file_row_index
+        self.collection_projection_index
             .borrow_mut()
             .remove(&owner.id());
 
@@ -4247,8 +4243,8 @@ impl DownloadManager {
     }
 
     /// Populate the per-owner lookup cache once from the persisted job state.
-    fn ensure_gallery_file_row_index(&self, owner_id: u64) -> bool {
-        if self.gallery_file_row_index.borrow().contains_key(&owner_id) {
+    fn ensure_collection_projection_index(&self, owner_id: u64) -> bool {
+        if self.collection_projection_index.borrow().contains_key(&owner_id) {
             return true;
         }
         let Some(state_indices) = self.gallery_jobs.borrow().get(&owner_id).map(|job| {
@@ -4261,12 +4257,13 @@ impl DownloadManager {
             return false;
         };
 
-        self.gallery_file_row_index
+        self.collection_projection_index
             .borrow_mut()
             .entry(owner_id)
-            .or_insert_with(|| GalleryFileRowIndex {
+            .or_insert_with(|| CollectionProjectionIndex {
                 state_indices,
                 rows: HashMap::new(),
+                ..Default::default()
             });
         true
     }
@@ -4323,11 +4320,11 @@ impl DownloadManager {
         // output path without walking either the persisted Vec or GTK store
         // for every gallery-dl percentage line.
         let owner_id = owner.id();
-        if !self.ensure_gallery_file_row_index(owner_id) {
+        if !self.ensure_collection_projection_index(owner_id) {
             return;
         }
         let existing_state_index = self
-            .gallery_file_row_index
+            .collection_projection_index
             .borrow()
             .get(&owner_id)
             .and_then(|index| index.state_indices.get(path))
@@ -4363,13 +4360,13 @@ impl DownloadManager {
             index
         };
         if existing_state_index.is_none()
-            && let Some(index) = self.gallery_file_row_index.borrow_mut().get_mut(&owner_id)
+            && let Some(index) = self.collection_projection_index.borrow_mut().get_mut(&owner_id)
         {
             index.state_indices.insert(path.to_string(), state_index);
         }
 
         if let Some(existing) = self
-            .gallery_file_row_index
+            .collection_projection_index
             .borrow()
             .get(&owner_id)
             .and_then(|index| index.rows.get(path))
@@ -4396,7 +4393,7 @@ impl DownloadManager {
         // Child rows describe the one gallery-dl process; they are not
         // independently scheduled or persisted as separate download jobs.
         self.store.append(&child);
-        if let Some(index) = self.gallery_file_row_index.borrow_mut().get_mut(&owner_id) {
+        if let Some(index) = self.collection_projection_index.borrow_mut().get_mut(&owner_id) {
             index.rows.insert(path.to_string(), child);
         }
     }
@@ -4522,9 +4519,9 @@ impl DownloadManager {
     }
 
     /// Build the playlist-entry and child-row indexes once per owner.
-    fn ensure_video_playlist_file_row_index(&self, owner_id: u64) -> bool {
+    fn ensure_collection_projection_index(&self, owner_id: u64) -> bool {
         if self
-            .video_playlist_file_row_index
+            .collection_projection_index
             .borrow()
             .contains_key(&owner_id)
         {
@@ -4566,10 +4563,10 @@ impl DownloadManager {
             })
             .collect();
 
-        self.video_playlist_file_row_index
+        self.collection_projection_index
             .borrow_mut()
             .entry(owner_id)
-            .or_insert_with(|| VideoPlaylistFileRowIndex {
+            .or_insert_with(|| CollectionProjectionIndex {
                 state_indices,
                 rows,
                 total,
@@ -4588,7 +4585,7 @@ impl DownloadManager {
         new_progress: f64,
     ) {
         if let Some(index) = self
-            .video_playlist_file_row_index
+            .collection_projection_index
             .borrow_mut()
             .get_mut(&owner_id)
         {
@@ -4613,11 +4610,11 @@ impl DownloadManager {
         path: Option<&str>,
     ) {
         let owner_id = owner.id();
-        if !self.ensure_video_playlist_file_row_index(owner_id) {
+        if !self.ensure_collection_projection_index(owner_id) {
             return;
         }
         let Some(state_index) = self
-            .video_playlist_file_row_index
+            .collection_projection_index
             .borrow()
             .get(&owner_id)
             .and_then(|index| index.state_indices.get(file_id))
@@ -4703,7 +4700,7 @@ impl DownloadManager {
             });
 
         let existing = self
-            .video_playlist_file_row_index
+            .collection_projection_index
             .borrow()
             .get(&owner_id)
             .and_then(|index| index.rows.get(file_id))
@@ -4725,7 +4722,7 @@ impl DownloadManager {
             child.set_status(status);
             self.store.append(&child);
             if let Some(index) = self
-                .video_playlist_file_row_index
+                .collection_projection_index
                 .borrow_mut()
                 .get_mut(&owner_id)
             {
@@ -4776,7 +4773,7 @@ impl DownloadManager {
     /// Reset unfinished files for a collection retry; completed entries stay Done.
     fn prepare_video_playlist_file_rows_for_attempt(&self, owner: &DownloadItem) {
         let owner_id = owner.id();
-        if !self.ensure_video_playlist_file_row_index(owner_id) {
+        if !self.ensure_collection_projection_index(owner_id) {
             return;
         }
         let updates = {
@@ -4808,7 +4805,7 @@ impl DownloadManager {
                 0.0,
             );
             if let Some(child) = self
-                .video_playlist_file_row_index
+                .collection_projection_index
                 .borrow()
                 .get(&owner_id)
                 .and_then(|index| index.rows.get(&file_id))
@@ -4824,7 +4821,7 @@ impl DownloadManager {
 
     /// Settle active playlist children when the one owning process pauses, fails, or is cancelled.
     fn finish_video_playlist_file_rows(&self, owner_id: u64, status: DownloadStatus) {
-        if !self.ensure_video_playlist_file_row_index(owner_id) {
+        if !self.ensure_collection_projection_index(owner_id) {
             return;
         }
         let updates = {
@@ -4858,7 +4855,7 @@ impl DownloadManager {
                 new_progress,
             );
             if let Some(child) = self
-                .video_playlist_file_row_index
+                .collection_projection_index
                 .borrow()
                 .get(&owner_id)
                 .and_then(|index| index.rows.get(&file_id))
@@ -4884,11 +4881,11 @@ impl DownloadManager {
 
     fn refresh_video_playlist_summary(&self, owner: &DownloadItem) {
         let owner_id = owner.id();
-        if !self.ensure_video_playlist_file_row_index(owner_id) {
+        if !self.ensure_collection_projection_index(owner_id) {
             return;
         }
         let Some((total, done, progress_sum)) = self
-            .video_playlist_file_row_index
+            .collection_projection_index
             .borrow()
             .get(&owner_id)
             .map(|index| (index.total, index.done, index.progress_sum))
@@ -5736,8 +5733,7 @@ impl DownloadManager {
             crate::extension_server::discard_handoff_cookies_async(&job.page_url);
         }
         self.gallery_jobs.borrow_mut().remove(&id);
-        self.gallery_file_row_index.borrow_mut().remove(&id);
-        self.video_playlist_file_row_index.borrow_mut().remove(&id);
+        self.collection_projection_index.borrow_mut().remove(&id);
         let released = self.find(id).filter(|item| item.public_only());
         if let Some(pos) = self.position_of(id) {
             self.store.remove(pos);
@@ -6288,8 +6284,7 @@ impl DownloadManager {
         for id in &owner_ids {
             self.video_sources.borrow_mut().remove(id);
             self.gallery_jobs.borrow_mut().remove(id);
-            self.gallery_file_row_index.borrow_mut().remove(id);
-            self.video_playlist_file_row_index.borrow_mut().remove(id);
+            self.collection_projection_index.borrow_mut().remove(id);
             self.epoch.borrow_mut().remove(id);
         }
 

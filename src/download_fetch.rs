@@ -825,7 +825,8 @@ const DESTINATION_DISAPPEARED: &str = "Destination file disappeared during downl
 
 /// Proof that a transfer owns the destination inode. Fresh transfers begin
 /// unclaimed and may acquire ownership only through an exclusive create_new.
-#[derive(Clone, Copy, Debug, Default)]
+/// This stateful claim is not `Copy`: an implicit copy could fork its ownership state.
+#[derive(Clone, Debug, Default)]
 struct DestinationClaim {
     identity: Option<FileIdentity>,
 }

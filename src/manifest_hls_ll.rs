@@ -1001,8 +1001,8 @@ fn classify_live_units(
         .map(|(id, segment)| {
             if let Some(index) = existing_index.and_then(|index| index.position(id)) {
                 LiveUnitClass::Existing(index)
-            } else if let Some(end_index) = existing_index
-                .and_then(|index| index.completed_parent_alias(id, segment))
+            } else if let Some(end_index) =
+                existing_index.and_then(|index| index.completed_parent_alias(id, segment))
             {
                 LiveUnitClass::ParentAlias(end_index)
             } else {

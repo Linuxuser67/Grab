@@ -637,10 +637,16 @@ fn status_views_use_gnome_adaptive_view_switcher() {
             .expect("search action is a toggle");
         search_bar.set_search_mode(true);
         drain_gtk_events();
-        assert!(search_toggle.is_active(), "the header toggle follows an enabled search mode");
+        assert!(
+            search_toggle.is_active(),
+            "the header toggle follows an enabled search mode"
+        );
         search_bar.set_search_mode(false);
         drain_gtk_events();
-        assert!(!search_toggle.is_active(), "closing search clears the header toggle");
+        assert!(
+            !search_toggle.is_active(),
+            "closing search clears the header toggle"
+        );
 
         let picker_child = gtk4::Box::new(gtk4::Orientation::Vertical, 0);
         let picker_page = libadwaita::NavigationPage::builder()

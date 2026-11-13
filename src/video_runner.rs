@@ -2740,17 +2740,11 @@ pub(crate) async fn run_live_ytdlp(
             // timeout -- the reap already killed everything real, so this is
             // grace for stragglers only, and the attempt timeout would park
             // the discard path (and a runtime thread) for minutes.
-            if let Some(pgid) = pgid
-                && !crate::video_spawn::await_group_quiescence(
-                    pgid,
-                    std::time::Duration::from_secs(5),
-                )
-                .await
-            {
-                tracing::warn!(
-                    "recorder process group did not quiesce; reclaiming anyway with a \
-                     writer possibly still present"
-                );
+            if let Some(pgid) = pgid {
+                // The manager's discard finalizer sweeps staging as soon as
+                // this worker returns. Do not return while a descendant may
+                // still hold a file descriptor into that directory.
+                crate::video_spawn::await_group_quiescence(pgid).await;
             }
             return Ok(None);
         }

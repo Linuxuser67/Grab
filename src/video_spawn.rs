@@ -682,28 +682,24 @@ pub(crate) async fn reap_child(child: &mut tokio::process::Child, group: &mut Pr
     group.disarm();
 }
 
-/// Wait until no process remains in `pgid`, bounded (`false` = treat a writer as possibly still present).
+/// Wait until no process remains in `pgid`. The caller must keep owned
+/// staging alive until this returns; a timeout would let a descendant keep
+/// writing after the discard finalizer starts removing its files.
 #[cfg(target_os = "linux")]
-pub(crate) async fn await_group_quiescence(pgid: i32, timeout: std::time::Duration) -> bool {
-    let deadline = std::time::Instant::now() + timeout;
+pub(crate) async fn await_group_quiescence(pgid: i32) {
     loop {
         // SAFETY: signal 0 performs error checking only; a constant signal.
         let alive = unsafe { libc::killpg(pgid, 0) } == 0
             || std::io::Error::last_os_error().raw_os_error() == Some(libc::EPERM);
         if !alive {
-            return true;
-        }
-        if std::time::Instant::now() >= deadline {
-            return false;
+            return;
         }
         tokio::time::sleep(std::time::Duration::from_millis(10)).await;
     }
 }
 
 #[cfg(not(target_os = "linux"))]
-pub(crate) async fn await_group_quiescence(_pgid: i32, _timeout: std::time::Duration) -> bool {
-    true
-}
+pub(crate) async fn await_group_quiescence(_pgid: i32) {}
 
 /// Join a pipe-drain with a grace period (orphaned grandchildren can hold pipes open; falls back to abort).
 pub(crate) async fn join_drain<T>(task: tokio::task::JoinHandle<T>) -> Option<T> {

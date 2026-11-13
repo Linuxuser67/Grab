@@ -659,7 +659,7 @@ pub fn build_window(
                 if item.is_collection_parent() && collection_owner_ids.contains(&item.id()) {
                     continue;
                 }
-                if let Some(group) = item.group().filter(|group| group.is_valid()) {
+                if let Some(group) = item.group() {
                     *group_sizes.entry(group.id()).or_default() += 1;
                 }
             }

@@ -4,9 +4,21 @@ use crate::download_store::DownloadGroup;
 use gtk4::glib;
 use gtk4::glib::subclass::types::ObjectSubclassIsExt;
 
+/// Mutually exclusive structural role of a queue row.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, glib::Enum)]
+#[enum_type(name = "GrabDownloadRowRole")]
+pub enum DownloadRowRole {
+    #[default]
+    Plain,
+    GalleryOwner,
+    PlaylistOwner,
+    Child,
+}
+
 mod imp {
     use std::cell::{Cell, RefCell};
 
+    use super::DownloadRowRole;
     use crate::download_store::{DownloadGroup, DownloadStatus};
     use gtk4::glib;
     use gtk4::glib::object::ObjectExt as _;
@@ -45,16 +57,10 @@ mod imp {
         /// Public-only network policy inherited from an untrusted browser handoff.
         #[property(get, set)]
         pub public_only: Cell<bool>,
-        /// True if this is the queue owner for one gallery-dl process.
-        #[property(get, set)]
-        pub is_gallery: Cell<bool>,
-        /// Queue owner for any collection that has read-only child file rows.
-        #[property(get, set)]
-        pub is_collection_owner: Cell<bool>,
-        /// Ephemeral read-only file row owned by one collection process.
-        /// These rows are recreated from persisted owner state after restore.
-        #[property(get, set)]
-        pub is_collection_child: Cell<bool>,
+        /// Mutually exclusive row role: ordinary item, gallery owner,
+        /// playlist owner, or read-only collection child.
+        #[property(get, set, builder(DownloadRowRole::Plain))]
+        pub role: Cell<DownloadRowRole>,
         /// Stable extractor/file identity for yt-dlp playlist child rows.
         #[property(get, set)]
         pub collection_file_id: RefCell<String>,
@@ -94,7 +100,52 @@ glib::wrapper! {
 impl DownloadItem {
     /// Whether this row owns the queue entry for a gallery or video collection.
     pub(crate) fn is_collection_parent(&self) -> bool {
-        self.is_gallery() || self.is_collection_owner()
+        matches!(
+            self.role(),
+            DownloadRowRole::GalleryOwner | DownloadRowRole::PlaylistOwner
+        )
+    }
+
+    pub fn is_gallery(&self) -> bool {
+        self.role() == DownloadRowRole::GalleryOwner
+    }
+
+    pub fn set_is_gallery(&self, value: bool) {
+        self.set_role(if value {
+            DownloadRowRole::GalleryOwner
+        } else if self.is_gallery() {
+            DownloadRowRole::Plain
+        } else {
+            self.role()
+        });
+    }
+
+    pub fn is_collection_owner(&self) -> bool {
+        self.role() == DownloadRowRole::PlaylistOwner
+    }
+
+    pub fn set_is_collection_owner(&self, value: bool) {
+        self.set_role(if value {
+            DownloadRowRole::PlaylistOwner
+        } else if self.is_collection_owner() {
+            DownloadRowRole::Plain
+        } else {
+            self.role()
+        });
+    }
+
+    pub fn is_collection_child(&self) -> bool {
+        self.role() == DownloadRowRole::Child
+    }
+
+    pub fn set_is_collection_child(&self, value: bool) {
+        self.set_role(if value {
+            DownloadRowRole::Child
+        } else if self.is_collection_child() {
+            DownloadRowRole::Plain
+        } else {
+            self.role()
+        });
     }
 
     /// The collection this child belongs to, if it was queued from a multi-item source.
@@ -136,6 +187,20 @@ impl DownloadItem {
 #[cfg(test)]
 mod tests {
     use super::DownloadItem;
+
+    #[test]
+    fn collection_role_is_mutually_exclusive() {
+        let item = DownloadItem::new(1, "https://example.com/collection", "Collection", "/tmp");
+        item.set_is_gallery(true);
+        item.set_is_collection_owner(true);
+        assert!(!item.is_gallery());
+        assert!(item.is_collection_owner());
+        assert!(!item.is_collection_child());
+
+        item.set_is_collection_child(true);
+        assert!(!item.is_collection_owner());
+        assert!(item.is_collection_child());
+    }
 
     #[test]
     fn collection_parent_includes_gallery_and_video_owners_only() {

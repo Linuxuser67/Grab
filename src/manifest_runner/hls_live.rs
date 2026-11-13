@@ -1275,6 +1275,51 @@ async fn refresh_live_hls_pathway(
     clippy::too_many_arguments,
     reason = "the runner coordinates the selected renditions, storage paths, progress, host policy, and shared stop signal"
 )]
+#[derive(Clone, Copy)]
+enum LiveHlsTrackKind {
+    Video,
+    Audio,
+}
+
+fn stop_capture_outcome(
+    intent: crate::video::StopIntent,
+    track: LiveHlsTrackKind,
+) -> LiveHlsCaptureOutcome {
+    match intent {
+        crate::video::StopIntent::Pause => LiveHlsCaptureOutcome::Paused,
+        crate::video::StopIntent::Finish => match track {
+            LiveHlsTrackKind::Video => LiveHlsCaptureOutcome::Finish,
+            LiveHlsTrackKind::Audio => LiveHlsCaptureOutcome::FinishVideoOnly,
+        },
+        crate::video::StopIntent::Discard => LiveHlsCaptureOutcome::Discard,
+    }
+}
+
+async fn finish_after_live_hls_continuity_loss(
+    video: &LiveHlsTrack,
+    staging_dir: &Path,
+    downloaded: &Arc<AtomicU64>,
+    tx: &tokio::sync::mpsc::UnboundedSender<EngineMsg>,
+    output: LiveHlsOutput,
+) -> Result<LiveHlsCapture, ManifestRunError> {
+    if video.accumulator.segment_count() == 0 {
+        return Ok(LiveHlsCapture::new(LiveHlsCaptureOutcome::Discard, output));
+    }
+    persist_unrecoverable_live_capture(
+        staging_dir,
+        ManifestKind::Hls,
+        "HLS playlist continuity could not be verified",
+        video.accumulator.resource_bytes(),
+        downloaded,
+        tx,
+    )
+    .await?;
+    Ok(LiveHlsCapture::new(
+        LiveHlsCaptureOutcome::Unrecoverable,
+        output,
+    ))
+}
+
 pub(super) async fn run_live_hls_tracks(
     client: &reqwest::Client,
     source_url: &str,
@@ -1350,11 +1395,7 @@ pub(super) async fn run_live_hls_tracks(
     if use_destination_parts {
         if let Some(intent) = append_live_hls_destination_part(&video, abort).await? {
             return Ok(LiveHlsCapture::new(
-                match intent {
-                    crate::video::StopIntent::Pause => LiveHlsCaptureOutcome::Paused,
-                    crate::video::StopIntent::Finish => LiveHlsCaptureOutcome::Finish,
-                    crate::video::StopIntent::Discard => LiveHlsCaptureOutcome::Discard,
-                },
+                stop_capture_outcome(intent, LiveHlsTrackKind::Video),
                 output,
             ));
         }
@@ -1362,11 +1403,7 @@ pub(super) async fn run_live_hls_tracks(
             && let Some(intent) = append_live_hls_destination_part(audio, abort).await?
         {
             return Ok(LiveHlsCapture::new(
-                match intent {
-                    crate::video::StopIntent::Pause => LiveHlsCaptureOutcome::Paused,
-                    crate::video::StopIntent::Finish => LiveHlsCaptureOutcome::FinishVideoOnly,
-                    crate::video::StopIntent::Discard => LiveHlsCaptureOutcome::Discard,
-                },
+                stop_capture_outcome(intent, LiveHlsTrackKind::Audio),
                 output,
             ));
         }
@@ -1427,31 +1464,19 @@ pub(super) async fn run_live_hls_tracks(
         LiveHlsSnapshotOutcome::RetryScheduled => {}
         LiveHlsSnapshotOutcome::Stopped(intent) => {
             return Ok(LiveHlsCapture::new(
-                match intent {
-                    crate::video::StopIntent::Pause => LiveHlsCaptureOutcome::Paused,
-                    crate::video::StopIntent::Finish => LiveHlsCaptureOutcome::Finish,
-                    crate::video::StopIntent::Discard => LiveHlsCaptureOutcome::Discard,
-                },
+                stop_capture_outcome(intent, LiveHlsTrackKind::Video),
                 output,
             ));
         }
         LiveHlsSnapshotOutcome::ContinuityLost => {
-            if video.accumulator.segment_count() == 0 {
-                return Ok(LiveHlsCapture::new(LiveHlsCaptureOutcome::Discard, output));
-            }
-            persist_unrecoverable_live_capture(
+            return finish_after_live_hls_continuity_loss(
+                &video,
                 staging_dir,
-                ManifestKind::Hls,
-                "HLS playlist continuity could not be verified",
-                video.accumulator.resource_bytes(),
                 downloaded,
                 tx,
-            )
-            .await?;
-            return Ok(LiveHlsCapture::new(
-                LiveHlsCaptureOutcome::Unrecoverable,
                 output,
-            ));
+            )
+            .await;
         }
     }
     if let (Some(plan), Some(track)) = (audio_plan, audio.as_mut()) {
@@ -1492,31 +1517,19 @@ pub(super) async fn run_live_hls_tracks(
             LiveHlsSnapshotOutcome::RetryScheduled => {}
             LiveHlsSnapshotOutcome::Stopped(intent) => {
                 return Ok(LiveHlsCapture::new(
-                    match intent {
-                        crate::video::StopIntent::Pause => LiveHlsCaptureOutcome::Paused,
-                        crate::video::StopIntent::Finish => LiveHlsCaptureOutcome::FinishVideoOnly,
-                        crate::video::StopIntent::Discard => LiveHlsCaptureOutcome::Discard,
-                    },
+                    stop_capture_outcome(intent, LiveHlsTrackKind::Audio),
                     output,
                 ));
             }
             LiveHlsSnapshotOutcome::ContinuityLost => {
-                if video.accumulator.segment_count() == 0 {
-                    return Ok(LiveHlsCapture::new(LiveHlsCaptureOutcome::Discard, output));
-                }
-                persist_unrecoverable_live_capture(
+                return finish_after_live_hls_continuity_loss(
+                    &video,
                     staging_dir,
-                    ManifestKind::Hls,
-                    "HLS playlist continuity could not be verified",
-                    video.accumulator.resource_bytes(),
                     downloaded,
                     tx,
-                )
-                .await?;
-                return Ok(LiveHlsCapture::new(
-                    LiveHlsCaptureOutcome::Unrecoverable,
                     output,
-                ));
+                )
+                .await;
             }
         }
     }
@@ -1549,11 +1562,10 @@ pub(super) async fn run_live_hls_tracks(
             biased;
             stop = &mut *abort => {
                 return Ok(LiveHlsCapture::new(
-                    match crate::video::stop_intent_or_pause(stop) {
-                        crate::video::StopIntent::Pause => LiveHlsCaptureOutcome::Paused,
-                        crate::video::StopIntent::Finish => LiveHlsCaptureOutcome::Finish,
-                        crate::video::StopIntent::Discard => LiveHlsCaptureOutcome::Discard,
-                    },
+                    stop_capture_outcome(
+                        crate::video::stop_intent_or_pause(stop),
+                        LiveHlsTrackKind::Video,
+                    ),
                     output,
                 ));
             }
@@ -1581,11 +1593,7 @@ pub(super) async fn run_live_hls_tracks(
             .await?
         {
             return Ok(LiveHlsCapture::new(
-                match intent {
-                    crate::video::StopIntent::Pause => LiveHlsCaptureOutcome::Paused,
-                    crate::video::StopIntent::Finish => LiveHlsCaptureOutcome::Finish,
-                    crate::video::StopIntent::Discard => LiveHlsCaptureOutcome::Discard,
-                },
+                stop_capture_outcome(intent, LiveHlsTrackKind::Video),
                 output,
             ));
         }
@@ -1619,31 +1627,19 @@ pub(super) async fn run_live_hls_tracks(
                 LiveHlsSnapshotOutcome::RetryScheduled => {}
                 LiveHlsSnapshotOutcome::Stopped(intent) => {
                     return Ok(LiveHlsCapture::new(
-                        match intent {
-                            crate::video::StopIntent::Pause => LiveHlsCaptureOutcome::Paused,
-                            crate::video::StopIntent::Finish => LiveHlsCaptureOutcome::Finish,
-                            crate::video::StopIntent::Discard => LiveHlsCaptureOutcome::Discard,
-                        },
+                        stop_capture_outcome(intent, LiveHlsTrackKind::Video),
                         output,
                     ));
                 }
                 LiveHlsSnapshotOutcome::ContinuityLost => {
-                    if video.accumulator.segment_count() == 0 {
-                        return Ok(LiveHlsCapture::new(LiveHlsCaptureOutcome::Discard, output));
-                    }
-                    persist_unrecoverable_live_capture(
+                    return finish_after_live_hls_continuity_loss(
+                        &video,
                         staging_dir,
-                        ManifestKind::Hls,
-                        "HLS playlist continuity could not be verified",
-                        video.accumulator.resource_bytes(),
                         downloaded,
                         tx,
-                    )
-                    .await?;
-                    return Ok(LiveHlsCapture::new(
-                        LiveHlsCaptureOutcome::Unrecoverable,
                         output,
-                    ));
+                    )
+                    .await;
                 }
             }
             if let Some(audio_track) = audio.as_mut() {
@@ -1679,33 +1675,19 @@ pub(super) async fn run_live_hls_tracks(
                 LiveHlsSnapshotOutcome::RetryScheduled => {}
                 LiveHlsSnapshotOutcome::Stopped(intent) => {
                     return Ok(LiveHlsCapture::new(
-                        match intent {
-                            crate::video::StopIntent::Pause => LiveHlsCaptureOutcome::Paused,
-                            crate::video::StopIntent::Finish => {
-                                LiveHlsCaptureOutcome::FinishVideoOnly
-                            }
-                            crate::video::StopIntent::Discard => LiveHlsCaptureOutcome::Discard,
-                        },
+                        stop_capture_outcome(intent, LiveHlsTrackKind::Audio),
                         output,
                     ));
                 }
                 LiveHlsSnapshotOutcome::ContinuityLost => {
-                    if video.accumulator.segment_count() == 0 {
-                        return Ok(LiveHlsCapture::new(LiveHlsCaptureOutcome::Discard, output));
-                    }
-                    persist_unrecoverable_live_capture(
+                    return finish_after_live_hls_continuity_loss(
+                        &video,
                         staging_dir,
-                        ManifestKind::Hls,
-                        "HLS playlist continuity could not be verified",
-                        video.accumulator.resource_bytes(),
                         downloaded,
                         tx,
-                    )
-                    .await?;
-                    return Ok(LiveHlsCapture::new(
-                        LiveHlsCaptureOutcome::Unrecoverable,
                         output,
-                    ));
+                    )
+                    .await;
                 }
             }
             apply_rendition_report(audio, &mut video);
@@ -2082,5 +2064,40 @@ mod destination_part_tests {
                 "committed HLS source resources remain in XDG staging"
             );
         }
+    }
+}
+#[cfg(test)]
+mod live_hls_outcome_tests {
+    use super::*;
+
+    #[test]
+    fn stop_intents_map_to_track_specific_capture_outcomes() {
+        use crate::video::StopIntent;
+
+        assert_eq!(
+            stop_capture_outcome(StopIntent::Pause, LiveHlsTrackKind::Video),
+            LiveHlsCaptureOutcome::Paused
+        );
+        assert_eq!(
+            stop_capture_outcome(StopIntent::Finish, LiveHlsTrackKind::Video),
+            LiveHlsCaptureOutcome::Finish
+        );
+        assert_eq!(
+            stop_capture_outcome(StopIntent::Discard, LiveHlsTrackKind::Video),
+            LiveHlsCaptureOutcome::Discard
+        );
+
+        assert_eq!(
+            stop_capture_outcome(StopIntent::Pause, LiveHlsTrackKind::Audio),
+            LiveHlsCaptureOutcome::Paused
+        );
+        assert_eq!(
+            stop_capture_outcome(StopIntent::Finish, LiveHlsTrackKind::Audio),
+            LiveHlsCaptureOutcome::FinishVideoOnly
+        );
+        assert_eq!(
+            stop_capture_outcome(StopIntent::Discard, LiveHlsTrackKind::Audio),
+            LiveHlsCaptureOutcome::Discard
+        );
     }
 }

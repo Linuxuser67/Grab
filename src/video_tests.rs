@@ -3536,7 +3536,10 @@ fn playlist_download_argv_uses_original_selected_indices_and_tagged_events() {
         "mp4",
         std::path::Path::new("/usr/bin/ffmpeg"),
         std::path::Path::new("/tmp/grab-playlist"),
-        &[0, 2, 6],
+        crate::video_argv::PlaylistRunSelection {
+            indices: &[0, 2, 6],
+            event_nonce: "testnonce",
+        },
     )
     .expect("valid playlist selection");
 
@@ -3550,15 +3553,15 @@ fn playlist_download_argv_uses_original_selected_indices_and_tagged_events() {
     assert!(argv.iter().any(|arg| arg == "--ignore-errors"));
     assert_eq!(value_after(&argv, "--playlist-items"), Some("1,3,7"));
     assert!(!argv.iter().any(|arg| arg == "--no-playlist"));
-    assert_eq!(
-        value_after(&argv, "--progress-template"),
-        Some(crate::video_argv::YTDLP_PLAYLIST_PROGRESS_TEMPLATE)
+    assert!(
+        value_after(&argv, "--progress-template")
+            .is_some_and(|value| value.starts_with("download:@GRAB:testnonce:PROGRESS;"))
     );
     assert!(argv.iter().any(|arg| {
-        arg == "before_dl:[GrabPlaylistStart];%(id)s;%(playlist_index)s;%(filename)s"
+        arg == "before_dl:@GRAB:testnonce:START;%(id)s;%(playlist_index)s;%(filename)s"
     }));
     assert!(argv.iter().any(|arg| {
-        arg == "after_move:[GrabPlaylistDone];%(id)s;%(playlist_index)s;%(filepath)s"
+        arg == "after_move:@GRAB:testnonce:DONE;%(id)s;%(playlist_index)s;%(filepath)s"
     }));
 }
 

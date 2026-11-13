@@ -165,20 +165,20 @@ pub(crate) async fn run_download(mut ctx: FetchCtx, connections: usize, mode: St
     }
     match mode {
         StartMode::Single => {
-            let mut expected_identity = match destination_identity(&ctx.dest).await {
-                Ok(identity) => identity,
+            let mut claim = match DestinationClaim::capture(&ctx.dest).await {
+                Ok(claim) => claim,
                 Err(error) => {
                     ctx.tx.send(EngineMsg::Failed(error)).ok();
                     return;
                 }
             };
-            single_loop(&ctx, &mut tries, None, &mut expected_identity).await;
+            single_loop(&ctx, &mut tries, None, &mut claim).await;
         }
         StartMode::Fresh => {
-            let mut expected_identity = None;
+            let mut claim = DestinationClaim::default();
             // Single connection skips probing (the probe consumes single-use token URLs; one stream needs no total up front).
             if connections <= 1 {
-                single_loop(&ctx, &mut tries, None, &mut expected_identity).await;
+                single_loop(&ctx, &mut tries, None, &mut claim).await;
                 return;
             }
             match probe_ranges(&ctx.client, &ctx.url, timeout).await {
@@ -205,7 +205,7 @@ pub(crate) async fn run_download(mut ctx: FetchCtx, connections: usize, mode: St
                         }
                     }
                     if plan_pieces(total, connections).is_empty() {
-                        single_loop(&ctx, &mut tries, Some(total), &mut expected_identity).await;
+                        single_loop(&ctx, &mut tries, Some(total), &mut claim).await;
                     } else {
                         let (ack_tx, mut ack_rx) = tokio::sync::mpsc::channel::<()>(1);
                         if ctx
@@ -217,37 +217,23 @@ pub(crate) async fn run_download(mut ctx: FetchCtx, connections: usize, mode: St
                             let _ =
                                 tokio::time::timeout(Duration::from_secs(2), ack_rx.recv()).await;
                         }
-                        if multi_loop(
-                            &ctx,
-                            total,
-                            None,
-                            connections,
-                            &mut tries,
-                            &mut expected_identity,
-                        )
-                        .await
+                        if multi_loop(&ctx, total, None, connections, &mut tries, &mut claim).await
                         {
                             let mut single_tries = 3;
-                            single_loop(
-                                &ctx,
-                                &mut single_tries,
-                                Some(total),
-                                &mut expected_identity,
-                            )
-                            .await;
+                            single_loop(&ctx, &mut single_tries, Some(total), &mut claim).await;
                         }
                     }
                 }
                 Err(_) => {
-                    single_loop(&ctx, &mut tries, None, &mut expected_identity).await;
+                    single_loop(&ctx, &mut tries, None, &mut claim).await;
                 }
             }
         }
         StartMode::Resume(st) => {
             let total = st.total;
-            let mut expected_identity = match destination_identity(&ctx.dest).await {
-                Ok(Some(identity)) => Some(identity),
-                Ok(None) => {
+            let mut claim = match DestinationClaim::capture(&ctx.dest).await {
+                Ok(claim) if claim.is_claimed() => claim,
+                Ok(_) => {
                     ctx.tx
                         .send(EngineMsg::Failed(gettext(
                             "The partial download file is missing",
@@ -260,18 +246,9 @@ pub(crate) async fn run_download(mut ctx: FetchCtx, connections: usize, mode: St
                     return;
                 }
             };
-            if multi_loop(
-                &ctx,
-                total,
-                Some(st),
-                connections,
-                &mut tries,
-                &mut expected_identity,
-            )
-            .await
-            {
+            if multi_loop(&ctx, total, Some(st), connections, &mut tries, &mut claim).await {
                 let mut single_tries = 3;
-                single_loop(&ctx, &mut single_tries, Some(total), &mut expected_identity).await;
+                single_loop(&ctx, &mut single_tries, Some(total), &mut claim).await;
             }
         }
     }
@@ -284,11 +261,11 @@ async fn single_loop(
     ctx: &FetchCtx,
     tries: &mut i32,
     expected: Option<u64>,
-    expected_identity: &mut Option<FileIdentity>,
+    claim: &mut DestinationClaim,
 ) {
     let mut failures: u32 = 0;
     loop {
-        match attempt_once(ctx, expected, expected_identity).await {
+        match attempt_once(ctx, expected, claim).await {
             Ok(()) => {
                 let size = tokio::fs::metadata(&ctx.dest)
                     .await
@@ -326,12 +303,12 @@ async fn multi_loop(
     saved: Option<SegmentState>,
     max_workers: usize,
     tries: &mut i32,
-    expected_identity: &mut Option<FileIdentity>,
+    claim: &mut DestinationClaim,
 ) -> bool {
     let mut st = saved.unwrap_or_else(|| SegmentState::new(total));
     let mut failures: u32 = 0;
     loop {
-        let result = attempt_multi(ctx, total, &mut st, max_workers, expected_identity).await;
+        let result = attempt_multi(ctx, total, &mut st, max_workers, claim).await;
 
         match result {
             Ok(()) => {
@@ -384,7 +361,7 @@ async fn attempt_multi(
     total: u64,
     st: &mut SegmentState,
     max_workers: usize,
-    expected_identity: &mut Option<FileIdentity>,
+    claim: &mut DestinationClaim,
 ) -> Result<(), AttemptFail> {
     if st.total != total {
         return Err(AttemptFail::Retryable(gettext("File changed on server")));
@@ -395,7 +372,7 @@ async fn attempt_multi(
     }
     let expect_bytes: u64 = missing.iter().map(|(_, s, e)| e - s + 1).sum();
     // Size without truncating: completed pieces are already on disk.
-    let output_file = ensure_sized(&ctx.dest, total, expected_identity).await?;
+    let output_file = ensure_sized(&ctx.dest, total, claim).await?;
     let queue: Arc<Mutex<VecDeque<(u64, u64, u64)>>> =
         Arc::new(Mutex::new(missing.into_iter().collect()));
     let failed = Arc::new(AtomicBool::new(false));
@@ -549,7 +526,7 @@ async fn local_len(path: &std::path::Path) -> Option<u64> {
 async fn attempt_once(
     ctx: &FetchCtx,
     expected_total: Option<u64>,
-    expected_identity: &mut Option<FileIdentity>,
+    claim: &mut DestinationClaim,
 ) -> Result<(), String> {
     // At most one restart: a 416 may only trigger a single reset-and-retry.
     let mut restarted = false;
@@ -559,18 +536,12 @@ async fn attempt_once(
                 return Err(DEST_EXISTS.to_string());
             }
             Ok(metadata) => {
-                let actual_identity = file_identity(&metadata);
-                match *expected_identity {
-                    Some(expected) if expected == actual_identity => metadata.len(),
-                    Some(_) => {
-                        return Err("Destination file was replaced during download".to_string());
-                    }
-                    None => return Err(DEST_EXISTS.to_string()),
-                }
+                claim.verify_metadata(&metadata)?;
+                metadata.len()
             }
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-                if expected_identity.is_some() {
-                    return Err("Destination file disappeared during download".to_string());
+                if claim.is_claimed() {
+                    return Err(DESTINATION_DISAPPEARED.to_string());
                 }
                 0
             }
@@ -600,12 +571,7 @@ async fn attempt_once(
                     ParsedContentRange::Unsatisfied { complete_length } => Some(complete_length),
                     ParsedContentRange::Satisfied { .. } => None,
                 });
-            let still_owned = match *expected_identity {
-                Some(expected) => verify_destination_identity(&ctx.dest, expected)
-                    .await
-                    .is_ok(),
-                None => false,
-            };
+            let still_owned = claim.verify(&ctx.dest).await.is_ok();
             // "Already complete" only with proof: matching length, unchanged inode,
             // unchanged local size, and fully allocated bytes.
             if start > 0
@@ -622,12 +588,7 @@ async fn attempt_once(
                 if let Ok(hresp) = execute_with_timeout(&ctx.client, hreq, ctx.timeout).await
                     && hresp.status().is_success()
                     && hresp.content_length() == Some(start)
-                    && verify_destination_identity(
-                        &ctx.dest,
-                        expected_identity.ok_or_else(|| DEST_EXISTS.to_string())?,
-                    )
-                    .await
-                    .is_ok()
+                    && claim.verify(&ctx.dest).await.is_ok()
                     && local_len(&ctx.dest).await == Some(start)
                     && !has_holes(&ctx.dest).await
                 {
@@ -640,8 +601,8 @@ async fn attempt_once(
 
             // Reset through the already-owned file descriptor. Never unlink a
             // pathname after an async/network wait: it may now name someone else's file.
-            if let Some(expected) = *expected_identity {
-                let file = open_owned_destination(&ctx.dest, expected).await?;
+            if claim.is_claimed() {
+                let file = claim.open_for_writing(&ctx.dest).await?;
                 file.set_len(0)
                     .await
                     .map_err(|error| format!("Cannot reset partial download: {error}"))?;
@@ -702,36 +663,15 @@ async fn attempt_once(
         }
 
         let mut file = if partial {
-            let expected = expected_identity.ok_or_else(|| DEST_EXISTS.to_string())?;
-            open_owned_partial(&ctx.dest, start, expected).await?
-        } else if let Some(expected) = *expected_identity {
-            let file = open_owned_destination(&ctx.dest, expected).await?;
-            file.set_len(0)
-                .await
-                .map_err(|error| format!("Cannot reset partial download: {error}"))?;
-            file
+            claim.open_partial(&ctx.dest, start).await?
         } else {
-            let file = match open_nofollow(
-                |options| {
-                    options.write(true).create_new(true);
-                },
-                &ctx.dest,
-            )
-            .await
-            {
-                Ok(file) => file,
-                Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
-                    return Err(DEST_EXISTS.to_string());
-                }
-                Err(error) => return Err(format!("Cannot write file: {error}")),
-            };
-            let metadata = file
-                .metadata()
-                .await
-                .map_err(|error| format!("Cannot inspect downloaded file: {error}"))?;
-            let identity = file_identity(&metadata);
-            *expected_identity = Some(identity);
-            verify_destination_identity(&ctx.dest, identity).await?;
+            let was_claimed = claim.is_claimed();
+            let file = claim.open_for_writing(&ctx.dest).await?;
+            if was_claimed {
+                file.set_len(0)
+                    .await
+                    .map_err(|error| format!("Cannot reset partial download: {error}"))?;
+            }
             file
         };
 
@@ -880,6 +820,136 @@ fn file_identity(metadata: &std::fs::Metadata) -> FileIdentity {
     }
 }
 
+const DESTINATION_REPLACED: &str = "Destination file was replaced during download";
+const DESTINATION_DISAPPEARED: &str = "Destination file disappeared during download";
+
+/// Proof that a transfer owns the destination inode. Fresh transfers begin
+/// unclaimed and may acquire ownership only through an exclusive create_new.
+#[derive(Clone, Copy, Debug, Default)]
+struct DestinationClaim {
+    identity: Option<FileIdentity>,
+}
+
+impl DestinationClaim {
+    async fn capture(path: &std::path::Path) -> Result<Self, String> {
+        Ok(Self {
+            identity: destination_identity(path).await?,
+        })
+    }
+
+    fn is_claimed(&self) -> bool {
+        self.identity.is_some()
+    }
+
+    #[cfg(test)]
+    fn from_identity(identity: FileIdentity) -> Self {
+        Self {
+            identity: Some(identity),
+        }
+    }
+
+    fn verify_metadata(&self, metadata: &std::fs::Metadata) -> Result<(), String> {
+        if metadata.file_type().is_symlink() || !metadata.is_file() {
+            return Err(DEST_EXISTS.to_string());
+        }
+        match self.identity {
+            Some(expected) if file_identity(metadata) == expected => Ok(()),
+            Some(_) => Err(DESTINATION_REPLACED.to_string()),
+            None => Err(DEST_EXISTS.to_string()),
+        }
+    }
+
+    async fn verify(&self, path: &std::path::Path) -> Result<(), String> {
+        let expected = self.identity.ok_or_else(|| DEST_EXISTS.to_string())?;
+        match destination_identity(path).await? {
+            Some(actual) if actual == expected => Ok(()),
+            Some(_) => Err(DESTINATION_REPLACED.to_string()),
+            None => Err(DESTINATION_DISAPPEARED.to_string()),
+        }
+    }
+
+    async fn verify_opened_file(
+        &self,
+        path: &std::path::Path,
+        file: &tokio::fs::File,
+        context: &str,
+    ) -> Result<(), String> {
+        let metadata = file
+            .metadata()
+            .await
+            .map_err(|error| format!("Could not inspect {context}: {error}"))?;
+        self.verify_metadata(&metadata)?;
+        self.verify(path).await
+    }
+
+    /// Open the claimed inode without following symlinks, or exclusively
+    /// create a fresh destination and claim its identity before returning.
+    async fn open_for_writing(
+        &mut self,
+        path: &std::path::Path,
+    ) -> Result<tokio::fs::File, String> {
+        let was_claimed = self.is_claimed();
+        if was_claimed {
+            self.verify(path).await?;
+        }
+        let file = open_nofollow(
+            move |options| {
+                options.write(true);
+                if !was_claimed {
+                    options.create_new(true);
+                }
+            },
+            path,
+        )
+        .await
+        .map_err(|error| {
+            if !was_claimed && error.kind() == std::io::ErrorKind::AlreadyExists {
+                DEST_EXISTS.to_string()
+            } else {
+                format!("Cannot write file: {error}")
+            }
+        })?;
+        let metadata = file
+            .metadata()
+            .await
+            .map_err(|error| format!("Cannot inspect downloaded file: {error}"))?;
+        if !metadata.is_file() {
+            return Err(if was_claimed {
+                DESTINATION_REPLACED.to_string()
+            } else {
+                DEST_EXISTS.to_string()
+            });
+        }
+        let actual = file_identity(&metadata);
+        match self.identity {
+            Some(expected) if expected != actual => {
+                return Err(DESTINATION_REPLACED.to_string());
+            }
+            None => self.identity = Some(actual),
+            _ => {}
+        }
+        self.verify_opened_file(path, &file, "downloaded file")
+            .await?;
+        Ok(file)
+    }
+
+    /// Resume an append only when the requested offset and opened inode still
+    /// match the captured destination claim.
+    async fn open_partial(
+        &self,
+        path: &std::path::Path,
+        start: u64,
+    ) -> Result<tokio::fs::File, String> {
+        if !self.is_claimed() {
+            return Err(DEST_EXISTS.to_string());
+        }
+        let file = open_partial(path, start).await?;
+        self.verify_opened_file(path, &file, "partial download")
+            .await?;
+        Ok(file)
+    }
+}
+
 /// Capture an existing regular destination before a resume request. A fresh
 /// download receives `None` and must create its first file with create_new.
 async fn destination_identity(path: &std::path::Path) -> Result<Option<FileIdentity>, String> {
@@ -893,117 +963,21 @@ async fn destination_identity(path: &std::path::Path) -> Result<Option<FileIdent
     }
 }
 
-async fn verify_destination_identity(
-    path: &std::path::Path,
-    expected: FileIdentity,
-) -> Result<(), String> {
-    match destination_identity(path).await? {
-        Some(actual) if actual == expected => Ok(()),
-        Some(_) => Err("Destination file was replaced during download".to_string()),
-        None => Err("Destination file disappeared during download".to_string()),
-    }
-}
-
-/// Open an already-owned destination without truncating it, then verify both
-/// the descriptor and the current path before allowing writes.
-async fn open_owned_destination(
-    path: &std::path::Path,
-    expected: FileIdentity,
-) -> Result<tokio::fs::File, String> {
-    let file = open_nofollow(
-        |options| {
-            options.write(true);
-        },
-        path,
-    )
-    .await
-    .map_err(|error| format!("Cannot write file: {error}"))?;
-    let metadata = file
-        .metadata()
-        .await
-        .map_err(|error| format!("Cannot inspect downloaded file: {error}"))?;
-    if !metadata.is_file() || file_identity(&metadata) != expected {
-        return Err("Destination file was replaced during download".to_string());
-    }
-    verify_destination_identity(path, expected).await?;
-    Ok(file)
-}
-
-/// Append to a resumed destination only after the opened inode matches its
-/// pre-request identity and the size still matches the requested range offset.
-async fn open_owned_partial(
-    path: &std::path::Path,
-    start: u64,
-    expected: FileIdentity,
-) -> Result<tokio::fs::File, String> {
-    let file = open_partial(path, start).await?;
-    let metadata = file
-        .metadata()
-        .await
-        .map_err(|error| format!("Cannot inspect partial download: {error}"))?;
-    if !metadata.is_file() || file_identity(&metadata) != expected {
-        return Err("Destination file was replaced during download".to_string());
-    }
-    verify_destination_identity(path, expected).await?;
-    Ok(file)
-}
-
 async fn ensure_sized(
     dest: &std::path::Path,
     total: u64,
-    expected_identity: &mut Option<FileIdentity>,
+    claim: &mut DestinationClaim,
 ) -> Result<tokio::fs::File, AttemptFail> {
-    use std::io::ErrorKind::{AlreadyExists, FileTooLarge, StorageFull};
+    use std::io::ErrorKind::{FileTooLarge, StorageFull};
 
-    // Unclaimed destinations must be atomically created. Once an inode has
-    // been recorded, retries may reopen only that same inode without truncating
-    // it during the open itself.
-    let file_result = if expected_identity.is_some() {
-        open_nofollow(
-            |options| {
-                options.write(true);
-            },
-            dest,
-        )
+    let file = claim
+        .open_for_writing(dest)
         .await
-    } else {
-        open_nofollow(
-            |options| {
-                options.write(true).create_new(true);
-            },
-            dest,
-        )
-        .await
-    };
-    let file = file_result.map_err(|error| {
-        if expected_identity.is_none() && error.kind() == AlreadyExists {
-            AttemptFail::Retryable(DEST_EXISTS.to_string())
-        } else {
-            AttemptFail::Retryable(format!("Cannot write file: {error}"))
-        }
-    })?;
-
+        .map_err(AttemptFail::Retryable)?;
     let metadata = file
         .metadata()
         .await
         .map_err(|error| AttemptFail::Retryable(format!("Cannot inspect file: {error}")))?;
-    if !metadata.is_file() {
-        return Err(AttemptFail::Retryable(DEST_EXISTS.to_string()));
-    }
-    let actual_identity = file_identity(&metadata);
-    match *expected_identity {
-        Some(expected) if expected != actual_identity => {
-            return Err(AttemptFail::Retryable(
-                "Destination file was replaced during download".to_string(),
-            ));
-        }
-        None => *expected_identity = Some(actual_identity),
-        _ => {}
-    }
-    verify_destination_identity(dest, actual_identity)
-        .await
-        .map_err(AttemptFail::Retryable)?;
-
     if metadata.len() != total
         && let Err(error) = file.set_len(total).await
     {
@@ -1014,7 +988,6 @@ async fn ensure_sized(
             AttemptFail::Retryable(message)
         });
     }
-
     Ok(file)
 }
 
@@ -1423,7 +1396,9 @@ const PIECE_TRIES: u32 = 3;
 
 #[cfg(test)]
 mod destination_ownership_tests {
-    use super::{FetchCtx, FileIdentity, attempt_once, ensure_sized, single_loop};
+    use super::{
+        DestinationClaim, FetchCtx, FileIdentity, attempt_once, ensure_sized, single_loop,
+    };
     use crate::download_net::{DEFAULT_USER_AGENT, DownloadOptions};
     use std::time::Duration;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -1505,8 +1480,8 @@ mod destination_ownership_tests {
             tx,
         );
         let mut tries = 3;
-        let mut expected_identity: Option<FileIdentity> = None;
-        single_loop(&context, &mut tries, None, &mut expected_identity).await;
+        let mut claim = DestinationClaim::default();
+        single_loop(&context, &mut tries, None, &mut claim).await;
         server.await.expect("server task");
 
         let bytes = tokio::fs::read(&destination)
@@ -1514,7 +1489,7 @@ mod destination_ownership_tests {
             .expect("read destination");
         assert_eq!(bytes, b"foreign sentinel");
         assert!(
-            expected_identity.is_none(),
+            !claim.is_claimed(),
             "a failed pre-open attempt must not acquire ownership"
         );
     }
@@ -1543,8 +1518,8 @@ mod destination_ownership_tests {
             .await
             .expect("replace the destination atomically");
 
-        let mut expected_identity = Some(expected);
-        let result = ensure_sized(&destination, 1024, &mut expected_identity).await;
+        let mut claim = DestinationClaim::from_identity(expected);
+        let result = ensure_sized(&destination, 1024, &mut claim).await;
         assert!(
             result.is_err(),
             "a replacement inode must not be adopted or resized"
@@ -1570,8 +1545,8 @@ mod destination_ownership_tests {
             destination.clone(),
             tx,
         );
-        let mut identity = None;
-        let error = attempt_once(&context, None, &mut identity)
+        let mut claim = DestinationClaim::default();
+        let error = attempt_once(&context, None, &mut claim)
             .await
             .expect_err("an unowned file must be rejected before networking");
         assert_eq!(error, crate::engine_msg::DEST_EXISTS);

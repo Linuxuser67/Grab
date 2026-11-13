@@ -332,6 +332,7 @@ fn the_sweep_follows_the_reap() {
         async move {
             reap_log.borrow_mut().push("reap");
         },
+        None,
         move || async move {
             sweep_log.borrow_mut().push("sweep");
         },
@@ -353,6 +354,7 @@ fn a_stalled_reap_blocks_the_sweep() {
         tokio::select! {
             _ = reap_then_sweep(
                 std::future::pending::<()>(),
+                None,
                 move || async move { sweep_flag.set(true); },
             ) => {}
             // Nothing can satisfy the reap arm: give the sequence a real window to misbehave.

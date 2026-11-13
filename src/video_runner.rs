@@ -1954,6 +1954,19 @@ async fn sweep_live_capture(
     // `grab-<id>-*` files were already swept above; the dir stays.
 }
 
+/// Reap the direct child and wait for its process group to stop writing before
+/// reclaiming capture scratch. Cleanup is constructed only after both waits.
+async fn reap_then_sweep<F, S, G>(reap: F, pgid: Option<i32>, sweep: S)
+where
+    F: std::future::Future<Output = ()>,
+    S: FnOnce() -> G,
+    G: std::future::Future<Output = ()>,
+{
+    reap.await;
+    await_ytdlp_group_quiescence(pgid).await;
+    sweep().await;
+}
+
 /// Wall-clock bound for the subtitle language probe: a single info-JSON fetch.
 /// Best-effort — on timeout the download simply gets no subtitles.
 const SUBTITLE_PROBE_TIMEOUT: Duration = Duration::from_secs(60);
@@ -2688,16 +2701,20 @@ pub(crate) async fn run_live_ytdlp(
                         Ok(Err(e)) => {
                             progress.abort();
                             logs.abort();
-                            reap_child(&mut child, &mut group).await;
-                            await_ytdlp_group_quiescence(pgid).await;
-                            sweep_live_capture(
-                                &out,
-                                &part,
-                                &state,
-                                staging,
-                                None,
-                                Staging::Sweep,
-                                Exit::CaptureWaitFailed,
+                            reap_then_sweep(
+                                reap_child(&mut child, &mut group),
+                                pgid,
+                                || {
+                                    sweep_live_capture(
+                                        &out,
+                                        &part,
+                                        &state,
+                                        staging,
+                                        None,
+                                        Staging::Sweep,
+                                        Exit::CaptureWaitFailed,
+                                    )
+                                },
                             )
                             .await;
                             return Err(VideoError::runtime(format!(

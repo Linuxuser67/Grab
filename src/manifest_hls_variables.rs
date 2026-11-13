@@ -8,6 +8,7 @@
 use std::collections::HashMap;
 
 use broadcast_hls::{Define, MediaPlaylist};
+use percent_encoding::percent_decode_str;
 use url::Url;
 
 use super::{MAX_MANIFEST_BYTES, ManifestError};
@@ -76,16 +77,7 @@ pub(super) fn expand_media_playlist_with_imports(
                         "EXT-X-DEFINE has unsupported required attributes",
                     ));
                 }
-                let mut values = playlist_url
-                    .query_pairs()
-                    .filter(|(key, _)| key.as_ref() == name.as_str())
-                    .map(|(_, value)| value.into_owned());
-                let value = values
-                    .next()
-                    .ok_or_else(|| unsupported("EXT-X-DEFINE query parameter is missing"))?;
-                if values.next().is_some() {
-                    return Err(unsupported("EXT-X-DEFINE query parameter is ambiguous"));
-                }
+                let value = query_parameter(&playlist_url, &name)?;
                 (name, value)
             }
             Define::Import { name, extra_attrs } => {
@@ -143,6 +135,41 @@ pub(super) fn expand_media_playlist_with_imports(
         ));
     }
     Ok(Some(expanded.into_bytes()))
+}
+
+/// Read one URL query parameter using URI percent-decoding, not HTML form
+/// decoding. A '+' is literal unless percent-encoded; it must not be turned
+/// into a space. Bare keys, empty values, invalid UTF-8 and duplicate keys fail.
+fn query_parameter(url: &Url, name: &str) -> Result<String, ManifestError> {
+    let mut found = None;
+    for pair in url.query().unwrap_or_default().split('&') {
+        let (raw_key, raw_value) = match pair.split_once('=') {
+            Some((key, value)) => (key, Some(value)),
+            None => (pair, None),
+        };
+        let Ok(key) = percent_decode_str(raw_key).decode_utf8() else {
+            // An unrelated opaque query key cannot match the UTF-8 DEFINE name.
+            continue;
+        };
+        if key != name {
+            continue;
+        }
+        let raw_value = raw_value
+            .ok_or_else(|| unsupported("EXT-X-DEFINE query parameter has no associated value"))?;
+        let value = percent_decode_str(raw_value)
+            .decode_utf8()
+            .map_err(|_| unsupported("EXT-X-DEFINE query parameter value is not valid UTF-8"))?
+            .into_owned();
+        if value.is_empty() {
+            return Err(unsupported(
+                "EXT-X-DEFINE query parameter has an empty value",
+            ));
+        }
+        if found.replace(value).is_some() {
+            return Err(unsupported("EXT-X-DEFINE query parameter is ambiguous"));
+        }
+    }
+    found.ok_or_else(|| unsupported("EXT-X-DEFINE query parameter is missing"))
 }
 
 fn contains_variable_reference(text: &str) -> bool {
@@ -321,16 +348,7 @@ pub(super) fn expand_master_playlist_with_variables(
                         "EXT-X-DEFINE has unsupported required attributes",
                     ));
                 }
-                let mut values = playlist_url
-                    .query_pairs()
-                    .filter(|(key, _)| key.as_ref() == name.as_str())
-                    .map(|(_, value)| value.into_owned());
-                let value = values
-                    .next()
-                    .ok_or_else(|| unsupported("EXT-X-DEFINE query parameter is missing"))?;
-                if values.next().is_some() {
-                    return Err(unsupported("EXT-X-DEFINE query parameter is ambiguous"));
-                }
+                let value = query_parameter(&playlist_url, &name)?;
                 (name, value)
             }
             Define::Import { .. } => {
@@ -812,6 +830,23 @@ segment-{$token}.ts
             expand_media_playlist(BASE, body),
             Err(ManifestError::UnsupportedPlaylistFeature(_))
         ));
+    }
+
+    #[test]
+    fn query_parameter_decodes_percent_escapes_without_form_decoding() {
+        let url = Url::parse("https://cdn.example.test/live.m3u8?token=a+b%2Fc").unwrap();
+        assert_eq!(query_parameter(&url, "token").unwrap(), "a+b/c");
+    }
+
+    #[test]
+    fn query_parameter_rejects_bare_and_empty_values() {
+        for raw in [
+            "https://cdn.example.test/live.m3u8?token",
+            "https://cdn.example.test/live.m3u8?token=",
+        ] {
+            let url = Url::parse(raw).unwrap();
+            assert!(query_parameter(&url, "token").is_err(), "{raw}");
+        }
     }
 
     #[test]

@@ -71,70 +71,77 @@ pub(crate) enum YtdlpPlaylistEvent {
     },
 }
 
-/// Parse one tagged playlist event. File paths are the final, unsplit field:
-/// a semicolon in a legitimate filename must not change event identity.
+/// Decode one JSON string field.
+fn parse_event_string(raw: &str) -> Option<String> {
+    serde_json::from_str::<String>(raw).ok()
+}
+
+/// Decode a number or a JSON string containing a number.
+fn parse_event_u64(raw: &str) -> Option<u64> {
+    serde_json::from_str::<u64>(raw)
+        .ok()
+        .or_else(|| serde_json::from_str::<String>(raw).ok()?.parse().ok())
+}
+
+fn parse_event_index(raw: &str) -> Option<usize> {
+    usize::try_from(parse_event_u64(raw)?).ok()
+}
+
+/// Parse one invocation-tagged playlist event. The marker is built once by
+/// the runner; yt-dlp JSON-encodes values so tabs/newlines cannot split fields.
 pub(crate) fn parse_ytdlp_playlist_event(
     line: &str,
-    event_nonce: &str,
+    event_marker: &str,
 ) -> Option<YtdlpPlaylistEvent> {
     let line = line.trim_end_matches(['\r', '\n']);
-    let marker = format!("@GRAB:{event_nonce}:");
-    let line = line.strip_prefix(&marker)?;
-    let parse_index = |raw: &str| raw.parse::<usize>().ok();
-    let parse_bytes = |raw: Option<&str>| {
-        raw.filter(|value| *value != "NA")
-            .and_then(|value| value.parse::<u64>().ok())
-    };
+    let mut fields = line.strip_prefix(event_marker)?.split('\t');
 
-    if let Some(rest) = line.strip_prefix("START;") {
-        let mut fields = rest.splitn(3, ';');
-        let file_id = fields.next()?.to_string();
-        let playlist_index = parse_index(fields.next()?)?;
-        let filename = fields.next()?.to_string();
-        if file_id.is_empty() {
-            return None;
+    match fields.next()? {
+        "START" => {
+            let file_id = parse_event_string(fields.next()?)?;
+            let playlist_index = parse_event_index(fields.next()?)?;
+            let filename = parse_event_string(fields.next()?)?;
+            if file_id.is_empty() || fields.next().is_some() {
+                return None;
+            }
+            Some(YtdlpPlaylistEvent::Started {
+                file_id,
+                playlist_index,
+                filename,
+            })
         }
-        return Some(YtdlpPlaylistEvent::Started {
-            file_id,
-            playlist_index,
-            filename,
-        });
-    }
-
-    if let Some(rest) = line.strip_prefix("DONE;") {
-        let mut fields = rest.splitn(3, ';');
-        let file_id = fields.next()?.to_string();
-        let playlist_index = parse_index(fields.next()?)?;
-        let path = fields.next()?.to_string();
-        if file_id.is_empty() || path.is_empty() {
-            return None;
+        "DONE" => {
+            let file_id = parse_event_string(fields.next()?)?;
+            let playlist_index = parse_event_index(fields.next()?)?;
+            let path = parse_event_string(fields.next()?)?;
+            if file_id.is_empty() || path.is_empty() || fields.next().is_some() {
+                return None;
+            }
+            Some(YtdlpPlaylistEvent::Finished {
+                file_id,
+                playlist_index,
+                path,
+            })
         }
-        return Some(YtdlpPlaylistEvent::Finished {
-            file_id,
-            playlist_index,
-            path,
-        });
-    }
-
-    if let Some(rest) = line.strip_prefix("PROGRESS;") {
-        let mut fields = rest.splitn(6, ';');
-        let file_id = fields.next()?.to_string();
-        let playlist_index = parse_index(fields.next()?)?;
-        let status = fields.next()?;
-        if file_id.is_empty() || status == "error" {
-            return None;
+        "PROGRESS" => {
+            let file_id = parse_event_string(fields.next()?)?;
+            let playlist_index = parse_event_index(fields.next()?)?;
+            let status = parse_event_string(fields.next()?)?;
+            let downloaded = parse_event_u64(fields.next()?);
+            let raw_total = fields.next()?;
+            let raw_estimate = fields.next()?;
+            if file_id.is_empty() || status == "error" || fields.next().is_some() {
+                return None;
+            }
+            Some(YtdlpPlaylistEvent::Progress {
+                file_id,
+                playlist_index,
+                downloaded,
+                total: parse_event_u64(raw_total).or_else(|| parse_event_u64(raw_estimate)),
+            })
         }
-        let downloaded = parse_bytes(fields.next());
-        let total = parse_bytes(fields.next()).or_else(|| parse_bytes(fields.next()));
-        return Some(YtdlpPlaylistEvent::Progress {
-            file_id,
-            playlist_index,
-            downloaded,
-            total,
-        });
+        _ => None,
     }
-
-    None
 }
 
 /// Whether a `--newline` line announces a merge/extract phase.
@@ -341,14 +348,19 @@ pub(crate) fn last_error_line(output: &str, fallback: &str) -> String {
 mod playlist_event_tests {
     use super::{YtdlpPlaylistEvent, parse_ytdlp_playlist_event};
 
+    const MARKER: &str = "@GRAB:testnonce:";
+
     #[test]
-    fn rejects_playlist_events_from_other_invocations_and_unscoped_output() {
+    fn rejects_events_from_other_invocations_and_unscoped_output() {
         assert_eq!(
-            parse_ytdlp_playlist_event("@GRAB:othernonce:DONE;abc123;4;/tmp/a.mp4", "testnonce"),
+            parse_ytdlp_playlist_event(
+                "@GRAB:othernonce:DONE\t\"abc123\"\t4\t\"/tmp/a.mp4\"",
+                MARKER,
+            ),
             None
         );
         assert_eq!(
-            parse_ytdlp_playlist_event("[GrabPlaylistDone];abc123;4;/tmp/a.mp4", "testnonce"),
+            parse_ytdlp_playlist_event("[GrabPlaylistDone];abc123;4;/tmp/a.mp4", MARKER),
             None
         );
     }
@@ -357,8 +369,8 @@ mod playlist_event_tests {
     fn parses_tagged_playlist_file_events() {
         assert_eq!(
             parse_ytdlp_playlist_event(
-                "@GRAB:testnonce:START;abc123;4;/tmp/004 - title.mp4",
-                "testnonce"
+                "@GRAB:testnonce:START\t\"abc123\"\t4\t\"/tmp/004 - title.mp4\"",
+                MARKER
             ),
             Some(YtdlpPlaylistEvent::Started {
                 file_id: "abc123".to_string(),
@@ -368,8 +380,8 @@ mod playlist_event_tests {
         );
         assert_eq!(
             parse_ytdlp_playlist_event(
-                "@GRAB:testnonce:PROGRESS;abc123;4;downloading;512;1024;NA",
-                "testnonce"
+                "@GRAB:testnonce:PROGRESS\t\"abc123\"\t4\t\"downloading\"\t512\t1024\t\"NA\"",
+                MARKER
             ),
             Some(YtdlpPlaylistEvent::Progress {
                 file_id: "abc123".to_string(),
@@ -380,8 +392,8 @@ mod playlist_event_tests {
         );
         assert_eq!(
             parse_ytdlp_playlist_event(
-                "@GRAB:testnonce:DONE;abc123;4;/tmp/a;final.mp4",
-                "testnonce"
+                "@GRAB:testnonce:DONE\t\"abc123\"\t4\t\"/tmp/a;final.mp4\"",
+                MARKER
             ),
             Some(YtdlpPlaylistEvent::Finished {
                 file_id: "abc123".to_string(),
@@ -391,9 +403,39 @@ mod playlist_event_tests {
         );
         assert_eq!(
             parse_ytdlp_playlist_event(
-                "@GRAB:testnonce:PROGRESS;abc123;4;error;NA;NA;NA",
-                "testnonce"
+                "@GRAB:testnonce:PROGRESS\t\"abc123\"\t4\t\"error\"\t\"NA\"\t\"NA\"\t\"NA\"",
+                MARKER
             ),
+            None
+        );
+    }
+
+    #[test]
+    fn json_fields_preserve_delimiters_and_escaped_newlines() {
+        assert_eq!(
+            parse_ytdlp_playlist_event(
+                r#"@GRAB:testnonce:START	"extractor;id;with;semicolons"	7	"/tmp/title; with \"quotes\"\ncontinued.mp4""#,
+                MARKER
+            ),
+            Some(YtdlpPlaylistEvent::Started {
+                file_id: "extractor;id;with;semicolons".to_string(),
+                playlist_index: 7,
+                filename: "/tmp/title; with \"quotes\"\ncontinued.mp4".to_string(),
+            })
+        );
+    }
+
+    #[test]
+    fn rejects_malformed_json_and_invalid_indices() {
+        assert_eq!(
+            parse_ytdlp_playlist_event(
+                "@GRAB:testnonce:START\t\"abc123\"\t\"not-an-index\"\t\"file.mp4\"",
+                MARKER
+            ),
+            None
+        );
+        assert_eq!(
+            parse_ytdlp_playlist_event("@GRAB:testnonce:DONE\t\"abc123\"\t4\tnot-json", MARKER),
             None
         );
     }

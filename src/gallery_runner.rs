@@ -14,20 +14,6 @@ use crate::gallery_progress::{GalleryProgress, ProgressLine, parse_progress_line
 use crate::gallery_tools::GalleryError;
 use crate::video_spawn::ProcessGroupGuard;
 
-pub(crate) fn gallery_event_nonce() -> Result<String, GalleryError> {
-    let mut bytes = [0_u8; 16];
-    getrandom::fill(&mut bytes).map_err(|error| {
-        GalleryError::runtime(format!("couldn't generate gallery event nonce: {error}"))
-    })?;
-    const HEX: &[u8; 16] = b"0123456789abcdef";
-    let mut nonce = String::with_capacity(bytes.len() * 2);
-    for byte in bytes {
-        nonce.push(char::from(HEX[(byte >> 4) as usize]));
-        nonce.push(char::from(HEX[(byte & 0x0f) as usize]));
-    }
-    Ok(nonce)
-}
-
 /// Outcome of a gallery download.
 #[derive(Debug)]
 pub struct GalleryResult {
@@ -155,7 +141,9 @@ pub async fn run_gallery_download_with_proxy(
             "Cannot safely use a configured proxy for an untrusted browser handoff".to_string(),
         ));
     }
-    let event_nonce = gallery_event_nonce()?;
+    let event_nonce = crate::event_nonce::new_event_nonce().map_err(|error| {
+        GalleryError::runtime(format!("couldn't generate gallery event nonce: {error}"))
+    })?;
     let argv = download_argv_with_proxy(
         tool,
         &job.page_url,
@@ -376,20 +364,6 @@ pub(crate) fn classify_result(
 /// Shared by the card enqueue and the video-fallback path.
 pub fn gallery_speed_limit(settings: &crate::settings::AppSettings) -> Option<u64> {
     crate::download_rate::parse_rate(settings.speed_limit().trim())
-}
-
-#[cfg(test)]
-mod gallery_event_nonce_tests {
-    use super::gallery_event_nonce;
-
-    #[test]
-    fn nonce_is_hex_and_unique_per_run() {
-        let first = gallery_event_nonce().expect("operating-system randomness");
-        let second = gallery_event_nonce().expect("operating-system randomness");
-        assert_eq!(first.len(), 32);
-        assert!(first.bytes().all(|byte| byte.is_ascii_hexdigit()));
-        assert_ne!(first, second);
-    }
 }
 
 #[cfg(test)]

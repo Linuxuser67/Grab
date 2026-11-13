@@ -15,6 +15,7 @@ mod download_rate;
 mod download_row;
 mod download_store;
 mod engine_msg;
+mod event_nonce;
 mod extension_server;
 mod file_names;
 mod inline_add;

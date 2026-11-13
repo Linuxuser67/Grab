@@ -384,8 +384,10 @@ async fn run_video_playlist_download_inner(
 
     let (spec, merging) = unified_format_spec(None, "", &job.quality, job.audio_only);
     let merge_ext = merge_output_ext("mp4");
-    let event_nonce = crate::gallery_runner::gallery_event_nonce()
-        .map_err(|error| VideoError::Fetch(error.to_string()))?;
+    let event_nonce = crate::event_nonce::new_event_nonce().map_err(|error| {
+        VideoError::Fetch(format!("couldn't generate yt-dlp event nonce: {error}"))
+    })?;
+    let event_marker = format!("@GRAB:{event_nonce}:");
     let argv = playlist_download_argv(
         &job,
         &spec,
@@ -435,7 +437,7 @@ async fn run_video_playlist_download_inner(
             if is_ytdlp_merge_line(&line) {
                 merging_reader.store(true, std::sync::atomic::Ordering::SeqCst);
             }
-            match parse_ytdlp_playlist_event(&line, &event_nonce) {
+            match parse_ytdlp_playlist_event(&line, &event_marker) {
                 Some(YtdlpPlaylistEvent::Started {
                     file_id, filename, ..
                 }) => {

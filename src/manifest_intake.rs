@@ -5063,8 +5063,7 @@ video/variant.m3u8
             ManifestTransportPolicy::HttpFixture,
             Duration::from_millis(100),
         )
-        .await
-        .expect("optional timeout should preserve the current pathway");
+        .await;
         assert!(result.is_none());
         assert_eq!(steering.active_pathway_id, previous_pathway);
         assert!(

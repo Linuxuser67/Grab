@@ -1327,7 +1327,7 @@ impl DownloadManager {
     pub(crate) fn manifest_filename_for_extension(
         filename: Option<&str>,
         source_url: &str,
-        extension: &str,
+        container: crate::media_types::ManifestContainer,
     ) -> String {
         let fallback_stem = crate::file_names::title_from_manifest_url(source_url);
         let stem = filename
@@ -1339,7 +1339,7 @@ impl DownloadManager {
             })
             .filter(|stem| !stem.is_empty())
             .unwrap_or(&fallback_stem);
-        format!("{stem}.{extension}")
+        format!("{stem}.{}", container.extension())
     }
 
     /// Queue a native HLS/DASH selection after listing its destination off GTK.
@@ -1362,9 +1362,11 @@ impl DownloadManager {
         // master child playlists are intentionally not fetched here; their
         // conservative Matroska default avoids a second, potentially one-shot
         // manifest request before the queue row appears.
-        let extension = source.output_extension.as_deref().unwrap_or("mkv");
+        let container = source
+            .output_extension
+            .unwrap_or(crate::media_types::ManifestContainer::Matroska);
         let requested_name =
-            Self::manifest_filename_for_extension(filename, &source.url, extension);
+            Self::manifest_filename_for_extension(filename, &source.url, container);
 
         let guard = self.batch_guard();
         let item = self.enqueue_manifest_staged(source, &dir, Some(&requested_name), &existing)?;
@@ -1758,21 +1760,19 @@ impl DownloadManager {
                     crate::file_names::title_from_manifest_url(&source.url)
                 )
             });
-        match std::path::Path::new(&requested_name)
+        let extension = std::path::Path::new(&requested_name)
             .extension()
-            .and_then(|extension| extension.to_str())
-        {
-            Some(extension)
-                if extension.eq_ignore_ascii_case("mp4")
-                    || extension.eq_ignore_ascii_case("mkv")
-                    || extension.eq_ignore_ascii_case("ts") => {}
-            Some(_) => {
-                return Err(gettext(
-                    "Native HLS/DASH downloads require an MP4, MKV, or TS filename",
-                ));
+            .and_then(|extension| extension.to_str());
+        let _container = match extension {
+            Some(extension) => crate::media_types::ManifestContainer::from_extension(extension)
+                .ok_or_else(|| {
+                    gettext("Native HLS/DASH downloads require an MP4, MKV, or TS filename")
+                })?,
+            None => {
+                requested_name.push_str(".mkv");
+                crate::media_types::ManifestContainer::Matroska
             }
-            None => requested_name.push_str(".mkv"),
-        }
+        };
         let name = self.finalize_filename(&requested_name);
         let name = dedupe_filename(&name, |candidate| {
             let path = std::path::Path::new(dir).join(candidate);

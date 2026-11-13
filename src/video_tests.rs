@@ -10466,22 +10466,16 @@ fn a_closed_stop_receiver_stops_delivery_rather_than_authorising_it() {
 
 #[cfg(target_os = "linux")]
 #[test]
-fn a_group_that_refuses_to_quiesce_is_reported_rather_than_assumed() {
-    // A descendant that ignores its group kill must be *reported*, not treated
-    // as gone: the caller sweeps anyway, but the outcome stays observable.
+fn group_quiescence_waits_until_all_descendants_exit() {
     use std::os::unix::process::CommandExt as _;
     let dir = std::env::temp_dir().join(format!("grab-quiesce-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).unwrap();
-    let marker = dir.join("still-writing");
-    // A process in its own group that writes, then sleeps well past the wait.
-    let script = dir.join("stubborn");
+    let script = dir.join("recorder");
+    let descendant_pid_file = dir.join("recorder-descendant-pid");
     std::fs::write(
         &script,
-        format!(
-            "#!/bin/sh\nprintf 'x' >> '{}'\nsleep 30\n",
-            marker.display()
-        ),
+        "#!/bin/sh\nsleep 30 &\nprintf '%s' \"$!\" > \"$GRAB_TEST_DESCENDANT_PID_FILE\"\nwait\n",
     )
     .unwrap();
     {
@@ -10489,28 +10483,48 @@ fn a_group_that_refuses_to_quiesce_is_reported_rather_than_assumed() {
         std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
     }
     let mut child = std::process::Command::new(&script)
+        .env("GRAB_TEST_DESCENDANT_PID_FILE", &descendant_pid_file)
         .process_group(0)
         .spawn()
-        .expect("stubborn descendant");
+        .expect("recorder process");
     let pgid = child.id() as i32;
-    std::thread::sleep(std::time::Duration::from_millis(100));
-
-    let quiesced = crate::runtime::tokio_rt().block_on(await_group_quiescence(
-        pgid,
-        std::time::Duration::from_millis(300),
-    ));
+    let mut cleanup = GroupCleanup(Some(pgid));
+    let descendant = read_pid(&descendant_pid_file);
     assert!(
-        !quiesced,
-        "a live process group was reported as quiesced, so a reclaim would run \
-         under a writer that never stopped"
+        still_running(descendant),
+        "the recorder descendant must be running before quiescence begins"
     );
-    // Kill the whole group, not just the direct child: the script's
-    // `sleep 30` grandchild shares the group and would leak.
-    // SAFETY: constant signal number; ESRCH (already dead) is harmless.
-    unsafe {
-        libc::killpg(pgid, libc::SIGKILL);
-    }
-    let _ = child.wait();
+
+    // Start the group wait while the recorder and its descendant are alive.
+    // It must remain pending until the group is explicitly killed.
+    let quiescence = crate::runtime::tokio_rt().spawn(await_group_quiescence(pgid));
+    crate::runtime::tokio_rt().block_on(async {
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        assert!(
+            !quiescence.is_finished(),
+            "quiescence returned while the recorder descendant was still running"
+        );
+
+        // SAFETY: constant signal number; the process group belongs to this test.
+        unsafe {
+            libc::killpg(pgid, libc::SIGKILL);
+        }
+        let status = child.wait().expect("reap recorder leader after group kill");
+        assert!(
+            !status.success(),
+            "the recorder leader should be killed with its group"
+        );
+        tokio::time::timeout(std::time::Duration::from_secs(5), quiescence)
+            .await
+            .expect("the killed recorder process group should become quiescent")
+            .expect("quiescence task should not panic");
+    });
+    assert!(
+        !still_running(descendant),
+        "the child process must no longer be able to execute after group quiescence"
+    );
+    cleanup.disarm();
+    drop(cleanup);
     let _ = std::fs::remove_dir_all(&dir);
 }
 

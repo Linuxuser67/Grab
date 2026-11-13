@@ -1458,10 +1458,10 @@ impl DownloadManager {
     }
 
     /// Preserve the editable stem, but derive the media suffix from the selected rendition.
-    pub(crate) fn manifest_filename_for_extension(
+    pub(crate) fn manifest_filename_for_container(
         filename: Option<&str>,
         source_url: &str,
-        extension: &str,
+        container: crate::media_types::ManifestContainer,
     ) -> String {
         let fallback_stem = crate::file_names::title_from_manifest_url(source_url);
         let stem = filename
@@ -1473,7 +1473,7 @@ impl DownloadManager {
             })
             .filter(|stem| !stem.is_empty())
             .unwrap_or(&fallback_stem);
-        format!("{stem}.{extension}")
+        format!("{stem}.{}", container.extension())
     }
 
     /// Queue a native HLS/DASH selection after listing its destination off GTK.
@@ -1496,9 +1496,11 @@ impl DownloadManager {
         // master child playlists are intentionally not fetched here; their
         // conservative Matroska default avoids a second, potentially one-shot
         // manifest request before the queue row appears.
-        let extension = source.output_extension.as_deref().unwrap_or("mkv");
+        let container = source
+            .output_container
+            .unwrap_or(crate::media_types::ManifestContainer::Mkv);
         let requested_name =
-            Self::manifest_filename_for_extension(filename, &source.url, extension);
+            Self::manifest_filename_for_container(filename, &source.url, container);
 
         let guard = self.batch_guard();
         let item = self.enqueue_manifest_staged(source, &dir, Some(&requested_name), &existing)?;

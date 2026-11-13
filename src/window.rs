@@ -674,7 +674,7 @@ pub fn build_window(
                 }
                 if let Some(group) = item
                     .group()
-                    .filter(|group| group.is_valid() && is_group_member(item, group.id()))
+                    .filter(|group| is_group_member(item, group.id()))
                 {
                     all_groups.entry(group.id()).or_default().push(item.clone());
                 }
@@ -701,7 +701,7 @@ pub fn build_window(
                 let status = effective_status(item);
                 let group_key = item
                     .group()
-                    .filter(|group| group.is_valid() && is_group_member(item, group.id()))
+                    .filter(|group| is_group_member(item, group.id()))
                     .map(|group| (group.id(), bucket));
 
                 let mut shown = sel == 0 || status_filter_bucket(status) == sel;
@@ -791,7 +791,7 @@ pub fn build_window(
                 };
                 let group_key = item
                     .group()
-                    .filter(|group| group.is_valid() && is_group_member(item, group.id()))
+                    .filter(|group| is_group_member(item, group.id()))
                     .map(|group| (group.id(), bucket));
                 let location = RowPlacement {
                     section: bucket,

@@ -1713,7 +1713,7 @@ fn native_manifest_source_survives_queue_restore() {
         url: "https://cdn.example.test/master.m3u8?token=rotating".to_string(),
         kind: crate::media_types::ManifestKind::Hls,
         representation_key: "hls-variant-0123456789abcdef0123456789abcdef".into(),
-        output_extension: None,
+        output_container: None,
         audio_key: Some("hls-audio-0123456789abcdef0123456789abcdef".into()),
         subtitle_key: Some("hls-subtitle-0123456789abcdef0123456789abcdef".into()),
         subtitle_language: Some("en".to_string()),
@@ -1780,7 +1780,7 @@ fn native_manifest_queue_deduplicates_repeated_requested_filenames() {
         url: "https://cdn.example.test/master.m3u8".to_string(),
         kind: crate::media_types::ManifestKind::Hls,
         representation_key: "hls-variant-0123456789abcdef0123456789abcdef".into(),
-        output_extension: None,
+        output_container: None,
         audio_key: None,
         subtitle_key: None,
         subtitle_language: None,
@@ -1813,7 +1813,7 @@ fn native_manifest_without_a_supplied_name_uses_a_title_from_the_manifest_url() 
         url: "https://cdn.example.test/media/my_video.m3u8?token=rotating".to_string(),
         kind: crate::media_types::ManifestKind::Hls,
         representation_key: "hls-variant-0123456789abcdef0123456789abcdef".into(),
-        output_extension: None,
+        output_container: None,
         audio_key: None,
         subtitle_key: None,
         subtitle_language: None,
@@ -1839,7 +1839,7 @@ fn native_manifest_accepts_mp4_mkv_and_ts_but_rejects_other_containers() {
         url: "https://cdn.example.test/master.m3u8".to_string(),
         kind: crate::media_types::ManifestKind::Hls,
         representation_key: "hls-variant-0123456789abcdef0123456789abcdef".into(),
-        output_extension: None,
+        output_container: None,
         audio_key: None,
         subtitle_key: None,
         subtitle_language: None,
@@ -1903,23 +1903,23 @@ fn yt_dlp_fallback_corrects_an_auto_selected_ts_name_to_its_real_container() {
 #[test]
 fn native_manifest_filename_preserves_the_stem_and_uses_the_detected_container() {
     assert_eq!(
-        DownloadManager::manifest_filename_for_extension(
+        DownloadManager::manifest_filename_for_container(
             Some("movie.part.MKV"),
             "https://cdn.example.test/ignored.m3u8",
-            "ts",
+            crate::media_types::ManifestContainer::Ts,
         ),
         "movie.part.ts"
     );
     assert_eq!(
-        DownloadManager::manifest_filename_for_extension(
+        DownloadManager::manifest_filename_for_container(
             Some("movie.webm"),
             "https://cdn.example.test/ignored.mpd",
-            "mp4",
+            crate::media_types::ManifestContainer::Mp4,
         ),
         "movie.mp4"
     );
     assert_eq!(
-        DownloadManager::manifest_filename_for_extension(
+        DownloadManager::manifest_filename_for_container(
             None,
             "https://cdn.example.test/my_video.m3u8?token=secret",
             "ts",
@@ -1947,7 +1947,7 @@ fn invalid_native_manifest_source_is_skipped_on_restore() {
                 url: "https://cdn.example.test/another.mpd".to_string(),
                 kind: crate::media_types::ManifestKind::Dash,
                 representation_key: "dash-0123456789abcdef0123456789abcdef".into(),
-                output_extension: None,
+                output_container: None,
                 audio_key: None,
                 subtitle_key: None,
                 subtitle_language: None,
@@ -5471,7 +5471,7 @@ fn pause_sends_a_distinct_intent_to_native_live_manifest_workers() {
                 url: "https://example.com/live.m3u8".to_string(),
                 kind: crate::media_types::ManifestKind::Hls,
                 representation_key: "hls-variant-test".into(),
-                output_extension: None,
+                output_container: None,
                 audio_key: None,
                 subtitle_key: None,
                 subtitle_language: None,
@@ -5516,7 +5516,7 @@ fn finish_live_recording_sends_finish_without_marking_the_row_cancelled() {
                 url: "https://example.com/live.m3u8".to_string(),
                 kind: crate::media_types::ManifestKind::Hls,
                 representation_key: "hls-variant-test".into(),
-                output_extension: None,
+                output_container: None,
                 audio_key: None,
                 subtitle_key: None,
                 subtitle_language: None,

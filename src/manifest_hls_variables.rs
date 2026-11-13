@@ -91,7 +91,6 @@ fn query_parameter(url: &Url, name: &str) -> Result<String, ManifestError> {
     found.ok_or_else(|| unsupported("EXT-X-DEFINE query parameter is missing"))
 }
 
-
 /// Resolve all EXT-X-DEFINE declarations once for both master and media
 /// playlists. `inherited_variables` is Some for media playlists and None for
 /// master playlists, where IMPORT has no parent scope.

@@ -1525,9 +1525,7 @@ pub(crate) fn parse_hls_master_playlist(
     let mut expanded_variant_count = 0usize;
     for variant in master.variants.iter().filter(|variant| !variant.is_i_frame) {
         let additional_variants = variant.video.as_deref().map_or(1, |group_id| {
-            video_renditions_by_group
-                .get(group_id)
-                .map_or(0, Vec::len)
+            video_renditions_by_group.get(group_id).map_or(0, Vec::len)
         });
         expanded_variant_count = expanded_variant_count.saturating_add(additional_variants);
         if expanded_variant_count > MAX_HLS_MASTER_VARIANTS {

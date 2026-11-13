@@ -54,6 +54,58 @@ mod sizing_guard_tests {
     }
 }
 
+/// Substitute translated message placeholders in one pass. Inserted remote
+/// filenames and error text are never scanned again for placeholder syntax.
+fn format_gettext_template(template: &str, vars: &[(&str, &str)]) -> String {
+    let mut output = String::with_capacity(template.len());
+    let mut rest = template;
+    while let Some(start) = rest.find('{') {
+        output.push_str(&rest[..start]);
+        let tail = &rest[start..];
+        if let Some((key, value)) = vars.iter().find(|(key, _)| {
+            let placeholder = format!("{{{key}}}");
+            tail.starts_with(&placeholder)
+        }) {
+            output.push_str(value);
+            rest = &tail[key.len() + 2..];
+        } else {
+            output.push('{');
+            rest = &tail[1..];
+        }
+    }
+    output.push_str(rest);
+    output
+}
+
+#[cfg(test)]
+mod gettext_template_tests {
+    use super::*;
+
+    #[test]
+    fn inserted_values_are_not_rescanned_as_placeholders() {
+        assert_eq!(
+            format_gettext_template(
+                "Restored {restored}/{total}; first failure: {filename}: {error}",
+                &[
+                    ("restored", "2"),
+                    ("total", "5"),
+                    ("filename", "video-{total}.mkv"),
+                    ("error", "file contains {restored}"),
+                ],
+            ),
+            "Restored 2/5; first failure: video-{total}.mkv: file contains {restored}"
+        );
+    }
+
+    #[test]
+    fn unknown_placeholders_are_preserved() {
+        assert_eq!(
+            format_gettext_template("Unknown {other}; value {value}", &[("value", "ok")]),
+            "Unknown {other}; value ok"
+        );
+    }
+}
+
 /// Re-register the network restriction persisted for a guarded queue row.
 /// Keep the download and gallery restore paths identical as the policy evolves.
 fn recheck_public_host(url: &str, kind: &str) -> Result<(), String> {
@@ -1510,7 +1562,7 @@ impl DownloadManager {
         item.set_gallery_file_count(job.file_count.unwrap_or(0));
         item.set_gallery_files_done(0);
         item.set_gallery_url(url.clone());
-        item.set_detail("Gallery".to_string());
+        item.set_detail(gettext("Gallery"));
         let gallery_dir = std::path::Path::new(&dir).join(&unique_title);
         let mut stored_job = job.clone();
         stored_job.dest_dir = gallery_dir;
@@ -2200,7 +2252,7 @@ impl DownloadManager {
         };
         item.set_gallery_files_done(files_done);
         item.set_gallery_url(url.clone());
-        item.set_detail("Gallery".to_string());
+        item.set_detail(gettext("Gallery"));
         // Status: Done/Failed/Paused kept; Downloading → Queued via the _ arm.
         // (Scheduled doesn't apply to galleries.)
         item.set_status(match stored.status {
@@ -4871,7 +4923,7 @@ impl DownloadManager {
             Some(j) => j,
             None => {
                 // Detail before status: the status notify fires synchronously.
-                item.set_detail("Gallery job not found".to_string());
+                item.set_detail(gettext("Gallery job not found"));
                 item.set_status(DownloadStatus::Failed);
                 self.changed();
                 self.start_next();
@@ -5064,13 +5116,27 @@ impl DownloadManager {
                             total,
                         ) {
                             item_c.set_progress(fraction);
-                            item_c.set_detail(format!(
-                                "Gallery \u{2022} {done}/{total} files{file_progress}{file_part}"
+                            let done_text = done.to_string();
+                            let total_text = total.to_string();
+                            item_c.set_detail(format_gettext_template(
+                                &gettext("Gallery \u{2022} {done}/{total} files{file_progress}{file_part}"),
+                                &[
+                                    ("done", &done_text),
+                                    ("total", &total_text),
+                                    ("file_progress", &file_progress),
+                                    ("file_part", &file_part),
+                                ],
                             ));
                         } else {
                             item_c.set_progress(0.0);
-                            item_c.set_detail(format!(
-                                "Gallery \u{2022} {done} files{file_progress}{file_part}"
+                            let done_text = done.to_string();
+                            item_c.set_detail(format_gettext_template(
+                                &gettext("Gallery \u{2022} {done} files{file_progress}{file_part}"),
+                                &[
+                                    ("done", &done_text),
+                                    ("file_progress", &file_progress),
+                                    ("file_part", &file_part),
+                                ],
                             ));
                         }
                         // Row and owner properties are updated immediately.
@@ -5099,9 +5165,9 @@ impl DownloadManager {
                                 let done =
                                     crate::gallery_runner::done_count(r.files_completed, r.skipped);
                                 let detail = if r.exit_code.is_some() {
-                                    "Gallery \u{2022} some failed".to_string()
+                                                    gettext("Gallery \u{2022} some failed")
                                 } else {
-                                    "Gallery".to_string()
+                                    gettext("Gallery")
                                 };
                                 item_c.set_gallery_files_done(done);
                                 let progress = if r.exit_code.is_some() {
@@ -5143,7 +5209,10 @@ impl DownloadManager {
                                 // notify fires synchronously and opens the dialog,
                                 // which reads these fields.
                                 let summary = e.lines().next().unwrap_or(&e).trim();
-                                item_c.set_detail(format!("Gallery failed: {summary}"));
+                                item_c.set_detail(format_gettext_template(
+                                    &gettext("Gallery failed: {summary}"),
+                                    &[("summary", summary)],
+                                ));
                                 item_c.set_error_log(e.clone());
                                 this.finish_gallery_file_rows(item_c.id(), DownloadStatus::Failed);
                                 item_c.set_status(DownloadStatus::Failed);
@@ -5720,7 +5789,13 @@ impl DownloadManager {
                 .collect::<HashMap<_, _>>()
         })
         .await
-        .map_err(|error| format!("Could not inspect Undo destinations: {error:?}"))?;
+        .map_err(|error| {
+            let message = format!("{error:?}");
+            format_gettext_template(
+                &gettext("Could not inspect Undo destinations: {error}"),
+                &[("error", &message)],
+            )
+        })?;
 
         let _batch = self.batch_guard();
         let mut restored = 0;
@@ -5734,7 +5809,7 @@ impl DownloadManager {
                 Some(Err(error)) => failures.push((snapshot.filename, error.clone())),
                 None => failures.push((
                     snapshot.filename,
-                    "destination listing was not available".to_string(),
+                    gettext("destination listing was not available"),
                 )),
             }
         }
@@ -5743,9 +5818,20 @@ impl DownloadManager {
             Ok(restored)
         } else {
             let (filename, error) = &failures[0];
-            Err(format!(
-                "Restored {restored} of {total} downloads; {} could not be restored. First failure for {filename}: {error}",
-                failures.len()
+            let restored_text = restored.to_string();
+            let total_text = total.to_string();
+            let failed_text = failures.len().to_string();
+            Err(format_gettext_template(
+                &gettext(
+                    "Restored {restored} of {total} downloads; {failed} could not be restored. First failure for {filename}: {error}",
+                ),
+                &[
+                    ("restored", &restored_text),
+                    ("total", &total_text),
+                    ("failed", &failed_text),
+                    ("filename", filename),
+                    ("error", error),
+                ],
             ))
         }
     }
@@ -5761,8 +5847,20 @@ impl DownloadManager {
             crate::video_staging::try_dir_file_names(std::path::Path::new(&dir))
         })
         .await
-        .map_err(|error| format!("Could not inspect Undo destination: {error:?}"))?
-        .map_err(|error| format!("Could not inspect Undo destination: {error}"))?;
+        .map_err(|error| {
+            let message = format!("{error:?}");
+            format_gettext_template(
+                &gettext("Could not inspect Undo destination: {error}"),
+                &[("error", &message)],
+            )
+        })?
+        .map_err(|error| {
+            let message = error.to_string();
+            format_gettext_template(
+                &gettext("Could not inspect Undo destination: {error}"),
+                &[("error", &message)],
+            )
+        })?;
         Ok(self.unremove_with_listing(snap, &existing))
     }
 

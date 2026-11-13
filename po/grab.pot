@@ -8,7 +8,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version: grab\n"
 "Report-Msgid-Bugs-To: https://github.com/Linuxuser67/Grab/issues\n"
-"POT-Creation-Date: 2026-09-28 11:25+0100\n"
+"POT-Creation-Date: 2026-11-13 09:24+0100\n"
 "PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
 "Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
 "Language-Team: LANGUAGE <LL@li.org>\n"
@@ -203,6 +203,50 @@ msgstr ""
 
 #: src/download.rs:1947
 msgid "Could not rename {name}: {error}"
+msgstr ""
+
+#: src/download.rs:1565 src/download.rs:2255 src/download.rs:5170 src/inline_add.rs:2603
+msgid "Gallery"
+msgstr ""
+
+#: src/download.rs:4434 src/download.rs:4500
+msgid "Gallery file failed"
+msgstr ""
+
+#: src/download.rs:4926
+msgid "Gallery job not found"
+msgstr ""
+
+#: src/download.rs:5122
+msgid "Gallery • {done}/{total} files{file_progress}{file_part}"
+msgstr ""
+
+#: src/download.rs:5134
+msgid "Gallery • {done} files{file_progress}{file_part}"
+msgstr ""
+
+#: src/download.rs:5168
+msgid "Gallery • some failed"
+msgstr ""
+
+#: src/download.rs:5213
+msgid "Gallery failed: {summary}"
+msgstr ""
+
+#: src/download.rs:5795
+msgid "Could not inspect Undo destinations: {error}"
+msgstr ""
+
+#: src/download.rs:5812
+msgid "destination listing was not available"
+msgstr ""
+
+#: src/download.rs:5826
+msgid "Restored {restored} of {total} downloads; {failed} could not be restored. First failure for {filename}: {error}"
+msgstr ""
+
+#: src/download.rs:5853 src/download.rs:5860
+msgid "Could not inspect Undo destination: {error}"
 msgstr ""
 
 #: src/inline_add.rs:874

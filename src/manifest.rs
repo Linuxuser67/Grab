@@ -1555,8 +1555,8 @@ pub(crate) fn parse_hls_master_playlist(
                     .and_then(|attributes| attributes.get(name))
                     .map(|value| value.as_str().to_string())
             };
-            let stable_variant_id = variant_attribute("STABLE-VARIANT-ID")
-                .filter(|value| !value.is_empty());
+            let stable_variant_id =
+                variant_attribute("STABLE-VARIANT-ID").filter(|value| !value.is_empty());
             let video_range = variant_attribute("VIDEO-RANGE");
             if video_range
                 .as_deref()

@@ -1459,14 +1459,14 @@
         <p>Embedded subtitles no longer leave a sidecar file alongside the video, and Clear Finished greys out when nothing is finished.</p>
       </description>
     </release>
-        <release version="4.2.1" date="2026-09-22">
+    <release version="4.2.1" date="2026-09-22">
       <description>
         <p>Hotfix: the tools install popover no longer stalls on
         "Downloading" after the downloads complete — each row now
         flips to Installed with its probed version.</p>
       </description>
     </release>
-<release version="4.2.0" date="2026-09-22">
+    <release version="4.2.0" date="2026-09-22">
       <description>
         <p>Beta: failed downloads can be retried from a toast with the failure count, the shortcuts dialog documents the queue search, and the internals get a cleanup pass.</p>
       </description>

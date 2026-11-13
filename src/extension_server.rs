@@ -2989,8 +2989,7 @@ mod tests {
         std::fs::write(&second, contents).expect("second cookie file");
         assert_eq!(handoff_cookie_hash(&first), handoff_cookie_hash(&second));
 
-        std::fs::write(&oversized, vec![b'x'; MAX_BODY_BYTES + 1])
-            .expect("oversized cookie file");
+        std::fs::write(&oversized, vec![b'x'; MAX_BODY_BYTES + 1]).expect("oversized cookie file");
         assert_eq!(handoff_cookie_hash(&oversized), None);
     }
 

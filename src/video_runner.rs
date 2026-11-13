@@ -70,7 +70,6 @@ impl<R> YtdlpStdoutReader<R> {
 
 impl<R: tokio::io::AsyncRead + Unpin> YtdlpStdoutReader<R> {
     async fn next_line(&mut self) -> std::io::Result<YtdlpStdoutLine> {
-        use tokio::io::AsyncBufReadExt as _;
 
         if self.eof {
             return Ok(YtdlpStdoutLine::Eof);
@@ -98,7 +97,11 @@ impl<R: tokio::io::AsyncRead + Unpin> YtdlpStdoutReader<R> {
                         }
                     }
                     (
-                        record_bytes + usize::from(newline.is_some()),
+                        if newline.is_some() {
+                            record_bytes + 1
+                        } else {
+                            record_bytes
+                        },
                         newline.is_some(),
                         false,
                     )
@@ -407,7 +410,6 @@ async fn run_video_playlist_download_inner(
     let tx_reader = tx.clone();
     let expected_root = canonical_dest.clone();
     let progress = tokio::spawn(async move {
-        use tokio::io::AsyncBufReadExt as _;
         let mut stdout_reader = YtdlpStdoutReader::new(stdout);
         let mut summary = PlaylistStreamSummary::default();
         let mut current_file: Option<String> = None;
@@ -1517,7 +1519,6 @@ async fn run_ytdlp_attempt(
     abort: &mut oneshot::Receiver<StopIntent>,
     timeout: Duration,
 ) -> Result<(Option<()>, Option<String>, Option<StopIntent>), VideoError> {
-    use tokio::io::AsyncBufReadExt as _;
     let guarded_argv = argv.to_vec();
     let guarded_proxy = crate::video_spawn::guard_untrusted_args(&guarded_argv)?;
     let mut cmd = ytdlp_command(youtube_bin).await;
@@ -2420,7 +2421,6 @@ pub(crate) async fn run_live_ytdlp(
     playlist_index: Option<usize>,
 ) -> Result<Option<u64>, VideoError> {
     use crate::engine_msg::EngineMsg;
-    use tokio::io::AsyncBufReadExt as _;
     // Fresh capture: a crashed run's live file must never be resumed into (append-only stream) nor adopted as an empty fresh capture.
     let ext = if job.audio_only { "m4a" } else { "mp4" };
     // Capture inside the row's staging dir: the `.part` shell stays hidden while
@@ -2574,7 +2574,7 @@ pub(crate) async fn run_live_ytdlp(
             // Announce once recording is confirmed (same "Recording…" the file watcher sends, so whichever fires first wins).
             let mut announced = false;
             loop {
-            let line = match stdout_reader.next_line().await {
+                let line = match stdout_reader.next_line().await {
                 Ok(YtdlpStdoutLine::Line(line)) => line,
                 Ok(YtdlpStdoutLine::SkippedOversized) => {
                     *lock_recover(&last_progress_p) = std::time::Instant::now();
@@ -2582,11 +2582,11 @@ pub(crate) async fn run_live_ytdlp(
                     continue;
                 }
                 Ok(YtdlpStdoutLine::Eof) => break,
-                Err(error) => {
-                    tracing::warn!(error = %error, "could not continue reading yt-dlp stdout");
-                    break;
-                }
-            };
+                    Err(error) => {
+                        tracing::warn!(error = %error, "could not continue reading yt-dlp stdout");
+                        break;
+                    }
+                };
                 // Any stdout line proves the recorder is alive.
                 *lock_recover(&last_progress_p) = std::time::Instant::now();
                 if let Some(p) = parse_ytdlp_template(&line) {
@@ -2962,7 +2962,6 @@ pub(crate) async fn run_hls_ytdlp(
     playlist_index: Option<usize>,
 ) -> Result<Option<u64>, VideoError> {
     use crate::engine_msg::EngineMsg;
-    use tokio::io::AsyncBufReadExt as _;
     tokio::fs::create_dir_all(staging)
         .await
         .map_err(VideoError::staging)?;

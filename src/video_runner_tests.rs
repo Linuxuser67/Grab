@@ -637,7 +637,6 @@ fn live_remux_retries_known_mp4_timestamp_mux_failures_only() {
     );
 }
 
-
 #[tokio::test]
 async fn ytdlp_stdout_reader_lossily_decodes_and_continues_after_invalid_utf8() {
     let bytes = b"before\\ninvalid:\\xff\\nafter\\n".to_vec();

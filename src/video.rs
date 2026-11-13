@@ -32,6 +32,31 @@ pub use crate::video_quality::{
 };
 /// Facade: attempt orchestration lives in [`video_runner`](crate::video_runner) now.
 pub use crate::video_runner::{StopIntent, run_video_download};
+
+/// Resolve a closed stop channel conservatively. The manager owns the sender;
+/// dropping it during teardown must preserve an in-progress capture rather
+/// than silently deleting media that has already been recorded.
+pub(crate) fn stop_intent_or_pause<T>(result: Result<StopIntent, T>) -> StopIntent {
+    result.unwrap_or(StopIntent::Pause)
+}
+
+#[cfg(test)]
+mod stop_intent_tests {
+    use super::{StopIntent, stop_intent_or_pause};
+
+    #[test]
+    fn closed_stop_channel_preserves_captured_media() {
+        assert_eq!(stop_intent_or_pause::<()>(Err(())), StopIntent::Pause);
+        assert_eq!(
+            stop_intent_or_pause::<()>(Ok(StopIntent::Discard)),
+            StopIntent::Discard
+        );
+        assert_eq!(
+            stop_intent_or_pause::<()>(Ok(StopIntent::Finish)),
+            StopIntent::Finish
+        );
+    }
+}
 /// Facade: spawn plumbing + fetch resolve live in
 /// [`video_spawn`](crate::video_spawn) now.
 pub use crate::video_spawn::fetch_video_infos;

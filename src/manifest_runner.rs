@@ -2853,7 +2853,7 @@ async fn fetch_resources_with_stop(
         tokio::select! {
             biased;
             stop = &mut *abort => ResourceFetchResult::Stopped(
-                stop.unwrap_or(crate::video::StopIntent::Discard),
+                crate::video::stop_intent_or_pause(stop),
             ),
             result = jobs.try_for_each(|_| async { Ok(()) }) => {
                 result.map_or_else(

@@ -760,7 +760,7 @@ impl OrderedTrackWriter {
                 self.output.sync_all().await
                     .map_err(|error| format!("Could not sync the interrupted manifest track: {error}"))?;
                 return Ok(AppendNextOutcome::Stopped(
-                    stop.unwrap_or(crate::video::StopIntent::Discard),
+                    crate::video::stop_intent_or_pause(stop),
                 ));
             }
             result = tokio::io::copy(&mut input, &mut hashing_output) => {

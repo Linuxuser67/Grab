@@ -1120,7 +1120,7 @@ pub(super) async fn run_live_dash_tracks(
         tokio::select! {
             biased;
             stop = &mut *abort => {
-                finish_capture!(match stop.unwrap_or(crate::video::StopIntent::Discard) {
+                finish_capture!(match crate::video::stop_intent_or_pause(stop) {
                     crate::video::StopIntent::Pause => DashLiveCaptureOutcome::Paused,
                     crate::video::StopIntent::Finish => DashLiveCaptureOutcome::Finish,
                     crate::video::StopIntent::Discard => DashLiveCaptureOutcome::Discard,
@@ -1132,7 +1132,7 @@ pub(super) async fn run_live_dash_tracks(
         let lookup = tokio::select! {
             biased;
             stop = &mut *abort => {
-                finish_capture!(match stop.unwrap_or(crate::video::StopIntent::Discard) {
+                finish_capture!(match crate::video::stop_intent_or_pause(stop) {
                     crate::video::StopIntent::Pause => DashLiveCaptureOutcome::Paused,
                     crate::video::StopIntent::Finish => DashLiveCaptureOutcome::Finish,
                     crate::video::StopIntent::Discard => DashLiveCaptureOutcome::Discard,

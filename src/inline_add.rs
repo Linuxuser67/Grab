@@ -1621,6 +1621,220 @@ async fn queue_plain(
     Ok(())
 }
 
+struct PlaylistImportRequest {
+    manager: Rc<DownloadManager>,
+    guarded_child_hosts: PublicHostLeases,
+    owner_generation: u64,
+    base_dir: String,
+    title: String,
+    group_title: String,
+    page_url: String,
+    existing_destination: Option<String>,
+    chosen: Vec<(usize, crate::media_types::PlaylistItem)>,
+    scheduled_at: Option<i64>,
+    audio_only: bool,
+}
+
+struct PlaylistImportOutcome {
+    accepted_indices: Vec<usize>,
+    skipped_by_host_limit: usize,
+}
+
+/// Create or inspect the playlist's dedicated destination away from the GTK
+/// context because the selected download folder may be a network mount.
+async fn prepare_playlist_destination(
+    existing_destination: Option<String>,
+    base_dir: String,
+    title: String,
+) -> Result<String, String> {
+    match gio::spawn_blocking(move || {
+        let dir = existing_destination
+            .unwrap_or_else(|| crate::file_names::collection_subdir(&base_dir, &title));
+        let path = std::path::Path::new(&dir);
+        let metadata = std::fs::symlink_metadata(path)?;
+        if metadata.file_type().is_symlink() || !metadata.is_dir() {
+            return Err(std::io::Error::from(std::io::ErrorKind::NotADirectory));
+        }
+        crate::video_staging::try_dir_file_names(path).map(|_| ())?;
+        Ok::<_, std::io::Error>(dir)
+    })
+    .await
+    {
+        Ok(Ok(dir)) => Ok(dir),
+        Ok(Err(error))
+            if matches!(
+                error.kind(),
+                std::io::ErrorKind::NotFound | std::io::ErrorKind::NotADirectory
+            ) =>
+        {
+            Err(gettext("The playlist destination folder is invalid"))
+        }
+        Ok(Err(error)) => {
+            tracing::warn!("playlist import directory listing failed: {error}");
+            Err(gettext("Could not inspect the download folder"))
+        }
+        Err(error) => {
+            tracing::warn!("playlist import dir setup failed: {error:?}");
+            Err(gettext("Could not prepare the download folder"))
+        }
+    }
+}
+
+fn playlist_host_limit_suffix(skipped: usize) -> String {
+    ngettext(
+        "{n} item was also skipped because the collection exceeded the limit of {limit} distinct hosts.",
+        "{n} items were also skipped because the collection exceeded the limit of {limit} distinct hosts.",
+        skipped as u32,
+    )
+    .replace("{n}", &skipped.to_string())
+    .replace(
+        "{limit}",
+        &crate::download_net::MAX_GUARDED_CHILD_HOSTS_PER_COLLECTION.to_string(),
+    )
+}
+
+fn playlist_host_limit_notice(skipped: usize) -> String {
+    ngettext(
+        "Skipped {n} selected item because the collection exceeded the limit of {limit} distinct hosts.",
+        "Skipped {n} selected items because the collection exceeded the limit of {limit} distinct hosts.",
+        skipped as u32,
+    )
+    .replace("{n}", &skipped.to_string())
+    .replace(
+        "{limit}",
+        &crate::download_net::MAX_GUARDED_CHILD_HOSTS_PER_COLLECTION.to_string(),
+    )
+}
+
+/// Apply the selected entries to one playlist owner. This async helper performs
+/// filesystem inspection on a blocking worker; its queue mutations still run
+/// on the caller's GLib context.
+async fn import_playlist_selection(
+    request: PlaylistImportRequest,
+) -> Result<Option<PlaylistImportOutcome>, String> {
+    let PlaylistImportRequest {
+        manager,
+        guarded_child_hosts,
+        owner_generation,
+        base_dir,
+        title,
+        group_title,
+        page_url,
+        existing_destination,
+        chosen,
+        scheduled_at,
+        audio_only,
+    } = request;
+
+    let dir = prepare_playlist_destination(existing_destination, base_dir, title).await?;
+
+    // The card may have been closed while the blocking directory inspection
+    // ran. Its lease scope is set to None on close; do not let this stale
+    // picker enqueue or reacquire policy entries.
+    if !guarded_child_hosts
+        .borrow()
+        .is_current(owner_generation)
+    {
+        return Ok(None);
+    }
+
+    // Keep the import atomic: the one owner and all its passive children enter
+    // the queue together, then the scheduler sees one playlist job.
+    let _batch = manager.batch_guard();
+    let mut failed: Option<String> = None;
+    let mut skipped_by_host_limit = 0usize;
+    let mut accepted_indices = Vec::with_capacity(chosen.len());
+    let mut playlist_files = Vec::with_capacity(chosen.len());
+
+    for (index, entry) in &chosen {
+        let item_page_url = crate::video_probe::story_segment_url(&page_url, &entry.id)
+            .unwrap_or_else(|| entry.page_url.to_string());
+        let inheritance = {
+            let mut lease_scope = guarded_child_hosts.borrow_mut();
+            if lease_scope.generation != owner_generation {
+                Err(crate::download_net::CollectionHostError::UnsafeDestination)
+            } else {
+                match lease_scope.hosts.as_mut() {
+                    Some(seen_hosts) => seen_hosts.inherit(&page_url, &item_page_url),
+                    None => Err(crate::download_net::CollectionHostError::UnsafeDestination),
+                }
+            }
+        };
+
+        match inheritance {
+            Ok(()) => {}
+            Err(crate::download_net::CollectionHostError::TooManyDistinctHosts) => {
+                skipped_by_host_limit += 1;
+                continue;
+            }
+            Err(crate::download_net::CollectionHostError::PolicyCapReached) => {
+                failed = Some(gettext(
+                    "Grab reached its limit for simultaneously protected public download hosts. Retry after another transfer finishes.",
+                ));
+                break;
+            }
+            Err(crate::download_net::CollectionHostError::UnsafeDestination) => {
+                failed = Some(gettext(
+                    "A selected item was rejected because its destination could not be verified as public.",
+                ));
+                break;
+            }
+        }
+
+        playlist_files.push(crate::media_types::VideoPlaylistFile {
+            id: entry.id.to_string(),
+            title: entry.title.to_string(),
+            page_url: item_page_url,
+            status: crate::download_store::DownloadStatus::Queued,
+            progress: 0.0,
+            path: None,
+        });
+        accepted_indices.push(*index);
+    }
+
+    if let Some(error) = failed {
+        return Err(if skipped_by_host_limit > 0 {
+            format!("{error} {}", playlist_host_limit_suffix(skipped_by_host_limit))
+        } else {
+            error
+        });
+    }
+
+    if !playlist_files.is_empty() {
+        let owner = manager.enqueue_video_playlist_staged(
+            &page_url,
+            &group_title,
+            &dir,
+            playlist_files,
+            manager.settings().video_quality(),
+            audio_only,
+        )?;
+        apply_scheduled_at(&owner, scheduled_at);
+    }
+
+    Ok(Some(PlaylistImportOutcome {
+        accepted_indices,
+        skipped_by_host_limit,
+    }))
+}
+
+/// Report an import error, restoring the picker for queue-all's off-screen flow.
+fn show_playlist_import_error(
+    error_caption: &gtk4::Label,
+    add_btn: &gtk4::Button,
+    nav: &adw::NavigationView,
+    picker_page: &adw::NavigationPage,
+    queue_all: bool,
+    message: &str,
+) {
+    error_caption.set_text(message);
+    error_caption.set_visible(true);
+    add_btn.set_sensitive(true);
+    if queue_all && crate::window_rows::form_is_visible(nav) {
+        nav.push(picker_page);
+    }
+}
+
 fn push_playlist_items_page(
     nav: &adw::NavigationView,
     manager: Rc<DownloadManager>,
@@ -1639,8 +1853,6 @@ fn push_playlist_items_page(
 
     let count = playlist.items.len();
     let truncated = crate::video_probe::playlist_truncated(&playlist);
-    // Titles; the truncation notice sits under the header as a dimmed
-    // caption.
     let titles = playlist
         .items
         .iter()
@@ -1653,7 +1865,6 @@ fn push_playlist_items_page(
         .orientation(gtk4::Orientation::Vertical)
         .spacing(6)
         .build();
-    // HIG padding between the grid and the scrolled viewport edges.
     list_box.set_margin_top(12);
     list_box.set_margin_bottom(12);
     list_box.set_margin_start(12);
@@ -1670,18 +1881,12 @@ fn push_playlist_items_page(
             .build();
         list_box.append(&notice);
     }
-    // Playlist entries are yt-dlp video pages, so one output-mode choice
-    // applies to every selected item. Torrent/magnet pickers deliberately
-    // have no media-mode control because torrent files are arbitrary content.
     let audio_only = gtk4::CheckButton::builder()
         .label(gettext("Download audio only"))
         .halign(gtk4::Align::Start)
         .build();
     list_box.append(&audio_only);
-    // Small selections use their natural height; long lists scroll within
-    // the grid's capped viewport. Captions stay outside the scroll area.
     list_box.append(grid.widget());
-    // The error caption lives under the list, like the old row list.
     let error_caption = gtk4::Label::builder()
         .label("")
         .css_classes(["error", "caption"])
@@ -1691,8 +1896,6 @@ fn push_playlist_items_page(
     list_box.append(&error_caption);
 
     let toolbar = adw::ToolbarView::new();
-    // Compact header instead of the auto AdwHeaderBar: back + title + count
-    // on one tight row, no 48px of empty chrome around a centered title.
     let (header, _count_label) = picker_header(
         nav,
         &playlist.title,
@@ -1709,273 +1912,96 @@ fn push_playlist_items_page(
         .build();
     picker_enter_confirms(&picker_page, &add_btn);
 
-    // The action counts the live selection (see `GalleryGrid::wire_selection_bar`).
     grid.wire_selection_bar(&select_all_btn, &select_none_btn, &add_btn, |n| {
         ngettext("_Queue {} item", "_Queue {} items", n as u32).replace("{}", &n.to_string())
     });
 
-    // The card owns these host leases so they are released with the picker,
-    // including when the card closes while a partial import is pending.
-    {
-        let nav_on_error = nav.clone();
-        let picker_page_on_error = picker_page.clone();
-        let guarded_child_hosts = Rc::clone(&owner.public_host_leases);
-        let owner_generation = owner.generation;
+    let nav_on_error = nav.clone();
+    let picker_page_on_error = picker_page.clone();
+    let guarded_child_hosts = Rc::clone(&owner.public_host_leases);
+    let owner_generation = owner.generation;
+    let close_card = Rc::clone(&owner.close_card);
+    let grid_for_import = grid.clone();
+    let add_btn_click = add_btn.clone();
+    let add_btn_guard = add_btn.clone();
+    add_btn_click.clone().connect_clicked(move |_| {
+        // Enter emits clicked directly, bypassing sensitivity, so guard against
+        // a second import while the previous selection is being committed.
+        if !add_btn_guard.is_sensitive() {
+            return;
+        }
 
-        let close_card = Rc::clone(&owner.close_card);
-        let grid = grid.clone();
-        let add_btn_click = add_btn.clone();
-        let add_btn_guard = add_btn.clone();
-        add_btn_click.clone().connect_clicked(move |_| {
-            // Guard against re-entry: Enter emits clicked directly, bypassing
-            // the sensitivity check, so a second press while the import is in
-            // flight would enqueue duplicates.
-            if !add_btn_guard.is_sensitive() {
-                return;
-            }
-            let picked: Vec<usize> = grid.selected_indices();
-            let picked_set: std::collections::HashSet<usize> = picked.into_iter().collect();
-            // Owned clones for the async import below.
-            let chosen: Vec<(usize, crate::media_types::PlaylistItem)> = playlist
-                .items
-                .iter()
-                .enumerate()
-                .filter(|(i, _)| picked_set.contains(i))
-                .map(|(i, item)| (i, item.clone()))
-                .collect();
-            if chosen.is_empty() {
-                error_caption.set_text(&gettext("Select at least one item"));
-                error_caption.set_visible(true);
-                return;
-            }
-            // Every playlist is one collection owner, including a playlist
-            // with only one entry. Create and inspect its titled subfolder off
-            // GTK because destination paths may be network mounts.
-            let base_dir = manager.resolve_dir(Some(&dest_dir.borrow()));
-            let title = playlist.title.clone();
-            // The directory worker consumes `title`; retain a separate copy
-            // for the collection metadata assigned after the async import.
-            let group_title = playlist.title.clone();
-            // Disable the button while the import is in flight: a second
-            // click would see the selection unchanged and enqueue duplicates.
-            add_btn_guard.set_sensitive(false);
-            let manager = manager.clone();
-            let grid = grid.clone();
-            let error_caption = error_caption.clone();
-            let close_card = close_card.clone();
-            let page_url = playlist.page_url.clone();
-            // Re-imports use the original owner folder even if the extractor's
-            // collection title has changed since the first selection.
-            let existing_destination =
-                manager.video_playlist_destination_for_url(&page_url);
-            let add_btn = add_btn_guard.clone();
-            let audio_only = audio_only.is_active();
-            // The GTK clicked handler is an `Fn` and may run repeatedly;
-            // clone the shared collection-host state for each import future.
-            let guarded_child_hosts = guarded_child_hosts.clone();
-            let group_title = group_title.clone();
-            let nav_on_error = nav_on_error.clone();
-            let picker_page_on_error = picker_page_on_error.clone();
-            glib::spawn_future_local(async move {
-                let reveal_picker_on_error = || {
-                    if queue_all && crate::window_rows::form_is_visible(&nav_on_error) {
-                        nav_on_error.push(&picker_page_on_error);
-                    }
-                };
-                // Create one titled output folder per playlist. The listing
-                // runs off GTK because downloads may live on network mounts.
-                let dir = match gio::spawn_blocking(move || {
-                    let dir = existing_destination
-                        .unwrap_or_else(|| crate::file_names::collection_subdir(&base_dir, &title));
-                    let path = std::path::Path::new(&dir);
-                    let metadata = std::fs::symlink_metadata(path)?;
-                    if metadata.file_type().is_symlink() || !metadata.is_dir() {
-                        return Err(std::io::Error::from(std::io::ErrorKind::NotADirectory));
-                    }
-                    crate::video_staging::try_dir_file_names(path).map(|_| ())?;
-                    Ok::<_, std::io::Error>(dir)
-                })
-                .await
-                {
-                    Ok(Ok(dir)) => dir,
-                    Ok(Err(error))
-                        if matches!(
-                            error.kind(),
-                            std::io::ErrorKind::NotFound | std::io::ErrorKind::NotADirectory
-                        ) =>
-                    {
-                        error_caption.set_text(&gettext(
-                            "The playlist destination folder is invalid",
-                        ));
-                        error_caption.set_visible(true);
-                        add_btn.set_sensitive(true);
-                        reveal_picker_on_error();
-                        return;
-                    }
-                    Ok(Err(error)) => {
-                        tracing::warn!("playlist import directory listing failed: {error}");
-                        error_caption.set_text(&gettext("Could not inspect the download folder"));
-                        error_caption.set_visible(true);
-                        add_btn.set_sensitive(true);
-                        reveal_picker_on_error();
-                        return;
-                    }
-                    Err(error) => {
-                        tracing::warn!("playlist import dir setup failed: {error:?}");
-                        error_caption.set_text(&gettext("Could not prepare the download folder"));
-                        error_caption.set_visible(true);
-                        add_btn.set_sensitive(true);
-                        reveal_picker_on_error();
-                        return;
-                    }
-                };
-                // The card may have been closed while the blocking directory
-                // inspection ran. Its lease scope is set to None on close; do not
-                // let this stale picker enqueue or reacquire policy entries.
-                if !guarded_child_hosts
-                    .borrow()
-                    .is_current(owner_generation)
-                {
-                    return;
-                }
+        let picked: std::collections::HashSet<usize> =
+            grid_for_import.selected_indices().into_iter().collect();
+        let chosen: Vec<(usize, crate::media_types::PlaylistItem)> = playlist
+            .items
+            .iter()
+            .enumerate()
+            .filter(|(index, _)| picked.contains(index))
+            .map(|(index, item)| (index, item.clone()))
+            .collect();
+        if chosen.is_empty() {
+            error_caption.set_text(&gettext("Select at least one item"));
+            error_caption.set_visible(true);
+            return;
+        }
 
-                // Keep the import atomic: the one owner and all its passive
-                // children enter the queue together, then the scheduler sees
-                // one playlist job, not one job per selected file.
-                let _batch = manager.batch_guard();
-                let mut failed: Option<String> = None;
-                let mut skipped_by_host_limit = 0usize;
-                let mut accepted_indices = Vec::with_capacity(chosen.len());
-                let mut playlist_files = Vec::with_capacity(chosen.len());
+        // Re-imports use the original owner folder even if the extractor's
+        // collection title has changed since the first selection.
+        let page_url = playlist.page_url.clone();
+        let request = PlaylistImportRequest {
+            manager: manager.clone(),
+            guarded_child_hosts: guarded_child_hosts.clone(),
+            owner_generation,
+            base_dir: manager.resolve_dir(Some(&dest_dir.borrow())),
+            title: playlist.title.clone(),
+            group_title: playlist.title.clone(),
+            page_url: page_url.clone(),
+            existing_destination: manager.video_playlist_destination_for_url(&page_url),
+            chosen,
+            scheduled_at,
+            audio_only: audio_only.is_active(),
+        };
 
-                for (i, entry) in &chosen {
-                    let item_page_url =
-                        crate::video_probe::story_segment_url(&page_url, &entry.id)
-                            .unwrap_or_else(|| entry.page_url.to_string());
-                    let inheritance = {
-                        let mut lease_scope = guarded_child_hosts.borrow_mut();
-                        if lease_scope.generation != owner_generation {
-                            Err(crate::download_net::CollectionHostError::UnsafeDestination)
-                        } else {
-                            match lease_scope.hosts.as_mut() {
-                                Some(seen_hosts) => {
-                                    seen_hosts.inherit(&page_url, &item_page_url)
-                                }
-                                None => {
-                                    Err(crate::download_net::CollectionHostError::UnsafeDestination)
-                                }
-                            }
-                        }
-                    };
-                    match inheritance {
-                        Ok(()) => {}
-                        Err(crate::download_net::CollectionHostError::TooManyDistinctHosts) => {
-                            skipped_by_host_limit += 1;
-                            continue;
-                        }
-                        Err(crate::download_net::CollectionHostError::PolicyCapReached) => {
-                            failed = Some(gettext(
-                                "Grab reached its limit for simultaneously protected public download hosts. Retry after another transfer finishes.",
-                            ));
-                            break;
-                        }
-                        Err(crate::download_net::CollectionHostError::UnsafeDestination) => {
-                            failed = Some(gettext(
-                                "A selected item was rejected because its destination could not be verified as public.",
-                            ));
-                            break;
-                        }
+        // Disable the button while the import is in flight.
+        add_btn_guard.set_sensitive(false);
+        let grid = grid_for_import.clone();
+        let error_caption = error_caption.clone();
+        let add_btn = add_btn_guard.clone();
+        let nav = nav_on_error.clone();
+        let picker_page = picker_page_on_error.clone();
+        let close_card = close_card.clone();
+        glib::spawn_future_local(async move {
+            match import_playlist_selection(request).await {
+                Err(error) => show_playlist_import_error(
+                    &error_caption,
+                    &add_btn,
+                    &nav,
+                    &picker_page,
+                    queue_all,
+                    &error,
+                ),
+                Ok(None) => {}
+                Ok(Some(outcome)) => {
+                    for index in outcome.accepted_indices {
+                        grid.unselect(index);
                     }
-
-                    playlist_files.push(crate::media_types::VideoPlaylistFile {
-                        id: entry.id.to_string(),
-                        title: entry.title.to_string(),
-                        page_url: item_page_url,
-                        status: crate::download_store::DownloadStatus::Queued,
-                        progress: 0.0,
-                        path: None,
-                    });
-                    accepted_indices.push(*i);
-                }
-
-                if let Some(error) = failed {
-                    let message = if skipped_by_host_limit > 0 {
-                        format!(
-                            "{error} {}",
-                            ngettext(
-                                "{n} item was also skipped because the collection exceeded the limit of {limit} distinct hosts.",
-                                "{n} items were also skipped because the collection exceeded the limit of {limit} distinct hosts.",
-                                skipped_by_host_limit as u32,
-                            )
-                            .replace("{n}", &skipped_by_host_limit.to_string())
-                            .replace(
-                                "{limit}",
-                                &crate::download_net::MAX_GUARDED_CHILD_HOSTS_PER_COLLECTION
-                                    .to_string(),
-                            )
-                        )
+                    if outcome.skipped_by_host_limit > 0 {
+                        show_playlist_import_error(
+                            &error_caption,
+                            &add_btn,
+                            &nav,
+                            &picker_page,
+                            queue_all,
+                            &playlist_host_limit_notice(outcome.skipped_by_host_limit),
+                        );
                     } else {
-                        error
-                    };
-                    error_caption.set_text(&message);
-                    error_caption.set_visible(true);
-                    add_btn.set_sensitive(true);
-                    reveal_picker_on_error();
-                    return;
-                }
-
-                if !playlist_files.is_empty() {
-                    match manager.enqueue_video_playlist_staged(
-                        &page_url,
-                        &group_title,
-                        &dir,
-                        playlist_files,
-                        manager.settings().video_quality(),
-                        audio_only,
-                    ) {
-                        Ok(owner) => {
-                            apply_scheduled_at(&owner, scheduled_at);
-                        }
-                        Err(error) => {
-                            error_caption.set_text(&error);
-                            error_caption.set_visible(true);
-                            add_btn.set_sensitive(true);
-                            reveal_picker_on_error();
-                            return;
-                        }
+                        close_card();
                     }
                 }
-
-                for index in accepted_indices {
-                    grid.unselect(index);
-                }
-
-                if skipped_by_host_limit > 0 {
-                    error_caption.set_text(
-                        &ngettext(
-                            "Skipped {n} selected item because the collection exceeded the limit of {limit} distinct hosts.",
-                            "Skipped {n} selected items because the collection exceeded the limit of {limit} distinct hosts.",
-                            skipped_by_host_limit as u32,
-                        )
-                        .replace("{n}", &skipped_by_host_limit.to_string())
-                        .replace(
-                            "{limit}",
-                            &crate::download_net::MAX_GUARDED_CHILD_HOSTS_PER_COLLECTION
-                                .to_string(),
-                        ),
-                    );
-                    error_caption.set_visible(true);
-                    add_btn.set_sensitive(true);
-                    reveal_picker_on_error();
-                    return;
-                }
-
-                // Complete success collapses the whole New Download card; a partial failure stays
-                // on the picker so the remaining rows (unchecked above) can be retried.
-                close_card();
-            });
+            }
         });
-    }
+    });
 
     if queue_all {
         // GalleryGrid::append selects every entry. Reuse the importer while

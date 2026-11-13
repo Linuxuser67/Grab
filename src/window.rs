@@ -532,8 +532,8 @@ pub fn build_window(
             }
         });
     }
-    // Keep the header toggle synchronized whether search is opened by the
-    // button, type-to-search, Ctrl+F, or GTK's built-in close/Escape behavior.
+    // Keep the header toggle synchronized for button, type-to-search, and
+    // Ctrl+F activation, as well as when Escape dismisses search mode.
     {
         let toggle = search_toggle.clone();
         search_bar.connect_search_mode_enabled_notify(move |bar| {

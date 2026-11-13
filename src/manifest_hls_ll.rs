@@ -2103,6 +2103,32 @@ segment.ts
     }
 
     #[test]
+    fn one_pass_tag_scan_collects_ll_hls_flags_and_trailing_discontinuity() {
+        let body = br#"#EXTM3U
+#EXT-X-SERVER-CONTROL:CAN-BLOCK-RELOAD=YES
+#EXT-X-PART-INF:PART-TARGET=0.5
+#EXT-X-KEY:METHOD=AES-128,URI="key.bin"
+#EXT-X-SKIP:SKIPPED-SEGMENTS=2
+#EXTINF:1.0,
+#EXT-X-DISCONTINUITY
+"#;
+        let flags = scan_ll_hls_tags(body);
+        assert!(flags.has_partial_segments == false);
+        assert!(flags.has_encrypted_media_key_tag);
+        assert!(flags.has_delta_update);
+        assert!(flags.has_ll_hls_tags);
+        assert!(flags.trailing_open_discontinuity);
+        assert!(has_ll_hls_tags(body));
+
+        let closed = br#"#EXTM3U
+#EXT-X-DISCONTINUITY
+#EXTINF:1.0,
+segment.ts
+"#;
+        assert!(!scan_ll_hls_tags(closed).trailing_open_discontinuity);
+    }
+
+    #[test]
     fn staged_names_recover_part_identity_and_order() {
         let first = ll_resource_filename(
             7,

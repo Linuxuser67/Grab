@@ -735,6 +735,18 @@ pub(crate) fn parse_single_video(mut value: serde_json::Value) -> Result<Video, 
 }
 
 #[cfg(test)]
+mod fallback_playlist_index_tests {
+    use super::fallback_playlist_index;
+
+    #[test]
+    fn fallback_index_is_one_based_and_clamped_without_narrowing_casts() {
+        assert_eq!(fallback_playlist_index(0), 1);
+        assert_eq!(fallback_playlist_index(1), 2);
+        assert_eq!(fallback_playlist_index(usize::MAX), u32::MAX);
+    }
+}
+
+#[cfg(test)]
 mod playlist_title_fallback_tests {
     use super::*;
 

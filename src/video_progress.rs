@@ -356,10 +356,7 @@ mod playlist_event_tests {
             })
         );
         assert_eq!(
-            parse_ytdlp_playlist_event(
-                "@GRAB:testnonce:DONE;abc123;/tmp/a;final.mp4",
-                "testnonce"
-            ),
+            parse_ytdlp_playlist_event("@GRAB:testnonce:DONE;abc123;/tmp/a;final.mp4", "testnonce"),
             Some(YtdlpPlaylistEvent::Finished {
                 file_id: "abc123".to_string(),
                 path: "/tmp/a;final.mp4".to_string(),

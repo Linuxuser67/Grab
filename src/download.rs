@@ -1875,13 +1875,18 @@ impl DownloadManager {
             else {
                 continue;
             };
-            match crate::download_net::inherit_public_resolution_for_collection(
-                &item.url(),
-                &url,
-                &mut guarded_child_hosts,
-            ) {
+            match guarded_child_hosts.inherit(&item.url(), &url) {
                 Ok(()) => {}
                 Err(crate::download_net::CollectionHostError::TooManyDistinctHosts) => {
+                    skipped_by_host_limit += 1;
+                    continue;
+                }
+                Err(crate::download_net::CollectionHostError::PolicyCapReached) => {
+                    tracing::warn!(
+                        parent_id = id,
+                        child_url = %url,
+                        "skipping playlist item because the process public-host policy is full"
+                    );
                     skipped_by_host_limit += 1;
                     continue;
                 }

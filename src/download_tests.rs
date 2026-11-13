@@ -1922,7 +1922,7 @@ fn native_manifest_filename_preserves_the_stem_and_uses_the_detected_container()
         DownloadManager::manifest_filename_for_container(
             None,
             "https://cdn.example.test/my_video.m3u8?token=secret",
-            "ts",
+            crate::media_types::ManifestContainer::Ts,
         ),
         "my video.ts"
     );

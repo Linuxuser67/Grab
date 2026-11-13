@@ -1731,10 +1731,7 @@ async fn import_playlist_selection(
     // The card may have been closed while the blocking directory inspection
     // ran. Its lease scope is set to None on close; do not let this stale
     // picker enqueue or reacquire policy entries.
-    if !guarded_child_hosts
-        .borrow()
-        .is_current(owner_generation)
-    {
+    if !guarded_child_hosts.borrow().is_current(owner_generation) {
         return Ok(None);
     }
 
@@ -1794,7 +1791,10 @@ async fn import_playlist_selection(
 
     if let Some(error) = failed {
         return Err(if skipped_by_host_limit > 0 {
-            format!("{error} {}", playlist_host_limit_suffix(skipped_by_host_limit))
+            format!(
+                "{error} {}",
+                playlist_host_limit_suffix(skipped_by_host_limit)
+            )
         } else {
             error
         });

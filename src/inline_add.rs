@@ -59,11 +59,11 @@ impl PublicHostLeaseScope {
         self.generation == generation && self.hosts.is_some()
     }
 
-    /// Keep active host policies alive for requests that outlive the card.
-    fn clone_leases(&self) -> Vec<std::sync::Arc<crate::download_net::PublicResolutionLease>> {
+    /// Create a typed guard for requests that outlive the card.
+    fn lease_guard(&self) -> crate::download_net::PublicResolutionLeaseGuard {
         self.hosts
             .as_ref()
-            .map(crate::download_net::PublicResolutionSet::clone_leases)
+            .map(crate::download_net::PublicResolutionSet::lease_guard)
             .unwrap_or_default()
     }
 }
@@ -2737,7 +2737,7 @@ fn wire_video_preview(step: Rc<VideoStep>) {
                     // The count can outlive the Add card. Give its Tokio task
                     // independent lease clones so closing the card does not
                     // relax DNS policy while gallery-dl is still running.
-                    let count_host_leases = public_host_leases.borrow().clone_leases();
+                    let count_host_lease_guard = public_host_leases.borrow().lease_guard();
                     let card_rc = card_rc.clone();
                     glib::spawn_future_local(async move {
                         let url_for_count = url.clone();
@@ -2748,8 +2748,7 @@ fn wire_video_preview(step: Rc<VideoStep>) {
                             crate::download::DownloadOptions::from_settings(&count_settings)
                                 .proxy_config();
                         let count_result = crate::runtime::tokio_rt()
-                            .spawn(async move {
-                                let _count_host_leases = count_host_leases;
+                            .spawn(count_host_lease_guard.hold(async move {
                                 let proxy = match proxy {
                                     Ok(proxy) => proxy,
                                     Err(error) => {
@@ -2775,7 +2774,7 @@ fn wire_video_preview(step: Rc<VideoStep>) {
                                 } else {
                                     None
                                 }
-                            })
+                            }))
                             .await
                             .ok()
                             .flatten();
@@ -3191,11 +3190,11 @@ fn build_video_lookup_kicker(context: VideoLookupContext) -> VideoLookupKick {
                 // Keep the browser-handoff DNS policy alive until the detached
                 // Tokio lookup has actually stopped, even when card close
                 // aborts the outer GLib future.
-                let lookup_host_leases = step_b.public_host_leases.borrow().clone_leases();
-                let lookup_task = crate::runtime::tokio_rt().spawn(async move {
-                    let _lookup_host_leases = lookup_host_leases;
-                    lookup_media(lookup_url, browser, newest_first, proxy).await
-                });
+                let lookup_host_lease_guard = step_b.public_host_leases.borrow().lease_guard();
+                let lookup_task = crate::runtime::tokio_rt().spawn(
+                    lookup_host_lease_guard
+                        .hold(lookup_media(lookup_url, browser, newest_first, proxy)),
+                );
                 let _abort_lookup_on_drop = AbortTaskOnDrop(lookup_task.abort_handle());
                 let outcome = match lookup_task.await {
                     Ok(outcome) => outcome,
@@ -4690,12 +4689,11 @@ fn make_gallery_picker_opener(
             // The enumeration is detached from the card's GLib future. Keep
             // the current URL and inherited child-host leases alive until the
             // gallery-dl request exits, including a close/abort race.
-            let enumeration_host_leases = step3.public_host_leases.borrow().clone_leases();
+            let enumeration_lease_guard = step3.public_host_leases.borrow().lease_guard();
             let (items_tx, mut items_rx) = tokio::sync::mpsc::channel(
                 crate::gallery_probe::GALLERY_ENUMERATION_CHANNEL_CAPACITY,
             );
-            let handle = crate::runtime::tokio_rt().spawn(async move {
-                let _enumeration_host_leases = enumeration_host_leases;
+            let handle = crate::runtime::tokio_rt().spawn(enumeration_lease_guard.hold(async move {
                 // Unified auth: handoff jar first, browser export as
                 // fallback (was handoff-only: auth-gated galleries could
                 // list nothing here but download fine).
@@ -4713,7 +4711,7 @@ fn make_gallery_picker_opener(
                 .await;
                 drop(auth);
                 r
-            });
+            }));
             *step3.enumerate_abort.borrow_mut() = Some(handle.abort_handle());
             // Fill the picker as items arrive: it opens on the first one, so
             // a huge gallery never blocks the UI on the full listing.
@@ -5266,7 +5264,7 @@ mod tests {
             .as_mut()
             .expect("active card scope")
             .insert(lease.host().to_string(), lease);
-        let background = scope.clone_leases();
+        let background = scope.lease_guard();
 
         scope.close();
         assert!(crate::download_net::is_untrusted_handoff_host(

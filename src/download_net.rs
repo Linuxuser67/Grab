@@ -1246,10 +1246,9 @@ mod tests {
         assert!(!is_untrusted_handoff_host("example.com"));
         assert!(!is_untrusted_handoff_host("cdn.www.example.com"));
         let mut children = PublicResolutionSet::default();
-        inherit_public_resolution_for_collection(
+        children.inherit(
             "https://www.example.com/list",
             "https://example.com/video.mp4",
-            &mut children,
         )
         .expect("cross-origin collection child should be leased");
         assert!(is_untrusted_handoff_host("example.com"));
@@ -1270,29 +1269,26 @@ mod tests {
         assert!(require_public_resolution("collection-limit.example"));
         let mut seen = PublicResolutionSet::default();
         for i in 0..MAX_GUARDED_CHILD_HOSTS_PER_COLLECTION {
-            inherit_public_resolution_for_collection(
+            seen.inherit(
                 "https://collection-limit.example/list",
                 &format!("https://child-{i}.example/video"),
-                &mut seen,
             )
             .expect("each host below the limit should be accepted");
         }
         assert_eq!(seen.len(), MAX_GUARDED_CHILD_HOSTS_PER_COLLECTION);
         assert_eq!(
-            inherit_public_resolution_for_collection(
+            seen.inherit(
                 "https://collection-limit.example/list",
                 "https://too-many.example/video",
-                &mut seen,
             ),
             Err(CollectionHostError::TooManyDistinctHosts)
         );
         assert!(!is_untrusted_handoff_host("too-many.example"));
         // Repeated hosts remain allowed after the limit; they do not consume
         // another slot or become unguarded.
-        inherit_public_resolution_for_collection(
+        seen.inherit(
             "https://collection-limit.example/list",
             "https://child-0.example/another-video",
-            &mut seen,
         )
         .expect("an already-counted host should remain accepted");
         assert_eq!(seen.len(), MAX_GUARDED_CHILD_HOSTS_PER_COLLECTION);
@@ -1343,18 +1339,16 @@ mod tests {
         };
         assert!(require_public_resolution("collection.example"));
         let mut children = PublicResolutionSet::default();
-        inherit_public_resolution_for_collection(
+        children.inherit(
             "https://collection.example/list",
             "https://cdn.example/video.mp4",
-            &mut children,
         )
         .expect("public child host should be leased");
         assert!(is_untrusted_handoff_host("cdn.example"));
         assert_eq!(
-            inherit_public_resolution_for_collection(
+            children.inherit(
                 "https://collection.example/list",
                 "http://127.0.0.1/admin",
-                &mut children,
             ),
             Err(CollectionHostError::UnsafeDestination)
         );
@@ -1377,6 +1371,14 @@ mod tests {
             retain_public_resolution(&host);
         }
         assert!(is_untrusted_handoff_host("test-0.example"));
+        let mut children = PublicResolutionSet::default();
+        assert_eq!(
+            children.inherit(
+                "https://test-0.example/list",
+                "https://overflow.example/video",
+            ),
+            Err(CollectionHostError::PolicyCapReached)
+        );
         assert!(!require_public_resolution("overflow.example"));
         assert!(
             is_untrusted_handoff_host("test-0.example"),

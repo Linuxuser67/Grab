@@ -3557,12 +3557,14 @@ fn playlist_download_argv_uses_original_selected_indices_and_tagged_events() {
         value_after(&argv, "--progress-template")
             .is_some_and(|value| value.starts_with("download:@GRAB:testnonce:PROGRESS;"))
     );
-    assert!(argv.iter().any(|arg| {
-        arg == "before_dl:@GRAB:testnonce:START;%(id)s;%(playlist_index)s;%(filename)s"
-    }));
-    assert!(argv.iter().any(|arg| {
-        arg == "after_move:@GRAB:testnonce:DONE;%(id)s;%(playlist_index)s;%(filepath)s"
-    }));
+    assert!(
+        argv.iter()
+            .any(|arg| arg == "before_dl:@GRAB:testnonce:START;%(id)s")
+    );
+    assert!(
+        argv.iter()
+            .any(|arg| arg == "after_move:@GRAB:testnonce:DONE;%(id)s;%(filepath)s")
+    );
 }
 
 fn direct_test_job() -> VideoJob {

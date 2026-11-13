@@ -58,6 +58,68 @@
     </screenshot>
   </screenshots>
   <releases>
+    <release version="6.5.0~beta.19" date="2026-11-13">
+      <description>
+        <ul>
+          <li>Native HLS: ad markers are ignored and every listed segment is downloaded; DASH no longer rejects SCTE-35 signaling.</li>
+          <li>Validate native HLS fMP4 and live MPEG-TS with FFmpeg instead of the built-in parsers, so real-world streams are accepted more often.</li>
+          <li>Collections: queue every item from the arrow inside the URL entry, split playlist picker imports, and keep progress, Undo, and sizing accurate while transfers run.</li>
+          <li>Live HLS: split the LL-HLS planner into stages, classify live update units, and centralize stop and continuity handling.</li>
+          <li>Native manifests: typed output containers, public-host leases for child requests, bounded resource limits, and no opaque query tokens in the playlist cache.</li>
+          <li>UI: show the selected manifest container in the Add preview, use plain-text toasts, and address the UI audit findings.</li>
+        </ul>
+      </description>
+    </release>
+    <release version="6.5.0~beta.18" date="2026-11-11">
+      <description>
+        <ul>
+          <li>Manifest downloads can emit native MPEG-TS output, inferring the container from the playlist and selected tracks while preserving subtitles on automatic TS output.</li>
+          <li>HLS: fix redirect query inheritance and pathway identity checks, and bound Content Steering expansion and retries.</li>
+          <li>Accept RFC-compliant LL-HLS part hold-back values.</li>
+          <li>Collections: enforce playlist collection invariants, allow incremental playlist picker imports, scope gallery progress to each download run, and adapt collection progress layout to expansion state.</li>
+          <li>Log native manifest fallback reasons for easier diagnostics.</li>
+        </ul>
+      </description>
+    </release>
+    <release version="6.5.0~beta.17" date="2026-11-11">
+      <description>
+        <ul>
+          <li>Live HLS: refresh Content Steering pathways and verify against Apple profiles, with bounded pathway waits.</li>
+          <li>HLS correctness: honor VIDEO/audio/subtitle rendition semantics, reject unknown required master attributes, treat declared VOD playlists as finite, and keep unencrypted METHOD=NONE streams on LL-HLS.</li>
+          <li>Preserve LL-HLS program date time, enforce Apple holdback, and keep rendition timestamps with FFmpeg copyts.</li>
+          <li>Treat HLS query parameters as opaque and preserve signed query parameters across resources; parse DASH SegmentList metadata in one pass.</li>
+          <li>Bound SAMPLE-AES segment memory before decryption and preserve destination ownership across HTTP retries.</li>
+          <li>Collections: keep gallery progress accurate on partial failures, expand progress bars while collapsed, index progress rows faster, and unify single-entry playlist imports.</li>
+          <li>Clarify retry ownership and byte-limit errors and bound the untrusted-host policy to active owners.</li>
+        </ul>
+      </description>
+    </release>
+    <release version="6.5.0~beta.16" date="2026-11-10">
+      <description>
+        <ul>
+          <li>Run yt-dlp playlists as single collection jobs with aggregate row progress.</li>
+          <li>Show per-file gallery-dl progress in the collection UI.</li>
+          <li>Prefer gallery-dl whenever the lookup succeeds.</li>
+          <li>Batch collection Undo and guard folder actions.</li>
+          <li>Native HLS: Content Steering pathways, pathway clones, EXT-X-START handling, and completed-gap/discontinuity improvements.</li>
+        </ul>
+      </description>
+    </release>
+    <release version="6.5.0~beta.15" date="2026-11-09">
+      <description>
+        <ul>
+          <li>Collection rows use conditional action icons like normal download rows, with a collection-level remove-from-list action.</li>
+          <li>Playlist imports reject duplicate entries, fixing the same video downloading twice under concurrent downloads.</li>
+        </ul>
+      </description>
+    </release>
+    <release version="6.5.0~beta.14" date="2026-11-08">
+      <description>
+        <ul>
+          <li>Group playlist downloads under expandable collection rows with shared metadata persisted across restarts.</li>
+        </ul>
+      </description>
+    </release>
     <release version="6.5.0~beta.13" date="2026-11-07">
       <description>
         <ul>
@@ -1459,14 +1521,14 @@
         <p>Embedded subtitles no longer leave a sidecar file alongside the video, and Clear Finished greys out when nothing is finished.</p>
       </description>
     </release>
-        <release version="4.2.1" date="2026-09-22">
+    <release version="4.2.1" date="2026-09-22">
       <description>
         <p>Hotfix: the tools install popover no longer stalls on
         "Downloading" after the downloads complete — each row now
         flips to Installed with its probed version.</p>
       </description>
     </release>
-<release version="4.2.0" date="2026-09-22">
+    <release version="4.2.0" date="2026-09-22">
       <description>
         <p>Beta: failed downloads can be retried from a toast with the failure count, the shortcuts dialog documents the queue search, and the internals get a cleanup pass.</p>
       </description>

@@ -5165,7 +5165,7 @@ impl DownloadManager {
                                 let done =
                                     crate::gallery_runner::done_count(r.files_completed, r.skipped);
                                 let detail = if r.exit_code.is_some() {
-                                                    gettext("Gallery \u{2022} some failed")
+                                    gettext("Gallery \u{2022} some failed")
                                 } else {
                                     gettext("Gallery")
                                 };

@@ -2216,7 +2216,9 @@ fn effective_list(
         .collect::<Result<Vec<_>, DashError>>()?;
 
     let segments = if is_dynamic {
-        let timeline = timeline.as_deref().ok_or(DashError::UnsupportedAddressing)?;
+        let timeline = timeline
+            .as_deref()
+            .ok_or(DashError::UnsupportedAddressing)?;
         let mut previous_end = None;
         let dynamic_segments = segments
             .into_iter()
@@ -2275,7 +2277,10 @@ fn expand_dynamic_list(
     list: &DashList,
     dynamic: &DashDynamicPresentation,
 ) -> Result<Vec<DashResource>, DashError> {
-    let Some(DashInitialization::Resource { url: Some(url), range }) = &list.initialization
+    let Some(DashInitialization::Resource {
+        url: Some(url),
+        range,
+    }) = &list.initialization
     else {
         return Err(DashError::UnsupportedAddressing);
     };
@@ -2296,9 +2301,10 @@ fn expand_dynamic_list(
         .map(|segment| segment.duration)
         .filter(|duration| *duration > 0)
         .ok_or(DashError::UnsupportedAddressing)?;
-    if segments.iter().any(|segment| {
-        segment.duration != segment_duration || segment.time % segment.duration != 0
-    }) {
+    if segments
+        .iter()
+        .any(|segment| segment.duration != segment_duration || segment.time % segment.duration != 0)
+    {
         return Err(DashError::UnsupportedAddressing);
     }
     let window_depth = dynamic.time_shift_buffer_depth.unwrap_or(

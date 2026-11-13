@@ -7514,7 +7514,7 @@ fn a_finalizer_releases_the_reservation_after_the_worker() {
 }
 
 #[test]
-fn removing_a_never_spawned_video_row_releases_synchronously() {
+fn removing_a_never_spawned_video_row_releases_after_finalizer() {
     // No worker in flight: reclaim runs inline, reservation already gone at return.
     let (_q, _l) = test_locks();
     let _qf = test_queue_file("reserve-release-sync");

@@ -2787,6 +2787,7 @@ impl DownloadManager {
         };
         // Track the pump handle so tests can wait for pump completion: a `spawn_future_local` task reaped on another thread trips glib's thread guard.
         let handle = glib::spawn_future_local(async move {
+            let mut last_playlist_progress_refresh: Option<Instant> = None;
             while let Some(msg) = rx.recv().await {
                 let Some(this) = weak.upgrade() else {
                     break;
@@ -3413,6 +3414,7 @@ impl DownloadManager {
                                 );
                                 this.persist_queue();
                                 this.changed();
+                                last_playlist_progress_refresh = Some(Instant::now());
                             }
                         }
                         crate::engine_msg::PlaylistFileEvent::Progress {
@@ -3422,6 +3424,8 @@ impl DownloadManager {
                         } => {
                             if item.is_collection_owner()
                                 && item.status() == DownloadStatus::Downloading
+                                && last_playlist_progress_refresh
+                                    .is_none_or(|last| last.elapsed() >= Duration::from_millis(100))
                             {
                                 let progress = total
                                     .filter(|total| *total > 0)
@@ -3432,7 +3436,7 @@ impl DownloadManager {
                                     .map(|total| {
                                         format!(
                                             "{} • {} / {}",
-                                            ((progress * 100.0) as u64),
+                                            (progress * 100.0) as u64,
                                             fmt_bytes(downloaded),
                                             fmt_bytes(total)
                                         )
@@ -3447,6 +3451,7 @@ impl DownloadManager {
                                     None,
                                 );
                                 this.changed();
+                                last_playlist_progress_refresh = Some(Instant::now());
                             }
                         }
                         crate::engine_msg::PlaylistFileEvent::Finished {
@@ -3466,6 +3471,7 @@ impl DownloadManager {
                                 );
                                 this.persist_queue();
                                 this.changed();
+                                last_playlist_progress_refresh = Some(Instant::now());
                             }
                         }
                         crate::engine_msg::PlaylistFileEvent::Failed { file_id, error } => {

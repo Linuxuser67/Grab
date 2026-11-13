@@ -1010,17 +1010,9 @@ async fn refresh_live_hls_pathway(
             LIVE_HLS_STEERING_REFRESH_TIMEOUT,
         ) => result,
     };
-    let lookup = match refresh_result {
-        Ok(Some(lookup)) => lookup,
-        Ok(None) => return Ok(None),
-        Err(error) => {
-            tracing::debug!(
-                error = %error,
-                "HLS Content Steering refresh could not be applied; retaining current Pathway"
-            );
-            steering.active_pathway_id = previous_pathway;
-            return Ok(None);
-        }
+    let Some(lookup) = refresh_result else {
+        steering.active_pathway_id = previous_pathway;
+        return Ok(None);
     };
 
     let plan = match crate::manifest_plan::download_plan(lookup, source) {

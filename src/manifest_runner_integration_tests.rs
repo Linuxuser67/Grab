@@ -3177,6 +3177,121 @@ async fn hls_fmp4_fixture_downloads_and_finalizes_with_audio_and_video() {
 }
 
 #[tokio::test]
+async fn hls_fmp4_invalid_resources_are_staged_for_ffmpeg_validation() {
+    if !tools_available() {
+        return;
+    }
+
+    let root = TempRoot::new("hls-fmp4-invalid");
+    let media_manifest_url = "https://cdn.fixture.invalid/media.m3u8";
+    let body = br#"#EXTM3U
+#EXT-X-VERSION:7
+#EXT-X-TARGETDURATION:2
+#EXT-X-MAP:URI="init.mp4"
+#EXTINF:1.0,
+segment.m4s
+#EXT-X-ENDLIST
+"#;
+    let mut plan = crate::manifest::plan_hls_media_playlist(media_manifest_url, body)
+        .expect("plan single-init HLS fMP4 presentation");
+    assert!(
+        plan.is_single_init_fmp4_presentation(),
+        "fixture must select the single-init fMP4 destination-part path"
+    );
+
+    let files = HashMap::from([
+        (
+            "/init.mp4".to_string(),
+            b"not a fragmented MP4 initialization segment".to_vec(),
+        ),
+        (
+            "/segment.m4s".to_string(),
+            b"not a fragmented MP4 media segment".to_vec(),
+        ),
+    ]);
+    let urls = plan
+        .resources
+        .iter()
+        .map(|resource| resource.url.clone())
+        .collect::<Vec<_>>();
+    let (server_url, server) = spawn_fixture_server(files, urls.len()).await;
+    for resource in &mut plan.resources {
+        resource.url = loopback_resource_url(&server_url, &resource.url);
+    }
+
+    let staging = root.path().join("staging");
+    let video_dir = staging.join("video");
+    tokio::fs::create_dir_all(&video_dir)
+        .await
+        .expect("create fMP4 staging directory");
+    let destination_dir = root.path().join("destination");
+    tokio::fs::create_dir_all(&destination_dir)
+        .await
+        .expect("create fMP4 destination directory");
+    let destination = destination_dir.join("recording.mp4");
+    crate::manifest_destination::ensure_plan(&staging, &destination, 91, false, false)
+        .expect("persist HLS fMP4 destination plan");
+
+    let client = fixture_client();
+    let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+    let downloaded = Arc::new(AtomicU64::new(0));
+    let (_abort_tx, mut abort) = tokio::sync::oneshot::channel();
+    assert!(
+        fetch_and_write_hls_track(ManifestHlsTrackTransfer {
+            client: &client,
+            staging: &staging,
+            plan: &plan,
+            directory: &video_dir,
+            filename: "video-track.ts",
+            destination: &destination,
+            item_id: 91,
+            track: crate::manifest_destination::TrackKind::Video,
+            tx: &tx,
+            downloaded: &downloaded,
+            abort: &mut abort,
+        })
+        .await
+        .expect("stage HLS fMP4 resources without per-resource parsing"),
+        "HLS fMP4 transfer unexpectedly aborted"
+    );
+    wait_for_fixture_server(server).await;
+
+    let part = crate::manifest_destination::part_path(
+        &staging,
+        &destination,
+        91,
+        crate::manifest_destination::TrackKind::Video,
+    )
+    .expect("resolve staged HLS fMP4 destination part");
+    let staged = tokio::fs::read(&part)
+        .await
+        .expect("read staged fMP4 destination part");
+    assert_eq!(
+        staged,
+        [
+            b"not a fragmented MP4 initialization segment".as_slice(),
+            b"not a fragmented MP4 media segment".as_slice(),
+        ]
+        .concat()
+    );
+
+    let output = root.path().join("invalid-fmp4.part.mp4");
+    let finalization = run_ffmpeg(
+        Path::new("ffmpeg"),
+        &part,
+        None,
+        SubtitleOutput::default(),
+        &output,
+        &mut abort,
+    )
+    .await;
+    assert!(
+        finalization.is_err(),
+        "FFmpeg must reject the assembled invalid fMP4 track, got {finalization:?}"
+    );
+}
+
+#[tokio::test]
 async fn dash_per_track_timestamp_offsets_align_fragmented_mp4_inputs() {
     if !tools_available() {
         return;

@@ -138,7 +138,8 @@ struct GalleryPreviewCacheKey {
     proxy: Option<String>,
 }
 
-type GalleryPreviewCacheMap = HashMap<GalleryPreviewCacheKey, (Instant, Vec<crate::gallery_probe::GalleryItem>)>;
+type GalleryPreviewCacheMap =
+    HashMap<GalleryPreviewCacheKey, (Instant, Vec<crate::gallery_probe::GalleryItem>)>;
 type GalleryPreviewCache = Mutex<GalleryPreviewCacheMap>;
 
 static GALLERY_PREVIEW_CACHE: LazyLock<GalleryPreviewCache> =
@@ -703,7 +704,8 @@ mod tests {
             extra: serde_json::Map::new(),
         }];
         for index in 0..GALLERY_PREVIEW_CACHE_CAPACITY {
-            let inserted_at = start + Duration::from_secs(u64::try_from(index).expect("cache index fits u64"));
+            let inserted_at =
+                start + Duration::from_secs(u64::try_from(index).expect("cache index fits u64"));
             insert_gallery_preview(
                 &mut cache,
                 key(&format!("item-{index}")),
@@ -714,7 +716,10 @@ mod tests {
         assert_eq!(cache.len(), GALLERY_PREVIEW_CACHE_CAPACITY);
 
         let overflow_key = key("overflow");
-        let inserted_at = start + Duration::from_secs(u64::try_from(GALLERY_PREVIEW_CACHE_CAPACITY).expect("cache capacity fits u64"));
+        let inserted_at = start
+            + Duration::from_secs(
+                u64::try_from(GALLERY_PREVIEW_CACHE_CAPACITY).expect("cache capacity fits u64"),
+            );
         insert_gallery_preview(&mut cache, overflow_key.clone(), &items, inserted_at);
 
         assert_eq!(cache.len(), GALLERY_PREVIEW_CACHE_CAPACITY);

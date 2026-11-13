@@ -501,7 +501,6 @@ impl HlsPlan {
         Ok(())
     }
 
-
     /// Rebuild a completed local HLS plan from a previously committed live capture.
     ///
     /// The local playlist is validated as Grab-owned staging metadata and its

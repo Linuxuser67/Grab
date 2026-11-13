@@ -645,11 +645,30 @@ fn write_handoff_cookies_with_count(url: &str, cookies: &[Cookie]) -> Option<(Pa
 /// Hash a staged handoff jar by content so a fresh jar with the same cookies
 /// reuses previews instead of missing on its new temporary path.
 pub(crate) fn handoff_cookie_hash(path: &Path) -> Option<[u8; 32]> {
-    let contents = std::fs::read(path).ok()?;
-    let digest = Sha256::digest(contents);
-    let mut hash = [0_u8; 32];
-    hash.copy_from_slice(&digest);
-    Some(hash)
+    use std::io::Read as _;
+
+    let path_metadata = std::fs::symlink_metadata(path).ok()?;
+    if path_metadata.file_type().is_symlink() || !path_metadata.is_file() {
+        return None;
+    }
+    let file = std::fs::File::open(path).ok()?;
+    let metadata = file.metadata().ok()?;
+    let maximum = u64::try_from(MAX_BODY_BYTES).ok()?;
+    if !metadata.is_file() || metadata.len() > maximum {
+        return None;
+    }
+
+    // The incoming extension body is capped at MAX_BODY_BYTES. Enforce the
+    // same bound on the staged file and read one extra byte to catch a file
+    // that grows after the metadata check.
+    let mut contents = Vec::with_capacity(usize::try_from(metadata.len()).ok()?);
+    file.take(maximum.saturating_add(1))
+        .read_to_end(&mut contents)
+        .ok()?;
+    if contents.len() > MAX_BODY_BYTES {
+        return None;
+    }
+    Some(Sha256::digest(&contents).into())
 }
 
 /// Store a cookie file for a URL. Called by the extension handoff once the
@@ -2957,6 +2976,21 @@ mod tests {
             secure: None,
             expiration_date: None,
         }
+    }
+
+    #[test]
+    fn handoff_cookie_hash_is_content_based_and_rejects_oversized_files() {
+        let directory = tempfile::tempdir().expect("temporary directory");
+        let first = directory.path().join("first.cookies");
+        let second = directory.path().join("second.cookies");
+        let oversized = directory.path().join("oversized.cookies");
+        let contents = b"# Netscape HTTP Cookie File\nexample.com\tFALSE\t/\tTRUE\t0\tc\tv\n";
+        std::fs::write(&first, contents).expect("first cookie file");
+        std::fs::write(&second, contents).expect("second cookie file");
+        assert_eq!(handoff_cookie_hash(&first), handoff_cookie_hash(&second));
+
+        std::fs::write(&oversized, vec![b'x'; MAX_BODY_BYTES + 1]).expect("oversized cookie file");
+        assert_eq!(handoff_cookie_hash(&oversized), None);
     }
 
     #[test]

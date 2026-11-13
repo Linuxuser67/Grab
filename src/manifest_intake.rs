@@ -204,10 +204,12 @@ fn is_cacheable_static_manifest(lookup: &ManifestLookup) -> bool {
                     .any(|resource| has_query_parameters(&resource.url))
         }
         crate::manifest_types::NativeManifest::Dash(plan) => {
-            matches!(
-                &plan.presentation,
-                crate::manifest::dash::DashPresentation::Static
-            )
+            !source_has_query
+                && matches!(
+                    &plan.presentation,
+                    crate::manifest::dash::DashPresentation::Static
+                )
+                && !plan.has_query_resource_urls()
         }
     }
 }
@@ -2876,6 +2878,46 @@ video.m3u8
         assert_eq!(
             plan.resources[0].url.as_str(),
             format!("https://{address}/segment0.ts")
+        );
+    }
+
+    #[test]
+    fn dash_preview_cache_rejects_query_bearing_source_and_child_resources() {
+        let body = r#"<?xml version="1.0"?>
+<MPD xmlns="urn:mpeg:dash:schema:mpd:2011"
+     type="static"
+     mediaPresentationDuration="PT10S">
+  <Period duration="PT10S">
+    <AdaptationSet id="video" contentType="video" mimeType="video/mp4">
+      <SegmentTemplate timescale="1" duration="5"
+                       initialization="init.mp4"
+                       media="seg-$Number$.m4s?sig=secret"/>
+      <Representation id="v1" bandwidth="1000000"
+                      width="1280" height="720" codecs="avc1.64001f"/>
+    </AdaptationSet>
+  </Period>
+</MPD>"#;
+        let plan = crate::manifest::dash::parse_dash_manifest(
+            "https://cdn.example.test/manifest.mpd",
+            body,
+        )
+        .expect("parse static DASH fixture");
+        let child_query_lookup = ManifestLookup {
+            source_url: "https://cdn.example.test/manifest.mpd".to_string(),
+            manifest: NativeManifest::Dash(plan.clone()),
+        };
+        assert!(
+            !is_cacheable_static_manifest(&child_query_lookup),
+            "a signed segment URL must prevent caching the DASH selection plan"
+        );
+
+        let signed_source_lookup = ManifestLookup {
+            source_url: "https://cdn.example.test/manifest.mpd?token=secret".to_string(),
+            manifest: NativeManifest::Dash(plan),
+        };
+        assert!(
+            !is_cacheable_static_manifest(&signed_source_lookup),
+            "a query-bearing source MPD must not be cached"
         );
     }
 

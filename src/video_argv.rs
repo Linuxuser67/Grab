@@ -283,9 +283,6 @@ pub(crate) fn unified_download_argv(
     args
 }
 
-/// Machine-readable per-file progress for an owning yt-dlp playlist process.
-
-
 /// Output template for a collection. The extractor ID disambiguates duplicate
 /// titles and keeps filenames stable if the playlist is reordered between
 /// retries. Only the directory is escaped: the remaining percent fields are
@@ -371,18 +368,23 @@ pub(crate) fn playlist_download_argv(
     if let Some(progress_at) = args.iter().position(|arg| arg == "--progress-template")
         && let Some(progress) = args.get_mut(progress_at + 1)
     {
-        *progress = YTDLP_PLAYLIST_PROGRESS_TEMPLATE.to_string();
+        *progress = format!(
+            "download:@GRAB:{event_nonce}:PROGRESS;%(info.id)s;%(info.playlist_index)s;%(progress.status)s;%(progress.downloaded_bytes)s;%(progress.total_bytes)s;%(progress.total_bytes_estimate)s"
+        );
     }
     if let Some(print_at) = args.iter().position(|arg| arg == "after_move:filepath") {
-        args[print_at] =
-            "after_move:[GrabPlaylistDone];%(id)s;%(playlist_index)s;%(filepath)s".to_string();
+        args[print_at] = format!(
+            "after_move:@GRAB:{event_nonce}:DONE;%(id)s;%(playlist_index)s;%(filepath)s"
+        );
     }
     if let Some(separator) = args.iter().position(|arg| arg == "--") {
         args.splice(
             separator..separator,
             [
                 "--print".to_string(),
-                format!("before_dl:@GRAB:{event_nonce}:START;%(id)s;%(playlist_index)s;%(filename)s"),
+                format!(
+                    "before_dl:@GRAB:{event_nonce}:START;%(id)s;%(playlist_index)s;%(filename)s"
+                ),
             ],
         );
     }

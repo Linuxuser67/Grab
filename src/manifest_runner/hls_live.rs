@@ -1271,10 +1271,6 @@ async fn refresh_live_hls_pathway(
     Ok(None)
 }
 
-#[expect(
-    clippy::too_many_arguments,
-    reason = "the runner coordinates the selected renditions, storage paths, progress, host policy, and shared stop signal"
-)]
 #[derive(Clone, Copy)]
 enum LiveHlsTrackKind {
     Video,
@@ -1320,6 +1316,10 @@ async fn finish_after_live_hls_continuity_loss(
     ))
 }
 
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the runner coordinates the selected renditions, storage paths, progress, host policy, and shared stop signal"
+)]
 pub(super) async fn run_live_hls_tracks(
     client: &reqwest::Client,
     source_url: &str,

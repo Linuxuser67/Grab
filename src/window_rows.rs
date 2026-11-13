@@ -181,10 +181,8 @@ fn open_with_default_app(path: &std::path::Path, toasts: &adw::ToastOverlay) {
         if let Err(e) = launcher.launch_future(None::<&gtk4::Window>).await {
             let error = e.to_string();
             let message = gettext("Could not open {what} with its default application: {e}");
-            let message = crate::ui_util::format_template(
-                &message,
-                &[("what", &what), ("e", &error)],
-            );
+            let message =
+                crate::ui_util::format_template(&message, &[("what", &what), ("e", &error)]);
             t.add_toast(crate::ui_util::plain_toast(&message));
         }
     });
@@ -1436,7 +1434,9 @@ pub(crate) fn build_row(
                 if m.finish_live_recording(id) {
                     // Progress, not completion: the remux can still fail, so
                     // promising a finished save would be a promise the code cannot keep.
-                    t.add_toast(crate::ui_util::plain_toast(&gettext("Finalizing recording…")));
+                    t.add_toast(crate::ui_util::plain_toast(&gettext(
+                        "Finalizing recording…",
+                    )));
                 }
             } else {
                 m.cancel(id);
@@ -1460,7 +1460,9 @@ pub(crate) fn build_row(
                 m.defer(id);
                 t.add_toast(crate::ui_util::plain_toast(&gettext("Queued for later")));
             } else {
-                t.add_toast(crate::ui_util::plain_toast(&gettext("No other downloads waiting")));
+                t.add_toast(crate::ui_util::plain_toast(&gettext(
+                    "No other downloads waiting",
+                )));
             }
         });
     }
@@ -1530,10 +1532,8 @@ pub(crate) fn build_row(
             };
             let name = snapshot.filename.clone();
             m.remove(id);
-            let message = crate::ui_util::format_template(
-                &gettext("Removed {name}"),
-                &[("name", &name)],
-            );
+            let message =
+                crate::ui_util::format_template(&gettext("Removed {name}"), &[("name", &name)]);
             let toast = crate::ui_util::plain_toast(&message);
             toast.set_button_label(Some(&gettext("Undo")));
             let m2 = Rc::clone(&m);

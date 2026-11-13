@@ -9,13 +9,11 @@ pub(crate) struct ValidatorInfo {
     pub(crate) last_modified: Option<String>,
 }
 
-/// Per-entry events from a parent-owned yt-dlp playlist process.
-/// Boxed as one envelope so the hot engine channel retains its established
-/// size budget even when event payloads carry filenames or error strings.
+/// Per-entry events from a parent-owned yt-dlp playlist process. The event is
+/// boxed so large error payloads cannot inflate the hot engine-message enum.
 pub(crate) enum PlaylistFileEvent {
     Started {
         file_id: String,
-        filename: String,
     },
     Progress {
         file_id: String,

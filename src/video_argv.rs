@@ -284,7 +284,7 @@ pub(crate) fn unified_download_argv(
 }
 
 /// Machine-readable per-file progress for an owning yt-dlp playlist process.
-pub(crate) const YTDLP_PLAYLIST_PROGRESS_TEMPLATE: &str = "download:[GrabPlaylist];%(info.id)s;%(info.playlist_index)s;%(progress.status)s;%(progress.downloaded_bytes)s;%(progress.total_bytes)s;%(progress.total_bytes_estimate)s";
+
 
 /// Output template for a collection. The extractor ID disambiguates duplicate
 /// titles and keeps filenames stable if the playlist is reordered between
@@ -375,6 +375,7 @@ pub(crate) fn playlist_download_argv(
     ffmpeg_bin: &Path,
     dest_dir: &Path,
     playlist_indices: &[usize],
+    event_nonce: &str,
 ) -> Result<Vec<String>, VideoError> {
     let mut args = unified_download_argv(
         job,
@@ -391,12 +392,14 @@ pub(crate) fn playlist_download_argv(
     replace_arg_value(
         &mut args,
         "--progress-template",
-        YTDLP_PLAYLIST_PROGRESS_TEMPLATE.to_string(),
+        format!(
+            "download:@GRAB:{event_nonce}:PROGRESS;%(info.id)s;%(info.playlist_index)s;%(progress.status)s;%(progress.downloaded_bytes)s;%(progress.total_bytes)s;%(progress.total_bytes_estimate)s"
+        ),
     )?;
     replace_print_template(
         &mut args,
         "after_move:filepath",
-        "after_move:[GrabPlaylistDone];%(id)s;%(playlist_index)s;%(filepath)s".to_string(),
+        format!("after_move:@GRAB:{event_nonce}:DONE;%(id)s;%(playlist_index)s;%(filepath)s"),
     )?;
     let separator = args
         .iter()
@@ -406,7 +409,9 @@ pub(crate) fn playlist_download_argv(
         separator..separator,
         [
             "--print".to_string(),
-            "before_dl:[GrabPlaylistStart];%(id)s;%(playlist_index)s;%(filename)s".to_string(),
+            format!(
+                "before_dl:@GRAB:{event_nonce}:START;%(id)s;%(playlist_index)s;%(filename)s"
+            ),
         ],
     );
     Ok(args)

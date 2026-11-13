@@ -1250,6 +1250,70 @@ async fn refresh_live_hls_pathway(
     Ok(None)
 }
 
+fn capture_outcome_for_stop(
+    intent: crate::video::StopIntent,
+    finish_video_only: bool,
+) -> LiveHlsCaptureOutcome {
+    match intent {
+        crate::video::StopIntent::Pause => LiveHlsCaptureOutcome::Paused,
+        crate::video::StopIntent::Finish if finish_video_only => {
+            LiveHlsCaptureOutcome::FinishVideoOnly
+        }
+        crate::video::StopIntent::Finish => LiveHlsCaptureOutcome::Finish,
+        crate::video::StopIntent::Discard => LiveHlsCaptureOutcome::Discard,
+    }
+}
+
+async fn handle_live_hls_snapshot_outcome(
+    outcome: LiveHlsSnapshotOutcome,
+    video: &LiveHlsTrack,
+    staging_dir: &Path,
+    destination_dir: &Path,
+    downloaded: &AtomicU64,
+    tx: &tokio::sync::mpsc::UnboundedSender<EngineMsg>,
+    output: LiveHlsOutput,
+    finish_video_only: bool,
+) -> Result<Option<LiveHlsCapture>, ManifestRunError> {
+    match outcome {
+        LiveHlsSnapshotOutcome::Committed => {
+            ensure_manifest_mux_spaces(
+                staging_dir,
+                destination_dir,
+                downloaded.load(Ordering::Relaxed),
+            )?;
+        }
+        LiveHlsSnapshotOutcome::RetryScheduled => {}
+        LiveHlsSnapshotOutcome::Stopped(intent) => {
+            return Ok(Some(LiveHlsCapture::new(
+                capture_outcome_for_stop(intent, finish_video_only),
+                output,
+            )));
+        }
+        LiveHlsSnapshotOutcome::ContinuityLost => {
+            if video.accumulator.segment_count() == 0 {
+                return Ok(Some(LiveHlsCapture::new(
+                    LiveHlsCaptureOutcome::Discard,
+                    output,
+                )));
+            }
+            persist_unrecoverable_live_capture(
+                staging_dir,
+                ManifestKind::Hls,
+                "HLS playlist continuity could not be verified",
+                video.accumulator.resource_bytes(),
+                downloaded,
+                tx,
+            )
+            .await?;
+            return Ok(Some(LiveHlsCapture::new(
+                LiveHlsCaptureOutcome::Unrecoverable,
+                output,
+            )));
+        }
+    }
+    Ok(None)
+}
+
 #[expect(
     clippy::too_many_arguments,
     reason = "the runner coordinates the selected renditions, storage paths, progress, host policy, and shared stop signal"

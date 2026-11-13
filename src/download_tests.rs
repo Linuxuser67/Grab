@@ -7633,20 +7633,27 @@ fn shutdown_during_a_pending_discard_stops_the_worker_rather_than_detaching_it()
 
     manager.shutdown();
 
+    // Synchronous shutdown must stay non-blocking on GTK. It aborts the worker
+    // and detaches the finalizer, which completes its bounded cleanup in Tokio.
+    // Observe that completion instead of assuming it ran before shutdown returns.
+    let cleanup_deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    let manifest = dest_dir.join(format!(".grab-{id}-manifest.json"));
+    while (!dropped.load(std::sync::atomic::Ordering::SeqCst) || manifest.exists() || part.exists())
+        && std::time::Instant::now() < cleanup_deadline
+    {
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
     assert!(
         dropped.load(std::sync::atomic::Ordering::SeqCst),
-        "shutdown left the worker running: the finalizer's handle was dropped, \
-         which detaches the task instead of aborting it"
+        "shutdown left the worker running after the finalizer deadline"
     );
     assert!(
-        !dest_dir.join(format!(".grab-{id}-manifest.json")).exists(),
-        "shutdown never ran the finalizer's staging sweep: aborting finalizers \
-         instead of awaiting them would leave this behind"
+        !manifest.exists(),
+        "the detached finalizer did not complete its staging sweep"
     );
     assert!(
         !part.exists(),
-        "shutdown never ran the finalizer's manifest-owned cleanup: aborting finalizers \
-         instead of awaiting them would leave this behind"
+        "the detached finalizer did not complete its manifest-owned cleanup"
     );
     assert!(
         dest_dir.join("v.video.notes").exists(),

@@ -503,13 +503,9 @@ fn build_plan(
         return Err(ManifestError::EmptyPlaylist);
     }
 
-    let mut resources = Vec::new();
+    let mut plan = PlanAcc::default();
     let mut map_filenames: HashMap<(String, Option<ManifestByteRange>), String> = HashMap::new();
-    let mut previous_range: Option<(String, u64)> = None;
     let mut active_map: Option<broadcast_hls::MapTag> = None;
-    let mut local_segments = Vec::new();
-    let mut unit_ids = Vec::new();
-    let mut first_part_independent = None;
     let first_visible_sequence = playlist
         .media_sequence
         .checked_add(skipped_segments)
@@ -540,7 +536,7 @@ fn build_plan(
             }
             checked_duration(segment.duration.get(), source_target_duration)?;
             let url = resolve_hls_media_resource_url(&base_url, &segment.uri)?;
-            plan_range(segment.byte_range.as_ref(), &url, &mut previous_range)?;
+            plan_range(segment.byte_range.as_ref(), &url, &mut plan.previous_range)?;
             pending_discontinuity |= segment.discontinuous;
             continue;
         }
@@ -549,21 +545,21 @@ fn build_plan(
         let map = plan_map(
             &base_url,
             active_map.as_ref(),
-            &mut resources,
+            &mut plan.resources,
             &mut map_filenames,
         )?;
         if segment.parts.is_empty() {
             let duration = checked_duration(segment.duration.get(), source_target_duration)?;
             let url = resolve_hls_media_resource_url(&base_url, &segment.uri)?;
-            let range = plan_range(segment.byte_range.as_ref(), &url, &mut previous_range)?;
+            let range = plan_range(segment.byte_range.as_ref(), &url, &mut plan.previous_range)?;
             let filename = ll_resource_filename(media_sequence, None, &url, range);
-            resources.push(HlsResource {
+            plan.resources.push(HlsResource {
                 url,
                 range,
                 filename: filename.clone(),
                 kind: HlsResourceKind::Segment,
             });
-            local_segments.push(LocalSegment {
+            plan.local_segments.push(LocalSegment {
                 uri: filename,
                 duration: media_segment_duration(duration),
                 discontinuity,
@@ -571,7 +567,7 @@ fn build_plan(
                 program_date_time,
                 ..Default::default()
             });
-            unit_ids.push(HlsLiveUnitId::Segment(media_sequence));
+            plan.unit_ids.push(HlsLiveUnitId::Segment(media_sequence));
             continue;
         }
 
@@ -586,23 +582,20 @@ fn build_plan(
         if (parts_duration - parent_duration.as_secs_f64()).abs() > PART_DURATION_TOLERANCE {
             return Err(ManifestError::LivePartDurationMismatch);
         }
-        let first_part_position = local_segments.len();
-        append_part_units(
-            &base_url,
-            media_sequence,
+        let first_part_position = plan.local_segments.len();
+        plan.append_parts(
+            PartContext {
+                base_url: &base_url,
+                media_sequence,
+                source_target_duration,
+                map,
+                discontinuity,
+                independent_segments: playlist.independent_segments,
+            },
             &segment.parts,
-            source_target_duration,
-            map,
-            discontinuity,
-            playlist.independent_segments,
-            &mut first_part_independent,
-            &mut resources,
-            &mut previous_range,
-            &mut local_segments,
-            &mut unit_ids,
         )?;
         if let Some(program_date_time) = program_date_time {
-            local_segments[first_part_position].program_date_time = Some(program_date_time);
+            plan.local_segments[first_part_position].program_date_time = Some(program_date_time);
         }
     }
 
@@ -618,36 +611,34 @@ fn build_plan(
         let map = plan_map(
             &base_url,
             active_map.as_ref(),
-            &mut resources,
+            &mut plan.resources,
             &mut map_filenames,
         )?;
         let discontinuity = open_segment_discontinuity;
         let open_date_time =
             open_segment_program_date_time(open)?.and_then(|segment| segment.program_date_time);
-        let first_part_position = local_segments.len();
-        append_part_units(
-            &base_url,
-            media_sequence,
+        let first_part_position = plan.local_segments.len();
+        plan.append_parts(
+            PartContext {
+                base_url: &base_url,
+                media_sequence,
+                source_target_duration,
+                map,
+                discontinuity,
+                independent_segments: playlist.independent_segments,
+            },
             &open.parts,
-            source_target_duration,
-            map,
-            discontinuity,
-            playlist.independent_segments,
-            &mut first_part_independent,
-            &mut resources,
-            &mut previous_range,
-            &mut local_segments,
-            &mut unit_ids,
         )?;
         if let Some(program_date_time) = open_date_time {
-            local_segments[first_part_position].program_date_time = Some(program_date_time);
+            plan.local_segments[first_part_position].program_date_time = Some(program_date_time);
         }
     }
 
-    if local_segments.is_empty()
-        || local_segments.len() > MAX_HLS_LIVE_UNITS
-        || (!end_list && !validate_live_unit_ids(&unit_ids))
-        || local_segments
+    if plan.local_segments.is_empty()
+        || plan.local_segments.len() > MAX_HLS_LIVE_UNITS
+        || (!end_list && !validate_live_unit_ids(&plan.unit_ids))
+        || plan
+            .local_segments
             .iter()
             .any(|segment| !segment.duration.is_finite() || segment.duration <= 0.0)
     {
@@ -679,7 +670,7 @@ fn build_plan(
         media_sequence: 0,
         discontinuity_sequence: playlist.discontinuity_sequence,
         independent_segments: false,
-        segments: local_segments,
+        segments: plan.local_segments,
         end_list: true,
         playlist_type: Some(MediaPlaylistType::Vod),
         ..Default::default()
@@ -689,18 +680,18 @@ fn build_plan(
     let rendition_reports = parse_rendition_reports(&base_url, &playlist.rendition_reports)?;
 
     Ok(HlsPlan {
-        resources: resources.into_boxed_slice(),
+        resources: plan.resources.into_boxed_slice(),
         requested_playlist_url: base_url.clone(),
         playlist_url: base_url,
         is_live: !end_list,
         end_list,
         source_target_duration,
         local_playlist,
-        ll_unit_ids: Some(unit_ids.into_boxed_slice()),
+        ll_unit_ids: Some(plan.unit_ids.into_boxed_slice()),
         part_target,
         can_skip_until,
         blocking_reload,
-        ll_first_part_independent: first_part_independent,
+        ll_first_part_independent: plan.first_part_independent,
         rendition_reports,
         inherited_variables: Vec::new().into_boxed_slice(),
     })
@@ -725,53 +716,62 @@ impl HlsRenditionReport {
     }
 }
 
-#[expect(
-    clippy::too_many_arguments,
-    reason = "the shared planner carries URL, continuity, resource, and output state for both closed and open parts"
-)]
-fn append_part_units(
-    base_url: &Url,
+#[derive(Default)]
+struct PlanAcc {
+    resources: Vec<HlsResource>,
+    previous_range: Option<(String, u64)>,
+    local_segments: Vec<LocalSegment>,
+    unit_ids: Vec<HlsLiveUnitId>,
+    first_part_independent: Option<bool>,
+}
+
+struct PartContext<'a> {
+    base_url: &'a Url,
     media_sequence: u64,
-    parts: &[LlPartSpec],
     source_target_duration: u64,
     map: Option<LocalMap>,
     discontinuity: bool,
     independent_segments: bool,
-    first_part_independent: &mut Option<bool>,
-    resources: &mut Vec<HlsResource>,
-    previous_range: &mut Option<(String, u64)>,
-    local_segments: &mut Vec<LocalSegment>,
-    unit_ids: &mut Vec<HlsLiveUnitId>,
-) -> Result<(), ManifestError> {
-    for (index, part) in parts.iter().enumerate() {
-        let part_index = u32::try_from(index).map_err(|_| ManifestError::DurationOverflow)?;
-        if local_segments.is_empty() {
-            *first_part_independent = Some(part.independent || independent_segments);
+}
+
+impl PlanAcc {
+    fn append_parts(
+        &mut self,
+        context: PartContext<'_>,
+        parts: &[LlPartSpec],
+    ) -> Result<(), ManifestError> {
+        for (index, part) in parts.iter().enumerate() {
+            let part_index = u32::try_from(index).map_err(|_| ManifestError::DurationOverflow)?;
+            if self.local_segments.is_empty() {
+                self.first_part_independent =
+                    Some(part.independent || context.independent_segments);
+            }
+            validate_part(part)?;
+            let duration = checked_duration(part.duration.get(), context.source_target_duration)?;
+            let url = resolve_hls_media_resource_url(context.base_url, &part.uri)?;
+            let range = plan_range(part.byte_range.as_ref(), &url, &mut self.previous_range)?;
+            let filename =
+                ll_resource_filename(context.media_sequence, Some(part_index), &url, range);
+            self.resources.push(HlsResource {
+                url,
+                range,
+                filename: filename.clone(),
+                kind: HlsResourceKind::Segment,
+            });
+            self.local_segments.push(LocalSegment {
+                uri: filename,
+                duration: media_segment_duration(duration),
+                discontinuity: context.discontinuity && part_index == 0,
+                map: context.map.clone(),
+                ..Default::default()
+            });
+            self.unit_ids.push(HlsLiveUnitId::Part {
+                media_sequence: context.media_sequence,
+                part_index,
+            });
         }
-        validate_part(part)?;
-        let duration = checked_duration(part.duration.get(), source_target_duration)?;
-        let url = resolve_hls_media_resource_url(base_url, &part.uri)?;
-        let range = plan_range(part.byte_range.as_ref(), &url, previous_range)?;
-        let filename = ll_resource_filename(media_sequence, Some(part_index), &url, range);
-        resources.push(HlsResource {
-            url,
-            range,
-            filename: filename.clone(),
-            kind: HlsResourceKind::Segment,
-        });
-        local_segments.push(LocalSegment {
-            uri: filename,
-            duration: media_segment_duration(duration),
-            discontinuity: discontinuity && part_index == 0,
-            map: map.clone(),
-            ..Default::default()
-        });
-        unit_ids.push(HlsLiveUnitId::Part {
-            media_sequence,
-            part_index,
-        });
+        Ok(())
     }
-    Ok(())
 }
 
 fn parse_rendition_reports(

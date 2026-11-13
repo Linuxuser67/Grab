@@ -3146,16 +3146,11 @@ impl DownloadManager {
                         }
                         let skipped_detail = || {
                             ngettext(
-                                "{skipped} item skipped because the collection exceeded the limit of {limit} distinct hosts",
-                                "{skipped} items skipped because the collection exceeded the limit of {limit} distinct hosts",
+                                "{skipped} item skipped because a public-host protection limit was reached",
+                                "{skipped} items skipped because a public-host protection limit was reached",
                                 skipped_by_host_limit as u32,
                             )
                             .replace("{skipped}", &skipped_by_host_limit.to_string())
-                            .replace(
-                                "{limit}",
-                                &crate::download_net::MAX_GUARDED_CHILD_HOSTS_PER_COLLECTION
-                                    .to_string(),
-                            )
                         };
                         if added == 0 {
                             let e = if skipped_by_host_limit > 0 {

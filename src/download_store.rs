@@ -81,7 +81,6 @@ impl DownloadGroup {
     pub(crate) fn title(&self) -> &str {
         &self.title
     }
-
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]

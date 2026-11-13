@@ -511,7 +511,6 @@ impl PublicResolutionSet {
     pub(crate) fn contains(&self, host: &str) -> bool {
         self.hosts.contains(host)
     }
-
 }
 
 /// Own cloned public-host leases for an asynchronous request.

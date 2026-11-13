@@ -637,7 +637,8 @@ fn build_plan(
     if plan.local_segments.is_empty()
         || plan.local_segments.len() > MAX_HLS_LIVE_UNITS
         || (!end_list && !validate_live_unit_ids(&plan.unit_ids))
-        || plan.local_segments
+        || plan
+            .local_segments
             .iter()
             .any(|segment| !segment.duration.is_finite() || segment.duration <= 0.0)
     {
@@ -748,11 +749,7 @@ impl PlanAcc {
             validate_part(part)?;
             let duration = checked_duration(part.duration.get(), context.source_target_duration)?;
             let url = resolve_hls_media_resource_url(context.base_url, &part.uri)?;
-            let range = plan_range(
-                part.byte_range.as_ref(),
-                &url,
-                &mut self.previous_range,
-            )?;
+            let range = plan_range(part.byte_range.as_ref(), &url, &mut self.previous_range)?;
             let filename =
                 ll_resource_filename(context.media_sequence, Some(part_index), &url, range);
             self.resources.push(HlsResource {

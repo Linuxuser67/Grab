@@ -4135,7 +4135,6 @@ async fn concat_dash_resource_names(
     Ok(true)
 }
 
-
 /// Whether a fetched resource is a structurally complete ISO BMFF init segment
 /// or fragmented media segment.
 async fn is_fmp4_resource(path: &Path) -> Result<bool, ManifestRunError> {
@@ -4452,7 +4451,7 @@ mod tests {
     fn valid_transport_stream(packet_count: usize, continuity_seed: u8) -> Vec<u8> {
         let mut bytes = vec![0xff; packet_count * 188];
         for (index, packet) in bytes
-            .as_chunks_mut::<{ 188 }>()
+            .as_chunks_mut::<188>()
             .0
             .iter_mut()
             .enumerate()
@@ -4464,7 +4463,6 @@ mod tests {
         }
         bytes
     }
-
 
     fn fmp4_box(kind: &[u8; 4], payload: &[u8]) -> Vec<u8> {
         let size = u32::try_from(8 + payload.len()).expect("test box fits in a u32");

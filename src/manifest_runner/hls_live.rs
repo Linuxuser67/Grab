@@ -942,9 +942,9 @@ async fn poll_live_hls_track(
 
 fn restore_previous_active_pathway(
     steering: &mut crate::manifest::HlsContentSteering,
-    previous_pathway: &Option<String>,
+    previous_pathway: Option<String>,
 ) {
-    steering.active_pathway_id.clone_from(previous_pathway);
+    steering.active_pathway_id = previous_pathway;
 }
 
 #[expect(
@@ -1186,9 +1186,9 @@ async fn refresh_live_hls_pathway(
                 )?;
             }
             Ok(LiveHlsSnapshotOutcome::Stopped(intent)) => {
-                restore_previous_active_pathway(steering, &previous_pathway);
+                restore_previous_active_pathway(steering, previous_pathway);
                 return Ok(Some(intent));
-            },
+            }
             Ok(LiveHlsSnapshotOutcome::RetryScheduled | LiveHlsSnapshotOutcome::ContinuityLost) => {
                 tracing::debug!(
                     "refreshed HLS video Pathway could not be committed; retaining current route"
@@ -1229,18 +1229,18 @@ async fn refresh_live_hls_pathway(
                 )?;
             }
             Ok(LiveHlsSnapshotOutcome::Stopped(intent)) => {
-                restore_previous_active_pathway(steering, &previous_pathway);
+                restore_previous_active_pathway(steering, previous_pathway);
                 return Ok(Some(intent));
-            },
+            }
             Ok(LiveHlsSnapshotOutcome::RetryScheduled | LiveHlsSnapshotOutcome::ContinuityLost) => {
-                restore_previous_active_pathway(steering, &previous_pathway);
+                restore_previous_active_pathway(steering, previous_pathway);
                 tracing::warn!(
                     playlist = %diagnostic_url(&next.playlist_url),
                     "HLS audio Pathway refresh could not be committed; preserving the existing audio route"
                 );
             }
             Err(error) => {
-                restore_previous_active_pathway(steering, &previous_pathway);
+                restore_previous_active_pathway(steering, previous_pathway);
                 tracing::warn!(
                     playlist = %diagnostic_url(&next.playlist_url),
                     error = %error,

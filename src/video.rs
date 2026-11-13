@@ -46,10 +46,7 @@ mod stop_intent_tests {
 
     #[test]
     fn closed_stop_channel_preserves_captured_media() {
-        assert_eq!(
-            stop_intent_or_pause::<()>(Err(())),
-            StopIntent::Pause
-        );
+        assert_eq!(stop_intent_or_pause::<()>(Err(())), StopIntent::Pause);
         assert_eq!(
             stop_intent_or_pause::<()>(Ok(StopIntent::Discard)),
             StopIntent::Discard

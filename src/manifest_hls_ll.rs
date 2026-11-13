@@ -984,7 +984,7 @@ fn plan_map(
     }))
 }
 
-pub(super) #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum LiveUnitClass {
     Existing(usize),
     ParentAlias(usize),
@@ -1121,7 +1121,7 @@ fn collect_live_unit_delta(
     Ok(delta)
 }
 
-fn prepare_live_update(
+pub(super) fn prepare_live_update(
     accumulator: &HlsLiveAccumulator,
     snapshot: &HlsPlan,
 ) -> Result<HlsLiveUpdate, ManifestError> {

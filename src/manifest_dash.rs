@@ -93,6 +93,14 @@ impl DashRepresentation {
     pub(crate) fn matches_key(&self, key: &str) -> bool {
         self.key == key || self.live_key == key || self.legacy_live_key.as_deref() == Some(key)
     }
+
+    fn has_query_resource_urls(&self) -> bool {
+        self.source.has_query_resource_urls()
+            || self
+                .additional_sources
+                .iter()
+                .any(DashRepresentationSource::has_query_resource_urls)
+    }
 }
 
 /// Timing model shared by all representations in a DASH presentation.
@@ -124,6 +132,20 @@ pub(crate) struct DashManifestPlan {
 }
 
 impl DashManifestPlan {
+    /// Whether any selectable DASH representation references a query-bearing resource URL.
+    ///
+    /// Signed query parameters are CDN-specific and can expire independently of the
+    /// five-minute preview cache. Check every Period source, not only the selected
+    /// representation, because the preview caches the complete selection plan.
+    #[must_use]
+    pub(crate) fn has_query_resource_urls(&self) -> bool {
+        self.video_representations
+            .iter()
+            .chain(&self.audio_representations)
+            .chain(&self.subtitle_representations)
+            .any(DashRepresentation::has_query_resource_urls)
+    }
+
     /// Return the main audio representation, or the first audio representation.
     #[must_use]
     pub(crate) fn default_audio(&self) -> Option<&DashRepresentation> {
@@ -234,6 +256,56 @@ struct DashRepresentationSource {
     base_url: Url,
     addressing: DashAddressing,
     period_start: Duration,
+}
+
+impl DashRepresentationSource {
+    fn has_query_resource_urls(&self) -> bool {
+        if self.base_url.query().is_some_and(|query| !query.is_empty()) {
+            return true;
+        }
+
+        let initialization_has_query = |initialization: Option<&DashInitialization>| {
+            let reference = match initialization {
+                Some(DashInitialization::Template(uri)) => Some(uri.as_str()),
+                Some(DashInitialization::Resource { url: Some(uri), .. }) => Some(uri.as_str()),
+                Some(DashInitialization::Resource { url: None, .. }) | None => None,
+            };
+            reference.is_some_and(|uri| resource_reference_has_query(&self.base_url, uri))
+        };
+
+        match &self.addressing {
+            DashAddressing::Template(template) => {
+                resource_reference_has_query(&self.base_url, &template.media)
+                    || initialization_has_query(template.initialization.as_ref())
+            }
+            DashAddressing::List(list) => {
+                initialization_has_query(list.initialization.as_ref())
+                    || list
+                        .segments
+                        .iter()
+                        .any(|segment| resource_reference_has_query(&self.base_url, &segment.media))
+            }
+            DashAddressing::Base(_) => false,
+            DashAddressing::IndexedBase(index) => {
+                index
+                    .index_url
+                    .as_deref()
+                    .is_some_and(|uri| resource_reference_has_query(&self.base_url, uri))
+                    || index
+                        .initialization_url
+                        .as_deref()
+                        .is_some_and(|uri| resource_reference_has_query(&self.base_url, uri))
+            }
+        }
+    }
+}
+
+/// Resolve each URI using the same rules as planning. If a stored reference cannot
+/// be resolved here, conservatively keep the manifest out of the preview cache.
+fn resource_reference_has_query(base_url: &Url, raw: &str) -> bool {
+    resolve_resource(base_url, raw).map_or(true, |url| {
+        url.query().is_some_and(|query| !query.is_empty())
+    })
 }
 
 fn source_timestamp_offset(

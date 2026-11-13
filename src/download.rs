@@ -71,6 +71,18 @@ struct GalleryFileRowIndex {
     rows: HashMap<String, DownloadItem>,
 }
 
+/// Runtime index for one yt-dlp playlist's persisted entry states and passive
+/// GTK child rows. Aggregate counters are maintained alongside state changes,
+/// so a byte-progress event does not rescan the playlist.
+#[derive(Default)]
+struct VideoPlaylistFileRowIndex {
+    state_indices: HashMap<String, usize>,
+    rows: HashMap<String, DownloadItem>,
+    total: usize,
+    done: usize,
+    progress_sum: f64,
+}
+
 /// A removal whose cleanup is still draining; `worker_abort` is absent when
 /// no worker had to be awaited.
 struct PendingDiscard {
@@ -416,6 +428,9 @@ pub struct DownloadManager {
     /// O(1) path-to-state and path-to-row lookups for high-frequency gallery progress.
     /// Rebuilt lazily from the persisted job and discarded with its owner.
     gallery_file_row_index: RefCell<HashMap<u64, GalleryFileRowIndex>>,
+    /// O(1) playlist-entry and child-row lookup plus incremental summary counters.
+    /// Rebuilt lazily from owner state and discarded with that owner.
+    video_playlist_file_row_index: RefCell<HashMap<u64, VideoPlaylistFileRowIndex>>,
     /// Abort senders for resolver workers, by row. Signalled from pause/park/cancel so extractor streams stop promptly.
     video_abort: RefCell<HashMap<u64, tokio::sync::oneshot::Sender<crate::video::StopIntent>>>,
     /// Delivery decision per video attempt, by row. Manager and worker arbitrate on this one object.
@@ -741,6 +756,7 @@ impl DownloadManager {
             video_sources: RefCell::new(HashMap::new()),
             gallery_jobs: RefCell::new(HashMap::new()),
             gallery_file_row_index: RefCell::new(HashMap::new()),
+            video_playlist_file_row_index: RefCell::new(HashMap::new()),
             video_abort: RefCell::new(HashMap::new()),
             gates: RefCell::new(HashMap::new()),
             reservations: std::sync::Arc::new(std::sync::Mutex::new(Reservations::default())),

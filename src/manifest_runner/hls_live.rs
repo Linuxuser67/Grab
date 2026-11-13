@@ -1228,7 +1228,10 @@ async fn refresh_live_hls_pathway(
                     downloaded.load(Ordering::Relaxed),
                 )?;
             }
-            Ok(LiveHlsSnapshotOutcome::Stopped(intent)) => return Ok(Some(intent)),
+            Ok(LiveHlsSnapshotOutcome::Stopped(intent)) => {
+                restore_previous_active_pathway(steering, &previous_pathway);
+                return Ok(Some(intent));
+            },
             Ok(LiveHlsSnapshotOutcome::RetryScheduled | LiveHlsSnapshotOutcome::ContinuityLost) => {
                 restore_previous_active_pathway(steering, &previous_pathway);
                 tracing::warn!(

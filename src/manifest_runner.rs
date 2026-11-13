@@ -4954,19 +4954,14 @@ segment-2.m4s
             Some(crate::media_types::ManifestContainer::Mp4)
         );
         assert_eq!(
-            crate::manifest_plan::dash_output_container(Some(
-                "application/mp4; codecs=avc1"
-            )),
+            crate::manifest_plan::dash_output_container(Some("application/mp4; codecs=avc1")),
             Some(crate::media_types::ManifestContainer::Mp4)
         );
         assert_eq!(
             crate::manifest_plan::dash_output_container(Some("video/webm")),
             None
         );
-        assert_eq!(
-            crate::manifest_plan::dash_output_container(None),
-            None
-        );
+        assert_eq!(crate::manifest_plan::dash_output_container(None), None);
     }
 
     #[test]

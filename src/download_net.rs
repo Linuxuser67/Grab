@@ -466,6 +466,10 @@ pub(crate) struct PublicResolutionSet {
 }
 
 impl PublicResolutionSet {
+    pub(crate) fn len(&self) -> usize {
+        self.hosts.len()
+    }
+
     /// Inherit public-only DNS policy from an untrusted parent onto one child.
     /// Collection-local and process-wide caps remain distinct for reporting.
     pub(crate) fn inherit(
@@ -492,7 +496,7 @@ impl PublicResolutionSet {
         if self.hosts.contains(&key) {
             return Ok(());
         }
-        if self.hosts.len() >= MAX_GUARDED_CHILD_HOSTS_PER_COLLECTION {
+        if self.len() >= MAX_GUARDED_CHILD_HOSTS_PER_COLLECTION {
             return Err(CollectionHostError::TooManyDistinctHosts);
         }
         if !is_public_destination_host(&child_host) {

@@ -958,30 +958,6 @@ msgid ""
 "Needs subtitles enabled under Media → Subtitles; does nothing without them"
 msgstr ""
 
-#: src/preferences.rs:721
-msgid "Remove sponsored segments"
-msgstr ""
-
-#: src/preferences.rs:722
-msgid "Cut SponsorBlock-flagged sponsor segments"
-msgstr ""
-
-#: src/preferences.rs:725
-msgid "Works where SponsorBlock has data, mostly YouTube"
-msgstr ""
-
-#: src/preferences.rs:736
-msgid "Mark sponsored segments"
-msgstr ""
-
-#: src/preferences.rs:738
-msgid "Tag SponsorBlock-flagged sponsor segments as chapters"
-msgstr ""
-
-#: src/preferences.rs:742
-msgid "Lets you skip sponsors with chapter navigation instead of cutting them"
-msgstr ""
-
 #: src/preferences.rs:760
 msgid "Embed chapters"
 msgstr ""

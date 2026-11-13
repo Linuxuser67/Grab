@@ -172,16 +172,6 @@
       <summary>Digest of the last link inserted by clipboard auto-paste</summary>
       <description>SHA-256 of the link, not the link itself. Prevents a stale clipboard link from pasting again on every fresh open, across restarts.</description>
     </key>
-    <key name="sponsorblock-remove" type="b">
-      <default>false</default>
-      <summary>Remove sponsored segments</summary>
-      <description>Cut SponsorBlock-flagged sponsor segments out of new video downloads.</description>
-    </key>
-    <key name="sponsorblock-mark" type="b">
-      <default>false</default>
-      <summary>Mark sponsored segments</summary>
-      <description>Mark SponsorBlock-flagged sponsor segments as chapters in new video downloads.</description>
-    </key>
     <key name="remux-video" type="s">
       <default>'off'</default>
       <summary>Remux video</summary>

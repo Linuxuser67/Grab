@@ -4164,8 +4164,6 @@ impl DownloadManager {
                 crate::video_prefs::subtitle_lang_active(&self.settings.subtitle_language())
             },
             embed_subs: self.settings.embed_subs(),
-            sponsorblock_remove: self.settings.sponsorblock_remove(),
-            sponsorblock_mark: self.settings.sponsorblock_mark(),
             // Note the enqueue→spawn gap: a pref change on a queued row can disagree with the dialog-time row name on the extension.
             remux_video: if audio_only {
                 None
@@ -4274,8 +4272,6 @@ impl DownloadManager {
                 crate::video_prefs::subtitle_lang_active(&self.settings.subtitle_language())
             },
             embed_subs: self.settings.embed_subs(),
-            sponsorblock_remove: self.settings.sponsorblock_remove(),
-            sponsorblock_mark: self.settings.sponsorblock_mark(),
             remux_video: if audio_only {
                 None
             } else {

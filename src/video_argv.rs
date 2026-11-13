@@ -55,10 +55,6 @@ pub struct VideoJob {
     pub subtitles: Option<String>,
     /// Mux downloaded subtitles into the finished file; live rows never take it.
     pub embed_subs: bool,
-    /// Cut SponsorBlock sponsor segments; live rows never take it.
-    pub sponsorblock_remove: bool,
-    /// Mark SponsorBlock sponsor segments as chapters; live rows never take it.
-    pub sponsorblock_mark: bool,
     /// Remux the finished file into another container (`None` = off; always `None` for audio-only/live).
     pub remux_video: Option<String>,
     /// Write chapter markers into the finished file; live rows never take it.
@@ -263,14 +259,6 @@ pub(crate) fn unified_download_argv(
     }
     if job.embed_subs {
         args.push("--embed-subs".to_string());
-    }
-    if job.sponsorblock_remove {
-        args.push("--sponsorblock-remove".to_string());
-        args.push("sponsor".to_string());
-    }
-    if job.sponsorblock_mark {
-        args.push("--sponsorblock-mark".to_string());
-        args.push("sponsor".to_string());
     }
     if job.embed_chapters {
         args.push("--embed-chapters".to_string());
@@ -705,14 +693,6 @@ pub(crate) fn hls_download_argv(
     }
     if job.embed_subs {
         args.push("--embed-subs".to_string());
-    }
-    if job.sponsorblock_remove {
-        args.push("--sponsorblock-remove".to_string());
-        args.push("sponsor".to_string());
-    }
-    if job.sponsorblock_mark {
-        args.push("--sponsorblock-mark".to_string());
-        args.push("sponsor".to_string());
     }
     if job.embed_chapters {
         args.push("--embed-chapters".to_string());

@@ -36,8 +36,6 @@ pub mod key {
     pub const YTDLP_EXTRACTOR_ARGS: &str = "yt-dlp-extractor-args";
     pub const IMPERSONATE_BROWSER: &str = "impersonate-browser";
     pub const LAST_AUTO_PASTE: &str = "last-auto-paste";
-    pub const SPONSORBLOCK_REMOVE: &str = "sponsorblock-remove";
-    pub const SPONSORBLOCK_MARK: &str = "sponsorblock-mark";
     pub const REMUX_VIDEO: &str = "remux-video";
     pub const EMBED_CHAPTERS: &str = "embed-chapters";
     pub const LIVE_FROM_START: &str = "live-from-start";
@@ -167,14 +165,6 @@ impl AppSettings {
     }
     pub fn set_last_auto_paste(&self, url: &str) {
         let _ = self.0.set_string(key::LAST_AUTO_PASTE, url);
-    }
-    /// Cut SponsorBlock-flagged sponsor segments out of yt-dlp downloads.
-    pub fn sponsorblock_remove(&self) -> bool {
-        self.0.boolean(key::SPONSORBLOCK_REMOVE)
-    }
-    /// Mark SponsorBlock-flagged sponsor segments as chapters in yt-dlp downloads.
-    pub fn sponsorblock_mark(&self) -> bool {
-        self.0.boolean(key::SPONSORBLOCK_MARK)
     }
     /// Target container for opt-in remuxing (`--remux-video`); `"off"` disables it.
     pub fn remux_video(&self) -> String {

@@ -983,45 +983,6 @@ pub fn show(
         .bind(crate::settings::key::EMBED_SUBS, &embed_subs, "active")
         .build();
     video_post_group.add(&embed_subs);
-    let sponsorblock = adw::SwitchRow::builder()
-        .title(gettext("Remove sponsored segments"))
-        .subtitle(gettext("Cut SponsorBlock-flagged sponsor segments"))
-        .build();
-    sponsorblock.set_tooltip_text(Some(&gettext(
-        "Works where SponsorBlock has data, mostly YouTube",
-    )));
-    settings
-        .bind(
-            crate::settings::key::SPONSORBLOCK_REMOVE,
-            &sponsorblock,
-            "active",
-        )
-        .build();
-    video_post_group.add(&sponsorblock);
-    let sponsorblock_mark = adw::SwitchRow::builder()
-        .title(gettext("Mark sponsored segments"))
-        .subtitle(gettext(
-            "Tag SponsorBlock-flagged sponsor segments as chapters",
-        ))
-        .build();
-    sponsorblock_mark.set_tooltip_text(Some(&gettext(
-        "Lets you skip sponsors with chapter navigation instead of cutting them",
-    )));
-    settings
-        .bind(
-            crate::settings::key::SPONSORBLOCK_MARK,
-            &sponsorblock_mark,
-            "active",
-        )
-        .build();
-    // Removing segments makes marking them moot: grey the Mark row out
-    // while Remove is on.
-    sponsorblock
-        .bind_property("active", &sponsorblock_mark, "sensitive")
-        .invert_boolean()
-        .sync_create()
-        .build();
-    video_post_group.add(&sponsorblock_mark);
     let embed_chapters = adw::SwitchRow::builder()
         .title(gettext("Embed chapters"))
         .subtitle(gettext("Write chapter markers into the finished file"))

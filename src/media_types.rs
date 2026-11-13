@@ -47,7 +47,7 @@ pub(crate) enum ManifestKind {
     Dash,
 }
 
-/// Preview-only output container selected from the native representation.
+/// Output container selected for a native HLS/DASH representation or destination.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum ManifestContainer {
     Mp4,
@@ -56,6 +56,17 @@ pub(crate) enum ManifestContainer {
 }
 
 impl ManifestContainer {
+    /// Parse a supported native-manifest output container from a filename extension.
+    #[must_use]
+    pub(crate) fn from_path(path: &std::path::Path) -> Option<Self> {
+        match path.extension().and_then(|extension| extension.to_str()) {
+            Some(extension) if extension.eq_ignore_ascii_case("mp4") => Some(Self::Mp4),
+            Some(extension) if extension.eq_ignore_ascii_case("mkv") => Some(Self::Mkv),
+            Some(extension) if extension.eq_ignore_ascii_case("ts") => Some(Self::Ts),
+            _ => None,
+        }
+    }
+
     /// Canonical filename suffix for this supported output container.
     #[must_use]
     pub(crate) const fn extension(self) -> &'static str {

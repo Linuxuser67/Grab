@@ -29,7 +29,9 @@ use crate::manifest::{
 use crate::manifest_intake::ManifestLookup;
 #[cfg(test)]
 use crate::manifest_intake::NativeManifest;
-use crate::media_types::{ManifestKind, ManifestRepresentationKey, ManifestSource};
+use crate::media_types::{
+    ManifestContainer, ManifestKind, ManifestRepresentationKey, ManifestSource,
+};
 
 mod dash_live;
 mod hls_live;
@@ -579,7 +581,7 @@ async fn prepare_manifest_attempt(
         })?
         .to_path_buf();
     let parent = dest_dir.clone();
-    let output_container = ManifestOutputContainer::from_path(&job.dest)?;
+    let output_container = output_container_from_path(&job.dest)?;
     let item_id = job.item_id;
     let staging = tokio::task::spawn_blocking(move || {
         crate::video_staging::ensure_manifest_staging_dir(&parent, item_id)
@@ -1949,7 +1951,7 @@ async fn finalize_manifest_download(
                     .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-')
         })
         .unwrap_or("und");
-    let output_container = ManifestOutputContainer::from_path(&job.dest)?;
+    let output_container = output_container_from_path(&job.dest)?;
     // MPEG-TS has inconsistent support for the WebVTT/TTML inputs normalized
     // by Grab. Preserve the selected subtitles as an SRT sidecar instead of
     // silently dropping them or failing the whole stream download.
@@ -2257,9 +2259,9 @@ async fn resolve_tracks(
 /// Whether the selected subtitle rendition can be embedded in the chosen container.
 fn embed_manifest_subtitles(
     embed_requested: bool,
-    output_container: ManifestOutputContainer,
+    output_container: ManifestContainer,
 ) -> bool {
-    embed_requested && output_container != ManifestOutputContainer::MpegTs
+    embed_requested && output_container != ManifestContainer::Ts
 }
 
 fn guard_hls_resources(
@@ -3202,32 +3204,12 @@ fn content_range_matches(header: Option<&str>, range: ManifestByteRange) -> bool
         })
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum ManifestOutputContainer {
-    Mp4,
-    Matroska,
-    MpegTs,
-}
-
-impl ManifestOutputContainer {
-    fn from_path(path: &Path) -> Result<Self, ManifestRunError> {
-        match path.extension().and_then(|extension| extension.to_str()) {
-            Some(extension) if extension.eq_ignore_ascii_case("mp4") => Ok(Self::Mp4),
-            Some(extension) if extension.eq_ignore_ascii_case("mkv") => Ok(Self::Matroska),
-            Some(extension) if extension.eq_ignore_ascii_case("ts") => Ok(Self::MpegTs),
-            _ => Err(ManifestRunError::Failed(
-                "Native HLS/DASH output must use an MP4, MKV, or TS filename".to_string(),
-            )),
-        }
-    }
-
-    fn extension(self) -> &'static str {
-        match self {
-            Self::Mp4 => "mp4",
-            Self::Matroska => "mkv",
-            Self::MpegTs => "ts",
-        }
-    }
+fn output_container_from_path(path: &Path) -> Result<ManifestContainer, ManifestRunError> {
+    ManifestContainer::from_path(path).ok_or_else(|| {
+        ManifestRunError::Failed(
+            "Native HLS/DASH output must use an MP4, MKV, or TS filename".to_string(),
+        )
+    })
 }
 
 const DASH_LIVE_STATE_NAME: &str = "live-dash-state.json";
@@ -4123,8 +4105,8 @@ async fn run_ffmpeg_with_offsets(
     output: &Path,
     abort: &mut tokio::sync::oneshot::Receiver<crate::video::StopIntent>,
 ) -> Result<bool, ManifestRunError> {
-    let output_container = ManifestOutputContainer::from_path(output)?;
-    if output_container == ManifestOutputContainer::MpegTs
+    let output_container = output_container_from_path(output)?;
+    if output_container == ManifestContainer::Ts
         && subtitles.input.is_some()
         && subtitles.embed
     {
@@ -4171,24 +4153,24 @@ async fn run_ffmpeg_with_offsets(
         command.arg("-map").arg(subtitle_stream).args([
             "-c:s",
             match output_container {
-                ManifestOutputContainer::Mp4 => "mov_text",
+                ManifestContainer::Mp4 => "mov_text",
                 // Matroska preserves the source subtitle codec instead of
                 // forcing MP4's mov_text representation.
-                ManifestOutputContainer::Matroska => "copy",
-                ManifestOutputContainer::MpegTs => {
+                ManifestContainer::Mkv => "copy",
+                ManifestContainer::Ts => {
                     return Err(mpegts_embedded_subtitle_error());
                 }
             },
         ]);
     }
     match output_container {
-        ManifestOutputContainer::Mp4 => {
+        ManifestContainer::Mp4 => {
             command.args(["-movflags", "+faststart", "-f", "mp4"]);
         }
-        ManifestOutputContainer::Matroska => {
+        ManifestContainer::Mkv => {
             command.args(["-f", "matroska"]);
         }
-        ManifestOutputContainer::MpegTs => {
+        ManifestContainer::Ts => {
             command.args(["-f", "mpegts"]);
         }
     }
@@ -4660,16 +4642,16 @@ segment-2.m4s
     fn mpegts_subtitles_use_a_sidecar_when_embedding_was_requested() {
         assert!(!embed_manifest_subtitles(
             true,
-            ManifestOutputContainer::MpegTs
+            ManifestContainer::Ts
         ));
         assert!(!embed_manifest_subtitles(
             false,
-            ManifestOutputContainer::Mp4
+            ManifestContainer::Mp4
         ));
-        assert!(embed_manifest_subtitles(true, ManifestOutputContainer::Mp4));
+        assert!(embed_manifest_subtitles(true, ManifestContainer::Mp4));
         assert!(embed_manifest_subtitles(
             true,
-            ManifestOutputContainer::Matroska
+            ManifestContainer::Mkv
         ));
     }
 
@@ -4697,19 +4679,19 @@ segment-2.m4s
     #[test]
     fn manifest_output_container_accepts_mp4_mkv_and_ts_extensions() {
         assert_eq!(
-            ManifestOutputContainer::from_path(Path::new("stream.mp4")).expect("MP4 path"),
-            ManifestOutputContainer::Mp4
+            output_container_from_path(Path::new("stream.mp4")).expect("MP4 path"),
+            ManifestContainer::Mp4
         );
         assert_eq!(
-            ManifestOutputContainer::from_path(Path::new("stream.MKV")).expect("MKV path"),
-            ManifestOutputContainer::Matroska
+            output_container_from_path(Path::new("stream.MKV")).expect("MKV path"),
+            ManifestContainer::Mkv
         );
         assert_eq!(
-            ManifestOutputContainer::from_path(Path::new("stream.TS")).expect("TS path"),
-            ManifestOutputContainer::MpegTs
+            output_container_from_path(Path::new("stream.TS")).expect("TS path"),
+            ManifestContainer::Ts
         );
-        assert!(ManifestOutputContainer::from_path(Path::new("stream.webm")).is_err());
-        assert!(ManifestOutputContainer::from_path(Path::new("stream")).is_err());
+        assert!(output_container_from_path(Path::new("stream.webm")).is_err());
+        assert!(output_container_from_path(Path::new("stream")).is_err());
     }
 
     #[tokio::test]

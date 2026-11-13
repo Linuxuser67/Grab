@@ -1954,9 +1954,6 @@ async fn sweep_live_capture(
     // `grab-<id>-*` files were already swept above; the dir stays.
 }
 
-/// Reap the recorder, and *only then* reclaim its scratch. The order is the contract: sweeping first could delete a file the recorder is still writing. Pinned by controlled futures in `video_runner_tests.rs`; the sweep is a closure so it cannot even be constructed before the reap completes.
-
-
 /// Wall-clock bound for the subtitle language probe: a single info-JSON fetch.
 /// Best-effort — on timeout the download simply gets no subtitles.
 const SUBTITLE_PROBE_TIMEOUT: Duration = Duration::from_secs(60);

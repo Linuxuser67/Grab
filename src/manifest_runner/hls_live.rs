@@ -599,7 +599,6 @@ pub(super) async fn apply_live_hls_snapshot(
         for resource in &newly_accounted_resources {
             if resource.kind != HlsResourceKind::Segment
                 || resource.range.is_some()
-
             {
                 if track.accumulator.segment_count() > 0 {
                     return Ok(LiveHlsSnapshotOutcome::Stopped(

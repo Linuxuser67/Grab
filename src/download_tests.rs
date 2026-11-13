@@ -7557,7 +7557,9 @@ fn removing_a_never_spawned_video_row_releases_after_finalizer() {
         .remove(&id)
         .expect("remove tracks an async finalizer for a never-spawned video row")
         .finalizer;
-    crate::runtime::tokio_rt().block_on(finalizer).expect("discard finalizer");
+    crate::runtime::tokio_rt()
+        .block_on(finalizer)
+        .expect("discard finalizer");
 
     assert!(
         !manager.dest_reserved(&dest),

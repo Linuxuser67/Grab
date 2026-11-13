@@ -593,9 +593,8 @@ fn prune_unreferenced_handoff_hosts(
 fn maybe_prune_unreferenced_handoff_hosts() {
     let now = Instant::now();
     let should_prune = {
-        let mut last_pruned = lock_recover(
-            UNTRUSTED_HANDOFF_HOSTS_LAST_PRUNED.get_or_init(|| Mutex::new(now)),
-        );
+        let mut last_pruned =
+            lock_recover(UNTRUSTED_HANDOFF_HOSTS_LAST_PRUNED.get_or_init(|| Mutex::new(now)));
         if now.duration_since(*last_pruned) < HANDOFF_HOST_PRUNE_INTERVAL {
             false
         } else {
@@ -1246,11 +1245,12 @@ mod tests {
         assert!(!is_untrusted_handoff_host("example.com"));
         assert!(!is_untrusted_handoff_host("cdn.www.example.com"));
         let mut children = PublicResolutionSet::default();
-        children.inherit(
-            "https://www.example.com/list",
-            "https://example.com/video.mp4",
-        )
-        .expect("cross-origin collection child should be leased");
+        children
+            .inherit(
+                "https://www.example.com/list",
+                "https://example.com/video.mp4",
+            )
+            .expect("cross-origin collection child should be leased");
         assert!(is_untrusted_handoff_host("example.com"));
         drop(children);
         assert!(!is_untrusted_handoff_host("example.com"));
@@ -1339,17 +1339,15 @@ mod tests {
         };
         assert!(require_public_resolution("collection.example"));
         let mut children = PublicResolutionSet::default();
-        children.inherit(
-            "https://collection.example/list",
-            "https://cdn.example/video.mp4",
-        )
-        .expect("public child host should be leased");
+        children
+            .inherit(
+                "https://collection.example/list",
+                "https://cdn.example/video.mp4",
+            )
+            .expect("public child host should be leased");
         assert!(is_untrusted_handoff_host("cdn.example"));
         assert_eq!(
-            children.inherit(
-                "https://collection.example/list",
-                "http://127.0.0.1/admin",
-            ),
+            children.inherit("https://collection.example/list", "http://127.0.0.1/admin",),
             Err(CollectionHostError::UnsafeDestination)
         );
         drop(children);

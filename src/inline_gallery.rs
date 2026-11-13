@@ -129,7 +129,7 @@ pub(crate) fn resolve_gallery_auth(url: &str, browser: &str) -> GalleryAuth {
 const GALLERY_PREVIEW_CACHE_TTL: Duration = Duration::from_secs(5 * 60);
 const GALLERY_PREVIEW_CACHE_CAPACITY: usize = 32;
 
-#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+#[derive(Clone, PartialEq, Eq, Hash)]
 struct GalleryPreviewCacheKey {
     url: String,
     cookies_browser: Option<String>,
@@ -139,7 +139,8 @@ struct GalleryPreviewCacheKey {
 }
 
 type GalleryPreviewItems = Option<Vec<crate::gallery_probe::GalleryItem>>;
-type GalleryPreviewCache = Mutex<HashMap<GalleryPreviewCacheKey, (Instant, GalleryPreviewItems)>>;
+type GalleryPreviewCacheMap = HashMap<GalleryPreviewCacheKey, (Instant, GalleryPreviewItems)>;
+type GalleryPreviewCache = Mutex<GalleryPreviewCacheMap>;
 
 static GALLERY_PREVIEW_CACHE: LazyLock<GalleryPreviewCache> =
     LazyLock::new(|| Mutex::new(HashMap::new()));
@@ -188,10 +189,34 @@ fn gallery_preview_cache_insert(key: GalleryPreviewCacheKey, items: &GalleryPrev
     let Ok(mut cache) = GALLERY_PREVIEW_CACHE.lock() else {
         return;
     };
-    if cache.len() >= GALLERY_PREVIEW_CACHE_CAPACITY && !cache.contains_key(&key) {
-        cache.clear();
+    insert_gallery_preview(&mut cache, key, items, Instant::now());
+}
+
+fn insert_gallery_preview(
+    cache: &mut GalleryPreviewCacheMap,
+    key: GalleryPreviewCacheKey,
+    items: &GalleryPreviewItems,
+    now: Instant,
+) {
+    // Empty and absent listings are negative results: do not let a transient
+    // empty preview suppress a later lookup for the same page.
+    if items.as_ref().is_none_or(Vec::is_empty) {
+        return;
     }
-    cache.insert(key, (Instant::now(), items.clone()));
+
+    cache.retain(|_, (cached_at, _)| {
+        now.saturating_duration_since(*cached_at) < GALLERY_PREVIEW_CACHE_TTL
+    });
+    if cache.len() >= GALLERY_PREVIEW_CACHE_CAPACITY && !cache.contains_key(&key) {
+        let oldest_key = cache
+            .iter()
+            .min_by_key(|(_, (cached_at, _))| *cached_at)
+            .map(|(cached_key, _)| cached_key.clone());
+        if let Some(oldest_key) = oldest_key {
+            cache.remove(&oldest_key);
+        }
+    }
+    cache.insert(key, (now, items.clone()));
 }
 
 /// Probe both backends for one URL, concurrently: yt-dlp's video check and
@@ -650,6 +675,51 @@ mod tests {
             ),
         );
         assert!(gallery_preview_cache_get(&key).is_none());
+    }
+
+    #[test]
+    fn gallery_preview_cache_skips_negative_results_and_evicts_oldest_entry() {
+        let mut cache = GalleryPreviewCacheMap::new();
+        let key = |name: &str| GalleryPreviewCacheKey {
+            url: format!("https://gallery-cache.example.test/{name}"),
+            cookies_browser: None,
+            handoff_cookie_hash: None,
+            user_agent: None,
+            proxy: None,
+        };
+        let no_items: GalleryPreviewItems = None;
+        let empty_items: GalleryPreviewItems = Some(Vec::new());
+        let start = Instant::now();
+        let empty_key = key("empty");
+        insert_gallery_preview(&mut cache, empty_key.clone(), &no_items, start);
+        insert_gallery_preview(&mut cache, empty_key.clone(), &empty_items, start);
+        assert!(!cache.contains_key(&empty_key));
+
+        let items: GalleryPreviewItems = Some(vec![crate::gallery_probe::GalleryItem {
+            filename: "one.jpg".to_string(),
+            extension: "jpg".to_string(),
+            category: "image".to_string(),
+            extra: serde_json::Map::new(),
+        }]);
+        for index in 0..GALLERY_PREVIEW_CACHE_CAPACITY {
+            let inserted_at = start + Duration::from_secs(index as u64);
+            insert_gallery_preview(
+                &mut cache,
+                key(&format!("item-{index}")),
+                &items,
+                inserted_at,
+            );
+        }
+        assert_eq!(cache.len(), GALLERY_PREVIEW_CACHE_CAPACITY);
+
+        let overflow_key = key("overflow");
+        let inserted_at = start + Duration::from_secs(GALLERY_PREVIEW_CACHE_CAPACITY as u64);
+        insert_gallery_preview(&mut cache, overflow_key.clone(), &items, inserted_at);
+
+        assert_eq!(cache.len(), GALLERY_PREVIEW_CACHE_CAPACITY);
+        assert!(!cache.contains_key(&key("item-0")));
+        assert!(cache.contains_key(&key("item-1")));
+        assert!(cache.contains_key(&overflow_key));
     }
 
     #[test]

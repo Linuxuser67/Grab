@@ -1005,7 +1005,9 @@ fn resolve_live_update_segments(
     // Delta and sliding-window playlists may omit the MAP line that established
     // the current initialization section. Carry the last committed map forward
     // before deriving identities and local resource references.
-    let mut active_map = existing_segments.last().and_then(|segment| segment.map.clone());
+    let mut active_map = existing_segments
+        .last()
+        .and_then(|segment| segment.map.clone());
     snapshot_segments
         .iter()
         .map(|segment| {
@@ -1030,8 +1032,8 @@ fn classify_live_update_units(
         .map(|(id, segment)| {
             if let Some(index) = existing_index.and_then(|existing| existing.position(id)) {
                 LiveUnitClass::Existing(index)
-            } else if let Some(alias_end) = existing_index
-                .and_then(|existing| existing.completed_parent_alias(id, segment))
+            } else if let Some(alias_end) =
+                existing_index.and_then(|existing| existing.completed_parent_alias(id, segment))
             {
                 LiveUnitClass::ParentAlias(alias_end)
             } else {
@@ -1054,19 +1056,13 @@ fn collect_live_unit_delta(
     let mut last_existing_index = None;
     let mut referenced_resource_set = HashSet::new();
 
-    for ((id, segment), class) in ids
-        .iter()
-        .zip(segments)
-        .zip(classes)
-        .skip(first_index)
-    {
+    for ((id, segment), class) in ids.iter().zip(segments).zip(classes).skip(first_index) {
         match *class {
             LiveUnitClass::Existing(index) => {
                 if saw_new || last_existing_index.is_some_and(|previous| index <= previous) {
                     return Err(ManifestError::LiveUnitOrderChanged);
                 }
-                if accumulator.segment_identities.get(index)
-                    != Some(&hls_segment_identity(segment))
+                if accumulator.segment_identities.get(index) != Some(&hls_segment_identity(segment))
                 {
                     return Err(ManifestError::LiveUnitIdentityChanged);
                 }

@@ -29,7 +29,10 @@ use crate::manifest::{
 use crate::manifest_intake::ManifestLookup;
 #[cfg(test)]
 use crate::manifest_intake::NativeManifest;
-use crate::media_types::{ManifestKind, ManifestRepresentationKey, ManifestSource};
+use crate::media_types::{
+    ManifestContainer as ManifestOutputContainer, ManifestKind, ManifestRepresentationKey,
+    ManifestSource,
+};
 use crate::mp4_validation::is_fmp4_resource as validate_fmp4_resource;
 use crate::mpeg_ts_validation::TransportStreamValidator;
 
@@ -579,7 +582,7 @@ async fn prepare_manifest_attempt(
         })?
         .to_path_buf();
     let parent = dest_dir.clone();
-    let output_container = ManifestOutputContainer::from_path(&job.dest)?;
+    let output_container = manifest_output_container_from_path(&job.dest)?;
     let item_id = job.item_id;
     let staging = tokio::task::spawn_blocking(move || {
         crate::video_staging::ensure_manifest_staging_dir(&parent, item_id)
@@ -1949,7 +1952,7 @@ async fn finalize_manifest_download(
                     .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-')
         })
         .unwrap_or("und");
-    let output_container = ManifestOutputContainer::from_path(&job.dest)?;
+    let output_container = manifest_output_container_from_path(&job.dest)?;
     // MPEG-TS has inconsistent support for the WebVTT/TTML inputs normalized
     // by Grab. Preserve the selected subtitles as an SRT sidecar instead of
     // silently dropping them or failing the whole stream download.
@@ -3203,32 +3206,14 @@ fn content_range_matches(header: Option<&str>, range: ManifestByteRange) -> bool
         })
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum ManifestOutputContainer {
-    Mp4,
-    Matroska,
-    MpegTs,
-}
-
-impl ManifestOutputContainer {
-    fn from_path(path: &Path) -> Result<Self, ManifestRunError> {
-        match path.extension().and_then(|extension| extension.to_str()) {
-            Some(extension) if extension.eq_ignore_ascii_case("mp4") => Ok(Self::Mp4),
-            Some(extension) if extension.eq_ignore_ascii_case("mkv") => Ok(Self::Matroska),
-            Some(extension) if extension.eq_ignore_ascii_case("ts") => Ok(Self::MpegTs),
-            _ => Err(ManifestRunError::Failed(
-                "Native HLS/DASH output must use an MP4, MKV, or TS filename".to_string(),
-            )),
-        }
-    }
-
-    fn extension(self) -> &'static str {
-        match self {
-            Self::Mp4 => "mp4",
-            Self::Matroska => "mkv",
-            Self::MpegTs => "ts",
-        }
-    }
+fn manifest_output_container_from_path(
+    path: &Path,
+) -> Result<ManifestOutputContainer, ManifestRunError> {
+    ManifestOutputContainer::from_path(path).ok_or_else(|| {
+        ManifestRunError::Failed(
+            "Native HLS/DASH output must use an MP4, MKV, or TS filename".to_string(),
+        )
+    })
 }
 
 const DASH_LIVE_STATE_NAME: &str = "live-dash-state.json";
@@ -4282,7 +4267,7 @@ async fn run_ffmpeg_with_offsets(
     output: &Path,
     abort: &mut tokio::sync::oneshot::Receiver<crate::video::StopIntent>,
 ) -> Result<bool, ManifestRunError> {
-    let output_container = ManifestOutputContainer::from_path(output)?;
+    let output_container = manifest_output_container_from_path(output)?;
     if output_container == ManifestOutputContainer::MpegTs
         && subtitles.input.is_some()
         && subtitles.embed
@@ -4945,25 +4930,25 @@ segment-2.m4s
     #[test]
     fn dash_output_container_follows_the_selected_video_mime_type() {
         assert_eq!(
-            crate::manifest_plan::dash_output_container_extension(Some("video/mp2t")),
-            Some("ts")
+            crate::manifest_plan::dash_output_container(Some("video/mp2t")),
+            Some(ManifestOutputContainer::MpegTs)
         );
         assert_eq!(
-            crate::manifest_plan::dash_output_container_extension(Some("video/mp4")),
-            Some("mp4")
+            crate::manifest_plan::dash_output_container(Some("video/mp4")),
+            Some(ManifestOutputContainer::Mp4)
         );
         assert_eq!(
-            crate::manifest_plan::dash_output_container_extension(Some(
+            crate::manifest_plan::dash_output_container(Some(
                 "application/mp4; codecs=avc1"
             )),
-            Some("mp4")
+            Some(ManifestOutputContainer::Mp4)
         );
         assert_eq!(
-            crate::manifest_plan::dash_output_container_extension(Some("video/webm")),
+            crate::manifest_plan::dash_output_container(Some("video/webm")),
             None
         );
         assert_eq!(
-            crate::manifest_plan::dash_output_container_extension(None),
+            crate::manifest_plan::dash_output_container(None),
             None
         );
     }
@@ -4982,8 +4967,8 @@ segment-2.m4s
             ManifestOutputContainer::from_path(Path::new("stream.TS")).expect("TS path"),
             ManifestOutputContainer::MpegTs
         );
-        assert!(ManifestOutputContainer::from_path(Path::new("stream.webm")).is_err());
-        assert!(ManifestOutputContainer::from_path(Path::new("stream")).is_err());
+        assert!(ManifestOutputContainer::from_path(Path::new("stream.webm")).is_none());
+        assert!(ManifestOutputContainer::from_path(Path::new("stream")).is_none());
     }
 
     #[tokio::test]

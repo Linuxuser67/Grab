@@ -169,7 +169,8 @@ impl HlsLiveIndex {
             return None;
         };
         let run = self.part_runs.get(sequence)?;
-        let duration_matches = (run.duration - f64::from(parent.duration)).abs() <= PART_DURATION_TOLERANCE;
+        let duration_matches =
+            (run.duration - f64::from(parent.duration)).abs() <= PART_DURATION_TOLERANCE;
         (run.contiguous
             && run.first_part_index == 0
             && run.first_discontinuity == parent.discontinuity
@@ -212,7 +213,7 @@ fn media_segment_duration(duration: Duration) -> f32 {
     duration.as_secs_f64() as f32
 }
 
-fn has_required_unknown_attributes(attributes: &[(String, String)]) -> bool {
+fn has_required_unknown_attributes<T>(attributes: &[(String, T)]) -> bool {
     attributes.iter().any(|(name, _)| name.starts_with("REQ-"))
 }
 
@@ -431,7 +432,10 @@ fn build_plan(
         .part_target
         .map(|target| {
             let seconds = target.get();
-            if !seconds.is_finite() || seconds <= 0.0 || seconds >= target_duration_seconds(source_target_duration) {
+            if !seconds.is_finite()
+                || seconds <= 0.0
+                || seconds >= target_duration_seconds(source_target_duration)
+            {
                 return Err(ManifestError::InvalidDuration);
             }
             Duration::try_from_secs_f64(seconds).map_err(|_| ManifestError::InvalidDuration)
@@ -466,7 +470,9 @@ fn build_plan(
             return Err(ManifestError::InvalidDuration);
         }
     }
-    if can_skip_until.is_some_and(|skip| skip.as_secs_f64() < 6.0 * target_duration_seconds(source_target_duration)) {
+    if can_skip_until.is_some_and(|skip| {
+        skip.as_secs_f64() < 6.0 * target_duration_seconds(source_target_duration)
+    }) {
         return Err(ManifestError::InvalidDuration);
     }
     validate_start_point(&playlist)?;
@@ -775,8 +781,7 @@ fn parse_rendition_reports(
     reports
         .iter()
         .map(|report| {
-            if has_required_unknown_attributes(&report.extra_attrs)
-            {
+            if has_required_unknown_attributes(&report.extra_attrs) {
                 return Err(ManifestError::UnsupportedPlaylist);
             }
             Ok(HlsRenditionReport {
@@ -870,8 +875,7 @@ fn validate_start_point(playlist: &LlMediaPlaylist) -> Result<(), ManifestError>
     if !start.time_offset.get().is_finite() {
         return Err(ManifestError::InvalidDuration);
     }
-    if has_required_unknown_attributes(&start.extra_attrs)
-    {
+    if has_required_unknown_attributes(&start.extra_attrs) {
         return Err(ManifestError::UnsupportedPlaylist);
     }
     Ok(())
@@ -883,15 +887,17 @@ fn validate_part(part: &LlPartSpec) -> Result<(), ManifestError> {
             "#EXT-X-PART GAP resources cannot be fetched".to_string(),
         ));
     }
-    if has_required_unknown_attributes(&part.extra_attrs)
-    {
+    if has_required_unknown_attributes(&part.extra_attrs) {
         return Err(ManifestError::UnsupportedPlaylist);
     }
     Ok(())
 }
 
 fn checked_duration(seconds: f64, target_duration: u64) -> Result<Duration, ManifestError> {
-    if !seconds.is_finite() || seconds <= 0.0 || seconds.round() > target_duration_seconds(target_duration) {
+    if !seconds.is_finite()
+        || seconds <= 0.0
+        || seconds.round() > target_duration_seconds(target_duration)
+    {
         return Err(ManifestError::InvalidDuration);
     }
     Duration::try_from_secs_f64(seconds).map_err(|_| ManifestError::InvalidDuration)
@@ -944,8 +950,7 @@ fn plan_map(
     let Some(map) = map else {
         return Ok(None);
     };
-    if has_required_unknown_attributes(&map.extra_attrs)
-    {
+    if has_required_unknown_attributes(&map.extra_attrs) {
         return Err(ManifestError::UnsupportedPlaylist);
     }
     let url = resolve_hls_media_resource_url(base_url, &map.uri)?;

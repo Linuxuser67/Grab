@@ -259,7 +259,10 @@ fn scan_ll_hls_tags(body: &[u8]) -> LlHlsTagFlags {
         // The previous implementation searched for the last EXTINF byte
         // sequence, then scanned only its suffix for a discontinuity. Resetting
         // on every line containing EXTINF preserves that ordering in one pass.
-        if raw_line.windows(EXTINF.len()).any(|window| window == EXTINF) {
+        if raw_line
+            .windows(EXTINF.len())
+            .any(|window| window == EXTINF)
+        {
             flags.trailing_open_discontinuity = false;
         }
 

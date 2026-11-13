@@ -458,6 +458,28 @@ impl Drop for PublicResolutionLease {
     }
 }
 
+/// Own cloned public-host leases for an asynchronous request.
+///
+/// This guard expresses the lifetime boundary: its leases remain registered
+/// until the guarded request completes or is cancelled.
+#[derive(Debug, Default)]
+#[must_use = "keep this guard alive for the full lifetime of the guarded request"]
+pub(crate) struct PublicResolutionLeaseGuard {
+    _leases: Vec<Arc<PublicResolutionLease>>,
+}
+
+impl PublicResolutionLeaseGuard {
+    /// Hold these registrations until the supplied future finishes or drops.
+    pub(crate) async fn hold<F>(self, future: F) -> F::Output
+    where
+        F: std::future::Future,
+    {
+        let output = future.await;
+        drop(self);
+        output
+    }
+}
+
 /// Per-operation child hosts; leases are released with the operation state.
 #[derive(Default)]
 pub(crate) struct PublicResolutionSet {
@@ -512,9 +534,11 @@ impl PublicResolutionSet {
         self.hosts.contains(host)
     }
 
-    /// Clone leases for asynchronous work that may outlive the owning set.
-    pub(crate) fn clone_leases(&self) -> Vec<Arc<PublicResolutionLease>> {
-        self.leases.clone()
+    /// Create a typed lifetime guard for requests that may outlive the owning set.
+    pub(crate) fn lease_guard(&self) -> PublicResolutionLeaseGuard {
+        PublicResolutionLeaseGuard {
+            _leases: self.leases.clone(),
+        }
     }
 
     pub(crate) fn insert(&mut self, host: String, lease: Arc<PublicResolutionLease>) {
@@ -1195,7 +1219,7 @@ mod tests {
         let lease =
             acquire_public_resolution("background-count.example").expect("public host lease");
         owner.insert(lease.host().to_string(), lease);
-        let background = owner.clone_leases();
+        let background = owner.lease_guard();
 
         drop(owner);
         assert!(

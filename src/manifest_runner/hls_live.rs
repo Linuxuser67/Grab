@@ -597,16 +597,15 @@ pub(super) async fn apply_live_hls_snapshot(
     }
     if track.destination_part.is_some() {
         for resource in &newly_accounted_resources {
-            if resource.kind != HlsResourceKind::Segment
-                || resource.range.is_some()
-            {
+            if resource.kind != HlsResourceKind::Segment || resource.range.is_some() {
                 if track.accumulator.segment_count() > 0 {
                     return Ok(LiveHlsSnapshotOutcome::Stopped(
                         crate::video::StopIntent::Finish,
                     ));
                 }
                 return Err(ManifestRunError::Unsupported(
-                    "A live HLS resource no longer matches the MPEG-TS destination-part layout".to_string(),
+                    "A live HLS resource no longer matches the MPEG-TS destination-part layout"
+                        .to_string(),
                 ));
             }
         }
@@ -1677,12 +1676,7 @@ mod destination_part_tests {
 
     fn transport_stream(seed: u8) -> Vec<u8> {
         let mut bytes = vec![0xff; 188 * 3];
-        for (index, packet) in bytes
-            .as_chunks_mut::<188>()
-            .0
-            .iter_mut()
-            .enumerate()
-        {
+        for (index, packet) in bytes.as_chunks_mut::<188>().0.iter_mut().enumerate() {
             packet[0] = 0x47;
             packet[1] = 0;
             packet[2] = 0;

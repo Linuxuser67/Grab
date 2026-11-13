@@ -606,13 +606,46 @@ fn status_views_use_gnome_adaptive_view_switcher() {
             );
         }
 
+        let add_button = find_widget_by_name(window.upcast_ref(), "add-download-button")
+            .expect("New Download remains in the header");
+        assert_eq!(
+            add_button
+                .next_sibling()
+                .map(|widget| widget.widget_name().to_string())
+                .as_deref(),
+            Some("main-menu-button"),
+            "the primary menu is immediately beside the window controls, after New Download"
+        );
+
+        let search_bar = find_widget_by_name(window.upcast_ref(), "download-search-bar")
+            .expect("the stock GTK search bar is present")
+            .downcast::<gtk4::SearchBar>()
+            .expect("queue search uses GtkSearchBar");
         assert!(
-            find_widget_by_name(window.upcast_ref(), "add-download-button").is_some(),
-            "New Download remains in the header"
+            search_bar
+                .child()
+                .is_some_and(|child| child.is::<gtk4::SearchEntry>()),
+            "GtkSearchBar contains GtkSearchEntry directly rather than a custom card"
         );
         assert!(
-            find_widget_by_name(window.upcast_ref(), "main-menu-button").is_some(),
-            "the primary menu remains beside the window controls"
+            !search_bar.property::<bool>("show-close-button"),
+            "the search bar does not add a separate close control"
+        );
+        let search_toggle = find_widget_by_name(window.upcast_ref(), "search-downloads-button")
+            .expect("header search toggle exists")
+            .downcast::<gtk4::ToggleButton>()
+            .expect("search action is a toggle");
+        search_bar.set_search_mode(true);
+        drain_gtk_events();
+        assert!(
+            search_toggle.is_active(),
+            "the header toggle follows an enabled search mode"
+        );
+        search_bar.set_search_mode(false);
+        drain_gtk_events();
+        assert!(
+            !search_toggle.is_active(),
+            "closing search clears the header toggle"
         );
 
         let picker_child = gtk4::Box::new(gtk4::Orientation::Vertical, 0);

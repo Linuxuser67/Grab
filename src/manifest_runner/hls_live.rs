@@ -595,33 +595,17 @@ pub(super) async fn apply_live_hls_snapshot(
     if full_resource_verification_due {
         track.last_full_resource_verification = Instant::now();
     }
-    for filename in plan
-        .ll_parts_without_init_map()
-        .filter(|filename| new_resource_names.contains(*filename))
-    {
-        if !super::is_mpegts_segment(&track.directory.join(filename)).await? {
-            if track.accumulator.segment_count() > 0 {
-                return Ok(LiveHlsSnapshotOutcome::ContinuityLost);
-            }
-            return Err(ManifestRunError::Unsupported(
-                "A Low-Latency HLS part without EXT-X-MAP is not a valid MPEG-TS fragment"
-                    .to_string(),
-            ));
-        }
-    }
     if track.destination_part.is_some() {
         for resource in &newly_accounted_resources {
-            if resource.kind != HlsResourceKind::Segment
-                || resource.range.is_some()
-                || !super::is_mpegts_segment(&track.directory.join(&resource.filename)).await?
-            {
+            if resource.kind != HlsResourceKind::Segment || resource.range.is_some() {
                 if track.accumulator.segment_count() > 0 {
                     return Ok(LiveHlsSnapshotOutcome::Stopped(
                         crate::video::StopIntent::Finish,
                     ));
                 }
                 return Err(ManifestRunError::Unsupported(
-                    "A live HLS segment is not a compatible MPEG-TS fragment".to_string(),
+                    "A live HLS resource no longer matches the MPEG-TS destination-part layout"
+                        .to_string(),
                 ));
             }
         }
@@ -728,18 +712,10 @@ fn apply_rendition_report(source: &LiveHlsTrack, peer: &mut LiveHlsTrack) -> boo
     true
 }
 
-async fn live_hls_track_has_only_mpegts_resources(
-    track: &LiveHlsTrack,
-) -> Result<bool, ManifestRunError> {
-    let Some(resources) = track.accumulator.plain_mpegts_resource_names() else {
-        return Ok(false);
-    };
-    for filename in resources {
-        if !super::is_mpegts_segment(&track.directory.join(filename)).await? {
-            return Ok(false);
-        }
-    }
-    Ok(true)
+fn live_hls_track_uses_plain_mpegts_resource_plan(track: &LiveHlsTrack) -> bool {
+    // This selects only the byte-concatenation optimization. FFmpeg validates
+    // the assembled transport stream when the complete track is finalized.
+    track.accumulator.plain_mpegts_resource_names().is_some()
 }
 
 async fn append_live_hls_destination_part(
@@ -777,18 +753,13 @@ async fn append_live_hls_destination_part(
         return Ok(None);
     };
 
+    if writer.next_resource_index() > resources.len() {
+        return Err(ManifestRunError::Failed(
+            "The live HLS destination-part checkpoint exceeds its resource plan".to_string(),
+        ));
+    }
+
     while writer.next_resource_index() < resources.len() {
-        let index = writer.next_resource_index();
-        let filename = resources.get(index).ok_or_else(|| {
-            ManifestRunError::Failed(
-                "The live HLS destination-part checkpoint exceeds its resource plan".to_string(),
-            )
-        })?;
-        if !super::is_mpegts_segment(&track.directory.join(filename)).await? {
-            return Err(ManifestRunError::Failed(
-                "A staged live HLS segment is not a compatible MPEG-TS fragment".to_string(),
-            ));
-        }
         match writer
             .append_next_outcome(abort)
             .await
@@ -1348,9 +1319,9 @@ pub(super) async fn run_live_hls_tracks(
     let mut use_destination_parts = video_plan.is_plain_mpegts_presentation()
         && audio_plan.is_none_or(HlsPlan::is_plain_mpegts_presentation);
     if use_destination_parts {
-        use_destination_parts = live_hls_track_has_only_mpegts_resources(&video).await?;
+        use_destination_parts = live_hls_track_uses_plain_mpegts_resource_plan(&video);
         if use_destination_parts && let Some(track) = audio.as_ref() {
-            use_destination_parts = live_hls_track_has_only_mpegts_resources(track).await?;
+            use_destination_parts = live_hls_track_uses_plain_mpegts_resource_plan(track);
         }
     }
     if use_destination_parts {
@@ -1705,12 +1676,7 @@ mod destination_part_tests {
 
     fn transport_stream(seed: u8) -> Vec<u8> {
         let mut bytes = vec![0xff; 188 * 3];
-        for (index, packet) in bytes
-            .as_chunks_mut::<{ mpeg_ts::ts::TS_PACKET_SIZE }>()
-            .0
-            .iter_mut()
-            .enumerate()
-        {
+        for (index, packet) in bytes.as_chunks_mut::<188>().0.iter_mut().enumerate() {
             packet[0] = 0x47;
             packet[1] = 0;
             packet[2] = 0;

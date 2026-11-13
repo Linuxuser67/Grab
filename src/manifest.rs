@@ -501,10 +501,11 @@ impl HlsPlan {
         Ok(())
     }
 
-    /// Confirmed LL-HLS part resources without an EXT-X-MAP initialization section.
+    /// Identify confirmed LL-HLS part resources without an EXT-X-MAP.
     ///
-    /// These are only valid for MPEG-TS parts; the runner validates their bytes
-    /// before committing them. CMAF parts without a known map are unsupported.
+    /// This planner detail is retained for unit tests. Production capture stages
+    /// the bytes and lets FFmpeg validate the completed assembled track.
+    #[cfg(test)]
     pub(crate) fn ll_parts_without_init_map(&self) -> impl Iterator<Item = &str> {
         self.ll_unit_ids
             .as_deref()

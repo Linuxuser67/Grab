@@ -169,7 +169,7 @@ jobs:
           # Scanner pins are NOT Dependabot-tracked: bump the version, URL and
           # sha256 together when a new gitleaks release lands (and the
           # [extend] useDefault pin in .gitleaks.toml if the ruleset changed).
-          curl --retry 5 --retry-all-errors --retry-delay 3 --retry-max-time 180 --connect-timeout 20 --max-time 60 -sSL --fail -H 'Accept: application/octet-stream' https://api.github.com/repos/gitleaks/gitleaks/releases/assets/378332058 -o /tmp/gitleaks.tgz
+          curl --retry 5 --retry-all-errors --retry-delay 3 --retry-max-time 180 --connect-timeout 20 --max-time 60 -sSL --fail -H 'Accept: application/octet-stream' https://github.com/gitleaks/gitleaks/releases/download/v8.30.1/gitleaks_8.30.1_linux_x64.tar.gz -o /tmp/gitleaks.tgz
           # Pinned hash, cross-checked against the vendor-published
           # gitleaks_8.30.1_checksums.txt: a swapped release asset fails here.
           echo "551f6fc83ea457d62a0d98237cbad105af8d557003051f41f3e7ca7b3f2470eb  /tmp/gitleaks.tgz" | sha256sum -c -
@@ -181,7 +181,7 @@ jobs:
         run: |
           # Scanner pins are NOT Dependabot-tracked: bump the version, URL and
           # sha256 together when a new cargo-audit release lands.
-          curl --retry 5 --retry-all-errors --retry-delay 3 --retry-max-time 180 --connect-timeout 20 --max-time 60 -sSL --fail -H 'Accept: application/octet-stream' https://api.github.com/repos/RustSec/rustsec/releases/assets/439291614 -o /tmp/cargo-audit.tgz
+          curl --retry 5 --retry-all-errors --retry-delay 3 --retry-max-time 180 --connect-timeout 20 --max-time 60 -sSL --fail -H 'Accept: application/octet-stream' https://github.com/rustsec/rustsec/releases/download/cargo-audit/v0.22.2/cargo-audit-x86_64-unknown-linux-gnu-v0.22.2.tgz -o /tmp/cargo-audit.tgz
           # Pinned hash (no vendor checksums published for this asset; the
           # extracted binary was verified to report 0.22.2): a swapped
           # release asset fails here instead of running unverified.

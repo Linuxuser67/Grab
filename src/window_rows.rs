@@ -854,21 +854,7 @@ pub(crate) fn build_download_group_row(
                 .iter()
                 .filter_map(|id| {
                     let item = manager.find(*id)?;
-                    Some(RemovedSnapshot {
-                        url: item.url().to_string(),
-                        dest_dir: item.dest_dir().to_string(),
-                        filename: item.filename().to_string(),
-                        status: item.status(),
-                        progress: item.progress(),
-                        detail: item.detail().to_string(),
-                        output_dir: item.output_dir().to_string(),
-                        segments: manager.segments_of(*id),
-                        video_source: manager.video_source(*id),
-                        started: manager.has_started(*id),
-                        public_only: item.public_only(),
-                        group: item.group(),
-                        gallery_job: manager.gallery_job(*id),
-                    })
+                    Some(RemovedSnapshot::capture(&manager, &item))
                 })
                 .collect::<Vec<_>>();
             if snapshots.is_empty() {
@@ -1515,21 +1501,7 @@ pub(crate) fn build_row(
         let t = Rc::clone(toasts);
         remove_btn.connect_clicked(move |_| {
             let Some(it) = m.find(id) else { return };
-            let snapshot = RemovedSnapshot {
-                url: it.url().to_string(),
-                dest_dir: it.dest_dir().to_string(),
-                filename: it.filename().to_string(),
-                status: it.status(),
-                progress: it.progress(),
-                detail: it.detail().to_string(),
-                output_dir: it.output_dir().to_string(),
-                segments: m.segments_of(id),
-                video_source: m.video_source(id),
-                started: m.has_started(id),
-                public_only: it.public_only(),
-                group: it.group(),
-                gallery_job: m.gallery_job(id),
-            };
+            let snapshot = RemovedSnapshot::capture(&m, &it);
             let name = snapshot.filename.clone();
             m.remove(id);
             let message =

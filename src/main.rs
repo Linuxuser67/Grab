@@ -32,7 +32,7 @@ mod manifest_runner;
 mod manifest_types;
 mod manifest_writer;
 mod media_types;
-mod mp4_validation;
+mod mp4_reader;
 mod net_types;
 mod preferences;
 mod runtime;

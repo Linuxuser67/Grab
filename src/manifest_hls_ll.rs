@@ -415,17 +415,27 @@ fn open_segment_program_date_time(
     parse_program_date_time_tag(tag).map(Some)
 }
 
-fn build_plan(
+/// Validated inputs shared by the LL-HLS planning stages.
+struct ValidatedLlHlsPlaylist {
+    base_url: Url,
+    source_target_duration: u64,
+    end_list: bool,
+    first_visible_sequence: u64,
+    part_target: Option<Duration>,
+    can_skip_until: Option<Duration>,
+    can_block_reload: bool,
+}
+
+fn validate_ll_hls_playlist(
     manifest_url: &str,
-    playlist: LlMediaPlaylist,
-    open_segment_discontinuity: bool,
-    source_segments: Option<&[m3u8_rs::MediaSegment]>,
-) -> Result<HlsPlan, ManifestError> {
+    playlist: &LlMediaPlaylist,
+) -> Result<ValidatedLlHlsPlaylist, ManifestError> {
     let base_url = parse_manifest_url(manifest_url)?;
     let source_target_duration = u64::from(playlist.target_duration);
     if source_target_duration == 0 || playlist.iframes_only {
         return Err(ManifestError::UnsupportedPlaylist);
     }
+
     // VOD is immutable even when an origin omits the redundant ENDLIST marker.
     // Keep LL-HLS VOD out of the live reload path, as with the standard planner.
     let declared_vod = matches!(
@@ -438,7 +448,7 @@ fn build_plan(
         .as_ref()
         .map_or(0, |skip| skip.skipped_segments);
     if let Some(skip) = playlist.skip.as_ref()
-        && (low_latency_can_skip_until(&playlist).is_none()
+        && (low_latency_can_skip_until(playlist).is_none()
             || !skip.recently_removed_daterange_ids.is_empty()
             || has_required_unknown_attributes(&skip.extra_attrs))
     {
@@ -451,6 +461,7 @@ fn build_plan(
             "#EXT-X-DEFINE variables must be expanded before LL-HLS planning".to_string(),
         ));
     }
+
     let low_latency = playlist
         .low_latency
         .as_ref()
@@ -508,7 +519,8 @@ fn build_plan(
     }) {
         return Err(ManifestError::InvalidDuration);
     }
-    validate_start_point(&playlist)?;
+
+    validate_start_point(playlist)?;
     // EXT-X-START is a playback-position hint, not a resource-selection
     // directive. A recording retains every unit in the advertised live window.
     let has_parts = playlist
@@ -523,7 +535,7 @@ fn build_plan(
         return Err(ManifestError::UnsupportedPlaylist);
     }
 
-    validate_playlist_tags(&playlist)?;
+    validate_playlist_tags(playlist)?;
     if end_list && playlist.open_segment.is_some() {
         return Err(ManifestError::UnsupportedPlaylist);
     }
@@ -536,198 +548,290 @@ fn build_plan(
         return Err(ManifestError::EmptyPlaylist);
     }
 
-    let mut plan = PlanAcc::default();
-    let mut map_filenames: HashMap<(String, Option<ManifestByteRange>), String> = HashMap::new();
-    let mut active_map: Option<broadcast_hls::MapTag> = None;
     let first_visible_sequence = playlist
         .media_sequence
         .checked_add(skipped_segments)
         .ok_or(ManifestError::DurationOverflow)?;
+    Ok(ValidatedLlHlsPlaylist {
+        base_url,
+        source_target_duration,
+        end_list,
+        first_visible_sequence,
+        part_target,
+        can_skip_until,
+        can_block_reload: low_latency.can_block_reload,
+    })
+}
 
-    let mut pending_discontinuity = false;
-    for (segment_index, segment) in playlist.segments.iter().enumerate() {
-        let program_date_time = source_segments
-            .and_then(|segments| segments.get(segment_index))
-            .and_then(|source| source.program_date_time);
-        let offset = u64::try_from(segment_index).map_err(|_| ManifestError::DurationOverflow)?;
-        let media_sequence = first_visible_sequence
-            .checked_add(offset)
-            .ok_or(ManifestError::DurationOverflow)?;
-        if let Some(map) = segment.map.as_ref() {
-            active_map = Some(map.clone());
-        }
-        if segment.gap {
-            // A completed presentation can omit a declared gap while retaining
-            // the source sequence and timestamp progression. A live snapshot
-            // needs a persistent gap unit in the recovery journal, which the
-            // current writer cannot represent safely.
-            if !end_list || !segment.parts.is_empty() {
-                return Err(ManifestError::UnsupportedPlaylistFeature(
-                    "#EXT-X-GAP in a live or partial LL-HLS segment cannot be reconciled safely"
-                        .to_string(),
-                ));
-            }
-            checked_duration(segment.duration.get(), source_target_duration)?;
-            let url = resolve_hls_media_resource_url(&base_url, &segment.uri)?;
-            plan_range(segment.byte_range.as_ref(), &url, &mut plan.previous_range)?;
-            pending_discontinuity |= segment.discontinuous;
-            continue;
-        }
-        let discontinuity = segment.discontinuous || pending_discontinuity;
-        pending_discontinuity = false;
-        let map = plan_map(
-            &base_url,
-            active_map.as_ref(),
-            &mut plan.resources,
-            &mut map_filenames,
-        )?;
-        if segment.parts.is_empty() {
-            let duration = checked_duration(segment.duration.get(), source_target_duration)?;
-            let url = resolve_hls_media_resource_url(&base_url, &segment.uri)?;
-            let range = plan_range(segment.byte_range.as_ref(), &url, &mut plan.previous_range)?;
-            let filename = ll_resource_filename(media_sequence, None, &url, range);
-            plan.resources.push(HlsResource {
-                url,
-                range,
-                filename: filename.clone(),
-                kind: HlsResourceKind::Segment,
-            });
-            plan.local_segments.push(LocalSegment {
-                uri: filename,
-                duration: media_segment_duration(duration),
-                discontinuity,
-                map,
-                program_date_time,
-                ..Default::default()
-            });
-            plan.unit_ids.push(HlsLiveUnitId::Segment(media_sequence));
-            continue;
-        }
+/// Mutable state accumulated while the closed and open playlist windows are planned.
+struct LlHlsPlanBuilder {
+    base_url: Url,
+    source_target_duration: u64,
+    end_list: bool,
+    first_visible_sequence: u64,
+    plan: PlanAcc,
+    map_filenames: HashMap<(String, Option<ManifestByteRange>), String>,
+    active_map: Option<broadcast_hls::MapTag>,
+    pending_discontinuity: bool,
+}
 
-        let parent_duration = checked_duration(segment.duration.get(), source_target_duration)?;
-        let parts_duration = segment.parts.iter().try_fold(0.0_f64, |total, part| {
-            let duration = part.duration.get();
-            if !duration.is_finite() || duration <= 0.0 {
-                return Err(ManifestError::InvalidDuration);
-            }
-            Ok(total + duration)
-        })?;
-        if (parts_duration - parent_duration.as_secs_f64()).abs() > PART_DURATION_TOLERANCE {
-            return Err(ManifestError::LivePartDurationMismatch);
-        }
-        let first_part_position = plan.local_segments.len();
-        plan.append_parts(
-            PartContext {
-                base_url: &base_url,
-                media_sequence,
-                source_target_duration,
-                map,
-                discontinuity,
-                independent_segments: playlist.independent_segments,
-            },
-            &segment.parts,
-        )?;
-        if let Some(program_date_time) = program_date_time {
-            plan.local_segments[first_part_position].program_date_time = Some(program_date_time);
+impl LlHlsPlanBuilder {
+    fn new(validated: &ValidatedLlHlsPlaylist) -> Self {
+        Self {
+            base_url: validated.base_url.clone(),
+            source_target_duration: validated.source_target_duration,
+            end_list: validated.end_list,
+            first_visible_sequence: validated.first_visible_sequence,
+            plan: PlanAcc::default(),
+            map_filenames: HashMap::new(),
+            active_map: None,
+            pending_discontinuity: false,
         }
     }
 
-    if let Some(open) = playlist.open_segment.as_ref() {
+    fn append_closed_segments(
+        &mut self,
+        playlist: &LlMediaPlaylist,
+        source_segments: Option<&[m3u8_rs::MediaSegment]>,
+    ) -> Result<(), ManifestError> {
+        for (segment_index, segment) in playlist.segments.iter().enumerate() {
+            let program_date_time = source_segments
+                .and_then(|segments| segments.get(segment_index))
+                .and_then(|source| source.program_date_time);
+            let offset =
+                u64::try_from(segment_index).map_err(|_| ManifestError::DurationOverflow)?;
+            let media_sequence = self
+                .first_visible_sequence
+                .checked_add(offset)
+                .ok_or(ManifestError::DurationOverflow)?;
+            if let Some(map) = segment.map.as_ref() {
+                self.active_map = Some(map.clone());
+            }
+            if segment.gap {
+                // A completed presentation can omit a declared gap while retaining
+                // the source sequence and timestamp progression. A live snapshot
+                // needs a persistent gap unit in the recovery journal, which the
+                // current writer cannot represent safely.
+                if !self.end_list || !segment.parts.is_empty() {
+                    return Err(ManifestError::UnsupportedPlaylistFeature(
+                        "#EXT-X-GAP in a live or partial LL-HLS segment cannot be reconciled safely"
+                            .to_string(),
+                    ));
+                }
+                checked_duration(segment.duration.get(), self.source_target_duration)?;
+                let url = resolve_hls_media_resource_url(&self.base_url, &segment.uri)?;
+                plan_range(
+                    segment.byte_range.as_ref(),
+                    &url,
+                    &mut self.plan.previous_range,
+                )?;
+                self.pending_discontinuity |= segment.discontinuous;
+                continue;
+            }
+
+            let discontinuity = segment.discontinuous || self.pending_discontinuity;
+            self.pending_discontinuity = false;
+            let map = plan_map(
+                &self.base_url,
+                self.active_map.as_ref(),
+                &mut self.plan.resources,
+                &mut self.map_filenames,
+            )?;
+            if segment.parts.is_empty() {
+                let duration =
+                    checked_duration(segment.duration.get(), self.source_target_duration)?;
+                let url = resolve_hls_media_resource_url(&self.base_url, &segment.uri)?;
+                let range = plan_range(
+                    segment.byte_range.as_ref(),
+                    &url,
+                    &mut self.plan.previous_range,
+                )?;
+                let filename = ll_resource_filename(media_sequence, None, &url, range);
+                self.plan.resources.push(HlsResource {
+                    url,
+                    range,
+                    filename: filename.clone(),
+                    kind: HlsResourceKind::Segment,
+                });
+                self.plan.local_segments.push(LocalSegment {
+                    uri: filename,
+                    duration: media_segment_duration(duration),
+                    discontinuity,
+                    map,
+                    program_date_time,
+                    ..Default::default()
+                });
+                self.plan
+                    .unit_ids
+                    .push(HlsLiveUnitId::Segment(media_sequence));
+                continue;
+            }
+
+            let parent_duration =
+                checked_duration(segment.duration.get(), self.source_target_duration)?;
+            let parts_duration = segment.parts.iter().try_fold(0.0_f64, |total, part| {
+                let duration = part.duration.get();
+                if !duration.is_finite() || duration <= 0.0 {
+                    return Err(ManifestError::InvalidDuration);
+                }
+                Ok(total + duration)
+            })?;
+            if (parts_duration - parent_duration.as_secs_f64()).abs() > PART_DURATION_TOLERANCE {
+                return Err(ManifestError::LivePartDurationMismatch);
+            }
+            let first_part_position = self.plan.local_segments.len();
+            self.plan.append_parts(
+                PartContext {
+                    base_url: &self.base_url,
+                    media_sequence,
+                    source_target_duration: self.source_target_duration,
+                    map,
+                    discontinuity,
+                    independent_segments: playlist.independent_segments,
+                },
+                &segment.parts,
+            )?;
+            if let Some(program_date_time) = program_date_time {
+                self.plan.local_segments[first_part_position].program_date_time =
+                    Some(program_date_time);
+            }
+        }
+        Ok(())
+    }
+
+    fn append_open_segment(
+        &mut self,
+        playlist: &LlMediaPlaylist,
+        open_segment_discontinuity: bool,
+    ) -> Result<(), ManifestError> {
+        let Some(open) = playlist.open_segment.as_ref() else {
+            return Ok(());
+        };
         let offset =
             u64::try_from(playlist.segments.len()).map_err(|_| ManifestError::DurationOverflow)?;
-        let media_sequence = first_visible_sequence
+        let media_sequence = self
+            .first_visible_sequence
             .checked_add(offset)
             .ok_or(ManifestError::DurationOverflow)?;
         if let Some(map) = open.map.as_ref() {
-            active_map = Some(map.clone());
+            self.active_map = Some(map.clone());
         }
         let map = plan_map(
-            &base_url,
-            active_map.as_ref(),
-            &mut plan.resources,
-            &mut map_filenames,
+            &self.base_url,
+            self.active_map.as_ref(),
+            &mut self.plan.resources,
+            &mut self.map_filenames,
         )?;
-        let discontinuity = open_segment_discontinuity;
         let open_date_time =
             open_segment_program_date_time(open)?.and_then(|segment| segment.program_date_time);
-        let first_part_position = plan.local_segments.len();
-        plan.append_parts(
+        let first_part_position = self.plan.local_segments.len();
+        self.plan.append_parts(
             PartContext {
-                base_url: &base_url,
+                base_url: &self.base_url,
                 media_sequence,
-                source_target_duration,
+                source_target_duration: self.source_target_duration,
                 map,
-                discontinuity,
+                discontinuity: open_segment_discontinuity,
                 independent_segments: playlist.independent_segments,
             },
             &open.parts,
         )?;
         if let Some(program_date_time) = open_date_time {
-            plan.local_segments[first_part_position].program_date_time = Some(program_date_time);
+            self.plan.local_segments[first_part_position].program_date_time =
+                Some(program_date_time);
         }
+        Ok(())
     }
 
-    if plan.local_segments.is_empty()
-        || plan.local_segments.len() > MAX_HLS_LIVE_UNITS
-        || (!end_list && !validate_live_unit_ids(&plan.unit_ids))
-        || plan
-            .local_segments
-            .iter()
-            .any(|segment| !segment.duration.is_finite() || segment.duration <= 0.0)
-    {
-        return Err(ManifestError::UnsupportedPlaylist);
+    fn finish(
+        self,
+        playlist: &LlMediaPlaylist,
+        validated: ValidatedLlHlsPlaylist,
+    ) -> Result<HlsPlan, ManifestError> {
+        if self.plan.local_segments.is_empty()
+            || self.plan.local_segments.len() > MAX_HLS_LIVE_UNITS
+            || (!self.end_list && !validate_live_unit_ids(&self.plan.unit_ids))
+            || self
+                .plan
+                .local_segments
+                .iter()
+                .any(|segment| !segment.duration.is_finite() || segment.duration <= 0.0)
+        {
+            return Err(ManifestError::UnsupportedPlaylist);
+        }
+
+        let blocking_reload = if !self.end_list && validated.can_block_reload {
+            let next_msn = self
+                .first_visible_sequence
+                .checked_add(
+                    u64::try_from(playlist.segments.len())
+                        .map_err(|_| ManifestError::DurationOverflow)?,
+                )
+                .ok_or(ManifestError::DurationOverflow)?;
+            let next_part = playlist
+                .open_segment
+                .as_ref()
+                .map(|segment| {
+                    u64::try_from(segment.parts.len()).map_err(|_| ManifestError::DurationOverflow)
+                })
+                .transpose()?;
+            Some((next_msn, next_part))
+        } else {
+            None
+        };
+
+        let PlanAcc {
+            resources,
+            local_segments,
+            unit_ids,
+            first_part_independent,
+            ..
+        } = self.plan;
+        let mut local_playlist = MediaPlaylist {
+            version: None,
+            target_duration: self.source_target_duration,
+            media_sequence: 0,
+            discontinuity_sequence: playlist.discontinuity_sequence,
+            independent_segments: false,
+            segments: local_segments,
+            end_list: true,
+            playlist_type: Some(MediaPlaylistType::Vod),
+            ..Default::default()
+        };
+        local_playlist.version = Some(minimum_hls_playlist_version(&local_playlist));
+
+        let rendition_reports =
+            parse_rendition_reports(&self.base_url, &playlist.rendition_reports)?;
+        Ok(HlsPlan {
+            resources: resources.into_boxed_slice(),
+            requested_playlist_url: self.base_url.clone(),
+            playlist_url: self.base_url,
+            is_live: !validated.end_list,
+            end_list: validated.end_list,
+            source_target_duration: validated.source_target_duration,
+            local_playlist,
+            ll_unit_ids: Some(unit_ids.into_boxed_slice()),
+            part_target: validated.part_target,
+            can_skip_until: validated.can_skip_until,
+            blocking_reload,
+            ll_first_part_independent: first_part_independent,
+            rendition_reports,
+            inherited_variables: Vec::new().into_boxed_slice(),
+        })
     }
+}
 
-    let blocking_reload = if !end_list && low_latency.can_block_reload {
-        let next_msn = first_visible_sequence
-            .checked_add(
-                u64::try_from(playlist.segments.len())
-                    .map_err(|_| ManifestError::DurationOverflow)?,
-            )
-            .ok_or(ManifestError::DurationOverflow)?;
-        let next_part = playlist
-            .open_segment
-            .as_ref()
-            .map(|segment| {
-                u64::try_from(segment.parts.len()).map_err(|_| ManifestError::DurationOverflow)
-            })
-            .transpose()?;
-        Some((next_msn, next_part))
-    } else {
-        None
-    };
-
-    let mut local_playlist = MediaPlaylist {
-        version: None,
-        target_duration: source_target_duration,
-        media_sequence: 0,
-        discontinuity_sequence: playlist.discontinuity_sequence,
-        independent_segments: false,
-        segments: plan.local_segments,
-        end_list: true,
-        playlist_type: Some(MediaPlaylistType::Vod),
-        ..Default::default()
-    };
-    local_playlist.version = Some(minimum_hls_playlist_version(&local_playlist));
-
-    let rendition_reports = parse_rendition_reports(&base_url, &playlist.rendition_reports)?;
-
-    Ok(HlsPlan {
-        resources: plan.resources.into_boxed_slice(),
-        requested_playlist_url: base_url.clone(),
-        playlist_url: base_url,
-        is_live: !end_list,
-        end_list,
-        source_target_duration,
-        local_playlist,
-        ll_unit_ids: Some(plan.unit_ids.into_boxed_slice()),
-        part_target,
-        can_skip_until,
-        blocking_reload,
-        ll_first_part_independent: plan.first_part_independent,
-        rendition_reports,
-        inherited_variables: Vec::new().into_boxed_slice(),
-    })
+fn build_plan(
+    manifest_url: &str,
+    playlist: LlMediaPlaylist,
+    open_segment_discontinuity: bool,
+    source_segments: Option<&[m3u8_rs::MediaSegment]>,
+) -> Result<HlsPlan, ManifestError> {
+    let validated = validate_ll_hls_playlist(manifest_url, &playlist)?;
+    let mut builder = LlHlsPlanBuilder::new(&validated);
+    builder.append_closed_segments(&playlist, source_segments)?;
+    builder.append_open_segment(&playlist, open_segment_discontinuity)?;
+    builder.finish(&playlist, validated)
 }
 
 #[derive(Clone, Debug)]

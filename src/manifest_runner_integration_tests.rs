@@ -2160,6 +2160,26 @@ async fn live_hls_pause_keeps_the_last_committed_window() {
     .expect("finish the restored live HLS capture");
     assert_eq!(finished.outcome, LiveHlsCaptureOutcome::Finish);
     assert_eq!(finished.output, super::LiveHlsOutput::DestinationParts);
+    // The production preparation path resumes the saved destination part after
+    // the Finish intent has closed the live polling loop.
+    let (_resume_tx, mut resume_abort) = tokio::sync::oneshot::channel();
+    assert_eq!(
+        super::hls_live::complete_saved_live_hls_destination_parts(
+            super::hls_live::SavedLiveHlsDestinationParts {
+                source_url: "https://origin.example.test/live.m3u8",
+                staging: root.path(),
+                destination: &destination,
+                item_id: 0,
+                video_dir: &video_dir,
+                audio_dir: &audio_dir,
+                has_audio: false,
+            },
+            &mut resume_abort,
+        )
+        .await
+        .expect("append the last committed window to its destination part"),
+        None
+    );
     let video_part = crate::manifest_destination::part_path(
         root.path(),
         &destination,

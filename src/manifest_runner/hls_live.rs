@@ -352,6 +352,46 @@ async fn fetched_hls_resource_bytes(
     Ok(total)
 }
 
+/// Maximum prefix read when rejecting obvious text error responses as live HLS media.
+const LIVE_HLS_RESPONSE_PREFIX_BYTES: usize = 64;
+
+fn is_obvious_text_error_body(bytes: &[u8]) -> bool {
+    let bytes = bytes.strip_prefix(b"\xef\xbb\xbf").unwrap_or(bytes);
+    let first_non_whitespace = bytes
+        .iter()
+        .position(|byte| !byte.is_ascii_whitespace())
+        .unwrap_or(bytes.len());
+    let body = &bytes[first_non_whitespace..];
+
+    body.starts_with(b"<") || body.starts_with(b"{") || body.starts_with(b"#EXTM3U")
+}
+
+async fn fetched_resource_is_obvious_text_error(path: &Path) -> Result<bool, ManifestRunError> {
+    use tokio::io::AsyncReadExt as _;
+
+    let mut file = tokio::fs::File::open(path).await.map_err(|error| {
+        manifest_storage_error("Could not inspect a fetched live HLS segment", error)
+    })?;
+    let mut prefix = [0_u8; LIVE_HLS_RESPONSE_PREFIX_BYTES];
+    let mut filled = 0;
+
+    while filled < prefix.len() {
+        match file.read(&mut prefix[filled..]).await {
+            Ok(0) => break,
+            Ok(read) => filled += read,
+            Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
+            Err(error) => {
+                return Err(manifest_storage_error(
+                    "Could not inspect a fetched live HLS segment",
+                    error,
+                ));
+            }
+        }
+    }
+
+    Ok(is_obvious_text_error_body(&prefix[..filled]))
+}
+
 const LIVE_HLS_FULL_RESOURCE_VERIFY_INTERVAL: Duration = Duration::from_secs(60);
 
 /// Preserve previously committed segments when a newly observed playlist or
@@ -607,6 +647,22 @@ pub(super) async fn apply_live_hls_snapshot(
                     "A live HLS resource no longer matches the MPEG-TS destination-part layout"
                         .to_string(),
                 ));
+            }
+
+            // Keep FFmpeg responsible for container validation, but do not append
+            // obvious HTML/XML, JSON, or playlist responses to a long-running TS part.
+            if fetched_resource_is_obvious_text_error(&track.directory.join(&resource.filename))
+                .await?
+            {
+                let error = ManifestRunError::Unsupported(
+                    "A live HLS segment response contains a text error body".to_string(),
+                );
+                return preserve_captured_or_fail(
+                    track,
+                    &playlist_url,
+                    "a live HLS segment response was not media content",
+                    error,
+                );
             }
         }
     }
@@ -1688,6 +1744,89 @@ mod destination_part_tests {
     use super::*;
 
     const BASE_URL: &str = "https://cdn.example.test/live.m3u8";
+
+    #[test]
+    fn text_error_prefix_detection_is_conservative() {
+        assert!(
+            is_obvious_text_error_body(b" <!DOCTYPE html><html>"),
+            "HTML error pages must be rejected"
+        );
+        assert!(
+            is_obvious_text_error_body(b"\xef\xbb\xbf {\"error\":\"expired\"}"),
+            "a UTF-8 BOM must not hide a JSON error response"
+        );
+        assert!(
+            is_obvious_text_error_body(b" \n#EXTM3U\n"),
+            "a nested playlist response must be rejected"
+        );
+        assert!(
+            !is_obvious_text_error_body(b"\xff\xf1\x50\x80"),
+            "packed binary media must remain eligible for FFmpeg validation"
+        );
+        assert!(
+            !is_obvious_text_error_body(b"upstream response is not a transport stream"),
+            "the conservative check must not reject arbitrary text-looking bytes"
+        );
+    }
+
+    #[tokio::test]
+    async fn destination_part_rejects_a_text_error_body_before_commit() {
+        let staging = tempfile::tempdir().expect("create live HLS staging");
+        let video_dir = staging.path().join("video");
+        tokio::fs::create_dir(&video_dir)
+            .await
+            .expect("create live HLS video directory");
+
+        let plan = crate::manifest::plan_hls_media_playlist(
+            BASE_URL,
+            b"#EXTM3U\n#EXT-X-VERSION:3\n#EXT-X-TARGETDURATION:4\n#EXT-X-MEDIA-SEQUENCE:7\n#EXTINF:4,\n7.ts\n",
+        )
+        .expect("plan a plain live MPEG-TS playlist");
+        let resource = plan.resources.first().expect("one live segment");
+        tokio::fs::write(
+            video_dir.join(&resource.filename),
+            b"<!DOCTYPE html><html><body>502 Bad Gateway</body></html>",
+        )
+        .await
+        .expect("stage the server's HTML error response");
+
+        let mut track = live_track_from_plan(&plan, HlsLiveAccumulator::new());
+        track.directory = video_dir.clone();
+        track.destination_part = Some(LiveHlsDestination {
+            staging: staging.path().to_path_buf(),
+            destination: staging.path().join("recording.mp4"),
+            item_id: 7,
+            track: crate::manifest_destination::TrackKind::Video,
+            filename: "video-track.ts",
+        });
+
+        let client = reqwest::Client::new();
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+        let downloaded = Arc::new(AtomicU64::new(0));
+        let (_stop_tx, mut abort) = tokio::sync::oneshot::channel();
+
+        let result = apply_live_hls_snapshot(
+            &client,
+            &plan,
+            &mut track,
+            1,
+            &tx,
+            &downloaded,
+            &mut abort,
+            0,
+        )
+        .await;
+
+        assert!(
+            matches!(result, Err(ManifestRunError::Unsupported(_))),
+            "a staged HTTP text error must not be committed as transport-stream media"
+        );
+        assert_eq!(track.accumulator.segment_count(), 0);
+        assert!(
+            !video_dir.join("local.m3u8").exists(),
+            "the rejected response must not enter the local playlist"
+        );
+    }
 
     fn transport_stream(seed: u8) -> Vec<u8> {
         let mut bytes = vec![0xff; 188 * 3];

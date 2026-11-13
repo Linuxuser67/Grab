@@ -318,9 +318,7 @@ async fn run_video_playlist_download_inner(
                 merging_reader.store(true, std::sync::atomic::Ordering::SeqCst);
             }
             match parse_ytdlp_playlist_event(&line, &event_nonce) {
-                Some(YtdlpPlaylistEvent::Started {
-                    file_id, filename, ..
-                }) => {
+                Some(YtdlpPlaylistEvent::Started { file_id }) => {
                     if let Some(previous) = current_file.replace(file_id.clone())
                         && !summary.finished_ids.contains(&previous)
                     {
@@ -337,7 +335,7 @@ async fn run_video_playlist_download_inner(
                     }
                     tx_reader
                         .send(EngineMsg::PlaylistFile(Box::new(
-                            PlaylistFileEvent::Started { file_id, filename },
+                            PlaylistFileEvent::Started { file_id },
                         )))
                         .ok();
                 }
@@ -345,7 +343,6 @@ async fn run_video_playlist_download_inner(
                     file_id,
                     downloaded,
                     total,
-                    ..
                 }) => {
                     if let Some(downloaded) = downloaded {
                         tx_reader
@@ -359,7 +356,7 @@ async fn run_video_playlist_download_inner(
                             .ok();
                     }
                 }
-                Some(YtdlpPlaylistEvent::Finished { file_id, path, .. }) => {
+                Some(YtdlpPlaylistEvent::Finished { file_id, path }) => {
                     let output = PathBuf::from(&path);
                     let canonical = match tokio::fs::canonicalize(&output).await {
                         Ok(path) => path,

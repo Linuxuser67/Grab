@@ -129,7 +129,7 @@ pub(crate) fn resolve_gallery_auth(url: &str, browser: &str) -> GalleryAuth {
 const GALLERY_PREVIEW_CACHE_TTL: Duration = Duration::from_secs(5 * 60);
 const GALLERY_PREVIEW_CACHE_CAPACITY: usize = 32;
 
-#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+#[derive(Clone, PartialEq, Eq, Hash)]
 struct GalleryPreviewCacheKey {
     url: String,
     cookies_browser: Option<String>,
@@ -138,8 +138,9 @@ struct GalleryPreviewCacheKey {
     proxy: Option<String>,
 }
 
-type GalleryPreviewItems = Option<Vec<crate::gallery_probe::GalleryItem>>;
-type GalleryPreviewCache = Mutex<HashMap<GalleryPreviewCacheKey, (Instant, GalleryPreviewItems)>>;
+type GalleryPreviewCacheMap =
+    HashMap<GalleryPreviewCacheKey, (Instant, Vec<crate::gallery_probe::GalleryItem>)>;
+type GalleryPreviewCache = Mutex<GalleryPreviewCacheMap>;
 
 static GALLERY_PREVIEW_CACHE: LazyLock<GalleryPreviewCache> =
     LazyLock::new(|| Mutex::new(HashMap::new()));
@@ -171,8 +172,10 @@ fn gallery_preview_cache_key(
     })
 }
 
-/// `Some(None)` is a cached "no items" result; `None` is a miss.
-fn gallery_preview_cache_get(key: &GalleryPreviewCacheKey) -> Option<GalleryPreviewItems> {
+/// Only non-empty gallery listings are cached; `None` is always a cache miss.
+fn gallery_preview_cache_get(
+    key: &GalleryPreviewCacheKey,
+) -> Option<Vec<crate::gallery_probe::GalleryItem>> {
     let mut cache = GALLERY_PREVIEW_CACHE.lock().ok()?;
     let expired = cache
         .get(key)
@@ -184,14 +187,41 @@ fn gallery_preview_cache_get(key: &GalleryPreviewCacheKey) -> Option<GalleryPrev
     cache.get(key).map(|(_, items)| items.clone())
 }
 
-fn gallery_preview_cache_insert(key: GalleryPreviewCacheKey, items: &GalleryPreviewItems) {
+fn gallery_preview_cache_insert(
+    key: GalleryPreviewCacheKey,
+    items: &[crate::gallery_probe::GalleryItem],
+) {
     let Ok(mut cache) = GALLERY_PREVIEW_CACHE.lock() else {
         return;
     };
-    if cache.len() >= GALLERY_PREVIEW_CACHE_CAPACITY && !cache.contains_key(&key) {
-        cache.clear();
+    insert_gallery_preview(&mut cache, key, items, Instant::now());
+}
+
+fn insert_gallery_preview(
+    cache: &mut GalleryPreviewCacheMap,
+    key: GalleryPreviewCacheKey,
+    items: &[crate::gallery_probe::GalleryItem],
+    now: Instant,
+) {
+    // Empty listings may be transient; keep them out of the cache so Retry
+    // always performs a fresh probe.
+    if items.is_empty() {
+        return;
     }
-    cache.insert(key, (Instant::now(), items.clone()));
+
+    cache.retain(|_, (cached_at, _)| {
+        now.saturating_duration_since(*cached_at) < GALLERY_PREVIEW_CACHE_TTL
+    });
+    if cache.len() >= GALLERY_PREVIEW_CACHE_CAPACITY && !cache.contains_key(&key) {
+        let oldest_key = cache
+            .iter()
+            .min_by_key(|(_, (cached_at, _))| *cached_at)
+            .map(|(cached_key, _)| cached_key.clone());
+        if let Some(oldest_key) = oldest_key {
+            cache.remove(&oldest_key);
+        }
+    }
+    cache.insert(key, (now, items.to_vec()));
 }
 
 /// Probe both backends for one URL, concurrently: yt-dlp's video check and
@@ -226,7 +256,7 @@ pub(crate) async fn dual_probe(ctx: DualProbeCtx<'_>) -> DualProbeOutcome {
         let cached = cache_key.as_ref().and_then(gallery_preview_cache_get);
         let r = if let Some(items) = cached {
             tracing::debug!(url_host = %host, "gallery-dl preview cache hit");
-            Ok(items)
+            Ok(Some(items))
         } else {
             let r = crate::gallery_probe::probe_gallery_with_proxy(
                 &ctx.tool,
@@ -241,7 +271,7 @@ pub(crate) async fn dual_probe(ctx: DualProbeCtx<'_>) -> DualProbeOutcome {
             // after the probe: a replaced or removed jar must not store its
             // result under the old credentials' key.
             let unchanged = gallery_preview_cache_key(&url, &auth, ctx.proxy.as_ref()) == cache_key;
-            if let Ok(items) = &r
+            if let Ok(Some(items)) = &r
                 && let Some(key) = cache_key
                 && unchanged
             {
@@ -548,28 +578,27 @@ mod tests {
         let url = "https://gallery-cache.example.test/collection#top";
         let anonymous = cache_auth(None, None, None);
         let base = gallery_preview_cache_key(url, &anonymous, None).expect("anonymous key");
-        assert_eq!(
+        assert!(
             gallery_preview_cache_key(
                 "https://gallery-cache.example.test/collection",
                 &anonymous,
                 None,
-            ),
-            Some(base.clone()),
+            ) == Some(base.clone()),
             "the fragment is not part of the page identity"
         );
         let other_url = "https://gallery-cache.example.test/other";
-        assert_ne!(
-            gallery_preview_cache_key(other_url, &anonymous, None),
-            Some(base.clone())
+        assert!(
+            gallery_preview_cache_key(other_url, &anonymous, None) != Some(base.clone()),
+            "different page URLs must not share a cache key"
         );
-        assert_ne!(
-            gallery_preview_cache_key(url, &cache_auth(None, Some("firefox"), None), None),
-            Some(base.clone()),
+        assert!(
+            gallery_preview_cache_key(url, &cache_auth(None, Some("firefox"), None), None)
+                != Some(base.clone()),
             "a browser profile must not reuse an anonymous probe"
         );
-        assert_ne!(
-            gallery_preview_cache_key(url, &cache_auth(None, None, Some("Grab-Test-UA")), None),
-            Some(base.clone()),
+        assert!(
+            gallery_preview_cache_key(url, &cache_auth(None, None, Some("Grab-Test-UA")), None)
+                != Some(base.clone()),
             "the paired user agent is part of the identity"
         );
         let proxy = crate::net_types::ResolvedProxy {
@@ -577,9 +606,8 @@ mod tests {
             cli_url: "socks5h://127.0.0.1:9050".to_string(),
             no_proxy_env: String::new(),
         };
-        assert_ne!(
-            gallery_preview_cache_key(url, &anonymous, Some(&proxy)),
-            Some(base),
+        assert!(
+            gallery_preview_cache_key(url, &anonymous, Some(&proxy)) != Some(base),
             "a proxy can change what the extractor returns"
         );
     }
@@ -599,16 +627,16 @@ mod tests {
         let second_key =
             gallery_preview_cache_key(url, &cache_auth(Some(second.clone()), None, None), None)
                 .expect("handoff key");
-        assert_eq!(
-            first_key, second_key,
+        assert!(
+            first_key == second_key,
             "a new staged path with the same cookies must reuse the probe"
         );
 
         std::fs::write(&second, b"# Netscape HTTP Cookie File\n").expect("changed jar");
-        assert_ne!(
+        assert!(
             gallery_preview_cache_key(url, &cache_auth(Some(second), None, None), None)
-                .expect("handoff key"),
-            first_key,
+                .expect("handoff key")
+                != first_key,
             "changed cookies must invalidate the probe"
         );
 
@@ -632,15 +660,15 @@ mod tests {
             user_agent: None,
             proxy: None,
         };
-        let items = Some(vec![crate::gallery_probe::GalleryItem {
+        let items = vec![crate::gallery_probe::GalleryItem {
             filename: "one.jpg".to_string(),
             extension: "jpg".to_string(),
             category: "image".to_string(),
             extra: serde_json::Map::new(),
-        }]);
+        }];
         gallery_preview_cache_insert(key.clone(), &items);
         let cached = gallery_preview_cache_get(&key).expect("cache hit");
-        assert_eq!(cached.as_ref().map(|items| items.len()), Some(1));
+        assert_eq!(cached.len(), 1);
 
         GALLERY_PREVIEW_CACHE.lock().expect("cache lock").insert(
             key.clone(),
@@ -650,6 +678,52 @@ mod tests {
             ),
         );
         assert!(gallery_preview_cache_get(&key).is_none());
+    }
+
+    #[test]
+    fn gallery_preview_cache_skips_negative_results_and_evicts_oldest_entry() {
+        let mut cache = GalleryPreviewCacheMap::new();
+        let key = |name: &str| GalleryPreviewCacheKey {
+            url: format!("https://gallery-cache.example.test/{name}"),
+            cookies_browser: None,
+            handoff_cookie_hash: None,
+            user_agent: None,
+            proxy: None,
+        };
+        let start = Instant::now();
+        let empty_key = key("empty");
+        insert_gallery_preview(&mut cache, empty_key.clone(), &[], start);
+        assert!(!cache.contains_key(&empty_key));
+
+        let items = vec![crate::gallery_probe::GalleryItem {
+            filename: "one.jpg".to_string(),
+            extension: "jpg".to_string(),
+            category: "image".to_string(),
+            extra: serde_json::Map::new(),
+        }];
+        for index in 0..GALLERY_PREVIEW_CACHE_CAPACITY {
+            let inserted_at =
+                start + Duration::from_secs(u64::try_from(index).expect("cache index fits u64"));
+            insert_gallery_preview(
+                &mut cache,
+                key(&format!("item-{index}")),
+                &items,
+                inserted_at,
+            );
+        }
+        assert_eq!(cache.len(), GALLERY_PREVIEW_CACHE_CAPACITY);
+
+        let overflow_key = key("overflow");
+        let inserted_at = start
+            + Duration::from_secs(
+                u64::try_from(GALLERY_PREVIEW_CACHE_CAPACITY).expect("cache capacity fits u64"),
+            );
+        insert_gallery_preview(&mut cache, overflow_key.clone(), &items, inserted_at);
+
+        assert_eq!(cache.len(), GALLERY_PREVIEW_CACHE_CAPACITY);
+        assert!(!cache.contains_key(&key("item-0")));
+        assert!(cache.contains_key(&key("item-1")));
+        assert!(cache.contains_key(&overflow_key));
     }
 
     #[test]

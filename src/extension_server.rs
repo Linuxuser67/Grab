@@ -2318,6 +2318,15 @@ mod tests {
             live_handoff_identity(url).is_none(),
             "stale entry must be gone"
         );
+        // Production unlink is dispatched to the blocking pool; observe its
+        // completion instead of racing the worker immediately after the handoff.
+        tokio::time::timeout(Duration::from_secs(1), async {
+            while staged.exists() {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("staged handoff file should be unlinked promptly");
         assert!(!staged.exists(), "staged file must be deleted");
         clear_handoff_cookies();
     }

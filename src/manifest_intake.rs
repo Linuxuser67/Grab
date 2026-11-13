@@ -574,6 +574,37 @@ enum ManifestFetchMode {
     Download,
 }
 
+#[derive(Clone, Copy)]
+struct ManifestFetchOptions {
+    transport_policy: ManifestTransportPolicy,
+    request_timeout: Duration,
+    max_attempts: u32,
+    mode: ManifestFetchMode,
+    max_bytes: usize,
+}
+
+impl ManifestFetchOptions {
+    fn download(transport_policy: ManifestTransportPolicy) -> Self {
+        Self {
+            transport_policy,
+            request_timeout: MANIFEST_REQUEST_TIMEOUT,
+            max_attempts: MAX_MANIFEST_ATTEMPTS,
+            mode: ManifestFetchMode::Download,
+            max_bytes: MAX_MANIFEST_BYTES,
+        }
+    }
+
+    fn preview(transport_policy: ManifestTransportPolicy) -> Self {
+        Self {
+            transport_policy,
+            request_timeout: MANIFEST_PREVIEW_REQUEST_TIMEOUT,
+            max_attempts: MAX_PREVIEW_MANIFEST_ATTEMPTS,
+            mode: ManifestFetchMode::Preview,
+            max_bytes: MAX_MANIFEST_BYTES,
+        }
+    }
+}
+
 fn validate_hls_stable_track_ids(master: &HlsMasterPlan) -> Result<(), ManifestIntakeError> {
     // Every track gets a key: an Apple stable ID when the origin provides one,
     // else a derived content identity (stable across CDN and signed-URL
@@ -1399,14 +1430,16 @@ async fn fetch_hls_steering_manifest(
     }
 
     let (request_timeout, max_attempts) = hls_steering_fetch_limits(fetch_mode);
-    let (response_url, body, _) = fetch_bounded_manifest_with_limits_and_size(
+    let (response_url, body, _) = fetch_manifest_with_options(
         client,
         request_url.clone(),
-        transport_policy,
-        request_timeout,
-        max_attempts,
-        fetch_mode,
-        MAX_HLS_STEERING_MANIFEST_BYTES,
+        ManifestFetchOptions {
+            transport_policy,
+            request_timeout,
+            max_attempts,
+            mode: fetch_mode,
+            max_bytes: MAX_HLS_STEERING_MANIFEST_BYTES,
+        },
     )
     .await?;
     Ok((request_url, response_url, body))
@@ -2248,12 +2281,10 @@ pub(crate) async fn lookup_hls_live_media(
 ) -> Result<HlsPlan, ManifestIntakeError> {
     let requested_url = hls_live_reload_url(raw_url, blocking_reload, can_skip_until)?;
     let authorization_url = strip_hls_blocking_reload_query(&requested_url);
-    let (final_url, body, _) = fetch_bounded_manifest_once(
+    let (final_url, body, _) = fetch_manifest_once_with_options(
         client,
         &requested_url,
-        ManifestTransportPolicy::HttpsOnly,
-        MANIFEST_REQUEST_TIMEOUT,
-        ManifestFetchMode::Download,
+        ManifestFetchOptions::download(ManifestTransportPolicy::HttpsOnly),
     )
     .await?;
     let mut final_url = strip_hls_blocking_reload_query(&final_url);
@@ -2325,8 +2356,12 @@ async fn fetch_bounded_manifest(
     client: &reqwest::Client,
     requested_url: Url,
 ) -> Result<(Url, Vec<u8>, SystemTime), ManifestIntakeError> {
-    fetch_bounded_manifest_with_policy(client, requested_url, ManifestTransportPolicy::HttpsOnly)
-        .await
+    fetch_manifest_with_options(
+        client,
+        requested_url,
+        ManifestFetchOptions::download(ManifestTransportPolicy::HttpsOnly),
+    )
+    .await
 }
 
 async fn fetch_bounded_manifest_with_policy(
@@ -2334,13 +2369,10 @@ async fn fetch_bounded_manifest_with_policy(
     requested_url: Url,
     transport_policy: ManifestTransportPolicy,
 ) -> Result<(Url, Vec<u8>, SystemTime), ManifestIntakeError> {
-    fetch_bounded_manifest_with_limits(
+    fetch_manifest_with_options(
         client,
         requested_url,
-        transport_policy,
-        MANIFEST_REQUEST_TIMEOUT,
-        MAX_MANIFEST_ATTEMPTS,
-        ManifestFetchMode::Download,
+        ManifestFetchOptions::download(transport_policy),
     )
     .await
 }
@@ -2350,35 +2382,24 @@ async fn fetch_bounded_preview_manifest_with_policy(
     requested_url: Url,
     transport_policy: ManifestTransportPolicy,
 ) -> Result<(Url, Vec<u8>, SystemTime), ManifestIntakeError> {
-    fetch_bounded_preview_manifest_with_limits(
+    fetch_bounded_preview_manifest_with_options(
         client,
         requested_url,
-        transport_policy,
         MANIFEST_LOOKUP_BUDGET,
-        MANIFEST_PREVIEW_REQUEST_TIMEOUT,
-        MAX_PREVIEW_MANIFEST_ATTEMPTS,
+        ManifestFetchOptions::preview(transport_policy),
     )
     .await
 }
 
-async fn fetch_bounded_preview_manifest_with_limits(
+async fn fetch_bounded_preview_manifest_with_options(
     client: &reqwest::Client,
     requested_url: Url,
-    transport_policy: ManifestTransportPolicy,
     preview_budget: Duration,
-    request_timeout: Duration,
-    max_attempts: u32,
+    options: ManifestFetchOptions,
 ) -> Result<(Url, Vec<u8>, SystemTime), ManifestIntakeError> {
     tokio::time::timeout(
         preview_budget,
-        fetch_bounded_manifest_with_limits(
-            client,
-            requested_url,
-            transport_policy,
-            request_timeout,
-            max_attempts,
-            ManifestFetchMode::Preview,
-        ),
+        fetch_manifest_with_options(client, requested_url, options),
     )
     .await
     .unwrap_or_else(|_| {
@@ -2389,36 +2410,12 @@ async fn fetch_bounded_preview_manifest_with_limits(
     })
 }
 
-async fn fetch_bounded_manifest_with_limits(
+async fn fetch_manifest_with_options(
     client: &reqwest::Client,
     requested_url: Url,
-    transport_policy: ManifestTransportPolicy,
-    request_timeout: Duration,
-    max_attempts: u32,
-    fetch_mode: ManifestFetchMode,
+    options: ManifestFetchOptions,
 ) -> Result<(Url, Vec<u8>, SystemTime), ManifestIntakeError> {
-    fetch_bounded_manifest_with_limits_and_size(
-        client,
-        requested_url,
-        transport_policy,
-        request_timeout,
-        max_attempts,
-        fetch_mode,
-        MAX_MANIFEST_BYTES,
-    )
-    .await
-}
-
-async fn fetch_bounded_manifest_with_limits_and_size(
-    client: &reqwest::Client,
-    requested_url: Url,
-    transport_policy: ManifestTransportPolicy,
-    request_timeout: Duration,
-    max_attempts: u32,
-    fetch_mode: ManifestFetchMode,
-    max_bytes: usize,
-) -> Result<(Url, Vec<u8>, SystemTime), ManifestIntakeError> {
-    if !transport_policy.accepts_url(&requested_url) {
+    if !options.transport_policy.accepts_url(&requested_url) {
         return Err(ManifestIntakeError::Failed(gettext(
             "Invalid stream manifest URL",
         )));
@@ -2427,17 +2424,8 @@ async fn fetch_bounded_manifest_with_limits_and_size(
     let mut attempt = 0_u32;
     loop {
         attempt += 1;
-        match fetch_bounded_manifest_once_with_limit(
-            client,
-            &requested_url,
-            transport_policy,
-            request_timeout,
-            fetch_mode,
-            max_bytes,
-        )
-        .await
-        {
-            Err(ManifestIntakeError::Retryable(error)) if attempt < max_attempts => {
+        match fetch_manifest_once_with_options(client, &requested_url, options).await {
+            Err(ManifestIntakeError::Retryable(error)) if attempt < options.max_attempts => {
                 let delay = MANIFEST_RETRY_BASE_DELAY * attempt;
                 tracing::debug!(
                     attempt,
@@ -2507,44 +2495,23 @@ fn manifest_status_error(
     }
 }
 
-async fn fetch_bounded_manifest_once(
+async fn fetch_manifest_once_with_options(
     client: &reqwest::Client,
     requested_url: &Url,
-    transport_policy: ManifestTransportPolicy,
-    request_timeout: Duration,
-    fetch_mode: ManifestFetchMode,
-) -> Result<(Url, Vec<u8>, SystemTime), ManifestIntakeError> {
-    fetch_bounded_manifest_once_with_limit(
-        client,
-        requested_url,
-        transport_policy,
-        request_timeout,
-        fetch_mode,
-        MAX_MANIFEST_BYTES,
-    )
-    .await
-}
-
-async fn fetch_bounded_manifest_once_with_limit(
-    client: &reqwest::Client,
-    requested_url: &Url,
-    transport_policy: ManifestTransportPolicy,
-    request_timeout: Duration,
-    fetch_mode: ManifestFetchMode,
-    max_bytes: usize,
+    options: ManifestFetchOptions,
 ) -> Result<(Url, Vec<u8>, SystemTime), ManifestIntakeError> {
     let response = client
         .get(requested_url.clone())
-        .timeout(request_timeout)
+        .timeout(options.request_timeout)
         .send()
         .await
         .map_err(|error| manifest_request_error("Could not retrieve the stream manifest", error))?;
     let status = response.status();
     if !status.is_success() {
-        return Err(manifest_status_error(status, fetch_mode));
+        return Err(manifest_status_error(status, options.mode));
     }
     let final_url = response.url().clone();
-    if !transport_policy.accepts_url(&final_url) {
+    if !options.transport_policy.accepts_url(&final_url) {
         return Err(ManifestIntakeError::Failed(gettext(
             "The stream manifest redirected to an unsafe URL",
         )));
@@ -2558,7 +2525,8 @@ async fn fetch_bounded_manifest_once_with_limit(
         .and_then(|value| value.to_str().ok())
         .and_then(|value| httpdate::parse_http_date(value).ok())
         .unwrap_or_else(SystemTime::now);
-    let body = read_bounded_response_with_limit(response, max_bytes, "stream manifest").await?;
+    let body =
+        read_bounded_response_with_limit(response, options.max_bytes, "stream manifest").await?;
     Ok((final_url, body, server_now))
 }
 
@@ -3050,13 +3018,17 @@ video.m3u8
             .expect("fixture manifest URL");
         let started = tokio::time::Instant::now();
 
-        let result = fetch_bounded_preview_manifest_with_limits(
+        let result = fetch_bounded_preview_manifest_with_options(
             &reqwest::Client::new(),
             url,
-            ManifestTransportPolicy::HttpFixture,
             Duration::from_millis(20),
-            Duration::from_secs(1),
-            1,
+            ManifestFetchOptions {
+                transport_policy: ManifestTransportPolicy::HttpFixture,
+                request_timeout: Duration::from_secs(1),
+                max_attempts: 1,
+                mode: ManifestFetchMode::Preview,
+                max_bytes: MAX_MANIFEST_BYTES,
+            },
         )
         .await;
 

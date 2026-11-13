@@ -325,11 +325,9 @@ async fn fetched_hls_resource_bytes(
     let mut total = 0_u64;
     for resource in resources {
         let path = directory.join(&resource.filename);
-        let metadata = tokio::fs::symlink_metadata(&path)
-            .await
-            .map_err(|error| {
-                manifest_storage_error("Could not inspect a fetched live HLS resource", error)
-            })?;
+        let metadata = tokio::fs::symlink_metadata(&path).await.map_err(|error| {
+            manifest_storage_error("Could not inspect a fetched live HLS resource", error)
+        })?;
         if metadata.file_type().is_symlink() || !metadata.is_file() {
             return Err(ManifestRunError::Unsupported(
                 "A fetched live HLS resource is not a regular file".to_string(),
@@ -575,12 +573,7 @@ pub(super) async fn apply_live_hls_snapshot(
         .map(str::to_string)
         .collect::<HashSet<_>>();
     if full_resource_verification_due {
-        verification_names.extend(
-            track
-                .accumulator
-                .resource_names()
-                .map(str::to_string),
-        );
+        verification_names.extend(track.accumulator.resource_names().map(str::to_string));
     }
     let verification = verify_live_hls_resource_files(
         &track.directory,

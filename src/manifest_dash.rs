@@ -428,14 +428,26 @@ struct DashList {
     /// Effective finite BaseURL availability offset for dynamic presentations.
     availability_time_offset: Duration,
     segments: Box<[DashListSegment]>,
+    /// Present only for dynamic lists, whose segment timing is validated at parse time.
+    timing: Option<DashListTiming>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct DashListSegment {
     media: String,
     range: Option<ManifestByteRange>,
-    time: Option<u64>,
-    duration: Option<u64>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct DashListTiming {
+    segment_duration: u64,
+    segments: Box<[DashListSegmentTiming]>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct DashListSegmentTiming {
+    time: u64,
+    duration: u64,
 }
 
 #[cfg(test)]
@@ -1420,11 +1432,23 @@ fn stable_representation_key(identity: RepresentationIdentity<'_>) -> String {
                 }
             }
             hasher.update((list.segments.len() as u64).to_le_bytes());
-            for segment in list.segments.iter() {
-                hasher.update(segment.media.as_bytes());
-                hash_optional_range(&mut hasher, segment.range);
-                hash_optional_number(&mut hasher, segment.time);
-                hash_optional_number(&mut hasher, segment.duration);
+            match &list.timing {
+                Some(timing) => {
+                    for (segment, timing) in list.segments.iter().zip(timing.segments.iter()) {
+                        hasher.update(segment.media.as_bytes());
+                        hash_optional_range(&mut hasher, segment.range);
+                        hash_optional_number(&mut hasher, Some(timing.time));
+                        hash_optional_number(&mut hasher, Some(timing.duration));
+                    }
+                }
+                None => {
+                    for segment in list.segments.iter() {
+                        hasher.update(segment.media.as_bytes());
+                        hash_optional_range(&mut hasher, segment.range);
+                        hash_optional_number(&mut hasher, None);
+                        hash_optional_number(&mut hasher, None);
+                    }
+                }
             }
         }
         DashAddressing::Base(_) => {
@@ -1529,7 +1553,7 @@ fn live_representation_key(
             hasher.update(list.timescale.to_le_bytes());
             hash_optional_number(
                 &mut hasher,
-                list.segments.first().and_then(|segment| segment.duration),
+                list.timing.as_ref().map(|timing| timing.segment_duration),
             );
             match &list.initialization {
                 Some(DashInitialization::Template(value)) => {
@@ -2164,50 +2188,64 @@ fn effective_list(
         return Err(DashError::UnsupportedAddressing);
     }
 
-    let segments = segment_urls
-        .iter()
-        .enumerate()
-        .map(|(index, segment)| {
-            if segment.index.is_some() || segment.indexRange.is_some() {
-                return Err(DashError::UnsupportedAddressing);
-            }
-            let media = segment
-                .media
-                .as_deref()
-                .filter(|media| !media.is_empty())
-                .ok_or(DashError::InvalidSegment)?;
-            let range = segment
-                .mediaRange
-                .as_deref()
-                .map(parse_byte_range)
-                .transpose()?;
-            let (time, duration) = timeline
+    let mut segments = Vec::with_capacity(segment_urls.len());
+    let mut segment_timings = Vec::with_capacity(segment_urls.len());
+    let mut previous_end = None;
+    let mut segment_duration = None;
+
+    for (index, segment) in segment_urls.iter().enumerate() {
+        if segment.index.is_some() || segment.indexRange.is_some() {
+            return Err(DashError::UnsupportedAddressing);
+        }
+        let media = segment
+            .media
+            .as_deref()
+            .filter(|media| !media.is_empty())
+            .ok_or(DashError::InvalidSegment)?;
+        let range = segment
+            .mediaRange
+            .as_deref()
+            .map(parse_byte_range)
+            .transpose()?;
+
+        if is_dynamic {
+            let entry = timeline
                 .as_ref()
                 .and_then(|entries| entries.get(index))
-                .map_or((None, None), |entry| (entry.start, Some(entry.duration)));
-            Ok(DashListSegment {
-                media: media.to_owned(),
-                range,
-                time,
-                duration,
-            })
-        })
-        .collect::<Result<Vec<_>, DashError>>()?;
-
-    if is_dynamic {
-        let mut previous_end = None;
-        for segment in &segments {
-            let start = segment.time.ok_or(DashError::UnsupportedAddressing)?;
-            let duration = segment.duration.ok_or(DashError::UnsupportedAddressing)?;
-            let end = start
+                .ok_or(DashError::UnsupportedAddressing)?;
+            let time = entry.start.ok_or(DashError::UnsupportedAddressing)?;
+            let duration = entry.duration;
+            if duration == 0 || time % duration != 0 {
+                return Err(DashError::UnsupportedAddressing);
+            }
+            if segment_duration.is_some_and(|previous| previous != duration) {
+                return Err(DashError::UnsupportedAddressing);
+            }
+            let end = time
                 .checked_add(duration)
                 .ok_or(DashError::InvalidSegment)?;
-            if previous_end.is_some_and(|previous| start != previous) {
+            if previous_end.is_some_and(|previous| time != previous) {
                 return Err(DashError::UnsupportedAddressing);
             }
             previous_end = Some(end);
+            segment_duration = Some(duration);
+            segment_timings.push(DashListSegmentTiming { time, duration });
         }
+
+        segments.push(DashListSegment {
+            media: media.to_owned(),
+            range,
+        });
     }
+
+    let timing = if is_dynamic {
+        Some(DashListTiming {
+            segment_duration: segment_duration.ok_or(DashError::UnsupportedAddressing)?,
+            segments: segment_timings.into_boxed_slice(),
+        })
+    } else {
+        None
+    };
 
     Ok(DashList {
         initialization,
@@ -2215,6 +2253,7 @@ fn effective_list(
         presentation_time_offset,
         availability_time_offset: Duration::ZERO,
         segments: segments.into_boxed_slice(),
+        timing,
     })
 }
 
@@ -2255,19 +2294,11 @@ fn expand_dynamic_list(
         .and_then(|elapsed| elapsed.checked_sub(dynamic.period_start))
         .ok_or(DashError::NoAvailableSegments)?;
 
-    let mut segment_duration = None;
-    for segment in &list.segments {
-        let time = segment.time.ok_or(DashError::UnsupportedAddressing)?;
-        let duration = segment.duration.ok_or(DashError::UnsupportedAddressing)?;
-        if duration == 0 || time % duration != 0 {
-            return Err(DashError::UnsupportedAddressing);
-        }
-        if segment_duration.is_some_and(|previous| previous != duration) {
-            return Err(DashError::UnsupportedAddressing);
-        }
-        segment_duration = Some(duration);
-    }
-    let segment_duration = segment_duration.ok_or(DashError::UnsupportedAddressing)?;
+    let timing = list
+        .timing
+        .as_ref()
+        .ok_or(DashError::UnsupportedAddressing)?;
+    let segment_duration = timing.segment_duration;
     let window_depth = dynamic.time_shift_buffer_depth.unwrap_or(
         dynamic
             .minimum_update_period
@@ -2298,9 +2329,9 @@ fn expand_dynamic_list(
 
     let mut whole_resources = HashSet::new();
     let mut ranged_resources: HashMap<String, Vec<ManifestByteRange>> = HashMap::new();
-    for segment in &list.segments {
-        let time = segment.time.ok_or(DashError::UnsupportedAddressing)?;
-        let duration = segment.duration.ok_or(DashError::UnsupportedAddressing)?;
+    for (segment, timing) in list.segments.iter().zip(timing.segments.iter()) {
+        let time = timing.time;
+        let duration = timing.duration;
         let end = time
             .checked_add(duration)
             .ok_or(DashError::InvalidSegment)?;

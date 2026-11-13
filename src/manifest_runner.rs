@@ -390,11 +390,34 @@ struct LiveHlsTrack {
     ended: bool,
     next_poll_at: Option<Instant>,
     target_duration: u64,
-    part_target: Option<Duration>,
-    blocking_reload: Option<(u64, Option<u64>)>,
-    can_skip_until: Option<Duration>,
-    rendition_reports: Box<[crate::manifest::hls_ll::HlsRenditionReport]>,
+    low_latency: Option<crate::manifest::HlsLowLatencyPlan>,
     destination_part: Option<LiveHlsDestination>,
+}
+
+impl LiveHlsTrack {
+    fn part_target(&self) -> Option<Duration> {
+        self.low_latency.as_ref()?.part_target
+    }
+
+    fn blocking_reload(&self) -> Option<(u64, Option<u64>)> {
+        self.low_latency.as_ref()?.blocking_reload
+    }
+
+    fn can_skip_until(&self) -> Option<Duration> {
+        self.low_latency.as_ref()?.can_skip_until
+    }
+
+    fn rendition_reports(&self) -> &[crate::manifest::hls_ll::HlsRenditionReport] {
+        self.low_latency
+            .as_ref()
+            .map_or(&[], |state| state.rendition_reports.as_ref())
+    }
+
+    fn set_blocking_reload(&mut self, target: Option<(u64, Option<u64>)>) {
+        if let Some(state) = self.low_latency.as_mut() {
+            state.blocking_reload = target;
+        }
+    }
 }
 
 #[derive(Clone, Debug)]

@@ -220,10 +220,7 @@ pub(super) async fn load_live_hls_track(
         ended: false,
         next_poll_at: None,
         target_duration: plan.source_target_duration,
-        part_target: plan.part_target,
-        blocking_reload: plan.blocking_reload,
-        can_skip_until: plan.can_skip_until,
-        rendition_reports: plan.rendition_reports.clone(),
+        low_latency: plan.low_latency.clone(),
         destination_part: None,
     })
 }
@@ -508,9 +505,19 @@ pub(super) async fn apply_live_hls_snapshot(
     };
     let changed = update.changed;
     let end_list = update.end_list;
-    let reload_delay = if plan.blocking_reload.is_some() && changed {
+    let reload_delay = if plan
+        .low_latency
+        .as_ref()
+        .and_then(|state| state.blocking_reload)
+        .is_some()
+        && changed
+    {
         Duration::ZERO
-    } else if let Some(part_target) = plan.part_target {
+    } else if let Some(part_target) = plan
+        .low_latency
+        .as_ref()
+        .and_then(|state| state.part_target)
+    {
         part_target.min(MAX_LIVE_HLS_POLL_INTERVAL)
     } else {
         live_hls_poll_interval(plan.source_target_duration, changed)
@@ -699,10 +706,7 @@ pub(super) async fn apply_live_hls_snapshot(
     track.ended = end_list;
     track.next_poll_at = next_poll_at;
     track.target_duration = plan.source_target_duration;
-    track.part_target = plan.part_target;
-    track.blocking_reload = plan.blocking_reload;
-    track.can_skip_until = plan.can_skip_until;
-    track.rendition_reports = plan.rendition_reports.clone();
+    track.low_latency = plan.low_latency.clone();
     Ok(LiveHlsSnapshotOutcome::Committed)
 }
 
@@ -728,7 +732,7 @@ fn apply_rendition_report(source: &LiveHlsTrack, peer: &mut LiveHlsTrack) -> boo
     }
     let peer_identity = crate::manifest::resource_cache_key(&peer.playlist_url);
     let Some(report) = source
-        .rendition_reports
+        .rendition_reports()
         .iter()
         .find(|report| crate::manifest::resource_cache_key(&report.playlist_url) == peer_identity)
     else {
@@ -738,7 +742,7 @@ fn apply_rendition_report(source: &LiveHlsTrack, peer: &mut LiveHlsTrack) -> boo
         return false;
     };
     if peer
-        .blocking_reload
+        .blocking_reload()
         .is_some_and(|current| !reload_target_is_ahead(target, current))
     {
         return false;
@@ -761,8 +765,8 @@ fn apply_rendition_report(source: &LiveHlsTrack, peer: &mut LiveHlsTrack) -> boo
         return false;
     }
 
-    if peer.blocking_reload.is_some() {
-        peer.blocking_reload = Some(target);
+    if peer.blocking_reload().is_some() {
+        peer.set_blocking_reload(Some(target));
     }
     peer.next_poll_at = Some(Instant::now());
     true
@@ -919,8 +923,8 @@ async fn poll_live_hls_track(
         result = crate::manifest_intake::lookup_hls_live_media(
             client,
             track.playlist_url.as_str(),
-            track.blocking_reload,
-            track.can_skip_until,
+            track.blocking_reload(),
+            track.can_skip_until(),
             &track.inherited_variables,
         ) => result,
     };
@@ -930,7 +934,7 @@ async fn poll_live_hls_track(
             // One failed blocking reload is not retried in-place. Schedule the
             // next normal live poll and preserve already committed resources.
             let delay = track
-                .part_target
+                .part_target()
                 .unwrap_or_else(|| live_hls_poll_interval(track.target_duration, false))
                 .min(MAX_LIVE_HLS_POLL_INTERVAL);
             track.snapshot_at = Instant::now();
@@ -1872,10 +1876,7 @@ mod destination_part_tests {
             ended: false,
             next_poll_at: Some(Instant::now() + Duration::from_secs(30)),
             target_duration: plan.source_target_duration,
-            part_target: plan.part_target,
-            blocking_reload: plan.blocking_reload,
-            can_skip_until: plan.can_skip_until,
-            rendition_reports: plan.rendition_reports.clone(),
+            low_latency: plan.low_latency.clone(),
             destination_part: None,
         }
     }
@@ -1924,7 +1925,7 @@ mod destination_part_tests {
         let peer_identity = crate::manifest::resource_cache_key(&peer_track.playlist_url);
 
         assert!(apply_rendition_report(&source_track, &mut peer_track));
-        assert_eq!(peer_track.blocking_reload, Some((31, Some(2))));
+        assert_eq!(peer_track.blocking_reload(), Some((31, Some(2))));
         assert!(
             peer_track.next_poll_at.expect("new peer poll deadline") <= Instant::now(),
             "a newly reported peer part should expedite the selected track"
@@ -1937,21 +1938,16 @@ mod destination_part_tests {
         );
 
         // A report for an unrelated child playlist cannot retarget the selected track.
-        source_track.rendition_reports = source_track
-            .rendition_reports
-            .iter()
-            .cloned()
-            .map(|mut report| {
+        if let Some(state) = source_track.low_latency.as_mut() {
+            for report in &mut state.rendition_reports {
                 report.playlist_url = Url::parse("https://cdn.example.test/live/other.m3u8")
                     .expect("unrelated report URL");
-                report
-            })
-            .collect::<Vec<_>>()
-            .into_boxed_slice();
+            }
+        }
         peer_track.next_poll_at = Some(Instant::now() + Duration::from_secs(30));
-        peer_track.blocking_reload = Some((31, Some(1)));
+        peer_track.set_blocking_reload(Some((31, Some(1))));
         assert!(!apply_rendition_report(&source_track, &mut peer_track));
-        assert_eq!(peer_track.blocking_reload, Some((31, Some(1))));
+        assert_eq!(peer_track.blocking_reload(), Some((31, Some(1))));
     }
 
     #[test]
@@ -1983,11 +1979,11 @@ mod destination_part_tests {
         .expect("peer LL-HLS playlist");
         let source_track = live_track_from_plan(&source, HlsLiveAccumulator::new());
         let mut peer_track = live_track_from_plan(&peer, committed_part_accumulator(&peer));
-        peer_track.blocking_reload = Some((31, Some(5)));
+        peer_track.set_blocking_reload(Some((31, Some(5))));
         let deadline = peer_track.next_poll_at;
 
         assert!(!apply_rendition_report(&source_track, &mut peer_track));
-        assert_eq!(peer_track.blocking_reload, Some((31, Some(5))));
+        assert_eq!(peer_track.blocking_reload(), Some((31, Some(5))));
         assert_eq!(peer_track.next_poll_at, deadline);
     }
 
@@ -2021,11 +2017,11 @@ mod destination_part_tests {
         let source_track = live_track_from_plan(&source, HlsLiveAccumulator::new());
         let mut peer_track = live_track_from_plan(&peer, committed_part_accumulator(&peer));
         let deadline = peer_track.next_poll_at;
-        let blocking_reload = peer_track.blocking_reload;
+        let blocking_reload = peer_track.blocking_reload();
 
         assert!(!apply_rendition_report(&source_track, &mut peer_track));
         assert_eq!(peer_track.next_poll_at, deadline);
-        assert_eq!(peer_track.blocking_reload, blocking_reload);
+        assert_eq!(peer_track.blocking_reload(), blocking_reload);
     }
 
     #[test]
@@ -2086,10 +2082,7 @@ mod destination_part_tests {
             ended: false,
             next_poll_at: None,
             target_duration: first_plan.source_target_duration,
-            part_target: first_plan.part_target,
-            blocking_reload: first_plan.blocking_reload,
-            can_skip_until: first_plan.can_skip_until,
-            rendition_reports: first_plan.rendition_reports.clone(),
+            low_latency: first_plan.low_latency.clone(),
             destination_part: Some(destination_state.clone()),
         };
         let (_stop_tx, mut abort) = tokio::sync::oneshot::channel();

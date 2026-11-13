@@ -356,7 +356,10 @@ mod playlist_event_tests {
     #[test]
     fn parses_tagged_playlist_file_events() {
         assert_eq!(
-            parse_ytdlp_playlist_event("@GRAB:testnonce:START;abc123;4;/tmp/004 - title.mp4", "testnonce"),
+            parse_ytdlp_playlist_event(
+                "@GRAB:testnonce:START;abc123;4;/tmp/004 - title.mp4",
+                "testnonce"
+            ),
             Some(YtdlpPlaylistEvent::Started {
                 file_id: "abc123".to_string(),
                 playlist_index: 4,
@@ -364,7 +367,10 @@ mod playlist_event_tests {
             })
         );
         assert_eq!(
-            parse_ytdlp_playlist_event("@GRAB:testnonce:PROGRESS;abc123;4;downloading;512;1024;NA", "testnonce"),
+            parse_ytdlp_playlist_event(
+                "@GRAB:testnonce:PROGRESS;abc123;4;downloading;512;1024;NA",
+                "testnonce"
+            ),
             Some(YtdlpPlaylistEvent::Progress {
                 file_id: "abc123".to_string(),
                 playlist_index: 4,
@@ -373,7 +379,10 @@ mod playlist_event_tests {
             })
         );
         assert_eq!(
-            parse_ytdlp_playlist_event("@GRAB:testnonce:DONE;abc123;4;/tmp/a;final.mp4", "testnonce"),
+            parse_ytdlp_playlist_event(
+                "@GRAB:testnonce:DONE;abc123;4;/tmp/a;final.mp4",
+                "testnonce"
+            ),
             Some(YtdlpPlaylistEvent::Finished {
                 file_id: "abc123".to_string(),
                 playlist_index: 4,
@@ -381,7 +390,10 @@ mod playlist_event_tests {
             })
         );
         assert_eq!(
-            parse_ytdlp_playlist_event("@GRAB:testnonce:PROGRESS;abc123;4;error;NA;NA;NA", "testnonce"),
+            parse_ytdlp_playlist_event(
+                "@GRAB:testnonce:PROGRESS;abc123;4;error;NA;NA;NA",
+                "testnonce"
+            ),
             None
         );
     }

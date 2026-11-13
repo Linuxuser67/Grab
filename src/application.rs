@@ -1057,11 +1057,12 @@ fn register_actions(
                     if let Some(s) = st.borrow().as_ref() {
                         let n = s.manager.retry_failed();
                         if n > 0 {
-                            s.toasts.add_toast(crate::ui_util::plain_toast(&ngettext_count(
-                                "Retrying failed download",
-                                "Retrying {n} failed downloads",
-                                n,
-                            )));
+                            s.toasts
+                                .add_toast(crate::ui_util::plain_toast(&ngettext_count(
+                                    "Retrying failed download",
+                                    "Retrying {n} failed downloads",
+                                    n,
+                                )));
                         }
                     }
                 })

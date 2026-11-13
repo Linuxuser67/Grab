@@ -3667,15 +3667,8 @@ async fn fetch_and_write_hls_track(
     };
 
     for resource in resources.into_iter().skip(writer.next_resource_index()) {
-        match fetch_hls_resource_to_writer(
-            client,
-            &resource,
-            &mut writer,
-            tx,
-            downloaded,
-            abort,
-        )
-        .await
+        match fetch_hls_resource_to_writer(client, &resource, &mut writer, tx, downloaded, abort)
+            .await
         {
             Ok(true) => {}
             Ok(false) => return Ok(false),
@@ -3959,8 +3952,7 @@ async fn fetch_and_write_ordered_track(
             Err(error) => {
                 tx.send(progress_message(downloaded.load(Ordering::Relaxed)))
                     .ok();
-                if matches!(&error, ManifestRunError::Unsupported(_))
-                {
+                if matches!(&error, ManifestRunError::Unsupported(_)) {
                     drop(writer);
                     crate::manifest_writer::cleanup_destination_part(
                         staging,

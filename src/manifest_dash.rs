@@ -431,11 +431,17 @@ struct DashList {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-struct DashListSegment {
-    media: String,
-    range: Option<ManifestByteRange>,
-    time: Option<u64>,
-    duration: Option<u64>,
+enum DashListSegment {
+    Static {
+        media: String,
+        range: Option<ManifestByteRange>,
+    },
+    Timed {
+        media: String,
+        range: Option<ManifestByteRange>,
+        time: u64,
+        duration: u64,
+    },
 }
 
 #[cfg(test)]
@@ -1421,10 +1427,25 @@ fn stable_representation_key(identity: RepresentationIdentity<'_>) -> String {
             }
             hasher.update((list.segments.len() as u64).to_le_bytes());
             for segment in list.segments.iter() {
-                hasher.update(segment.media.as_bytes());
-                hash_optional_range(&mut hasher, segment.range);
-                hash_optional_number(&mut hasher, segment.time);
-                hash_optional_number(&mut hasher, segment.duration);
+                match segment {
+                    DashListSegment::Static { media, range } => {
+                        hasher.update(media.as_bytes());
+                        hash_optional_range(&mut hasher, *range);
+                        hash_optional_number(&mut hasher, None);
+                        hash_optional_number(&mut hasher, None);
+                    }
+                    DashListSegment::Timed {
+                        media,
+                        range,
+                        time,
+                        duration,
+                    } => {
+                        hasher.update(media.as_bytes());
+                        hash_optional_range(&mut hasher, *range);
+                        hash_optional_number(&mut hasher, Some(*time));
+                        hash_optional_number(&mut hasher, Some(*duration));
+                    }
+                }
             }
         }
         DashAddressing::Base(_) => {
@@ -1529,7 +1550,10 @@ fn live_representation_key(
             hasher.update(list.timescale.to_le_bytes());
             hash_optional_number(
                 &mut hasher,
-                list.segments.first().and_then(|segment| segment.duration),
+                list.segments.first().and_then(|segment| match segment {
+                    DashListSegment::Static { .. } => None,
+                    DashListSegment::Timed { duration, .. } => Some(*duration),
+                }),
             );
             match &list.initialization {
                 Some(DashInitialization::Template(value)) => {
@@ -2175,34 +2199,41 @@ fn effective_list(
                 .media
                 .as_deref()
                 .filter(|media| !media.is_empty())
-                .ok_or(DashError::InvalidSegment)?;
+                .ok_or(DashError::InvalidSegment)?
+                .to_owned();
             let range = segment
                 .mediaRange
                 .as_deref()
                 .map(parse_byte_range)
                 .transpose()?;
-            let (time, duration) = timeline
-                .as_ref()
-                .and_then(|entries| entries.get(index))
-                .map_or((None, None), |entry| (entry.start, Some(entry.duration)));
-            Ok(DashListSegment {
-                media: media.to_owned(),
-                range,
-                time,
-                duration,
-            })
+            if is_dynamic {
+                let entry = timeline
+                    .as_ref()
+                    .and_then(|entries| entries.get(index))
+                    .ok_or(DashError::UnsupportedAddressing)?;
+                let time = entry.start.ok_or(DashError::UnsupportedAddressing)?;
+                Ok(DashListSegment::Timed {
+                    media,
+                    range,
+                    time,
+                    duration: entry.duration,
+                })
+            } else {
+                Ok(DashListSegment::Static { media, range })
+            }
         })
         .collect::<Result<Vec<_>, DashError>>()?;
 
     if is_dynamic {
         let mut previous_end = None;
         for segment in &segments {
-            let start = segment.time.ok_or(DashError::UnsupportedAddressing)?;
-            let duration = segment.duration.ok_or(DashError::UnsupportedAddressing)?;
-            let end = start
-                .checked_add(duration)
+            let DashListSegment::Timed { time, duration, .. } = segment else {
+                return Err(DashError::UnsupportedAddressing);
+            };
+            let end = time
+                .checked_add(*duration)
                 .ok_or(DashError::InvalidSegment)?;
-            if previous_end.is_some_and(|previous| start != previous) {
+            if previous_end.is_some_and(|previous| *time != previous) {
                 return Err(DashError::UnsupportedAddressing);
             }
             previous_end = Some(end);
@@ -2257,15 +2288,16 @@ fn expand_dynamic_list(
 
     let mut segment_duration = None;
     for segment in &list.segments {
-        let time = segment.time.ok_or(DashError::UnsupportedAddressing)?;
-        let duration = segment.duration.ok_or(DashError::UnsupportedAddressing)?;
-        if duration == 0 || time % duration != 0 {
+        let DashListSegment::Timed { time, duration, .. } = segment else {
+            return Err(DashError::UnsupportedAddressing);
+        };
+        if *duration == 0 || *time % *duration != 0 {
             return Err(DashError::UnsupportedAddressing);
         }
-        if segment_duration.is_some_and(|previous| previous != duration) {
+        if segment_duration.is_some_and(|previous| previous != *duration) {
             return Err(DashError::UnsupportedAddressing);
         }
-        segment_duration = Some(duration);
+        segment_duration = Some(*duration);
     }
     let segment_duration = segment_duration.ok_or(DashError::UnsupportedAddressing)?;
     let window_depth = dynamic.time_shift_buffer_depth.unwrap_or(
@@ -2299,28 +2331,35 @@ fn expand_dynamic_list(
     let mut whole_resources = HashSet::new();
     let mut ranged_resources: HashMap<String, Vec<ManifestByteRange>> = HashMap::new();
     for segment in &list.segments {
-        let time = segment.time.ok_or(DashError::UnsupportedAddressing)?;
-        let duration = segment.duration.ok_or(DashError::UnsupportedAddressing)?;
+        let DashListSegment::Timed {
+            media,
+            range: segment_range,
+            time,
+            duration,
+        } = segment
+        else {
+            return Err(DashError::UnsupportedAddressing);
+        };
         let end = time
-            .checked_add(duration)
+            .checked_add(*duration)
             .ok_or(DashError::InvalidSegment)?;
-        let url = resolve_resource(&representation.source.base_url, &segment.media)?;
+        let url = resolve_resource(&representation.source.base_url, media)?;
         let url_key = url.as_str().to_owned();
-        if let Some(segment_range) = segment.range {
+        if let Some(segment_range) = segment_range {
             if whole_resources.contains(&url_key) {
                 return Err(DashError::InvalidSegment);
             }
             ranged_resources
                 .entry(url_key.clone())
                 .or_default()
-                .push(segment_range);
+                .push(*segment_range);
         } else if !whole_resources.insert(url_key.clone())
             || ranged_resources.contains_key(&url_key)
         {
             return Err(DashError::InvalidSegment);
         }
         if url == initialization_url {
-            let (Some(initialization_range), Some(segment_range)) = (*range, segment.range) else {
+            let (Some(initialization_range), Some(segment_range)) = (*range, *segment_range) else {
                 return Err(DashError::UnsupportedAddressing);
             };
             if ranges_overlap(initialization_range, segment_range)? {
@@ -2330,14 +2369,14 @@ fn expand_dynamic_list(
         if end > elapsed_ticks || end <= window_start_ticks {
             continue;
         }
-        let filename = super::resource_filename("dash-live-segment", None, &url, segment.range);
+        let filename = super::resource_filename("dash-live-segment", None, &url, *segment_range);
         let number = time
             .checked_div(segment_duration)
             .and_then(|index| index.checked_add(1))
             .ok_or(DashError::InvalidSegment)?;
         resources.push(DashResource {
             url,
-            range: segment.range,
+            range: *segment_range,
             filename,
             kind: DashResourceKind::Segment,
             segment_number: Some(number),
@@ -3117,11 +3156,14 @@ fn expand_list(
     }
 
     for (index, segment) in list.segments.iter().enumerate() {
-        let url = resolve_resource(base_url, &segment.media)?;
-        let filename = super::resource_filename("dash-segment", Some(index), &url, segment.range);
+        let DashListSegment::Static { media, range } = segment else {
+            return Err(DashError::UnsupportedAddressing);
+        };
+        let url = resolve_resource(base_url, media)?;
+        let filename = super::resource_filename("dash-segment", Some(index), &url, *range);
         resources.push(DashResource {
             url,
-            range: segment.range,
+            range: *range,
             filename,
             kind: DashResourceKind::Segment,
             segment_number: Some(u64::try_from(index).map_err(|_| DashError::LimitExceeded)?),

@@ -947,3 +947,29 @@ mod playlist_scope_invariant_tests {
         );
     }
 }
+
+
+#[cfg(test)]
+mod playlist_argv_builder_tests {
+    use super::{replace_arg_value, replace_print_template};
+
+    #[test]
+    fn required_argument_replacement_fails_when_flag_or_value_is_missing() {
+        let mut missing_flag = vec!["--other".to_string()];
+        assert!(replace_arg_value(&mut missing_flag, "-o", "out".to_string()).is_err());
+
+        let mut missing_value = vec!["-o".to_string()];
+        assert!(replace_arg_value(&mut missing_value, "-o", "out".to_string()).is_err());
+    }
+
+    #[test]
+    fn required_print_template_replacement_fails_when_template_is_missing() {
+        let mut args = vec!["after_move:other".to_string()];
+        assert!(replace_print_template(
+            &mut args,
+            "after_move:filepath",
+            "after_move:replacement".to_string()
+        )
+        .is_err());
+    }
+}

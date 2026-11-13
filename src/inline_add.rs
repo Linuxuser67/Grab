@@ -843,6 +843,9 @@ pub(crate) struct VideoStep {
     /// closes: dropping the task kills its probe children (kill_on_drop)
     /// instead of letting them run out their timeouts on a dead URL.
     pub(crate) lookup_abort: Rc<RefCell<Option<glib::JoinHandle<()>>>>,
+    /// True while the URL row represents a collection: the entry's arrow
+    /// queues all instead of submitting the lookup.
+    pub(crate) queue_all_action: Cell<bool>,
     /// Queue-all action for collections; reused as the labeled Add action
     /// for single-media results.
     pub(crate) add_btn: gtk4::Button,
@@ -852,21 +855,31 @@ pub(crate) struct VideoStep {
 /// The tick submits the URL; while looking up it morphs into a spinner in
 /// place (browser-address-bar style); once the URL-row actions appear beside
 /// the entry — or the preview block shows an error/tools recovery action —
-/// the entry carries no icon.
+/// the entry carries no icon. Collections replace the circular button with
+/// an arrow inside the entry that queues every item.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum EntryIcon {
     Tick,
     Spinner,
+    QueueAll,
     None,
 }
 
 /// Derive the entry icon from the card state. Pure so it's unit-testable
 /// (widget creation segfaults headless, so CI can't cover the GTK calls).
-fn entry_icon_for(has_text: bool, looking_up: bool, add_shown: bool, blocked: bool) -> EntryIcon {
+fn entry_icon_for(
+    has_text: bool,
+    looking_up: bool,
+    add_shown: bool,
+    blocked: bool,
+    queue_all: bool,
+) -> EntryIcon {
     if looking_up {
         EntryIcon::Spinner
     } else if blocked {
         EntryIcon::None
+    } else if queue_all {
+        EntryIcon::QueueAll
     } else if has_text && !add_shown {
         EntryIcon::Tick
     } else {
@@ -912,6 +925,7 @@ pub(crate) fn sync_entry_icon(v: &VideoStep) {
         v.looking_up.get(),
         v.action_revealer.reveals_child(),
         v.error.is_visible() || v.tools.is_visible(),
+        v.queue_all_action.get(),
     );
     let pos = gtk4::EntryIconPosition::Secondary;
     match icon {
@@ -921,6 +935,18 @@ pub(crate) fn sync_entry_icon(v: &VideoStep) {
             v.url_entry.set_icon_activatable(pos, true);
             v.url_entry
                 .set_icon_tooltip_text(pos, Some(&gettext("Look up")));
+        }
+        EntryIcon::QueueAll => {
+            // The arrow GNOME puts inside the lock-screen entry.
+            v.url_entry
+                .set_icon_from_icon_name(pos, Some("go-next-symbolic"));
+            v.url_entry.set_icon_activatable(pos, true);
+            let tooltip = v
+                .add_btn
+                .tooltip_text()
+                .unwrap_or_else(|| gettext("Queue all files"));
+            v.url_entry
+                .set_icon_tooltip_text(pos, Some(tooltip.as_str()));
         }
         EntryIcon::Spinner => {
             v.url_entry
@@ -962,6 +988,7 @@ pub(crate) fn hide_video_step(v: &VideoStep) {
     v.select_files_btn.set_visible(false);
     v.gallery_filter_wrap.set_visible(false);
     v.is_gallery.set(false);
+    v.queue_all_action.set(false);
     v.gallery_card.borrow_mut().take();
     // NOTE: the URL actions keep their current appearance while the revealer
     // slides out; resetting their styles here would flash a different icon
@@ -1110,6 +1137,7 @@ fn show_manifest_ready(
     step.add_btn
         .update_property(&[gtk4::accessible::Property::Label(&gettext("Add download"))]);
     step.add_btn.set_label(&gettext("Add"));
+    step.add_btn.set_visible(true);
     set_looking_up(step, false);
     set_lookup_add(lookup_add, true);
 
@@ -1201,6 +1229,7 @@ fn show_video_ready(v: &VideoStep) {
     v.add_btn
         .update_property(&[gtk4::accessible::Property::Label(&gettext("Add download"))]);
     v.add_btn.set_label(&gettext("Add"));
+    v.add_btn.set_visible(true);
     v.name.set_visible(true);
     v.revert.set_visible(true);
     v.format.set_visible(true);
@@ -2250,7 +2279,7 @@ fn clear_field_error(field: &impl IsA<gtk4::Widget>) {
 }
 
 fn show_video_playlist(v: &VideoStep, playlist: &crate::media_types::PlaylistInfo) {
-    // Select files opens the checklist; the circular action queues every
+    // Select files opens the checklist; the entry's arrow queues every
     // resolved item. A capped preview describes the subset it can enqueue.
     hide_video_step(v);
     set_looking_up(v, false);
@@ -2270,6 +2299,8 @@ fn show_video_playlist(v: &VideoStep, playlist: &crate::media_types::PlaylistInf
     v.add_btn.set_tooltip_text(Some(&queue_label));
     v.add_btn
         .update_property(&[gtk4::accessible::Property::Label(&queue_label)]);
+    v.add_btn.set_visible(false);
+    v.queue_all_action.set(true);
     v.action_revealer.set_visible(true);
     v.action_revealer.set_reveal_child(true);
     sync_entry_icon(v);
@@ -2663,6 +2694,7 @@ fn build_video_preview(
         gallery_filter_wrap: filter_wrap,
         collection_group,
         is_gallery: Rc::new(Cell::new(false)),
+        queue_all_action: Cell::new(false),
         gallery_card: Rc::new(RefCell::new(None)),
         select_files_btn: select_files_btn.clone(),
         gallery_select_opener: Rc::new(RefCell::new(None)),
@@ -3930,8 +3962,9 @@ fn wire_url_entry(
         let s = submit.clone();
         url_entry.connect_activate(move |_| s(SubmitSource::Enter));
     }
-    // Tick icon inside the entry submits like Enter; the spinner cancels the
-    // running lookup (the entry is locked while it resolves).
+    // Tick icon inside the entry submits like Enter; the arrow queues every
+    // item of a resolved collection; the spinner cancels the running lookup
+    // (the entry is locked while it resolves).
     {
         let s = submit.clone();
         let step = step.clone();
@@ -3949,6 +3982,8 @@ fn wire_url_entry(
                 add_btn.set_sensitive(true);
                 select_files_btn.set_sensitive(true);
                 sync_entry_icon(&step);
+            } else if step.queue_all_action.get() {
+                s(SubmitSource::Button);
             } else {
                 s(SubmitSource::Enter);
             }
@@ -4054,6 +4089,8 @@ fn wire_url_entry(
                     .update_property(&[gtk4::accessible::Property::Label(&gettext(
                         "Queue all files",
                     ))]);
+                step2.add_btn.set_visible(false);
+                step2.queue_all_action.set(true);
                 step2.action_revealer.set_visible(true);
                 step2.action_revealer.set_reveal_child(true);
             }
@@ -4847,6 +4884,8 @@ fn show_gallery_ready(v: &VideoStep, card: crate::gallery_card::GalleryCard, tit
         .update_property(&[gtk4::accessible::Property::Label(&gettext(
             "Queue all files",
         ))]);
+    v.add_btn.set_visible(false);
+    v.queue_all_action.set(true);
     // The collection row under the URL bar carries the title and counts;
     // the filter chooses what Queue all and Select files enqueue.
     v.gallery_filter.set_active_name(Some("all"));
@@ -5213,34 +5252,45 @@ mod tests {
     #[test]
     fn entry_icon_lookup_wins_over_everything() {
         // While a lookup is in flight the tick morphs into a spinner in
-        // place, regardless of text, Add visibility, or error state.
-        assert_eq!(entry_icon_for(true, true, false, false), EntryIcon::Spinner);
-        assert_eq!(entry_icon_for(true, true, true, false), EntryIcon::Spinner);
-        assert_eq!(entry_icon_for(false, true, false, true), EntryIcon::Spinner);
+        // place, regardless of text, Add visibility, collection state, or
+        // error state.
+        assert_eq!(entry_icon_for(true, true, false, false, false), EntryIcon::Spinner);
+        assert_eq!(entry_icon_for(true, true, true, false, true), EntryIcon::Spinner);
+        assert_eq!(entry_icon_for(false, true, false, true, false), EntryIcon::Spinner);
     }
 
     #[test]
     fn entry_icon_tick_only_when_idle_with_text_and_no_add() {
         // The tick submits: idle, non-empty, and no Add button yet.
-        assert_eq!(entry_icon_for(true, false, false, false), EntryIcon::Tick);
+        assert_eq!(entry_icon_for(true, false, false, false, false), EntryIcon::Tick);
         // Empty entry: nothing to submit.
-        assert_eq!(entry_icon_for(false, false, false, false), EntryIcon::None);
+        assert_eq!(entry_icon_for(false, false, false, false, false), EntryIcon::None);
     }
 
     #[test]
     fn entry_icon_cleared_once_add_appears() {
         // Once Add appears beside the entry, the entry carries no icon —
         // the button owns the action.
-        assert_eq!(entry_icon_for(true, false, true, false), EntryIcon::None);
-        assert_eq!(entry_icon_for(false, false, true, false), EntryIcon::None);
+        assert_eq!(entry_icon_for(true, false, true, false, false), EntryIcon::None);
+        assert_eq!(entry_icon_for(false, false, true, false, false), EntryIcon::None);
     }
 
     #[test]
     fn entry_icon_cleared_on_error_or_tools_state() {
         // On lookup failure the error row's Retry (or the tools row's
-        // Install) owns recovery: no entry icon.
-        assert_eq!(entry_icon_for(true, false, false, true), EntryIcon::None);
-        assert_eq!(entry_icon_for(true, false, true, true), EntryIcon::None);
+        // Install) owns recovery: no entry icon, even for a collection.
+        assert_eq!(entry_icon_for(true, false, false, true, false), EntryIcon::None);
+        assert_eq!(entry_icon_for(true, false, true, true, false), EntryIcon::None);
+        assert_eq!(entry_icon_for(true, false, true, true, true), EntryIcon::None);
+    }
+
+    #[test]
+    fn entry_icon_arrow_queues_all_for_collections() {
+        // A resolved collection replaces the circular button with the
+        // entry's arrow; Select files keeps the actions row revealed.
+        assert_eq!(entry_icon_for(true, false, true, false, true), EntryIcon::QueueAll);
+        // The arrow wins over the idle tick.
+        assert_eq!(entry_icon_for(true, false, false, false, true), EntryIcon::QueueAll);
     }
 
     fn dummy_probe() -> crate::video::ProbeResult {

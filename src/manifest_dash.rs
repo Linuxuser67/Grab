@@ -260,11 +260,7 @@ struct DashRepresentationSource {
 
 impl DashRepresentationSource {
     fn has_query_resource_urls(&self) -> bool {
-        if self
-            .base_url
-            .query()
-            .is_some_and(|query| !query.is_empty())
-        {
+        if self.base_url.query().is_some_and(|query| !query.is_empty()) {
             return true;
         }
 
@@ -284,9 +280,10 @@ impl DashRepresentationSource {
             }
             DashAddressing::List(list) => {
                 initialization_has_query(list.initialization.as_ref())
-                    || list.segments.iter().any(|segment| {
-                        resource_reference_has_query(&self.base_url, &segment.media)
-                    })
+                    || list
+                        .segments
+                        .iter()
+                        .any(|segment| resource_reference_has_query(&self.base_url, &segment.media))
             }
             DashAddressing::Base(_) => false,
             DashAddressing::IndexedBase(index) => {

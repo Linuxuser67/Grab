@@ -437,8 +437,7 @@ impl ManifestLookup {
                 .find(|representation| representation.matches_key(representation_key.as_str()))
                 .and_then(|representation| {
                     dash_output_container(representation.mime_type.as_deref())
-                })
-                .map(str::to_owned),
+                }),
         };
         Some(ManifestSource {
             url: self.source_url.clone(),

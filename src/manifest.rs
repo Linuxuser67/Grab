@@ -1508,11 +1508,35 @@ pub(crate) fn parse_hls_master_playlist(
         return Err(ManifestError::UnsupportedPlaylist);
     }
 
-    let video_renditions = master
+    // Index VIDEO renditions once. The master is remote, untrusted input, so
+    // expansion must be bounded before allocating one HlsVariant per choice.
+    let mut video_renditions_by_group = HashMap::new();
+    for rendition in master
         .alternatives
         .iter()
         .filter(|alternative| alternative.media_type == AlternativeMediaType::Video)
-        .collect::<Vec<_>>();
+    {
+        video_renditions_by_group
+            .entry(rendition.group_id.as_str())
+            .or_insert_with(Vec::new)
+            .push(rendition);
+    }
+
+    let mut expanded_variant_count = 0usize;
+    for variant in master.variants.iter().filter(|variant| !variant.is_i_frame) {
+        let additional_variants = variant.video.as_deref().map_or(1, |group_id| {
+            video_renditions_by_group
+                .get(group_id)
+                .map_or(0, Vec::len)
+        });
+        expanded_variant_count = expanded_variant_count.saturating_add(additional_variants);
+        if expanded_variant_count > MAX_HLS_MASTER_VARIANTS {
+            return Err(ManifestError::Parse(
+                "HLS master contains too many video variants".to_string(),
+            ));
+        }
+    }
+
     let variants = master
         .variants
         .into_iter()
@@ -1577,11 +1601,10 @@ pub(crate) fn parse_hls_master_playlist(
             if group_id.trim().is_empty() {
                 return Err(ManifestError::InvalidVideoGroup);
             }
-            let group_renditions = video_renditions
-                .iter()
-                .copied()
-                .filter(|rendition| rendition.group_id == group_id)
-                .collect::<Vec<_>>();
+            let group_renditions = video_renditions_by_group
+                .get(group_id)
+                .map(Vec::as_slice)
+                .unwrap_or(&[]);
             if group_renditions.is_empty() {
                 return Err(ManifestError::InvalidVideoGroup);
             }
@@ -1593,7 +1616,7 @@ pub(crate) fn parse_hls_master_playlist(
             let mut embedded_rendition_seen = false;
             let mut stable_rendition_ids = HashSet::new();
             let mut choices = Vec::with_capacity(group_renditions.len());
-            for rendition in group_renditions {
+            for rendition in group_renditions.iter().copied() {
                 if rendition.name.trim().is_empty() {
                     return Err(ManifestError::InvalidVideoGroup);
                 }
@@ -2764,6 +2787,28 @@ video/1080.m3u8
                 "#EXT-X-STREAM-INF:BANDWIDTH=1000000\nhttps://cdn.example.test/{index}.m3u8\n"
             ));
         }
+        assert!(matches!(
+            parse_hls_master_playlist(BASE_URL, body.as_bytes()),
+            Err(ManifestError::Parse(_))
+        ));
+    }
+
+    #[test]
+    fn parser_bounds_video_rendition_expansion_before_materializing_variants() {
+        let mut body = String::from("#EXTM3U\n");
+        for index in 0..=MAX_HLS_MASTER_VARIANTS {
+            body.push_str(&format!(
+                "#EXT-X-MEDIA:TYPE=VIDEO,GROUP-ID=\"angles\",NAME=\"Camera {index}\",URI=\"video/{index}.m3u8\"\n"
+            ));
+        }
+        // A second dimension makes the old implementation materialize the
+        // rendition cross-product before it reaches the post-collect limit.
+        for _ in 0..=MAX_HLS_MASTER_VARIANTS {
+            body.push_str(
+                "#EXT-X-STREAM-INF:BANDWIDTH=1000000,VIDEO=\"angles\"\nvideo/main.m3u8\n",
+            );
+        }
+
         assert!(matches!(
             parse_hls_master_playlist(BASE_URL, body.as_bytes()),
             Err(ManifestError::Parse(_))

@@ -283,7 +283,6 @@ pub(crate) fn unified_download_argv(
     args
 }
 
-
 /// Output template for a collection. The extractor ID disambiguates duplicate
 /// titles and keeps filenames stable if the playlist is reordered between
 /// retries. Only the directory is escaped: the remaining percent fields are
@@ -357,7 +356,10 @@ fn replace_print_template(
     current: &str,
     replacement: String,
 ) -> Result<(), VideoError> {
-    let Some(argument) = args.iter_mut().find(|argument| argument.as_str() == current) else {
+    let Some(argument) = args
+        .iter_mut()
+        .find(|argument| argument.as_str() == current)
+    else {
         return Err(VideoError::Fetch(format!(
             "Could not locate yt-dlp print template {current}"
         )));
@@ -400,25 +402,29 @@ pub(crate) fn playlist_download_argv(
         &mut args,
         "--progress-template",
         format!(
-            "download:@GRAB:{selection.event_nonce}:PROGRESS;%(info.id)s;%(info.playlist_index)s;%(progress.status)s;%(progress.downloaded_bytes)s;%(progress.total_bytes)s;%(progress.total_bytes_estimate)s"
+            "download:@GRAB:{}:PROGRESS;%(info.id)s;%(info.playlist_index)s;%(progress.status)s;%(progress.downloaded_bytes)s;%(progress.total_bytes)s;%(progress.total_bytes_estimate)s",
+            selection.event_nonce
         ),
     )?;
     replace_print_template(
         &mut args,
         "after_move:filepath",
-        format!("after_move:@GRAB:{selection.event_nonce}:DONE;%(id)s;%(playlist_index)s;%(filepath)s"),
+        format!(
+            "after_move:@GRAB:{}:DONE;%(id)s;%(playlist_index)s;%(filepath)s",
+            selection.event_nonce
+        ),
     )?;
-    let separator = args
-        .iter()
-        .position(|arg| arg == "--")
-        .ok_or_else(|| {
-            VideoError::Fetch("Could not locate yt-dlp's positional URL separator".to_string())
-        })?;
+    let separator = args.iter().position(|arg| arg == "--").ok_or_else(|| {
+        VideoError::Fetch("Could not locate yt-dlp's positional URL separator".to_string())
+    })?;
     args.splice(
         separator..separator,
         [
             "--print".to_string(),
-            format!("before_dl:@GRAB:{selection.event_nonce}:START;%(id)s;%(playlist_index)s;%(filename)s"),
+            format!(
+                "before_dl:@GRAB:{}:START;%(id)s;%(playlist_index)s;%(filename)s",
+                selection.event_nonce
+            ),
         ],
     );
     Ok(args)
@@ -960,7 +966,6 @@ mod playlist_scope_invariant_tests {
     }
 }
 
-
 #[cfg(test)]
 mod playlist_argv_builder_tests {
     use super::{replace_arg_value, replace_print_template};
@@ -977,11 +982,13 @@ mod playlist_argv_builder_tests {
     #[test]
     fn required_print_template_replacement_fails_when_template_is_missing() {
         let mut args = vec!["after_move:other".to_string()];
-        assert!(replace_print_template(
-            &mut args,
-            "after_move:filepath",
-            "after_move:replacement".to_string()
-        )
-        .is_err());
+        assert!(
+            replace_print_template(
+                &mut args,
+                "after_move:filepath",
+                "after_move:replacement".to_string()
+            )
+            .is_err()
+        );
     }
 }

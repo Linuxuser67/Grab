@@ -1717,6 +1717,24 @@ impl DownloadManager {
 
         let previous_status = owner.status();
         let _batch = self.batch_guard();
+        // Commit the validated source update before changing worker or owner
+        // state. If the source disappeared, the active collection stays intact.
+        let added_files = {
+            let mut sources = self.video_sources.borrow_mut();
+            let Some(crate::media_types::VideoSource::Playlist { state, .. }) =
+                sources.get_mut(&owner.id())
+            else {
+                return Err(gettext(
+                    "The existing playlist collection is no longer available",
+                ));
+            };
+            state.files.extend(additions.iter().cloned());
+            additions
+        };
+        // Rebuild once from the extended source while retaining row objects
+        // already present in the GTK store.
+        self.video_playlist_file_row_index.borrow_mut().remove(&owner.id());
+
         if previous_status == DownloadStatus::Downloading {
             // The active yt-dlp process has already captured its playlist-index
             // list. Stop it and let the next attempt resolve the enlarged ID set.
@@ -1730,22 +1748,7 @@ impl DownloadManager {
             owner.set_status(DownloadStatus::Queued);
         }
 
-        let all_files = {
-            let mut sources = self.video_sources.borrow_mut();
-            let Some(crate::media_types::VideoSource::Playlist { state, .. }) =
-                sources.get_mut(&owner.id())
-            else {
-                return Err(gettext(
-                    "The existing playlist collection is no longer available",
-                ));
-            };
-            state.files.extend(additions);
-            state.files.clone()
-        };
-        // The file list may have grown; rebuild the index once before the
-        // child projection is refreshed for the extended collection.
-        self.video_playlist_file_row_index.borrow_mut().remove(&owner.id());
-        self.restore_video_playlist_file_rows(owner, &all_files);
+        self.restore_video_playlist_file_rows(owner, &added_files);
         if requeue {
             // A new invocation owns the expanded ID set. Reset every unfinished
             // projection consistently; completed entries remain untouched.

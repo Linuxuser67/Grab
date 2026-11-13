@@ -296,10 +296,6 @@ fn scan_ll_hls_tag_flags(body: &[u8]) -> LlHlsTagFlags {
     flags
 }
 
-pub(crate) fn has_ll_hls_tags(body: &[u8]) -> bool {
-    scan_ll_hls_tag_flags(body).has_ll_hls_tags
-}
-
 #[cfg(test)]
 mod ll_hls_tag_flag_tests {
     use super::*;
@@ -417,23 +413,6 @@ fn open_segment_program_date_time(
         return Err(ManifestError::UnsupportedPlaylist);
     }
     parse_program_date_time_tag(tag).map(Some)
-}
-
-fn has_trailing_open_discontinuity(body: &[u8]) -> bool {
-    const EXTINF: &[u8] = b"#EXTINF:";
-    let tail_start = body
-        .windows(EXTINF.len())
-        .rposition(|window| window == EXTINF)
-        .unwrap_or(0);
-    body[tail_start..]
-        .split(|byte| *byte == b'\n')
-        .any(|raw_line| {
-            raw_line
-                .strip_suffix(b"\r")
-                .unwrap_or(raw_line)
-                .trim_ascii_start()
-                == b"#EXT-X-DISCONTINUITY"
-        })
 }
 
 fn build_plan(

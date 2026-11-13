@@ -1319,7 +1319,6 @@ async fn handle_live_hls_snapshot_outcome(
     Ok(None)
 }
 
-
 #[expect(
     clippy::too_many_arguments,
     reason = "the runner coordinates the selected renditions, storage paths, progress, host policy, and shared stop signal"

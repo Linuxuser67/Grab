@@ -88,7 +88,17 @@ fn sync_cookies_override_row(
             && crate::video_tools::browser_profile_dir(&lookup_browser).is_none()
     });
     gtk4::glib::MainContext::default().spawn_local(async move {
-        let missing_profile = lookup.await.unwrap_or(false);
+        let missing_profile = match lookup.await {
+            Ok(missing_profile) => missing_profile,
+            Err(error) => {
+                tracing::warn!(
+                    %error,
+                    browser = %browser,
+                    "browser profile lookup task failed"
+                );
+                false
+            }
+        };
         // Ignore stale results when the setting changed while the scan ran.
         if settings
             .string(crate::settings::key::COOKIES_BROWSER)

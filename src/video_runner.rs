@@ -59,7 +59,7 @@ struct YtdlpStdoutReader<R> {
     eof: bool,
 }
 
-impl<R> YtdlpStdoutReader<R> {
+impl<R: tokio::io::AsyncRead> YtdlpStdoutReader<R> {
     fn new(reader: R) -> Self {
         Self {
             reader: tokio::io::BufReader::new(reader),

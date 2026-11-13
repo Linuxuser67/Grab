@@ -7,7 +7,7 @@ use gtk4::glib::subclass::types::ObjectSubclassIsExt;
 /// Mutually exclusive structural role of a queue row.
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq, glib::Enum)]
 #[enum_type(name = "GrabDownloadRowRole")]
-pub(crate) enum DownloadRowRole {
+pub enum DownloadRowRole {
     #[default]
     Plain,
     GalleryOwner,

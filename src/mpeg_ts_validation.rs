@@ -9,7 +9,6 @@ use mpeg_ts::ts::{AdaptationFieldControl, TS_PACKET_SIZE, TsPacket};
 pub(crate) struct TransportStreamValidator {
     packet: [u8; TS_PACKET_SIZE],
     packet_len: usize,
-    total_bytes: u64,
     saw_packet: bool,
     valid: bool,
 }
@@ -27,7 +26,6 @@ impl TransportStreamValidator {
         Self {
             packet: [0; TS_PACKET_SIZE],
             packet_len: 0,
-            total_bytes: 0,
             saw_packet: false,
             valid: true,
         }
@@ -35,16 +33,6 @@ impl TransportStreamValidator {
 
     /// Add an arbitrary body chunk, including chunks that split packet boundaries.
     pub(crate) fn observe(&mut self, mut chunk: &[u8]) {
-        let Ok(chunk_len) = u64::try_from(chunk.len()) else {
-            self.valid = false;
-            return;
-        };
-        let Some(total_bytes) = self.total_bytes.checked_add(chunk_len) else {
-            self.valid = false;
-            return;
-        };
-        self.total_bytes = total_bytes;
-
         while !chunk.is_empty() {
             let remaining = TS_PACKET_SIZE - self.packet_len;
             let copied = remaining.min(chunk.len());

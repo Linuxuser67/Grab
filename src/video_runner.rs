@@ -219,11 +219,7 @@ async fn run_video_playlist_download_inner(
             missing_ids.push(file.id.clone());
             continue;
         };
-        match crate::download_net::inherit_public_resolution_for_collection(
-            &job.page_url,
-            &current.page_url,
-            &mut guarded_child_hosts,
-        ) {
+        match guarded_child_hosts.inherit(&job.page_url, &current.page_url) {
             Ok(()) => selected_indices.push(current.playlist_index.saturating_sub(1) as usize),
             Err(crate::download_net::CollectionHostError::TooManyDistinctHosts) => {
                 tx.send(EngineMsg::PlaylistFile(Box::new(
@@ -231,6 +227,17 @@ async fn run_video_playlist_download_inner(
                         file_id: file.id.clone(),
                         error: gettext(
                             "The collection exceeded the limit of distinct download hosts",
+                        ),
+                    },
+                )))
+                .ok();
+            }
+            Err(crate::download_net::CollectionHostError::PolicyCapReached) => {
+                tx.send(EngineMsg::PlaylistFile(Box::new(
+                    PlaylistFileEvent::Failed {
+                        file_id: file.id.clone(),
+                        error: gettext(
+                            "Grab reached its limit for simultaneously protected public download hosts",
                         ),
                     },
                 )))

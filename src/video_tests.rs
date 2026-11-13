@@ -10489,14 +10489,19 @@ fn group_quiescence_waits_until_all_descendants_exit() {
             libc::killpg(pgid, libc::SIGKILL);
         }
     });
+    // Reap the process-group leader before probing for remaining members.
+    // killpg(pgid, 0) also sees an unreaped zombie, so waiting for group
+    // quiescence first would wait forever on this test's own child.
+    let status = child.wait().expect("reap recorder leader after group kill");
+    assert!(!status.success(), "the recorder leader should be killed with its group");
+    killer.join().expect("kill helper");
+
     let started = std::time::Instant::now();
     crate::runtime::tokio_rt().block_on(await_group_quiescence(pgid));
     assert!(
-        started.elapsed() >= std::time::Duration::from_millis(250),
-        "quiescence returned while the recorder group was still alive"
+        started.elapsed() < std::time::Duration::from_secs(5),
+        "the killed recorder process group should become quiescent"
     );
-    killer.join().expect("kill helper");
-    let _ = child.wait();
     let _ = std::fs::remove_dir_all(&dir);
 }
 

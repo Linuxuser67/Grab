@@ -1298,7 +1298,7 @@ video/720.m3u8
         let source = lookup
             .selected_source(&video_key, None, Some(&subtitle_key))
             .expect("selected DASH subtitle should be validated");
-        assert_eq!(source.output_extension.as_deref(), Some("mp4"));
+        assert_eq!(source.output_extension, Some(crate::media_types::ManifestContainer::Mp4));
         let plan = download_plan(lookup, &source).expect("selected DASH subtitle plan");
         let ManifestDownloadPlan::Dash {
             subtitle: Some(subtitle),
@@ -1333,19 +1333,19 @@ video/720.m3u8
     #[test]
     fn dash_output_container_uses_the_selected_representation_mime_type() {
         assert_eq!(
-            dash_output_container_extension(Some("video/mp2t")),
-            Some("ts")
+            dash_output_container(Some("video/mp2t")),
+            Some(crate::media_types::ManifestContainer::MpegTs)
         );
         assert_eq!(
-            dash_output_container_extension(Some("video/mp4")),
-            Some("mp4")
+            dash_output_container(Some("video/mp4")),
+            Some(crate::media_types::ManifestContainer::Mp4)
         );
         assert_eq!(
-            dash_output_container_extension(Some("application/mp4; codecs=avc1")),
-            Some("mp4")
+            dash_output_container(Some("application/mp4; codecs=avc1")),
+            Some(crate::media_types::ManifestContainer::Mp4)
         );
-        assert_eq!(dash_output_container_extension(Some("video/webm")), None);
-        assert_eq!(dash_output_container_extension(None), None);
+        assert_eq!(dash_output_container(Some("video/webm")), None);
+        assert_eq!(dash_output_container(None), None);
     }
 
     #[test]
@@ -1366,7 +1366,7 @@ segment.ts
         let source = lookup
             .selected_source(&ManifestRepresentationKey::from("hls-media"), None, None)
             .expect("direct HLS source");
-        assert_eq!(source.output_extension.as_deref(), Some("ts"));
+        assert_eq!(source.output_extension, Some(crate::media_types::ManifestContainer::MpegTs));
     }
 
     #[test]

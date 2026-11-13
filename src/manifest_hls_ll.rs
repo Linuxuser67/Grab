@@ -283,8 +283,8 @@ fn scan_ll_hls_tags(body: &[u8]) -> LlHlsTagFlags {
             // Missing or malformed METHOD values fail closed. METHOD=NONE only
             // disables encryption; it must not divert ordinary unencrypted
             // LL-HLS away from the low-latency planner.
-            flags.has_encrypted_media_key_tag |=
-                hls_key_method(attributes).is_none_or(|method| !method.eq_ignore_ascii_case(b"NONE"));
+            flags.has_encrypted_media_key_tag |= hls_key_method(attributes)
+                .is_none_or(|method| !method.eq_ignore_ascii_case(b"NONE"));
         }
         if line.trim_ascii_start() == DISCONTINUITY {
             flags.trailing_open_discontinuity = true;

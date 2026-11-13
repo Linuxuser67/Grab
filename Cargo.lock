@@ -1498,7 +1498,7 @@ dependencies = [
  "librqbit",
  "m3u8-rs",
  "mp4box",
- "mpeg-ts",
+
  "mpeg2ts",
  "nom 7.1.3",
  "percent-encoding",
@@ -2775,18 +2775,6 @@ checksum = "7ae7aaf77bec45241eb7d6b94913d42542e5d9718a9551b3e2c3f98893913d5a"
 dependencies = [
  "anyhow",
  "serde",
-]
-
-[[package]]
-name = "mpeg-ts"
-version = "0.6.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "58e29fe9663eaab1366e35fee07415500dca8fde1ba58df7cfa5a363920f0b97"
-dependencies = [
- "broadcast-common",
- "bytes",
- "serde",
- "thiserror 2.0.21",
 ]
 
 [[package]]

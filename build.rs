@@ -54,8 +54,14 @@ fn main() {
     .expect("could not write the generated GResource manifest");
     let gresource = out_dir.join("grab.gresource");
     let res_status = std::process::Command::new("glib-compile-resources")
+        // The translated AppStream file is generated outside the source tree,
+        // so its directory must be searched first. Keep the manifest root as
+        // a second source directory so future GResource entries using
+        // source-relative paths continue to resolve.
         .arg("--sourcedir")
         .arg(metainfo_parent)
+        .arg("--sourcedir")
+        .arg(&manifest_dir)
         .arg("--target")
         .arg(&gresource)
         .arg(&resource_manifest)

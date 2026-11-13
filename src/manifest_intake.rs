@@ -915,23 +915,21 @@ fn is_valid_hls_query_component(value: &str, allow_empty: bool) -> bool {
 }
 
 fn decode_hls_query_component(value: &str) -> Option<String> {
-    let input = value.as_bytes();
-    let mut decoded = Vec::with_capacity(input.len());
-    let mut index = 0;
-    while index < input.len() {
-        if input[index] == b'%' {
-            let high = *input.get(index + 1)?;
-            let low = *input.get(index + 2)?;
-            let high = (high as char).to_digit(16)?;
-            let low = (low as char).to_digit(16)?;
-            decoded.push(u8::try_from(high * 16 + low).ok()?);
-            index += 3;
-        } else {
-            decoded.push(input[index]);
-            index += 1;
+    let mut bytes = value.bytes();
+    while let Some(byte) = bytes.next() {
+        if byte == b'%' {
+            let high = bytes.next()?;
+            let low = bytes.next()?;
+            if !high.is_ascii_hexdigit() || !low.is_ascii_hexdigit() {
+                return None;
+            }
         }
     }
-    String::from_utf8(decoded).ok()
+
+    percent_encoding::percent_decode_str(value)
+        .decode_utf8()
+        .ok()
+        .map(|decoded| decoded.into_owned())
 }
 
 fn append_hls_pathway_params(uri: &mut Url, params: &BTreeMap<String, String>) {
@@ -4649,6 +4647,25 @@ video/b.m3u8
         let replaced =
             replace_hls_pathway_uri(&source, &clone, None).expect("safe replacement URL");
         assert_eq!(replaced.query(), Some("keep=yes&token%2Bkey=new%2Fvalue"));
+    }
+
+    #[test]
+    fn hls_query_component_uses_strict_uri_percent_decoding() {
+        assert_eq!(
+            decode_hls_query_component("camera%20one+backup"),
+            Some("camera one+backup".to_string())
+        );
+        assert_eq!(
+            decode_hls_query_component("%E2%9C%93"),
+            Some("✓".to_string())
+        );
+        for malformed in ["%", "%2", "%GG", "%FF"] {
+            assert_eq!(
+                decode_hls_query_component(malformed),
+                None,
+                "{malformed} must not be accepted as a decoded query component"
+            );
+        }
     }
 
     #[test]

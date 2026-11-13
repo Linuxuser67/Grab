@@ -421,10 +421,7 @@ pub(crate) fn playlist_download_argv(
         separator..separator,
         [
             "--print".to_string(),
-            format!(
-                "before_dl:@GRAB:{}:START;%(id)s",
-                selection.event_nonce
-            ),
+            format!("before_dl:@GRAB:{}:START;%(id)s", selection.event_nonce),
         ],
     );
     Ok(args)

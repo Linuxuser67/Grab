@@ -56,8 +56,10 @@ where
     D: serde::Deserializer<'de>,
 {
     use serde::Deserialize as _;
-    let raw = Option::<RawDownloadGroup>::deserialize(deserializer)?;
-    Ok(raw.and_then(|group| DownloadGroup::try_new(group.id, &group.title)))
+    let raw = Option::<serde_json::Value>::deserialize(deserializer)?;
+    Ok(raw
+        .and_then(|value| serde_json::from_value::<RawDownloadGroup>(value).ok())
+        .and_then(|group| DownloadGroup::try_new(group.id, &group.title)))
 }
 
 impl DownloadGroup {
@@ -195,6 +197,25 @@ mod group_metadata_tests {
                 "group": group
             }))
             .expect("invalid optional group must not reject its queue item");
+            assert_eq!(item.group, None);
+        }
+    }
+
+    #[test]
+    fn malformed_collection_group_metadata_is_ignored_without_rejecting_the_queue_item() {
+        for group in [
+            serde_json::json!("not an object"),
+            serde_json::json!({"id": "not a number", "title": "Course playlist"}),
+            serde_json::json!({"id": 41}),
+        ] {
+            let item: StoredItem = serde_json::from_value(serde_json::json!({
+                "url": "https://example.com/video/one",
+                "dest_dir": "/tmp/downloads",
+                "filename": "one.mp4",
+                "status": "queued",
+                "group": group
+            }))
+            .expect("malformed optional group must not reject its queue item");
             assert_eq!(item.group, None);
         }
     }

@@ -1396,7 +1396,9 @@ const PIECE_TRIES: u32 = 3;
 
 #[cfg(test)]
 mod destination_ownership_tests {
-    use super::{DestinationClaim, FetchCtx, FileIdentity, attempt_once, ensure_sized, single_loop};
+    use super::{
+        DestinationClaim, FetchCtx, FileIdentity, attempt_once, ensure_sized, single_loop,
+    };
     use crate::download_net::{DEFAULT_USER_AGENT, DownloadOptions};
     use std::time::Duration;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};

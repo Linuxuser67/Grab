@@ -3226,19 +3226,6 @@
     {
         "type": "archive",
         "archive-type": "tar-gzip",
-        "url": "https://static.crates.io/crates/mpeg-ts/mpeg-ts-0.6.2.crate",
-        "sha256": "58e29fe9663eaab1366e35fee07415500dca8fde1ba58df7cfa5a363920f0b97",
-        "dest": "cargo/mpeg-ts-0.6.2"
-    },
-    {
-        "type": "inline",
-        "contents": "{\"package\": \"58e29fe9663eaab1366e35fee07415500dca8fde1ba58df7cfa5a363920f0b97\", \"files\": {}}",
-        "dest": "cargo/mpeg-ts-0.6.2",
-        "dest-filename": ".cargo-checksum.json"
-    },
-    {
-        "type": "archive",
-        "archive-type": "tar-gzip",
         "url": "https://static.crates.io/crates/mpeg2ts/mpeg2ts-0.3.1.crate",
         "sha256": "6435feaa73e6dca8c812de3fea58331b4f35375798dcabe436a4321f0d21043d",
         "dest": "cargo/mpeg2ts-0.3.1"

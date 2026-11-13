@@ -51,11 +51,11 @@ mod stop_intent_tests {
             StopIntent::Pause
         );
         assert_eq!(
-            stop_intent_or_pause(Ok(StopIntent::Discard)),
+            stop_intent_or_pause::<()>(Ok(StopIntent::Discard)),
             StopIntent::Discard
         );
         assert_eq!(
-            stop_intent_or_pause(Ok(StopIntent::Finish)),
+            stop_intent_or_pause::<()>(Ok(StopIntent::Finish)),
             StopIntent::Finish
         );
     }

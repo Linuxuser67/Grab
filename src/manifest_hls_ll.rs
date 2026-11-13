@@ -186,109 +186,104 @@ pub(crate) fn validate_live_unit_ids(ids: &[HlsLiveUnitId]) -> bool {
     ids.windows(2).all(|pair| pair[1].is_successor_of(&pair[0]))
 }
 
-fn has_ll_hls_partial_segments(body: &[u8]) -> bool {
-    body.split(|byte| *byte == b'\n')
-        .any(|line| line.starts_with(b"#EXT-X-PART:"))
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+struct LlHlsTagFlags {
+    partial_segments: bool,
+    encrypted_media_key: bool,
+    delta_update: bool,
+    has_ll_hls_tags: bool,
+    trailing_open_discontinuity: bool,
 }
 
-fn trim_ascii_whitespace(value: &[u8]) -> &[u8] {
-    value.trim_ascii()
-}
+/// Read the untrusted playlist body once and collect the raw-tag facts used
+/// to route and construct an LL-HLS plan.
+fn scan_ll_hls_tag_flags(body: &[u8]) -> LlHlsTagFlags {
+    const EXTINF: &[u8] = b"#EXTINF:";
+    const DISCONTINUITY: &[u8] = b"#EXT-X-DISCONTINUITY";
+    let mut flags = LlHlsTagFlags::default();
 
-const PART_DURATION_TOLERANCE: f64 = 0.02;
+    for raw_line in body.split(|byte| *byte == b'\n') {
+        let line = raw_line.strip_suffix(b"\r").unwrap_or(raw_line);
+        flags.partial_segments |= raw_line.starts_with(b"#EXT-X-PART:");
+        flags.delta_update |= raw_line.starts_with(b"#EXT-X-SKIP:");
+        flags.has_ll_hls_tags |= raw_line.starts_with(b"#EXT-X-SERVER-CONTROL:")
+            || raw_line.starts_with(b"#EXT-X-PART-INF:")
+            || raw_line.starts_with(b"#EXT-X-PART:")
+            || raw_line.starts_with(b"#EXT-X-PRELOAD-HINT:")
+            || raw_line.starts_with(b"#EXT-X-RENDITION-REPORT:")
+            || raw_line.starts_with(b"#EXT-X-SKIP:");
 
-#[expect(
-    clippy::cast_precision_loss,
-    reason = "HLS target durations are integer seconds compared with fractional durations"
-)]
-fn target_duration_seconds(seconds: u64) -> f64 {
-    seconds as f64
-}
+        if let Some(attributes) = line.strip_prefix(b"#EXT-X-KEY:") {
+            // Missing or malformed METHOD values fail closed. METHOD=NONE
+            // only disables encryption and must not divert unencrypted
+            // LL-HLS away from the low-latency planner.
+            flags.encrypted_media_key |=
+                hls_key_method(attributes).is_none_or(|method| !method.eq_ignore_ascii_case(b"NONE"));
+        }
 
-#[expect(
-    clippy::cast_possible_truncation,
-    reason = "m3u8-rs stores segment durations as f32; validation is performed in f64 first"
-)]
-fn media_segment_duration(duration: Duration) -> f32 {
-    duration.as_secs_f64() as f32
-}
-
-fn has_required_unknown_attributes<T>(attributes: &[(String, T)]) -> bool {
-    attributes.iter().any(|(name, _)| name.starts_with("REQ-"))
-}
-
-fn hls_key_method(attributes: &[u8]) -> Option<&[u8]> {
-    let mut attribute_start = 0;
-    let mut inside_quotes = false;
-
-    for index in 0..=attributes.len() {
-        let at_end = index == attributes.len();
-        if at_end || (attributes[index] == b',' && !inside_quotes) {
-            let attribute = trim_ascii_whitespace(&attributes[attribute_start..index]);
-            if let Some(separator) = attribute.iter().position(|byte| *byte == b'=')
-                && trim_ascii_whitespace(&attribute[..separator]).eq_ignore_ascii_case(b"METHOD")
-            {
-                return Some(trim_ascii_whitespace(&attribute[separator + 1..]));
-            }
-            attribute_start = index.saturating_add(1);
-        } else if attributes[index] == b'"' {
-            inside_quotes = !inside_quotes;
+        // Preserve the old "from the last EXTINF onward" rule, including the
+        // no-EXTINF case (where the whole body was inspected).
+        if raw_line.windows(EXTINF.len()).any(|window| window == EXTINF) {
+            flags.trailing_open_discontinuity = false;
+        }
+        if line.trim_ascii_start() == DISCONTINUITY {
+            flags.trailing_open_discontinuity = true;
         }
     }
 
-    None
-}
-
-fn has_hls_encrypted_media_key_tag(body: &[u8]) -> bool {
-    body.split(|byte| *byte == b'\n').any(|line| {
-        let line = line.strip_suffix(b"\r").unwrap_or(line);
-        let Some(attributes) = line.strip_prefix(b"#EXT-X-KEY:") else {
-            return false;
-        };
-
-        // Missing or malformed METHOD values fail closed. METHOD=NONE only
-        // disables encryption; it must not divert an unencrypted LL-HLS
-        // playlist away from the low-latency planner.
-        hls_key_method(attributes).is_none_or(|method| !method.eq_ignore_ascii_case(b"NONE"))
-    })
-}
-
-fn is_hls_method_none_key_tag(tag: &str) -> bool {
-    let Some(attributes) = tag.as_bytes().strip_prefix(b"#EXT-X-KEY:") else {
-        return false;
-    };
-    // RFC 8216 permits no attributes other than METHOD when its value is
-    // NONE. Reject malformed or extended forms instead of silently ignoring
-    // an unexpected key declaration.
-    !attributes.contains(&b',')
-        && hls_key_method(attributes).is_some_and(|method| method.eq_ignore_ascii_case(b"NONE"))
-}
-
-fn has_ll_hls_delta_update(body: &[u8]) -> bool {
-    body.split(|byte| *byte == b'\n')
-        .any(|line| line.starts_with(b"#EXT-X-SKIP:"))
+    flags
 }
 
 pub(crate) fn has_ll_hls_tags(body: &[u8]) -> bool {
-    body.split(|byte| *byte == b'\n').any(|line| {
-        line.starts_with(b"#EXT-X-SERVER-CONTROL:")
-            || line.starts_with(b"#EXT-X-PART-INF:")
-            || line.starts_with(b"#EXT-X-PART:")
-            || line.starts_with(b"#EXT-X-PRELOAD-HINT:")
-            || line.starts_with(b"#EXT-X-RENDITION-REPORT:")
-            || line.starts_with(b"#EXT-X-SKIP:")
-    })
+    scan_ll_hls_tag_flags(body).has_ll_hls_tags
 }
+
+#[cfg(test)]
+mod ll_hls_tag_flag_tests {
+    use super::*;
+
+    #[test]
+    fn scans_all_ll_hls_dispatch_flags_together() {
+        let flags = scan_ll_hls_tag_flags(
+            b"#EXTM3U\r\n#EXT-X-SERVER-CONTROL:CAN-BLOCK-RELOAD=YES\r\n#EXT-X-PART:URI=part.m4s,DURATION=0.2\r\n#EXT-X-SKIP:SKIPPED-SEGMENTS=1\r\n#EXT-X-KEY:METHOD=AES-128,URI=key.bin\r\n#EXTINF:1,\r\n#EXT-X-DISCONTINUITY\r\n",
+        );
+
+        assert!(flags.partial_segments);
+        assert!(flags.encrypted_media_key);
+        assert!(flags.delta_update);
+        assert!(flags.has_ll_hls_tags);
+        assert!(flags.trailing_open_discontinuity);
+    }
+
+    #[test]
+    fn latest_extinf_resets_trailing_discontinuity_state() {
+        let flags = scan_ll_hls_tag_flags(
+            b"#EXTM3U\n#EXTINF:1,\n#EXT-X-DISCONTINUITY\n#EXTINF:1,\n#EXT-X-PART:URI=part.m4s,DURATION=0.2\n",
+        );
+
+        assert!(!flags.trailing_open_discontinuity);
+    }
+
+    #[test]
+    fn malformed_key_method_fails_closed_and_method_none_is_unencrypted() {
+        let encrypted = scan_ll_hls_tag_flags(b"#EXT-X-KEY:URI=key.bin\n");
+        let unencrypted = scan_ll_hls_tag_flags(b"#EXT-X-KEY:METHOD=NONE\n");
+
+        assert!(encrypted.encrypted_media_key);
+        assert!(!unencrypted.encrypted_media_key);
+    }
+}
+
 
 pub(crate) fn plan_hls_media_playlist(
     manifest_url: &str,
     body: &[u8],
 ) -> Result<Option<HlsPlan>, ManifestError> {
-    let has_partial_segments = has_ll_hls_partial_segments(body);
-    let use_standard_encryption_planner = !has_partial_segments
-        && has_hls_encrypted_media_key_tag(body)
-        && !has_ll_hls_delta_update(body);
-    if !has_ll_hls_tags(body) || use_standard_encryption_planner {
+    let tag_flags = scan_ll_hls_tag_flags(body);
+    let use_standard_encryption_planner = !tag_flags.partial_segments
+        && tag_flags.encrypted_media_key
+        && !tag_flags.delta_update;
+    if !tag_flags.has_ll_hls_tags || use_standard_encryption_planner {
         // Keep complete-segment LL-HLS on the live planner unless it actually
         // carries media encryption. Only complete encrypted segments are
         // delegated to the ordinary HLS planner, which already owns key
@@ -319,11 +314,10 @@ pub(crate) fn plan_hls_media_playlist(
     } else {
         None
     };
-    let open_segment_discontinuity = has_trailing_open_discontinuity(body);
     build_plan(
         manifest_url,
         playlist,
-        open_segment_discontinuity,
+        tag_flags.trailing_open_discontinuity,
         source_segments.as_deref(),
     )
     .map(Some)

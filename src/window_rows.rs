@@ -179,11 +179,11 @@ fn open_with_default_app(path: &std::path::Path, toasts: &adw::ToastOverlay) {
     let what = path.to_string_lossy().into_owned();
     glib::spawn_future_local(async move {
         if let Err(e) = launcher.launch_future(None::<&gtk4::Window>).await {
-            t.add_toast(adw::Toast::new(
-                &gettext("Could not open {what} with its default application: {e}")
-                    .replace("{what}", &crate::ui_util::esc_markup(&what))
-                    .replace("{e}", &crate::ui_util::esc_markup(&e.to_string())),
-            ));
+            let error = e.to_string();
+            let message = gettext("Could not open {what} with its default application: {e}");
+            let message =
+                crate::ui_util::format_template(&message, &[("what", &what), ("e", &error)]);
+            t.add_toast(crate::ui_util::plain_toast(&message));
         }
     });
 }
@@ -208,12 +208,13 @@ pub fn launch_path(path: &std::path::Path, toasts: &adw::ToastOverlay, reveal: b
             } else {
                 gettext("open")
             };
-            t.add_toast(adw::Toast::new(
-                &gettext("Could not {verb} {what} in the file manager: {e}")
-                    .replace("{verb}", &verb)
-                    .replace("{what}", &crate::ui_util::esc_markup(&what))
-                    .replace("{e}", &crate::ui_util::esc_markup(&e.to_string())),
-            ));
+            let error = e.to_string();
+            let message = gettext("Could not {verb} {what} in the file manager: {e}");
+            let message = crate::ui_util::format_template(
+                &message,
+                &[("verb", &verb), ("what", &what), ("e", &error)],
+            );
+            t.add_toast(crate::ui_util::plain_toast(&message));
         }
     });
 }
@@ -819,7 +820,7 @@ pub(crate) fn build_download_group_row(
                 return;
             };
             if directories.any(|candidate| candidate != directory) {
-                toasts.add_toast(adw::Toast::new(&gettext(
+                toasts.add_toast(crate::ui_util::plain_toast(&gettext(
                     "This collection uses more than one destination folder",
                 )));
                 return;
@@ -880,7 +881,7 @@ pub(crate) fn build_download_group_row(
                 return;
             }
 
-            let toast = adw::Toast::new(&ngettext_count(
+            let toast = crate::ui_util::plain_toast(&ngettext_count(
                 "Removed {n} item",
                 "Removed {n} items",
                 count,
@@ -894,7 +895,7 @@ pub(crate) fn build_download_group_row(
                 let toasts = Rc::clone(&undo_toasts);
                 glib::spawn_future_local(async move {
                     if let Err(error) = manager.unremove_many_async(snapshots).await {
-                        toasts.add_toast(adw::Toast::new(&error));
+                        toasts.add_toast(crate::ui_util::plain_toast(&error));
                     }
                 });
             });
@@ -1433,7 +1434,9 @@ pub(crate) fn build_row(
                 if m.finish_live_recording(id) {
                     // Progress, not completion: the remux can still fail, so
                     // promising a finished save would be a promise the code cannot keep.
-                    t.add_toast(adw::Toast::new(&gettext("Finalizing recording…")));
+                    t.add_toast(crate::ui_util::plain_toast(&gettext(
+                        "Finalizing recording…",
+                    )));
                 }
             } else {
                 m.cancel(id);
@@ -1455,9 +1458,11 @@ pub(crate) fn build_row(
             };
             if another_queued(&m, &it) {
                 m.defer(id);
-                t.add_toast(adw::Toast::new(&gettext("Queued for later")));
+                t.add_toast(crate::ui_util::plain_toast(&gettext("Queued for later")));
             } else {
-                t.add_toast(adw::Toast::new(&gettext("No other downloads waiting")));
+                t.add_toast(crate::ui_util::plain_toast(&gettext(
+                    "No other downloads waiting",
+                )));
             }
         });
     }
@@ -1481,7 +1486,7 @@ pub(crate) fn build_row(
             {
                 let recording = m.is_live_video(id);
                 m.remove(id);
-                t.add_toast(adw::Toast::new(&if recording {
+                t.add_toast(crate::ui_util::plain_toast(&if recording {
                     gettext("Deleting recording…")
                 } else {
                     gettext("Deleting download…")
@@ -1499,8 +1504,8 @@ pub(crate) fn build_row(
                 let result = m.delete_download_async(id).await;
                 button.set_sensitive(true);
                 match result {
-                    Err(e) => t.add_toast(adw::Toast::new(&e)),
-                    Ok(()) => t.add_toast(adw::Toast::new(&gettext("Moved to Trash"))),
+                    Err(e) => t.add_toast(crate::ui_util::plain_toast(&e)),
+                    Ok(()) => t.add_toast(crate::ui_util::plain_toast(&gettext("Moved to Trash"))),
                 }
             });
         });
@@ -1527,9 +1532,9 @@ pub(crate) fn build_row(
             };
             let name = snapshot.filename.clone();
             m.remove(id);
-            let toast = adw::Toast::new(
-                &gettext("Removed {name}").replace("{name}", &crate::ui_util::esc_markup(&name)),
-            );
+            let message =
+                crate::ui_util::format_template(&gettext("Removed {name}"), &[("name", &name)]);
+            let toast = crate::ui_util::plain_toast(&message);
             toast.set_button_label(Some(&gettext("Undo")));
             let m2 = Rc::clone(&m);
             let undo_toasts = Rc::clone(&t);
@@ -1539,7 +1544,7 @@ pub(crate) fn build_row(
                 let snapshot = snapshot.clone();
                 glib::spawn_future_local(async move {
                     if let Err(error) = manager.unremove_async(snapshot).await {
-                        toasts.add_toast(adw::Toast::new(&error));
+                        toasts.add_toast(crate::ui_util::plain_toast(&error));
                     }
                 });
             });
@@ -1582,10 +1587,12 @@ pub(crate) fn build_row(
                 } else {
                     // Repeat failure, backgrounded window, or dialog already
                     // open: toast instead of stacking presents.
-                    toasts.add_toast(adw::Toast::new(
-                        &gettext("Download failed: {name}")
-                            .replace("{name}", &crate::ui_util::esc_markup(&item.filename())),
-                    ));
+                    let filename = item.filename();
+                    let message = crate::ui_util::format_template(
+                        &gettext("Download failed: {name}"),
+                        &[("name", filename.as_str())],
+                    );
+                    toasts.add_toast(crate::ui_util::plain_toast(&message));
                 }
             } else {
                 notified.set(false);

@@ -108,7 +108,7 @@ async fn intake_remote_torrent(
     file_name: String,
 ) -> Routed {
     let fail = |msg: String| {
-        toasts.add_toast(adw::Toast::new(&crate::ui_util::esc_markup(&msg)));
+        toasts.add_toast(crate::ui_util::plain_toast(&msg));
     };
     let fetch_url = url.clone();
     let fetch_client = client.clone();
@@ -318,7 +318,7 @@ async fn route_open_uri(
     // torrent intake instead of saving the .torrent itself.
     if is_remote_torrent_url(&uri) {
         if let Err(e) = check_remote_torrent_uri(&uri) {
-            toasts.add_toast(adw::Toast::new(&crate::ui_util::esc_markup(&e)));
+            toasts.add_toast(crate::ui_util::plain_toast(&e));
             return Routed::Failed;
         }
         let url = uri.as_str().to_string();
@@ -330,14 +330,14 @@ async fn route_open_uri(
             match crate::download_net::DownloadOptions::from_settings(&settings).proxy_config() {
                 Ok(p) => p,
                 Err(e) => {
-                    toasts.add_toast(adw::Toast::new(&crate::ui_util::esc_markup(&e)));
+                    toasts.add_toast(crate::ui_util::plain_toast(&e));
                     return Routed::Failed;
                 }
             };
         let client = match crate::download_net::http_client_for(proxy.as_ref()) {
             Ok(c) => c,
             Err(e) => {
-                toasts.add_toast(adw::Toast::new(&crate::ui_util::esc_markup(&e)));
+                toasts.add_toast(crate::ui_util::plain_toast(&e));
                 return Routed::Failed;
             }
         };
@@ -360,7 +360,7 @@ async fn route_open_uri(
     match enqueue_direct_handoff(&manager, &uri).await {
         Ok(()) => Routed::Queued,
         Err(e) => {
-            toasts.add_toast(adw::Toast::new(&crate::ui_util::esc_markup(&e)));
+            toasts.add_toast(crate::ui_util::plain_toast(&e));
             Routed::Failed
         }
     }
@@ -418,12 +418,12 @@ fn dispatch_handoff(
         // filter for both extractor and direct-file requests. Refuse every
         // unconfirmed handoff while such a proxy is configured.
         if let Err(e) = crate::subprocess_proxy::validate_proxy_compatibility() {
-            toasts.add_toast(adw::Toast::new(&crate::ui_util::esc_markup(&e)));
+            toasts.add_toast(crate::ui_util::plain_toast(&e));
             answer_handoff(decision, crate::extension_server::HandoffOutcome::Failed);
             return;
         }
         let Some(lease) = crate::download_net::acquire_public_resolution(host) else {
-            toasts.add_toast(adw::Toast::new(&gettext(
+            toasts.add_toast(crate::ui_util::plain_toast(&gettext(
                 "This browser handoff cannot be accepted safely: the safe-host limit was reached.",
             )));
             answer_handoff(decision, crate::extension_server::HandoffOutcome::Failed);
@@ -447,7 +447,7 @@ fn dispatch_handoff(
     let canonical = match crate::download_intake::normalize_url(uri.as_str()) {
         Ok(u) => u,
         Err(e) => {
-            toasts.add_toast(adw::Toast::new(&crate::ui_util::esc_markup(&e)));
+            toasts.add_toast(crate::ui_util::plain_toast(&e));
             answer_handoff(decision, crate::extension_server::HandoffOutcome::Failed);
             return;
         }
@@ -474,7 +474,7 @@ fn dispatch_handoff(
                 .as_ref()
                 .is_some_and(|sender| sender.is_closed());
             if expired || sender_closed {
-                toasts.add_toast(adw::Toast::new(&gettext(
+                toasts.add_toast(crate::ui_util::plain_toast(&gettext(
                     "This browser handoff expired before it was approved.",
                 )));
                 let _ = decision.borrow_mut().take();
@@ -536,7 +536,7 @@ fn handle_open_files(s: Rc<State>, files: Vec<gio::File>) {
             return;
         }
         if s.manager.restore_failed() {
-            s.toasts.add_toast(adw::Toast::new(&gettext(
+            s.toasts.add_toast(crate::ui_util::plain_toast(&gettext(
                 "Could not process opened files because the saved queue could not be restored.",
             )));
             return;
@@ -582,14 +582,12 @@ fn handle_open_files(s: Rc<State>, files: Vec<gio::File>) {
                         let (bytes, _, entries) = match loaded {
                             Ok(Ok(data)) => data,
                             Ok(Err(e)) => {
-                                toasts.add_toast(adw::Toast::new(&crate::ui_util::esc_markup(
-                                    &e.to_string(),
-                                )));
+                                toasts.add_toast(crate::ui_util::plain_toast(&e.to_string()));
                                 return;
                             }
                             Err(e) => {
                                 tracing::warn!(error = ?e, "torrent read/parse worker failed");
-                                toasts.add_toast(adw::Toast::new(&gettext(
+                                toasts.add_toast(crate::ui_util::plain_toast(&gettext(
                                     "Could not read that .torrent file",
                                 )));
                                 return;
@@ -603,14 +601,14 @@ fn handle_open_files(s: Rc<State>, files: Vec<gio::File>) {
                             .enqueue_torrent_file_async(bytes, &stem, None, None)
                             .await
                         {
-                            toasts.add_toast(adw::Toast::new(&crate::ui_util::esc_markup(&e)));
+                            toasts.add_toast(crate::ui_util::plain_toast(&e));
                         }
                     });
                     continue;
                 }
                 // Only .torrent files open as files now; anything else
                 // explains itself instead of queuing garbage rows.
-                s.toasts.add_toast(adw::Toast::new(&gettext(
+                s.toasts.add_toast(crate::ui_util::plain_toast(&gettext(
                     "Only .torrent files can be opened directly",
                 )));
             }
@@ -726,7 +724,7 @@ pub fn setup(app: &adw::Application) {
                 glib::spawn_future_local(async move {
                     manager.wait_for_restore().await;
                     if manager.restore_failed() {
-                        toasts.add_toast(adw::Toast::new(&gettext(
+                        toasts.add_toast(crate::ui_util::plain_toast(&gettext(
                             "Could not restore the saved queue. The original queue file was preserved; restart Grab to try again.",
                         )));
                     } else if !manager.is_shutting_down() {
@@ -801,7 +799,7 @@ pub fn setup(app: &adw::Application) {
                         continue;
                     }
                     if s.manager.restore_failed() {
-                        s.toasts.add_toast(adw::Toast::new(&gettext(
+                        s.toasts.add_toast(crate::ui_util::plain_toast(&gettext(
                             "Browser links cannot be queued because the saved queue could not be restored.",
                         )));
                         answer_handoff(decision, crate::extension_server::HandoffOutcome::Failed);
@@ -810,7 +808,7 @@ pub fn setup(app: &adw::Application) {
                     // The extension sends the real URL (it unwraps grab:// in JS).
                     // The text is not echoed: it is attacker-controllable.
                     let Ok(uri) = url_text.parse::<url::Url>() else {
-                        s.toasts.add_toast(adw::Toast::new(&gettext(
+                        s.toasts.add_toast(crate::ui_util::plain_toast(&gettext(
                             "Couldn't read the link sent by the browser extension",
                         )));
                         continue;
@@ -1041,7 +1039,7 @@ fn register_actions(
                             // changed while the dialog sat open.
                             let n = manager.active_count();
                             manager.cancel_all();
-                            let toast = adw::Toast::new(&ngettext_count(
+                            let toast = crate::ui_util::plain_toast(&ngettext_count(
                                 "Cancelled download",
                                 "Cancelled {n} downloads",
                                 n,
@@ -1059,11 +1057,12 @@ fn register_actions(
                     if let Some(s) = st.borrow().as_ref() {
                         let n = s.manager.retry_failed();
                         if n > 0 {
-                            s.toasts.add_toast(adw::Toast::new(&ngettext_count(
-                                "Retrying failed download",
-                                "Retrying {n} failed downloads",
-                                n,
-                            )));
+                            s.toasts
+                                .add_toast(crate::ui_util::plain_toast(&ngettext_count(
+                                    "Retrying failed download",
+                                    "Retrying {n} failed downloads",
+                                    n,
+                                )));
                         }
                     }
                 })
@@ -1100,7 +1099,7 @@ fn register_actions(
                             if n == 0 {
                                 return;
                             }
-                            let toast = adw::Toast::new(&ngettext_count(
+                            let toast = crate::ui_util::plain_toast(&ngettext_count(
                                 "Cleared finished download",
                                 "Cleared {n} finished downloads",
                                 n,
@@ -1114,7 +1113,7 @@ fn register_actions(
                                 let snapshots = snapshots.clone();
                                 glib::spawn_future_local(async move {
                                     if let Err(error) = manager.unremove_many_async(snapshots).await {
-                                        toasts.add_toast(adw::Toast::new(&error));
+                                        toasts.add_toast(crate::ui_util::plain_toast(&error));
                                     }
                                 });
                             });

@@ -47,6 +47,44 @@ pub(crate) enum ManifestKind {
     Dash,
 }
 
+/// Output container supported by the native HLS/DASH finalizer.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum ManifestContainer {
+    Mp4,
+    Matroska,
+    MpegTs,
+}
+
+impl ManifestContainer {
+    /// Parse an extension at a model/input boundary; arbitrary path fragments
+    /// can never be carried as a selected manifest container.
+    pub(crate) fn from_extension(extension: &str) -> Option<Self> {
+        if extension.eq_ignore_ascii_case("mp4") {
+            Some(Self::Mp4)
+        } else if extension.eq_ignore_ascii_case("mkv") {
+            Some(Self::Matroska)
+        } else if extension.eq_ignore_ascii_case("ts") {
+            Some(Self::MpegTs)
+        } else {
+            None
+        }
+    }
+
+    pub(crate) fn from_path(path: &std::path::Path) -> Option<Self> {
+        path.extension()
+            .and_then(std::ffi::OsStr::to_str)
+            .and_then(Self::from_extension)
+    }
+
+    pub(crate) fn extension(self) -> &'static str {
+        match self {
+            Self::Mp4 => "mp4",
+            Self::Matroska => "mkv",
+            Self::MpegTs => "ts",
+        }
+    }
+}
+
 macro_rules! manifest_key {
     ($name:ident, $description:literal) => {
         #[doc = $description]
@@ -105,7 +143,7 @@ pub(crate) struct ManifestSource {
     pub(crate) representation_key: ManifestRepresentationKey,
     /// Transient container hint from the Add-card preview; never part of persisted source identity.
     #[serde(skip)]
-    pub(crate) output_extension: Option<String>,
+    pub(crate) output_extension: Option<ManifestContainer>,
     /// Missing values preserve the automatic default/first-track behavior of
     /// queue entries created before audio selection was introduced.
     #[serde(default, skip_serializing_if = "Option::is_none")]

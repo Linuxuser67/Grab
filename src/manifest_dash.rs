@@ -1111,7 +1111,9 @@ pub(crate) fn plan_dash_representation(
     // container-aware remapping. Multi-period native assembly is
     // therefore limited to fragment-addressed resources with a shared init.
     if sources.len() > 1
-        && sources.iter().any(|source| matches!(&source.addressing, DashAddressing::Base(_)))
+        && sources
+            .iter()
+            .any(|source| matches!(&source.addressing, DashAddressing::Base(_)))
     {
         return Err(DashError::UnsupportedAddressing);
     }

@@ -92,7 +92,10 @@ pub(crate) enum ManifestError {
 
 /// Unknown tags that do not affect resource selection or timing.
 fn is_benign_hls_tag(tag: &m3u8_rs::ExtTag) -> bool {
-    matches!(tag.tag.as_str(), "X-ALLOW-CACHE" | "X-BITRATE" | "X-CONTENT-STEERING")
+    matches!(
+        tag.tag.as_str(),
+        "X-ALLOW-CACHE" | "X-BITRATE" | "X-CONTENT-STEERING"
+    )
 }
 
 /// Accept only identity AES-128 session keys; media-playlist keys remain authoritative.

@@ -732,7 +732,6 @@ async fn lookup_with_http_fixture_client(
     .await
 }
 
-
 /// Fetch and parse an HLS child media playlist with explicit parent variable imports.
 pub(crate) async fn lookup_hls_media_with_variables(
     client: &reqwest::Client,

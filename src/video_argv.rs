@@ -350,6 +350,7 @@ pub(crate) fn playlist_download_argv(
     ffmpeg_bin: &Path,
     dest_dir: &Path,
     playlist_indices: &[usize],
+    event_nonce: &str,
 ) -> Result<Vec<String>, VideoError> {
     let mut args = unified_download_argv(
         job,
@@ -381,7 +382,7 @@ pub(crate) fn playlist_download_argv(
             separator..separator,
             [
                 "--print".to_string(),
-                "before_dl:[GrabPlaylistStart];%(id)s;%(playlist_index)s;%(filename)s".to_string(),
+                format!("before_dl:@GRAB:{event_nonce}:START;%(id)s;%(playlist_index)s;%(filename)s"),
             ],
         );
     }

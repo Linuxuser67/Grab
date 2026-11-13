@@ -18,8 +18,8 @@ pub(crate) enum DownloadRowRole {
 mod imp {
     use std::cell::{Cell, RefCell};
 
-    use crate::download_store::{DownloadGroup, DownloadStatus};
     use super::DownloadRowRole;
+    use crate::download_store::{DownloadGroup, DownloadStatus};
     use gtk4::glib;
     use gtk4::glib::object::ObjectExt as _;
     use gtk4::glib::subclass::prelude::*;

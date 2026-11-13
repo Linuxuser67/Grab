@@ -147,9 +147,10 @@ fn query_parameter(url: &Url, name: &str) -> Result<String, ManifestError> {
             Some((key, value)) => (key, Some(value)),
             None => (pair, None),
         };
-        let key = percent_decode_str(raw_key)
-            .decode_utf8()
-            .map_err(|_| unsupported("EXT-X-DEFINE query parameter name is not valid UTF-8"))?;
+        let Ok(key) = percent_decode_str(raw_key).decode_utf8() else {
+            // An unrelated opaque query key cannot match the UTF-8 DEFINE name.
+            continue;
+        };
         if key != name {
             continue;
         }

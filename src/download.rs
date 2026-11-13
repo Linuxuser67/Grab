@@ -71,6 +71,108 @@ struct GalleryFileRowIndex {
     rows: HashMap<String, DownloadItem>,
 }
 
+/// O(1) lookup and aggregate counters for yt-dlp playlist child projections.
+/// The persisted playlist state remains the source of truth.
+#[derive(Default)]
+struct VideoPlaylistFileRowIndex {
+    state_indices: HashMap<String, usize>,
+    rows: HashMap<String, DownloadItem>,
+    total: usize,
+    done_count: usize,
+    progress_sum: f64,
+}
+
+impl VideoPlaylistFileRowIndex {
+    fn from_files(files: &[crate::media_types::VideoPlaylistFile]) -> Self {
+        let mut index = Self {
+            total: files.len(),
+            ..Self::default()
+        };
+        for (position, file) in files.iter().enumerate() {
+            index.state_indices.insert(file.id.clone(), position);
+            if file.status == DownloadStatus::Done {
+                index.done_count += 1;
+            }
+            index.progress_sum += file.progress.clamp(0.0, 1.0);
+        }
+        index
+    }
+
+    fn record_transition(
+        &mut self,
+        previous_status: DownloadStatus,
+        previous_progress: f64,
+        next_status: DownloadStatus,
+        next_progress: f64,
+    ) {
+        match (
+            previous_status == DownloadStatus::Done,
+            next_status == DownloadStatus::Done,
+        ) {
+            (false, true) => self.done_count = self.done_count.saturating_add(1),
+            (true, false) => self.done_count = self.done_count.saturating_sub(1),
+            _ => {}
+        }
+        self.progress_sum +=
+            next_progress.clamp(0.0, 1.0) - previous_progress.clamp(0.0, 1.0);
+    }
+}
+
+#[cfg(test)]
+mod video_playlist_file_row_index_tests {
+    use super::*;
+
+    fn file(
+        id: &str,
+        status: DownloadStatus,
+        progress: f64,
+    ) -> crate::media_types::VideoPlaylistFile {
+        crate::media_types::VideoPlaylistFile {
+            id: id.to_string(),
+            title: id.to_string(),
+            page_url: format!("https://example.test/{id}"),
+            status,
+            progress,
+            path: None,
+        }
+    }
+
+    #[test]
+    fn playlist_projection_index_tracks_file_identity_and_aggregate_transitions() {
+        let files = [
+            file("one", DownloadStatus::Queued, 0.0),
+            file("two", DownloadStatus::Downloading, 0.25),
+            file("three", DownloadStatus::Done, 1.0),
+        ];
+        let mut index = VideoPlaylistFileRowIndex::from_files(&files);
+
+        assert_eq!(index.total, 3);
+        assert_eq!(index.done_count, 1);
+        assert!((index.progress_sum - 1.25).abs() < f64::EPSILON);
+        assert_eq!(index.state_indices.get("one"), Some(&0));
+        assert_eq!(index.state_indices.get("two"), Some(&1));
+        assert_eq!(index.state_indices.get("three"), Some(&2));
+
+        index.record_transition(
+            DownloadStatus::Downloading,
+            0.25,
+            DownloadStatus::Done,
+            1.0,
+        );
+        assert_eq!(index.done_count, 2);
+        assert!((index.progress_sum - 2.0).abs() < f64::EPSILON);
+
+        index.record_transition(
+            DownloadStatus::Done,
+            1.0,
+            DownloadStatus::Failed,
+            1.0,
+        );
+        assert_eq!(index.done_count, 1);
+        assert!((index.progress_sum - 2.0).abs() < f64::EPSILON);
+    }
+}
+
 /// A removal whose cleanup is still draining; `worker_abort` is absent when
 /// no worker had to be awaited.
 struct PendingDiscard {
@@ -416,6 +518,8 @@ pub struct DownloadManager {
     /// O(1) path-to-state and path-to-row lookups for high-frequency gallery progress.
     /// Rebuilt lazily from the persisted job and discarded with its owner.
     gallery_file_row_index: RefCell<HashMap<u64, GalleryFileRowIndex>>,
+    /// O(1) yt-dlp playlist file-ID to persisted-state and transient-row lookups.
+    video_playlist_file_row_index: RefCell<HashMap<u64, VideoPlaylistFileRowIndex>>,
     /// Abort senders for resolver workers, by row. Signalled from pause/park/cancel so extractor streams stop promptly.
     video_abort: RefCell<HashMap<u64, tokio::sync::oneshot::Sender<crate::video::StopIntent>>>,
     /// Delivery decision per video attempt, by row. Manager and worker arbitrate on this one object.
@@ -741,6 +845,7 @@ impl DownloadManager {
             video_sources: RefCell::new(HashMap::new()),
             gallery_jobs: RefCell::new(HashMap::new()),
             gallery_file_row_index: RefCell::new(HashMap::new()),
+            video_playlist_file_row_index: RefCell::new(HashMap::new()),
             video_abort: RefCell::new(HashMap::new()),
             gates: RefCell::new(HashMap::new()),
             reservations: std::sync::Arc::new(std::sync::Mutex::new(Reservations::default())),
@@ -1701,6 +1806,23 @@ impl DownloadManager {
 
         let previous_status = owner.status();
         let _batch = self.batch_guard();
+        // Commit the validated state mutation before changing the running
+        // worker or owner status. A missing source therefore leaves the
+        // existing collection untouched.
+        let added_files = {
+            let mut sources = self.video_sources.borrow_mut();
+            let Some(crate::media_types::VideoSource::Playlist { state, .. }) =
+                sources.get_mut(&owner.id())
+            else {
+                return Err(gettext(
+                    "The existing playlist collection is no longer available",
+                ));
+            };
+            state.files.extend(additions.iter().cloned());
+            additions
+        };
+        self.rebuild_video_playlist_file_row_index(owner.id());
+
         if previous_status == DownloadStatus::Downloading {
             // The active yt-dlp process has already captured its playlist-index
             // list. Stop it and let the next attempt resolve the enlarged ID set.
@@ -1714,19 +1836,7 @@ impl DownloadManager {
             owner.set_status(DownloadStatus::Queued);
         }
 
-        let all_files = {
-            let mut sources = self.video_sources.borrow_mut();
-            let Some(crate::media_types::VideoSource::Playlist { state, .. }) =
-                sources.get_mut(&owner.id())
-            else {
-                return Err(gettext(
-                    "The existing playlist collection is no longer available",
-                ));
-            };
-            state.files.extend(additions);
-            state.files.clone()
-        };
-        self.restore_video_playlist_file_rows(owner, &all_files);
+        self.restore_video_playlist_file_rows(owner, &added_files);
         if requeue {
             // A new invocation owns the expanded ID set. Reset every unfinished
             // projection consistently; completed entries remain untouched.
@@ -2768,6 +2878,7 @@ impl DownloadManager {
         };
         // Track the pump handle so tests can wait for pump completion: a `spawn_future_local` task reaped on another thread trips glib's thread guard.
         let handle = glib::spawn_future_local(async move {
+            let mut last_playlist_progress_refresh = Instant::now();
             while let Some(msg) = rx.recv().await {
                 let Some(this) = weak.upgrade() else {
                     break;
@@ -3392,6 +3503,7 @@ impl DownloadManager {
                                     &gettext("Downloading"),
                                     None,
                                 );
+                                this.refresh_video_playlist_summary(&item);
                                 this.persist_queue();
                                 this.changed();
                             }
@@ -3427,7 +3539,15 @@ impl DownloadManager {
                                     &detail,
                                     None,
                                 );
-                                this.changed();
+                                this.refresh_video_playlist_summary(&item);
+                                // Keep child and owner progress current, but rebuild
+                                // the grouped queue at most ten times per second.
+                                if last_playlist_progress_refresh.elapsed()
+                                    >= Duration::from_millis(100)
+                                {
+                                    this.changed();
+                                    last_playlist_progress_refresh = Instant::now();
+                                }
                             }
                         }
                         crate::engine_msg::PlaylistFileEvent::Finished {
@@ -3445,6 +3565,7 @@ impl DownloadManager {
                                         .replace("{size}", &fmt_bytes(size)),
                                     Some(&path),
                                 );
+                                this.refresh_video_playlist_summary(&item);
                                 this.persist_queue();
                                 this.changed();
                             }
@@ -3459,6 +3580,7 @@ impl DownloadManager {
                                     &error,
                                     None,
                                 );
+                                this.refresh_video_playlist_summary(&item);
                                 this.persist_queue();
                                 this.changed();
                             }
@@ -4124,6 +4246,61 @@ impl DownloadManager {
         true
     }
 
+    /// Build the playlist index once after enqueue/restore. Existing transient
+    /// rows are preserved when the persisted file vector is rebuilt.
+    fn ensure_video_playlist_file_row_index(&self, owner_id: u64) -> bool {
+        if self
+            .video_playlist_file_row_index
+            .borrow()
+            .contains_key(&owner_id)
+        {
+            return true;
+        }
+        let index = {
+            let sources = self.video_sources.borrow();
+            match sources.get(&owner_id) {
+                Some(crate::media_types::VideoSource::Playlist { state, .. }) => {
+                    Some(VideoPlaylistFileRowIndex::from_files(&state.files))
+                }
+                _ => None,
+            }
+        };
+        let Some(index) = index else {
+            return false;
+        };
+        self.video_playlist_file_row_index
+            .borrow_mut()
+            .entry(owner_id)
+            .or_insert(index);
+        true
+    }
+
+    /// Rebuild state positions and aggregate counters after an occasional
+    /// collection extension, retaining already-created GTK child rows.
+    fn rebuild_video_playlist_file_row_index(&self, owner_id: u64) {
+        let rows = self
+            .video_playlist_file_row_index
+            .borrow_mut()
+            .remove(&owner_id)
+            .map(|index| index.rows)
+            .unwrap_or_default();
+        let index = {
+            let sources = self.video_sources.borrow();
+            match sources.get(&owner_id) {
+                Some(crate::media_types::VideoSource::Playlist { state, .. }) => {
+                    Some(VideoPlaylistFileRowIndex::from_files(&state.files))
+                }
+                _ => None,
+            }
+        };
+        if let Some(mut index) = index {
+            index.rows = rows;
+            self.video_playlist_file_row_index
+                .borrow_mut()
+                .insert(owner_id, index);
+        }
+    }
+
     /// Create or refresh a transient read-only child row for one file in a
     /// gallery collection. The path must remain inside gallery-dl's assigned
     /// output directory; extractor-controlled paths are never accepted as
@@ -4384,76 +4561,139 @@ impl DownloadManager {
         detail: &str,
         path: Option<&str>,
     ) {
-        let (file, dest_dir, title, audio_only) = {
+        let owner_id = owner.id();
+        if !self.ensure_video_playlist_file_row_index(owner_id) {
+            return;
+        }
+        let Some(state_index) = self
+            .video_playlist_file_row_index
+            .borrow()
+            .get(&owner_id)
+            .and_then(|index| index.state_indices.get(file_id))
+            .copied()
+        else {
+            tracing::warn!(
+                owner_id,
+                file_id,
+                "ignoring yt-dlp playlist event for an unknown entry"
+            );
+            return;
+        };
+
+        // Only the changed file's display fields are cloned. The playlist
+        // vector and the GTK ListStore are never searched or cloned per event.
+        let update = {
             let mut sources = self.video_sources.borrow_mut();
             let Some(crate::media_types::VideoSource::Playlist {
                 audio_only, state, ..
-            }) = sources.get_mut(&owner.id())
+            }) = sources.get_mut(&owner_id)
             else {
                 return;
             };
-            let Some(file) = state.files.iter_mut().find(|file| file.id == file_id) else {
-                tracing::warn!(
-                    owner_id = owner.id(),
-                    file_id,
-                    "ignoring yt-dlp playlist event for an unknown entry"
-                );
-                return;
-            };
-            file.status = status;
-            file.progress = progress.clamp(0.0, 1.0);
-            if let Some(path) = path.filter(|path| !path.is_empty()) {
-                file.path = Some(path.to_string());
+            if let Some(file) = state
+                .files
+                .get_mut(state_index)
+                .filter(|file| file.id == file_id)
+            {
+                let previous_status = file.status;
+                let previous_progress = file.progress;
+                file.status = status;
+                file.progress = progress.clamp(0.0, 1.0);
+                if let Some(path) = path.filter(|path| !path.is_empty()) {
+                    file.path = Some(path.to_string());
+                }
+                Some((
+                    file.page_url.clone(),
+                    file.title.clone(),
+                    file.path.clone(),
+                    state.dest_dir.clone(),
+                    state.title.clone(),
+                    *audio_only,
+                    previous_status,
+                    previous_progress,
+                    file.progress,
+                ))
+            } else {
+                None
             }
-            (
-                file.clone(),
-                state.dest_dir.clone(),
-                state.title.clone(),
-                *audio_only,
-            )
+        };
+        let Some((
+            page_url,
+            file_title,
+            file_path,
+            dest_dir,
+            title,
+            audio_only,
+            previous_status,
+            previous_progress,
+            progress,
+        )) = update
+        else {
+            self.video_playlist_file_row_index
+                .borrow_mut()
+                .remove(&owner_id);
+            tracing::warn!(
+                owner_id,
+                file_id,
+                state_index,
+                "playlist file index became stale; rebuilding on the next update"
+            );
+            return;
         };
 
-        let group = owner
-            .group()
-            .or_else(|| crate::download_store::DownloadGroup::try_new(owner.id(), &title));
-        let filename = file
-            .path
+        if let Some(index) = self
+            .video_playlist_file_row_index
+            .borrow_mut()
+            .get_mut(&owner_id)
+        {
+            index.record_transition(previous_status, previous_progress, status, progress);
+        }
+
+        let filename = file_path
             .as_deref()
             .and_then(|path| std::path::Path::new(path).file_name())
             .and_then(|name| name.to_str())
             .map(str::to_string)
             .unwrap_or_else(|| {
                 let remux = crate::video_prefs::remux_video_active(&self.settings.remux_video());
-                crate::video::default_video_filename(&file.title, audio_only, remux.as_deref())
+                crate::video::default_video_filename(&file_title, audio_only, remux.as_deref())
             });
-        let progress = file.progress;
+        let group = owner
+            .group()
+            .or_else(|| crate::download_store::DownloadGroup::try_new(owner_id, &title));
+        let display_path = file_path.unwrap_or_default();
 
-        if let Some(existing) = self.items().find(|candidate| {
-            candidate.is_collection_child()
-                && candidate
-                    .group()
-                    .is_some_and(|group| group.id() == owner.id())
-                && candidate.collection_file_id() == file_id
-        }) {
+        let existing = self
+            .video_playlist_file_row_index
+            .borrow()
+            .get(&owner_id)
+            .and_then(|index| index.rows.get(file_id))
+            .cloned();
+        if let Some(existing) = existing {
             existing.set_filename(filename);
-            existing.set_gallery_file_path(file.path.unwrap_or_default());
+            existing.set_gallery_file_path(display_path);
             existing.set_progress(progress);
             existing.set_detail(detail.to_string());
             existing.set_status(status);
-            self.refresh_video_playlist_summary(owner);
             return;
         }
 
-        let child = DownloadItem::new(self.alloc_id(), &file.page_url, &filename, &dest_dir);
+        let child = DownloadItem::new(self.alloc_id(), &page_url, &filename, &dest_dir);
         child.set_is_collection_child(true);
         child.set_collection_file_id(file_id);
-        child.set_gallery_file_path(file.path.unwrap_or_default());
+        child.set_gallery_file_path(display_path);
         child.set_group(group);
         child.set_progress(progress);
         child.set_detail(detail.to_string());
         child.set_status(status);
         self.store.append(&child);
-        self.refresh_video_playlist_summary(owner);
+        if let Some(index) = self
+            .video_playlist_file_row_index
+            .borrow_mut()
+            .get_mut(&owner_id)
+        {
+            index.rows.insert(file_id.to_string(), child);
+        }
     }
 
     /// Rebuild passive child projections from persisted owner state after restore or Undo.
@@ -4496,10 +4736,14 @@ impl DownloadManager {
 
     /// Reset unfinished files for a collection retry; completed entries stay Done.
     fn prepare_video_playlist_file_rows_for_attempt(&self, owner: &DownloadItem) {
+        let owner_id = owner.id();
+        if !self.ensure_video_playlist_file_row_index(owner_id) {
+            return;
+        }
         let updates = {
             let mut sources = self.video_sources.borrow_mut();
             let Some(crate::media_types::VideoSource::Playlist { state, .. }) =
-                sources.get_mut(&owner.id())
+                sources.get_mut(&owner_id)
             else {
                 return;
             };
@@ -4508,29 +4752,46 @@ impl DownloadManager {
                 .iter_mut()
                 .filter(|file| file.status != DownloadStatus::Done)
                 .map(|file| {
+                    let previous_status = file.status;
+                    let previous_progress = file.progress;
                     file.status = DownloadStatus::Queued;
                     file.progress = 0.0;
-                    file.id.clone()
+                    (file.id.clone(), previous_status, previous_progress)
                 })
                 .collect::<Vec<_>>()
         };
-        for file_id in updates {
-            if let Some(child) = self.items().find(|item| {
-                item.is_collection_child()
-                    && item.group().is_some_and(|group| group.id() == owner.id())
-                    && item.collection_file_id() == file_id
-            }) {
-                child.set_progress(0.0);
-                child.set_detail(gettext("Waiting in collection"));
-                child.set_status(DownloadStatus::Queued);
-            }
+        let rows = {
+            let mut indices = self.video_playlist_file_row_index.borrow_mut();
+            let Some(index) = indices.get_mut(&owner_id) else {
+                return;
+            };
+            updates
+                .iter()
+                .filter_map(|(file_id, previous_status, previous_progress)| {
+                    index.record_transition(
+                        *previous_status,
+                        *previous_progress,
+                        DownloadStatus::Queued,
+                        0.0,
+                    );
+                    index.rows.get(file_id).cloned()
+                })
+                .collect::<Vec<_>>()
+        };
+        for child in rows {
+            child.set_progress(0.0);
+            child.set_detail(gettext("Waiting in collection"));
+            child.set_status(DownloadStatus::Queued);
         }
         self.refresh_video_playlist_summary(owner);
     }
 
     /// Settle active playlist children when the one owning process pauses, fails, or is cancelled.
     fn finish_video_playlist_file_rows(&self, owner_id: u64, status: DownloadStatus) {
-        let changed_ids = {
+        if !self.ensure_video_playlist_file_row_index(owner_id) {
+            return;
+        }
+        let updates = {
             let mut sources = self.video_sources.borrow_mut();
             let Some(crate::media_types::VideoSource::Playlist { state, .. }) =
                 sources.get_mut(&owner_id)
@@ -4542,32 +4803,45 @@ impl DownloadManager {
                 .iter_mut()
                 .filter(|file| file.status == DownloadStatus::Downloading)
                 .map(|file| {
+                    let previous_progress = file.progress;
                     file.status = status;
                     if status == DownloadStatus::Done {
                         file.progress = 1.0;
                     }
-                    file.id.clone()
+                    (file.id.clone(), previous_progress, file.progress)
                 })
                 .collect::<Vec<_>>()
         };
-        for file_id in changed_ids {
-            if let Some(child) = self.items().find(|item| {
-                item.is_collection_child()
-                    && item.group().is_some_and(|group| group.id() == owner_id)
-                    && item.collection_file_id() == file_id
-            }) {
-                if status == DownloadStatus::Done {
-                    child.set_progress(1.0);
-                    child.set_detail(gettext("Finished"));
-                } else {
-                    child.set_detail(match status {
-                        DownloadStatus::Paused => gettext("Paused"),
-                        DownloadStatus::Cancelled => gettext("Cancelled"),
-                        _ => gettext("Failed"),
-                    });
-                }
-                child.set_status(status);
+        let rows = {
+            let mut indices = self.video_playlist_file_row_index.borrow_mut();
+            let Some(index) = indices.get_mut(&owner_id) else {
+                return;
+            };
+            updates
+                .iter()
+                .filter_map(|(file_id, previous_progress, next_progress)| {
+                    index.record_transition(
+                        DownloadStatus::Downloading,
+                        *previous_progress,
+                        status,
+                        *next_progress,
+                    );
+                    index.rows.get(file_id).cloned()
+                })
+                .collect::<Vec<_>>()
+        };
+        for child in rows {
+            if status == DownloadStatus::Done {
+                child.set_progress(1.0);
+                child.set_detail(gettext("Finished"));
+            } else {
+                child.set_detail(match status {
+                    DownloadStatus::Paused => gettext("Paused"),
+                    DownloadStatus::Cancelled => gettext("Cancelled"),
+                    _ => gettext("Failed"),
+                });
             }
+            child.set_status(status);
         }
         if let Some(owner) = self.find(owner_id) {
             self.refresh_video_playlist_summary(&owner);
@@ -4575,26 +4849,22 @@ impl DownloadManager {
     }
 
     fn refresh_video_playlist_summary(&self, owner: &DownloadItem) {
-        let Some(crate::media_types::VideoSource::Playlist { state, .. }) =
-            self.video_sources.borrow().get(&owner.id()).cloned()
+        let owner_id = owner.id();
+        if !self.ensure_video_playlist_file_row_index(owner_id) {
+            return;
+        }
+        let Some((total, done, progress_sum)) = self
+            .video_playlist_file_row_index
+            .borrow()
+            .get(&owner_id)
+            .map(|index| (index.total, index.done_count, index.progress_sum))
         else {
             return;
         };
-        let total = state.files.len();
-        let done = state
-            .files
-            .iter()
-            .filter(|file| file.status == DownloadStatus::Done)
-            .count();
         let fraction = if total == 0 {
             0.0
         } else {
-            state
-                .files
-                .iter()
-                .map(|file| file.progress.clamp(0.0, 1.0))
-                .sum::<f64>()
-                / total as f64
+            progress_sum / total as f64
         };
         owner.set_gallery_file_count(total.min(u32::MAX as usize) as u32);
         owner.set_gallery_files_done(done.min(u32::MAX as usize) as u32);
@@ -5427,6 +5697,7 @@ impl DownloadManager {
         }
         self.gallery_jobs.borrow_mut().remove(&id);
         self.gallery_file_row_index.borrow_mut().remove(&id);
+        self.video_playlist_file_row_index.borrow_mut().remove(&id);
         let released = self.find(id).filter(|item| item.public_only());
         if let Some(pos) = self.position_of(id) {
             self.store.remove(pos);
@@ -5931,6 +6202,7 @@ impl DownloadManager {
         self.video_sources.borrow_mut().remove(&id);
         self.gallery_jobs.borrow_mut().remove(&id);
         self.gallery_file_row_index.borrow_mut().remove(&id);
+        self.video_playlist_file_row_index.borrow_mut().remove(&id);
         self.epoch.borrow_mut().remove(&id);
         let released = self.find(id).filter(|item| item.public_only());
         if let Some(pos) = self.position_of(id) {

@@ -1023,7 +1023,7 @@ fn refresh_manifest_audio_picker(
 /// metadata that enqueue uses to rewrite the destination filename.
 fn selected_manifest_output_container(
     step: &VideoStep,
-) -> Option<crate::media_types::ManifestContainer> {
+) -> Option<ManifestContainer> {
     let manifest = step.manifest.borrow();
     let selection = step.manifest_selection.borrow();
     let audio = step.manifest_audio_selection.borrow();
@@ -1047,7 +1047,7 @@ fn refresh_manifest_filename(step: &VideoStep) {
         return;
     };
     let container = selected_manifest_output_container(step)
-        .unwrap_or(crate::media_types::ManifestContainer::Mkv);
+        .unwrap_or(ManifestContainer::Mkv);
     let filename = step.name.text();
     let filename = filename.trim();
     let requested_name = crate::download::DownloadManager::manifest_filename_for_container(
@@ -5671,34 +5671,50 @@ mod tests {
 #[cfg(test)]
 mod manifest_filename_tests {
     use crate::download::DownloadManager;
+    use ManifestContainer;
 
     const SOURCE_URL: &str = "https://cdn.example.test/stream.m3u8";
 
     fn manifest_filename(
         filename: &str,
-        container: Option<crate::media_types::ManifestContainer>,
+        container: Option<ManifestContainer>,
     ) -> String {
         DownloadManager::manifest_filename_for_container(
             Some(filename),
             SOURCE_URL,
-            container.unwrap_or(crate::media_types::ManifestContainer::Mkv),
+            container.unwrap_or(ManifestContainer::Mkv),
         )
     }
 
     #[test]
     fn preview_uses_the_same_selected_container_suffix_as_enqueue() {
-        assert_eq!(manifest_filename("Stream.mkv", Some(crate::media_types::ManifestContainer::Ts)), "Stream.ts");
-        assert_eq!(manifest_filename("Stream.mkv", Some(crate::media_types::ManifestContainer::Mp4)), "Stream.mp4");
+        assert_eq!(
+            manifest_filename("Stream.mkv", Some(ManifestContainer::Ts)),
+            "Stream.ts"
+        );
+        assert_eq!(
+            manifest_filename("Stream.mkv", Some(ManifestContainer::Mp4)),
+            "Stream.mp4"
+        );
         assert_eq!(manifest_filename("Stream.mkv", None), "Stream.mkv");
     }
 
     #[test]
     fn manifest_container_suffix_does_not_follow_a_stale_or_user_typed_extension() {
-        assert_eq!(manifest_filename("Stream.ts", Some(crate::media_types::ManifestContainer::Mp4)), "Stream.mp4");
-        assert_eq!(manifest_filename("Stream.mp4", Some(crate::media_types::ManifestContainer::Ts)), "Stream.ts");
+        assert_eq!(
+            manifest_filename("Stream.ts", Some(ManifestContainer::Mp4)),
+            "Stream.mp4"
+        );
+        assert_eq!(
+            manifest_filename("Stream.mp4", Some(ManifestContainer::Ts)),
+            "Stream.ts"
+        );
         assert_eq!(manifest_filename("Stream.webm", None), "Stream.mkv");
         assert_eq!(
-            manifest_filename("archive.part.MKV", Some(crate::media_types::ManifestContainer::Ts)),
+            manifest_filename(
+                "archive.part.MKV",
+                Some(ManifestContainer::Ts)
+            ),
             "archive.part.ts"
         );
     }

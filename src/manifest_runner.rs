@@ -1,6 +1,5 @@
 //! Native HLS/DASH segment transfer, resume and container finalization.
 
-use std::collections::HashSet;
 use std::fmt;
 use std::path::{Path, PathBuf};
 use std::sync::{
@@ -18,13 +17,8 @@ use url::Url;
 use crate::content_range::{ParsedContentRange, parse_content_range};
 use crate::engine_msg::EngineMsg;
 use crate::manifest::{
-    HlsContentSteering, HlsLiveAccumulator, HlsPlan, HlsResource, HlsResourceKind,
-    ManifestByteRange,
-    dash::{
-        DashPresentation, DashRepresentationPlan, DashResource, DashResourceKind,
-        DashSegmentBaseIndex, DashSidxEntry, MAX_DASH_SIDX_SEGMENTS, dash_sidx_media_resource,
-        parse_child_segment_index, parse_segment_base_index, validate_segment_base_sidx_ranges,
-    },
+    HlsLiveAccumulator, HlsPlan, HlsResource, HlsResourceKind, ManifestByteRange,
+    dash::{DashPresentation, DashRepresentationPlan, DashResource, DashResourceKind},
 };
 use crate::manifest_intake::ManifestLookup;
 #[cfg(test)]
@@ -346,7 +340,6 @@ enum Tracks {
         audio: Option<Box<HlsPlan>>,
         subtitle: Option<Box<HlsPlan>>,
         subtitle_language: Option<String>,
-        content_steering: Option<Box<HlsContentSteering>>,
     },
     Dash {
         video: Box<DashRepresentationPlan>,
@@ -378,8 +371,6 @@ impl Tracks {
 struct LiveHlsTrack {
     /// Effective post-redirect playlist URL used for resource resolution and polling.
     playlist_url: Url,
-    /// URL advertised by the selected master pathway, before media-playlist redirects.
-    requested_playlist_url: Url,
     inherited_variables: Box<[(String, String)]>,
     directory: PathBuf,
     accumulator: HlsLiveAccumulator,
@@ -830,13 +821,7 @@ async fn resolve_manifest_tracks(
             )
         })?
     } else {
-        match crate::manifest_intake::lookup_with_client(
-            &client,
-            &job.source.url,
-            job.proxy.is_some(),
-        )
-        .await
-        {
+        match crate::manifest_intake::lookup_with_client(&client, &job.source.url).await {
             Ok(Some(lookup)) if lookup.kind() == job.source.kind => {
                 match resolve_tracks(&client, lookup, &job.source, &mut guarded_child_hosts).await {
                     Ok(tracks) => tracks,
@@ -1184,8 +1169,6 @@ struct ManifestLiveHlsFinalization<'a> {
     finish_only: bool,
     video: &'a HlsPlan,
     audio: Option<&'a HlsPlan>,
-    source: &'a ManifestSource,
-    content_steering: Option<&'a mut HlsContentSteering>,
     video_dir: &'a Path,
     audio_dir: &'a Path,
     concurrency: usize,
@@ -1331,8 +1314,6 @@ async fn prepare_live_hls_finalization(
         finish_only,
         video,
         audio,
-        source,
-        content_steering,
         video_dir,
         audio_dir,
         concurrency,
@@ -1346,8 +1327,6 @@ async fn prepare_live_hls_finalization(
     let capture = run_live_hls_tracks(
         client,
         source_url,
-        source,
-        content_steering,
         dest_dir,
         destination,
         item_id,
@@ -1473,7 +1452,6 @@ async fn prepare_live_hls_finalization(
 /// Inputs for capturing live DASH tracks and preparing their local track files.
 struct ManifestLiveDashFinalization<'a> {
     client: &'a reqwest::Client,
-    proxy_configured: bool,
     source_url: &'a str,
     dest_dir: &'a Path,
     destination: &'a Path,
@@ -1498,7 +1476,6 @@ async fn prepare_live_dash_finalization(
 ) -> Result<LiveCapturePreparation, ManifestRunError> {
     let ManifestLiveDashFinalization {
         client,
-        proxy_configured,
         source_url,
         dest_dir,
         destination,
@@ -1519,7 +1496,6 @@ async fn prepare_live_dash_finalization(
 
     let capture = run_live_dash_tracks(
         client,
-        proxy_configured,
         source_url,
         dest_dir,
         destination,
@@ -1645,13 +1621,7 @@ pub(crate) async fn run_manifest_download(
     let static_destination_parts = !live_hls && !live_dash && tracks.uses_destination_parts();
     let mut live_destination_parts = live_dash;
     if live_hls {
-        let Tracks::Hls {
-            video,
-            audio,
-            content_steering,
-            ..
-        } = &mut tracks
-        else {
+        let Tracks::Hls { video, audio, .. } = &mut tracks else {
             return Err(ManifestRunError::Failed(
                 "Live HLS capture requires HLS media tracks".to_string(),
             ));
@@ -1666,8 +1636,6 @@ pub(crate) async fn run_manifest_download(
             finish_only: finish_requested,
             video: video.as_ref(),
             audio: audio.as_deref(),
-            source: &job.source,
-            content_steering: content_steering.as_deref_mut(),
             video_dir: &video_dir,
             audio_dir: &audio_dir,
             concurrency,
@@ -1717,7 +1685,6 @@ pub(crate) async fn run_manifest_download(
         };
         match prepare_live_dash_finalization(ManifestLiveDashFinalization {
             client: &client,
-            proxy_configured: job.proxy.is_some(),
             source_url: &job.source.url,
             dest_dir: &dest_dir,
             destination: &job.dest,
@@ -2171,7 +2138,6 @@ async fn resolve_tracks(
                 audio: None,
                 subtitle: None,
                 subtitle_language: None,
-                content_steering: None,
             })
         }
         ManifestDownloadPlan::HlsMaster(plan) => {
@@ -2181,7 +2147,6 @@ async fn resolve_tracks(
                 subtitle_url,
                 subtitle_language,
                 inherited_variables,
-                content_steering,
             } = *plan;
             guard_manifest_child_url(&source.url, &video_url, guarded_child_hosts)?;
             if let Some(audio_url) = audio_url.as_ref() {
@@ -2238,7 +2203,6 @@ async fn resolve_tracks(
                 audio: audio.map(Box::new),
                 subtitle,
                 subtitle_language,
-                content_steering: content_steering.map(Box::new),
             })
         }
         ManifestDownloadPlan::Dash {
@@ -2246,24 +2210,15 @@ async fn resolve_tracks(
             audio,
             subtitle,
         } => {
-            if let Some(index) = video.segment_base_index.as_ref() {
-                guard_manifest_child_url(&source.url, &index.index_url, guarded_child_hosts)?;
-            }
             for resource in video.resources.iter() {
                 guard_manifest_child_url(&source.url, &resource.url, guarded_child_hosts)?;
             }
             if let Some(audio) = audio.as_ref() {
-                if let Some(index) = audio.segment_base_index.as_ref() {
-                    guard_manifest_child_url(&source.url, &index.index_url, guarded_child_hosts)?;
-                }
                 for resource in audio.resources.iter() {
                     guard_manifest_child_url(&source.url, &resource.url, guarded_child_hosts)?;
                 }
             }
             if let Some(subtitle) = subtitle.as_ref() {
-                if let Some(index) = subtitle.segment_base_index.as_ref() {
-                    guard_manifest_child_url(&source.url, &index.index_url, guarded_child_hosts)?;
-                }
                 for resource in subtitle.resources.iter() {
                     guard_manifest_child_url(&source.url, &resource.url, guarded_child_hosts)?;
                 }
@@ -3237,320 +3192,6 @@ fn manifest_output_container(path: &Path) -> Result<ManifestContainer, ManifestR
 const DASH_LIVE_STATE_NAME: &str = "live-dash-state.json";
 const DASH_LIVE_STATE_VERSION: u32 = 1;
 
-const MAX_DASH_INDEX_RANGE_BYTES: u64 = crate::manifest_types::MAX_DASH_SIDX_BYTES;
-const MAX_DASH_SIDX_DEPTH: usize = 8;
-const MAX_DASH_SIDX_NODES: usize = 128;
-const MAX_DASH_SIDX_TOTAL_BYTES: u64 = 16 * 1024 * 1024;
-
-/// Fetch a bounded control range without staging it or counting it as downloaded media.
-/// This is used for SIDX boxes and the one-byte external-media length probe.
-async fn fetch_dash_range_bytes(
-    client: &reqwest::Client,
-    url: &Url,
-    range: ManifestByteRange,
-    abort: &mut tokio::sync::oneshot::Receiver<crate::video::StopIntent>,
-) -> Result<Option<(Vec<u8>, u64)>, ManifestRunError> {
-    let end = range
-        .offset
-        .checked_add(range.length)
-        .and_then(|value| value.checked_sub(1))
-        .filter(|_| range.length > 0 && range.length <= MAX_DASH_INDEX_RANGE_BYTES)
-        .ok_or_else(|| {
-            ManifestRunError::Unsupported(
-                "The DASH byte range exceeds the supported limit".to_string(),
-            )
-        })?;
-    let request = client.get(url.clone()).header(
-        reqwest::header::RANGE,
-        format!("bytes={}-{end}", range.offset),
-    );
-    let response = tokio::select! {
-        biased;
-        stop = &mut *abort => {
-            let _ = stop;
-            return Ok(None);
-        }
-        response = tokio::time::timeout(RESOURCE_IDLE_TIMEOUT, request.send()) => {
-            response
-                .map_err(|_| ManifestRunError::Retryable(
-                    "Timed out while requesting the DASH byte range".to_string(),
-                ))?
-                .map_err(|error| ManifestRunError::Retryable(format!(
-                    "Could not retrieve the DASH byte range: {}",
-                    error.without_url()
-                )))?
-        }
-    };
-    let status = response.status();
-    if status != reqwest::StatusCode::PARTIAL_CONTENT {
-        if is_retryable_resource_status(status) {
-            return Err(ManifestRunError::Retryable(format!(
-                "The stream server returned HTTP {} for the DASH byte range",
-                status.as_u16()
-            )));
-        }
-        return Err(ManifestRunError::Unsupported(
-            "The stream server did not honor the requested DASH byte range".to_string(),
-        ));
-    }
-
-    let content_range = response
-        .headers()
-        .get(reqwest::header::CONTENT_RANGE)
-        .and_then(|value| value.to_str().ok());
-    if !content_range_matches(content_range, range) {
-        return Err(ManifestRunError::Unsupported(
-            "The stream server returned an invalid Content-Range for the DASH byte range"
-                .to_string(),
-        ));
-    }
-    let total_length = match content_range.and_then(parse_content_range) {
-        Some(ParsedContentRange::Satisfied {
-            complete_length: Some(total),
-            ..
-        }) => total,
-        _ => {
-            return Err(ManifestRunError::Unsupported(
-                "The DASH byte-range response omitted the complete resource length".to_string(),
-            ));
-        }
-    };
-    if response
-        .content_length()
-        .is_some_and(|length| length != range.length)
-    {
-        return Err(ManifestRunError::Unsupported(
-            "The DASH byte-range response length did not match its byte range".to_string(),
-        ));
-    }
-
-    let capacity = usize::try_from(range.length).map_err(|_| {
-        ManifestRunError::Unsupported("The DASH byte range is too large".to_string())
-    })?;
-    let mut bytes = Vec::with_capacity(capacity);
-    let mut stream = response.bytes_stream();
-    loop {
-        let next = tokio::select! {
-            biased;
-            stop = &mut *abort => {
-                let _ = stop;
-                return Ok(None);
-            }
-            chunk = tokio::time::timeout(RESOURCE_IDLE_TIMEOUT, stream.next()) => {
-                chunk.map_err(|_| ManifestRunError::Retryable(
-                    "The DASH byte range stopped making progress".to_string(),
-                ))?
-            }
-        };
-        let Some(chunk) = next else {
-            break;
-        };
-        let chunk = chunk.map_err(|error| {
-            ManifestRunError::Retryable(format!(
-                "The DASH byte-range transfer failed: {}",
-                error.without_url()
-            ))
-        })?;
-        let chunk_length = u64::try_from(chunk.len()).map_err(|_| {
-            ManifestRunError::Unsupported("The DASH byte range is too large".to_string())
-        })?;
-        if u64::try_from(bytes.len())
-            .ok()
-            .and_then(|length| length.checked_add(chunk_length))
-            .is_none_or(|length| length > range.length)
-        {
-            return Err(ManifestRunError::Unsupported(
-                "The stream server returned more bytes than the requested DASH byte range"
-                    .to_string(),
-            ));
-        }
-        bytes.extend_from_slice(&chunk);
-    }
-    if u64::try_from(bytes.len()).ok() != Some(range.length) {
-        return Err(ManifestRunError::Unsupported(
-            "The stream server returned an incomplete DASH byte range".to_string(),
-        ));
-    }
-    Ok(Some((bytes, total_length)))
-}
-
-/// Resolve a bounded hierarchy of SIDX boxes before handing only media leaves to the writer.
-async fn resolve_dash_segment_base_resources(
-    client: &reqwest::Client,
-    index: &DashSegmentBaseIndex,
-    abort: &mut tokio::sync::oneshot::Receiver<crate::video::StopIntent>,
-) -> Result<Option<Vec<DashResource>>, ManifestRunError> {
-    let Some((root_bytes, index_resource_length)) =
-        fetch_dash_range_bytes(client, &index.index_url, index.index_range, abort).await?
-    else {
-        return Ok(None);
-    };
-    let media_resource_length = if index.index_is_external {
-        let Some((_, length)) = fetch_dash_range_bytes(
-            client,
-            &index.url,
-            ManifestByteRange {
-                offset: 0,
-                length: 1,
-            },
-            abort,
-        )
-        .await?
-        else {
-            return Ok(None);
-        };
-        length
-    } else {
-        index_resource_length
-    };
-    let root = parse_segment_base_index(
-        index,
-        &root_bytes,
-        index_resource_length,
-        media_resource_length,
-    )
-    .map_err(|error| {
-        ManifestRunError::Unsupported(format!(
-            "The DASH SegmentBase index is unsupported: {error}"
-        ))
-    })?;
-    if index.index_is_external
-        && root
-            .entries
-            .iter()
-            .any(|entry| matches!(entry, DashSidxEntry::Index(_)))
-    {
-        return Err(ManifestRunError::Unsupported(
-            "Hierarchical SIDX references from an external RepresentationIndex are not supported"
-                .to_string(),
-        ));
-    }
-
-    let mut pending: Vec<(DashSidxEntry, usize)> = root
-        .entries
-        .into_iter()
-        .rev()
-        .map(|entry| (entry, 0))
-        .collect();
-    let mut total_entry_count = pending.len();
-    if total_entry_count > MAX_DASH_SIDX_SEGMENTS {
-        return Err(ManifestRunError::Unsupported(
-            "The DASH SIDX hierarchy contains too many references".to_string(),
-        ));
-    }
-    let mut seen_indexes = HashSet::new();
-    if !index.index_is_external {
-        seen_indexes.insert((index.index_range.offset, index.index_range.length));
-    }
-    let mut child_index_ranges = Vec::new();
-    let mut media_ranges = Vec::new();
-    let mut resources = Vec::new();
-    let mut total_index_bytes = index.index_range.length;
-    let mut index_count = 1_usize;
-
-    while let Some((entry, depth)) = pending.pop() {
-        match entry {
-            DashSidxEntry::Media(range) => {
-                if media_ranges.len() >= MAX_DASH_SIDX_SEGMENTS {
-                    return Err(ManifestRunError::Unsupported(
-                        "The DASH SIDX hierarchy contains too many media references".to_string(),
-                    ));
-                }
-                let resource = dash_sidx_media_resource(&index.url, range, resources.len())
-                    .map_err(|error| {
-                        ManifestRunError::Unsupported(format!(
-                            "The DASH SIDX media reference is unsupported: {error}"
-                        ))
-                    })?;
-                media_ranges.push(range);
-                resources.push(resource);
-            }
-            DashSidxEntry::Index(child) => {
-                let child_depth = depth.checked_add(1).ok_or_else(|| {
-                    ManifestRunError::Unsupported(
-                        "The DASH SIDX hierarchy is too deeply nested".to_string(),
-                    )
-                })?;
-                if child_depth > MAX_DASH_SIDX_DEPTH {
-                    return Err(ManifestRunError::Unsupported(
-                        "The DASH SIDX hierarchy exceeds the supported nesting depth".to_string(),
-                    ));
-                }
-                if index_count >= MAX_DASH_SIDX_NODES {
-                    return Err(ManifestRunError::Unsupported(
-                        "The DASH SIDX hierarchy contains too many index boxes".to_string(),
-                    ));
-                }
-                let child_key = (child.range.offset, child.range.length);
-                if !seen_indexes.insert(child_key) {
-                    return Err(ManifestRunError::Unsupported(
-                        "The DASH SIDX hierarchy contains a repeated child index".to_string(),
-                    ));
-                }
-                total_index_bytes = total_index_bytes
-                    .checked_add(child.range.length)
-                    .filter(|bytes| *bytes <= MAX_DASH_SIDX_TOTAL_BYTES)
-                    .ok_or_else(|| {
-                        ManifestRunError::Unsupported(
-                            "The DASH SIDX hierarchy exceeds the aggregate index-size limit"
-                                .to_string(),
-                        )
-                    })?;
-                index_count += 1;
-
-                let Some((child_bytes, child_total_length)) =
-                    fetch_dash_range_bytes(client, &index.url, child.range, abort).await?
-                else {
-                    return Ok(None);
-                };
-                if child_total_length != media_resource_length {
-                    return Err(ManifestRunError::Unsupported(
-                        "The DASH media file changed while its SIDX hierarchy was being read"
-                            .to_string(),
-                    ));
-                }
-                let child_node =
-                    parse_child_segment_index(index, &child, &child_bytes, media_resource_length)
-                        .map_err(|error| {
-                        ManifestRunError::Unsupported(format!(
-                            "The DASH child SIDX is unsupported: {error}"
-                        ))
-                    })?;
-                total_entry_count = total_entry_count
-                    .checked_add(child_node.entries.len())
-                    .filter(|count| *count <= MAX_DASH_SIDX_SEGMENTS)
-                    .ok_or_else(|| {
-                        ManifestRunError::Unsupported(
-                            "The DASH SIDX hierarchy contains too many references".to_string(),
-                        )
-                    })?;
-                child_index_ranges.push(child.range);
-                pending.extend(
-                    child_node
-                        .entries
-                        .into_iter()
-                        .rev()
-                        .map(|entry| (entry, child_depth)),
-                );
-            }
-        }
-    }
-
-    validate_segment_base_sidx_ranges(
-        index,
-        &child_index_ranges,
-        &media_ranges,
-        media_resource_length,
-    )
-    .map_err(|error| {
-        ManifestRunError::Unsupported(format!(
-            "The DASH SIDX hierarchy contains overlapping or invalid ranges: {error}"
-        ))
-    })?;
-
-    Ok(Some(resources))
-}
-
 struct ManifestDashTrackTransfer<'a> {
     client: &'a reqwest::Client,
     staging: &'a Path,
@@ -3583,18 +3224,7 @@ async fn fetch_and_write_dash_track(
         downloaded,
         abort,
     } = context;
-    let resources = if let Some(index) = plan.segment_base_index.as_ref() {
-        let Some(media_resources) =
-            resolve_dash_segment_base_resources(client, index, abort).await?
-        else {
-            return Ok(false);
-        };
-        let mut resources = dash_resources(plan);
-        resources.extend(dash_resources_from(&media_resources));
-        resources
-    } else {
-        dash_resources(plan)
-    };
+    let resources = dash_resources(plan);
     fetch_and_write_ordered_track(ManifestOrderedTrackTransfer {
         client,
         staging,
@@ -5418,175 +5048,6 @@ segment-2.m4s
             ManifestRunError::Failed("local".to_string()).into_engine_message(),
             EngineMsg::Failed(_)
         ));
-    }
-
-    #[tokio::test]
-    async fn external_dash_representation_index_resolves_media_ranges_on_base_url() {
-        use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
-
-        let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0))
-            .await
-            .expect("bind HTTP test listener");
-        let address = listener.local_addr().expect("listener address");
-        let mut sidx = Vec::with_capacity(44);
-        sidx.extend_from_slice(&44_u32.to_be_bytes());
-        sidx.extend_from_slice(b"sidx");
-        sidx.extend_from_slice(&[0, 0, 0, 0]);
-        sidx.extend_from_slice(&7_u32.to_be_bytes());
-        sidx.extend_from_slice(&1_000_u32.to_be_bytes());
-        sidx.extend_from_slice(&0_u32.to_be_bytes());
-        sidx.extend_from_slice(&144_u32.to_be_bytes());
-        sidx.extend_from_slice(&0_u16.to_be_bytes());
-        sidx.extend_from_slice(&1_u16.to_be_bytes());
-        sidx.extend_from_slice(&80_u32.to_be_bytes());
-        sidx.extend_from_slice(&2_000_u32.to_be_bytes());
-        sidx.extend_from_slice(&0x9000_0000_u32.to_be_bytes());
-        assert_eq!(sidx.len(), 44);
-
-        let server_sidx = sidx.clone();
-        let server = tokio::spawn(async move {
-            for expected_path in ["/index.sidx", "/media.mp4"] {
-                let (mut socket, _) = listener.accept().await.expect("accept range request");
-                let mut request = [0_u8; 2048];
-                let length = socket.read(&mut request).await.expect("read range request");
-                let request = String::from_utf8_lossy(&request[..length]).to_ascii_lowercase();
-                assert!(request.starts_with(&format!("get {expected_path} ")));
-                assert!(request.contains("range: bytes=0-"));
-                if expected_path == "/index.sidx" {
-                    socket
-                        .write_all(
-                            b"HTTP/1.1 206 Partial Content\r\nContent-Length: 44\r\nContent-Range: bytes 0-43/44\r\nConnection: close\r\n\r\n",
-                        )
-                        .await
-                        .expect("write external SIDX response headers");
-                    socket
-                        .write_all(&server_sidx)
-                        .await
-                        .expect("write external SIDX response body");
-                } else {
-                    socket
-                        .write_all(
-                            b"HTTP/1.1 206 Partial Content\r\nContent-Length: 1\r\nContent-Range: bytes 0-0/224\r\nConnection: close\r\n\r\nx",
-                        )
-                        .await
-                        .expect("write media length probe response");
-                }
-            }
-        });
-
-        let client = reqwest::Client::builder()
-            .no_proxy()
-            .build()
-            .expect("build direct HTTP test client");
-        let media_url = Url::parse(&format!("http://{address}/media.mp4")).expect("media URL");
-        let index_url = Url::parse(&format!("http://{address}/index.sidx")).expect("index URL");
-        let index = DashSegmentBaseIndex {
-            url: media_url.clone(),
-            index_url,
-            index_range: ManifestByteRange {
-                offset: 0,
-                length: 44,
-            },
-            index_is_external: true,
-            initialization_url: media_url.clone(),
-            initialization_is_external: false,
-            initialization_range: Some(ManifestByteRange {
-                offset: 0,
-                length: 100,
-            }),
-            index_range_exact: false,
-            timescale: Some(1_000),
-        };
-        let (_stop_tx, mut abort) = tokio::sync::oneshot::channel();
-        let resources = resolve_dash_segment_base_resources(&client, &index, &mut abort)
-            .await
-            .expect("resolve external RepresentationIndex")
-            .expect("range resolution should complete");
-
-        server.await.expect("HTTP test server task");
-        assert_eq!(resources.len(), 1);
-        assert_eq!(resources[0].url, media_url);
-        assert_eq!(
-            resources[0].range,
-            Some(ManifestByteRange {
-                offset: 144,
-                length: 80,
-            })
-        );
-    }
-
-    #[tokio::test]
-    async fn dash_index_fetch_uses_and_validates_the_requested_range() {
-        use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
-
-        let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0))
-            .await
-            .expect("bind HTTP test listener");
-        let address = listener.local_addr().expect("listener address");
-        let server = tokio::spawn(async move {
-            let (mut socket, _) = listener.accept().await.expect("accept index request");
-            let mut request = [0_u8; 1024];
-            let length = socket.read(&mut request).await.expect("read index request");
-            let request = String::from_utf8_lossy(&request[..length]).to_ascii_lowercase();
-            assert!(request.contains("range: bytes=40-43"));
-            socket
-                .write_all(
-                    b"HTTP/1.1 206 Partial Content\r\nContent-Length: 4\r\nContent-Range: bytes 40-43/1000\r\nConnection: close\r\n\r\nsidx",
-                )
-                .await
-                .expect("write index response");
-        });
-
-        let client = reqwest::Client::builder()
-            .no_proxy()
-            .build()
-            .expect("build direct HTTP test client");
-        let url = Url::parse(&format!("http://{address}/media.mp4")).expect("media URL");
-        let range = ManifestByteRange {
-            offset: 40,
-            length: 4,
-        };
-        let (_stop_tx, mut abort) = tokio::sync::oneshot::channel();
-        let result = fetch_dash_range_bytes(&client, &url, range, &mut abort)
-            .await
-            .expect("fetch index range");
-
-        server.await.expect("HTTP test server task");
-        assert_eq!(result, Some((b"sidx".to_vec(), 1_000)));
-    }
-
-    #[tokio::test]
-    async fn dash_index_fetch_rejects_full_response_without_retrying() {
-        use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
-
-        let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0))
-            .await
-            .expect("bind HTTP test listener");
-        let address = listener.local_addr().expect("listener address");
-        let server = tokio::spawn(async move {
-            let (mut socket, _) = listener.accept().await.expect("accept index request");
-            let mut request = [0_u8; 1024];
-            let _ = socket.read(&mut request).await.expect("read index request");
-            socket
-                .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
-                .await
-                .expect("write un-ranged response");
-        });
-
-        let client = reqwest::Client::builder()
-            .no_proxy()
-            .build()
-            .expect("build direct HTTP test client");
-        let url = Url::parse(&format!("http://{address}/media.mp4")).expect("media URL");
-        let range = ManifestByteRange {
-            offset: 40,
-            length: 4,
-        };
-        let (_stop_tx, mut abort) = tokio::sync::oneshot::channel();
-        let result = fetch_dash_range_bytes(&client, &url, range, &mut abort).await;
-
-        server.await.expect("HTTP test server task");
-        assert!(matches!(result, Err(ManifestRunError::Unsupported(_))));
     }
 
     #[tokio::test]

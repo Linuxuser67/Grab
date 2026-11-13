@@ -64,20 +64,11 @@ integration fixtures cover AVC/AAC SDR, HEVC/E-AC-3 PQ and AVC/AC-3 fallback
 when the corresponding encoders are present on the test host. This matrix does
 not claim Dolby Vision, AV1, or spatial-video verification.
 
-HLS Content Steering retains the unfiltered master and applies each refreshed
-clone set afresh. Ordinary live HLS follows the response TTL and relative
-RELOAD-URI, preserving signed query parameters and sending the active
-_HLS_pathway. A route change requires the selected stable track identities
-to remain valid and the refreshed playlist to continue at the exact next
-uncommitted media sequence. A change that requires switching both separate
-audio and video playlists together is deferred rather than committed
-non-atomically. LL-HLS refreshes steering metadata but defers pathway switches
-because its part identities need a separate cross-pathway reconciliation
-model.
 For ordinary HLS, `EXT-X-START` is ignored during recording: all listed
 segments are retained and the playback hint is omitted from the local playlist.
-Ad-marked playlists that also use `EXT-X-START` remain on fallback because
-omitting tagged segments would invalidate the source playback hint.
+`EXT-X-CONTENT-STEERING` is accepted as benign metadata: Grab does not fetch
+the steering manifest, does not select a Pathway, and downloads the variants
+the master advertises. Pathway-driven host or URI rewriting is not applied.
 Media-playlist NAME/VALUE and QUERYPARAM variable substitution is supported
 for ordinary HLS and LL-HLS. Master-playlist
 NAME/VALUE and QUERYPARAM variables are expanded in variant and rendition
@@ -170,9 +161,9 @@ Finite BaseURL availabilityTimeOffset values are summed across MPD,
 Period, AdaptationSet, and Representation levels for dynamic SegmentTemplate
 and the bounded dynamic SegmentList profile. Negative/infinite offsets, static
 offsets, BaseURL availabilityTimeComplete=false, and unsupported BaseURL
-metadata remain on yt-dlp fallback. Static LL-DASH, SegmentBase, and static
-SegmentList extensions beyond the existing explicit-resource profile also
-remain on fallback. Static SegmentList presentationTimeOffset is applied to the
+metadata remain on yt-dlp fallback. Static LL-DASH, indexed SegmentBase, and
+static SegmentList extensions beyond the existing explicit-resource profile
+also remain on fallback. Static SegmentList presentationTimeOffset is applied to the
 track timestamp mapping; dynamic SegmentList PTO remains on fallback. Dynamic
 SegmentList is limited to a single MP4 Period with a separate initialization
 resource, a zero-origin explicit SegmentTimeline containing one entry per
@@ -186,23 +177,15 @@ stripped.
 
 ## Phases
 
-### 1. Static DASH SegmentBase and hierarchical SIDX — implemented
+### 1. Static DASH single-file SegmentBase — implemented
 
-Support a static single-period MP4 representation with an in-file
-`SegmentBase@indexRange`, `Initialization@range`, and bounded SIDX hierarchy.
-Fetch each bounded index range, decode SIDX with the existing `mp4box`
-dependency, and translate direct and nested references into ordered Grab
-byte-range resources. Separate initialization URLs, dynamic SegmentBase, malformed or out-of-file
-references, and hierarchies exceeding the explicit depth/node/size limits remain
-on yt-dlp fallback.
-
-Acceptance is covered by tests for exact/non-exact index ranges, initialization
-and media extents, nested child indexes, reference identity/timing validation,
-overlap, overflow, and truncated responses. Index responses require strict
-`206`/Content-Range validation and bounded bodies; media bytes flow through the
-existing ordered writer and recovery journal. Static non-zero
-`SegmentBase@presentationTimeOffset` values are also retained for per-track
+Support a static single-period MP4 representation addressed by a plain
+`SegmentBase` `BaseURL` with no index. The whole media file is downloaded and
+non-zero `SegmentBase@presentationTimeOffset` values are retained for per-track
 timestamp alignment during finalization.
+
+Indexed `SegmentBase` (`indexRange`/`indexRangeExact`, `Initialization`
+children, and `RepresentationIndex`) remains on yt-dlp fallback.
 
 ### 2. Static multi-period DASH — implemented
 
@@ -305,22 +288,12 @@ mapping, SegmentBase and static SegmentList PTO, zero-origin behavior, and
 FFmpeg/ffprobe validation that independently offset video and audio start within
 one video frame.
 
-### 6. Broader DASH index addressing — evaluated, bounded subset implemented
+### 6. Broader DASH index addressing — evaluated, not implemented
 
-The native path now supports:
-- `RepresentationIndex@sourceURL` with an explicit bounded `range`, either
-  referencing the media resource itself or a separate HTTPS index resource.
-  An external SIDX uses `first_offset` relative to the media resource; its
-  media extents are validated against the media resource's independently
-  checked total length. External indexes are limited to a flat SIDX.
-- Bounded hierarchical SIDX when the index and media ranges are in the same
-  media resource.
-
-The following remain explicit yt-dlp fallbacks:
-- External RepresentationIndex hierarchies and external index resources without
-  an explicit bounded range.
-- Separate initialization URLs, dynamic SegmentBase, and non-zero
-  `eptDelta`/`pbDelta`.
+Indexed `SegmentBase` addressing (`indexRange`/`indexRangeExact`,
+`Initialization` children, and `RepresentationIndex`) remains on yt-dlp
+fallback. Native DASH downloads only a plain single-file `SegmentBase` without
+an index.
 
 `BaseURL@byteRange` remains unsupported. ISO/IEC 23009-1 Annex E defines it
 as an alternate byte-range URL template for regular GET requests when HTTP

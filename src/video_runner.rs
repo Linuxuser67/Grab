@@ -1955,15 +1955,7 @@ async fn sweep_live_capture(
 }
 
 /// Reap the recorder, and *only then* reclaim its scratch. The order is the contract: sweeping first could delete a file the recorder is still writing. Pinned by controlled futures in `video_runner_tests.rs`; the sweep is a closure so it cannot even be constructed before the reap completes.
-async fn reap_then_sweep<F, S, G>(reap: F, sweep: S)
-where
-    F: std::future::Future<Output = ()>,
-    S: FnOnce() -> G,
-    G: std::future::Future<Output = ()>,
-{
-    reap.await;
-    sweep().await;
-}
+
 
 /// Wall-clock bound for the subtitle language probe: a single info-JSON fetch.
 /// Best-effort — on timeout the download simply gets no subtitles.

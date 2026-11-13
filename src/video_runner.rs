@@ -89,7 +89,7 @@ impl<R: tokio::io::AsyncRead + Unpin> YtdlpStdoutReader<R> {
                 if buffer.is_empty() {
                     (0, false, true)
                 } else {
-                    let newline = buffer.iter().position(|byte| *byte == b'\\n');
+                    let newline = buffer.iter().position(|byte| *byte == b'\n');
                     let record_bytes = newline.unwrap_or(buffer.len());
                     if !discarding_oversized {
                         if line.len().saturating_add(record_bytes)
@@ -137,7 +137,7 @@ impl<R: tokio::io::AsyncRead + Unpin> YtdlpStdoutReader<R> {
 }
 
 fn lossy_stdout_record(bytes: &[u8]) -> String {
-    let bytes = bytes.strip_suffix(b"\\r").unwrap_or(bytes);
+    let bytes = bytes.strip_suffix(b"\r").unwrap_or(bytes);
     String::from_utf8_lossy(bytes).into_owned()
 }
 

@@ -639,7 +639,7 @@ fn live_remux_retries_known_mp4_timestamp_mux_failures_only() {
 
 #[tokio::test]
 async fn ytdlp_stdout_reader_lossily_decodes_and_continues_after_invalid_utf8() {
-    let bytes = b"before\\ninvalid:\\xff\\nafter\\n".to_vec();
+    let bytes = b"before\ninvalid:\xff\nafter\n".to_vec();
     let mut reader = super::YtdlpStdoutReader::new(std::io::Cursor::new(bytes));
 
     assert_eq!(
@@ -663,7 +663,7 @@ async fn ytdlp_stdout_reader_lossily_decodes_and_continues_after_invalid_utf8() 
 #[tokio::test]
 async fn ytdlp_stdout_reader_discards_oversized_records_and_keeps_draining() {
     let mut bytes = vec![b'x'; super::MAX_YTDLP_STDOUT_LINE_BYTES + 1];
-    bytes.extend_from_slice(b"\\nvalid\\n");
+    bytes.extend_from_slice(b"\nvalid\n");
     let mut reader = super::YtdlpStdoutReader::new(std::io::Cursor::new(bytes));
 
     assert_eq!(

@@ -1364,7 +1364,10 @@ async fn saved_live_hls_capture_finalizes_without_contacting_the_origin() {
     .await
     .expect("resume a durable finish without polling the source");
     assert_eq!(finish_outcome.outcome, LiveHlsCaptureOutcome::Finish);
-    assert_eq!(finish_outcome.output, super::LiveHlsOutput::DestinationParts);
+    assert_eq!(
+        finish_outcome.output,
+        super::LiveHlsOutput::DestinationParts
+    );
     let final_playlist = m3u8_rs::parse_media_playlist_res(
         &tokio::fs::read(video_dir.join("local.m3u8"))
             .await
@@ -1387,7 +1390,9 @@ async fn saved_live_hls_capture_finalizes_without_contacting_the_origin() {
     )
     .expect("resolve saved live HLS destination part");
     assert_eq!(
-        tokio::fs::read(video_part).await.expect("read saved destination part"),
+        tokio::fs::read(video_part)
+            .await
+            .expect("read saved destination part"),
         segment_bytes
     );
 }
@@ -2163,7 +2168,9 @@ async fn live_hls_pause_keeps_the_last_committed_window() {
     )
     .expect("resolve paused live HLS destination part");
     assert_eq!(
-        tokio::fs::read(video_part).await.expect("read paused destination part"),
+        tokio::fs::read(video_part)
+            .await
+            .expect("read paused destination part"),
         b"committed-segment"
     );
 }

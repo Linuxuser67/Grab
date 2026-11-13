@@ -730,6 +730,44 @@ pub(crate) struct RemovedSnapshot {
     pub gallery_job: Option<crate::gallery_argv::GalleryJob>,
 }
 
+impl RemovedSnapshot {
+    /// Capture all state needed to reconstruct a removed queue row.
+    pub(crate) fn capture(manager: &DownloadManager, item: &DownloadItem) -> Self {
+        let id = item.id();
+        Self {
+            url: item.url().to_string(),
+            dest_dir: item.dest_dir().to_string(),
+            filename: item.filename().to_string(),
+            status: item.status(),
+            progress: item.progress(),
+            detail: item.detail().to_string(),
+            output_dir: item.output_dir().to_string(),
+            segments: manager.segments_of(id),
+            video_source: manager.video_source(id),
+            started: manager.has_started(id),
+            public_only: item.public_only(),
+            group: item.group(),
+            gallery_job: manager.gallery_job(id),
+        }
+    }
+}
+
+fn saturating_u32(value: usize) -> u32 {
+    u32::try_from(value).unwrap_or(u32::MAX)
+}
+
+#[cfg(test)]
+mod saturating_count_tests {
+    use super::saturating_u32;
+
+    #[test]
+    fn count_conversion_saturates_without_truncating() {
+        assert_eq!(saturating_u32(0), 0);
+        assert_eq!(saturating_u32(42), 42);
+        assert_eq!(saturating_u32(usize::MAX), u32::MAX);
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum RestoreState {
     /// Queue restore has not yet finished.
@@ -1887,7 +1925,7 @@ impl DownloadManager {
         item.set_is_collection_owner(true);
         item.set_group(crate::download_store::DownloadGroup::try_new(id, title));
         item.set_gallery_url(url.clone());
-        item.set_gallery_file_count(state.files.len().min(u32::MAX as usize) as u32);
+        item.set_gallery_file_count(saturating_u32(state.files.len()));
         item.set_gallery_files_done(0);
         item.set_detail(pending_resolve_detail(audio_only));
 
@@ -2188,7 +2226,7 @@ impl DownloadManager {
         current.set_is_collection_owner(true);
         current.set_group(group);
         current.set_gallery_url(item.url());
-        current.set_gallery_file_count(state.files.len().min(u32::MAX as usize) as u32);
+        current.set_gallery_file_count(saturating_u32(state.files.len()));
         current.set_gallery_files_done(0);
         current.set_progress(0.0);
         current.set_detail(gettext("Playlist • waiting for a download slot"));
@@ -2300,15 +2338,14 @@ impl DownloadManager {
                             .or_else(|| stored.group.clone()),
                     );
                     item.set_gallery_url(url.clone());
-                    item.set_gallery_file_count(state.files.len().min(u32::MAX as usize) as u32);
-                    item.set_gallery_files_done(
+                    item.set_gallery_file_count(saturating_u32(state.files.len()));
+                    item.set_gallery_files_done(saturating_u32(
                         state
                             .files
                             .iter()
                             .filter(|file| file.status == DownloadStatus::Done)
-                            .count()
-                            .min(u32::MAX as usize) as u32,
-                    );
+                            .count(),
+                    ));
                     playlist_file_rows = Some(state.files.clone());
                 }
                 item.set_detail(pending_resolve_detail(audio_only));
@@ -4978,8 +5015,8 @@ impl DownloadManager {
         else {
             return;
         };
-        owner.set_gallery_file_count(summary.total.min(u32::MAX as usize) as u32);
-        owner.set_gallery_files_done(summary.done.min(u32::MAX as usize) as u32);
+        owner.set_gallery_file_count(saturating_u32(summary.total));
+        owner.set_gallery_files_done(saturating_u32(summary.done));
         owner.set_progress(summary.fraction());
         owner.set_detail(
             gettext("Playlist • {done}/{total} files")
@@ -6009,15 +6046,14 @@ impl DownloadManager {
                     &state.title,
                 ));
                 item.set_gallery_url(item.url());
-                item.set_gallery_file_count(state.files.len().min(u32::MAX as usize) as u32);
-                item.set_gallery_files_done(
+                item.set_gallery_file_count(saturating_u32(state.files.len()));
+                item.set_gallery_files_done(saturating_u32(
                     state
                         .files
                         .iter()
                         .filter(|file| file.status == DownloadStatus::Done)
-                        .count()
-                        .min(u32::MAX as usize) as u32,
-                );
+                        .count(),
+                ));
                 playlist_file_rows = Some(state.files.clone());
             }
             self.video_sources.borrow_mut().insert(item.id(), src);
@@ -6315,21 +6351,7 @@ impl DownloadManager {
     pub fn finished_snapshots(&self) -> Vec<RemovedSnapshot> {
         self.owners()
             .filter(|it| it.status() == DownloadStatus::Done)
-            .map(|it| RemovedSnapshot {
-                url: it.url().to_string(),
-                dest_dir: it.dest_dir().to_string(),
-                filename: it.filename().to_string(),
-                status: it.status(),
-                progress: it.progress(),
-                detail: it.detail().to_string(),
-                output_dir: it.output_dir().to_string(),
-                segments: self.segments_of(it.id()),
-                video_source: self.video_source(it.id()),
-                started: self.has_started(it.id()),
-                public_only: it.public_only(),
-                group: it.group(),
-                gallery_job: self.gallery_job(it.id()),
-            })
+            .map(|item| RemovedSnapshot::capture(self, &item))
             .collect()
     }
 

@@ -70,6 +70,7 @@ impl<R> YtdlpStdoutReader<R> {
 
 impl<R: tokio::io::AsyncRead + Unpin> YtdlpStdoutReader<R> {
     async fn next_line(&mut self) -> std::io::Result<YtdlpStdoutLine> {
+        use tokio::io::AsyncBufReadExt as _;
 
         if self.eof {
             return Ok(YtdlpStdoutLine::Eof);
@@ -80,7 +81,11 @@ impl<R: tokio::io::AsyncRead + Unpin> YtdlpStdoutReader<R> {
 
         loop {
             let (consumed, ended_line, reached_eof) = {
-                let buffer = self.reader.fill_buf().await?;
+                let buffer = match self.reader.fill_buf().await {
+                    Ok(buffer) => buffer,
+                    Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
+                    Err(error) => return Err(error),
+                };
                 if buffer.is_empty() {
                     (0, false, true)
                 } else {
@@ -2575,13 +2580,13 @@ pub(crate) async fn run_live_ytdlp(
             let mut announced = false;
             loop {
                 let line = match stdout_reader.next_line().await {
-                Ok(YtdlpStdoutLine::Line(line)) => line,
-                Ok(YtdlpStdoutLine::SkippedOversized) => {
-                    *lock_recover(&last_progress_p) = std::time::Instant::now();
-                    tracing::warn!("discarded oversized yt-dlp stdout record");
-                    continue;
-                }
-                Ok(YtdlpStdoutLine::Eof) => break,
+                    Ok(YtdlpStdoutLine::Line(line)) => line,
+                    Ok(YtdlpStdoutLine::SkippedOversized) => {
+                        *lock_recover(&last_progress_p) = std::time::Instant::now();
+                        tracing::warn!("discarded oversized yt-dlp stdout record");
+                        continue;
+                    }
+                    Ok(YtdlpStdoutLine::Eof) => break,
                     Err(error) => {
                         tracing::warn!(error = %error, "could not continue reading yt-dlp stdout");
                         break;

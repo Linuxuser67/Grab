@@ -345,6 +345,11 @@ pub(super) fn expand_master_playlist_with_variables(
             "could not parse HLS master-playlist variable declarations: {error}"
         ))
     })?;
+    if parsed.defines.len() != definitions.len() {
+        return Err(unsupported(
+            "master-playlist DEFINE declarations could not be represented exactly",
+        ));
+    }
     let playlist_url = Url::parse(manifest_url).map_err(|_| ManifestError::InvalidManifestUrl)?;
     let variables = resolve_defines(parsed.defines, &playlist_url, None)?;
     let expanded = expand_playlist_lines(text, &variables, |line| {

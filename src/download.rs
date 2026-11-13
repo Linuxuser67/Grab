@@ -1982,7 +1982,7 @@ impl DownloadManager {
             dest_dir,
         );
         item.set_public_only(public_only);
-        item.set_group(stored.group.clone().filter(|group| group.is_valid()));
+        item.set_group(stored.group.clone());
         // Resumed rows requeue; only settled rows keep their status.
         // Scheduled rows keep their status and timestamp; overdue ones queue immediately.
         let now = glib::DateTime::now_local()
@@ -2025,7 +2025,7 @@ impl DownloadManager {
                     item.set_is_collection_owner(true);
                     item.set_group(
                         crate::download_store::DownloadGroup::try_new(item.id(), &state.title)
-                            .or_else(|| stored.group.clone().filter(|group| group.is_valid())),
+                            .or_else(|| stored.group.clone()),
                     );
                     item.set_gallery_url(url.clone());
                     item.set_gallery_file_count(state.files.len().min(u32::MAX as usize) as u32);
@@ -2224,7 +2224,7 @@ impl DownloadManager {
             return;
         }
         let item = DownloadItem::new(self.claim_id_in(stored_id, existing), &url, &name, &dir);
-        item.set_group(group.filter(|group| group.is_valid()));
+        item.set_group(group);
         item.set_progress(progress.clamp(0.0, 1.0));
         item.set_status(DownloadStatus::Done);
         // Already trust-checked by the caller (must sit inside `dir`).
@@ -4163,7 +4163,7 @@ impl DownloadManager {
             return;
         };
         let filename = relative.to_string_lossy().into_owned();
-        let Some(group) = owner.group().filter(|group| group.is_valid()) else {
+        let Some(group) = owner.group() else {
             tracing::warn!(
                 gallery_id = owner.id(),
                 "gallery file event has no collection identity"
@@ -6187,7 +6187,7 @@ impl DownloadManager {
                             | crate::media_types::VideoSource::Playlist { .. }
                     )
                 });
-                let group = it.group().filter(|group| group.is_valid());
+                let group = it.group();
                 items.push(StoredItem {
                     id: Some(it.id()),
                     url: it.url().to_string(),

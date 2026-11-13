@@ -578,28 +578,27 @@ mod tests {
         let url = "https://gallery-cache.example.test/collection#top";
         let anonymous = cache_auth(None, None, None);
         let base = gallery_preview_cache_key(url, &anonymous, None).expect("anonymous key");
-        assert_eq!(
+        assert!(
             gallery_preview_cache_key(
                 "https://gallery-cache.example.test/collection",
                 &anonymous,
                 None,
-            ),
-            Some(base.clone()),
+            ) == Some(base.clone()),
             "the fragment is not part of the page identity"
         );
         let other_url = "https://gallery-cache.example.test/other";
-        assert_ne!(
-            gallery_preview_cache_key(other_url, &anonymous, None),
-            Some(base.clone())
+        assert!(
+            gallery_preview_cache_key(other_url, &anonymous, None) != Some(base.clone()),
+            "different page URLs must not share a cache key"
         );
-        assert_ne!(
-            gallery_preview_cache_key(url, &cache_auth(None, Some("firefox"), None), None),
-            Some(base.clone()),
+        assert!(
+            gallery_preview_cache_key(url, &cache_auth(None, Some("firefox"), None), None)
+                != Some(base.clone()),
             "a browser profile must not reuse an anonymous probe"
         );
-        assert_ne!(
-            gallery_preview_cache_key(url, &cache_auth(None, None, Some("Grab-Test-UA")), None),
-            Some(base.clone()),
+        assert!(
+            gallery_preview_cache_key(url, &cache_auth(None, None, Some("Grab-Test-UA")), None)
+                != Some(base.clone()),
             "the paired user agent is part of the identity"
         );
         let proxy = crate::net_types::ResolvedProxy {
@@ -607,9 +606,8 @@ mod tests {
             cli_url: "socks5h://127.0.0.1:9050".to_string(),
             no_proxy_env: String::new(),
         };
-        assert_ne!(
-            gallery_preview_cache_key(url, &anonymous, Some(&proxy)),
-            Some(base),
+        assert!(
+            gallery_preview_cache_key(url, &anonymous, Some(&proxy)) != Some(base),
             "a proxy can change what the extractor returns"
         );
     }
@@ -629,16 +627,16 @@ mod tests {
         let second_key =
             gallery_preview_cache_key(url, &cache_auth(Some(second.clone()), None, None), None)
                 .expect("handoff key");
-        assert_eq!(
-            first_key, second_key,
+        assert!(
+            first_key == second_key,
             "a new staged path with the same cookies must reuse the probe"
         );
 
         std::fs::write(&second, b"# Netscape HTTP Cookie File\n").expect("changed jar");
-        assert_ne!(
+        assert!(
             gallery_preview_cache_key(url, &cache_auth(Some(second), None, None), None)
-                .expect("handoff key"),
-            first_key,
+                .expect("handoff key")
+                != first_key,
             "changed cookies must invalidate the probe"
         );
 
@@ -670,7 +668,7 @@ mod tests {
         }];
         gallery_preview_cache_insert(key.clone(), &items);
         let cached = gallery_preview_cache_get(&key).expect("cache hit");
-        assert_eq!(cached.as_ref().map(|items| items.len()), Some(1));
+        assert_eq!(cached.len(), 1);
 
         GALLERY_PREVIEW_CACHE.lock().expect("cache lock").insert(
             key.clone(),

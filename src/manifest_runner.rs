@@ -169,10 +169,8 @@ fn subtitle_mux_unsupported(log: &str) -> bool {
 
 /// Whether FFmpeg rejected the input presentation rather than its output destination.
 fn ffmpeg_rejected_input(log: &str) -> bool {
-    let log = log.to_ascii_lowercase();
-    ["invalid data found when processing input"]
-        .iter()
-        .any(|needle| log.contains(needle))
+    log.to_ascii_lowercase()
+        .contains("invalid data found when processing input")
 }
 
 /// Classify a failed FFmpeg pass: unsupported source media falls back to yt-dlp,
@@ -1841,7 +1839,11 @@ async fn finalize_manifest_download(
     }
     // Separate HLS rendition inputs must retain their common source PTS clock.
     // The same applies to raw destination parts assembled from those renditions.
-    let preserve_hls_input_timestamps = has_separate_hls_audio;
+    let timestamp_policy = if has_separate_hls_audio {
+        InputTimestampPolicy::Preserve
+    } else {
+        InputTimestampPolicy::Normalize
+    };
     let video_input = if destination_parts {
         crate::manifest_destination::part_path_async(
             staging.to_path_buf(),
@@ -1993,7 +1995,7 @@ async fn finalize_manifest_download(
             path,
             timestamp_offset: audio_timestamp_offset.as_deref(),
         }),
-        preserve_hls_input_timestamps,
+        timestamp_policy,
         SubtitleOutput {
             input: subtitle_input.as_deref(),
             embed: embed_subtitles,
@@ -4078,12 +4080,20 @@ async fn run_ffmpeg(
             path,
             timestamp_offset: None,
         }),
-        false,
+        InputTimestampPolicy::Normalize,
         subtitles,
         output,
         abort,
     )
     .await
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum InputTimestampPolicy {
+    /// Preserve the shared source PTS clock across separate HLS renditions.
+    Preserve,
+    /// Let FFmpeg apply its normal output timestamp handling.
+    Normalize,
 }
 
 fn mpegts_embedded_subtitle_error() -> ManifestRunError {
@@ -4097,7 +4107,7 @@ async fn run_ffmpeg_with_offsets(
     ffmpeg: &Path,
     video_input: FfmpegInput<'_>,
     audio_input: Option<FfmpegInput<'_>>,
-    copy_input_timestamps: bool,
+    timestamp_policy: InputTimestampPolicy,
     subtitles: SubtitleOutput<'_>,
     output: &Path,
     abort: &mut tokio::sync::oneshot::Receiver<crate::video::StopIntent>,
@@ -4112,7 +4122,7 @@ async fn run_ffmpeg_with_offsets(
         add_hls_staging_options(&mut command);
     }
     command.arg("-hide_banner").arg("-nostdin").arg("-n");
-    if copy_input_timestamps {
+    if timestamp_policy == InputTimestampPolicy::Preserve {
         command.arg("-copyts");
     }
     if let Some(offset) = video_input.timestamp_offset {
@@ -4689,7 +4699,7 @@ segment-2.m4s
                 timestamp_offset: None,
             },
             None,
-            false,
+            InputTimestampPolicy::Normalize,
             SubtitleOutput {
                 input: Some(Path::new("subtitles.vtt")),
                 embed: true,

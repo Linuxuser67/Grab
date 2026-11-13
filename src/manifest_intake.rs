@@ -1691,14 +1691,14 @@ pub(crate) async fn refresh_hls_content_steering(
     steering: &mut crate::manifest::HlsContentSteering,
 ) -> Result<Option<crate::manifest_types::ManifestLookup>, ManifestIntakeError> {
     let proxy_configured = steering.proxy_configured;
-    refresh_hls_content_steering_with_policy(
+    Ok(refresh_hls_content_steering_with_policy(
         client,
         master_url,
         steering,
         ManifestTransportPolicy::HttpsOnly,
         proxy_configured,
     )
-    .await
+    .await)
 }
 
 /// Refresh steering metadata with a short budget in the live playlist loop.
@@ -1742,7 +1742,7 @@ async fn refresh_hls_content_steering_with_timeout_and_policy(
     )
     .await
     {
-        Ok(result) => result,
+        Ok(result) => Ok(result),
         Err(_) => {
             tracing::debug!(
                 host = %steering.reload_url.host_str().unwrap_or_default(),
@@ -1768,16 +1768,16 @@ async fn refresh_hls_content_steering_with_policy(
     steering: &mut crate::manifest::HlsContentSteering,
     transport_policy: ManifestTransportPolicy,
     proxy_configured: bool,
-) -> Result<Option<crate::manifest_types::ManifestLookup>, ManifestIntakeError> {
+) -> Option<crate::manifest_types::ManifestLookup> {
     if !steering
         .refresh_at
         .is_some_and(|deadline| deadline <= Instant::now())
     {
-        return Ok(None);
+        return None;
     }
     let Some(base_master) = steering.base_master.as_deref().cloned() else {
         schedule_hls_steering_retry(steering);
-        return Ok(None);
+        return None;
     };
     let master_url = match steering
         .master_url
@@ -1787,7 +1787,7 @@ async fn refresh_hls_content_steering_with_policy(
         Some(url) => url,
         None => {
             schedule_hls_steering_retry(steering);
-            return Ok(None);
+            return None;
         }
     };
     let mut snapshot = steering.clone();
@@ -1811,7 +1811,7 @@ async fn refresh_hls_content_steering_with_policy(
                 "HLS Content Steering refresh failed; retaining current Pathway"
             );
             schedule_hls_steering_retry(steering);
-            return Ok(None);
+            return None;
         }
     };
     steering.public_host_leases = snapshot.public_host_leases.clone();
@@ -1824,7 +1824,7 @@ async fn refresh_hls_content_steering_with_policy(
                 "HLS Content Steering refresh was invalid; retaining current Pathway"
             );
             schedule_hls_steering_retry(steering);
-            return Ok(None);
+            return None;
         }
     };
     let reload_url = match resolve_hls_steering_reload_url(
@@ -1840,7 +1840,7 @@ async fn refresh_hls_content_steering_with_policy(
                 "HLS Content Steering RELOAD-URI was rejected; retaining current Pathway"
             );
             schedule_hls_steering_retry(steering);
-            return Ok(None);
+            return None;
         }
     };
 
@@ -1851,7 +1851,7 @@ async fn refresh_hls_content_steering_with_policy(
             "refreshed HLS Content Steering identities are invalid; retaining current Pathway"
         );
         schedule_hls_steering_retry(steering);
-        return Ok(None);
+        return None;
     }
     let mut priority = manifest.pathway_priority.clone();
     if let Some(active) = snapshot.active_pathway_id.as_ref() {
@@ -1870,7 +1870,7 @@ async fn refresh_hls_content_steering_with_policy(
             "refreshed HLS Content Steering Pathway is unavailable; retaining current Pathway"
         );
         schedule_hls_steering_retry(steering);
-        return Ok(None);
+        return None;
     }
     inherit_hls_master_query_parameters(&master_url, &mut master);
     if let Err(error) = validate_hls_stable_track_ids(&master) {
@@ -1879,12 +1879,12 @@ async fn refresh_hls_content_steering_with_policy(
             "refreshed HLS Content Steering tracks are invalid; retaining current Pathway"
         );
         schedule_hls_steering_retry(steering);
-        return Ok(None);
+        return None;
     }
 
     let Some(mut next_state) = master.content_steering.take() else {
         schedule_hls_steering_retry(steering);
-        return Ok(None);
+        return None;
     };
     next_state.active_pathway_id = master
         .variants
@@ -1896,10 +1896,10 @@ async fn refresh_hls_content_steering_with_policy(
     *steering = next_state.clone();
     master.content_steering = Some(next_state);
 
-    Ok(Some(crate::manifest_types::ManifestLookup {
+    Some(crate::manifest_types::ManifestLookup {
         source_url: master_url.to_string(),
         manifest: crate::manifest_types::NativeManifest::HlsMaster(Box::new(master)),
-    }))
+    })
 }
 
 /// Attach the master's signed query only to selected child URLs on the same

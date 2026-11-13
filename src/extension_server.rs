@@ -2979,6 +2979,22 @@ mod tests {
     }
 
     #[test]
+    fn handoff_cookie_hash_is_content_based_and_rejects_oversized_files() {
+        let directory = tempfile::tempdir().expect("temporary directory");
+        let first = directory.path().join("first.cookies");
+        let second = directory.path().join("second.cookies");
+        let oversized = directory.path().join("oversized.cookies");
+        let contents = b"# Netscape HTTP Cookie File\nexample.com\tFALSE\t/\tTRUE\t0\tc\tv\n";
+        std::fs::write(&first, contents).expect("first cookie file");
+        std::fs::write(&second, contents).expect("second cookie file");
+        assert_eq!(handoff_cookie_hash(&first), handoff_cookie_hash(&second));
+
+        std::fs::write(&oversized, vec![b'x'; MAX_BODY_BYTES + 1])
+            .expect("oversized cookie file");
+        assert_eq!(handoff_cookie_hash(&oversized), None);
+    }
+
+    #[test]
     fn write_handoff_cookies_refuses_field_injection() {
         let url = "https://example.com/";
         for bad in [

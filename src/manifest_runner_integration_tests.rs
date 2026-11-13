@@ -1726,7 +1726,7 @@ async fn llhls_mapless_parts_are_staged_without_packet_sniffing() {
 }
 
 #[tokio::test]
-async fn llhls_mapless_non_transport_stream_part_is_rejected_before_commit() {
+async fn llhls_mapless_non_transport_stream_part_is_staged_for_ffmpeg() {
     let root = TempRoot::new("llhls-mapless-invalid");
     let video_dir = root.path().join("video");
     tokio::fs::create_dir_all(&video_dir)
@@ -1758,7 +1758,7 @@ async fn llhls_mapless_non_transport_stream_part_is_rejected_before_commit() {
     let downloaded = Arc::new(AtomicU64::new(0));
     let (_stop_tx, mut abort) = tokio::sync::oneshot::channel();
 
-    assert!(matches!(
+    assert_eq!(
         apply_live_hls_snapshot(
             &client,
             &plan,
@@ -1769,15 +1769,28 @@ async fn llhls_mapless_non_transport_stream_part_is_rejected_before_commit() {
             &mut abort,
             0,
         )
-        .await,
-        Err(ManifestRunError::Unsupported(_))
-    ));
+        .await
+        .expect("stage mapless media part without packet sniffing"),
+        LiveHlsSnapshotOutcome::Committed
+    );
     wait_for_fixture_server(server).await;
-    assert_eq!(track.accumulator.segment_count(), 0);
-    assert!(
-        tokio::fs::symlink_metadata(video_dir.join("local.m3u8"))
+    assert_eq!(track.accumulator.segment_count(), 1);
+    let local = m3u8_rs::parse_media_playlist_res(
+        &tokio::fs::read(video_dir.join("local.m3u8"))
             .await
-            .is_err()
+            .expect("read staged mapless playlist"),
+    )
+    .expect("parse staged mapless playlist");
+    assert!(local.segments[0].map.is_none());
+    assert_eq!(
+        tokio::fs::read(video_dir.join(&local.segments[0].uri))
+            .await
+            .expect("read staged non-transport-stream part"),
+        b"not an MPEG-TS fragment"
+    );
+    assert_eq!(
+        downloaded.load(Ordering::Relaxed),
+        b"not an MPEG-TS fragment".len() as u64
     );
 }
 

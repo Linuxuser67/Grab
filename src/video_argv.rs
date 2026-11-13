@@ -402,7 +402,7 @@ pub(crate) fn playlist_download_argv(
         &mut args,
         "--progress-template",
         format!(
-            "download:@GRAB:{}:PROGRESS;%(info.id)s;%(info.playlist_index)s;%(progress.status)s;%(progress.downloaded_bytes)s;%(progress.total_bytes)s;%(progress.total_bytes_estimate)s",
+            "download:@GRAB:{}:PROGRESS\t%(info.id)j\t%(info.playlist_index)j\t%(progress.status)j\t%(progress.downloaded_bytes)j\t%(progress.total_bytes)j\t%(progress.total_bytes_estimate)j",
             selection.event_nonce
         ),
     )?;
@@ -410,7 +410,7 @@ pub(crate) fn playlist_download_argv(
         &mut args,
         "after_move:filepath",
         format!(
-            "after_move:@GRAB:{}:DONE;%(id)s;%(playlist_index)s;%(filepath)s",
+            "after_move:@GRAB:{}:DONE\t%(id)j\t%(playlist_index)j\t%(filepath)j",
             selection.event_nonce
         ),
     )?;
@@ -422,7 +422,7 @@ pub(crate) fn playlist_download_argv(
         [
             "--print".to_string(),
             format!(
-                "before_dl:@GRAB:{}:START;%(id)s;%(playlist_index)s;%(filename)s",
+                "before_dl:@GRAB:{}:START\t%(id)j\t%(playlist_index)j\t%(filename)j",
                 selection.event_nonce
             ),
         ],

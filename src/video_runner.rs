@@ -7,7 +7,7 @@ use crate::runtime::lock_recover;
 use crate::video_argv::{
     VideoJob, apply_proxy_env, container_truth_name, dash_merge_argv, fallback_to_live_edge,
     hls_download_argv, live_capture_argv, live_from_start_unsupported, live_remux_argv,
-    merge_output_ext, playlist_download_argv, playlist_scope_args, proxy_cli_args,
+    merge_output_ext, playlist_download_argv, playlist_scope_args, proxy_cli_args, PlaylistRunSelection,
     unified_download_argv, unified_format_spec, unified_output_template, unified_staging_prefix,
     write_manifest,
 };
@@ -287,8 +287,10 @@ async fn run_video_playlist_download_inner(
         &merge_ext,
         &libs.ffmpeg,
         &canonical_dest,
-        &selected_indices,
-        &event_nonce,
+        PlaylistRunSelection {
+            indices: &selected_indices,
+            event_nonce: &event_nonce,
+        },
     )?;
     let guarded_proxy = crate::video_spawn::guard_untrusted_args(&argv)?;
     let mut cmd = ytdlp_command(&libs.youtube).await;

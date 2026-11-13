@@ -31,16 +31,22 @@ pub(super) struct RepresentationRoleMetadata {
 /// Representation metadata for one Period, grouped by AdaptationSet.
 pub(super) type PeriodRepresentationMetadata = Vec<Vec<RepresentationRoleMetadata>>;
 
-/// Representation metadata and SegmentList compatibility flags collected in one bounded XML pass.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub(super) struct RepresentationMetadata {
-    /// Representation metadata grouped in MPD Period source order.
-    pub(super) periods: Vec<PeriodRepresentationMetadata>,
+/// Compatibility facts gathered while parsing all DASH SegmentList elements.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub(super) struct SegmentListCompatibility {
     pub(super) has_unsupported_segment_list_timing_attributes: bool,
     pub(super) has_nonzero_segment_list_presentation_time_offset: bool,
     pub(super) has_invalid_segment_list_presentation_time_offset: bool,
     pub(super) has_nondefault_segment_list_start_number: bool,
     pub(super) has_invalid_segment_list_start_number: bool,
+}
+
+/// Representation metadata and SegmentList compatibility flags collected in one bounded XML pass.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(super) struct RepresentationMetadata {
+    /// Representation metadata grouped in MPD Period source order.
+    pub(super) periods: Vec<PeriodRepresentationMetadata>,
+    pub(super) segment_list: SegmentListCompatibility,
 }
 
 #[derive(Default)]
@@ -51,11 +57,7 @@ struct MetadataState {
     adaptation_list_pto: Option<u64>,
     period_list_ato: Option<String>,
     adaptation_list_ato: Option<String>,
-    has_unsupported_segment_list_timing_attributes: bool,
-    has_nonzero_segment_list_presentation_time_offset: bool,
-    has_invalid_segment_list_presentation_time_offset: bool,
-    has_nondefault_segment_list_start_number: bool,
-    has_invalid_segment_list_start_number: bool,
+    segment_list: SegmentListCompatibility,
 }
 
 #[derive(Clone, Copy)]
@@ -118,14 +120,7 @@ pub(super) fn representation_metadata(
 
     Some(RepresentationMetadata {
         periods,
-        has_unsupported_segment_list_timing_attributes: state
-            .has_unsupported_segment_list_timing_attributes,
-        has_nonzero_segment_list_presentation_time_offset: state
-            .has_nonzero_segment_list_presentation_time_offset,
-        has_invalid_segment_list_presentation_time_offset: state
-            .has_invalid_segment_list_presentation_time_offset,
-        has_nondefault_segment_list_start_number: state.has_nondefault_segment_list_start_number,
-        has_invalid_segment_list_start_number: state.has_invalid_segment_list_start_number,
+        segment_list: state.segment_list,
     })
 }
 
@@ -148,38 +143,16 @@ fn push_element(
         ResolveResult::Bound(namespace) if namespace.into_inner() == DASH_MPD_NAMESPACE
     );
 
-    // Collect compatibility flags while the representation metadata pass is
-    // already visiting each XML node. These checks deliberately cover every
-    // DASH SegmentList, not only the locations modeled for inheritance below.
-    if in_mpd_namespace && name == "SegmentList" {
-        for attribute in start.attributes() {
-            let attribute = attribute.ok()?;
-            let key = attribute.key.as_ref();
-            if key == "duration"
-                || key == "availabilityTimeComplete"
-                || key == "eptDelta"
-                || key == "pbDelta"
-            {
-                state.has_unsupported_segment_list_timing_attributes = true;
-            } else if key == "presentationTimeOffset" {
-                let value = attribute.normalized_value(XmlVersion::Implicit1_0).ok()?;
-                match value.parse::<u64>() {
-                    Ok(offset) => {
-                        state.has_nonzero_segment_list_presentation_time_offset |= offset != 0;
-                    }
-                    Err(_) => state.has_invalid_segment_list_presentation_time_offset = true,
-                }
-            } else if key == "startNumber" {
-                let value = attribute.normalized_value(XmlVersion::Implicit1_0).ok()?;
-                match value.parse::<u64>() {
-                    Ok(number) => {
-                        state.has_nondefault_segment_list_start_number |= number != 1;
-                    }
-                    Err(_) => state.has_invalid_segment_list_start_number = true,
-                }
-            }
-        }
-    }
+    // Parse each DASH SegmentList's attributes once. Compatibility facts are
+    // retained for every SegmentList; inherited timing values are consumed
+    // below only for Period/AdaptationSet/Representation direct children.
+    let segment_list = if in_mpd_namespace && name == "SegmentList" {
+        let attributes = segment_list_attributes(start)?;
+        state.segment_list.merge(&attributes.compatibility);
+        Some(attributes)
+    } else {
+        None
+    };
 
     let element = match (stack.last().copied(), name, in_mpd_namespace) {
         (None, "MPD", true) => Element::Mpd,
@@ -213,7 +186,7 @@ fn push_element(
                 .last_mut()?
                 .last_mut()?
                 .push(RepresentationRoleMetadata {
-                    id: representation_id(start)?,
+                    id: representation_id(start).ok()?,
                     is_main: false,
                     segment_list_presentation_time_offset: state.adaptation_list_pto,
                     segment_list_availability_time_offset: state.adaptation_list_ato.clone(),
@@ -227,30 +200,33 @@ fn push_element(
             Element::Other
         }
         (Some(Element::Period), "SegmentList", true) => {
-            if let Some(offset) = segment_list_presentation_time_offset(start)? {
-                state.period_list_pto = Some(offset);
+            let attributes = segment_list.as_ref()?;
+            if let Some(offset) = attributes.presentation_time_offset.as_ref().ok()?.as_ref() {
+                state.period_list_pto = Some(*offset);
             }
-            if let Some(offset) = segment_list_availability_time_offset(start)? {
-                state.period_list_ato = Some(offset);
+            if let Some(offset) = &attributes.availability_time_offset {
+                state.period_list_ato = Some(offset.clone());
             }
             Element::Other
         }
         (Some(Element::AdaptationSet), "SegmentList", true) => {
-            if let Some(offset) = segment_list_presentation_time_offset(start)? {
-                state.adaptation_list_pto = Some(offset);
+            let attributes = segment_list.as_ref()?;
+            if let Some(offset) = attributes.presentation_time_offset.as_ref().ok()?.as_ref() {
+                state.adaptation_list_pto = Some(*offset);
             }
-            if let Some(offset) = segment_list_availability_time_offset(start)? {
-                state.adaptation_list_ato = Some(offset);
+            if let Some(offset) = &attributes.availability_time_offset {
+                state.adaptation_list_ato = Some(offset.clone());
             }
             Element::Other
         }
         (Some(Element::Representation), "SegmentList", true) => {
+            let attributes = segment_list.as_ref()?;
             let metadata = periods.last_mut()?.last_mut()?.last_mut()?;
-            if let Some(offset) = segment_list_presentation_time_offset(start)? {
-                metadata.segment_list_presentation_time_offset = Some(offset);
+            if let Some(offset) = attributes.presentation_time_offset.as_ref().ok()?.as_ref() {
+                metadata.segment_list_presentation_time_offset = Some(*offset);
             }
-            if let Some(offset) = segment_list_availability_time_offset(start)? {
-                metadata.segment_list_availability_time_offset = Some(offset);
+            if let Some(offset) = &attributes.availability_time_offset {
+                metadata.segment_list_availability_time_offset = Some(offset.clone());
             }
             Element::Other
         }
@@ -260,44 +236,102 @@ fn push_element(
     Some(())
 }
 
-fn segment_list_presentation_time_offset(start: &BytesStart<'_>) -> Option<Option<u64>> {
-    let mut offset = None;
-    for attribute in start.attributes() {
-        let attribute = attribute.ok()?;
-        if attribute.key.as_ref() == "presentationTimeOffset" {
-            let value = attribute.normalized_value(XmlVersion::Implicit1_0).ok()?;
-            offset = Some(value.parse::<u64>().ok()?);
-        }
-    }
-    Some(offset)
+struct SegmentListAttributes {
+    presentation_time_offset: Result<Option<u64>, ()>,
+    availability_time_offset: Option<String>,
+    compatibility: SegmentListCompatibility,
 }
 
-fn segment_list_availability_time_offset(start: &BytesStart<'_>) -> Option<Option<String>> {
-    let mut offset = None;
+fn segment_list_attributes(start: &BytesStart<'_>) -> Option<SegmentListAttributes> {
+    let mut attributes = SegmentListAttributes {
+        presentation_time_offset: Ok(None),
+        availability_time_offset: None,
+        compatibility: SegmentListCompatibility::default(),
+    };
     for attribute in start.attributes() {
         let attribute = attribute.ok()?;
-        if attribute.key.as_ref() == "availabilityTimeOffset" {
-            let value = attribute.normalized_value(XmlVersion::Implicit1_0).ok()?;
-            offset = Some(value.into_owned());
+        match attribute.key.as_ref() {
+            "duration" | "availabilityTimeComplete" | "eptDelta" | "pbDelta" => {
+                attributes
+                    .compatibility
+                    .has_unsupported_segment_list_timing_attributes = true;
+            }
+            "presentationTimeOffset" => {
+                let value = attribute.normalized_value(XmlVersion::Implicit1_0).ok()?;
+                match value.parse::<u64>() {
+                    Ok(offset) => {
+                        attributes
+                            .compatibility
+                            .has_nonzero_segment_list_presentation_time_offset |= offset != 0;
+                        if !matches!(attributes.presentation_time_offset, Err(())) {
+                            attributes.presentation_time_offset = Ok(Some(offset));
+                        }
+                    }
+                    Err(_) => {
+                        attributes
+                            .compatibility
+                            .has_invalid_segment_list_presentation_time_offset = true;
+                        attributes.presentation_time_offset = Err(());
+                    }
+                }
+            }
+            "availabilityTimeOffset" => {
+                attributes.availability_time_offset = Some(
+                    attribute
+                        .normalized_value(XmlVersion::Implicit1_0)
+                        .ok()?
+                        .into_owned(),
+                );
+            }
+            "startNumber" => {
+                let value = attribute.normalized_value(XmlVersion::Implicit1_0).ok()?;
+                match value.parse::<u64>() {
+                    Ok(number) => {
+                        attributes
+                            .compatibility
+                            .has_nondefault_segment_list_start_number |= number != 1;
+                    }
+                    Err(_) => {
+                        attributes
+                            .compatibility
+                            .has_invalid_segment_list_start_number = true;
+                    }
+                }
+            }
+            _ => {}
         }
     }
-    Some(offset)
+    Some(attributes)
 }
 
-fn representation_id(start: &BytesStart<'_>) -> Option<Option<String>> {
+impl SegmentListCompatibility {
+    fn merge(&mut self, other: &Self) {
+        self.has_unsupported_segment_list_timing_attributes |=
+            other.has_unsupported_segment_list_timing_attributes;
+        self.has_nonzero_segment_list_presentation_time_offset |=
+            other.has_nonzero_segment_list_presentation_time_offset;
+        self.has_invalid_segment_list_presentation_time_offset |=
+            other.has_invalid_segment_list_presentation_time_offset;
+        self.has_nondefault_segment_list_start_number |=
+            other.has_nondefault_segment_list_start_number;
+        self.has_invalid_segment_list_start_number |= other.has_invalid_segment_list_start_number;
+    }
+}
+
+fn representation_id(start: &BytesStart<'_>) -> Result<Option<String>, ()> {
     let mut id = None;
     for attribute in start.attributes() {
-        let attribute = attribute.ok()?;
+        let attribute = attribute.map_err(|_| ())?;
         if attribute.key.as_ref() == "id" {
             id = Some(
                 attribute
                     .normalized_value(XmlVersion::Implicit1_0)
-                    .ok()?
+                    .map_err(|_| ())?
                     .into_owned(),
             );
         }
     }
-    Some(id)
+    Ok(id)
 }
 
 fn is_main_role(start: &BytesStart<'_>) -> Option<bool> {
@@ -431,21 +465,24 @@ mod tests {
                 r#"<MPD xmlns="urn:mpeg:dash:schema:mpd:2011"><Period><AdaptationSet><SegmentList {attribute}/></AdaptationSet></Period></MPD>"#
             );
             assert_eq!(
-                super::representation_metadata(body.as_bytes(), 1)
-                    .map(|metadata| metadata.has_unsupported_segment_list_timing_attributes),
+                super::representation_metadata(body.as_bytes(), 1).map(|metadata| metadata
+                    .segment_list
+                    .has_unsupported_segment_list_timing_attributes),
                 Some(true),
                 "{attribute}"
             );
         }
         assert_eq!(
-            super::representation_metadata(supported, 1)
-                .map(|metadata| metadata.has_unsupported_segment_list_timing_attributes),
+            super::representation_metadata(supported, 1).map(|metadata| metadata
+                .segment_list
+                .has_unsupported_segment_list_timing_attributes),
             Some(false)
         );
         let finite_availability_offset = br#"<MPD xmlns="urn:mpeg:dash:schema:mpd:2011"><Period><AdaptationSet><SegmentList availabilityTimeOffset="1"/></AdaptationSet></Period></MPD>"#;
         assert_eq!(
-            super::representation_metadata(finite_availability_offset, 1)
-                .map(|metadata| metadata.has_unsupported_segment_list_timing_attributes),
+            super::representation_metadata(finite_availability_offset, 1).map(|metadata| metadata
+                .segment_list
+                .has_unsupported_segment_list_timing_attributes),
             Some(false)
         );
     }
@@ -455,13 +492,15 @@ mod tests {
         let default_number = br#"<MPD xmlns="urn:mpeg:dash:schema:mpd:2011"><Period><AdaptationSet><SegmentList startNumber="1"/></AdaptationSet></Period></MPD>"#;
         let nondefault_number = br#"<mpd:MPD xmlns:mpd="urn:mpeg:dash:schema:mpd:2011"><mpd:Period><mpd:AdaptationSet><mpd:SegmentList startNumber="42"/></mpd:AdaptationSet></mpd:Period></mpd:MPD>"#;
         assert_eq!(
-            super::representation_metadata(default_number, 1)
-                .map(|metadata| metadata.has_nondefault_segment_list_start_number),
+            super::representation_metadata(default_number, 1).map(|metadata| metadata
+                .segment_list
+                .has_nondefault_segment_list_start_number),
             Some(false)
         );
         assert_eq!(
-            super::representation_metadata(nondefault_number, 1)
-                .map(|metadata| metadata.has_nondefault_segment_list_start_number),
+            super::representation_metadata(nondefault_number, 1).map(|metadata| metadata
+                .segment_list
+                .has_nondefault_segment_list_start_number),
             Some(true)
         );
     }
@@ -520,22 +559,25 @@ mod tests {
     fn detects_nonzero_segment_list_presentation_time_offsets() {
         let nonzero = br#"<MPD xmlns="urn:mpeg:dash:schema:mpd:2011"><Period><AdaptationSet><SegmentList presentationTimeOffset="9000"/></AdaptationSet></Period></MPD>"#;
         assert_eq!(
-            super::representation_metadata(nonzero, 1)
-                .map(|metadata| metadata.has_nonzero_segment_list_presentation_time_offset),
+            super::representation_metadata(nonzero, 1).map(|metadata| metadata
+                .segment_list
+                .has_nonzero_segment_list_presentation_time_offset),
             Some(true)
         );
 
         let zero = br#"<MPD xmlns="urn:mpeg:dash:schema:mpd:2011"><Period><AdaptationSet><SegmentList presentationTimeOffset="0"/></AdaptationSet></Period></MPD>"#;
         assert_eq!(
-            super::representation_metadata(zero, 1)
-                .map(|metadata| metadata.has_nonzero_segment_list_presentation_time_offset),
+            super::representation_metadata(zero, 1).map(|metadata| metadata
+                .segment_list
+                .has_nonzero_segment_list_presentation_time_offset),
             Some(false)
         );
 
         let foreign = br#"<MPD xmlns="urn:mpeg:dash:schema:mpd:2011" xmlns:foreign="urn:example:foreign"><Period><AdaptationSet><foreign:SegmentList presentationTimeOffset="9000"/></AdaptationSet></Period></MPD>"#;
         assert_eq!(
-            super::representation_metadata(foreign, 1)
-                .map(|metadata| metadata.has_nonzero_segment_list_presentation_time_offset),
+            super::representation_metadata(foreign, 1).map(|metadata| metadata
+                .segment_list
+                .has_nonzero_segment_list_presentation_time_offset),
             Some(false)
         );
     }
@@ -544,14 +586,28 @@ mod tests {
     fn records_invalid_dynamic_segment_list_numbers_without_rejecting_static_metadata() {
         let invalid_offsets = br#"<MPD xmlns="urn:mpeg:dash:schema:mpd:2011"><Period><AdaptationSet><Other><SegmentList presentationTimeOffset="invalid"/></Other></AdaptationSet></Period></MPD>"#;
         let invalid_start_number = br#"<MPD xmlns="urn:mpeg:dash:schema:mpd:2011"><Period><AdaptationSet><Other><SegmentList startNumber="invalid"/></Other></AdaptationSet></Period></MPD>"#;
+        let invalid_inherited_offset = br#"<MPD xmlns="urn:mpeg:dash:schema:mpd:2011"><Period><AdaptationSet><SegmentList presentationTimeOffset="invalid"/></AdaptationSet></Period></MPD>"#;
+
+        assert!(
+            representation_metadata(invalid_inherited_offset, 1).is_none(),
+            "an invalid inherited offset cannot be used to plan a representation"
+        );
 
         let offset_metadata =
             representation_metadata(invalid_offsets, 1).expect("bounded metadata scan");
-        assert!(offset_metadata.has_invalid_segment_list_presentation_time_offset);
+        assert!(
+            offset_metadata
+                .segment_list
+                .has_invalid_segment_list_presentation_time_offset
+        );
 
         let start_metadata =
             representation_metadata(invalid_start_number, 1).expect("bounded metadata scan");
-        assert!(start_metadata.has_invalid_segment_list_start_number);
+        assert!(
+            start_metadata
+                .segment_list
+                .has_invalid_segment_list_start_number
+        );
     }
 
     #[test]
@@ -567,8 +623,9 @@ mod tests {
         );
 
         assert_eq!(
-            super::representation_metadata(nested.as_bytes(), 1)
-                .map(|metadata| metadata.has_nonzero_segment_list_presentation_time_offset),
+            super::representation_metadata(nested.as_bytes(), 1).map(|metadata| metadata
+                .segment_list
+                .has_nonzero_segment_list_presentation_time_offset),
             None
         );
     }

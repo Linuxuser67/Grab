@@ -1264,55 +1264,61 @@ fn capture_outcome_for_stop(
     }
 }
 
+#[derive(Clone, Copy)]
+struct LiveHlsSnapshotContext<'a> {
+    staging_dir: &'a Path,
+    destination_dir: &'a Path,
+    downloaded: &'a AtomicU64,
+    tx: &'a tokio::sync::mpsc::UnboundedSender<EngineMsg>,
+    output: LiveHlsOutput,
+    finish_video_only: bool,
+}
+
 async fn handle_live_hls_snapshot_outcome(
     outcome: LiveHlsSnapshotOutcome,
     video: &LiveHlsTrack,
-    staging_dir: &Path,
-    destination_dir: &Path,
-    downloaded: &AtomicU64,
-    tx: &tokio::sync::mpsc::UnboundedSender<EngineMsg>,
-    output: LiveHlsOutput,
-    finish_video_only: bool,
+    context: LiveHlsSnapshotContext<'_>,
 ) -> Result<Option<LiveHlsCapture>, ManifestRunError> {
     match outcome {
         LiveHlsSnapshotOutcome::Committed => {
             ensure_manifest_mux_spaces(
-                staging_dir,
-                destination_dir,
-                downloaded.load(Ordering::Relaxed),
+                context.staging_dir,
+                context.destination_dir,
+                context.downloaded.load(Ordering::Relaxed),
             )?;
         }
         LiveHlsSnapshotOutcome::RetryScheduled => {}
         LiveHlsSnapshotOutcome::Stopped(intent) => {
             return Ok(Some(LiveHlsCapture::new(
-                capture_outcome_for_stop(intent, finish_video_only),
-                output,
+                capture_outcome_for_stop(intent, context.finish_video_only),
+                context.output,
             )));
         }
         LiveHlsSnapshotOutcome::ContinuityLost => {
             if video.accumulator.segment_count() == 0 {
                 return Ok(Some(LiveHlsCapture::new(
                     LiveHlsCaptureOutcome::Discard,
-                    output,
+                    context.output,
                 )));
             }
             persist_unrecoverable_live_capture(
-                staging_dir,
+                context.staging_dir,
                 ManifestKind::Hls,
                 "HLS playlist continuity could not be verified",
                 video.accumulator.resource_bytes(),
-                downloaded,
-                tx,
+                context.downloaded,
+                context.tx,
             )
             .await?;
             return Ok(Some(LiveHlsCapture::new(
                 LiveHlsCaptureOutcome::Unrecoverable,
-                output,
+                context.output,
             )));
         }
     }
     Ok(None)
 }
+
 
 #[expect(
     clippy::too_many_arguments,
@@ -1454,12 +1460,14 @@ pub(super) async fn run_live_hls_tracks(
     if let Some(capture) = handle_live_hls_snapshot_outcome(
         video_snapshot_outcome,
         &video,
-        staging_dir,
-        destination_dir,
-        downloaded,
-        tx,
-        output,
-        false,
+        LiveHlsSnapshotContext {
+            staging_dir,
+            destination_dir,
+            downloaded,
+            tx,
+            output,
+            finish_video_only: false,
+        },
     )
     .await?
     {
@@ -1495,12 +1503,14 @@ pub(super) async fn run_live_hls_tracks(
         if let Some(capture) = handle_live_hls_snapshot_outcome(
             audio_outcome,
             &video,
-            staging_dir,
-            destination_dir,
-            downloaded,
-            tx,
-            output,
-            true,
+            LiveHlsSnapshotContext {
+                staging_dir,
+                destination_dir,
+                downloaded,
+                tx,
+                output,
+                finish_video_only: true,
+            },
         )
         .await?
         {
@@ -1590,12 +1600,14 @@ pub(super) async fn run_live_hls_tracks(
             if let Some(capture) = handle_live_hls_snapshot_outcome(
                 video_poll_outcome,
                 &video,
-                staging_dir,
-                destination_dir,
-                downloaded,
-                tx,
-                output,
-                false,
+                LiveHlsSnapshotContext {
+                    staging_dir,
+                    destination_dir,
+                    downloaded,
+                    tx,
+                    output,
+                    finish_video_only: false,
+                },
             )
             .await?
             {
@@ -1626,12 +1638,14 @@ pub(super) async fn run_live_hls_tracks(
             if let Some(capture) = handle_live_hls_snapshot_outcome(
                 audio_poll_outcome,
                 &video,
-                staging_dir,
-                destination_dir,
-                downloaded,
-                tx,
-                output,
-                true,
+                LiveHlsSnapshotContext {
+                    staging_dir,
+                    destination_dir,
+                    downloaded,
+                    tx,
+                    output,
+                    finish_video_only: true,
+                },
             )
             .await?
             {

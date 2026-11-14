@@ -10435,8 +10435,7 @@ fn an_hls_leg_honours_a_discard_before_its_commit() {
 fn a_closed_stop_receiver_preserves_an_in_flight_live_capture() {
     use std::os::unix::fs::PermissionsExt as _;
 
-    let dir =
-        std::env::temp_dir().join(format!("grab-gate-closed-live-{}", std::process::id()));
+    let dir = std::env::temp_dir().join(format!("grab-gate-closed-live-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).unwrap();
 
@@ -10531,7 +10530,10 @@ sleep 30 & wait
         matches!(result, Ok(Some(size)) if size > 0),
         "a closed sender must preserve and deliver the in-flight capture: {result:?}"
     );
-    assert!(gate.was_delivered(), "the preserved capture must claim delivery");
+    assert!(
+        gate.was_delivered(),
+        "the preserved capture must claim delivery"
+    );
     assert_eq!(std::fs::read(&dest).unwrap(), b"tsbytes");
     let _ = std::fs::remove_dir_all(&dir);
 }

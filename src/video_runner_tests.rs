@@ -920,3 +920,105 @@ async fn video_resolution_stop_drops_the_pending_probe_future() {
         .await
         .expect("stop intent must drop the pending probe future");
 }
+
+#[cfg(unix)]
+#[tokio::test]
+async fn live_remux_does_not_overwrite_a_foreign_final_slot() {
+    use std::os::unix::fs::PermissionsExt as _;
+
+    let directory = tempfile::tempdir().expect("create remux test directory");
+    let ffmpeg = directory.path().join("fake-ffmpeg");
+    std::fs::write(&ffmpeg, "#!/bin/sh\nfor arg in \"$@\"; do output=\"$arg\"; done\nprintf partial > \"$output\"\ndest=\"${output%.part}\"\nprintf foreign > \"$dest\"\n")
+        .expect("write fake FFmpeg executable");
+    std::fs::set_permissions(&ffmpeg, std::fs::Permissions::from_mode(0o700))
+        .expect("make fake FFmpeg executable");
+    let source = directory.path().join("capture.ts");
+    std::fs::write(&source, b"source").expect("write fake capture");
+    let final_slot = directory.path().join("final.mp4");
+    let gate = AttemptGate::new();
+
+    let result = remux_live_capture(
+        &ffmpeg,
+        &source,
+        &final_slot,
+        false,
+        Duration::from_secs(5),
+        "https://example.com/live",
+        &gate,
+    )
+    .await;
+
+    assert!(result.is_err());
+    assert_eq!(std::fs::read(&final_slot).unwrap(), b"foreign");
+    assert!(!directory.path().join("final.mp4.part").exists());
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn discarding_during_live_remux_reaps_ffmpeg_and_removes_its_partial() {
+    use std::os::unix::fs::PermissionsExt as _;
+
+    let directory = tempfile::tempdir().expect("create remux test directory");
+    let ffmpeg = directory.path().join("fake-ffmpeg");
+    let script = "#!/bin/sh\nfor arg in \"$@\"; do output=\"$arg\"; done\nprintf partial > \"$output\"\nexec sleep 30\n";
+    std::fs::write(&ffmpeg, script).expect("write fake FFmpeg executable");
+    std::fs::set_permissions(&ffmpeg, std::fs::Permissions::from_mode(0o700))
+        .expect("make fake FFmpeg executable");
+    let source = directory.path().join("capture.ts");
+    std::fs::write(&source, b"source").expect("write fake capture");
+    let final_slot = directory.path().join("final.mp4");
+    let partial = directory.path().join("final.mp4.part");
+    let gate = AttemptGate::new();
+    let worker_gate = gate.clone();
+    let worker_ffmpeg = ffmpeg.clone();
+    let worker_source = source.clone();
+    let worker_final_slot = final_slot.clone();
+    let worker = tokio::spawn(async move {
+        remux_live_capture(
+            &worker_ffmpeg,
+            &worker_source,
+            &worker_final_slot,
+            false,
+            Duration::from_secs(30),
+            "https://example.com/live",
+            &worker_gate,
+        )
+        .await
+    });
+
+    let partial_ready = tokio::time::timeout(Duration::from_secs(3), async {
+        while !partial.exists() {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await;
+    if partial_ready.is_err() {
+        worker.abort();
+        let _ = worker.await;
+        panic!("fake FFmpeg must create its partial output");
+    }
+    if !gate.discard() {
+        worker.abort();
+        let _ = worker.await;
+        panic!("discard must win before remux publication");
+    }
+    let mut worker = worker;
+    let result = match tokio::time::timeout(Duration::from_secs(8), &mut worker).await {
+        Ok(joined) => joined.expect("remux task must not panic"),
+        Err(_) => {
+            worker.abort();
+            let _ = worker.await;
+            panic!("discard must stop the remux promptly");
+        }
+    };
+
+    assert!(result.is_err());
+    assert!(
+        !partial.exists(),
+        "quiescent discarded partial must be removed"
+    );
+    assert!(
+        !final_slot.exists(),
+        "discarded remux must not publish a final slot"
+    );
+}

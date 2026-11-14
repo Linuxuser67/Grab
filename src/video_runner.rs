@@ -2000,6 +2000,7 @@ pub(crate) async fn remux_live_capture(
     audio_only: bool,
     timeout: Duration,
     page_url: &str,
+    gate: &std::sync::Arc<AttemptGate>,
 ) -> Result<(), VideoError> {
     let mut partial = dest.as_os_str().to_os_string();
     partial.push(".part");
@@ -2011,13 +2012,26 @@ pub(crate) async fn remux_live_capture(
     let mut with_bsf = true;
     let mut repair_timestamps = false;
     loop {
-        // Never unlink the output path blindly: a foreign file may have
-        // appeared since the slot scan. ffmpeg runs without `-y` and will
-        // refuse an existing file rather than clobber it.
-        if tokio::fs::symlink_metadata(&partial).await.is_ok() {
-            return Err(VideoError::staging(
-                "remux temporary output already exists".to_string(),
-            ));
+        if !gate.is_active() {
+            return Err(VideoError::part_failed("attempt discarded"));
+        }
+        // Check both names: a foreign file may have appeared since the slot
+        // scan. FFmpeg writes only the .part path; the final slot is claimed
+        // below with a no-replace rename.
+        for candidate in [dest, partial.as_path()] {
+            match tokio::fs::symlink_metadata(candidate).await {
+                Ok(_) => {
+                    return Err(VideoError::staging(
+                        "remux temporary output already exists".to_string(),
+                    ));
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                Err(error) => {
+                    return Err(VideoError::staging(format!(
+                        "could not verify remux temporary output: {error}"
+                    )));
+                }
+            }
         }
         let mut cmd = tokio::process::Command::new(ffmpeg_bin);
         cmd.args(live_remux_argv(
@@ -2043,21 +2057,45 @@ pub(crate) async fn remux_live_capture(
             .take()
             .ok_or_else(|| VideoError::runtime("ffmpeg gave no log pipe"))?;
         let logs = drain_stderr_to_tail(stderr);
-        let status = match tokio::time::timeout(timeout, child.wait()).await {
-            Ok(Ok(status)) => {
+        // The attempt gate is synchronous, so poll its discard state while FFmpeg runs.
+        let mut cancellation_poll = tokio::time::interval(LIVE_REMUX_DISCARD_POLL_INTERVAL);
+        let wait_result = {
+            let wait = tokio::time::timeout(timeout, child.wait());
+            tokio::pin!(wait);
+            loop {
+                tokio::select! {
+                    biased;
+                    _ = cancellation_poll.tick() => {
+                        if !gate.is_active() {
+                            break None;
+                        }
+                    }
+                    result = &mut wait => break Some(result),
+                }
+            }
+        };
+        let status = match wait_result {
+            None => {
+                reap_child(&mut child, &mut group).await;
+                await_ytdlp_group_quiescence_or_abort(pgid, &[logs.abort_handle()]).await?;
+                logs.abort();
+                let _ = tokio::fs::remove_file(&partial).await;
+                return Err(VideoError::part_failed("attempt discarded"));
+            }
+            Some(Ok(Ok(status))) => {
                 // The leader is reaped; wait for any ffmpeg descendants before publishing the remux.
                 group.disarm();
                 await_ytdlp_group_quiescence_or_abort(pgid, &[logs.abort_handle()]).await?;
                 status
             }
-            Ok(Err(e)) => {
+            Some(Ok(Err(e))) => {
                 reap_child(&mut child, &mut group).await;
                 await_ytdlp_group_quiescence_or_abort(pgid, &[logs.abort_handle()]).await?;
                 join_drain(logs).await;
                 let _ = tokio::fs::remove_file(&partial).await;
                 return Err(VideoError::runtime(&e));
             }
-            Err(_) => {
+            Some(Err(_)) => {
                 reap_child(&mut child, &mut group).await;
                 await_ytdlp_group_quiescence_or_abort(pgid, &[logs.abort_handle()]).await?;
                 join_drain(logs).await;
@@ -2066,13 +2104,28 @@ pub(crate) async fn remux_live_capture(
             }
         };
         let log_tail = join_drain(logs).await.unwrap_or_default();
+        if !gate.is_active() {
+            let _ = tokio::fs::remove_file(&partial).await;
+            return Err(VideoError::part_failed("attempt discarded"));
+        }
         if status.success() {
             // Only now is this a recording: a crash before this point leaves a `.part`, which no sweep has to protect.
-            break match tokio::fs::rename(&partial, dest).await {
+            let partial_for_rename = partial.clone();
+            let dest_for_rename = dest.to_path_buf();
+            let rename_result = spawn_blocking_attempt(gate, move || {
+                crate::file_names::rename_noreplace(&partial_for_rename, &dest_for_rename)
+            })
+            .await
+            .map_err(|error| VideoError::runtime(&error))?;
+            break match rename_result {
                 Ok(()) => Ok(()),
-                Err(e) => {
+                Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
                     let _ = tokio::fs::remove_file(&partial).await;
-                    Err(VideoError::runtime(&e))
+                    Err(VideoError::exists())
+                }
+                Err(error) => {
+                    let _ = tokio::fs::remove_file(&partial).await;
+                    Err(VideoError::runtime(&error))
                 }
             };
         }
@@ -2209,6 +2262,8 @@ async fn drain_with_timeout(
         }
     }
 }
+
+const LIVE_REMUX_DISCARD_POLL_INTERVAL: Duration = Duration::from_millis(50);
 
 /// Wall-clock bound for the merge phase: merges are local ffmpeg work and
 /// typically stream-copies finishing in minutes, so an hour is generous even
@@ -3116,22 +3171,30 @@ pub(crate) async fn run_live_ytdlp(
         job.audio_only,
         timeout,
         page_url,
+        gate,
     )
     .await
     {
-        // The remux never materialized, so the recorded shell is the user's only
-        // copy: keep it for salvage, drop only the scratch around it.
+        // The remux helper owns its partial cleanup and only removes it after
+        // confirmed quiescence. Never unlink the reserved final slot here:
+        // another process may have claimed it since the reservation scan.
         let note = salvage_note(staging);
         sweep_live_capture(
             &out,
             &part,
             &state,
             staging,
-            Some(&final_tmp),
+            None,
             Staging::Sweep,
             Exit::RemuxFailed,
         )
         .await;
+        // The slot is no longer being attempted. Release only its lease; the
+        // final path and any unquiesced .part remain untouched.
+        release_remux_lease(&final_tmp).await;
+        if !gate.is_active() {
+            return Ok(None);
+        }
         return Err(e.with_suffix(note));
     }
     // The linearization point. `try_commit` is a CAS, so there is no window

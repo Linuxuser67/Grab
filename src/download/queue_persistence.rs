@@ -5,9 +5,11 @@ use super::{
     StoredQueue,
 };
 #[cfg(not(test))]
+#[cfg(not(test))]
 use crate::runtime::tokio_rt;
 use gtk4::glib;
 use std::sync::atomic::Ordering;
+#[cfg(not(test))]
 #[cfg(not(test))]
 use std::time::Duration;
 

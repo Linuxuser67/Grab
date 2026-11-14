@@ -2439,12 +2439,16 @@ pub(super) async fn write_staged_file_atomic(
                     Ok(_) => {}
                     Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
                     Err(error) => {
-                        return Err(format!("Could not inspect staged target {target_name}: {error}"));
+                        return Err(format!(
+                            "Could not inspect staged target {target_name}: {error}"
+                        ));
                     }
                 }
                 tokio::fs::rename(&temporary, &target)
                     .await
-                    .map_err(|error| format!("Could not publish staged file {target_name}: {error}"))
+                    .map_err(|error| {
+                        format!("Could not publish staged file {target_name}: {error}")
+                    })
             }
             StagedPublish::NoReplace => crate::file_names::rename_noreplace(&temporary, &target)
                 .map_err(|error| format!("Could not publish staged file {target_name}: {error}")),

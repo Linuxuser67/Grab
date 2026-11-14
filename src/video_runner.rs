@@ -407,6 +407,7 @@ async fn run_video_playlist_download_inner(
     crate::video_spawn::apply_guarded_proxy_env(&mut cmd, guarded_proxy.as_deref());
     let (mut child, stdout, stderr) = spawn_piped_ytdlp(cmd)?;
     let mut group = ProcessGroupGuard::new(&child);
+    let pgid = group.pgid();
 
     let last_progress = Arc::new(std::sync::Mutex::new(std::time::Instant::now()));
     let last_progress_reader = Arc::clone(&last_progress);
@@ -579,6 +580,7 @@ async fn run_video_playlist_download_inner(
             biased;
             intent = &mut abort => {
                 reap_child(&mut child, &mut group).await;
+                await_ytdlp_group_quiescence(pgid).await;
                 progress.abort();
                 logs.abort();
                 let _intent = intent.ok();
@@ -587,10 +589,12 @@ async fn run_video_playlist_download_inner(
             waited = await_child(&mut child, merging_snapshot, remaining, MERGE_WALL_CLOCK) => match waited {
                 Ok(Ok(status)) => {
                     group.disarm();
+                    await_ytdlp_group_quiescence(pgid).await;
                     break status;
                 }
                 Ok(Err(error)) => {
                     reap_child(&mut child, &mut group).await;
+                    await_ytdlp_group_quiescence(pgid).await;
                     progress.abort();
                     logs.abort();
                     return Err(VideoError::runtime(&error));
@@ -600,6 +604,7 @@ async fn run_video_playlist_download_inner(
                         && !merging.load(std::sync::atomic::Ordering::SeqCst) =>
                 {
                     reap_child(&mut child, &mut group).await;
+                    await_ytdlp_group_quiescence(pgid).await;
                     progress.abort();
                     logs.abort();
                     return Err(VideoError::part_failed("stalled"));
@@ -611,10 +616,12 @@ async fn run_video_playlist_download_inner(
                     match child.try_wait() {
                         Ok(Some(status)) => {
                             group.disarm();
+                            await_ytdlp_group_quiescence(pgid).await;
                             break status;
                         }
                         _ => {
                             reap_child(&mut child, &mut group).await;
+                            await_ytdlp_group_quiescence(pgid).await;
                             progress.abort();
                             logs.abort();
                             return Err(VideoError::part_failed("playlist merge timed out"));
@@ -1538,6 +1545,7 @@ async fn run_ytdlp_attempt(
     crate::video_spawn::apply_guarded_proxy_env(&mut cmd, guarded_proxy.as_deref());
     let (mut child, stdout, stderr) = spawn_piped_ytdlp(cmd)?;
     let mut group = ProcessGroupGuard::new(&child);
+    let pgid = group.pgid();
     // Stall watchdog, not a wall clock: any stdout line proves yt-dlp is alive, so a progressing download never trips the timeout: only silence does. The merge phase uses a generous wall-clock instead of the stall deadline (see `await_child`).
     let last_progress = std::sync::Arc::new(std::sync::Mutex::new(std::time::Instant::now()));
     let last_progress_p = last_progress.clone();
@@ -1626,6 +1634,7 @@ async fn run_ytdlp_attempt(
             biased;
             intent = &mut *abort => {
                 reap_child(&mut child, &mut group).await;
+                await_ytdlp_group_quiescence(pgid).await;
                 progress.abort();
                 logs.abort();
                 // Preserve the abort intent: the caller may merge partials on Preserve.
@@ -1634,12 +1643,14 @@ async fn run_ytdlp_attempt(
             }
             waited = await_child(&mut child, merging_snapshot, remaining, MERGE_WALL_CLOCK) => match waited {
                 Ok(Ok(status)) => {
-                    // The leader is reaped, so release the PGID: holding it across the drain joins would risk the OS recycling it onto another group.
+                    // The leader is reaped; wait for any ffmpeg descendants before reading or publishing their output.
                     group.disarm();
+                    await_ytdlp_group_quiescence(pgid).await;
                     break status;
                 }
                 Ok(Err(e)) => {
                     reap_child(&mut child, &mut group).await;
+                    await_ytdlp_group_quiescence(pgid).await;
                     progress.abort();
                     logs.abort();
                     return Err(VideoError::runtime(&e));
@@ -1652,6 +1663,7 @@ async fn run_ytdlp_attempt(
                         && !merging.load(std::sync::atomic::Ordering::SeqCst) =>
                 {
                     reap_child(&mut child, &mut group).await;
+                    await_ytdlp_group_quiescence(pgid).await;
                     progress.abort();
                     logs.abort();
                     return Err(VideoError::part_failed("stalled"));
@@ -1668,10 +1680,12 @@ async fn run_ytdlp_attempt(
                     match child.try_wait() {
                         Ok(Some(status)) => {
                             group.disarm();
+                            await_ytdlp_group_quiescence(pgid).await;
                             break status;
                         }
                         _ => {
                             reap_child(&mut child, &mut group).await;
+                            await_ytdlp_group_quiescence(pgid).await;
                             progress.abort();
                             logs.abort();
                             return Err(VideoError::part_failed("merge timed out"));
@@ -1825,6 +1839,7 @@ pub(crate) async fn remux_live_capture(
         }
         let mut child = cmd.spawn().map_err(VideoError::runtime)?;
         let mut group = ProcessGroupGuard::new(&child);
+        let pgid = group.pgid();
         let stderr = child
             .stderr
             .take()
@@ -1832,18 +1847,21 @@ pub(crate) async fn remux_live_capture(
         let logs = drain_stderr_to_tail(stderr);
         let status = match tokio::time::timeout(timeout, child.wait()).await {
             Ok(Ok(status)) => {
-                // The leader is reaped, so release the PGID: holding it across the drain joins would risk the OS recycling it onto another group.
+                // The leader is reaped; wait for any ffmpeg descendants before publishing the remux.
                 group.disarm();
+                await_ytdlp_group_quiescence(pgid).await;
                 status
             }
             Ok(Err(e)) => {
                 reap_child(&mut child, &mut group).await;
+                await_ytdlp_group_quiescence(pgid).await;
                 join_drain(logs).await;
                 let _ = tokio::fs::remove_file(&partial).await;
                 return Err(VideoError::runtime(&e));
             }
             Err(_) => {
                 reap_child(&mut child, &mut group).await;
+                await_ytdlp_group_quiescence(pgid).await;
                 join_drain(logs).await;
                 let _ = tokio::fs::remove_file(&partial).await;
                 return Err(VideoError::part_failed("timed out finalizing"));
@@ -3004,6 +3022,7 @@ pub(crate) async fn run_hls_ytdlp(
     crate::video_spawn::apply_guarded_proxy_env(&mut cmd, guarded_proxy.as_deref());
     let (mut child, stdout, stderr) = spawn_piped_ytdlp(cmd)?;
     let mut group = ProcessGroupGuard::new(&child);
+    let pgid = group.pgid();
     // Progress lines may land on either stream depending on version;
     // parse both, collect the log tail for failure diagnostics.
     let tx_p = tx.clone();
@@ -3074,6 +3093,7 @@ pub(crate) async fn run_hls_ytdlp(
             biased;
             _ = &mut *abort => {
                 reap_child(&mut child, &mut group).await;
+                await_ytdlp_group_quiescence(pgid).await;
                 progress.abort();
                 logs.abort();
                 sweep_staging_preserving_recordings(staging, job.item_id);
@@ -3082,12 +3102,14 @@ pub(crate) async fn run_hls_ytdlp(
             }
             waited = await_child(&mut child, merging_snapshot, remaining, MERGE_WALL_CLOCK) => match waited {
                 Ok(Ok(status)) => {
-                    // The leader is reaped, so release the PGID: holding it across the drain joins would risk the OS recycling it onto another group.
+                    // The leader is reaped; wait for any ffmpeg descendants before inspecting the output.
                     group.disarm();
+                    await_ytdlp_group_quiescence(pgid).await;
                     break status;
                 }
                 Ok(Err(e)) => {
                     reap_child(&mut child, &mut group).await;
+                    await_ytdlp_group_quiescence(pgid).await;
                     progress.abort();
                     logs.abort();
                     return Err(VideoError::runtime(&e));

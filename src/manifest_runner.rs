@@ -1116,13 +1116,11 @@ async fn transfer_static_manifest_tracks(
                     .await
                     .map_err(ManifestRunError::Failed)?
                 } else {
-                    subtitle_dir.join(
-                        TrackKind::Subtitles.part_filename(TrackFileFormat::Mp4),
-                    )
+                    subtitle_dir.join(TrackKind::Subtitles.part_filename(TrackFileFormat::Mp4))
                 };
-                let output = staging.join("subtitles").join(
-                    TrackKind::Subtitles.part_filename(TrackFileFormat::Vtt),
-                );
+                let output = staging
+                    .join("subtitles")
+                    .join(TrackKind::Subtitles.part_filename(TrackFileFormat::Vtt));
                 match tokio::task::spawn_blocking(move || extractor(&source, &output, &codecs))
                     .await
                 {
@@ -1852,9 +1850,7 @@ async fn finalize_manifest_download(
         match &tracks {
             Tracks::Hls { .. } => video_dir.join("local.m3u8"),
             Tracks::Dash { .. } | Tracks::DashLiveOffline { .. } => {
-                video_dir.join(
-                    TrackKind::Video.part_filename(TrackFileFormat::Mp4),
-                )
+                video_dir.join(TrackKind::Video.part_filename(TrackFileFormat::Mp4))
             }
         }
     };
@@ -1871,9 +1867,9 @@ async fn finalize_manifest_download(
         } else {
             match job.source.kind {
                 ManifestKind::Hls => audio_dir.join("local.m3u8"),
-                ManifestKind::Dash => audio_dir.join(
-                    TrackKind::Audio.part_filename(TrackFileFormat::Mp4),
-                ),
+                ManifestKind::Dash => {
+                    audio_dir.join(TrackKind::Audio.part_filename(TrackFileFormat::Mp4))
+                }
             }
         })
     } else {
@@ -1886,9 +1882,9 @@ async fn finalize_manifest_download(
         Tracks::Dash {
             subtitle: Some(_), ..
         } => {
-            let path = staging.join("subtitles").join(
-                    TrackKind::Subtitles.part_filename(TrackFileFormat::Vtt),
-                );
+            let path = staging
+                .join("subtitles")
+                .join(TrackKind::Subtitles.part_filename(TrackFileFormat::Vtt));
             match tokio::fs::symlink_metadata(&path).await {
                 Ok(metadata) if !metadata.file_type().is_symlink() && metadata.is_file() => {
                     Some(path)

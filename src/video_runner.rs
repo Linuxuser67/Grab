@@ -583,7 +583,7 @@ async fn run_video_playlist_download_inner(
                 await_ytdlp_group_quiescence_or_abort(
                     pgid,
                     &[progress.abort_handle(), logs.abort_handle()],
-                )
+                    )
                 .await?;
                 progress.abort();
                 logs.abort();
@@ -594,19 +594,19 @@ async fn run_video_playlist_download_inner(
                 Ok(Ok(status)) => {
                     group.disarm();
                     await_ytdlp_group_quiescence_or_abort(
-                    pgid,
-                    &[progress.abort_handle(), logs.abort_handle()],
-                )
-                .await?;
+                        pgid,
+                        &[progress.abort_handle(), logs.abort_handle()],
+                        )
+                    .await?;
                     break status;
                 }
                 Ok(Err(error)) => {
                     reap_child(&mut child, &mut group).await;
                     await_ytdlp_group_quiescence_or_abort(
-                    pgid,
-                    &[progress.abort_handle(), logs.abort_handle()],
-                )
-                .await?;
+                        pgid,
+                        &[progress.abort_handle(), logs.abort_handle()],
+                        )
+                    .await?;
                     progress.abort();
                     logs.abort();
                     return Err(VideoError::runtime(&error));
@@ -617,10 +617,10 @@ async fn run_video_playlist_download_inner(
                 {
                     reap_child(&mut child, &mut group).await;
                     await_ytdlp_group_quiescence_or_abort(
-                    pgid,
-                    &[progress.abort_handle(), logs.abort_handle()],
-                )
-                .await?;
+                        pgid,
+                        &[progress.abort_handle(), logs.abort_handle()],
+                        )
+                    .await?;
                     progress.abort();
                     logs.abort();
                     return Err(VideoError::part_failed("stalled"));
@@ -633,19 +633,19 @@ async fn run_video_playlist_download_inner(
                         Ok(Some(status)) => {
                             group.disarm();
                             await_ytdlp_group_quiescence_or_abort(
-                    pgid,
-                    &[progress.abort_handle(), logs.abort_handle()],
-                )
-                .await?;
+                                pgid,
+                                &[progress.abort_handle(), logs.abort_handle()],
+                                )
+                            .await?;
                             break status;
                         }
                         _ => {
                             reap_child(&mut child, &mut group).await;
                             await_ytdlp_group_quiescence_or_abort(
-                    pgid,
-                    &[progress.abort_handle(), logs.abort_handle()],
-                )
-                .await?;
+                                pgid,
+                                &[progress.abort_handle(), logs.abort_handle()],
+                                )
+                            .await?;
                             progress.abort();
                             logs.abort();
                             return Err(VideoError::part_failed("playlist merge timed out"));
@@ -1753,7 +1753,7 @@ async fn run_ytdlp_attempt(
                 await_ytdlp_group_quiescence_or_abort(
                     pgid,
                     &[progress.abort_handle(), logs.abort_handle()],
-                )
+                    )
                 .await?;
                 progress.abort();
                 logs.abort();
@@ -1766,19 +1766,19 @@ async fn run_ytdlp_attempt(
                     // The leader is reaped; wait for any ffmpeg descendants before reading or publishing their output.
                     group.disarm();
                     await_ytdlp_group_quiescence_or_abort(
-                    pgid,
-                    &[progress.abort_handle(), logs.abort_handle()],
-                )
-                .await?;
+                        pgid,
+                        &[progress.abort_handle(), logs.abort_handle()],
+                        )
+                    .await?;
                     break status;
                 }
                 Ok(Err(e)) => {
                     reap_child(&mut child, &mut group).await;
                     await_ytdlp_group_quiescence_or_abort(
-                    pgid,
-                    &[progress.abort_handle(), logs.abort_handle()],
-                )
-                .await?;
+                        pgid,
+                        &[progress.abort_handle(), logs.abort_handle()],
+                        )
+                    .await?;
                     progress.abort();
                     logs.abort();
                     return Err(VideoError::runtime(&e));
@@ -1792,10 +1792,10 @@ async fn run_ytdlp_attempt(
                 {
                     reap_child(&mut child, &mut group).await;
                     await_ytdlp_group_quiescence_or_abort(
-                    pgid,
-                    &[progress.abort_handle(), logs.abort_handle()],
-                )
-                .await?;
+                        pgid,
+                        &[progress.abort_handle(), logs.abort_handle()],
+                        )
+                    .await?;
                     progress.abort();
                     logs.abort();
                     return Err(VideoError::part_failed("stalled"));
@@ -1813,19 +1813,19 @@ async fn run_ytdlp_attempt(
                         Ok(Some(status)) => {
                             group.disarm();
                             await_ytdlp_group_quiescence_or_abort(
-                    pgid,
-                    &[progress.abort_handle(), logs.abort_handle()],
-                )
-                .await?;
+                                pgid,
+                                &[progress.abort_handle(), logs.abort_handle()],
+                                )
+                            .await?;
                             break status;
                         }
                         _ => {
                             reap_child(&mut child, &mut group).await;
                             await_ytdlp_group_quiescence_or_abort(
-                    pgid,
-                    &[progress.abort_handle(), logs.abort_handle()],
-                )
-                .await?;
+                                pgid,
+                                &[progress.abort_handle(), logs.abort_handle()],
+                                )
+                            .await?;
                             progress.abort();
                             logs.abort();
                             return Err(VideoError::part_failed("merge timed out"));
@@ -2830,10 +2830,10 @@ pub(crate) async fn run_live_ytdlp(
                 intent = &mut abort => {
                     reap_child(&mut child, &mut group).await;
                     await_ytdlp_group_quiescence_or_abort(
-                    pgid,
-                    &[progress.abort_handle(), logs.abort_handle()],
-                )
-                .await?;
+                        pgid,
+                        &[progress.abort_handle(), logs.abort_handle()],
+                        )
+                    .await?;
                     break match intent {
                         Ok(StopIntent::Finish | StopIntent::Pause) => (true, false),
                         Ok(StopIntent::Discard) => (true, true),
@@ -2849,10 +2849,10 @@ pub(crate) async fn run_live_ytdlp(
                         Ok(Ok(status)) => {
                             group.disarm();
                             await_ytdlp_group_quiescence_or_abort(
-                    pgid,
-                    &[progress.abort_handle(), logs.abort_handle()],
-                )
-                .await?;
+                                pgid,
+                                &[progress.abort_handle(), logs.abort_handle()],
+                                )
+                            .await?;
                             if !status.success() {
                                 progress.abort();
                                 let log_tail = join_drain(logs).await.unwrap_or_default();
@@ -2933,10 +2933,10 @@ pub(crate) async fn run_live_ytdlp(
                             // but only after every process that could write it exits.
                             reap_child(&mut child, &mut group).await;
                             await_ytdlp_group_quiescence_or_abort(
-                    pgid,
-                    &[progress.abort_handle(), logs.abort_handle()],
-                )
-                .await?;
+                                pgid,
+                                &[progress.abort_handle(), logs.abort_handle()],
+                                )
+                            .await?;
                             break (false, false);
                         }
                     }
@@ -3265,7 +3265,7 @@ pub(crate) async fn run_hls_ytdlp(
                 await_ytdlp_group_quiescence_or_abort(
                     pgid,
                     &[progress.abort_handle(), logs.abort_handle()],
-                )
+                    )
                 .await?;
                 progress.abort();
                 logs.abort();
@@ -3278,19 +3278,19 @@ pub(crate) async fn run_hls_ytdlp(
                     // The leader is reaped; wait for any ffmpeg descendants before inspecting the output.
                     group.disarm();
                     await_ytdlp_group_quiescence_or_abort(
-                    pgid,
-                    &[progress.abort_handle(), logs.abort_handle()],
-                )
-                .await?;
+                        pgid,
+                        &[progress.abort_handle(), logs.abort_handle()],
+                        )
+                    .await?;
                     break status;
                 }
                 Ok(Err(e)) => {
                     reap_child(&mut child, &mut group).await;
                     await_ytdlp_group_quiescence_or_abort(
-                    pgid,
-                    &[progress.abort_handle(), logs.abort_handle()],
-                )
-                .await?;
+                        pgid,
+                        &[progress.abort_handle(), logs.abort_handle()],
+                        )
+                    .await?;
                     progress.abort();
                     logs.abort();
                     return Err(VideoError::runtime(&e));
@@ -3304,10 +3304,10 @@ pub(crate) async fn run_hls_ytdlp(
                 {
                     reap_child(&mut child, &mut group).await;
                     await_ytdlp_group_quiescence_or_abort(
-                    pgid,
-                    &[progress.abort_handle(), logs.abort_handle()],
-                )
-                .await?;
+                        pgid,
+                        &[progress.abort_handle(), logs.abort_handle()],
+                        )
+                    .await?;
                     progress.abort();
                     logs.abort();
                     return Err(VideoError::part_failed("stalled"));
@@ -3325,19 +3325,19 @@ pub(crate) async fn run_hls_ytdlp(
                         Ok(Some(status)) => {
                             group.disarm();
                             await_ytdlp_group_quiescence_or_abort(
-                    pgid,
-                    &[progress.abort_handle(), logs.abort_handle()],
-                )
-                .await?;
+                                pgid,
+                                &[progress.abort_handle(), logs.abort_handle()],
+                                )
+                            .await?;
                             break status;
                         }
                         _ => {
                             reap_child(&mut child, &mut group).await;
                             await_ytdlp_group_quiescence_or_abort(
-                    pgid,
-                    &[progress.abort_handle(), logs.abort_handle()],
-                )
-                .await?;
+                                pgid,
+                                &[progress.abort_handle(), logs.abort_handle()],
+                                )
+                            .await?;
                             progress.abort();
                             logs.abort();
                             return Err(VideoError::part_failed("merge timed out"));

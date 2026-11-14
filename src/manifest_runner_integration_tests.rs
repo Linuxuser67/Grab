@@ -4130,9 +4130,12 @@ async fn hls_sample_aes_mpegts_is_decrypted_by_iori_ssa_before_ffmpeg_finalizati
     write_playlist(&video_dir, &plan)
         .await
         .expect("write localized SAMPLE-AES playlist");
-    decrypt_hls_sample_aes_segments(&video_dir, &plan)
-        .await
-        .expect("decrypt SAMPLE-AES segment with iori-ssa");
+    assert!(
+        decrypt_hls_sample_aes_segments(&video_dir, &plan, &mut abort)
+            .await
+            .expect("decrypt SAMPLE-AES segment with iori-ssa"),
+        "SAMPLE-AES decryption unexpectedly aborted"
+    );
     let local_playlist_bytes = tokio::fs::read(video_dir.join("local.m3u8"))
         .await
         .expect("read decrypted local HLS playlist");

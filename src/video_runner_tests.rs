@@ -829,3 +829,40 @@ fn cumulative_progress_saturates_instead_of_wrapping() {
     assert_eq!(add_progress_bytes(12, 30), 42);
     assert_eq!(add_progress_bytes(u64::MAX, 1), u64::MAX);
 }
+
+#[tokio::test]
+async fn video_resolution_stop_drops_the_pending_probe_future() {
+    struct DropNotice(Option<tokio::sync::oneshot::Sender<()>>);
+    impl Drop for DropNotice {
+        fn drop(&mut self) {
+            if let Some(sender) = self.0.take() {
+                let _ = sender.send(());
+            }
+        }
+    }
+
+    let (stop_sender, stop_receiver) = tokio::sync::oneshot::channel();
+    let (started_sender, started_receiver) = tokio::sync::oneshot::channel();
+    let (dropped_sender, dropped_receiver) = tokio::sync::oneshot::channel();
+    let task = tokio::spawn(async move {
+        let mut abort = stop_receiver;
+        let operation = async move {
+            let _drop_notice = DropNotice(Some(dropped_sender));
+            let _ = started_sender.send(());
+            std::future::pending::<()>().await;
+        };
+        await_video_operation_or_stop(&mut abort, operation).await
+    });
+
+    started_receiver.await.expect("probe future must start");
+    stop_sender
+        .send(StopIntent::Pause)
+        .expect("probe receiver must remain active");
+    assert_eq!(
+        task.await.expect("stop race task must complete"),
+        Err(StopIntent::Pause)
+    );
+    dropped_receiver
+        .await
+        .expect("stop intent must drop the pending probe future");
+}

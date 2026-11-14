@@ -44,7 +44,7 @@ pub(crate) fn apply_configured_proxy_env(
 const FETCH_TIMEOUT_SECS: u64 = 60;
 
 /// Byte ceilings for drained child pipes (the timeout bounds time, not memory; stdout carries the JSON document).
-const MAX_STDOUT_BYTES: u64 = 32 * 1024 * 1024;
+pub(crate) const MAX_STDOUT_BYTES: u64 = 32 * 1024 * 1024;
 const MAX_STDERR_BYTES: u64 = 1024 * 1024;
 
 /// Drain one child pipe with a hard byte ceiling (overflow fails as QuotaExceeded, never a bigger buffer).

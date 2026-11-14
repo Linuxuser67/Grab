@@ -533,31 +533,21 @@ fn valid_cookie_path(path: &str) -> bool {
     path.starts_with('/') && !path.chars().any(char::is_control)
 }
 
-/// Write extension-provided cookies to a staging file for yt-dlp's `--cookies`.
-/// Returns the path, or None if there are no usable cookies or the write fails.
-/// Cookies whose domain or path is malformed, or whose domain does not cover
-/// the URL's host, are dropped.
-#[cfg(test)]
-pub(crate) fn write_handoff_cookies(url: &str, cookies: &[Cookie]) -> Option<PathBuf> {
-    write_handoff_cookies_with_count(url, cookies).map(|(path, _)| path)
-}
-
-/// Like `write_handoff_cookies`, but also reports how many cookies were
-/// serialized after scope and format validation.
-fn write_handoff_cookies_with_count(url: &str, cookies: &[Cookie]) -> Option<(PathBuf, usize)> {
+/// Serialize extension-provided cookies into the Netscape format used by yt-dlp.
+/// Cookies with malformed scope or a domain that does not cover the URL host are dropped.
+fn serialize_handoff_cookies(url: &str, cookies: &[Cookie]) -> Option<(String, usize)> {
     if cookies.is_empty() {
         return None;
     }
-    // Netscape cookie file format.
-    let mut content = String::from("# Netscape HTTP Cookie File\n");
     let fallback_domain = url::Url::parse(url).ok()?.host_str()?.to_string();
+    let mut content = String::from("# Netscape HTTP Cookie File\n");
     let mut written = 0;
     for cookie in cookies {
         // Netscape fields are tab-delimited; strip all Unicode control chars,
         // not only ASCII tabs/newlines, before serializing.
-        let n: String = cookie.name.chars().filter(|c| !c.is_control()).collect();
-        let v: String = cookie.value.chars().filter(|c| !c.is_control()).collect();
-        if n.is_empty() {
+        let name: String = cookie.name.chars().filter(|character| !character.is_control()).collect();
+        let value: String = cookie.value.chars().filter(|character| !character.is_control()).collect();
+        if name.is_empty() {
             continue;
         }
         // Preserve the browser's scope when the extension sends it; otherwise
@@ -577,16 +567,12 @@ fn write_handoff_cookies_with_count(url: &str, cookies: &[Cookie]) -> Option<(Pa
         if !valid_cookie_domain(undotted) || !domain_covers_host(undotted, &fallback_domain) {
             continue;
         }
-        // Netscape format requires the leading dot when tailmatch is TRUE
-        // (Python's cookiejar rejects the whole file otherwise), and no
-        // leading dot when FALSE. Add it only for the output line, after
-        // validation.
+        // Netscape format requires the leading dot when tailmatch is TRUE.
         let domain = if tailmatch == "TRUE" {
             format!(".{undotted}")
         } else {
             undotted.to_string()
         };
-        let domain = domain.as_str();
         let path = cookie.path.as_deref().unwrap_or("/");
         if !valid_cookie_path(path) {
             continue;
@@ -596,36 +582,70 @@ fn write_handoff_cookies_with_count(url: &str, cookies: &[Cookie]) -> Option<(Pa
         } else {
             "FALSE"
         };
-        let expiry = cookie.expiration_date.map(|e| e as i64).unwrap_or(0);
+        let expiry = cookie.expiration_date.map(|timestamp| timestamp as i64).unwrap_or(0);
         content.push_str(&format!(
-            "{domain}\t{tailmatch}\t{path}\t{secure}\t{expiry}\t{n}\t{v}\n"
+            "{domain}\t{tailmatch}\t{path}\t{secure}\t{expiry}\t{name}\t{value}\n"
         ));
         written += 1;
     }
-    if written == 0 {
-        return None;
+    (written > 0).then_some((content, written))
+}
+
+/// Own a staged cookie file until the handoff store accepts it.
+struct PendingCookieFile(Option<PathBuf>);
+
+impl PendingCookieFile {
+    fn into_path(mut self) -> PathBuf {
+        self.0.take().expect("pending cookie file retains its path until transferred")
     }
-    // The private staging dir (runtime dir, or cache fallback), the one the
-    // startup sweep cleans; no usable dir means no cookies, never /tmp.
+}
+
+impl Drop for PendingCookieFile {
+    fn drop(&mut self) {
+        let Some(path) = self.0.take() else {
+            return;
+        };
+        // A cancelled request can drop the result after the blocking write
+        // finishes. Keep its cleanup off the Tokio worker as well.
+        drop(crate::runtime::tokio_rt().spawn_blocking(move || {
+            if let Err(error) = std::fs::remove_file(&path)
+                && error.kind() != std::io::ErrorKind::NotFound
+            {
+                tracing::debug!(
+                    path = %path.display(),
+                    %error,
+                    "could not remove an abandoned extension cookie file"
+                );
+            }
+        }));
+    }
+}
+
+/// Create a private cookie file. This function only runs on a blocking worker.
+fn write_handoff_cookie_file(
+    content: String,
+    written: usize,
+) -> Option<(PendingCookieFile, usize)> {
     let mut path = crate::download_net::cookie_staging_dir()?;
     let count = COOKIE_FILE_COUNTER.fetch_add(1, Ordering::Relaxed);
     path.push(format!(
-        "grab-handoff-cookies-{}-{}",
-        std::process::id(),
-        count
+        "grab-handoff-cookies-{}-{count}",
+        std::process::id()
     ));
-    use std::io::Write;
-    let mut opts = std::fs::OpenOptions::new();
-    opts.write(true).create_new(true);
+    use std::io::Write as _;
+    let mut options = std::fs::OpenOptions::new();
+    options.write(true).create_new(true);
     #[cfg(unix)]
     {
         use std::os::unix::fs::OpenOptionsExt as _;
-        opts.mode(0o600);
+        options.mode(0o600);
     }
-    let mut file = opts.open(&path).ok()?;
+    let mut file = options.open(&path).ok()?;
     if let Err(error) = file.write_all(content.as_bytes()) {
         drop(file);
-        if let Err(cleanup_error) = std::fs::remove_file(&path) {
+        if let Err(cleanup_error) = std::fs::remove_file(&path)
+            && cleanup_error.kind() != std::io::ErrorKind::NotFound
+        {
             tracing::debug!(
                 path = %path.display(),
                 error = %cleanup_error,
@@ -639,7 +659,32 @@ fn write_handoff_cookies_with_count(url: &str, cookies: &[Cookie]) -> Option<(Pa
         );
         return None;
     }
-    Some((path, written))
+    Some((PendingCookieFile(Some(path)), written))
+}
+
+/// Write extension cookies on the Tokio blocking pool.
+///
+/// The returned guard removes the file if the request is cancelled before the
+/// handoff store takes ownership of it.
+async fn stage_handoff_cookies(
+    url: &str,
+    cookies: &[Cookie],
+) -> Option<(PendingCookieFile, usize)> {
+    let (content, written) = serialize_handoff_cookies(url, cookies)?;
+    match tokio::task::spawn_blocking(move || write_handoff_cookie_file(content, written)).await {
+        Ok(result) => result,
+        Err(error) => {
+            tracing::warn!(%error, "extension cookie staging worker failed");
+            None
+        }
+    }
+}
+
+/// Synchronous fixture helper; production requests use stage_handoff_cookies.
+#[cfg(test)]
+pub(crate) fn write_handoff_cookies(url: &str, cookies: &[Cookie]) -> Option<PathBuf> {
+    let (content, written) = serialize_handoff_cookies(url, cookies)?;
+    write_handoff_cookie_file(content, written).map(|(file, _)| file.into_path())
 }
 
 /// Hash a staged handoff jar by content so a fresh jar with the same cookies
@@ -1464,9 +1509,9 @@ async fn handle_add(
     // exact entry, and every cookieless handoff suppresses older same-host
     // jars so the fallback cannot resurrect an earlier browser session.
     let (staged, accepted_cookie_count) = if authenticated {
-        match write_handoff_cookies_with_count(&req.url, &req.cookies) {
-            Some((path, accepted)) => {
-                store_handoff_cookies(&req.url, path, req.user_agent);
+        match stage_handoff_cookies(&req.url, &req.cookies).await {
+            Some((staged_file, accepted)) => {
+                store_handoff_cookies(&req.url, staged_file.into_path(), req.user_agent);
                 (true, accepted)
             }
             None => {
@@ -1899,6 +1944,23 @@ mod tests {
             secure: None,
             expiration_date: None,
         }
+    }
+
+    #[tokio::test]
+    async fn dropping_unclaimed_cookie_file_removes_it_off_the_request_worker() {
+        let directory = tempfile::tempdir().expect("temporary cookie directory");
+        let path = directory.path().join("unclaimed-cookie");
+        std::fs::write(&path, b"secret").expect("write staged cookie fixture");
+
+        drop(PendingCookieFile(Some(path.clone())));
+
+        tokio::time::timeout(Duration::from_secs(2), async {
+            while path.exists() {
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .expect("abandoned staged cookie file should be removed");
     }
 
     #[test]

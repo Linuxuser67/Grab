@@ -1,10 +1,9 @@
-use crate::engine_msg::{DEST_EXISTS, EngineMsg};
 use crate::file_names::{
     dedupe_filename, filename_from_url, fmt_bytes, name_stem, rename_noreplace,
     restrict_filename_ascii, sane_filename, shorten_filename,
 };
 use crate::runtime::tokio_rt;
-use gettextrs::{gettext, ngettext};
+use gettextrs::gettext;
 use gtk4::gio::prelude::*;
 use gtk4::{gio, glib};
 use std::cell::{Cell, RefCell};
@@ -136,15 +135,12 @@ fn recheck_public_host(url: &str, kind: &str) -> Result<(), String> {
 
 /// Facade: HTTP fetch engine lives in [`download_fetch`](crate::download_fetch)
 /// now (no re-exports: the manager consumes it here, tests import it directly).
-use crate::download_fetch::{
-    FetchCtx, StartMode, apply_torrent_limits, run_download, truncate_to_prefix,
-};
+use crate::download_fetch::{apply_torrent_limits, truncate_to_prefix};
 /// Facade: intake normalization lives in [`download_intake`](crate::download_intake)
 /// now; the re-exports keep the in-tree `crate::download::X` paths working.
 pub use crate::download_intake::normalize_url;
 /// Facade: network options + proxy/client plumbing lives in
 /// [`download_net`](crate::download_net); re-exports keep `crate::download::X` working.
-use crate::download_net::http_client_for;
 pub use crate::download_net::{
     DownloadOptions, PROXY_MODE_MANUAL, proxy_mode_index, proxy_mode_labels, proxy_mode_value,
     proxy_type_index, proxy_type_labels, proxy_type_value,
@@ -155,7 +151,7 @@ use crate::download_pieces::BLOCK_CELLS;
 use crate::download_pieces::SegmentState;
 /// Facade: rate parsing/pacing + progress text lives in
 /// [`download_rate`](crate::download_rate); the engine consumes it here, tests import it directly.
-use crate::download_rate::{fmt_eta, format_amounts, parse_rate, publish_rate_limit};
+use crate::download_rate::{parse_rate, publish_rate_limit};
 /// Facade: the row object lives in [`download_row`](crate::download_row) now;
 /// this re-export keeps every `crate::download::X` path working.
 pub use crate::download_row::DownloadItem;

@@ -5,7 +5,7 @@ use super::{
     format_gettext_template,
 };
 use crate::download_fetch::{FetchCtx, StartMode, run_download, truncate_to_prefix};
-use crate::download_net::http_client_for;
+use crate::download_net::{DownloadOptions, http_client_for};
 use crate::download_pieces::SegmentState;
 use crate::download_rate::{fmt_eta, format_amounts, parse_rate, publish_rate_limit};
 use crate::download_row::DownloadItem;

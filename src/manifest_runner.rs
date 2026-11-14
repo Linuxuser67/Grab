@@ -5653,3 +5653,70 @@ mod integration_tests;
 #[cfg(test)]
 #[path = "manifest_runner_sample_aes_tests.rs"]
 mod sample_aes_tests;
+
+#[cfg(test)]
+mod staged_file_atomic_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn replace_publishes_new_contents_without_a_missing_target_window() {
+        let directory = tempfile::tempdir().expect("create staging directory");
+        let target = directory.path().join("local.m3u8");
+        tokio::fs::write(&target, b"old playlist")
+            .await
+            .expect("write existing playlist");
+
+        write_staged_file_atomic(
+            directory.path(),
+            "local.m3u8.part",
+            "local.m3u8",
+            b"new playlist",
+            StagedPublish::Replace,
+        )
+        .await
+        .expect("atomically replace playlist");
+
+        assert_eq!(
+            tokio::fs::read(&target).await.expect("read published playlist"),
+            b"new playlist"
+        );
+        assert!(
+            tokio::fs::symlink_metadata(directory.path().join("local.m3u8.part"))
+                .await
+                .is_err(),
+            "the temporary file must be renamed away"
+        );
+    }
+
+    #[tokio::test]
+    async fn no_replace_keeps_existing_target_and_removes_temporary_file() {
+        let directory = tempfile::tempdir().expect("create staging directory");
+        let target = directory.path().join("marker");
+        tokio::fs::write(&target, b"existing marker")
+            .await
+            .expect("write existing marker");
+
+        assert!(
+            write_staged_file_atomic(
+                directory.path(),
+                "marker.part",
+                "marker",
+                b"new marker",
+                StagedPublish::NoReplace,
+            )
+            .await
+            .is_err(),
+            "no-replace publication must reject an existing target"
+        );
+        assert_eq!(
+            tokio::fs::read(&target).await.expect("read existing marker"),
+            b"existing marker"
+        );
+        assert!(
+            tokio::fs::symlink_metadata(directory.path().join("marker.part"))
+                .await
+                .is_err(),
+            "failed publication must clean its temporary file"
+        );
+    }
+}

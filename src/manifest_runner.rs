@@ -913,7 +913,8 @@ struct ManifestStaticTransfer<'a> {
     abort: &'a mut tokio::sync::oneshot::Receiver<crate::video::StopIntent>,
 }
 
-/// Keep both track errors and prefer terminal/retryable errors over fallback.
+/// Keep both track errors: terminal failures win, then unsupported tracks
+/// trigger the yt-dlp fallback before a retry of a native pair that cannot work.
 fn combine_parallel_track_errors(
     video: ManifestRunError,
     audio: ManifestRunError,
@@ -923,12 +924,12 @@ fn combine_parallel_track_errors(
         || matches!(&audio, ManifestRunError::Failed(_))
     {
         ManifestRunError::Failed(message)
-    } else if matches!(&video, ManifestRunError::Retryable(_))
-        || matches!(&audio, ManifestRunError::Retryable(_))
+    } else if matches!(&video, ManifestRunError::Unsupported(_))
+        || matches!(&audio, ManifestRunError::Unsupported(_))
     {
-        ManifestRunError::Retryable(message)
-    } else {
         ManifestRunError::Unsupported(message)
+    } else {
+        ManifestRunError::Retryable(message)
     }
 }
 
@@ -1138,7 +1139,7 @@ mod parallel_manifest_track_tests {
     }
 
     #[tokio::test]
-    async fn static_track_pair_preserves_audio_error_after_video_fails() {
+    async fn static_track_pair_prefers_video_unsupported_over_audio_retryable() {
         let (_keep_stop_sender, mut abort) = tokio::sync::oneshot::channel();
         let (video_abort, _video_abort_receiver) = tokio::sync::oneshot::channel();
         let (audio_abort, audio_abort_receiver) = tokio::sync::oneshot::channel();
@@ -1163,9 +1164,41 @@ mod parallel_manifest_track_tests {
 
         assert!(matches!(
             result,
-            Err(ManifestRunError::Retryable(message))
+            Err(ManifestRunError::Unsupported(message))
                 if message.contains("video format is unsupported")
                     && message.contains("audio request timed out")
+        ));
+    }
+
+    #[tokio::test]
+    async fn static_track_pair_prefers_audio_unsupported_over_video_retryable() {
+        let (_keep_stop_sender, mut abort) = tokio::sync::oneshot::channel();
+        let (video_abort, video_abort_receiver) = tokio::sync::oneshot::channel();
+        let (audio_abort, _audio_abort_receiver) = tokio::sync::oneshot::channel();
+        let video = async move {
+            assert_eq!(
+                video_abort_receiver.await.expect("peer pause is forwarded"),
+                crate::video::StopIntent::Pause
+            );
+            Err(ManifestRunError::Retryable(
+                "video request timed out".to_string(),
+            ))
+        };
+        let audio = async {
+            Err(ManifestRunError::Unsupported(
+                "audio representation is unsupported".to_string(),
+            ))
+        };
+
+        let result =
+            transfer_parallel_manifest_tracks(video, audio, &mut abort, video_abort, audio_abort)
+                .await;
+
+        assert!(matches!(
+            result,
+            Err(ManifestRunError::Unsupported(message))
+                if message.contains("video request timed out")
+                    && message.contains("audio representation is unsupported")
         ));
     }
 

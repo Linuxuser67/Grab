@@ -789,8 +789,11 @@ fn sweep_stale_dash_merge_directories(root_dir: &Path) {
         let Some(pid) = dash_merge_directory_pid(&name) else {
             continue;
         };
-        // A live or reused PID makes cleanup unsafe; retain the directory.
-        if proc_root.join(pid.to_string()).is_dir() {
+        // A live or reused PID, or any surviving member of its process group,
+        // makes cleanup unsafe. The leader may have exited before its descendants.
+        if proc_root.join(pid.to_string()).is_dir()
+            || crate::video_spawn::process_group_has_live_members(pid as libc::pid_t)
+        {
             continue;
         }
 
@@ -1740,6 +1743,61 @@ mod tests {
             "grab-staging-{tag}-{}-{n}-{nanos}",
             std::process::id()
         ))
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn startup_sweep_preserves_dash_merge_dir_while_a_child_process_group_survives() {
+        use std::os::unix::fs::PermissionsExt as _;
+        use std::os::unix::process::CommandExt as _;
+        use std::process::Stdio;
+
+        let root = ensure_dash_merge_temp_root().expect("create private merge root");
+        let mut command = std::process::Command::new("sh");
+        command
+            .args(["-c", "sleep 30 & exit 0"])
+            .process_group(0)
+            .stdout(Stdio::null())
+            .stderr(Stdio::null());
+        let mut child = command.spawn().expect("spawn process-group leader");
+        let pgid = child.id();
+        child.wait().expect("reap process-group leader");
+        assert!(
+            crate::video_spawn::process_group_has_live_members(pgid as libc::pid_t),
+            "the background descendant must outlive its process-group leader"
+        );
+
+        let sequence = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("system clock is after the Unix epoch")
+            .as_nanos();
+        let directory = root.join(format!(".grab-dash-merge-{pgid}-{sequence}"));
+        std::fs::create_dir(&directory).expect("create merge scratch");
+        std::fs::set_permissions(&directory, std::fs::Permissions::from_mode(0o700))
+            .expect("make scratch private");
+        std::fs::write(directory.join("merged.tmp"), b"partial merge")
+            .expect("write merge output");
+
+        sweep_stale_dash_merge_directories(&root);
+        assert!(
+            directory.exists(),
+            "a surviving descendant keeps its leader's merge scratch"
+        );
+
+        // SAFETY: pgid is the process group created by this test.
+        let signal_result = unsafe { libc::kill(-(pgid as i32), libc::SIGKILL) };
+        assert_eq!(signal_result, 0, "terminate the test process group");
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+        while crate::video_spawn::process_group_has_live_members(pgid as libc::pid_t)
+            && std::time::Instant::now() < deadline
+        {
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        sweep_stale_dash_merge_directories(&root);
+        assert!(
+            !directory.exists(),
+            "merge scratch is reclaimed once the surviving group exits"
+        );
     }
 
     #[cfg(target_os = "linux")]

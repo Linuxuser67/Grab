@@ -1495,7 +1495,9 @@ fn add_progress_bytes(banked: u64, current_leg: u64) -> u64 {
 
 /// A split download has a determinate total only when both legs are known and their sum fits.
 fn combined_format_size(video: Option<u64>, audio: Option<u64>) -> Option<u64> {
-    video.zip(audio).and_then(|(video, audio)| video.checked_add(audio))
+    video
+        .zip(audio)
+        .and_then(|(video, audio)| video.checked_add(audio))
 }
 
 /// Time since yt-dlp last wrote a stdout line: the stall watchdog's clock.

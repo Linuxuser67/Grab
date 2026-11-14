@@ -2132,7 +2132,7 @@ pub(crate) fn ytdlp_identity_args(
         has_custom_youtube_player_client(custom_youtube_args),
     );
     if let Some(extractor_args) =
-        merge_youtube_extractor_args(custom_youtube_args, player_client_args.as_deref())
+        merge_youtube_extractor_args(custom_youtube_args, player_client_args)
     {
         args.push("--extractor-args".to_string());
         args.push(extractor_args);

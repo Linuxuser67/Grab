@@ -1108,13 +1108,19 @@ pub(super) async fn run_live_hls_tracks(
             audio
                 .as_ref()
                 .map_or(0, |track| track.accumulator.resource_bytes()),
-        )
+        );
+    let Some(retained_bytes) = retained_bytes
         .filter(|total| *total <= crate::manifest::MAX_HLS_LIVE_CAPTURE_BYTES)
-        .ok_or_else(|| {
-            ManifestRunError::Failed(
-                "The staged live HLS recording exceeds Grab's native byte limit".to_string(),
-            )
-        })?;
+    else {
+        return Ok(LiveHlsCapture::new(
+            if video.accumulator.segment_count() > 0 {
+                LiveHlsCaptureOutcome::FinishVideoOnly
+            } else {
+                LiveHlsCaptureOutcome::Discard
+            },
+            output,
+        ));
+    };
     downloaded.store(retained_bytes, Ordering::Relaxed);
     ensure_manifest_mux_spaces(staging, destination_dir, retained_bytes)?;
     if use_destination_parts {
@@ -1137,25 +1143,6 @@ pub(super) async fn run_live_hls_tracks(
         return Ok(LiveHlsCapture::new(LiveHlsCaptureOutcome::Finish, output));
     }
     let staging_dir = staging;
-
-    let audio_resource_bytes = audio
-        .as_ref()
-        .map_or(0, |track| track.accumulator.resource_bytes());
-    if video
-        .accumulator
-        .resource_bytes()
-        .checked_add(audio_resource_bytes)
-        .is_none_or(|total| total > crate::manifest::MAX_HLS_LIVE_CAPTURE_BYTES)
-    {
-        return Ok(LiveHlsCapture::new(
-            if video.accumulator.segment_count() > 0 {
-                LiveHlsCaptureOutcome::FinishVideoOnly
-            } else {
-                LiveHlsCaptureOutcome::Discard
-            },
-            output,
-        ));
-    }
 
     let all_tracks_ended = video_plan.end_list && audio_plan.is_none_or(|plan| plan.end_list);
     if !all_tracks_ended {

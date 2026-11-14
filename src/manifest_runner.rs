@@ -798,6 +798,11 @@ async fn prepare_manifest_attempt(
     .ok();
     let concurrency = job.connections.clamp(1, MAX_RESOURCE_CONNECTIONS);
     let downloaded = Arc::new(AtomicU64::new(finish_marker_bytes.unwrap_or(0)));
+    if finish_requested && finish_marker_bytes.is_none() {
+        ensure_live_finish_marker(&staging, downloaded.load(Ordering::Relaxed))
+            .await
+            .map_err(ManifestRunError::Failed)?;
+    }
 
     Ok(ManifestPreparationOutcome::Ready(Box::new(
         ManifestPreparation {

@@ -1023,7 +1023,6 @@ async fn discarding_during_live_remux_reaps_ffmpeg_and_removes_its_partial() {
     );
 }
 
-
 #[test]
 fn closed_live_capture_stop_channel_preserves_recorded_media() {
     assert_eq!(

@@ -870,9 +870,7 @@ pub(super) async fn complete_saved_live_hls_destination_parts(
         destination: destination.to_path_buf(),
         item_id,
         track: TrackKind::Video,
-        filename: TrackKind::Video.part_filename(
-                TrackFileFormat::Ts,
-            ),
+        filename: TrackKind::Video.part_filename(TrackFileFormat::Ts),
     });
     if let Some(intent) = append_live_hls_destination_part(&video, abort).await? {
         return Ok(Some(intent));
@@ -888,9 +886,7 @@ pub(super) async fn complete_saved_live_hls_destination_parts(
             destination: destination.to_path_buf(),
             item_id,
             track: TrackKind::Audio,
-            filename: TrackKind::Audio.part_filename(
-                    TrackFileFormat::Ts,
-                ),
+            filename: TrackKind::Audio.part_filename(TrackFileFormat::Ts),
         });
         if let Some(intent) = append_live_hls_destination_part(&audio, abort).await? {
             return Ok(Some(intent));
@@ -1088,9 +1084,7 @@ pub(super) async fn run_live_hls_tracks(
             destination: destination.to_path_buf(),
             item_id,
             track: TrackKind::Video,
-            filename: TrackKind::Video.part_filename(
-                TrackFileFormat::Ts,
-            ),
+            filename: TrackKind::Video.part_filename(TrackFileFormat::Ts),
         });
         if let Some(track) = audio.as_mut() {
             track.destination_part = Some(LiveHlsDestination {
@@ -1098,9 +1092,7 @@ pub(super) async fn run_live_hls_tracks(
                 destination: destination.to_path_buf(),
                 item_id,
                 track: TrackKind::Audio,
-                filename: TrackKind::Audio.part_filename(
-                    TrackFileFormat::Ts,
-                ),
+                filename: TrackKind::Audio.part_filename(TrackFileFormat::Ts),
             });
         }
     }

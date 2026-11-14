@@ -50,6 +50,8 @@ const MAX_RESOURCE_BYTES: u64 = crate::manifest_writer::MAX_RESOURCE_BYTES;
 /// The decoder and MPEG-TS preflight both need whole-segment buffers, so this
 /// limit is intentionally much smaller than the general staged-resource cap.
 const MAX_SAMPLE_AES_SEGMENT_BYTES: usize = 32 * 1024 * 1024;
+/// Bound one in-memory SAMPLE-AES decrypt so malformed input cannot pin a worker indefinitely.
+const SAMPLE_AES_DECRYPT_TIMEOUT: Duration = Duration::from_secs(30);
 /// Aggregate resource ceiling, matching the regular segmented downloader's 1 TiB trust limit.
 const MAX_MANIFEST_DOWNLOAD_BYTES: u64 = crate::manifest_types::MAX_MANIFEST_TOTAL_BYTES;
 /// Idle budget for receiving a response body; progressing transfers are not wall-clock limited.
@@ -992,10 +994,14 @@ async fn transfer_static_manifest_tracks(
                     return Ok(false);
                 }
                 write_playlist(video_dir, video.as_ref()).await?;
-                decrypt_hls_sample_aes_segments(video_dir, video.as_ref()).await?;
+                if !decrypt_hls_sample_aes_segments(video_dir, video.as_ref(), abort).await? {
+                    return Ok(false);
+                }
                 if let Some(audio) = audio {
                     write_playlist(audio_dir, audio.as_ref()).await?;
-                    decrypt_hls_sample_aes_segments(audio_dir, audio.as_ref()).await?;
+                    if !decrypt_hls_sample_aes_segments(audio_dir, audio.as_ref(), abort).await? {
+                        return Ok(false);
+                    }
                 }
             }
             if let Some(subtitle) = subtitle {
@@ -1015,7 +1021,9 @@ async fn transfer_static_manifest_tracks(
                     return Ok(false);
                 }
                 write_playlist(&subtitle_dir, subtitle).await?;
-                decrypt_hls_sample_aes_segments(&subtitle_dir, subtitle).await?;
+                if !decrypt_hls_sample_aes_segments(&subtitle_dir, subtitle, abort).await? {
+                    return Ok(false);
+                }
             }
         }
         Tracks::Dash {
@@ -2466,7 +2474,8 @@ async fn read_sample_aes_resource(
 async fn decrypt_hls_sample_aes_segments(
     directory: &Path,
     plan: &HlsPlan,
-) -> Result<(), ManifestRunError> {
+    abort: &mut tokio::sync::oneshot::Receiver<crate::video::StopIntent>,
+) -> Result<bool, ManifestRunError> {
     let playlist_bytes = plan
         .local_playlist_bytes()
         .map_err(|error| ManifestRunError::Failed(error.to_string()))?;
@@ -2517,26 +2526,38 @@ async fn decrypt_hls_sample_aes_segments(
         .await?;
         let encrypted_size = encrypted.len();
 
-        let decrypted = tokio::task::spawn_blocking(move || {
-            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                validate_iori_sample_aes_segment(&encrypted)?;
-                let mut decrypted = Vec::with_capacity(encrypted.len());
-                iori_ssa::decrypt(
-                    std::io::Cursor::new(encrypted.as_slice()),
-                    &mut decrypted,
-                    key,
-                    iv,
-                )
-                .map_err(|error| error.to_string())?;
-                Ok::<Vec<u8>, String>(decrypted)
-            }))
-        })
-        .await
-        .map_err(|error| {
-            ManifestRunError::Failed(format!(
-                "The HLS SAMPLE-AES worker failed for {segment_uri}: {error}"
-            ))
-        })?;
+        let decrypted = tokio::select! {
+            biased;
+            _ = &mut *abort => return Ok(false),
+            result = tokio::time::timeout(
+                SAMPLE_AES_DECRYPT_TIMEOUT,
+                tokio::task::spawn_blocking(move || {
+                    std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                        validate_iori_sample_aes_segment(&encrypted)?;
+                        let mut decrypted = Vec::with_capacity(encrypted.len());
+                        iori_ssa::decrypt(
+                            std::io::Cursor::new(encrypted.as_slice()),
+                            &mut decrypted,
+                            key,
+                            iv,
+                        )
+                        .map_err(|error| error.to_string())?;
+                        Ok::<Vec<u8>, String>(decrypted)
+                    }))
+                }),
+            ) => {
+                let worker = result.map_err(|_| {
+                    ManifestRunError::Unsupported(format!(
+                        "iori-ssa timed out while processing HLS SAMPLE-AES segment {segment_uri}"
+                    ))
+                })?;
+                worker.map_err(|error| {
+                    ManifestRunError::Failed(format!(
+                        "The HLS SAMPLE-AES worker failed for {segment_uri}: {error}"
+                    ))
+                })?
+            }
+        };
         let decrypted = match decrypted {
             Ok(Ok(bytes)) => bytes,
             Ok(Err(error)) => {
@@ -2644,7 +2665,7 @@ async fn decrypt_hls_sample_aes_segments(
             .map_err(ManifestRunError::Failed)?;
     }
 
-    Ok(())
+    Ok(true)
 }
 
 /// Validate the MPEG-TS packet/PES structure before handing untrusted bytes to

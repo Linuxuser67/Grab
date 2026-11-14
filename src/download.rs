@@ -19,6 +19,8 @@ mod queue_persistence;
 mod queue_restore;
 mod scheduler;
 #[cfg(test)]
+use cancellation::cleanup_discarded_video_files;
+#[cfg(test)]
 use queue_restore::PendingRestore;
 
 /// Counter for unique queue temp-file names. Combined with the PID, this makes

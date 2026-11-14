@@ -10,7 +10,7 @@ use std::collections::HashSet;
 use std::rc::Rc;
 
 /// Remove a discarded download's owned files, preserving native ownership records on error.
-fn cleanup_discarded_video_files(dest: &std::path::Path, id: u64) -> Result<(), String> {
+pub(super) fn cleanup_discarded_video_files(dest: &std::path::Path, id: u64) -> Result<(), String> {
     if let Some(dest_dir) = dest.parent() {
         if let Some(staging) = crate::video_staging::manifest_staging_dir_for_cleanup(dest_dir, id)?
         {
@@ -140,7 +140,7 @@ impl DownloadManager {
     }
 
     /// Stop the engine for `id`, keeping file, bitmap and progress, and mark it queued. Live rows only signal (see `stop_engine`).
-    fn park(&self, id: u64) {
+    pub(super) fn park(&self, id: u64) {
         // Live rows only signal: the worker finalizes and its message completes the row.
         if !self.stop_engine(id, crate::video::StopIntent::Finish) {
             return;

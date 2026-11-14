@@ -5988,7 +5988,6 @@ impl DownloadManager {
         let filled = (item.progress().clamp(0.0, 1.0) * BLOCK_CELLS as f64) as usize;
         (0..BLOCK_CELLS).map(|i| i < filled).collect()
     }
-
 }
 
 #[cfg(test)]

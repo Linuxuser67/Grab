@@ -869,9 +869,9 @@ pub(super) async fn complete_saved_live_hls_destination_parts(
         staging: staging.to_path_buf(),
         destination: destination.to_path_buf(),
         item_id,
-        track: crate::manifest_destination::TrackKind::Video,
-        filename: crate::manifest_destination::TrackKind::Video.part_filename(
-                crate::manifest_destination::TrackFileFormat::Ts,
+        track: TrackKind::Video,
+        filename: TrackKind::Video.part_filename(
+                TrackFileFormat::Ts,
             ),
     });
     if let Some(intent) = append_live_hls_destination_part(&video, abort).await? {
@@ -887,9 +887,9 @@ pub(super) async fn complete_saved_live_hls_destination_parts(
             staging: staging.to_path_buf(),
             destination: destination.to_path_buf(),
             item_id,
-            track: crate::manifest_destination::TrackKind::Audio,
-            filename: crate::manifest_destination::TrackKind::Audio.part_filename(
-                    crate::manifest_destination::TrackFileFormat::Ts,
+            track: TrackKind::Audio,
+            filename: TrackKind::Audio.part_filename(
+                    TrackFileFormat::Ts,
                 ),
         });
         if let Some(intent) = append_live_hls_destination_part(&audio, abort).await? {
@@ -1087,9 +1087,9 @@ pub(super) async fn run_live_hls_tracks(
             staging: staging.to_path_buf(),
             destination: destination.to_path_buf(),
             item_id,
-            track: crate::manifest_destination::TrackKind::Video,
-            filename: crate::manifest_destination::TrackKind::Video.part_filename(
-                crate::manifest_destination::TrackFileFormat::Ts,
+            track: TrackKind::Video,
+            filename: TrackKind::Video.part_filename(
+                TrackFileFormat::Ts,
             ),
         });
         if let Some(track) = audio.as_mut() {
@@ -1097,9 +1097,9 @@ pub(super) async fn run_live_hls_tracks(
                 staging: staging.to_path_buf(),
                 destination: destination.to_path_buf(),
                 item_id,
-                track: crate::manifest_destination::TrackKind::Audio,
-                filename: crate::manifest_destination::TrackKind::Audio.part_filename(
-                    crate::manifest_destination::TrackFileFormat::Ts,
+                track: TrackKind::Audio,
+                filename: TrackKind::Audio.part_filename(
+                    TrackFileFormat::Ts,
                 ),
             });
         }
@@ -1458,7 +1458,7 @@ mod destination_part_tests {
             staging: staging.path().to_path_buf(),
             destination: staging.path().join("recording.mp4"),
             item_id: 7,
-            track: crate::manifest_destination::TrackKind::Video,
+            track: TrackKind::Video,
             filename: "video-track.ts",
         });
 
@@ -1725,7 +1725,7 @@ mod destination_part_tests {
             staging: staging.path().to_path_buf(),
             destination: destination.clone(),
             item_id: 73,
-            track: crate::manifest_destination::TrackKind::Video,
+            track: TrackKind::Video,
             filename: "video-track.ts",
         };
         let mut track = LiveHlsTrack {
@@ -1753,7 +1753,7 @@ mod destination_part_tests {
             staging.path(),
             &destination,
             73,
-            crate::manifest_destination::TrackKind::Video,
+            TrackKind::Video,
         )
         .expect("resolve visible HLS destination part");
         let expected_first = first_bodies.concat();

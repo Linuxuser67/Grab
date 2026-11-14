@@ -4500,7 +4500,7 @@ async fn run_ffmpeg_with_offsets_timeout(
                 .await);
             }
         },
-        status = wait_for_manifest_mux(&mut child, mux_timeout) => status,
+        status = wait_for_manifest_mux(&mut child, options.timeout) => status,
     };
     let status = match status {
         Ok(status) => status,

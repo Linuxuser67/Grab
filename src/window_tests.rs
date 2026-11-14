@@ -631,6 +631,23 @@ fn status_views_use_gnome_adaptive_view_switcher() {
             !search_bar.property::<bool>("show-close-button"),
             "the search bar does not add a separate close control"
         );
+        let search_clamp = find_widget_by_name(window.upcast_ref(), "download-search-clamp")
+            .expect("search entry is constrained by an AdwClamp")
+            .downcast::<libadwaita::Clamp>()
+            .expect("search width clamp is an AdwClamp");
+        assert_eq!(
+            search_clamp.property::<i32>("maximum-size"),
+            600,
+            "the search bar uses the standard readable maximum width"
+        );
+        assert_eq!(
+            search_bar
+                .parent()
+                .expect("search bar remains inside its width clamp")
+                .widget_name()
+                .as_str(),
+            "download-search-clamp"
+        );
         let search_toggle = find_widget_by_name(window.upcast_ref(), "search-downloads-button")
             .expect("header search toggle exists")
             .downcast::<gtk4::ToggleButton>()
@@ -646,6 +663,22 @@ fn status_views_use_gnome_adaptive_view_switcher() {
         assert!(
             !search_toggle.is_active(),
             "closing search clears the header toggle"
+        );
+        search_bar.set_search_mode(true);
+        drain_gtk_events();
+        assert!(
+            search_bar.width() <= 600,
+            "the visible search bar never exceeds the HIG width clamp"
+        );
+        search_bar.set_search_mode(false);
+        add_card.open(None);
+        drain_gtk_events();
+        let inline_add_card = find_widget_by_name(window.upcast_ref(), "inline-add-card")
+            .expect("the inline add card is present after opening it");
+        assert_eq!(
+            inline_add_card.margin_top(),
+            0,
+            "the inline add card must sit directly below the header"
         );
 
         let picker_child = gtk4::Box::new(gtk4::Orientation::Vertical, 0);

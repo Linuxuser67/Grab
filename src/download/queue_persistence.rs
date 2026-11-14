@@ -302,5 +302,4 @@ impl DownloadManager {
             Err(e) => tracing::error!("could not persist download queue: {e}"),
         }
     }
-
 }

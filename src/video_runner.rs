@@ -921,7 +921,7 @@ async fn run_video_download_inner(
             audio_sel.size
         } else {
             match (video_sel.as_ref().and_then(|s| s.size), audio_sel.size) {
-                (Some(v), Some(a)) => Some(v + a),
+                (video, audio) => combined_format_size(video, audio),
                 _ => None,
             }
         },
@@ -1491,6 +1491,16 @@ pub(crate) async fn run_unified_ytdlp(
     Ok(Some(final_bytes.unwrap_or(0)))
 }
 
+/// Add yt-dlp byte counters without allowing malformed progress values to wrap.
+fn add_progress_bytes(banked: u64, current_leg: u64) -> u64 {
+    banked.saturating_add(current_leg)
+}
+
+/// A split download has a determinate total only when both legs are known and their sum fits.
+fn combined_format_size(video: Option<u64>, audio: Option<u64>) -> Option<u64> {
+    video.zip(audio).and_then(|(video, audio)| video.checked_add(audio))
+}
+
 /// Time since yt-dlp last wrote a stdout line: the stall watchdog's clock.
 fn stall_elapsed(last_progress: &std::sync::Mutex<std::time::Instant>) -> std::time::Duration {
     lock_recover(last_progress).elapsed()
@@ -1580,7 +1590,7 @@ async fn run_ytdlp_attempt(
             }
             if let Some(p) = parse_ytdlp_template(&line) {
                 if p.finished {
-                    banked += p.downloaded.unwrap_or(0).max(leg_max);
+                    banked = add_progress_bytes(banked, p.downloaded.unwrap_or(0).max(leg_max));
                     leg_max = 0;
                 } else {
                     if let Some(d) = p.downloaded {
@@ -1590,7 +1600,7 @@ async fn run_ytdlp_attempt(
                         total = total.max(t);
                     }
                     if total > 0 {
-                        report(banked + leg_max, total);
+                        report(add_progress_bytes(banked, leg_max), total);
                     }
                 }
             }

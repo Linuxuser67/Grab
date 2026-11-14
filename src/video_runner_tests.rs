@@ -328,15 +328,17 @@ fn a_sweep_removes_only_its_own_temp() {
 fn the_sweep_follows_the_reap() {
     let log = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
     let (reap_log, sweep_log) = (log.clone(), log.clone());
-    crate::runtime::tokio_rt().block_on(reap_then_sweep(
-        async move {
-            reap_log.borrow_mut().push("reap");
-        },
-        None,
-        move || async move {
-            sweep_log.borrow_mut().push("sweep");
-        },
-    ));
+    crate::runtime::tokio_rt()
+        .block_on(reap_then_sweep(
+            async move {
+                reap_log.borrow_mut().push("reap");
+            },
+            None,
+            move || async move {
+                sweep_log.borrow_mut().push("sweep");
+            },
+        ))
+        .expect("quiescent group should permit scratch sweep");
     assert_eq!(
         *log.borrow(),
         ["reap", "sweep"],
@@ -406,7 +408,9 @@ fn hls_group_quiescence_waits_for_extractor_descendants() {
             "the descendant must still be running after its leader exits"
         );
 
-        await_ytdlp_group_quiescence(pgid).await;
+        await_ytdlp_group_quiescence(pgid)
+            .await
+            .expect("extractor descendants must become quiescent");
         assert_eq!(
             std::fs::read(&marker).unwrap(),
             b"done",

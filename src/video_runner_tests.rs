@@ -453,7 +453,10 @@ fn subtitle_probe_disarms_group_after_leader_is_reaped() {
 
         let status = child.wait().await.unwrap();
         assert!(!status.success());
-        assert!(group.is_armed(), "the test must exercise a reaped, armed guard");
+        assert!(
+            group.is_armed(),
+            "the test must exercise a reaped, armed guard"
+        );
 
         finish_subtitle_probe_child(&mut child, &mut group).await;
         assert!(

@@ -348,7 +348,7 @@ async fn fetched_hls_resource_bytes(
 }
 
 /// Maximum prefix read when rejecting obvious text error responses as live HLS media.
-const LIVE_HLS_RESPONSE_PREFIX_BYTES: usize = 64;
+pub(super) const LIVE_HLS_RESPONSE_PREFIX_BYTES: usize = 64;
 
 pub(super) fn is_obvious_text_error_body(bytes: &[u8]) -> bool {
     let bytes = bytes.strip_prefix(b"\xef\xbb\xbf").unwrap_or(bytes);

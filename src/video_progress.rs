@@ -64,10 +64,6 @@ pub(crate) enum YtdlpPlaylistEvent {
         downloaded: Option<u64>,
         total: Option<u64>,
     },
-    Failed {
-        file_id: String,
-        playlist_index: usize,
-    },
     Finished {
         file_id: String,
         playlist_index: usize,
@@ -134,14 +130,8 @@ pub(crate) fn parse_ytdlp_playlist_event(
             let downloaded = parse_event_u64(fields.next()?);
             let raw_total = fields.next()?;
             let raw_estimate = fields.next()?;
-            if file_id.is_empty() || fields.next().is_some() {
+            if file_id.is_empty() || status == "error" || fields.next().is_some() {
                 return None;
-            }
-            if status == "error" {
-                return Some(YtdlpPlaylistEvent::Failed {
-                    file_id,
-                    playlist_index,
-                });
             }
             Some(YtdlpPlaylistEvent::Progress {
                 file_id,
@@ -416,10 +406,7 @@ mod playlist_event_tests {
                 "@GRAB:testnonce:PROGRESS\t\"abc123\"\t4\t\"error\"\t\"NA\"\t\"NA\"\t\"NA\"",
                 MARKER
             ),
-            Some(YtdlpPlaylistEvent::Failed {
-                file_id: "abc123".to_string(),
-                playlist_index: 4,
-            })
+            None
         );
     }
 

@@ -452,11 +452,9 @@ async fn run_video_playlist_download_inner(
                 Some(YtdlpPlaylistEvent::Started {
                     file_id, filename, ..
                 }) => {
-                    if let Some(previous) = advance_playlist_entry(
-                        &mut current_file,
-                        &file_id,
-                        &summary.finished_ids,
-                    ) {
+                    if let Some(previous) =
+                        advance_playlist_entry(&mut current_file, &file_id, &summary.finished_ids)
+                    {
                         summary.failed.entry(previous).or_insert_with(|| {
                             gettext(
                                 "yt-dlp moved to the next playlist entry without finalizing the previous one",
@@ -587,9 +585,10 @@ async fn run_video_playlist_download_inner(
         if let Some(file_id) = current_file
             && !summary.finished_ids.contains(&file_id)
         {
-            summary.failed.entry(file_id).or_insert_with(|| {
-                gettext("yt-dlp exited before finalizing this playlist entry")
-            });
+            summary
+                .failed
+                .entry(file_id)
+                .or_insert_with(|| gettext("yt-dlp exited before finalizing this playlist entry"));
         }
         for (file_id, error) in std::mem::take(&mut summary.failed) {
             tx_reader
@@ -710,7 +709,9 @@ async fn run_video_playlist_download_inner(
     }
     if unresolved > 0 {
         let fallback = format!("yt-dlp completed with {unresolved} playlist entries unresolved");
-        return Err(VideoError::part_failed(last_error_line(&log_tail, &fallback)));
+        return Err(VideoError::part_failed(last_error_line(
+            &log_tail, &fallback,
+        )));
     }
 
     // The playlist writes final files directly into its dedicated collection

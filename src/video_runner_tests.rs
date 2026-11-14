@@ -1023,7 +1023,6 @@ async fn discarding_during_live_remux_reaps_ffmpeg_and_removes_its_partial() {
     );
 }
 
-
 #[test]
 fn repeated_playlist_start_for_the_same_id_does_not_fail_the_active_entry() {
     let mut current_file = Some("video-id".to_string());

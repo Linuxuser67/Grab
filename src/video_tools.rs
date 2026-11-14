@@ -2103,9 +2103,10 @@ fn merge_youtube_extractor_args(
 /// Shared trailing argv for every yt-dlp spawn: user-configured extractor args,
 /// JS runtime pin for YouTube, cookie source, UA, then the page URL behind `--`.
 ///
-/// The web-embedded exclusion above is deliberately limited to cookie-backed
-/// YouTube requests, including browser profiles and staged extension handoffs.
-/// Explicit extractor arguments always take precedence.
+/// The web-embedded exclusion above is limited to cookie-backed YouTube
+/// requests, including browser profiles and staged extension handoffs.
+/// Explicit YouTube player-client arguments take precedence; other extractor
+/// arguments are preserved.
 pub(crate) fn ytdlp_identity_args(
     cookies_browser: &str,
     handoff_cookie_file: Option<&std::path::Path>,
@@ -2243,11 +2244,11 @@ mod extractor_args_compat_tests {
                 true,
                 false,
             ),
-            Some("youtube:player_client=default,-web_embedded"),
+            Some("player_client=default,-web_embedded"),
         );
         assert_eq!(
             youtube_cookie_player_client_args("https://youtu.be/example", true, false),
-            Some("youtube:player_client=default,-web_embedded"),
+            Some("player_client=default,-web_embedded"),
         );
     }
 

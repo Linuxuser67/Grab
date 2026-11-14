@@ -156,6 +156,7 @@ impl VideoError {
         match self {
             Self::MissingLibraries(s) => Self::MissingLibraries(format!("{s}{suffix}")),
             Self::Fetch(s) => Self::Fetch(format!("{s}{suffix}")),
+            Self::RetryableFetch(s) => Self::RetryableFetch(format!("{s}{suffix}")),
             Self::ToolProbeTimeout(s) => Self::ToolProbeTimeout(format!("{s}{suffix}")),
             Self::Runtime(s) => Self::Runtime(format!("{s}{suffix}")),
             Self::Message(s) => Self::Message(format!("{s}{suffix}")),

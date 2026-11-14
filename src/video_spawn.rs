@@ -815,8 +815,10 @@ mod tests {
 
     #[test]
     fn process_group_scan_observes_the_current_process() {
+        // SAFETY: getpgrp has no preconditions and only returns the caller's process-group ID.
+        let pgid = unsafe { libc::getpgrp() };
         assert!(
-            process_group_has_live_members(libc::getpgrp()),
+            process_group_has_live_members(pgid),
             "the current process must keep its own process group live"
         );
     }

@@ -930,7 +930,9 @@ async fn transfer_static_manifest_tracks(
                     staging,
                     plan: video.as_ref(),
                     directory: video_dir,
-                    filename: "video-track.ts",
+                    filename: crate::manifest_destination::TrackKind::Video.part_filename(
+                        crate::manifest_destination::TrackFileFormat::Ts,
+                    ),
                     destination,
                     item_id,
                     track: crate::manifest_destination::TrackKind::Video,
@@ -948,7 +950,9 @@ async fn transfer_static_manifest_tracks(
                         staging,
                         plan: audio.as_ref(),
                         directory: audio_dir,
-                        filename: "audio-track.ts",
+                        filename: crate::manifest_destination::TrackKind::Audio.part_filename(
+                            crate::manifest_destination::TrackFileFormat::Ts,
+                        ),
                         destination,
                         item_id,
                         track: crate::manifest_destination::TrackKind::Audio,
@@ -1029,7 +1033,9 @@ async fn transfer_static_manifest_tracks(
                 staging,
                 plan: video.as_ref(),
                 directory: video_dir,
-                filename: "video-track.mp4",
+                filename: crate::manifest_destination::TrackKind::Video.part_filename(
+                    crate::manifest_destination::TrackFileFormat::Mp4,
+                ),
                 destination,
                 item_id,
                 track: crate::manifest_destination::TrackKind::Video,
@@ -1048,7 +1054,9 @@ async fn transfer_static_manifest_tracks(
                     staging,
                     plan: audio,
                     directory: audio_dir,
-                    filename: "audio-track.mp4",
+                    filename: crate::manifest_destination::TrackKind::Audio.part_filename(
+                        crate::manifest_destination::TrackFileFormat::Mp4,
+                    ),
                     destination,
                     item_id,
                     track: crate::manifest_destination::TrackKind::Audio,
@@ -1092,7 +1100,9 @@ async fn transfer_static_manifest_tracks(
                     staging,
                     plan: subtitle,
                     directory: &subtitle_dir,
-                    filename: "subtitle-track.mp4",
+                    filename: crate::manifest_destination::TrackKind::Subtitles.part_filename(
+                        crate::manifest_destination::TrackFileFormat::Mp4,
+                    ),
                     destination,
                     item_id,
                     track: crate::manifest_destination::TrackKind::Subtitles,
@@ -1115,9 +1125,17 @@ async fn transfer_static_manifest_tracks(
                     .await
                     .map_err(ManifestRunError::Failed)?
                 } else {
-                    subtitle_dir.join("subtitle-track.mp4")
+                    subtitle_dir.join(
+                        crate::manifest_destination::TrackKind::Subtitles.part_filename(
+                            crate::manifest_destination::TrackFileFormat::Mp4,
+                        ),
+                    )
                 };
-                let output = staging.join("subtitles/subtitle-track.vtt");
+                let output = staging.join("subtitles").join(
+                    crate::manifest_destination::TrackKind::Subtitles.part_filename(
+                        crate::manifest_destination::TrackFileFormat::Vtt,
+                    ),
+                );
                 match tokio::task::spawn_blocking(move || extractor(&source, &output, &codecs))
                     .await
                 {
@@ -1242,7 +1260,9 @@ async fn cleanup_static_destination_parts_after_fallback(
                 item_id,
                 video_dir,
                 crate::manifest_destination::TrackKind::Video,
-                "video-track.ts",
+                crate::manifest_destination::TrackKind::Video.part_filename(
+                    crate::manifest_destination::TrackFileFormat::Ts,
+                ),
             )
             .await?;
             if audio.is_some() {
@@ -1252,7 +1272,9 @@ async fn cleanup_static_destination_parts_after_fallback(
                     item_id,
                     audio_dir,
                     crate::manifest_destination::TrackKind::Audio,
-                    "audio-track.ts",
+                    crate::manifest_destination::TrackKind::Audio.part_filename(
+                    crate::manifest_destination::TrackFileFormat::Ts,
+                ),
                 )
                 .await?;
             }
@@ -1266,7 +1288,9 @@ async fn cleanup_static_destination_parts_after_fallback(
                 item_id,
                 video_dir,
                 crate::manifest_destination::TrackKind::Video,
-                "video-track.mp4",
+                crate::manifest_destination::TrackKind::Video.part_filename(
+                    crate::manifest_destination::TrackFileFormat::Mp4,
+                ),
             )
             .await?;
             if audio.is_some() {
@@ -1276,7 +1300,9 @@ async fn cleanup_static_destination_parts_after_fallback(
                     item_id,
                     audio_dir,
                     crate::manifest_destination::TrackKind::Audio,
-                    "audio-track.mp4",
+                    crate::manifest_destination::TrackKind::Audio.part_filename(
+                    crate::manifest_destination::TrackFileFormat::Mp4,
+                ),
                 )
                 .await?;
             }
@@ -1288,7 +1314,9 @@ async fn cleanup_static_destination_parts_after_fallback(
                     item_id,
                     &subtitle_directory,
                     crate::manifest_destination::TrackKind::Subtitles,
-                    "subtitle-track.mp4",
+                    crate::manifest_destination::TrackKind::Subtitles.part_filename(
+                    crate::manifest_destination::TrackFileFormat::Mp4,
+                ),
                 )
                 .await?;
             }
@@ -1369,7 +1397,9 @@ async fn prepare_live_hls_finalization(
                         item_id,
                         audio_dir,
                         crate::manifest_destination::TrackKind::Audio,
-                        "audio-track.ts",
+                        crate::manifest_destination::TrackKind::Audio.part_filename(
+                    crate::manifest_destination::TrackFileFormat::Ts,
+                ),
                     )
                     .await?;
                 }
@@ -1400,7 +1430,9 @@ async fn prepare_live_hls_finalization(
             item_id,
             audio_dir,
             crate::manifest_destination::TrackKind::Audio,
-            "audio-track.ts",
+            crate::manifest_destination::TrackKind::Audio.part_filename(
+                    crate::manifest_destination::TrackFileFormat::Ts,
+                ),
         )
         .await?;
     }
@@ -1847,7 +1879,11 @@ async fn finalize_manifest_download(
         match &tracks {
             Tracks::Hls { .. } => video_dir.join("local.m3u8"),
             Tracks::Dash { .. } | Tracks::DashLiveOffline { .. } => {
-                video_dir.join("video-track.mp4")
+                video_dir.join(
+                    crate::manifest_destination::TrackKind::Video.part_filename(
+                        crate::manifest_destination::TrackFileFormat::Mp4,
+                    ),
+                )
             }
         }
     };
@@ -1864,7 +1900,11 @@ async fn finalize_manifest_download(
         } else {
             match job.source.kind {
                 ManifestKind::Hls => audio_dir.join("local.m3u8"),
-                ManifestKind::Dash => audio_dir.join("audio-track.mp4"),
+                ManifestKind::Dash => audio_dir.join(
+                    crate::manifest_destination::TrackKind::Audio.part_filename(
+                        crate::manifest_destination::TrackFileFormat::Mp4,
+                    ),
+                ),
             }
         })
     } else {
@@ -1877,7 +1917,11 @@ async fn finalize_manifest_download(
         Tracks::Dash {
             subtitle: Some(_), ..
         } => {
-            let path = staging.join("subtitles/subtitle-track.vtt");
+            let path = staging.join("subtitles").join(
+                    crate::manifest_destination::TrackKind::Subtitles.part_filename(
+                        crate::manifest_destination::TrackFileFormat::Vtt,
+                    ),
+                );
             match tokio::fs::symlink_metadata(&path).await {
                 Ok(metadata) if !metadata.file_type().is_symlink() && metadata.is_file() => {
                     Some(path)
@@ -2045,9 +2089,13 @@ async fn finalize_manifest_download(
     let mut destination_parts_cleaned = true;
     if destination_parts {
         let (video_filename, audio_filename) = if matches!(&tracks, Tracks::Hls { .. }) {
-            ("video-track.ts", "audio-track.ts")
+            (crate::manifest_destination::TrackKind::Video.part_filename(
+                    crate::manifest_destination::TrackFileFormat::Ts,
+                ), "audio-track.ts")
         } else {
-            ("video-track.mp4", "audio-track.mp4")
+            (crate::manifest_destination::TrackKind::Video.part_filename(
+                    crate::manifest_destination::TrackFileFormat::Mp4,
+                ), "audio-track.mp4")
         };
         let has_destination_subtitles = matches!(
             &tracks,
@@ -2072,7 +2120,9 @@ async fn finalize_manifest_download(
             ),
             (
                 crate::manifest_destination::TrackKind::Subtitles,
-                "subtitle-track.mp4",
+                crate::manifest_destination::TrackKind::Subtitles.part_filename(
+                    crate::manifest_destination::TrackFileFormat::Mp4,
+                ),
                 subtitle_directory.as_path(),
                 has_destination_subtitles,
             ),

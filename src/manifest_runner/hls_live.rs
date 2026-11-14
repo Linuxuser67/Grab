@@ -166,14 +166,11 @@ pub(super) async fn load_live_hls_track(
         let is_key = accumulator.is_key_resource(&filename)
             || expected.is_some_and(|resource| resource.kind == HlsResourceKind::Key);
         let cached_is_valid = metadata.as_ref().is_some_and(|metadata| {
-            metadata.len() > 0
-                && metadata.len() <= MAX_RESOURCE_BYTES
-                && (!is_key || metadata.len() == 16)
-                && expected.is_none_or(|resource| {
-                    resource
-                        .range
-                        .is_none_or(|range| metadata.len() == range.length)
-                })
+            super::staged_resource_size_ok(
+                metadata.len(),
+                expected.and_then(|resource| resource.range),
+                is_key,
+            )
         });
         if cached_is_valid {
             if let Some(metadata) = metadata.as_ref() {
@@ -249,10 +246,11 @@ async fn missing_hls_resources(
         match tokio::fs::symlink_metadata(&path).await {
             Ok(metadata) if metadata.file_type().is_file() => {
                 let size = metadata.len();
-                let valid_size = size > 0
-                    && size <= MAX_RESOURCE_BYTES
-                    && resource.range.is_none_or(|range| size == range.length)
-                    && (resource.kind != HlsResourceKind::Key || size == 16);
+                let valid_size = super::staged_resource_size_ok(
+                    size,
+                    resource.range,
+                    resource.kind == HlsResourceKind::Key,
+                );
                 if valid_size {
                     continue;
                 }
@@ -296,11 +294,11 @@ async fn fetched_hls_resource_bytes(
             ));
         }
         let size = metadata.len();
-        if size == 0
-            || size > MAX_RESOURCE_BYTES
-            || resource.range.is_some_and(|range| size != range.length)
-            || (resource.kind == HlsResourceKind::Key && size != 16)
-        {
+        if !super::staged_resource_size_ok(
+            size,
+            resource.range,
+            resource.kind == HlsResourceKind::Key,
+        ) {
             return Err(ManifestRunError::Unsupported(
                 "A fetched live HLS resource has an invalid size".to_string(),
             ));

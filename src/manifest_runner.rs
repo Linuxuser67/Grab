@@ -46,6 +46,17 @@ use hls_live::{
 
 /// Upper bound for one media resource, independent of a server-supplied length.
 const MAX_RESOURCE_BYTES: u64 = crate::manifest_writer::MAX_RESOURCE_BYTES;
+
+pub(super) fn staged_resource_size_ok(
+    size: u64,
+    range: Option<ManifestByteRange>,
+    is_key: bool,
+) -> bool {
+    size > 0
+        && size <= MAX_RESOURCE_BYTES
+        && range.is_none_or(|range| size == range.length)
+        && (!is_key || size == 16)
+}
 /// Maximum encrypted SAMPLE-AES segment size accepted by the in-memory decoder.
 /// The decoder and MPEG-TS preflight both need whole-segment buffers, so this
 /// limit is intentionally much smaller than the general staged-resource cap.
@@ -2972,14 +2983,7 @@ async fn fetch_resource_once(
                 "A manifest resource path is not a regular file".to_string(),
             ));
         }
-        let cached_range_matches = resource
-            .range
-            .is_none_or(|range| metadata.len() == range.length);
-        if metadata.len() > 0
-            && metadata.len() <= MAX_RESOURCE_BYTES
-            && cached_range_matches
-            && (!resource.key || metadata.len() == 16)
-        {
+        if staged_resource_size_ok(metadata.len(), resource.range, resource.key) {
             let size = metadata.len();
             let total = reserve_download_bytes(downloaded, size)?;
             tx.send(progress_message(total)).ok();
@@ -5678,6 +5682,32 @@ mod integration_tests;
 #[cfg(test)]
 #[path = "manifest_runner_sample_aes_tests.rs"]
 mod sample_aes_tests;
+
+#[cfg(test)]
+mod staged_resource_size_tests {
+    use super::*;
+
+    #[test]
+    fn staged_resource_size_validation_covers_bounds_ranges_and_keys() {
+        assert!(staged_resource_size_ok(1, None, false));
+        assert!(!staged_resource_size_ok(0, None, false));
+        assert!(!staged_resource_size_ok(
+            MAX_RESOURCE_BYTES + 1,
+            None,
+            false
+        ));
+
+        let range = ManifestByteRange {
+            offset: 16,
+            length: 32,
+        };
+        assert!(staged_resource_size_ok(32, Some(range), false));
+        assert!(!staged_resource_size_ok(31, Some(range), false));
+
+        assert!(staged_resource_size_ok(16, None, true));
+        assert!(!staged_resource_size_ok(15, None, true));
+    }
+}
 
 #[cfg(test)]
 mod staged_file_atomic_tests {

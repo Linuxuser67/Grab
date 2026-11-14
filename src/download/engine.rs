@@ -1,8 +1,8 @@
 //! Download attempt preparation, backend execution and message-pump lifecycle.
 
 use super::{
-    ensure_contained_parent, format_gettext_template, DownloadManager, FinalNameReservations,
-    ProbeJsonKey, RestoreState,
+    DownloadManager, FinalNameReservations, ProbeJsonKey, RestoreState, ensure_contained_parent,
+    format_gettext_template,
 };
 use crate::download_fetch::{FetchCtx, StartMode, run_download, truncate_to_prefix};
 use crate::download_net::http_client_for;
@@ -11,9 +11,7 @@ use crate::download_rate::{fmt_eta, format_amounts, parse_rate, publish_rate_lim
 use crate::download_row::DownloadItem;
 use crate::download_store::DownloadStatus;
 use crate::engine_msg::{DEST_EXISTS, EngineMsg};
-use crate::file_names::{
-    dedupe_filename, fmt_bytes, name_stem, rename_noreplace, sane_filename,
-};
+use crate::file_names::{dedupe_filename, fmt_bytes, name_stem, rename_noreplace, sane_filename};
 use crate::runtime::tokio_rt;
 use crate::video::AttemptGate;
 use gettextrs::{gettext, ngettext};
@@ -1848,7 +1846,6 @@ impl DownloadManager {
         self.changed();
         self.pump(item, id, generation, rx);
     }
-
 
 }
 

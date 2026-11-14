@@ -14,8 +14,8 @@ use std::sync::atomic::AtomicU64;
 use std::time::{Duration, Instant, SystemTime};
 
 mod cancellation;
-mod engine;
 mod deletion;
+mod engine;
 mod queue_persistence;
 mod queue_restore;
 mod scheduler;
@@ -2391,7 +2391,6 @@ impl DownloadManager {
     pub fn max_concurrent(&self) -> usize {
         self.settings.max_concurrent().max(1) as usize
     }
-
 
 }
 

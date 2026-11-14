@@ -760,7 +760,11 @@ async fn await_group_quiescence_with_timeout(pgid: i32, timeout: Duration) -> bo
     loop {
         let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
         if remaining.is_zero() {
-            tracing::warn!(pgid, ?timeout, "process group did not become quiescent before the deadline");
+            tracing::warn!(
+                pgid,
+                ?timeout,
+                "process group did not become quiescent before the deadline"
+            );
             return false;
         }
 
@@ -773,14 +777,22 @@ async fn await_group_quiescence_with_timeout(pgid: i32, timeout: Duration) -> bo
                 return false;
             }
             Err(_) => {
-                tracing::warn!(pgid, ?timeout, "process-group scan exceeded the quiescence deadline");
+                tracing::warn!(
+                    pgid,
+                    ?timeout,
+                    "process-group scan exceeded the quiescence deadline"
+                );
                 return false;
             }
         }
 
         let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
         if remaining.is_zero() {
-            tracing::warn!(pgid, ?timeout, "process group did not become quiescent before the deadline");
+            tracing::warn!(
+                pgid,
+                ?timeout,
+                "process group did not become quiescent before the deadline"
+            );
             return false;
         }
         tokio::time::sleep(delay.min(remaining)).await;

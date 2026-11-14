@@ -1775,8 +1775,7 @@ mod tests {
         std::fs::create_dir(&directory).expect("create merge scratch");
         std::fs::set_permissions(&directory, std::fs::Permissions::from_mode(0o700))
             .expect("make scratch private");
-        std::fs::write(directory.join("merged.tmp"), b"partial merge")
-            .expect("write merge output");
+        std::fs::write(directory.join("merged.tmp"), b"partial merge").expect("write merge output");
 
         sweep_stale_dash_merge_directories(&root);
         assert!(

@@ -2114,11 +2114,7 @@ async fn sweep_live_capture(
 
 /// Reap the direct child and wait for its process group to stop writing before
 /// reclaiming capture scratch. Cleanup is constructed only after both waits.
-async fn reap_then_sweep<F, S, G>(
-    reap: F,
-    pgid: Option<i32>,
-    sweep: S,
-) -> Result<(), VideoError>
+async fn reap_then_sweep<F, S, G>(reap: F, pgid: Option<i32>, sweep: S) -> Result<(), VideoError>
 where
     F: std::future::Future<Output = ()>,
     S: FnOnce() -> G,

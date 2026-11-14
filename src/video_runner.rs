@@ -2138,11 +2138,12 @@ const SUBTITLE_DRAIN_TIMEOUT: Duration = Duration::from_secs(5);
 /// Drain the probe's stdout with a deadline; on expiry abort the drain task so
 /// it can't linger on a pipe held open by a grandchild, then `None`.
 async fn drain_with_timeout(
-    mut drain: tokio::task::JoinHandle<Vec<u8>>,
+    mut drain: tokio::task::JoinHandle<std::io::Result<Vec<u8>>>,
     bound: Duration,
-) -> Option<Vec<u8>> {
+) -> Option<std::io::Result<Vec<u8>>> {
     match tokio::time::timeout(bound, &mut drain).await {
-        Ok(bytes) => Some(bytes.unwrap_or_default()),
+        Ok(Ok(bytes)) => Some(bytes),
+        Ok(Err(error)) => Some(Err(std::io::Error::other(error))),
         Err(_) => {
             drain.abort();
             let _ = drain.await;
@@ -2281,12 +2282,12 @@ pub(crate) async fn resolve_subtitle_lang(
     // moves the child, which `select!` forbids alongside `kill`).
     let stdout = child.stdout.take();
     let drain = tokio::spawn(async move {
-        let mut out_bytes = Vec::new();
-        if let Some(mut pipe) = stdout {
-            use tokio::io::AsyncReadExt as _;
-            let _ = pipe.read_to_end(&mut out_bytes).await;
+        match stdout {
+            Some(pipe) => {
+                crate::video_spawn::read_bounded(pipe, crate::video_spawn::MAX_STDOUT_BYTES).await
+            }
+            None => Ok(Vec::new()),
         }
-        out_bytes
     });
     let status = tokio::select! {
         biased;
@@ -2311,7 +2312,21 @@ pub(crate) async fn resolve_subtitle_lang(
     // would stall the download on an otherwise successful probe. 5 s is
     // generous — the info JSON is small and fully written by now.
     let out_bytes = match drain_with_timeout(drain, SUBTITLE_DRAIN_TIMEOUT).await {
-        Some(bytes) => bytes,
+        Some(Ok(bytes)) => bytes,
+        Some(Err(error)) => {
+            if error.kind() == std::io::ErrorKind::QuotaExceeded {
+                tracing::warn!(
+                    limit = crate::video_spawn::MAX_STDOUT_BYTES,
+                    "subtitle probe output exceeded its size limit; downloading without subtitles"
+                );
+            } else {
+                tracing::warn!(
+                    error = %error,
+                    "subtitle probe output could not be read; downloading without subtitles"
+                );
+            }
+            return Ok(None);
+        }
         None => {
             tracing::warn!("subtitle probe drain timed out; downloading without subtitles");
             return Ok(None);

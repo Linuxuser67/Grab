@@ -483,6 +483,60 @@ fn subtitle_probe_drain_times_out_when_pipe_stays_open() {
     let _ = std::fs::remove_dir_all(&base);
 }
 
+/// Oversized extractor metadata is discarded at the same hard ceiling as the main JSON probe.
+#[cfg(unix)]
+#[test]
+fn subtitle_probe_rejects_oversized_json_output() {
+    let base = std::env::temp_dir().join(format!("grab-subtitle-oversize-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&base);
+    std::fs::create_dir_all(&base).unwrap();
+    let bin = base.join("fake-ytdlp-oversized-output");
+    let output_bytes = crate::video_spawn::MAX_STDOUT_BYTES + 1;
+    std::fs::write(
+        &bin,
+        format!("#!/bin/sh\nhead -c {output_bytes} /dev/zero\n"),
+    )
+    .unwrap();
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
+
+    let job = VideoJob {
+        item_id: 1,
+        page_url: "https://example.com/v".into(),
+        playlist_item_id: None,
+        quality: "1080p".into(),
+        audio_only: false,
+        dest: base.join("v.mp4"),
+        speed_limit: None,
+        keep_server_date: false,
+        video_format_id: None,
+        is_live: false,
+        live_from_start: false,
+        newest_codecs: true,
+        cookies_browser: "none".into(),
+        subtitles: Some("en".into()),
+        embed_subs: false,
+        sponsorblock_remove: false,
+        sponsorblock_mark: false,
+        remux_video: None,
+        embed_chapters: false,
+        proxy: None,
+        info_json: None,
+    };
+    let (_abort_tx, mut abort_rx) = tokio::sync::oneshot::channel::<StopIntent>();
+    let result =
+        crate::runtime::tokio_rt().block_on(resolve_subtitle_lang(&bin, &job, &mut abort_rx, None));
+
+    assert_eq!(
+        result,
+        Ok(None),
+        "oversized extractor metadata must be rejected without failing the media download"
+    );
+    let _ = std::fs::remove_dir_all(&base);
+}
+
 #[cfg(unix)]
 #[test]
 fn subtitle_probe_disarms_group_after_leader_is_reaped() {
@@ -568,11 +622,11 @@ fn drain_with_timeout_aborts_lingering_task() {
                 }
             }
         }
-        let lingering: tokio::task::JoinHandle<Vec<u8>> = tokio::spawn(async move {
-            let _guard = AbortGuard(Some(tx));
-            std::future::pending::<()>().await;
-            unreachable!("a lingering drain never resolves on its own")
-        });
+        let lingering: tokio::task::JoinHandle<std::io::Result<Vec<u8>>> =
+            tokio::spawn(async move {
+                let _guard = AbortGuard(Some(tx));
+                std::future::pending::<std::io::Result<Vec<u8>>>().await
+            });
         let result = drain_with_timeout(lingering, std::time::Duration::from_millis(50)).await;
         assert!(
             result.is_none(),

@@ -2391,7 +2391,6 @@ impl DownloadManager {
     pub fn max_concurrent(&self) -> usize {
         self.settings.max_concurrent().max(1) as usize
     }
-
 }
 
 impl DownloadManager {

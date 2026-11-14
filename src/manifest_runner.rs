@@ -931,9 +931,7 @@ async fn transfer_static_manifest_tracks(
                     staging,
                     plan: video.as_ref(),
                     directory: video_dir,
-                    filename: TrackKind::Video.part_filename(
-                        TrackFileFormat::Ts,
-                    ),
+                    filename: TrackKind::Video.part_filename(TrackFileFormat::Ts),
                     destination,
                     item_id,
                     track: TrackKind::Video,
@@ -951,9 +949,7 @@ async fn transfer_static_manifest_tracks(
                         staging,
                         plan: audio.as_ref(),
                         directory: audio_dir,
-                        filename: TrackKind::Audio.part_filename(
-                            TrackFileFormat::Ts,
-                        ),
+                        filename: TrackKind::Audio.part_filename(TrackFileFormat::Ts),
                         destination,
                         item_id,
                         track: TrackKind::Audio,
@@ -1034,9 +1030,7 @@ async fn transfer_static_manifest_tracks(
                 staging,
                 plan: video.as_ref(),
                 directory: video_dir,
-                filename: TrackKind::Video.part_filename(
-                    TrackFileFormat::Mp4,
-                ),
+                filename: TrackKind::Video.part_filename(TrackFileFormat::Mp4),
                 destination,
                 item_id,
                 track: TrackKind::Video,
@@ -1055,9 +1049,7 @@ async fn transfer_static_manifest_tracks(
                     staging,
                     plan: audio,
                     directory: audio_dir,
-                    filename: TrackKind::Audio.part_filename(
-                        TrackFileFormat::Mp4,
-                    ),
+                    filename: TrackKind::Audio.part_filename(TrackFileFormat::Mp4),
                     destination,
                     item_id,
                     track: TrackKind::Audio,
@@ -1101,9 +1093,7 @@ async fn transfer_static_manifest_tracks(
                     staging,
                     plan: subtitle,
                     directory: &subtitle_dir,
-                    filename: TrackKind::Subtitles.part_filename(
-                        TrackFileFormat::Mp4,
-                    ),
+                    filename: TrackKind::Subtitles.part_filename(TrackFileFormat::Mp4),
                     destination,
                     item_id,
                     track: TrackKind::Subtitles,
@@ -1127,15 +1117,11 @@ async fn transfer_static_manifest_tracks(
                     .map_err(ManifestRunError::Failed)?
                 } else {
                     subtitle_dir.join(
-                        TrackKind::Subtitles.part_filename(
-                            TrackFileFormat::Mp4,
-                        ),
+                        TrackKind::Subtitles.part_filename(TrackFileFormat::Mp4),
                     )
                 };
                 let output = staging.join("subtitles").join(
-                    TrackKind::Subtitles.part_filename(
-                        TrackFileFormat::Vtt,
-                    ),
+                    TrackKind::Subtitles.part_filename(TrackFileFormat::Vtt),
                 );
                 match tokio::task::spawn_blocking(move || extractor(&source, &output, &codecs))
                     .await
@@ -1261,9 +1247,7 @@ async fn cleanup_static_destination_parts_after_fallback(
                 item_id,
                 video_dir,
                 TrackKind::Video,
-                TrackKind::Video.part_filename(
-                    TrackFileFormat::Ts,
-                ),
+                TrackKind::Video.part_filename(TrackFileFormat::Ts),
             )
             .await?;
             if audio.is_some() {
@@ -1273,9 +1257,7 @@ async fn cleanup_static_destination_parts_after_fallback(
                     item_id,
                     audio_dir,
                     TrackKind::Audio,
-                    TrackKind::Audio.part_filename(
-                    TrackFileFormat::Ts,
-                ),
+                    TrackKind::Audio.part_filename(TrackFileFormat::Ts),
                 )
                 .await?;
             }
@@ -1289,9 +1271,7 @@ async fn cleanup_static_destination_parts_after_fallback(
                 item_id,
                 video_dir,
                 TrackKind::Video,
-                TrackKind::Video.part_filename(
-                    TrackFileFormat::Mp4,
-                ),
+                TrackKind::Video.part_filename(TrackFileFormat::Mp4),
             )
             .await?;
             if audio.is_some() {
@@ -1301,9 +1281,7 @@ async fn cleanup_static_destination_parts_after_fallback(
                     item_id,
                     audio_dir,
                     TrackKind::Audio,
-                    TrackKind::Audio.part_filename(
-                    TrackFileFormat::Mp4,
-                ),
+                    TrackKind::Audio.part_filename(TrackFileFormat::Mp4),
                 )
                 .await?;
             }
@@ -1315,9 +1293,7 @@ async fn cleanup_static_destination_parts_after_fallback(
                     item_id,
                     &subtitle_directory,
                     TrackKind::Subtitles,
-                    TrackKind::Subtitles.part_filename(
-                    TrackFileFormat::Mp4,
-                ),
+                    TrackKind::Subtitles.part_filename(TrackFileFormat::Mp4),
                 )
                 .await?;
             }
@@ -1398,9 +1374,7 @@ async fn prepare_live_hls_finalization(
                         item_id,
                         audio_dir,
                         TrackKind::Audio,
-                        TrackKind::Audio.part_filename(
-                    TrackFileFormat::Ts,
-                ),
+                        TrackKind::Audio.part_filename(TrackFileFormat::Ts),
                     )
                     .await?;
                 }
@@ -1431,9 +1405,7 @@ async fn prepare_live_hls_finalization(
             item_id,
             audio_dir,
             TrackKind::Audio,
-            TrackKind::Audio.part_filename(
-                    TrackFileFormat::Ts,
-                ),
+            TrackKind::Audio.part_filename(TrackFileFormat::Ts),
         )
         .await?;
     }
@@ -1881,9 +1853,7 @@ async fn finalize_manifest_download(
             Tracks::Hls { .. } => video_dir.join("local.m3u8"),
             Tracks::Dash { .. } | Tracks::DashLiveOffline { .. } => {
                 video_dir.join(
-                    TrackKind::Video.part_filename(
-                        TrackFileFormat::Mp4,
-                    ),
+                    TrackKind::Video.part_filename(TrackFileFormat::Mp4),
                 )
             }
         }
@@ -1902,9 +1872,7 @@ async fn finalize_manifest_download(
             match job.source.kind {
                 ManifestKind::Hls => audio_dir.join("local.m3u8"),
                 ManifestKind::Dash => audio_dir.join(
-                    TrackKind::Audio.part_filename(
-                        TrackFileFormat::Mp4,
-                    ),
+                    TrackKind::Audio.part_filename(TrackFileFormat::Mp4),
                 ),
             }
         })
@@ -1919,9 +1887,7 @@ async fn finalize_manifest_download(
             subtitle: Some(_), ..
         } => {
             let path = staging.join("subtitles").join(
-                    TrackKind::Subtitles.part_filename(
-                        TrackFileFormat::Vtt,
-                    ),
+                    TrackKind::Subtitles.part_filename(TrackFileFormat::Vtt),
                 );
             match tokio::fs::symlink_metadata(&path).await {
                 Ok(metadata) if !metadata.file_type().is_symlink() && metadata.is_file() => {
@@ -2091,21 +2057,13 @@ async fn finalize_manifest_download(
     if destination_parts {
         let (video_filename, audio_filename) = if matches!(&tracks, Tracks::Hls { .. }) {
             (
-                TrackKind::Video.part_filename(
-                    TrackFileFormat::Ts,
-                ),
-                TrackKind::Audio.part_filename(
-                    TrackFileFormat::Ts,
-                ),
+                TrackKind::Video.part_filename(TrackFileFormat::Ts),
+                TrackKind::Audio.part_filename(TrackFileFormat::Ts),
             )
         } else {
             (
-                TrackKind::Video.part_filename(
-                    TrackFileFormat::Mp4,
-                ),
-                TrackKind::Audio.part_filename(
-                    TrackFileFormat::Mp4,
-                ),
+                TrackKind::Video.part_filename(TrackFileFormat::Mp4),
+                TrackKind::Audio.part_filename(TrackFileFormat::Mp4),
             )
         };
         let has_destination_subtitles = matches!(

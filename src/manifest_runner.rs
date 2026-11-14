@@ -70,7 +70,7 @@ const MAX_MANIFEST_DOWNLOAD_BYTES: u64 = crate::manifest_types::MAX_MANIFEST_TOT
 const RESOURCE_IDLE_TIMEOUT: Duration = Duration::from_secs(30);
 /// Bound parallel manifest requests to the same range as the regular HTTP engine.
 const MAX_RESOURCE_CONNECTIONS: usize = 16;
-/// Static HLS playlist-based transfers stay serial because each presentation is one ordered track.
+/// Keep resources within each HLS rendition serial; separate audio/video renditions run concurrently.
 const HLS_STATIC_RESOURCE_CONNECTIONS: usize = 1;
 /// Keep only a small diagnostic tail from FFmpeg.
 const FFMPEG_LOG_LINES: usize = 32;
@@ -911,6 +911,194 @@ struct ManifestStaticTransfer<'a> {
     abort: &'a mut tokio::sync::oneshot::Receiver<crate::video::StopIntent>,
 }
 
+/// Run a static video/audio track pair concurrently and forward stop intent to both.
+async fn transfer_parallel_manifest_tracks<Video, Audio>(
+    video: Video,
+    audio: Audio,
+    abort: &mut tokio::sync::oneshot::Receiver<crate::video::StopIntent>,
+    video_abort: tokio::sync::oneshot::Sender<crate::video::StopIntent>,
+    audio_abort: tokio::sync::oneshot::Sender<crate::video::StopIntent>,
+) -> Result<bool, ManifestRunError>
+where
+    Video: std::future::Future<Output = Result<bool, ManifestRunError>>,
+    Audio: std::future::Future<Output = Result<bool, ManifestRunError>>,
+{
+    tokio::pin!(video);
+    tokio::pin!(audio);
+    let stop_intent = async { crate::video::stop_intent_or_pause((&mut *abort).await) };
+    tokio::pin!(stop_intent);
+
+    let mut video_abort = Some(video_abort);
+    let mut audio_abort = Some(audio_abort);
+    let mut video_finished = false;
+    let mut audio_finished = false;
+
+    loop {
+        if video_finished && audio_finished {
+            return Ok(true);
+        }
+
+        tokio::select! {
+            biased;
+            intent = &mut stop_intent => {
+                if let Some(sender) = video_abort.take() {
+                    let _ = sender.send(intent);
+                }
+                if let Some(sender) = audio_abort.take() {
+                    let _ = sender.send(intent);
+                }
+                if video_finished {
+                    let _ = (&mut audio).await;
+                } else if audio_finished {
+                    let _ = (&mut video).await;
+                } else {
+                    let _ = tokio::join!(&mut video, &mut audio);
+                }
+                return Ok(false);
+            }
+            result = &mut video, if !video_finished => {
+                video_finished = true;
+                if !matches!(&result, Ok(true)) {
+                    if let Some(sender) = audio_abort.take() {
+                        let _ = sender.send(crate::video::StopIntent::Pause);
+                    }
+                    if !audio_finished {
+                        let _ = (&mut audio).await;
+                    }
+                    return result;
+                }
+            }
+            result = &mut audio, if !audio_finished => {
+                audio_finished = true;
+                if !matches!(&result, Ok(true)) {
+                    if let Some(sender) = video_abort.take() {
+                        let _ = sender.send(crate::video::StopIntent::Pause);
+                    }
+                    if !video_finished {
+                        let _ = (&mut video).await;
+                    }
+                    return result;
+                }
+            }
+        }
+    }
+}
+
+/// Split a multi-track DASH request budget without exceeding its configured total.
+fn split_manifest_track_connections(connections: usize) -> (usize, usize) {
+    let total = connections.clamp(2, MAX_RESOURCE_CONNECTIONS);
+    (total.div_ceil(2), total / 2)
+}
+
+#[cfg(test)]
+mod manifest_track_connection_tests {
+    use super::*;
+
+    #[test]
+    fn split_track_connection_budget_is_positive_and_bounded() {
+        for configured in 2..=MAX_RESOURCE_CONNECTIONS {
+            let (video, audio) = split_manifest_track_connections(configured);
+            assert!(video >= 1);
+            assert!(audio >= 1);
+            assert_eq!(video + audio, configured);
+        }
+
+        assert_eq!(
+            split_manifest_track_connections(MAX_RESOURCE_CONNECTIONS + 1),
+            (MAX_RESOURCE_CONNECTIONS / 2, MAX_RESOURCE_CONNECTIONS / 2)
+        );
+    }
+}
+
+#[cfg(test)]
+mod parallel_manifest_track_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn static_track_pair_polls_video_and_audio_concurrently() {
+        let barrier = Arc::new(tokio::sync::Barrier::new(2));
+        let video_barrier = Arc::clone(&barrier);
+        let audio_barrier = Arc::clone(&barrier);
+        let video = async move {
+            video_barrier.wait().await;
+            Ok(true)
+        };
+        let audio = async move {
+            audio_barrier.wait().await;
+            Ok(true)
+        };
+        let (_keep_stop_sender, mut abort) = tokio::sync::oneshot::channel();
+        let (video_abort, _video_abort_receiver) = tokio::sync::oneshot::channel();
+        let (audio_abort, _audio_abort_receiver) = tokio::sync::oneshot::channel();
+
+        assert!(
+            transfer_parallel_manifest_tracks(video, audio, &mut abort, video_abort, audio_abort,)
+                .await
+                .expect("both track transfers should complete")
+        );
+    }
+
+    #[tokio::test]
+    async fn static_track_pair_broadcasts_the_original_stop_intent() {
+        let (stop_sender, mut abort) = tokio::sync::oneshot::channel();
+        let (video_abort, video_abort_receiver) = tokio::sync::oneshot::channel();
+        let (audio_abort, audio_abort_receiver) = tokio::sync::oneshot::channel();
+        let video = async move {
+            assert_eq!(
+                video_abort_receiver
+                    .await
+                    .expect("video stop should be forwarded"),
+                crate::video::StopIntent::Finish
+            );
+            Ok(false)
+        };
+        let audio = async move {
+            assert_eq!(
+                audio_abort_receiver
+                    .await
+                    .expect("audio stop should be forwarded"),
+                crate::video::StopIntent::Finish
+            );
+            Ok(false)
+        };
+
+        let transfer =
+            transfer_parallel_manifest_tracks(video, audio, &mut abort, video_abort, audio_abort);
+        let (result, sent) = tokio::join!(transfer, async move {
+            stop_sender.send(crate::video::StopIntent::Finish)
+        });
+
+        assert!(sent.is_ok(), "the manager stop signal should be accepted");
+        assert!(!result.expect("stopped track transfers should not fail"));
+    }
+
+    #[tokio::test]
+    async fn static_track_pair_stops_the_peer_when_one_track_fails() {
+        let (_keep_stop_sender, mut abort) = tokio::sync::oneshot::channel();
+        let (video_abort, _video_abort_receiver) = tokio::sync::oneshot::channel();
+        let (audio_abort, audio_abort_receiver) = tokio::sync::oneshot::channel();
+        let video = async { Err(ManifestRunError::Failed("video track failed".to_string())) };
+        let audio = async move {
+            assert_eq!(
+                audio_abort_receiver
+                    .await
+                    .expect("peer stop should be forwarded"),
+                crate::video::StopIntent::Pause
+            );
+            Ok(false)
+        };
+
+        let result =
+            transfer_parallel_manifest_tracks(video, audio, &mut abort, video_abort, audio_abort)
+                .await;
+
+        assert!(matches!(
+            result,
+            Err(ManifestRunError::Failed(message)) if message == "video track failed"
+        ));
+    }
+}
+
 /// Transfer selected static HLS/DASH resources and assemble their local track inputs.
 ///
 /// Returns `false` when the attempt was stopped before all selected tracks were staged.
@@ -939,7 +1127,47 @@ async fn transfer_static_manifest_tracks(
             ..
         } => {
             if destination_parts {
-                if !fetch_and_write_hls_track(ManifestHlsTrackTransfer {
+                if let Some(audio) = audio {
+                    let (video_abort_sender, mut video_abort) = tokio::sync::oneshot::channel();
+                    let (audio_abort_sender, mut audio_abort) = tokio::sync::oneshot::channel();
+                    let video_transfer = fetch_and_write_hls_track(ManifestHlsTrackTransfer {
+                        client,
+                        staging,
+                        plan: video.as_ref(),
+                        directory: video_dir,
+                        filename: TrackKind::Video.part_filename(TrackFileFormat::Ts),
+                        destination,
+                        item_id,
+                        track: TrackKind::Video,
+                        tx,
+                        downloaded,
+                        abort: &mut video_abort,
+                    });
+                    let audio_transfer = fetch_and_write_hls_track(ManifestHlsTrackTransfer {
+                        client,
+                        staging,
+                        plan: audio.as_ref(),
+                        directory: audio_dir,
+                        filename: TrackKind::Audio.part_filename(TrackFileFormat::Ts),
+                        destination,
+                        item_id,
+                        track: TrackKind::Audio,
+                        tx,
+                        downloaded,
+                        abort: &mut audio_abort,
+                    });
+                    if !transfer_parallel_manifest_tracks(
+                        video_transfer,
+                        audio_transfer,
+                        abort,
+                        video_abort_sender,
+                        audio_abort_sender,
+                    )
+                    .await?
+                    {
+                        return Ok(false);
+                    }
+                } else if !fetch_and_write_hls_track(ManifestHlsTrackTransfer {
                     client,
                     staging,
                     plan: video.as_ref(),
@@ -956,29 +1184,40 @@ async fn transfer_static_manifest_tracks(
                 {
                     return Ok(false);
                 }
+            } else {
                 if let Some(audio) = audio {
-                    match fetch_and_write_hls_track(ManifestHlsTrackTransfer {
+                    let (video_abort_sender, mut video_abort) = tokio::sync::oneshot::channel();
+                    let (audio_abort_sender, mut audio_abort) = tokio::sync::oneshot::channel();
+                    let video_transfer = fetch_resources(
                         client,
-                        staging,
-                        plan: audio.as_ref(),
-                        directory: audio_dir,
-                        filename: TrackKind::Audio.part_filename(TrackFileFormat::Ts),
-                        destination,
-                        item_id,
-                        track: TrackKind::Audio,
+                        hls_resources(video.as_ref()),
+                        video_dir,
+                        HLS_STATIC_RESOURCE_CONNECTIONS,
                         tx,
                         downloaded,
+                        &mut video_abort,
+                    );
+                    let audio_transfer = fetch_resources(
+                        client,
+                        hls_resources(audio.as_ref()),
+                        audio_dir,
+                        HLS_STATIC_RESOURCE_CONNECTIONS,
+                        tx,
+                        downloaded,
+                        &mut audio_abort,
+                    );
+                    if !transfer_parallel_manifest_tracks(
+                        video_transfer,
+                        audio_transfer,
                         abort,
-                    })
-                    .await
+                        video_abort_sender,
+                        audio_abort_sender,
+                    )
+                    .await?
                     {
-                        Ok(true) => {}
-                        Ok(false) => return Ok(false),
-                        Err(error) => return Err(error),
+                        return Ok(false);
                     }
-                }
-            } else {
-                if !fetch_resources(
+                } else if !fetch_resources(
                     client,
                     hls_resources(video.as_ref()),
                     video_dir,
@@ -991,27 +1230,14 @@ async fn transfer_static_manifest_tracks(
                 {
                     return Ok(false);
                 }
-                if let Some(audio) = audio
-                    && !fetch_resources(
-                        client,
-                        hls_resources(audio.as_ref()),
-                        audio_dir,
-                        HLS_STATIC_RESOURCE_CONNECTIONS,
-                        tx,
-                        downloaded,
-                        abort,
-                    )
-                    .await?
-                {
-                    return Ok(false);
-                }
+
                 write_playlist(video_dir, video.as_ref()).await?;
                 if !decrypt_hls_sample_aes_segments(video_dir, video.as_ref(), abort).await? {
                     return Ok(false);
                 }
                 if let Some(audio) = audio {
-                    write_playlist(audio_dir, audio.as_ref()).await?;
-                    if !decrypt_hls_sample_aes_segments(audio_dir, audio.as_ref(), abort).await? {
+                    write_playlist(audio_dir, audio).await?;
+                    if !decrypt_hls_sample_aes_segments(audio_dir, audio, abort).await? {
                         return Ok(false);
                     }
                 }
@@ -1044,7 +1270,91 @@ async fn transfer_static_manifest_tracks(
             subtitle,
             ..
         } => {
-            if !fetch_and_write_dash_track(ManifestDashTrackTransfer {
+            if let Some(audio) = audio {
+                if concurrency == 1 {
+                    if !fetch_and_write_dash_track(ManifestDashTrackTransfer {
+                        client,
+                        staging,
+                        plan: video.as_ref(),
+                        directory: video_dir,
+                        filename: TrackKind::Video.part_filename(TrackFileFormat::Mp4),
+                        destination,
+                        item_id,
+                        track: TrackKind::Video,
+                        connections: concurrency,
+                        tx,
+                        downloaded,
+                        abort,
+                    })
+                    .await?
+                    {
+                        return Ok(false);
+                    }
+                    if !fetch_and_write_dash_track(ManifestDashTrackTransfer {
+                        client,
+                        staging,
+                        plan: audio,
+                        directory: audio_dir,
+                        filename: TrackKind::Audio.part_filename(TrackFileFormat::Mp4),
+                        destination,
+                        item_id,
+                        track: TrackKind::Audio,
+                        connections: concurrency,
+                        tx,
+                        downloaded,
+                        abort,
+                    })
+                    .await?
+                    {
+                        return Ok(false);
+                    }
+                } else {
+                    // Share the configured request budget evenly across both active tracks.
+                    let (video_connections, audio_connections) =
+                        split_manifest_track_connections(concurrency);
+                    let (video_abort_sender, mut video_abort) = tokio::sync::oneshot::channel();
+                    let (audio_abort_sender, mut audio_abort) = tokio::sync::oneshot::channel();
+                    let video_transfer = fetch_and_write_dash_track(ManifestDashTrackTransfer {
+                        client,
+                        staging,
+                        plan: video.as_ref(),
+                        directory: video_dir,
+                        filename: TrackKind::Video.part_filename(TrackFileFormat::Mp4),
+                        destination,
+                        item_id,
+                        track: TrackKind::Video,
+                        connections: video_connections,
+                        tx,
+                        downloaded,
+                        abort: &mut video_abort,
+                    });
+                    let audio_transfer = fetch_and_write_dash_track(ManifestDashTrackTransfer {
+                        client,
+                        staging,
+                        plan: audio,
+                        directory: audio_dir,
+                        filename: TrackKind::Audio.part_filename(TrackFileFormat::Mp4),
+                        destination,
+                        item_id,
+                        track: TrackKind::Audio,
+                        connections: audio_connections,
+                        tx,
+                        downloaded,
+                        abort: &mut audio_abort,
+                    });
+                    if !transfer_parallel_manifest_tracks(
+                        video_transfer,
+                        audio_transfer,
+                        abort,
+                        video_abort_sender,
+                        audio_abort_sender,
+                    )
+                    .await?
+                    {
+                        return Ok(false);
+                    }
+                }
+            } else if !fetch_and_write_dash_track(ManifestDashTrackTransfer {
                 client,
                 staging,
                 plan: video.as_ref(),
@@ -1059,25 +1369,6 @@ async fn transfer_static_manifest_tracks(
                 abort,
             })
             .await?
-            {
-                return Ok(false);
-            }
-            if let Some(audio) = audio
-                && !fetch_and_write_dash_track(ManifestDashTrackTransfer {
-                    client,
-                    staging,
-                    plan: audio,
-                    directory: audio_dir,
-                    filename: TrackKind::Audio.part_filename(TrackFileFormat::Mp4),
-                    destination,
-                    item_id,
-                    track: TrackKind::Audio,
-                    connections: concurrency,
-                    tx,
-                    downloaded,
-                    abort,
-                })
-                .await?
             {
                 return Ok(false);
             }

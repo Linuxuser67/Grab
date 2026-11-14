@@ -2031,7 +2031,7 @@ async fn finalize_manifest_download(
     drop(output_file);
     let output_metadata = tokio::fs::symlink_metadata(&output_part)
         .await
-        .map_err(|error| format!("Could not inspect the finalized stream: {error}"))?;
+        .map_err(|error| manifest_storage_error("Could not inspect the finalized stream", error))?;
     if output_metadata.file_type().is_symlink()
         || !output_metadata.is_file()
         || output_metadata.len() == 0
@@ -2989,9 +2989,9 @@ async fn fetch_resource_once(
             tx.send(progress_message(total)).ok();
             return Ok(size);
         }
-        tokio::fs::remove_file(&target)
-            .await
-            .map_err(|error| format!("Could not reset an incomplete manifest resource: {error}"))?;
+        tokio::fs::remove_file(&target).await.map_err(|error| {
+            manifest_storage_error("Could not reset an incomplete manifest resource", error)
+        })?;
     }
 
     let part = directory.join(format!("{}.part", resource.filename));

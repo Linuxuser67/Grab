@@ -1045,6 +1045,8 @@ static DASH_MERGE_TEMP_DIR_COUNTER: AtomicU64 = AtomicU64::new(0);
 /// Intermediate merge files stay out of the user's download directory.
 struct DashMergeTempDir {
     path: Option<PathBuf>,
+    /// Keep the private workspace until every FFmpeg descendant has stopped.
+    pgid: Option<i32>,
 }
 
 impl DashMergeTempDir {
@@ -1057,7 +1059,10 @@ impl DashMergeTempDir {
                 std::process::id()
             ));
             match create_private_merge_dir(&path) {
-                Ok(()) => return Ok(Self { path: Some(path) }),
+                Ok(()) => return Ok(Self {
+                    path: Some(path),
+                    pgid: None,
+                }),
                 Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
                 Err(error) => return Err(error),
             }
@@ -1073,14 +1078,17 @@ impl DashMergeTempDir {
     }
 
     async fn cleanup(&mut self) {
+        if let Some(pgid) = self.pgid.take() {
+            await_ytdlp_group_quiescence(Some(pgid)).await;
+        }
         if let Some(path) = self.path.take() {
             let _ = tokio::task::spawn_blocking(move || std::fs::remove_dir_all(path)).await;
         }
     }
 
-    /// Called only from a blocking worker that owns the directory through a
-    /// potentially detached final rename.
+    /// Called only from a blocking worker after the FFmpeg process group is quiescent.
     fn cleanup_blocking(&mut self) {
+        debug_assert!(self.pgid.is_none());
         if let Some(path) = self.path.take() {
             let _ = std::fs::remove_dir_all(path);
         }
@@ -1089,15 +1097,30 @@ impl DashMergeTempDir {
 
 impl Drop for DashMergeTempDir {
     fn drop(&mut self) {
-        if let Some(path) = self.path.take() {
-            match tokio::runtime::Handle::try_current() {
-                Ok(handle) => {
-                    // Cancellation may drop the temporary directory on a runtime worker.
-                    drop(handle.spawn_blocking(move || std::fs::remove_dir_all(path)));
-                }
-                Err(_) => {
-                    let _ = std::fs::remove_dir_all(path);
-                }
+        let Some(path) = self.path.take() else {
+            return;
+        };
+        let pgid = self.pgid.take();
+        match tokio::runtime::Handle::try_current() {
+            Ok(handle) => {
+                // A cancelled FFmpeg future drops this guard after ProcessGroupGuard
+                // has sent its kill signal. Wait for the group before unlinking its
+                // private output directory.
+                drop(handle.spawn(async move {
+                    await_ytdlp_group_quiescence(pgid).await;
+                    let _ = tokio::task::spawn_blocking(move || std::fs::remove_dir_all(path)).await;
+                }));
+            }
+            Err(_) if pgid.is_none() => {
+                let _ = std::fs::remove_dir_all(path);
+            }
+            Err(_) => {
+                // Without a runtime there is no safe way to await the child group.
+                // Leave the private directory for startup cleanup rather than race it.
+                tracing::warn!(
+                    path = %path.display(),
+                    "preserving DASH merge scratch because its process group is still active"
+                );
             }
         }
     }
@@ -1273,10 +1296,35 @@ async fn try_merge_dash_partials(
     let argv = dash_merge_argv(video_part, audio_part, &merged_tmp, page_url);
     let mut cmd = tokio::process::Command::new(ffmpeg_bin);
     cmd.args(&argv);
+    #[cfg(unix)]
+    cmd.process_group(0);
     cmd.stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null());
-    let status = cmd.status().await.ok()?;
+    let mut child = cmd.spawn().ok()?;
+    let mut group = ProcessGroupGuard::new(&child);
+    let pgid = group.pgid();
+    merged_dir.pgid = pgid;
+    let status = match tokio::time::timeout(MERGE_WALL_CLOCK, child.wait()).await {
+        Ok(Ok(status)) => {
+            group.disarm();
+            await_ytdlp_group_quiescence(pgid).await;
+            merged_dir.pgid = None;
+            status
+        }
+        Ok(Err(error)) => {
+            reap_child(&mut child, &mut group).await;
+            merged_dir.cleanup().await;
+            tracing::warn!(error = %error, "DASH partial merge process failed");
+            return None;
+        }
+        Err(_) => {
+            reap_child(&mut child, &mut group).await;
+            merged_dir.cleanup().await;
+            tracing::warn!("DASH partial merge exceeded its one-hour wall-clock limit");
+            return None;
+        }
+    };
     if !status.success() {
         merged_dir.cleanup().await;
         return None;

@@ -368,6 +368,54 @@ fn a_stalled_reap_blocks_the_sweep() {
     );
 }
 
+#[cfg(target_os = "linux")]
+#[test]
+fn hls_group_quiescence_waits_for_extractor_descendants() {
+    let base = std::env::temp_dir().join(format!("grab-hls-quiescence-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&base);
+    std::fs::create_dir_all(&base).unwrap();
+    let bin = base.join("fake-ytdlp-background-child");
+    let marker = base.join("descendant-finished");
+    std::fs::write(
+        &bin,
+        "#!/bin/sh\n(sleep 1; printf done > \"$MARKER_PATH\") &\nexit 0\n",
+    )
+    .unwrap();
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
+
+    crate::runtime::tokio_rt().block_on(async {
+        let mut command = tokio::process::Command::new(&bin);
+        command.process_group(0);
+        command
+            .env("MARKER_PATH", &marker)
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null());
+        let mut child = command.spawn().unwrap();
+        let mut group = ProcessGroupGuard::new(&child);
+        let pgid = group.pgid();
+        assert!(pgid.is_some());
+
+        let status = child.wait().await.unwrap();
+        assert!(status.success());
+        group.disarm();
+        assert!(
+            !marker.exists(),
+            "the descendant must still be running after its leader exits"
+        );
+
+        await_ytdlp_group_quiescence(pgid).await;
+        assert_eq!(
+            std::fs::read(&marker).unwrap(),
+            b"done",
+            "quiescence must wait until extractor descendants finish"
+        );
+    });
+    let _ = std::fs::remove_dir_all(&base);
+}
+
 /// Item 3: the post-wait drain must be bounded — a child that exits while a
 /// grandchild keeps its stdout pipe open must not stall the subtitle probe.
 /// The fake binary prints valid subtitle JSON, exits at once, and leaves

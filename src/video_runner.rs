@@ -3195,6 +3195,7 @@ pub(crate) async fn run_hls_ytdlp(
                         && !merging.load(std::sync::atomic::Ordering::SeqCst) =>
                 {
                     reap_child(&mut child, &mut group).await;
+                    await_ytdlp_group_quiescence(pgid).await;
                     progress.abort();
                     logs.abort();
                     return Err(VideoError::part_failed("stalled"));
@@ -3215,6 +3216,7 @@ pub(crate) async fn run_hls_ytdlp(
                         }
                         _ => {
                             reap_child(&mut child, &mut group).await;
+                            await_ytdlp_group_quiescence(pgid).await;
                             progress.abort();
                             logs.abort();
                             return Err(VideoError::part_failed("merge timed out"));

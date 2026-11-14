@@ -19,9 +19,12 @@ pub enum VideoError {
     /// A required toolchain is missing from the managed/system search paths.
     #[error("{0}")]
     MissingLibraries(String),
-    /// The page could not be extracted (wrong URL, offline, …). Retryable.
+    /// A permanent extraction failure, such as an unsupported or unavailable URL.
     #[error("{0}")]
     Fetch(String),
+    /// A temporary network/server failure that may succeed on a later attempt.
+    #[error("{0}")]
+    RetryableFetch(String),
     /// A tool was present but its version command exceeded the probe deadline.
     #[error("{0}")]
     ToolProbeTimeout(String),
@@ -53,6 +56,14 @@ impl VideoError {
         Self::Fetch(
             gettext("Couldn't read the video page: {detail}").replace("{detail}", &e.to_string()),
         )
+    }
+    pub(crate) fn retryable_fetch(e: impl std::fmt::Display) -> Self {
+        Self::RetryableFetch(
+            gettext("Couldn't read the video page: {detail}").replace("{detail}", &e.to_string()),
+        )
+    }
+    pub(crate) fn is_retryable_fetch(&self) -> bool {
+        matches!(self, Self::RetryableFetch(_))
     }
     pub(crate) fn install(e: impl std::fmt::Display) -> Self {
         Self::Message(
@@ -145,6 +156,7 @@ impl VideoError {
         match self {
             Self::MissingLibraries(s) => Self::MissingLibraries(format!("{s}{suffix}")),
             Self::Fetch(s) => Self::Fetch(format!("{s}{suffix}")),
+            Self::RetryableFetch(s) => Self::RetryableFetch(format!("{s}{suffix}")),
             Self::ToolProbeTimeout(s) => Self::ToolProbeTimeout(format!("{s}{suffix}")),
             Self::Runtime(s) => Self::Runtime(format!("{s}{suffix}")),
             Self::Message(s) => Self::Message(format!("{s}{suffix}")),
@@ -3414,5 +3426,22 @@ mod update_hint_tests {
         assert!(!extractor_failure("ERROR: Video unavailable"));
         assert!(!extractor_failure("ERROR: Private video"));
         assert!(!extractor_failure("ERROR: unable to download webpage"));
+    }
+}
+
+#[cfg(test)]
+mod retryable_video_error_tests {
+    use super::VideoError;
+
+    #[test]
+    fn suffix_preserves_retry_classification() {
+        let error = VideoError::retryable_fetch("HTTP Error 503").with_suffix(" (retry exhausted)");
+        assert!(error.is_retryable_fetch());
+        assert!(error.to_string().contains("retry exhausted"));
+    }
+
+    #[test]
+    fn ordinary_fetch_errors_are_not_retryable() {
+        assert!(!VideoError::fetch("Unsupported URL").is_retryable_fetch());
     }
 }

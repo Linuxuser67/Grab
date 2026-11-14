@@ -69,6 +69,44 @@ pub(crate) async fn read_bounded(
     ))
 }
 
+/// Whether yt-dlp's final diagnostic identifies a transient network/server failure.
+fn ytdlp_failure_is_retryable(detail: &str) -> bool {
+    let lower = detail.to_ascii_lowercase();
+
+    let retryable_http_status = lower
+        .match_indices("http error ")
+        .filter_map(|(index, _)| {
+            lower[index + "http error ".len()..]
+                .split_ascii_whitespace()
+                .next()
+        })
+        .filter_map(|status| status.trim_end_matches(':').parse::<u16>().ok())
+        .any(|status| matches!(status, 408 | 425 | 429 | 500..=599));
+    if retryable_http_status {
+        return true;
+    }
+
+    [
+        "timed out",
+        "timeout",
+        "connection reset",
+        "connection aborted",
+        "connection refused",
+        "remote end closed connection",
+        "remote disconnected",
+        "temporary failure in name resolution",
+        "temporary failure",
+        "name or service not known",
+        "nodename nor servname provided",
+        "network is unreachable",
+        "no route to host",
+        "incomplete read",
+        "unexpected eof",
+    ]
+    .iter()
+    .any(|needle| lower.contains(needle))
+}
+
 /// Fetch one page's raw `--dump-single-json`, then parse leniently. `flat_playlist` lists collection stubs; false runs full extraction.
 pub(crate) async fn fetch_raw_dump_json(
     youtube_bin: &Path,
@@ -140,7 +178,7 @@ pub(crate) async fn fetch_raw_dump_json(
         }
         Err(_) => {
             reap_child(&mut child, &mut group).await;
-            return Err(VideoError::fetch(gettext("the lookup timed out")));
+            return Err(VideoError::retryable_fetch(gettext("the lookup timed out")));
         }
     };
     // Drains join with a grace period (an orphaned grandchild holding the pipe would stall a bare await); only the ceiling gets the size message.
@@ -162,7 +200,11 @@ pub(crate) async fn fetch_raw_dump_json(
     crate::backend_debug::echo_stderr(&stderr);
     if !status.success() {
         let detail = last_log_line(&String::from_utf8_lossy(&stderr), "yt-dlp reported failure");
-        return Err(VideoError::fetch(detail));
+        return Err(if ytdlp_failure_is_retryable(&detail) {
+            VideoError::retryable_fetch(detail)
+        } else {
+            VideoError::fetch(detail)
+        });
     }
     let value: serde_json::Value =
         serde_json::from_str(&String::from_utf8_lossy(&stdout)).map_err(VideoError::fetch)?;
@@ -1195,3 +1237,50 @@ mod tests {
         drop(guard);
     }
 }
+
+#[cfg(test)]
+mod ytdlp_retry_classification_tests {
+    use super::ytdlp_failure_is_retryable;
+
+    #[test]
+    fn retries_temporary_http_and_transport_failures() {
+        for detail in [
+            "HTTP Error 408: Request Timeout",
+            "HTTP Error 425: Too Early",
+            "HTTP Error 429: Too Many Requests",
+            "HTTP Error 500: Internal Server Error",
+            "HTTP Error 502: Bad Gateway",
+            "HTTP Error 503: Service Unavailable",
+            "HTTP Error 504: Gateway Timeout",
+            "Unable to download webpage: Connection reset by peer",
+            "Temporary failure in name resolution",
+            "The read operation timed out",
+            "No route to host",
+        ] {
+            assert!(
+                ytdlp_failure_is_retryable(detail),
+                "transient diagnostic must retry: {detail}"
+            );
+        }
+    }
+
+    #[test]
+    fn does_not_retry_permanent_http_or_extractor_failures() {
+        for detail in [
+            "HTTP Error 400: Bad Request",
+            "HTTP Error 401: Unauthorized",
+            "HTTP Error 403: Forbidden",
+            "HTTP Error 404: Not Found",
+            "Unsupported URL: https://example.invalid/",
+            "This video is unavailable",
+            "The requested video is private",
+            "Failed to parse JSON",
+        ] {
+            assert!(
+                !ytdlp_failure_is_retryable(detail),
+                "permanent diagnostic must not retry: {detail}"
+            );
+        }
+    }
+}
+

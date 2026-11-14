@@ -1030,7 +1030,10 @@ fn repeated_playlist_start_for_the_same_id_does_not_fail_the_active_entry() {
 
     let (is_new_entry, abandoned) =
         advance_playlist_entry(&mut current_file, "video-id", &finished_ids);
-    assert!(!is_new_entry, "a repeated format start must not reset row progress");
+    assert!(
+        !is_new_entry,
+        "a repeated format start must not reset row progress"
+    );
     assert_eq!(abandoned, None);
     assert_eq!(current_file.as_deref(), Some("video-id"));
 }

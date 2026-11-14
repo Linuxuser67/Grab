@@ -241,8 +241,7 @@ fn advance_playlist_entry(
 ) -> (bool, Option<String>) {
     let previous = current_file.replace(next_file_id.to_owned());
     let is_new_entry = previous.as_deref() != Some(next_file_id);
-    let abandoned =
-        previous.filter(|previous| is_new_entry && !finished_ids.contains(previous));
+    let abandoned = previous.filter(|previous| is_new_entry && !finished_ids.contains(previous));
     (is_new_entry, abandoned)
 }
 

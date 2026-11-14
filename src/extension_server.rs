@@ -603,11 +603,21 @@ fn serialize_handoff_cookies(url: &str, cookies: &[Cookie]) -> Option<(String, u
 }
 
 /// Own a staged cookie file until the handoff store accepts it.
-struct PendingCookieFile(Option<PathBuf>);
+struct PendingCookieFile {
+    path: Option<PathBuf>,
+    cleanup_runtime: tokio::runtime::Handle,
+}
 
 impl PendingCookieFile {
+    fn new(path: PathBuf, cleanup_runtime: tokio::runtime::Handle) -> Self {
+        Self {
+            path: Some(path),
+            cleanup_runtime,
+        }
+    }
+
     fn into_path(mut self) -> PathBuf {
-        self.0
+        self.path
             .take()
             .expect("pending cookie file retains its path until transferred")
     }
@@ -615,12 +625,12 @@ impl PendingCookieFile {
 
 impl Drop for PendingCookieFile {
     fn drop(&mut self) {
-        let Some(path) = self.0.take() else {
+        let Some(path) = self.path.take() else {
             return;
         };
         // A cancelled request can drop the result after the blocking write
         // finishes. Keep its cleanup off the Tokio worker as well.
-        drop(crate::runtime::tokio_rt().spawn_blocking(move || {
+        drop(self.cleanup_runtime.spawn_blocking(move || {
             if let Err(error) = std::fs::remove_file(&path)
                 && error.kind() != std::io::ErrorKind::NotFound
             {
@@ -635,10 +645,7 @@ impl Drop for PendingCookieFile {
 }
 
 /// Create a private cookie file. This function only runs on a blocking worker.
-fn write_handoff_cookie_file(
-    content: String,
-    written: usize,
-) -> Option<(PendingCookieFile, usize)> {
+fn write_handoff_cookie_file(content: String, written: usize) -> Option<(PathBuf, usize)> {
     let mut path = crate::download_net::cookie_staging_dir()?;
     let count = COOKIE_FILE_COUNTER.fetch_add(1, Ordering::Relaxed);
     path.push(format!(
@@ -672,7 +679,7 @@ fn write_handoff_cookie_file(
         );
         return None;
     }
-    Some((PendingCookieFile(Some(path)), written))
+    Some((path, written))
 }
 
 /// Write extension cookies on the Tokio blocking pool.
@@ -684,7 +691,13 @@ async fn stage_handoff_cookies(
     cookies: &[Cookie],
 ) -> Option<(PendingCookieFile, usize)> {
     let (content, written) = serialize_handoff_cookies(url, cookies)?;
-    match tokio::task::spawn_blocking(move || write_handoff_cookie_file(content, written)).await {
+    let cleanup_runtime = tokio::runtime::Handle::current();
+    match tokio::task::spawn_blocking(move || {
+        let (path, written) = write_handoff_cookie_file(content, written)?;
+        Some((PendingCookieFile::new(path, cleanup_runtime), written))
+    })
+    .await
+    {
         Ok(result) => result,
         Err(error) => {
             tracing::warn!(%error, "extension cookie staging worker failed");
@@ -697,7 +710,7 @@ async fn stage_handoff_cookies(
 #[cfg(test)]
 pub(crate) fn write_handoff_cookies(url: &str, cookies: &[Cookie]) -> Option<PathBuf> {
     let (content, written) = serialize_handoff_cookies(url, cookies)?;
-    write_handoff_cookie_file(content, written).map(|(file, _)| file.into_path())
+    write_handoff_cookie_file(content, written).map(|(path, _)| path)
 }
 
 /// Hash a staged handoff jar by content so a fresh jar with the same cookies
@@ -1965,7 +1978,10 @@ mod tests {
         let path = directory.path().join("unclaimed-cookie");
         std::fs::write(&path, b"secret").expect("write staged cookie fixture");
 
-        drop(PendingCookieFile(Some(path.clone())));
+        drop(PendingCookieFile::new(
+            path.clone(),
+            tokio::runtime::Handle::current(),
+        ));
 
         tokio::time::timeout(Duration::from_secs(2), async {
             while path.exists() {

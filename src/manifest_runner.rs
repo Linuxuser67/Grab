@@ -576,6 +576,23 @@ fn resolve_manifest_ffmpeg(dirs: &[PathBuf]) -> Result<PathBuf, ManifestRunError
     Ok(ffmpeg_dir.join("ffmpeg"))
 }
 
+/// Result of preparing a native manifest attempt, including an early user stop.
+enum ManifestPreparationOutcome {
+    Ready(ManifestPreparation),
+    Stopped(crate::video::StopIntent),
+}
+
+async fn await_manifest_operation_or_stop<T>(
+    abort: &mut tokio::sync::oneshot::Receiver<crate::video::StopIntent>,
+    operation: impl std::future::Future<Output = T>,
+) -> Result<T, crate::video::StopIntent> {
+    tokio::select! {
+        biased;
+        intent = &mut *abort => Err(crate::video::stop_intent_or_pause(intent)),
+        result = operation => Ok(result),
+    }
+}
+
 /// State resolved before any manifest resources are transferred.
 struct ManifestPreparation {
     staging: PathBuf,
@@ -598,7 +615,8 @@ struct ManifestPreparation {
 async fn prepare_manifest_attempt(
     job: &ManifestJob,
     tx: &tokio::sync::mpsc::UnboundedSender<EngineMsg>,
-) -> Result<ManifestPreparation, ManifestRunError> {
+    abort: &mut tokio::sync::oneshot::Receiver<crate::video::StopIntent>,
+) -> Result<ManifestPreparationOutcome, ManifestRunError> {
     let dest_dir = job
         .dest
         .parent()
@@ -724,12 +742,21 @@ async fn prepare_manifest_attempt(
         ));
     }
 
+    let resolved = match await_manifest_operation_or_stop(
+        abort,
+        resolve_manifest_tracks(job, offline_tracks, finish_requested),
+    )
+    .await
+    {
+        Ok(result) => result?,
+        Err(intent) => return Ok(ManifestPreparationOutcome::Stopped(intent)),
+    };
     let ResolvedManifestTracks {
         client,
         tracks,
         guarded_child_hosts,
         has_audio,
-    } = resolve_manifest_tracks(job, offline_tracks, finish_requested).await?;
+    } = resolved;
     if has_audio {
         ensure_track_dir(&audio_dir).await?;
     }
@@ -768,7 +795,7 @@ async fn prepare_manifest_attempt(
     let concurrency = job.connections.clamp(1, MAX_RESOURCE_CONNECTIONS);
     let downloaded = Arc::new(AtomicU64::new(finish_marker_bytes.unwrap_or(0)));
 
-    Ok(ManifestPreparation {
+    Ok(ManifestPreparationOutcome::Ready(ManifestPreparation {
         staging,
         dest_dir,
         output_part,
@@ -783,7 +810,7 @@ async fn prepare_manifest_attempt(
         finish_requested,
         concurrency,
         downloaded,
-    })
+    }))
 }
 
 /// Resolved manifest tracks and the network client used to transfer them.
@@ -2030,7 +2057,15 @@ pub(crate) async fn run_manifest_download(
         finish_requested,
         concurrency,
         downloaded,
-    } = prepare_manifest_attempt(&job, &tx).await?;
+    } = match prepare_manifest_attempt(&job, &tx, &mut abort).await? {
+        ManifestPreparationOutcome::Ready(preparation) => preparation,
+        ManifestPreparationOutcome::Stopped(crate::video::StopIntent::Pause) => {
+            return Ok(ManifestOutcome::Paused);
+        }
+        ManifestPreparationOutcome::Stopped(
+            crate::video::StopIntent::Finish | crate::video::StopIntent::Discard,
+        ) => return Ok(ManifestOutcome::Aborted),
+    };
     let mut _finish_stop_sender = None;
     let static_destination_parts = !live_hls && !live_dash && tracks.uses_destination_parts();
     let mut live_destination_parts = live_dash;
@@ -6432,5 +6467,47 @@ mod staged_file_atomic_tests {
                 .is_err(),
             "failed publication must clean its temporary file"
         );
+    }
+}
+
+#[cfg(test)]
+mod manifest_preparation_stop_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn stop_intent_drops_pending_manifest_lookup() {
+        struct DropNotice(Option<tokio::sync::oneshot::Sender<()>>);
+        impl Drop for DropNotice {
+            fn drop(&mut self) {
+                if let Some(sender) = self.0.take() {
+                    let _ = sender.send(());
+                }
+            }
+        }
+
+        let (stop_sender, stop_receiver) = tokio::sync::oneshot::channel();
+        let (started_sender, started_receiver) = tokio::sync::oneshot::channel();
+        let (dropped_sender, dropped_receiver) = tokio::sync::oneshot::channel();
+        let task = tokio::spawn(async move {
+            let mut abort = stop_receiver;
+            let operation = async move {
+                let _drop_notice = DropNotice(Some(dropped_sender));
+                let _ = started_sender.send(());
+                std::future::pending::<()>().await;
+            };
+            await_manifest_operation_or_stop(&mut abort, operation).await
+        });
+
+        started_receiver.await.expect("manifest lookup must start");
+        stop_sender
+            .send(crate::video::StopIntent::Pause)
+            .expect("manifest preparation receiver must remain active");
+        assert_eq!(
+            task.await.expect("stop race task must complete"),
+            Err(crate::video::StopIntent::Pause)
+        );
+        dropped_receiver
+            .await
+            .expect("stop intent must drop the pending manifest lookup");
     }
 }

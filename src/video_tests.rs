@@ -3109,15 +3109,8 @@ fn ffmpeg_version_token_takes_word_after_version() {
 
 #[test]
 fn ytdlp_identity_args_pins_deno_for_youtube_with_cookies() {
-    let args = ytdlp_identity_args(
-        "firefox",
-        None,
-        None,
-        "https://www.youtube.com/watch?v=abc",
-    );
-    assert!(args.iter().any(|arg| {
-        arg == "youtube:player_client=default,-web_embedded"
-    }));
+    let args = ytdlp_identity_args("firefox", None, None, "https://www.youtube.com/watch?v=abc");
+    assert!(args.iter().any(|arg| arg == "youtube:player_client=default,-web_embedded"));
     let pos = args
         .iter()
         .position(|a| a == "--no-js-runtimes")
@@ -3667,12 +3660,7 @@ fn fetch_video_page_parses_dump_json() {
 #[test]
 fn identity_args_order_and_trim() {
     // No forced extractor override; trim user-agent and keep `--` + page last.
-    let argv = ytdlp_identity_args(
-        "none",
-        None,
-        Some("  Grab/1  "),
-        "https://x.com/u/status/1",
-    );
+    let argv = ytdlp_identity_args("none", None, Some("  Grab/1  "), "https://x.com/u/status/1");
     assert_eq!(
         argv,
         vec![

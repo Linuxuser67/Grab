@@ -408,7 +408,7 @@ fn hls_group_quiescence_waits_for_extractor_descendants() {
             "the descendant must still be running after its leader exits"
         );
 
-        await_ytdlp_group_quiescence(pgid)
+        await_ytdlp_group_quiescence(pgid.as_ref())
             .await
             .expect("extractor descendants must become quiescent");
         assert_eq!(

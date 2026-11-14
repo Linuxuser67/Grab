@@ -4130,6 +4130,16 @@ async fn hls_sample_aes_mpegts_is_decrypted_by_iori_ssa_before_ffmpeg_finalizati
     write_playlist(&video_dir, &plan)
         .await
         .expect("write localized SAMPLE-AES playlist");
+    let (cancel_tx, mut cancelled) = tokio::sync::oneshot::channel();
+    cancel_tx
+        .send(crate::video::StopIntent::Pause)
+        .expect("send SAMPLE-AES cancellation");
+    assert!(
+        !decrypt_hls_sample_aes_segments(&video_dir, &plan, &mut cancelled)
+            .await
+            .expect("cancel SAMPLE-AES decryption"),
+        "SAMPLE-AES decryption must stop when cancellation is already pending"
+    );
     assert!(
         decrypt_hls_sample_aes_segments(&video_dir, &plan, &mut abort)
             .await

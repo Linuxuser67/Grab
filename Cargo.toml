@@ -72,7 +72,7 @@ libc = "0.2"
 # Mozilla Public Suffix List for validating browser cookie domains.
 psl = "=2.1.241"
 # Safe wrappers for Linux no-replace renameat2 operations.
-rustix = { version = "1.1.6", features = ["fs"] }
+rustix = { version = "1.1.6", features = ["fs", "process"] }
 thiserror = "2"
 # Secure destination-local temporary file for atomic no-clobber publication.
 tempfile = "3.27.0"

@@ -616,42 +616,114 @@ pub(crate) fn kill_tree(child: &mut tokio::process::Child) {
     }
 }
 
-/// Kills the process group on drop (covers task-abort mid-await, where async cleanup never runs).
-/// Disarm as soon as the child is reaped: a recycled PGID would otherwise SIGKILL an unrelated group.
-/// Runners must disarm in their own wait arm too; the seven spawn sites each carry a guard plus a disarm.
-pub(crate) struct ProcessGroupGuard {
-    pid: Option<libc::pid_t>,
+/// Identity for a spawned process group. On Linux, the pidfd keeps the
+/// original leader's PID reserved after wait() reaps it, preventing numeric
+/// PGID reuse before a bounded post-reap escalation.
+#[derive(Clone)]
+pub(crate) struct ProcessGroupId {
+    pgid: libc::pid_t,
+    #[cfg(target_os = "linux")]
+    leader_pidfd: Option<std::sync::Arc<rustix::fd::OwnedFd>>,
 }
 
-impl ProcessGroupGuard {
-    /// `None` when the child was already reaped (no group left to signal).
-    pub(crate) fn new(child: &tokio::process::Child) -> Self {
+impl std::fmt::Debug for ProcessGroupId {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("ProcessGroupId")
+            .field("pgid", &self.pgid)
+            .finish()
+    }
+}
+
+impl ProcessGroupId {
+    fn new(pgid: libc::pid_t) -> Self {
+        #[cfg(target_os = "linux")]
+        let leader_pidfd = rustix::process::Pid::from_raw(pgid)
+            .and_then(|pid| {
+                rustix::process::pidfd_open(pid, rustix::process::PidfdFlags::empty()).ok()
+            })
+            .map(std::sync::Arc::new);
+
         Self {
-            pid: child.id().map(|pid| pid as libc::pid_t),
+            pgid,
+            #[cfg(target_os = "linux")]
+            leader_pidfd,
         }
     }
 
-    /// Give up ownership: the child has been reaped, so its group id is no longer ours to signal.
+    fn raw(&self) -> libc::pid_t {
+        self.pgid
+    }
+
+    /// Kill remaining descendants only while a pidfd pins the original
+    /// leader's numeric identity. Without that pin, fail closed.
+    #[cfg(target_os = "linux")]
+    fn kill_remaining_members(&self) -> bool {
+        if self.leader_pidfd.is_none() {
+            tracing::warn!(
+                pgid = self.pgid,
+                "cannot safely escalate process-group quiescence without a leader pidfd"
+            );
+            return false;
+        }
+        let Some(pgid) = rustix::process::Pid::from_raw(self.pgid) else {
+            return false;
+        };
+        match rustix::process::kill_process_group(pgid, rustix::process::Signal::KILL) {
+            Ok(()) | Err(rustix::io::Errno::SRCH) => true,
+            Err(error) => {
+                tracing::warn!(
+                    pgid = self.pgid,
+                    error = %error,
+                    "could not terminate surviving process-group members"
+                );
+                false
+            }
+        }
+    }
+}
+
+/// Kills the process group on drop (covers task-abort mid-await, where async cleanup never runs).
+/// Disarm after the direct child is reaped; only a separately retained identity
+/// may be used for post-reap quiescence checks.
+pub(crate) struct ProcessGroupGuard {
+    group: Option<ProcessGroupId>,
+    armed: bool,
+}
+
+impl ProcessGroupGuard {
+    /// Capture the process-group identity while its direct child is still unreaped.
+    pub(crate) fn new(child: &tokio::process::Child) -> Self {
+        let group = child
+            .id()
+            .and_then(|pid| i32::try_from(pid).ok())
+            .map(ProcessGroupId::new);
+        Self { group, armed: true }
+    }
+
+    /// Give up the guard's authority to signal after the direct child is reaped.
     pub(crate) fn disarm(&mut self) {
-        self.pid = None;
+        self.armed = false;
     }
 
-    /// The process group id this guard signals.
-    pub(crate) fn pgid(&self) -> Option<libc::pid_t> {
-        self.pid
+    /// Retain the process-group identity for post-reap descendant supervision.
+    pub(crate) fn pgid(&self) -> Option<ProcessGroupId> {
+        self.group.clone()
     }
 
-    /// Whether the guard would still signal on drop (test-only: catches guards outliving their reap).
+    /// Whether the guard would still signal on drop.
     #[cfg(test)]
     pub(crate) fn is_armed(&self) -> bool {
-        self.pid.is_some()
+        self.armed && self.group.is_some()
     }
 }
 
 impl Drop for ProcessGroupGuard {
     fn drop(&mut self) {
-        if let Some(pid) = self.pid {
-            signal_group(pid);
+        if self.armed
+            && let Some(group) = self.group.as_ref()
+        {
+            signal_group(group.raw());
         }
     }
 }
@@ -737,51 +809,80 @@ fn process_group_and_state(stat: &str) -> Option<(libc::pid_t, char)> {
     Some((process_group, state))
 }
 
-/// Maximum time to confirm that a child process group has stopped writing.
+/// Maximum initial time to confirm that a child process group has stopped writing.
 #[cfg(target_os = "linux")]
 const GROUP_QUIESCENCE_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// Maximum time allowed after terminating remaining process-group members.
+#[cfg(target_os = "linux")]
+const GROUP_QUIESCENCE_KILL_GRACE: Duration = Duration::from_secs(5);
 
 /// Maximum delay between process-group scans.
 #[cfg(target_os = "linux")]
 const GROUP_QUIESCENCE_MAX_DELAY: Duration = Duration::from_millis(500);
 
-/// Wait for a process group to become quiescent without parking a worker forever.
-///
-/// A failed scan or an elapsed deadline returns false; callers must not publish or
-/// remove files that a surviving group member could still be writing.
+/// Wait for a process group to become quiescent, escalating once after the
+/// initial deadline. Its retained pidfd prevents numeric PGID reuse during
+/// SIGKILL. Failure to pin or terminate the group remains fail-closed.
 #[cfg(target_os = "linux")]
-pub(crate) async fn await_group_quiescence(pgid: i32) -> bool {
-    await_group_quiescence_with_timeout(pgid, GROUP_QUIESCENCE_TIMEOUT).await
+pub(crate) async fn await_group_quiescence(group: &ProcessGroupId) -> bool {
+    await_group_quiescence_with_timeout(group, GROUP_QUIESCENCE_TIMEOUT).await
 }
 
 #[cfg(target_os = "linux")]
-async fn await_group_quiescence_with_timeout(pgid: i32, timeout: Duration) -> bool {
-    let deadline = tokio::time::Instant::now() + timeout;
+async fn await_group_quiescence_with_timeout(group: &ProcessGroupId, timeout: Duration) -> bool {
+    let mut deadline = tokio::time::Instant::now() + timeout;
+    let mut escalated = false;
     let mut delay = Duration::from_millis(20);
 
     loop {
         let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
         if remaining.is_zero() {
+            if !escalated && group.kill_remaining_members() {
+                tracing::warn!(
+                    pgid = group.raw(),
+                    ?timeout,
+                    "process group exceeded its quiescence deadline; terminated remaining members"
+                );
+                escalated = true;
+                deadline = tokio::time::Instant::now() + GROUP_QUIESCENCE_KILL_GRACE;
+                delay = Duration::from_millis(20);
+                continue;
+            }
             tracing::warn!(
-                pgid,
+                pgid = group.raw(),
                 ?timeout,
-                "process group did not become quiescent before the deadline"
+                escalated,
+                "process group did not become quiescent before its deadline"
             );
             return false;
         }
 
+        let pgid = group.raw();
         let scan = tokio::task::spawn_blocking(move || process_group_has_live_members(pgid));
         match tokio::time::timeout(remaining, scan).await {
             Ok(Ok(false)) => return true,
             Ok(Ok(true)) => {}
             Ok(Err(error)) => {
-                tracing::warn!(pgid, error = %error, "process-group scan task failed");
+                tracing::warn!(pgid = group.raw(), error = %error, "process-group scan task failed");
                 return false;
             }
             Err(_) => {
+                if !escalated && group.kill_remaining_members() {
+                    tracing::warn!(
+                        pgid = group.raw(),
+                        ?timeout,
+                        "process-group scan exceeded its deadline; terminated remaining members"
+                    );
+                    escalated = true;
+                    deadline = tokio::time::Instant::now() + GROUP_QUIESCENCE_KILL_GRACE;
+                    delay = Duration::from_millis(20);
+                    continue;
+                }
                 tracing::warn!(
-                    pgid,
+                    pgid = group.raw(),
                     ?timeout,
+                    escalated,
                     "process-group scan exceeded the quiescence deadline"
                 );
                 return false;
@@ -790,12 +891,7 @@ async fn await_group_quiescence_with_timeout(pgid: i32, timeout: Duration) -> bo
 
         let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
         if remaining.is_zero() {
-            tracing::warn!(
-                pgid,
-                ?timeout,
-                "process group did not become quiescent before the deadline"
-            );
-            return false;
+            continue;
         }
         tokio::time::sleep(delay.min(remaining)).await;
         delay = (delay * 2).min(GROUP_QUIESCENCE_MAX_DELAY);
@@ -803,7 +899,7 @@ async fn await_group_quiescence_with_timeout(pgid: i32, timeout: Duration) -> bo
 }
 
 #[cfg(not(target_os = "linux"))]
-pub(crate) async fn await_group_quiescence(_pgid: i32) -> bool {
+pub(crate) async fn await_group_quiescence(_group: &ProcessGroupId) -> bool {
     true
 }
 
@@ -870,34 +966,37 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn process_group_quiescence_deadline_returns_while_a_descendant_is_live() {
+    async fn process_group_quiescence_escalates_after_the_initial_deadline() {
         let mut command = tokio::process::Command::new("sh");
         command
-            .args(["-c", "sleep 30 & wait"])
+            .args(["-c", "sleep 30 & exit 0"])
             .process_group(0)
             .stdout(std::process::Stdio::null())
             .stderr(std::process::Stdio::null());
         let mut child = command.spawn().expect("spawn a test process group");
-        let pgid = child.id().expect("test process has a pid") as i32;
+        let mut guard = ProcessGroupGuard::new(&child);
+        let group = guard.pgid().expect("retain the process-group identity");
+
+        let status = child.wait().await.expect("reap the direct child");
+        assert!(status.success());
+        guard.disarm();
+        assert!(
+            process_group_has_live_members(group.raw()),
+            "the background descendant must remain after its leader exits"
+        );
 
         let started = tokio::time::Instant::now();
         assert!(
-            !await_group_quiescence_with_timeout(pgid, Duration::from_millis(40)).await,
-            "a live descendant must prevent a quiescent result"
+            await_group_quiescence_with_timeout(&group, Duration::from_millis(40)).await,
+            "the escalation must terminate a surviving descendant"
         );
         assert!(
-            started.elapsed() < Duration::from_secs(2),
-            "the quiescence wait must respect its deadline"
+            started.elapsed() < Duration::from_secs(6),
+            "the escalation wait must have a bounded grace period"
         );
-
-        // SAFETY: pgid is the process group created by this test; SIGKILL only
-        // terminates the test-owned shell and its sleep descendant.
-        let signal_result = unsafe { libc::kill(-pgid, libc::SIGKILL) };
-        assert_eq!(signal_result, 0, "terminate the test process group");
-        let _ = child.wait().await;
         assert!(
-            await_group_quiescence_with_timeout(pgid, Duration::from_secs(2)).await,
-            "the process group must become quiescent after it is killed"
+            !process_group_has_live_members(group.raw()),
+            "the original group must be quiescent after escalation"
         );
     }
 

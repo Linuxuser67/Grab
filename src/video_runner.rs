@@ -20,8 +20,9 @@ use crate::video_progress::{
 };
 use crate::video_quality::default_video_filename;
 use crate::video_spawn::{
-    LiveScratchGuard, ProcessGroupGuard, discover_ytdlp_output, drain_stderr_to_tail,
-    fetch_video_page, join_drain, reap_child, spawn_piped_ytdlp, ytdlp_command,
+    LiveScratchGuard, ProcessGroupGuard, ProcessGroupId, discover_ytdlp_output,
+    drain_stderr_to_tail, fetch_video_page, join_drain, reap_child, spawn_piped_ytdlp,
+    ytdlp_command,
 };
 use crate::video_staging::{
     ResumePlan, ResumeQuery, VideoManifest, clean_staging_files, collect_sidecar, dest_part_path,
@@ -581,7 +582,7 @@ async fn run_video_playlist_download_inner(
             intent = &mut abort => {
                 reap_child(&mut child, &mut group).await;
                 await_ytdlp_group_quiescence_or_abort(
-                    pgid,
+                    pgid.as_ref(),
                     &[progress.abort_handle(), logs.abort_handle()],
                 )
                 .await?;
@@ -594,7 +595,7 @@ async fn run_video_playlist_download_inner(
                 Ok(Ok(status)) => {
                     group.disarm();
                     await_ytdlp_group_quiescence_or_abort(
-                        pgid,
+                        pgid.as_ref(),
                         &[progress.abort_handle(), logs.abort_handle()],
                     )
                     .await?;
@@ -603,7 +604,7 @@ async fn run_video_playlist_download_inner(
                 Ok(Err(error)) => {
                     reap_child(&mut child, &mut group).await;
                     await_ytdlp_group_quiescence_or_abort(
-                        pgid,
+                        pgid.as_ref(),
                         &[progress.abort_handle(), logs.abort_handle()],
                     )
                     .await?;
@@ -617,7 +618,7 @@ async fn run_video_playlist_download_inner(
                 {
                     reap_child(&mut child, &mut group).await;
                     await_ytdlp_group_quiescence_or_abort(
-                        pgid,
+                        pgid.as_ref(),
                         &[progress.abort_handle(), logs.abort_handle()],
                     )
                     .await?;
@@ -633,7 +634,7 @@ async fn run_video_playlist_download_inner(
                         Ok(Some(status)) => {
                             group.disarm();
                             await_ytdlp_group_quiescence_or_abort(
-                                pgid,
+                                pgid.as_ref(),
                                 &[progress.abort_handle(), logs.abort_handle()],
                             )
                             .await?;
@@ -642,7 +643,7 @@ async fn run_video_playlist_download_inner(
                         _ => {
                             reap_child(&mut child, &mut group).await;
                             await_ytdlp_group_quiescence_or_abort(
-                                pgid,
+                                pgid.as_ref(),
                                 &[progress.abort_handle(), logs.abort_handle()],
                             )
                             .await?;
@@ -1140,7 +1141,7 @@ static DASH_MERGE_TEMP_DIR_COUNTER: AtomicU64 = AtomicU64::new(0);
 struct DashMergeTempDir {
     path: Option<PathBuf>,
     /// Keep the private workspace until every FFmpeg descendant has stopped.
-    pgid: Option<i32>,
+    pgid: Option<ProcessGroupId>,
 }
 
 impl DashMergeTempDir {
@@ -1174,7 +1175,7 @@ impl DashMergeTempDir {
     }
 
     async fn cleanup(&mut self) {
-        if let Some(pgid) = self.pgid {
+        if let Some(pgid) = self.pgid.as_ref() {
             if await_ytdlp_group_quiescence(Some(pgid)).await.is_err() {
                 return;
             }
@@ -1206,7 +1207,7 @@ impl Drop for DashMergeTempDir {
                 // has sent its kill signal. Wait for the group before unlinking its
                 // private output directory.
                 drop(handle.spawn(async move {
-                    if await_ytdlp_group_quiescence(pgid).await.is_ok() {
+                    if await_ytdlp_group_quiescence(pgid.as_ref()).await.is_ok() {
                         let _ =
                             tokio::task::spawn_blocking(move || std::fs::remove_dir_all(path)).await;
                     } else {
@@ -1411,11 +1412,11 @@ async fn try_merge_dash_partials(
     let mut child = cmd.spawn().ok()?;
     let mut group = ProcessGroupGuard::new(&child);
     let pgid = group.pgid();
-    merged_dir.pgid = pgid;
+    merged_dir.pgid = pgid.clone();
     let status = match tokio::time::timeout(MERGE_WALL_CLOCK, child.wait()).await {
         Ok(Ok(status)) => {
             group.disarm();
-            if let Err(error) = await_ytdlp_group_quiescence(pgid).await {
+            if let Err(error) = await_ytdlp_group_quiescence(pgid.as_ref()).await {
                 tracing::warn!(error = %error, "preserving DASH partial merge scratch");
                 return None;
             }
@@ -1671,7 +1672,7 @@ fn stall_elapsed(last_progress: &std::sync::Mutex<std::time::Instant>) -> std::t
 /// output instead of forwarding it, so a merge is silent on both streams — a
 /// stall deadline there would kill legitimate long merges, but a truly hung
 /// ffmpeg must not park the row forever either.
-async fn await_ytdlp_group_quiescence(pgid: Option<i32>) -> Result<(), VideoError> {
+async fn await_ytdlp_group_quiescence(pgid: Option<&ProcessGroupId>) -> Result<(), VideoError> {
     if let Some(pgid) = pgid
         && !crate::video_spawn::await_group_quiescence(pgid).await
     {
@@ -1684,7 +1685,7 @@ async fn await_ytdlp_group_quiescence(pgid: Option<i32>) -> Result<(), VideoErro
 
 /// Abort pipe readers when a child group remains live after its bounded wait.
 async fn await_ytdlp_group_quiescence_or_abort(
-    pgid: Option<i32>,
+    pgid: Option<&ProcessGroupId>,
     drains: &[tokio::task::AbortHandle],
 ) -> Result<(), VideoError> {
     let result = await_ytdlp_group_quiescence(pgid).await;
@@ -1817,7 +1818,7 @@ async fn run_ytdlp_attempt(
             intent = &mut *abort => {
                 reap_child(&mut child, &mut group).await;
                 await_ytdlp_group_quiescence_or_abort(
-                    pgid,
+                    pgid.as_ref(),
                     &[progress.abort_handle(), logs.abort_handle()],
                 )
                 .await?;
@@ -1832,7 +1833,7 @@ async fn run_ytdlp_attempt(
                     // The leader is reaped; wait for any ffmpeg descendants before reading or publishing their output.
                     group.disarm();
                     await_ytdlp_group_quiescence_or_abort(
-                        pgid,
+                        pgid.as_ref(),
                         &[progress.abort_handle(), logs.abort_handle()],
                     )
                     .await?;
@@ -1841,7 +1842,7 @@ async fn run_ytdlp_attempt(
                 Ok(Err(e)) => {
                     reap_child(&mut child, &mut group).await;
                     await_ytdlp_group_quiescence_or_abort(
-                        pgid,
+                        pgid.as_ref(),
                         &[progress.abort_handle(), logs.abort_handle()],
                     )
                     .await?;
@@ -1858,7 +1859,7 @@ async fn run_ytdlp_attempt(
                 {
                     reap_child(&mut child, &mut group).await;
                     await_ytdlp_group_quiescence_or_abort(
-                        pgid,
+                        pgid.as_ref(),
                         &[progress.abort_handle(), logs.abort_handle()],
                     )
                     .await?;
@@ -1879,7 +1880,7 @@ async fn run_ytdlp_attempt(
                         Ok(Some(status)) => {
                             group.disarm();
                             await_ytdlp_group_quiescence_or_abort(
-                                pgid,
+                                pgid.as_ref(),
                                 &[progress.abort_handle(), logs.abort_handle()],
                             )
                             .await?;
@@ -1888,7 +1889,7 @@ async fn run_ytdlp_attempt(
                         _ => {
                             reap_child(&mut child, &mut group).await;
                             await_ytdlp_group_quiescence_or_abort(
-                                pgid,
+                                pgid.as_ref(),
                                 &[progress.abort_handle(), logs.abort_handle()],
                             )
                             .await?;
@@ -2085,7 +2086,8 @@ pub(crate) async fn remux_live_capture(
         let status = match wait_result {
             None => {
                 reap_child(&mut child, &mut group).await;
-                await_ytdlp_group_quiescence_or_abort(pgid, &[logs.abort_handle()]).await?;
+                await_ytdlp_group_quiescence_or_abort(pgid.as_ref(), &[logs.abort_handle()])
+                    .await?;
                 logs.abort();
                 let _ = tokio::fs::remove_file(&partial).await;
                 return Err(VideoError::part_failed("attempt discarded"));
@@ -2093,19 +2095,22 @@ pub(crate) async fn remux_live_capture(
             Some(Ok(Ok(status))) => {
                 // The leader is reaped; wait for any ffmpeg descendants before publishing the remux.
                 group.disarm();
-                await_ytdlp_group_quiescence_or_abort(pgid, &[logs.abort_handle()]).await?;
+                await_ytdlp_group_quiescence_or_abort(pgid.as_ref(), &[logs.abort_handle()])
+                    .await?;
                 status
             }
             Some(Ok(Err(e))) => {
                 reap_child(&mut child, &mut group).await;
-                await_ytdlp_group_quiescence_or_abort(pgid, &[logs.abort_handle()]).await?;
+                await_ytdlp_group_quiescence_or_abort(pgid.as_ref(), &[logs.abort_handle()])
+                    .await?;
                 join_drain(logs).await;
                 let _ = tokio::fs::remove_file(&partial).await;
                 return Err(VideoError::runtime(&e));
             }
             Some(Err(_)) => {
                 reap_child(&mut child, &mut group).await;
-                await_ytdlp_group_quiescence_or_abort(pgid, &[logs.abort_handle()]).await?;
+                await_ytdlp_group_quiescence_or_abort(pgid.as_ref(), &[logs.abort_handle()])
+                    .await?;
                 join_drain(logs).await;
                 let _ = tokio::fs::remove_file(&partial).await;
                 return Err(VideoError::part_failed("timed out finalizing"));
@@ -2233,7 +2238,11 @@ async fn sweep_live_capture(
 
 /// Reap the direct child and wait for its process group to stop writing before
 /// reclaiming capture scratch. Cleanup is constructed only after both waits.
-async fn reap_then_sweep<F, S, G>(reap: F, pgid: Option<i32>, sweep: S) -> Result<(), VideoError>
+async fn reap_then_sweep<F, S, G>(
+    reap: F,
+    pgid: Option<&ProcessGroupId>,
+    sweep: S,
+) -> Result<(), VideoError>
 where
     F: std::future::Future<Output = ()>,
     S: FnOnce() -> G,
@@ -2970,7 +2979,7 @@ pub(crate) async fn run_live_ytdlp(
                 intent = &mut abort => {
                     reap_child(&mut child, &mut group).await;
                     await_ytdlp_group_quiescence_or_abort(
-                        pgid,
+                        pgid.as_ref(),
                         &[progress.abort_handle(), logs.abort_handle()],
                     )
                     .await?;
@@ -2984,7 +2993,7 @@ pub(crate) async fn run_live_ytdlp(
                         Ok(Ok(status)) => {
                             group.disarm();
                             await_ytdlp_group_quiescence_or_abort(
-                                pgid,
+                                pgid.as_ref(),
                                 &[progress.abort_handle(), logs.abort_handle()],
                             )
                             .await?;
@@ -3040,7 +3049,7 @@ pub(crate) async fn run_live_ytdlp(
                             logs.abort();
                             reap_then_sweep(
                                 reap_child(&mut child, &mut group),
-                                pgid,
+                                pgid.as_ref(),
                                 || {
                                     sweep_live_capture(
                                         &out,
@@ -3068,7 +3077,7 @@ pub(crate) async fn run_live_ytdlp(
                             // but only after every process that could write it exits.
                             reap_child(&mut child, &mut group).await;
                             await_ytdlp_group_quiescence_or_abort(
-                                pgid,
+                                pgid.as_ref(),
                                 &[progress.abort_handle(), logs.abort_handle()],
                             )
                             .await?;
@@ -3406,7 +3415,7 @@ pub(crate) async fn run_hls_ytdlp(
             _ = &mut *abort => {
                 reap_child(&mut child, &mut group).await;
                 await_ytdlp_group_quiescence_or_abort(
-                    pgid,
+                    pgid.as_ref(),
                     &[progress.abort_handle(), logs.abort_handle()],
                 )
                 .await?;
@@ -3421,7 +3430,7 @@ pub(crate) async fn run_hls_ytdlp(
                     // The leader is reaped; wait for any ffmpeg descendants before inspecting the output.
                     group.disarm();
                     await_ytdlp_group_quiescence_or_abort(
-                        pgid,
+                        pgid.as_ref(),
                         &[progress.abort_handle(), logs.abort_handle()],
                     )
                     .await?;
@@ -3430,7 +3439,7 @@ pub(crate) async fn run_hls_ytdlp(
                 Ok(Err(e)) => {
                     reap_child(&mut child, &mut group).await;
                     await_ytdlp_group_quiescence_or_abort(
-                        pgid,
+                        pgid.as_ref(),
                         &[progress.abort_handle(), logs.abort_handle()],
                     )
                     .await?;
@@ -3447,7 +3456,7 @@ pub(crate) async fn run_hls_ytdlp(
                 {
                     reap_child(&mut child, &mut group).await;
                     await_ytdlp_group_quiescence_or_abort(
-                        pgid,
+                        pgid.as_ref(),
                         &[progress.abort_handle(), logs.abort_handle()],
                     )
                     .await?;
@@ -3468,7 +3477,7 @@ pub(crate) async fn run_hls_ytdlp(
                         Ok(Some(status)) => {
                             group.disarm();
                             await_ytdlp_group_quiescence_or_abort(
-                                pgid,
+                                pgid.as_ref(),
                                 &[progress.abort_handle(), logs.abort_handle()],
                             )
                             .await?;
@@ -3477,7 +3486,7 @@ pub(crate) async fn run_hls_ytdlp(
                         _ => {
                             reap_child(&mut child, &mut group).await;
                             await_ytdlp_group_quiescence_or_abort(
-                                pgid,
+                                pgid.as_ref(),
                                 &[progress.abort_handle(), logs.abort_handle()],
                             )
                             .await?;

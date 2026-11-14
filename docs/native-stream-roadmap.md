@@ -66,7 +66,7 @@ not claim Dolby Vision, AV1, or spatial-video verification.
 
 For ordinary HLS, `EXT-X-START` is ignored during recording: all listed
 segments are retained and the playback hint is omitted from the local playlist.
-`EXT-X-CONTENT-STEERING` is accepted as benign metadata: Grab does not fetch
+`EXT-X-CONTENT-STEERING` is ignored as inert metadata: Grab does not fetch
 the steering manifest, does not select a Pathway, and downloads the variants
 the master advertises. Pathway-driven host or URI rewriting is not applied.
 Media-playlist NAME/VALUE and QUERYPARAM variable substitution is supported

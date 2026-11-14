@@ -2089,13 +2089,23 @@ async fn finalize_manifest_download(
     let mut destination_parts_cleaned = true;
     if destination_parts {
         let (video_filename, audio_filename) = if matches!(&tracks, Tracks::Hls { .. }) {
-            (crate::manifest_destination::TrackKind::Video.part_filename(
+            (
+                crate::manifest_destination::TrackKind::Video.part_filename(
                     crate::manifest_destination::TrackFileFormat::Ts,
-                ), "audio-track.ts")
+                ),
+                crate::manifest_destination::TrackKind::Audio.part_filename(
+                    crate::manifest_destination::TrackFileFormat::Ts,
+                ),
+            )
         } else {
-            (crate::manifest_destination::TrackKind::Video.part_filename(
+            (
+                crate::manifest_destination::TrackKind::Video.part_filename(
                     crate::manifest_destination::TrackFileFormat::Mp4,
-                ), "audio-track.mp4")
+                ),
+                crate::manifest_destination::TrackKind::Audio.part_filename(
+                    crate::manifest_destination::TrackFileFormat::Mp4,
+                ),
+            )
         };
         let has_destination_subtitles = matches!(
             &tracks,

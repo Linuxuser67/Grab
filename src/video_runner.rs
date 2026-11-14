@@ -1059,10 +1059,12 @@ impl DashMergeTempDir {
                 std::process::id()
             ));
             match create_private_merge_dir(&path) {
-                Ok(()) => return Ok(Self {
-                    path: Some(path),
-                    pgid: None,
-                }),
+                Ok(()) => {
+                    return Ok(Self {
+                        path: Some(path),
+                        pgid: None,
+                    });
+                }
                 Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
                 Err(error) => return Err(error),
             }
@@ -1109,7 +1111,8 @@ impl Drop for DashMergeTempDir {
                 // private output directory.
                 drop(handle.spawn(async move {
                     await_ytdlp_group_quiescence(pgid).await;
-                    let _ = tokio::task::spawn_blocking(move || std::fs::remove_dir_all(path)).await;
+                    let _ =
+                        tokio::task::spawn_blocking(move || std::fs::remove_dir_all(path)).await;
                 }));
             }
             Err(_) if pgid.is_none() => {

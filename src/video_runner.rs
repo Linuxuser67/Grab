@@ -852,7 +852,7 @@ async fn run_video_download_inner(
                 }
                 // No picked entry: the spawner expands the collection into per-item rows instead of failing it.
                 Ok(FetchedVideo::Playlist(pl)) => return Ok(VideoOutcome::Expand(pl.into())),
-                Err(e) if attempt + 1 < 3 => {
+                Err(e) if attempt + 1 < 3 && e.is_retryable_fetch() => {
                     tracing::info!("video resolve failed, retrying: {e}");
                     if await_video_operation_or_stop(
                         &mut abort,

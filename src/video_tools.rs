@@ -19,9 +19,12 @@ pub enum VideoError {
     /// A required toolchain is missing from the managed/system search paths.
     #[error("{0}")]
     MissingLibraries(String),
-    /// The page could not be extracted (wrong URL, offline, …). Retryable.
+    /// A permanent extraction failure such as an unsupported URL or rejected request.
     #[error("{0}")]
     Fetch(String),
+    /// A temporary network or server failure that may succeed on a later attempt.
+    #[error("{0}")]
+    RetryableFetch(String),
     /// A tool was present but its version command exceeded the probe deadline.
     #[error("{0}")]
     ToolProbeTimeout(String),
@@ -53,6 +56,14 @@ impl VideoError {
         Self::Fetch(
             gettext("Couldn't read the video page: {detail}").replace("{detail}", &e.to_string()),
         )
+    }
+    pub(crate) fn retryable_fetch(e: impl std::fmt::Display) -> Self {
+        Self::RetryableFetch(
+            gettext("Couldn't read the video page: {detail}").replace("{detail}", &e.to_string()),
+        )
+    }
+    pub(crate) fn is_retryable_fetch(&self) -> bool {
+        matches!(self, Self::RetryableFetch(_))
     }
     pub(crate) fn install(e: impl std::fmt::Display) -> Self {
         Self::Message(

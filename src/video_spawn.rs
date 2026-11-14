@@ -69,6 +69,40 @@ pub(crate) async fn read_bounded(
     ))
 }
 
+/// Whether yt-dlp's final diagnostic identifies a transient transport/server failure.
+fn ytdlp_error_is_retryable(detail: &str) -> bool {
+    let detail = detail.to_ascii_lowercase();
+    let transient_http_status = detail
+        .split("http error ")
+        .filter_map(|suffix| suffix.split_once(':').map(|(status, _)| status.trim()))
+        .filter_map(|status| status.parse::<u16>().ok())
+        .any(|status| matches!(status, 408 | 425 | 429 | 500..=599));
+    if transient_http_status {
+        return true;
+    }
+
+    [
+        "timed out",
+        "timeout",
+        "connection reset",
+        "connection refused",
+        "connection aborted",
+        "remote end closed connection",
+        "remote disconnected",
+        "temporary failure in name resolution",
+        "temporary failure",
+        "network is unreachable",
+        "network unreachable",
+        "transporterror",
+        "connectionerror",
+        "proxyerror",
+        "incomplete read",
+        "unexpected eof",
+    ]
+    .iter()
+    .any(|needle| detail.contains(needle))
+}
+
 /// Fetch one page's raw `--dump-single-json`, then parse leniently. `flat_playlist` lists collection stubs; false runs full extraction.
 pub(crate) async fn fetch_raw_dump_json(
     youtube_bin: &Path,
@@ -140,7 +174,7 @@ pub(crate) async fn fetch_raw_dump_json(
         }
         Err(_) => {
             reap_child(&mut child, &mut group).await;
-            return Err(VideoError::fetch(gettext("the lookup timed out")));
+            return Err(VideoError::retryable_fetch(gettext("the lookup timed out")));
         }
     };
     // Drains join with a grace period (an orphaned grandchild holding the pipe would stall a bare await); only the ceiling gets the size message.
@@ -162,7 +196,11 @@ pub(crate) async fn fetch_raw_dump_json(
     crate::backend_debug::echo_stderr(&stderr);
     if !status.success() {
         let detail = last_log_line(&String::from_utf8_lossy(&stderr), "yt-dlp reported failure");
-        return Err(VideoError::fetch(detail));
+        return Err(if ytdlp_error_is_retryable(&detail) {
+            VideoError::retryable_fetch(detail)
+        } else {
+            VideoError::fetch(detail)
+        });
     }
     let value: serde_json::Value =
         serde_json::from_str(&String::from_utf8_lossy(&stdout)).map_err(VideoError::fetch)?;
@@ -1193,5 +1231,45 @@ mod tests {
         assert_eq!(rt.block_on(worker).expect("worker completes"), 7);
         // Aborting a finished task is a no-op, not a cancellation.
         drop(guard);
+    }
+}
+
+#[cfg(test)]
+mod ytdlp_retry_classification_tests {
+    use super::ytdlp_error_is_retryable;
+
+    #[test]
+    fn retries_temporary_http_and_transport_failures() {
+        for detail in [
+            "HTTP Error 408: Request Timeout",
+            "HTTP Error 429: Too Many Requests",
+            "HTTP Error 503: Service Unavailable",
+            "Unable to download webpage: Connection reset by peer",
+            "Temporary failure in name resolution",
+            "The read operation timed out",
+        ] {
+            assert!(
+                ytdlp_error_is_retryable(detail),
+                "transient diagnostic must retry: {detail}"
+            );
+        }
+    }
+
+    #[test]
+    fn does_not_retry_permanent_http_or_extractor_failures() {
+        for detail in [
+            "HTTP Error 400: Bad Request",
+            "HTTP Error 401: Unauthorized",
+            "HTTP Error 403: Forbidden",
+            "HTTP Error 404: Not Found",
+            "Unsupported URL: https://example.invalid/",
+            "This video is unavailable",
+            "Failed to parse JSON",
+        ] {
+            assert!(
+                !ytdlp_error_is_retryable(detail),
+                "permanent diagnostic must not retry: {detail}"
+            );
+        }
     }
 }

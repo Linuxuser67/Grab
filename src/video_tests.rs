@@ -1,10 +1,10 @@
 use super::*;
-use crate::attempt_gate::AttemptGate;
 use crate::file_names::{is_url_derived_name, strip_dedupe_suffix};
 use crate::media_types::{
     PlaylistInfo, PlaylistItem, PlaylistKind, VIDEO_QUALITY_VALUES, VideoSource, quality_index,
     quality_value,
 };
+use crate::video::AttemptGate;
 use crate::video_argv::{
     YTDLP_PROGRESS_TEMPLATE, apply_proxy_env, container_truth_name, dash_merge_argv,
     fallback_to_live_edge, hls_download_argv, hls_format_spec, live_capture_argv,
@@ -5111,6 +5111,7 @@ exit 0
         std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755)).unwrap();
     }
 
+    let gate = crate::video::AttemptGate::new();
     let res = crate::runtime::tokio_rt().block_on(remux_live_capture(
         &bin,
         &src,
@@ -5118,6 +5119,7 @@ exit 0
         false,
         std::time::Duration::from_secs(30),
         "https://x.com/watch?v=abc123",
+        &gate,
     ));
     assert!(
         res.is_ok(),
@@ -5139,6 +5141,7 @@ fn a_successful_live_remux_is_only_named_final_once_ffmpeg_succeeds() {
     let final_tmp = dir.join("final.1.mp4");
     let fake_ff = fake_ffmpeg_copy(&dir);
 
+    let gate = crate::video::AttemptGate::new();
     let res = crate::runtime::tokio_rt().block_on(remux_live_capture(
         &fake_ff,
         &src,
@@ -5146,6 +5149,7 @@ fn a_successful_live_remux_is_only_named_final_once_ffmpeg_succeeds() {
         false,
         std::time::Duration::from_secs(30),
         "https://x.com/watch?v=abc123",
+        &gate,
     ));
     assert!(res.is_ok(), "{res:?}");
     assert_eq!(
@@ -5203,6 +5207,7 @@ fn a_failed_live_remux_leaves_no_partial_behind() {
     let final_tmp = dir.join("final.1.mp4");
     let fake_ff = fake_ffmpeg_fail(&dir, true);
 
+    let gate = crate::video::AttemptGate::new();
     let res = crate::runtime::tokio_rt().block_on(remux_live_capture(
         &fake_ff,
         &src,
@@ -5210,6 +5215,7 @@ fn a_failed_live_remux_leaves_no_partial_behind() {
         false,
         std::time::Duration::from_secs(30),
         "https://x.com/watch?v=abc123",
+        &gate,
     ));
     assert!(res.is_err(), "the remux must fail");
     assert!(

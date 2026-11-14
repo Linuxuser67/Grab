@@ -39,6 +39,29 @@ pub(crate) enum TrackKind {
     Subtitles,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum TrackFileFormat {
+    Ts,
+    Mp4,
+    Vtt,
+}
+
+impl TrackKind {
+    pub(crate) const fn part_filename(self, format: TrackFileFormat) -> &'static str {
+        match (self, format) {
+            (Self::Video, TrackFileFormat::Ts) => "video-track.ts",
+            (Self::Video, TrackFileFormat::Mp4) => "video-track.mp4",
+            (Self::Video, TrackFileFormat::Vtt) => "video-track.vtt",
+            (Self::Audio, TrackFileFormat::Ts) => "audio-track.ts",
+            (Self::Audio, TrackFileFormat::Mp4) => "audio-track.mp4",
+            (Self::Audio, TrackFileFormat::Vtt) => "audio-track.vtt",
+            (Self::Subtitles, TrackFileFormat::Ts) => "subtitle-track.ts",
+            (Self::Subtitles, TrackFileFormat::Mp4) => "subtitle-track.mp4",
+            (Self::Subtitles, TrackFileFormat::Vtt) => "subtitle-track.vtt",
+        }
+    }
+}
+
 /// Persist the exact destination-side part names before any media files are
 /// created. The XDG state directory is already bound to this item and
 /// destination by its owner marker.
@@ -1110,4 +1133,20 @@ mod tests {
         );
         assert_eq!(fs::read(victim).expect("read victim"), b"preserve");
     }
+    #[test]
+    fn track_part_filenames_follow_track_and_container_format() {
+        assert_eq!(
+            TrackKind::Video.part_filename(TrackFileFormat::Ts),
+            "video-track.ts"
+        );
+        assert_eq!(
+            TrackKind::Audio.part_filename(TrackFileFormat::Mp4),
+            "audio-track.mp4"
+        );
+        assert_eq!(
+            TrackKind::Subtitles.part_filename(TrackFileFormat::Vtt),
+            "subtitle-track.vtt"
+        );
+    }
+
 }

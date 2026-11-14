@@ -5707,7 +5707,6 @@ impl DownloadManager {
     }
 }
 
-
 impl DownloadManager {
     /// Segment bitmap snapshot for Undo: cloned before [`DownloadManager::remove`] drops the row's live bitmap.
     pub fn segments_of(&self, id: u64) -> Option<SegmentState> {

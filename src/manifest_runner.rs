@@ -703,7 +703,7 @@ async fn prepare_manifest_attempt(
             "resuming finalization of an unrecoverable live capture without polling its source"
         );
     }
-    let finish_requested = finish_marker_bytes.is_some();
+    let mut finish_requested = finish_marker_bytes.is_some();
     let dash_live_requested = job.source.kind == ManifestKind::Dash
         && job
             .source
@@ -750,6 +750,7 @@ async fn prepare_manifest_attempt(
     {
         Ok(result) => result?,
         Err(crate::video::StopIntent::Finish) if offline_tracks.is_some() => {
+            finish_requested = true;
             resolve_manifest_tracks(job, &mut offline_tracks, true).await?
         }
         Err(intent) => return Ok(ManifestPreparationOutcome::Stopped(intent)),

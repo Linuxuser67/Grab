@@ -4467,8 +4467,7 @@ mod tests {
         use std::os::unix::fs::PermissionsExt as _;
 
         let path = directory.join("fake-ffmpeg");
-        std::fs::write(&path, "#!/bin/sh\nexec sleep 0.1\n")
-            .expect("write fake FFmpeg executable");
+        std::fs::write(&path, "#!/bin/sh\nexec sleep 0.1\n").expect("write fake FFmpeg executable");
         std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o700))
             .expect("make fake FFmpeg executable");
         path

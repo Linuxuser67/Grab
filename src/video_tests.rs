@@ -10552,9 +10552,10 @@ async fn group_quiescence_waits_until_all_descendants_exit() {
     // Start the group wait while the recorder and its descendant are alive.
     // It must remain pending until the group is explicitly killed.
     let worker_group = group.clone();
-    let quiescence = tokio::spawn(
-        async move { crate::video_spawn::await_group_quiescence(&worker_group).await },
-    );
+    let quiescence =
+        tokio::spawn(
+            async move { crate::video_spawn::await_group_quiescence(&worker_group).await },
+        );
     tokio::time::sleep(std::time::Duration::from_millis(100)).await;
     assert!(
         !quiescence.is_finished(),

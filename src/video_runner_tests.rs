@@ -1022,3 +1022,35 @@ async fn discarding_during_live_remux_reaps_ffmpeg_and_removes_its_partial() {
         "discarded remux must not publish a final slot"
     );
 }
+
+
+#[test]
+fn repeated_playlist_start_for_the_same_id_does_not_fail_the_active_entry() {
+    let mut current_file = Some("video-id".to_string());
+    let finished_ids = std::collections::HashSet::new();
+
+    assert_eq!(
+        advance_playlist_entry(&mut current_file, "video-id", &finished_ids),
+        None
+    );
+    assert_eq!(current_file.as_deref(), Some("video-id"));
+}
+
+#[test]
+fn playlist_start_marks_only_a_different_unfinished_entry_as_abandoned() {
+    let mut current_file = Some("first-id".to_string());
+    let finished_ids = std::collections::HashSet::new();
+
+    assert_eq!(
+        advance_playlist_entry(&mut current_file, "second-id", &finished_ids),
+        Some("first-id".to_string())
+    );
+    assert_eq!(current_file.as_deref(), Some("second-id"));
+
+    let finished_ids = std::collections::HashSet::from(["second-id".to_string()]);
+    assert_eq!(
+        advance_playlist_entry(&mut current_file, "third-id", &finished_ids),
+        None
+    );
+    assert_eq!(current_file.as_deref(), Some("third-id"));
+}

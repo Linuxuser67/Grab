@@ -5707,6 +5707,290 @@ impl DownloadManager {
     }
 }
 
+
+impl DownloadManager {
+    /// Segment bitmap snapshot for Undo: cloned before [`DownloadManager::remove`] drops the row's live bitmap.
+    pub fn segments_of(&self, id: u64) -> Option<SegmentState> {
+        self.segment_state.borrow().get(&id).cloned()
+    }
+
+    /// Whether the engine ever started this row (for Undo snapshots, which
+    /// are built outside this module).
+    pub(crate) fn has_started(&self, id: u64) -> bool {
+        self.started.borrow().contains(&id)
+    }
+
+    /// Gallery job payload used by collection Undo.
+    pub(crate) fn gallery_job(&self, id: u64) -> Option<crate::gallery_argv::GalleryJob> {
+        self.gallery_jobs.borrow().get(&id).cloned()
+    }
+
+    /// Restore a group of removed rows after listing each distinct destination
+    /// directory off GTK. One batch keeps persistence, UI refresh and scheduling
+    /// to one update, while failures are collected for a single user-facing toast.
+    pub(crate) async fn unremove_many_async(
+        self: &Rc<Self>,
+        snapshots: Vec<RemovedSnapshot>,
+    ) -> Result<usize, String> {
+        let total = snapshots.len();
+        if total == 0 {
+            return Ok(0);
+        }
+
+        let directories = snapshots
+            .iter()
+            .map(|snapshot| snapshot.dest_dir.clone())
+            .collect::<HashSet<_>>();
+        let listings = gio::spawn_blocking(move || {
+            directories
+                .into_iter()
+                .map(|directory| {
+                    let result =
+                        crate::video_staging::try_dir_file_names(std::path::Path::new(&directory))
+                            .map_err(|error| error.to_string());
+                    (directory, result)
+                })
+                .collect::<HashMap<_, _>>()
+        })
+        .await
+        .map_err(|error| {
+            let message = format!("{error:?}");
+            format_gettext_template(
+                &gettext("Could not inspect Undo destinations: {error}"),
+                &[("error", &message)],
+            )
+        })?;
+
+        let _batch = self.batch_guard();
+        let mut restored = 0;
+        let mut failures = Vec::new();
+        for snapshot in snapshots {
+            match listings.get(&snapshot.dest_dir) {
+                Some(Ok(existing)) => {
+                    self.unremove_with_listing(snapshot, existing);
+                    restored += 1;
+                }
+                Some(Err(error)) => failures.push((snapshot.filename, error.clone())),
+                None => failures.push((
+                    snapshot.filename,
+                    gettext("destination listing was not available"),
+                )),
+            }
+        }
+
+        if failures.is_empty() {
+            Ok(restored)
+        } else {
+            let (filename, error) = &failures[0];
+            let restored_text = restored.to_string();
+            let total_text = total.to_string();
+            let failed_text = failures.len().to_string();
+            Err(format_gettext_template(
+                &gettext(
+                    "Restored {restored} of {total} downloads; {failed} could not be restored. First failure for {filename}: {error}",
+                ),
+                &[
+                    ("restored", &restored_text),
+                    ("total", &total_text),
+                    ("failed", &failed_text),
+                    ("filename", filename),
+                    ("error", error),
+                ],
+            ))
+        }
+    }
+
+    /// Re-insert one previously removed download (Undo) after listing its
+    /// destination off GTK. Collection actions use the batched entry point.
+    pub(crate) async fn unremove_async(
+        self: &Rc<Self>,
+        snap: RemovedSnapshot,
+    ) -> Result<DownloadItem, String> {
+        let dir = snap.dest_dir.clone();
+        let existing = gio::spawn_blocking(move || {
+            crate::video_staging::try_dir_file_names(std::path::Path::new(&dir))
+        })
+        .await
+        .map_err(|error| {
+            let message = format!("{error:?}");
+            format_gettext_template(
+                &gettext("Could not inspect Undo destination: {error}"),
+                &[("error", &message)],
+            )
+        })?
+        .map_err(|error| {
+            let message = error.to_string();
+            format_gettext_template(
+                &gettext("Could not inspect Undo destination: {error}"),
+                &[("error", &message)],
+            )
+        })?;
+        Ok(self.unremove_with_listing(snap, &existing))
+    }
+
+    /// Synchronous Undo for tests; production single-row callers use `unremove_async`.
+    #[cfg(test)]
+    pub fn unremove(self: &Rc<Self>, snap: RemovedSnapshot) -> DownloadItem {
+        let existing = crate::video_staging::dir_file_names(std::path::Path::new(&snap.dest_dir));
+        self.unremove_with_listing(snap, &existing)
+    }
+
+    /// Re-insert a previously removed download (Undo). Restored `Downloading`
+    /// restarts as `Queued`; a restored bitmap resumes, a stale one is dropped
+    /// at spawn.
+    fn unremove_with_listing(
+        self: &Rc<Self>,
+        snap: RemovedSnapshot,
+        existing: &[String],
+    ) -> DownloadItem {
+        let id = self.alloc_id_for_in(existing);
+        let item = DownloadItem::new(id, &snap.url, &snap.filename, &snap.dest_dir);
+        item.set_progress(snap.progress.clamp(0.0, 1.0));
+        item.set_detail(snap.detail);
+        item.set_status(match snap.status {
+            DownloadStatus::Downloading => DownloadStatus::Queued,
+            s => s,
+        });
+        item.set_output_dir(snap.output_dir);
+        item.set_public_only(snap.public_only);
+        let mut gallery_file_rows = None;
+        let mut playlist_file_rows = None;
+        if let Some(mut job) = snap.gallery_job {
+            job.item_id = id;
+            item.set_is_gallery(true);
+            item.set_gallery_file_count(job.file_count.unwrap_or(0));
+            item.set_gallery_files_done(
+                job.file_rows
+                    .iter()
+                    .filter(|file| file.status == DownloadStatus::Done)
+                    .count() as u32,
+            );
+            item.set_gallery_url(job.page_url.clone());
+            item.set_group(
+                crate::download_store::DownloadGroup::try_new(id, &job.title)
+                    .or_else(|| crate::download_store::DownloadGroup::try_new(id, &snap.filename)),
+            );
+            gallery_file_rows = Some(job.file_rows.clone());
+            self.gallery_jobs.borrow_mut().insert(id, job);
+        } else {
+            item.set_group(snap.group);
+        }
+        if let Some(st) = snap.segments {
+            self.segment_state.borrow_mut().insert(item.id(), st);
+        }
+        // An Undo-restored row keeps its started mark under its new id: the
+        // partial on disk is its own bytes, so the spawn gate resumes it
+        // instead of failing it at DEST_EXISTS as a foreign file.
+        if snap.started {
+            self.started.borrow_mut().insert(item.id());
+        }
+        // Re-stage before insert (see `enqueue_video`): the persist carries it and `start_next` dispatches on it.
+        if let Some(src) = snap.video_source {
+            if let crate::media_types::VideoSource::Playlist { state, .. } = &src {
+                item.set_is_collection_owner(true);
+                item.set_group(crate::download_store::DownloadGroup::try_new(
+                    id,
+                    &state.title,
+                ));
+                item.set_gallery_url(item.url());
+                item.set_gallery_file_count(saturating_u32(state.files.len()));
+                item.set_gallery_files_done(saturating_u32(
+                    state
+                        .files
+                        .iter()
+                        .filter(|file| file.status == DownloadStatus::Done)
+                        .count(),
+                ));
+                playlist_file_rows = Some(state.files.clone());
+            }
+            self.video_sources.borrow_mut().insert(item.id(), src);
+        }
+        // Undo bypasses intake dedupe, so consult the reservation: a discard still
+        // tearing down owns this destination, and the finalizer's `wake_tx` wakeup
+        // starts the row once the destination is free.
+        if item.status() == DownloadStatus::Queued && self.dest_reserved(&item.file_path()) {
+            item.set_status(DownloadStatus::Queued);
+            Self::claim_public_policy(&item);
+            self.store.append(&item);
+            self.persist_queue();
+            self.changed();
+            if let Some(file_rows) = gallery_file_rows.as_deref() {
+                self.restore_gallery_file_rows(&item, file_rows);
+            }
+            if let Some(files) = playlist_file_rows.as_deref() {
+                self.restore_video_playlist_file_rows(&item, files);
+            }
+            return item;
+        }
+        let item = self.insert(item);
+        if let Some(file_rows) = gallery_file_rows.as_deref() {
+            self.restore_gallery_file_rows(&item, file_rows);
+        }
+        if let Some(files) = playlist_file_rows.as_deref() {
+            self.restore_video_playlist_file_rows(&item, files);
+        }
+        item
+    }
+
+    /// Engine's real output folder for a torrent row: recorded at enqueue, else recomputed from the archive, else the row's own path.
+    /// The recomputed leaf goes through the same guard as the write path; the
+    /// recorded branch refuses a path that is itself a symlink. Either way, a
+    /// symlink planted after the download finished can't divert the
+    /// delete/trash onto its target.
+    #[cfg(test)]
+    fn torrent_folder(item: &DownloadItem) -> std::path::PathBuf {
+        let dest_dir = item.dest_dir().to_string();
+        let url = item.url().to_string();
+        let output_dir = item.output_dir().to_string();
+        let filename = item.filename().to_string();
+        Self::torrent_folder_from_parts(&dest_dir, &url, &output_dir, &filename)
+    }
+
+    /// Resolve a torrent output folder from plain path metadata so the same
+    /// guard can run on a blocking worker without moving a GTK object.
+    fn torrent_folder_from_parts(
+        dest_dir: &str,
+        url: &str,
+        recorded: &str,
+        filename: &str,
+    ) -> std::path::PathBuf {
+        if !recorded.is_empty() {
+            let path = std::path::PathBuf::from(recorded);
+            // Refuse a recorded folder that is itself a symlink: swapped in
+            // after the finish, cleanup could otherwise run through it.
+            let is_link = std::fs::symlink_metadata(&path)
+                .map(|m| m.file_type().is_symlink())
+                .unwrap_or(false);
+            if !is_link {
+                return path;
+            }
+        }
+        let dest = std::path::PathBuf::from(dest_dir);
+        crate::torrent::torrent_output_dir(&dest, url)
+            .map(|folder| crate::torrent::guard_output_folder(&dest, folder))
+            .unwrap_or_else(|| dest.join(filename))
+    }
+
+    /// Per-piece completion for the block map: segmented bitmap, torrent haves, or a prefix fill from byte progress. Empty when nothing is known.
+    pub fn piece_bitmap(&self, id: u64) -> Vec<bool> {
+        if let Some(st) = self.segment_state.borrow().get(&id) {
+            return st.done.clone();
+        }
+        if let Some(have) = self.torrent_pieces.borrow().get(&id) {
+            return have.clone();
+        }
+        let Some(item) = self.find(id) else {
+            return Vec::new();
+        };
+        if crate::torrent::is_torrent(&item.url()) || item.progress() <= 0.0 {
+            return Vec::new();
+        }
+        let filled = (item.progress().clamp(0.0, 1.0) * BLOCK_CELLS as f64) as usize;
+        (0..BLOCK_CELLS).map(|i| i < filled).collect()
+    }
+
+}
+
 #[cfg(test)]
 #[path = "download_tests.rs"]
 mod tests;

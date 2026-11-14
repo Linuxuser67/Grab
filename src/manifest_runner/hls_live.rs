@@ -770,6 +770,14 @@ fn apply_rendition_report(source: &LiveHlsTrack, peer: &mut LiveHlsTrack) -> boo
     true
 }
 
+fn live_hls_byte_limit_outcome(video_segment_count: usize) -> LiveHlsCaptureOutcome {
+    if video_segment_count > 0 {
+        LiveHlsCaptureOutcome::FinishVideoOnly
+    } else {
+        LiveHlsCaptureOutcome::Discard
+    }
+}
+
 fn live_hls_track_uses_plain_mpegts_resource_plan(track: &LiveHlsTrack) -> bool {
     // This selects only the byte-concatenation optimization. FFmpeg validates
     // the assembled transport stream when the complete track is finalized.
@@ -1101,20 +1109,19 @@ pub(super) async fn run_live_hls_tracks(
     } else {
         super::LiveHlsOutput::LocalPlaylist
     };
-    let retained_bytes = video
+    let audio_resource_bytes = audio
+        .as_ref()
+        .map_or(0, |track| track.accumulator.resource_bytes());
+    let Some(retained_bytes) = video
         .accumulator
         .resource_bytes()
-        .checked_add(
-            audio
-                .as_ref()
-                .map_or(0, |track| track.accumulator.resource_bytes()),
-        )
-        .filter(|total| *total <= crate::manifest::MAX_HLS_LIVE_CAPTURE_BYTES)
-        .ok_or_else(|| {
-            ManifestRunError::Failed(
-                "The staged live HLS recording exceeds Grab's native byte limit".to_string(),
-            )
-        })?;
+        .checked_add(audio_resource_bytes)
+    else {
+        return Ok(LiveHlsCapture::new(
+            live_hls_byte_limit_outcome(video.accumulator.segment_count()),
+            output,
+        ));
+    };
     downloaded.store(retained_bytes, Ordering::Relaxed);
     ensure_manifest_mux_spaces(staging, destination_dir, retained_bytes)?;
     if use_destination_parts {
@@ -1138,21 +1145,9 @@ pub(super) async fn run_live_hls_tracks(
     }
     let staging_dir = staging;
 
-    let audio_resource_bytes = audio
-        .as_ref()
-        .map_or(0, |track| track.accumulator.resource_bytes());
-    if video
-        .accumulator
-        .resource_bytes()
-        .checked_add(audio_resource_bytes)
-        .is_none_or(|total| total > crate::manifest::MAX_HLS_LIVE_CAPTURE_BYTES)
-    {
+    if retained_bytes > crate::manifest::MAX_HLS_LIVE_CAPTURE_BYTES {
         return Ok(LiveHlsCapture::new(
-            if video.accumulator.segment_count() > 0 {
-                LiveHlsCaptureOutcome::FinishVideoOnly
-            } else {
-                LiveHlsCaptureOutcome::Discard
-            },
+            live_hls_byte_limit_outcome(video.accumulator.segment_count()),
             output,
         ));
     }
@@ -1830,6 +1825,18 @@ mod destination_part_tests {
 #[cfg(test)]
 mod live_hls_outcome_tests {
     use super::*;
+
+    #[test]
+    fn byte_limit_outcome_preserves_video_when_available() {
+        assert_eq!(
+            live_hls_byte_limit_outcome(1),
+            LiveHlsCaptureOutcome::FinishVideoOnly
+        );
+        assert_eq!(
+            live_hls_byte_limit_outcome(0),
+            LiveHlsCaptureOutcome::Discard
+        );
+    }
 
     #[test]
     fn stop_intents_map_to_track_specific_capture_outcomes() {

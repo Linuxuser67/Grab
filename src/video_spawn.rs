@@ -684,15 +684,18 @@ pub(crate) async fn reap_child(child: &mut tokio::process::Child, group: &mut Pr
 
 /// Whether a Linux process-group member can still execute.
 #[cfg(target_os = "linux")]
-fn process_group_has_live_members(pgid: libc::pid_t) -> bool {
-    let Ok(processes) = std::fs::read_dir("/proc") else {
+async fn process_group_has_live_members(pgid: libc::pid_t) -> bool {
+    let mut processes = match tokio::fs::read_dir("/proc").await {
+        Ok(processes) => processes,
         // Cleanup must fail closed: without procfs, do not assume the group is empty.
-        return true;
+        Err(_) => return true,
     };
 
-    for process in processes {
-        let Ok(process) = process else {
-            return true;
+    loop {
+        let process = match processes.next_entry().await {
+            Ok(Some(process)) => process,
+            Ok(None) => break,
+            Err(_) => return true,
         };
         if !process
             .file_name()
@@ -701,7 +704,7 @@ fn process_group_has_live_members(pgid: libc::pid_t) -> bool {
         {
             continue;
         }
-        let stat = match std::fs::read_to_string(process.path().join("stat")) {
+        let stat = match tokio::fs::read_to_string(process.path().join("stat")).await {
             Ok(stat) => stat,
             // The process exited between read_dir and opening stat.
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
@@ -740,7 +743,7 @@ fn process_group_and_state(stat: &str) -> Option<(libc::pid_t, char)> {
 /// staging alive while any live descendant remains in the process group.
 #[cfg(target_os = "linux")]
 pub(crate) async fn await_group_quiescence(pgid: i32) {
-    while process_group_has_live_members(pgid) {
+    while process_group_has_live_members(pgid).await {
         tokio::time::sleep(std::time::Duration::from_millis(20)).await;
     }
 }
@@ -801,6 +804,22 @@ pub(crate) fn discover_ytdlp_output(dest: &Path, after_move: Option<&str>) -> Op
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn process_group_stat_parser_handles_parentheses_in_command_name() {
+        assert_eq!(
+            process_group_and_state("123 (yt-dlp (worker)) S 1 456 7"),
+            Some((456, 'S'))
+        );
+    }
+
+    #[tokio::test]
+    async fn process_group_scan_observes_the_current_process() {
+        assert!(
+            process_group_has_live_members(unsafe { libc::getpgrp() }).await,
+            "the current process must keep its own process group live"
+        );
+    }
 
     #[test]
     fn guarded_proxy_validation_leaves_credentials_out_of_argv_and_rejects_overrides() {

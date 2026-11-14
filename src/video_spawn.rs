@@ -684,7 +684,7 @@ pub(crate) async fn reap_child(child: &mut tokio::process::Child, group: &mut Pr
 
 /// Whether a Linux process-group member can still execute.
 #[cfg(target_os = "linux")]
-fn process_group_has_live_members(pgid: libc::pid_t) -> bool {
+pub(crate) fn process_group_has_live_members(pgid: libc::pid_t) -> bool {
     let Ok(processes) = std::fs::read_dir("/proc") else {
         // Cleanup must fail closed: without procfs, do not assume the group is empty.
         return true;
@@ -735,21 +735,63 @@ fn process_group_and_state(stat: &str) -> Option<(libc::pid_t, char)> {
     Some((process_group, state))
 }
 
-/// Wait until no live process remains in the process group. Zombie/dead entries no longer
-/// execute or write, so they do not delay discard cleanup. The caller must keep
-/// staging alive while any live descendant remains in the process group.
+/// Maximum time to confirm that a child process group has stopped writing.
 #[cfg(target_os = "linux")]
-pub(crate) async fn await_group_quiescence(pgid: i32) {
-    while tokio::task::spawn_blocking(move || process_group_has_live_members(pgid))
-        .await
-        .unwrap_or(true)
-    {
-        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+const GROUP_QUIESCENCE_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// Maximum delay between process-group scans.
+#[cfg(target_os = "linux")]
+const GROUP_QUIESCENCE_MAX_DELAY: Duration = Duration::from_millis(500);
+
+/// Wait for a process group to become quiescent without parking a worker forever.
+///
+/// A failed scan or an elapsed deadline returns false; callers must not publish or
+/// remove files that a surviving group member could still be writing.
+#[cfg(target_os = "linux")]
+pub(crate) async fn await_group_quiescence(pgid: i32) -> bool {
+    await_group_quiescence_with_timeout(pgid, GROUP_QUIESCENCE_TIMEOUT).await
+}
+
+#[cfg(target_os = "linux")]
+async fn await_group_quiescence_with_timeout(pgid: i32, timeout: Duration) -> bool {
+    let deadline = tokio::time::Instant::now() + timeout;
+    let mut delay = Duration::from_millis(20);
+
+    loop {
+        let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+        if remaining.is_zero() {
+            tracing::warn!(pgid, ?timeout, "process group did not become quiescent before the deadline");
+            return false;
+        }
+
+        let scan = tokio::task::spawn_blocking(move || process_group_has_live_members(pgid));
+        match tokio::time::timeout(remaining, scan).await {
+            Ok(Ok(false)) => return true,
+            Ok(Ok(true)) => {}
+            Ok(Err(error)) => {
+                tracing::warn!(pgid, error = %error, "process-group scan task failed");
+                return false;
+            }
+            Err(_) => {
+                tracing::warn!(pgid, ?timeout, "process-group scan exceeded the quiescence deadline");
+                return false;
+            }
+        }
+
+        let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+        if remaining.is_zero() {
+            tracing::warn!(pgid, ?timeout, "process group did not become quiescent before the deadline");
+            return false;
+        }
+        tokio::time::sleep(delay.min(remaining)).await;
+        delay = (delay * 2).min(GROUP_QUIESCENCE_MAX_DELAY);
     }
 }
 
 #[cfg(not(target_os = "linux"))]
-pub(crate) async fn await_group_quiescence(_pgid: i32) {}
+pub(crate) async fn await_group_quiescence(_pgid: i32) -> bool {
+    true
+}
 
 /// Join a pipe-drain with a grace period (orphaned grandchildren can hold pipes open; falls back to abort).
 pub(crate) async fn join_drain<T>(task: tokio::task::JoinHandle<T>) -> Option<T> {
@@ -810,6 +852,38 @@ mod tests {
         assert_eq!(
             process_group_and_state("123 (yt-dlp (worker)) S 1 456 7"),
             Some((456, 'S'))
+        );
+    }
+
+    #[tokio::test]
+    async fn process_group_quiescence_deadline_returns_while_a_descendant_is_live() {
+        let mut command = tokio::process::Command::new("sh");
+        command
+            .args(["-c", "sleep 30 & wait"])
+            .process_group(0)
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null());
+        let mut child = command.spawn().expect("spawn a test process group");
+        let pgid = child.id().expect("test process has a pid") as i32;
+
+        let started = tokio::time::Instant::now();
+        assert!(
+            !await_group_quiescence_with_timeout(pgid, Duration::from_millis(40)).await,
+            "a live descendant must prevent a quiescent result"
+        );
+        assert!(
+            started.elapsed() < Duration::from_secs(2),
+            "the quiescence wait must respect its deadline"
+        );
+
+        // SAFETY: pgid is the process group created by this test; SIGKILL only
+        // terminates the test-owned shell and its sleep descendant.
+        let signal_result = unsafe { libc::kill(-pgid, libc::SIGKILL) };
+        assert_eq!(signal_result, 0, "terminate the test process group");
+        let _ = child.wait().await;
+        assert!(
+            await_group_quiescence_with_timeout(pgid, Duration::from_secs(2)).await,
+            "the process group must become quiescent after it is killed"
         );
     }
 

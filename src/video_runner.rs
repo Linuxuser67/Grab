@@ -1078,8 +1078,9 @@ impl DashMergeTempDir {
     }
 
     async fn cleanup(&mut self) {
-        if let Some(pgid) = self.pgid.take() {
+        if let Some(pgid) = self.pgid {
             await_ytdlp_group_quiescence(Some(pgid)).await;
+            self.pgid = None;
         }
         if let Some(path) = self.path.take() {
             let _ = tokio::task::spawn_blocking(move || std::fs::remove_dir_all(path)).await;

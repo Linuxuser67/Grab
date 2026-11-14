@@ -2222,8 +2222,7 @@ mod extractor_args_compat_tests {
             Some("youtube:lang=en;player_client=default,-web_embedded"),
         );
         assert_eq!(
-            merge_youtube_extractor_args(Some("youtube:player_client=android"), None,)
-                .as_deref(),
+            merge_youtube_extractor_args(Some("youtube:player_client=android"), None,).as_deref(),
             Some("youtube:player_client=android"),
         );
         assert_eq!(

@@ -431,6 +431,72 @@ fn subtitle_probe_drain_times_out_when_pipe_stays_open() {
     let _ = std::fs::remove_dir_all(&base);
 }
 
+#[cfg(unix)]
+#[test]
+fn subtitle_probe_disarms_group_after_leader_is_reaped() {
+    let base = std::env::temp_dir().join(format!("grab-subtitle-reaped-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&base);
+    std::fs::create_dir_all(&base).unwrap();
+    let bin = base.join("fake-ytdlp-exit");
+    std::fs::write(&bin, "#!/bin/sh\nexit 1\n").unwrap();
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
+
+    crate::runtime::tokio_rt().block_on(async {
+        let mut command = tokio::process::Command::new(&bin);
+        command.process_group(0);
+        let mut child = command.spawn().unwrap();
+        let mut group = ProcessGroupGuard::new(&child);
+        assert!(group.is_armed());
+
+        let status = child.wait().await.unwrap();
+        assert!(!status.success());
+        assert!(group.is_armed(), "the test must exercise a reaped, armed guard");
+
+        finish_subtitle_probe_child(&mut child, &mut group).await;
+        assert!(
+            !group.is_armed(),
+            "a reaped child must disarm its group guard before it is dropped"
+        );
+    });
+    let _ = std::fs::remove_dir_all(&base);
+}
+
+#[cfg(unix)]
+#[test]
+fn subtitle_probe_cleanup_reaps_a_live_process_group() {
+    let base = std::env::temp_dir().join(format!("grab-subtitle-live-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&base);
+    std::fs::create_dir_all(&base).unwrap();
+    let bin = base.join("fake-ytdlp-sleep");
+    std::fs::write(&bin, "#!/bin/sh\nsleep 30\n").unwrap();
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
+
+    crate::runtime::tokio_rt().block_on(async {
+        let mut command = tokio::process::Command::new(&bin);
+        command.process_group(0);
+        let mut child = command.spawn().unwrap();
+        let mut group = ProcessGroupGuard::new(&child);
+        assert!(group.is_armed());
+
+        tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            finish_subtitle_probe_child(&mut child, &mut group),
+        )
+        .await
+        .expect("subtitle probe cleanup must reap a live child promptly");
+
+        assert!(child.id().is_none(), "the live probe leader must be reaped");
+        assert!(!group.is_armed(), "cleanup must disarm the group guard");
+    });
+    let _ = std::fs::remove_dir_all(&base);
+}
+
 /// Item 2 (handoff-4): on drain timeout the drain task must be aborted, not
 /// detached — dropping the `JoinHandle` leaves the task parked on the pipe
 /// until the grandchild exits (~30 s). The guard sender fires only when the

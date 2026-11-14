@@ -3234,6 +3234,7 @@ pub(crate) async fn run_hls_ytdlp(
                     match child.try_wait() {
                         Ok(Some(status)) => {
                             group.disarm();
+                            await_ytdlp_group_quiescence(pgid).await?;
                             break status;
                         }
                         _ => {

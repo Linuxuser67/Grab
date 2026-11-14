@@ -583,7 +583,7 @@ async fn run_video_playlist_download_inner(
                 await_ytdlp_group_quiescence_or_abort(
                     pgid,
                     &[progress.abort_handle(), logs.abort_handle()],
-                    )
+                )
                 .await?;
                 progress.abort();
                 logs.abort();
@@ -596,7 +596,7 @@ async fn run_video_playlist_download_inner(
                     await_ytdlp_group_quiescence_or_abort(
                         pgid,
                         &[progress.abort_handle(), logs.abort_handle()],
-                        )
+                    )
                     .await?;
                     break status;
                 }
@@ -605,7 +605,7 @@ async fn run_video_playlist_download_inner(
                     await_ytdlp_group_quiescence_or_abort(
                         pgid,
                         &[progress.abort_handle(), logs.abort_handle()],
-                        )
+                    )
                     .await?;
                     progress.abort();
                     logs.abort();
@@ -619,7 +619,7 @@ async fn run_video_playlist_download_inner(
                     await_ytdlp_group_quiescence_or_abort(
                         pgid,
                         &[progress.abort_handle(), logs.abort_handle()],
-                        )
+                    )
                     .await?;
                     progress.abort();
                     logs.abort();
@@ -635,7 +635,7 @@ async fn run_video_playlist_download_inner(
                             await_ytdlp_group_quiescence_or_abort(
                                 pgid,
                                 &[progress.abort_handle(), logs.abort_handle()],
-                                )
+                            )
                             .await?;
                             break status;
                         }
@@ -644,7 +644,7 @@ async fn run_video_playlist_download_inner(
                             await_ytdlp_group_quiescence_or_abort(
                                 pgid,
                                 &[progress.abort_handle(), logs.abort_handle()],
-                                )
+                            )
                             .await?;
                             progress.abort();
                             logs.abort();
@@ -1753,7 +1753,7 @@ async fn run_ytdlp_attempt(
                 await_ytdlp_group_quiescence_or_abort(
                     pgid,
                     &[progress.abort_handle(), logs.abort_handle()],
-                    )
+                )
                 .await?;
                 progress.abort();
                 logs.abort();
@@ -1768,7 +1768,7 @@ async fn run_ytdlp_attempt(
                     await_ytdlp_group_quiescence_or_abort(
                         pgid,
                         &[progress.abort_handle(), logs.abort_handle()],
-                        )
+                    )
                     .await?;
                     break status;
                 }
@@ -1777,7 +1777,7 @@ async fn run_ytdlp_attempt(
                     await_ytdlp_group_quiescence_or_abort(
                         pgid,
                         &[progress.abort_handle(), logs.abort_handle()],
-                        )
+                    )
                     .await?;
                     progress.abort();
                     logs.abort();
@@ -1794,7 +1794,7 @@ async fn run_ytdlp_attempt(
                     await_ytdlp_group_quiescence_or_abort(
                         pgid,
                         &[progress.abort_handle(), logs.abort_handle()],
-                        )
+                    )
                     .await?;
                     progress.abort();
                     logs.abort();
@@ -1815,7 +1815,7 @@ async fn run_ytdlp_attempt(
                             await_ytdlp_group_quiescence_or_abort(
                                 pgid,
                                 &[progress.abort_handle(), logs.abort_handle()],
-                                )
+                            )
                             .await?;
                             break status;
                         }
@@ -1824,7 +1824,7 @@ async fn run_ytdlp_attempt(
                             await_ytdlp_group_quiescence_or_abort(
                                 pgid,
                                 &[progress.abort_handle(), logs.abort_handle()],
-                                )
+                            )
                             .await?;
                             progress.abort();
                             logs.abort();
@@ -2832,7 +2832,7 @@ pub(crate) async fn run_live_ytdlp(
                     await_ytdlp_group_quiescence_or_abort(
                         pgid,
                         &[progress.abort_handle(), logs.abort_handle()],
-                        )
+                    )
                     .await?;
                     break match intent {
                         Ok(StopIntent::Finish | StopIntent::Pause) => (true, false),
@@ -2851,7 +2851,7 @@ pub(crate) async fn run_live_ytdlp(
                             await_ytdlp_group_quiescence_or_abort(
                                 pgid,
                                 &[progress.abort_handle(), logs.abort_handle()],
-                                )
+                            )
                             .await?;
                             if !status.success() {
                                 progress.abort();
@@ -2935,7 +2935,7 @@ pub(crate) async fn run_live_ytdlp(
                             await_ytdlp_group_quiescence_or_abort(
                                 pgid,
                                 &[progress.abort_handle(), logs.abort_handle()],
-                                )
+                            )
                             .await?;
                             break (false, false);
                         }
@@ -3265,7 +3265,7 @@ pub(crate) async fn run_hls_ytdlp(
                 await_ytdlp_group_quiescence_or_abort(
                     pgid,
                     &[progress.abort_handle(), logs.abort_handle()],
-                    )
+                )
                 .await?;
                 progress.abort();
                 logs.abort();
@@ -3280,7 +3280,7 @@ pub(crate) async fn run_hls_ytdlp(
                     await_ytdlp_group_quiescence_or_abort(
                         pgid,
                         &[progress.abort_handle(), logs.abort_handle()],
-                        )
+                    )
                     .await?;
                     break status;
                 }
@@ -3289,7 +3289,7 @@ pub(crate) async fn run_hls_ytdlp(
                     await_ytdlp_group_quiescence_or_abort(
                         pgid,
                         &[progress.abort_handle(), logs.abort_handle()],
-                        )
+                    )
                     .await?;
                     progress.abort();
                     logs.abort();
@@ -3306,7 +3306,7 @@ pub(crate) async fn run_hls_ytdlp(
                     await_ytdlp_group_quiescence_or_abort(
                         pgid,
                         &[progress.abort_handle(), logs.abort_handle()],
-                        )
+                    )
                     .await?;
                     progress.abort();
                     logs.abort();
@@ -3327,7 +3327,7 @@ pub(crate) async fn run_hls_ytdlp(
                             await_ytdlp_group_quiescence_or_abort(
                                 pgid,
                                 &[progress.abort_handle(), logs.abort_handle()],
-                                )
+                            )
                             .await?;
                             break status;
                         }
@@ -3336,7 +3336,7 @@ pub(crate) async fn run_hls_ytdlp(
                             await_ytdlp_group_quiescence_or_abort(
                                 pgid,
                                 &[progress.abort_handle(), logs.abort_handle()],
-                                )
+                            )
                             .await?;
                             progress.abort();
                             logs.abort();

@@ -730,26 +730,22 @@ async fn run_video_download_inner(
     // Keep the canonical path: `discover_unified_output` compares a canonicalized `after_move` against it (symlinked roots would otherwise fail closed).
     let staging = ensure_staging_dir_in(&loc.root, &loc.dir)?;
     let libs = resolve_libraries()?;
-    let (yt_version, ff_version) = match
-        await_video_operation_or_stop(&mut abort, ensure_tool_versions(&libs)).await
-    {
-        Ok(result) => result?,
-        Err(intent) => {
-            tracing::debug!(
-                item_id = job.item_id,
-                ?intent,
-                "video attempt stopped during tool version checks"
-            );
-            return Ok(VideoOutcome::Aborted);
-        }
-    };
+    let (yt_version, ff_version) =
+        match await_video_operation_or_stop(&mut abort, ensure_tool_versions(&libs)).await {
+            Ok(result) => result?,
+            Err(intent) => {
+                tracing::debug!(
+                    item_id = job.item_id,
+                    ?intent,
+                    "video attempt stopped during tool version checks"
+                );
+                return Ok(VideoOutcome::Aborted);
+            }
+        };
     // Deno provisioning runs on Grab's process-lifetime runtime, so dropping
     // this waiter is safe even when the install itself must continue.
-    match await_video_operation_or_stop(
-        &mut abort,
-        crate::video_tools::ensure_deno(&job.page_url),
-    )
-    .await
+    match await_video_operation_or_stop(&mut abort, crate::video_tools::ensure_deno(&job.page_url))
+        .await
     {
         Ok(result) => result?,
         Err(intent) => {

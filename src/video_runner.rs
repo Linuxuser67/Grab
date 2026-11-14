@@ -238,9 +238,12 @@ fn advance_playlist_entry(
     current_file: &mut Option<String>,
     next_file_id: &str,
     finished_ids: &std::collections::HashSet<String>,
-) -> Option<String> {
-    let previous = current_file.replace(next_file_id.to_owned())?;
-    (previous != next_file_id && !finished_ids.contains(&previous)).then_some(previous)
+) -> (bool, Option<String>) {
+    let previous = current_file.replace(next_file_id.to_owned());
+    let is_new_entry = previous.as_deref() != Some(next_file_id);
+    let abandoned =
+        previous.filter(|previous| is_new_entry && !finished_ids.contains(previous));
+    (is_new_entry, abandoned)
 }
 
 async fn run_video_playlist_download_inner(
@@ -452,9 +455,9 @@ async fn run_video_playlist_download_inner(
                 Some(YtdlpPlaylistEvent::Started {
                     file_id, filename, ..
                 }) => {
-                    if let Some(previous) =
-                        advance_playlist_entry(&mut current_file, &file_id, &summary.finished_ids)
-                    {
+                    let (is_new_entry, previous) =
+                        advance_playlist_entry(&mut current_file, &file_id, &summary.finished_ids);
+                    if let Some(previous) = previous {
                         summary.failed.entry(previous).or_insert_with(|| {
                             gettext(
                                 "yt-dlp moved to the next playlist entry without finalizing the previous one",
@@ -476,11 +479,13 @@ async fn run_video_playlist_download_inner(
                                 .ok();
                         }
                     }
-                    tx_reader
-                        .send(EngineMsg::PlaylistFile(Box::new(
-                            PlaylistFileEvent::Started { file_id, filename },
-                        )))
-                        .ok();
+                    if is_new_entry {
+                        tx_reader
+                            .send(EngineMsg::PlaylistFile(Box::new(
+                                PlaylistFileEvent::Started { file_id, filename },
+                            )))
+                            .ok();
+                    }
                 }
                 Some(YtdlpPlaylistEvent::Progress {
                     file_id,

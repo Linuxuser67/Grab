@@ -1022,3 +1022,33 @@ async fn discarding_during_live_remux_reaps_ffmpeg_and_removes_its_partial() {
         "discarded remux must not publish a final slot"
     );
 }
+
+
+#[test]
+fn closed_live_capture_stop_channel_preserves_recorded_media() {
+    assert_eq!(
+        live_capture_abort_result::<()>(Err(())),
+        (true, false),
+        "a dropped stop sender must preserve an in-progress recording"
+    );
+}
+
+#[test]
+fn explicit_live_capture_discard_does_not_adopt_recorded_media() {
+    assert_eq!(
+        live_capture_abort_result(Ok(StopIntent::Discard)),
+        (true, true)
+    );
+}
+
+#[test]
+fn live_capture_pause_and_finish_preserve_recorded_media() {
+    assert_eq!(
+        live_capture_abort_result(Ok(StopIntent::Pause)),
+        (true, false)
+    );
+    assert_eq!(
+        live_capture_abort_result(Ok(StopIntent::Finish)),
+        (true, false)
+    );
+}

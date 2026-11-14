@@ -1,6 +1,7 @@
 src/main.rs
 src/application.rs
 src/download.rs
+src/download/scheduler.rs
 src/download/deletion.rs
 src/download/queue_restore.rs
 src/download_fetch.rs

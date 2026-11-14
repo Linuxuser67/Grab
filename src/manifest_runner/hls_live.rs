@@ -770,6 +770,14 @@ fn apply_rendition_report(source: &LiveHlsTrack, peer: &mut LiveHlsTrack) -> boo
     true
 }
 
+fn live_hls_byte_limit_outcome(video_segment_count: usize) -> LiveHlsCaptureOutcome {
+    if video_segment_count > 0 {
+        LiveHlsCaptureOutcome::FinishVideoOnly
+    } else {
+        LiveHlsCaptureOutcome::Discard
+    }
+}
+
 fn live_hls_track_uses_plain_mpegts_resource_plan(track: &LiveHlsTrack) -> bool {
     // This selects only the byte-concatenation optimization. FFmpeg validates
     // the assembled transport stream when the complete track is finalized.
@@ -1101,23 +1109,17 @@ pub(super) async fn run_live_hls_tracks(
     } else {
         super::LiveHlsOutput::LocalPlaylist
     };
-    let retained_bytes = video
+    let Some(retained_bytes) = video
         .accumulator
         .resource_bytes()
         .checked_add(
             audio
                 .as_ref()
                 .map_or(0, |track| track.accumulator.resource_bytes()),
-        );
-    let Some(retained_bytes) = retained_bytes
-        .filter(|total| *total <= crate::manifest::MAX_HLS_LIVE_CAPTURE_BYTES)
+        )
     else {
         return Ok(LiveHlsCapture::new(
-            if video.accumulator.segment_count() > 0 {
-                LiveHlsCaptureOutcome::FinishVideoOnly
-            } else {
-                LiveHlsCaptureOutcome::Discard
-            },
+            live_hls_byte_limit_outcome(video.accumulator.segment_count()),
             output,
         ));
     };
@@ -1143,6 +1145,13 @@ pub(super) async fn run_live_hls_tracks(
         return Ok(LiveHlsCapture::new(LiveHlsCaptureOutcome::Finish, output));
     }
     let staging_dir = staging;
+
+    if retained_bytes > crate::manifest::MAX_HLS_LIVE_CAPTURE_BYTES {
+        return Ok(LiveHlsCapture::new(
+            live_hls_byte_limit_outcome(video.accumulator.segment_count()),
+            output,
+        ));
+    }
 
     let all_tracks_ended = video_plan.end_list && audio_plan.is_none_or(|plan| plan.end_list);
     if !all_tracks_ended {
@@ -1817,6 +1826,18 @@ mod destination_part_tests {
 #[cfg(test)]
 mod live_hls_outcome_tests {
     use super::*;
+
+    #[test]
+    fn byte_limit_outcome_preserves_video_when_available() {
+        assert_eq!(
+            live_hls_byte_limit_outcome(1),
+            LiveHlsCaptureOutcome::FinishVideoOnly
+        );
+        assert_eq!(
+            live_hls_byte_limit_outcome(0),
+            LiveHlsCaptureOutcome::Discard
+        );
+    }
 
     #[test]
     fn stop_intents_map_to_track_specific_capture_outcomes() {

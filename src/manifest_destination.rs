@@ -39,6 +39,7 @@ pub(crate) enum TrackKind {
     Subtitles,
 }
 
+/// File format used for a native manifest track's staged part.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum TrackFileFormat {
     Ts,
@@ -47,6 +48,7 @@ pub(crate) enum TrackFileFormat {
 }
 
 impl TrackKind {
+    /// Return the canonical staging filename for this track and file format.
     pub(crate) const fn part_filename(self, format: TrackFileFormat) -> &'static str {
         match (self, format) {
             (Self::Video, TrackFileFormat::Ts) => "video-track.ts",
@@ -1133,6 +1135,7 @@ mod tests {
         );
         assert_eq!(fs::read(victim).expect("read victim"), b"preserve");
     }
+
     #[test]
     fn track_part_filenames_follow_track_and_container_format() {
         assert_eq!(
@@ -1148,5 +1151,4 @@ mod tests {
             "subtitle-track.vtt"
         );
     }
-
 }

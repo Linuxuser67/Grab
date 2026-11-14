@@ -695,3 +695,16 @@ async fn ytdlp_stdout_reader_emits_a_final_record_without_a_newline() {
         super::YtdlpStdoutLine::Eof
     );
 }
+
+#[test]
+fn split_format_total_is_unknown_on_overflow() {
+    assert_eq!(combined_format_size(Some(12), Some(30)), Some(42));
+    assert_eq!(combined_format_size(Some(u64::MAX), Some(1)), None);
+    assert_eq!(combined_format_size(Some(12), None), None);
+}
+
+#[test]
+fn cumulative_progress_saturates_instead_of_wrapping() {
+    assert_eq!(add_progress_bytes(12, 30), 42);
+    assert_eq!(add_progress_bytes(u64::MAX, 1), u64::MAX);
+}

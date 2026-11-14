@@ -703,7 +703,7 @@ async fn prepare_manifest_attempt(
             "resuming finalization of an unrecoverable live capture without polling its source"
         );
     }
-    let mut finish_requested = finish_marker_bytes.is_some();
+    let finish_requested = finish_marker_bytes.is_some();
     let dash_live_requested = job.source.kind == ManifestKind::Dash
         && job
             .source
@@ -750,7 +750,11 @@ async fn prepare_manifest_attempt(
     {
         Ok(result) => result?,
         Err(crate::video::StopIntent::Finish) if offline_tracks.is_some() => {
-            finish_requested = true;
+            // Re-arm Finish for the live finalization path so it can persist
+            // the marker with the actual staged-byte count before finalizing.
+            let (sender, receiver) = tokio::sync::oneshot::channel();
+            let _ = sender.send(crate::video::StopIntent::Finish);
+            *abort = receiver;
             resolve_manifest_tracks(job, &mut offline_tracks, true).await?
         }
         Err(intent) => return Ok(ManifestPreparationOutcome::Stopped(intent)),
@@ -798,11 +802,6 @@ async fn prepare_manifest_attempt(
     .ok();
     let concurrency = job.connections.clamp(1, MAX_RESOURCE_CONNECTIONS);
     let downloaded = Arc::new(AtomicU64::new(finish_marker_bytes.unwrap_or(0)));
-    if finish_requested && finish_marker_bytes.is_none() {
-        ensure_live_finish_marker(&staging, downloaded.load(Ordering::Relaxed))
-            .await
-            .map_err(ManifestRunError::Failed)?;
-    }
 
     Ok(ManifestPreparationOutcome::Ready(Box::new(
         ManifestPreparation {

@@ -4316,8 +4316,7 @@ pub fn build_add_card(manager: Rc<DownloadManager>) -> AddCard {
         .reveal_child(false)
         .build();
     let card = gtk4::Box::new(gtk4::Orientation::Vertical, 0);
-    // 12px: matches the download list's original window margins.
-    card.set_margin_top(12);
+    card.set_widget_name("inline-add-card");
     card.set_margin_bottom(12);
     card.set_margin_start(12);
     card.set_margin_end(12);

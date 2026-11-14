@@ -272,6 +272,12 @@ pub fn build_window(
     search_bar.set_margin_bottom(12);
     search_bar.set_margin_start(12);
     search_bar.set_margin_end(12);
+    // Keep the standard search entry at a readable width on wide windows,
+    // while AdwClamp continues to fill the available width on narrow windows.
+    let search_clamp = adw::Clamp::builder().maximum_size(600).build();
+    search_clamp.set_widget_name("download-search-clamp");
+    search_clamp.set_hexpand(true);
+    search_clamp.set_child(Some(&search_bar));
 
     let menu = gio::Menu::new();
     let section = gio::Menu::new();
@@ -1004,7 +1010,7 @@ pub fn build_window(
 
     let toolbar = adw::ToolbarView::new();
     toolbar.add_top_bar(&header);
-    toolbar.add_top_bar(&search_bar);
+    toolbar.add_top_bar(&search_clamp);
     toolbar.add_top_bar(&banner);
     toolbar.add_bottom_bar(&switcher_bar);
     // The add card's gallery/playlist picker pages can be much taller than

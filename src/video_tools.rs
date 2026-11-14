@@ -2057,27 +2057,47 @@ fn ytdlp_runtime_args(page_url: &str, deno_path: Option<&Path>) -> Vec<String> {
     ]
 }
 
+/// YouTube's current web-embedded GVS experiment can return media URLs that
+/// fail with HTTP 403 for cookie-authenticated requests. Use yt-dlp's documented
+/// default client chain without `web_embedded` unless the user supplied custom
+/// extractor arguments; anonymous requests keep yt-dlp's unmodified defaults.
+fn youtube_cookie_player_client_args(
+    page_url: &str,
+    has_browser_cookies: bool,
+    has_custom_extractor_args: bool,
+) -> Option<&'static str> {
+    (is_youtube_url(page_url) && has_browser_cookies && !has_custom_extractor_args)
+        .then_some("youtube:player_client=default,-web_embedded")
+}
+
 /// Shared trailing argv for every yt-dlp spawn: user-configured extractor args,
-/// JS runtime pin for YouTube, cookies, UA, then the page URL behind `--`.
+/// JS runtime pin for YouTube, cookie source, UA, then the page URL behind `--`.
 ///
-/// Do not force a player-client set here. yt-dlp's defaults evolve with site
-/// behavior, and forcing a multi-client rotation adds requests to ordinary
-/// lookups. Users can still explicitly configure `youtube:player_client=…` in
-/// Preferences when they need a particular client for format coverage.
+/// The web-embedded exclusion above is deliberately limited to cookie-backed
+/// YouTube requests. Explicit extractor arguments always take precedence.
 pub(crate) fn ytdlp_identity_args(
     cookies_browser: &str,
     user_agent: Option<&str>,
     page_url: &str,
 ) -> Vec<String> {
     let mut args = Vec::new();
-    if let Some(extra_args) =
-        validated_ytdlp_extractor_args(&crate::settings::AppSettings::new().ytdlp_extractor_args())
-    {
+    let extra_args =
+        validated_ytdlp_extractor_args(&crate::settings::AppSettings::new().ytdlp_extractor_args());
+    let cookie_spec = cookies_browser_spec(cookies_browser);
+    if let Some(extra_args) = extra_args.as_ref() {
         args.push("--extractor-args".to_string());
-        args.push(extra_args);
+        args.push(extra_args.clone());
     }
     args.extend(ytdlp_runtime_args(page_url, find_deno().as_deref()));
-    if let Some(spec) = cookies_browser_spec(cookies_browser) {
+    if let Some(extractor_args) = youtube_cookie_player_client_args(
+        page_url,
+        cookie_spec.is_some() || user_agent.is_some(),
+        extra_args.is_some(),
+    ) {
+        args.push("--extractor-args".to_string());
+        args.push(extractor_args.to_string());
+    }
+    if let Some(spec) = cookie_spec {
         args.push(format!("--cookies-from-browser={spec}"));
     }
     if let Some(ua) = user_agent.map(str::trim).filter(|s| !s.is_empty()) {
@@ -2095,7 +2115,7 @@ pub(crate) fn ytdlp_identity_args(
 mod extractor_args_compat_tests {
     use super::{
         gallery_cookies_browser_spec_for_profile, validated_ytdlp_extractor_args,
-        ytdlp_runtime_args,
+        youtube_cookie_player_client_args, ytdlp_runtime_args,
     };
     use std::path::Path;
 
@@ -2134,6 +2154,38 @@ mod extractor_args_compat_tests {
         );
         assert!(gallery_cookies_browser_spec_for_profile("whale", None).is_none());
         assert!(gallery_cookies_browser_spec_for_profile("none", None).is_none());
+    }
+
+    #[test]
+    fn cookie_backed_youtube_requests_skip_the_web_embedded_client_by_default() {
+        assert_eq!(
+            youtube_cookie_player_client_args(
+                "https://www.youtube.com/playlist?list=example",
+                true,
+                false,
+            ),
+            Some("youtube:player_client=default,-web_embedded"),
+        );
+        assert_eq!(
+            youtube_cookie_player_client_args("https://youtu.be/example", true, false),
+            Some("youtube:player_client=default,-web_embedded"),
+        );
+    }
+
+    #[test]
+    fn youtube_player_client_workaround_preserves_user_and_anonymous_defaults() {
+        assert_eq!(
+            youtube_cookie_player_client_args("https://youtube.com/watch?v=example", false, false),
+            None,
+        );
+        assert_eq!(
+            youtube_cookie_player_client_args("https://youtube.com/watch?v=example", true, true),
+            None,
+        );
+        assert_eq!(
+            youtube_cookie_player_client_args("https://example.org/video", true, false),
+            None,
+        );
     }
 
     #[test]

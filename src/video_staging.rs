@@ -1654,7 +1654,8 @@ pub(crate) fn resume_plan(q: &ResumeQuery) -> ResumePlan {
         return ResumePlan::Fresh;
     }
     if let Some(final_bytes) = m.final_bytes
-        && file_len(q.dest) == Some(final_bytes)
+        && std::fs::symlink_metadata(q.dest)
+            .is_ok_and(|metadata| metadata.file_type().is_file() && metadata.len() == final_bytes)
     {
         return ResumePlan::Finished;
     }

@@ -716,6 +716,21 @@ async fn await_video_operation_or_stop<T>(
     }
 }
 
+/// Refuse every existing destination entry without following symlinks.
+///
+/// A dangling symlink still occupies the destination name, and must be caught
+/// before an expensive media download rather than at the final no-replace rename.
+async fn ensure_destination_unclaimed(destination: &Path) -> Result<(), VideoError> {
+    match tokio::fs::symlink_metadata(destination).await {
+        Ok(_) => Err(VideoError::exists()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(VideoError::staging(format!(
+            "Could not inspect download destination {}: {error}",
+            destination.display()
+        ))),
+    }
+}
+
 async fn run_video_download_inner(
     mut job: VideoJob,
     gate: &std::sync::Arc<AttemptGate>,
@@ -1035,9 +1050,7 @@ async fn run_video_download_inner(
         }
         ResumePlan::Fresh => {
             // Refuse an existing destination without sweeping neighboring files.
-            if job.dest.exists() {
-                return Err(VideoError::exists());
-            }
+            ensure_destination_unclaimed(&job.dest).await?;
             // Clear this item's staging files (grab-<id>-*), not the dest dir itself: a previous attempt's detached writers may still hold old inodes, so unlink first. Only mismatches/oversize leftovers land here; same-selection resume never does.
             crate::video::clean_staging_files(&staging, job.item_id);
             // Record this attempt's selection up front: a pause from here on leaves a matchable sidecar, so the next attempt resumes instead of wiping.
@@ -1070,9 +1083,7 @@ async fn run_video_download_inner(
             // Finished for the complete case), so refuse before a wasted download. Never delete here — the manifest
             // is written with final_bytes: None and only updated on success, so a crash between the atomic rename
             // and the update would delete a good file.
-            if job.dest.exists() {
-                return Err(VideoError::exists());
-            }
+            ensure_destination_unclaimed(&job.dest).await?;
             phase(gettext("Resuming download…"));
         }
     }
@@ -3324,9 +3335,7 @@ pub(crate) async fn run_hls_ytdlp(
         .map_err(VideoError::staging)?;
     // Overwrite pre-flight: refuse if dest exists. The manifest proves ownership for future retries,
     // but never delete here — a weak match could delete a completed output.
-    if job.dest.exists() {
-        return Err(VideoError::exists());
-    }
+    ensure_destination_unclaimed(&job.dest).await?;
     // Resolve the subtitle language against what the video actually offers
     // (preferred, else English, else none) before the media argv is built.
     // An abort here stops the download; a probe failure just drops subtitles.

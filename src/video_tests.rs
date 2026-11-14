@@ -10876,3 +10876,26 @@ fn dash_merge_argv_maps_video_audio_and_copies() {
     assert_eq!(argv[argv.len() - 2], "--");
     assert_eq!(argv[argv.len() - 1], "/tmp/st/title.mp4");
 }
+
+#[cfg(unix)]
+#[test]
+fn resume_plan_does_not_follow_a_symlink_to_a_finished_file() {
+    use std::os::unix::fs::symlink;
+
+    let dir = test_manifest_dir("finished-symlink");
+    let target = dir.join("foreign.mp4");
+    let dest = dir.join("Clip.mp4");
+    let staging = test_staging(&dir);
+    std::fs::write(&target, vec![0u8; 1000]).unwrap();
+    symlink(&target, &dest).unwrap();
+
+    let mut manifest = test_manifest();
+    manifest.final_bytes = Some(1000);
+    let query = test_query(Some(&manifest), &dest, &staging);
+    assert_eq!(
+        resume_plan(&query),
+        ResumePlan::Resume,
+        "a symlink must never prove that this row delivered its output"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}

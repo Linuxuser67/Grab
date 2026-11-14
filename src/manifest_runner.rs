@@ -2370,25 +2370,16 @@ async fn ensure_live_finish_marker(directory: &Path, staged_bytes: u64) -> Resul
         };
     }
 
-    let marker = directory.join(LIVE_FINISH_MARKER_NAME);
-    let mut file = tokio::fs::OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .open(&marker)
-        .await
-        .map_err(|error| format!("Could not create live finish marker: {error}"))?;
     let contents = format!("{LIVE_FINISH_MARKER_VERSION}\n{staged_bytes}\n");
-    if let Err(error) = file.write_all(contents.as_bytes()).await {
-        drop(file);
-        let _ = remove_regular_file_if_present(&marker).await;
-        return Err(format!("Could not write live finish marker: {error}"));
-    }
-    if let Err(error) = file.sync_all().await {
-        drop(file);
-        let _ = remove_regular_file_if_present(&marker).await;
-        return Err(format!("Could not flush live finish marker: {error}"));
-    }
-    Ok(())
+    write_staged_file_atomic(
+        directory,
+        "live-capture.finished.part",
+        LIVE_FINISH_MARKER_NAME,
+        contents.as_bytes(),
+        StagedPublish::NoReplace,
+    )
+    .await?;
+    sync_staging_directory(directory).await
 }
 
 async fn staged_regular_file_exists(path: &Path) -> bool {
@@ -2407,29 +2398,78 @@ async fn sync_staging_directory(directory: &Path) -> Result<(), String> {
         .map_err(|error| format!("Could not sync staging directory: {error}"))
 }
 
+#[derive(Clone, Copy)]
+pub(super) enum StagedPublish {
+    Replace,
+    NoReplace,
+}
+
+pub(super) async fn write_staged_file_atomic(
+    directory: &Path,
+    temporary_name: &str,
+    target_name: &str,
+    bytes: &[u8],
+    publish: StagedPublish,
+) -> Result<(), String> {
+    let temporary = directory.join(temporary_name);
+    let target = directory.join(target_name);
+    remove_regular_file_if_present(&temporary).await?;
+
+    let result = async {
+        let mut file = tokio::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&temporary)
+            .await
+            .map_err(|error| format!("Could not create staged file {target_name}: {error}"))?;
+        file.write_all(bytes)
+            .await
+            .map_err(|error| format!("Could not write staged file {target_name}: {error}"))?;
+        file.sync_all()
+            .await
+            .map_err(|error| format!("Could not flush staged file {target_name}: {error}"))?;
+        drop(file);
+
+        match publish {
+            StagedPublish::Replace => {
+                match tokio::fs::symlink_metadata(&target).await {
+                    Ok(metadata) if metadata.file_type().is_symlink() || !metadata.is_file() => {
+                        return Err(format!("Staged target {target_name} is not a regular file"));
+                    }
+                    Ok(_) => {}
+                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                    Err(error) => {
+                        return Err(format!("Could not inspect staged target {target_name}: {error}"));
+                    }
+                }
+                tokio::fs::rename(&temporary, &target)
+                    .await
+                    .map_err(|error| format!("Could not publish staged file {target_name}: {error}"))
+            }
+            StagedPublish::NoReplace => crate::file_names::rename_noreplace(&temporary, &target)
+                .map_err(|error| format!("Could not publish staged file {target_name}: {error}")),
+        }
+    }
+    .await;
+
+    if result.is_err() {
+        let _ = remove_regular_file_if_present(&temporary).await;
+    }
+    result
+}
+
 async fn write_playlist(directory: &Path, plan: &HlsPlan) -> Result<(), String> {
     let bytes = plan
         .local_playlist_bytes()
         .map_err(|error| error.to_string())?;
-    let target = directory.join("local.m3u8");
-    let part = directory.join("local.m3u8.part");
-    remove_regular_file_if_present(&target).await?;
-    remove_regular_file_if_present(&part).await?;
-    let mut file = tokio::fs::OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .open(&part)
-        .await
-        .map_err(|error| format!("Could not write the local HLS playlist: {error}"))?;
-    file.write_all(&bytes)
-        .await
-        .map_err(|error| format!("Could not write the local HLS playlist: {error}"))?;
-    file.sync_all()
-        .await
-        .map_err(|error| format!("Could not flush the local HLS playlist: {error}"))?;
-    drop(file);
-    crate::file_names::rename_noreplace(&part, &target)
-        .map_err(|error| format!("Could not publish the local HLS playlist: {error}"))
+    write_staged_file_atomic(
+        directory,
+        "local.m3u8.part",
+        "local.m3u8",
+        &bytes,
+        StagedPublish::Replace,
+    )
+    .await
 }
 
 /// Read a staged SAMPLE-AES resource off the async executor with a dedicated
@@ -2563,39 +2603,16 @@ async fn decrypt_hls_sample_aes_segments(
         // Write each decrypted occurrence to a distinct staged file. Keep
         // encrypted source resources untouched until the whole playlist succeeds.
         let decrypted_uri = format!("sample-aes-decrypted-{index}.bin");
-        let decrypted_path = local_hls_resource_path(directory, &decrypted_uri)?;
-        remove_regular_file_if_present(&decrypted_path)
-            .await
-            .map_err(ManifestRunError::Failed)?;
-        let temporary = directory.join(format!("{decrypted_uri}.part"));
-        remove_regular_file_if_present(&temporary)
-            .await
-            .map_err(ManifestRunError::Failed)?;
-        let write_result = async {
-            let mut file = tokio::fs::OpenOptions::new()
-                .write(true)
-                .create_new(true)
-                .open(&temporary)
-                .await
-                .map_err(|error| {
-                    format!("Could not create decrypted HLS segment staging: {error}")
-                })?;
-            file.write_all(&decrypted).await.map_err(|error| {
-                format!("Could not write decrypted HLS segment staging: {error}")
-            })?;
-            file.sync_all().await.map_err(|error| {
-                format!("Could not flush decrypted HLS segment staging: {error}")
-            })?;
-            drop(file);
-            tokio::fs::rename(&temporary, &decrypted_path)
-                .await
-                .map_err(|error| format!("Could not publish the decrypted HLS segment: {error}"))
-        }
-        .await;
-        if let Err(error) = write_result {
-            let _ = remove_regular_file_if_present(&temporary).await;
-            return Err(ManifestRunError::Failed(error));
-        }
+        local_hls_resource_path(directory, &decrypted_uri)?;
+        write_staged_file_atomic(
+            directory,
+            &format!("{decrypted_uri}.part"),
+            &decrypted_uri,
+            &decrypted,
+            StagedPublish::Replace,
+        )
+        .await
+        .map_err(ManifestRunError::Failed)?;
 
         segment.uri = decrypted_uri;
         segment.key = None;
@@ -2609,36 +2626,15 @@ async fn decrypt_hls_sample_aes_segments(
                 "Could not serialize the decrypted HLS playlist: {error}"
             ))
         })?;
-        let target = directory.join("local.m3u8");
-        let temporary = directory.join("local.m3u8.sample-aes.part");
-        remove_regular_file_if_present(&temporary)
-            .await
-            .map_err(ManifestRunError::Failed)?;
-        let write_result = async {
-            let mut file = tokio::fs::OpenOptions::new()
-                .write(true)
-                .create_new(true)
-                .open(&temporary)
-                .await
-                .map_err(|error| {
-                    format!("Could not create the decrypted HLS playlist staging: {error}")
-                })?;
-            file.write_all(&rewritten).await.map_err(|error| {
-                format!("Could not write the decrypted HLS playlist staging: {error}")
-            })?;
-            file.sync_all().await.map_err(|error| {
-                format!("Could not flush the decrypted HLS playlist staging: {error}")
-            })?;
-            drop(file);
-            tokio::fs::rename(&temporary, &target)
-                .await
-                .map_err(|error| format!("Could not publish the decrypted HLS playlist: {error}"))
-        }
-        .await;
-        if let Err(error) = write_result {
-            let _ = remove_regular_file_if_present(&temporary).await;
-            return Err(ManifestRunError::Failed(error));
-        }
+        write_staged_file_atomic(
+            directory,
+            "local.m3u8.sample-aes.part",
+            "local.m3u8",
+            &rewritten,
+            StagedPublish::Replace,
+        )
+        .await
+        .map_err(ManifestRunError::Failed)?;
         sync_staging_directory(directory)
             .await
             .map_err(ManifestRunError::Failed)?;

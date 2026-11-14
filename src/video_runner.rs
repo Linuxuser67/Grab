@@ -2284,11 +2284,7 @@ pub(crate) async fn resolve_subtitle_lang(
     let drain = tokio::spawn(async move {
         match stdout {
             Some(pipe) => {
-                crate::video_spawn::read_bounded(
-                    pipe,
-                    crate::video_spawn::MAX_STDOUT_BYTES,
-                )
-                .await
+                crate::video_spawn::read_bounded(pipe, crate::video_spawn::MAX_STDOUT_BYTES).await
             }
             None => Ok(Vec::new()),
         }

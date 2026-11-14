@@ -1,4 +1,5 @@
 use super::*;
+use crate::engine_msg::EngineMsg;
 use crate::download_fetch::{
     AttemptFail, FetchCtx, StartMode, accepts_content_range, backoff_delay, fetch_piece,
     filename_from_content_disposition, has_holes, open_partial, rejects_unexpected_restart,
@@ -6,7 +7,8 @@ use crate::download_fetch::{
 };
 use crate::download_intake::{MAX_URL_LEN, normalize_url};
 use crate::download_net::{
-    DownloadOptions, PROXY_MODE_DIRECT, PROXY_MODE_SYSTEM, http_client, normalize_no_proxy,
+    DownloadOptions, PROXY_MODE_DIRECT, PROXY_MODE_SYSTEM, http_client, http_client_for,
+    normalize_no_proxy,
     proxy_mode_index, proxy_mode_labels, proxy_mode_value, proxy_type_index, proxy_type_labels,
     proxy_type_value,
 };

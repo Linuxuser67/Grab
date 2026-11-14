@@ -4,9 +4,11 @@ use super::{
     DownloadManager, DownloadStatus, QUEUE_TMP_COUNTER, QUEUE_VERSION, RestoreState, StoredItem,
     StoredQueue,
 };
+#[cfg(not(test))]
 use crate::runtime::tokio_rt;
 use gtk4::glib;
 use std::sync::atomic::Ordering;
+#[cfg(not(test))]
 use std::time::Duration;
 
 impl DownloadManager {

@@ -3110,7 +3110,10 @@ fn ffmpeg_version_token_takes_word_after_version() {
 #[test]
 fn ytdlp_identity_args_pins_deno_for_youtube_with_cookies() {
     let args = ytdlp_identity_args("firefox", None, None, "https://www.youtube.com/watch?v=abc");
-    assert!(args.iter().any(|arg| arg == "youtube:player_client=default,-web_embedded"));
+    assert!(
+        args.iter()
+            .any(|arg| arg == "youtube:player_client=default,-web_embedded")
+    );
     let pos = args
         .iter()
         .position(|a| a == "--no-js-runtimes")

@@ -1051,3 +1051,44 @@ fn live_capture_pause_and_finish_preserve_recorded_media() {
         (true, false)
     );
 }
+
+#[cfg(unix)]
+#[test]
+fn destination_preflight_rejects_a_dangling_symlink() {
+    use std::os::unix::fs::symlink;
+
+    let dir = std::env::temp_dir().join(format!("grab-destination-symlink-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let destination = dir.join("dangling.mp4");
+    symlink(dir.join("missing-target"), &destination).unwrap();
+
+    let result = crate::runtime::tokio_rt().block_on(ensure_destination_unclaimed(&destination));
+    assert!(
+        result.is_err(),
+        "a dangling symlink still occupies the destination path"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn destination_preflight_allows_missing_and_rejects_regular_files() {
+    let dir =
+        std::env::temp_dir().join(format!("grab-destination-preflight-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let destination = dir.join("video.mp4");
+
+    assert!(
+        crate::runtime::tokio_rt()
+            .block_on(ensure_destination_unclaimed(&destination))
+            .is_ok()
+    );
+    std::fs::write(&destination, b"foreign").unwrap();
+    assert!(
+        crate::runtime::tokio_rt()
+            .block_on(ensure_destination_unclaimed(&destination))
+            .is_err()
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}

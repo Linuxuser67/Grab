@@ -2058,23 +2058,46 @@ fn ytdlp_runtime_args(page_url: &str, deno_path: Option<&Path>) -> Vec<String> {
 }
 
 /// YouTube's current web-embedded GVS experiment can return media URLs that
-/// fail with HTTP 403 for cookie-authenticated requests. Use yt-dlp's documented
-/// default client chain without `web_embedded` when a cookie source is present
-/// unless the user supplied custom extractor arguments; anonymous requests
-/// keep yt-dlp's unmodified defaults.
-fn has_custom_youtube_extractor_args(extra_args: Option<&str>) -> bool {
-    extra_args
-        .and_then(|args| args.split_once(':'))
-        .is_some_and(|(key, _)| key.eq_ignore_ascii_case("youtube"))
+/// fail with HTTP 403 for cookie-authenticated requests. Exclude
+/// `web_embedded` only when no explicit YouTube player client is configured.
+fn custom_youtube_extractor_args(extra_args: Option<&str>) -> Option<&str> {
+    extra_args.filter(|args| {
+        args.split_once(':')
+            .is_some_and(|(key, _)| key.eq_ignore_ascii_case("youtube"))
+    })
+}
+
+fn has_custom_youtube_player_client(extra_args: Option<&str>) -> bool {
+    custom_youtube_extractor_args(extra_args)
+        .and_then(|args| args.split_once(':').map(|(_, values)| values))
+        .is_some_and(|values| {
+            values.split(';').any(|value| {
+                value
+                    .split_once('=')
+                    .is_some_and(|(key, _)| key.trim().eq_ignore_ascii_case("player_client"))
+            })
+        })
 }
 
 fn youtube_cookie_player_client_args(
     page_url: &str,
     has_cookie_source: bool,
-    has_custom_youtube_args: bool,
+    has_custom_youtube_player_client: bool,
 ) -> Option<&'static str> {
-    (is_youtube_url(page_url) && has_cookie_source && !has_custom_youtube_args)
-        .then_some("youtube:player_client=default,-web_embedded")
+    (is_youtube_url(page_url) && has_cookie_source && !has_custom_youtube_player_client)
+        .then_some("player_client=default,-web_embedded")
+}
+
+fn merge_youtube_extractor_args(
+    custom_args: Option<&str>,
+    player_client_args: Option<&str>,
+) -> Option<String> {
+    match (custom_args, player_client_args) {
+        (Some(custom), Some(player_client)) => Some(format!("{custom};{player_client}")),
+        (Some(custom), None) => Some(custom.to_string()),
+        (None, Some(player_client)) => Some(format!("youtube:{player_client}")),
+        (None, None) => None,
+    }
 }
 
 /// Shared trailing argv for every yt-dlp spawn: user-configured extractor args,
@@ -2092,21 +2115,23 @@ pub(crate) fn ytdlp_identity_args(
     let mut args = Vec::new();
     let extra_args =
         validated_ytdlp_extractor_args(&crate::settings::AppSettings::new().ytdlp_extractor_args());
-    let has_custom_youtube_args =
-        has_custom_youtube_extractor_args(extra_args.as_deref());
+    let custom_youtube_args = custom_youtube_extractor_args(extra_args.as_deref());
     let cookie_spec = cookies_browser_spec(cookies_browser);
-    if let Some(extra_args) = extra_args {
+    if let Some(extra_args) = extra_args.as_deref().filter(|_| custom_youtube_args.is_none()) {
         args.push("--extractor-args".to_string());
-        args.push(extra_args);
+        args.push(extra_args.to_string());
     }
     args.extend(ytdlp_runtime_args(page_url, find_deno().as_deref()));
-    if let Some(extractor_args) = youtube_cookie_player_client_args(
+    let player_client_args = youtube_cookie_player_client_args(
         page_url,
         cookie_spec.is_some() || handoff_cookie_file.is_some(),
-        has_custom_youtube_args,
-    ) {
+        has_custom_youtube_player_client(custom_youtube_args),
+    );
+    if let Some(extractor_args) =
+        merge_youtube_extractor_args(custom_youtube_args, player_client_args.as_deref())
+    {
         args.push("--extractor-args".to_string());
-        args.push(extractor_args.to_string());
+        args.push(extractor_args);
     }
     if let Some(spec) = cookie_spec {
         args.push(format!("--cookies-from-browser={spec}"));
@@ -2125,7 +2150,8 @@ pub(crate) fn ytdlp_identity_args(
 #[cfg(test)]
 mod extractor_args_compat_tests {
     use super::{
-        gallery_cookies_browser_spec_for_profile, has_custom_youtube_extractor_args,
+        custom_youtube_extractor_args, gallery_cookies_browser_spec_for_profile,
+        has_custom_youtube_player_client, merge_youtube_extractor_args,
         validated_ytdlp_extractor_args, youtube_cookie_player_client_args, ytdlp_runtime_args,
     };
     use std::path::Path;
@@ -2168,14 +2194,45 @@ mod extractor_args_compat_tests {
     }
 
     #[test]
-    fn custom_extractor_arguments_only_override_the_youtube_workaround_for_youtube() {
-        assert!(!has_custom_youtube_extractor_args(Some(
-            "instagram:api_version=sample"
-        )));
-        assert!(has_custom_youtube_extractor_args(Some(
+    fn custom_youtube_player_client_is_distinguished_from_other_extractor_arguments() {
+        assert!(custom_youtube_extractor_args(Some("youtube:lang=en")).is_some());
+        assert!(custom_youtube_extractor_args(Some("instagram:api_version=sample")).is_none());
+        assert!(has_custom_youtube_player_client(Some(
             "youtube:player_client=android"
         )));
-        assert!(!has_custom_youtube_extractor_args(None));
+        assert!(!has_custom_youtube_player_client(Some("youtube:lang=en")));
+        assert!(!has_custom_youtube_player_client(Some(
+            "instagram:api_version=sample"
+        )));
+        assert!(!has_custom_youtube_player_client(None));
+    }
+
+    #[test]
+    fn automatic_player_client_is_merged_with_existing_youtube_extractor_args() {
+        assert_eq!(
+            merge_youtube_extractor_args(
+                Some("youtube:lang=en"),
+                Some("player_client=default,-web_embedded"),
+            )
+            .as_deref(),
+            Some("youtube:lang=en;player_client=default,-web_embedded"),
+        );
+        assert_eq!(
+            merge_youtube_extractor_args(
+                Some("youtube:player_client=android"),
+                None,
+            )
+            .as_deref(),
+            Some("youtube:player_client=android"),
+        );
+        assert_eq!(
+            merge_youtube_extractor_args(
+                None,
+                Some("player_client=default,-web_embedded"),
+            )
+            .as_deref(),
+            Some("player_client=default,-web_embedded"),
+        );
     }
 
     #[test]

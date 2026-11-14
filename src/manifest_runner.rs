@@ -3407,6 +3407,8 @@ async fn fetch_hls_resource_to_writer(
 
         let mut stream = response.bytes_stream();
         let mut size = 0_u64;
+        let mut response_prefix = Vec::with_capacity(hls_live::LIVE_HLS_RESPONSE_PREFIX_BYTES);
+        let mut response_prefix_checked = false;
         let pace_start = Instant::now();
         let mut paced = 0_u64;
         let mut last_progress = Instant::now();
@@ -3438,10 +3440,34 @@ async fn fetch_hls_resource_to_writer(
                 .ok_or_else(|| {
                     ManifestRunError::Failed("An HLS fragment exceeds the 1 GiB limit".to_string())
                 })?;
-            writer
-                .write_streamed_chunk(&chunk)
-                .await
-                .map_err(ManifestRunError::Failed)?;
+            if response_prefix_checked {
+                writer
+                    .write_streamed_chunk(&chunk)
+                    .await
+                    .map_err(ManifestRunError::Failed)?;
+            } else {
+                let prefix_bytes = (hls_live::LIVE_HLS_RESPONSE_PREFIX_BYTES - response_prefix.len()).min(chunk.len());
+                response_prefix.extend_from_slice(&chunk[..prefix_bytes]);
+                if response_prefix.len() == hls_live::LIVE_HLS_RESPONSE_PREFIX_BYTES {
+                    if hls_live::is_obvious_text_error_body(&response_prefix) {
+                        return Err(ManifestRunError::Unsupported(
+                            "An HLS fragment response contains a text error body".to_string(),
+                        ));
+                    }
+                    writer
+                        .write_streamed_chunk(&response_prefix)
+                        .await
+                        .map_err(ManifestRunError::Failed)?;
+                    response_prefix.clear();
+                    response_prefix_checked = true;
+                    if chunk.len() > prefix_bytes {
+                        writer
+                            .write_streamed_chunk(&chunk[prefix_bytes..])
+                            .await
+                            .map_err(ManifestRunError::Failed)?;
+                    }
+                }
+            }
             let total = reservation
                 .reserve(chunk_len)
                 .map_err(ManifestRunError::Failed)?;
@@ -3458,6 +3484,17 @@ async fn fetch_hls_resource_to_writer(
             .await;
         }
 
+        if !response_prefix_checked && !response_prefix.is_empty() {
+            if hls_live::is_obvious_text_error_body(&response_prefix) {
+                return Err(ManifestRunError::Unsupported(
+                    "An HLS fragment response contains a text error body".to_string(),
+                ));
+            }
+            writer
+                .write_streamed_chunk(&response_prefix)
+                .await
+                .map_err(ManifestRunError::Failed)?;
+        }
         if size == 0 {
             return Err(ManifestRunError::Failed(
                 "The stream server returned an empty HLS fragment".to_string(),

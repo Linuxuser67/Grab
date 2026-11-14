@@ -89,24 +89,15 @@ pub(super) async fn ensure_live_hls_marker(directory: &Path) -> Result<(), Strin
     if read_live_hls_marker(directory).await? {
         return Ok(());
     }
-    let marker = directory.join(LIVE_HLS_MARKER_NAME);
-    let mut file = tokio::fs::OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .open(&marker)
-        .await
-        .map_err(|error| format!("Could not create live HLS staging marker: {error}"))?;
-    if let Err(error) = file.write_all(LIVE_HLS_MARKER_CONTENT).await {
-        drop(file);
-        let _ = remove_regular_file_if_present(&marker).await;
-        return Err(format!("Could not write live HLS staging marker: {error}"));
-    }
-    if let Err(error) = file.sync_all().await {
-        drop(file);
-        let _ = remove_regular_file_if_present(&marker).await;
-        return Err(format!("Could not flush live HLS staging marker: {error}"));
-    }
-    Ok(())
+    super::write_staged_file_atomic(
+        directory,
+        "live-hls.capture.part",
+        LIVE_HLS_MARKER_NAME,
+        LIVE_HLS_MARKER_CONTENT,
+        super::StagedPublish::NoReplace,
+    )
+    .await?;
+    super::sync_staging_directory(directory).await
 }
 
 pub(super) async fn load_live_hls_track(
@@ -237,38 +228,14 @@ pub(super) async fn write_live_playlist(
     let bytes = accumulator
         .local_playlist_bytes()
         .map_err(|error| error.to_string())?;
-    let target = directory.join("local.m3u8");
-    let part = directory.join("local.m3u8.next.part");
-    remove_regular_file_if_present(&part).await?;
-    let mut file = tokio::fs::OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .open(&part)
-        .await
-        .map_err(|error| format!("Could not create the live HLS playlist: {error}"))?;
-    file.write_all(&bytes)
-        .await
-        .map_err(|error| format!("Could not write the live HLS playlist: {error}"))?;
-    file.sync_all()
-        .await
-        .map_err(|error| format!("Could not flush the live HLS playlist: {error}"))?;
-    drop(file);
-
-    match tokio::fs::symlink_metadata(&target).await {
-        Ok(metadata) if metadata.file_type().is_symlink() || !metadata.is_file() => {
-            return Err("The staged live HLS playlist is not a regular file".to_string());
-        }
-        Ok(_) => {}
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-        Err(error) => {
-            return Err(format!(
-                "Could not inspect the staged live HLS playlist: {error}"
-            ));
-        }
-    }
-    tokio::fs::rename(&part, &target)
-        .await
-        .map_err(|error| format!("Could not publish the live HLS playlist: {error}"))?;
+    super::write_staged_file_atomic(
+        directory,
+        "local.m3u8.next.part",
+        "local.m3u8",
+        &bytes,
+        super::StagedPublish::Replace,
+    )
+    .await?;
     sync_staging_directory(directory).await
 }
 

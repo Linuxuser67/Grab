@@ -622,7 +622,7 @@ async fn hls_separate_inputs_preserve_rendition_timestamp_offsets() {
     let audio_playlist = audio_dir.join("local.m3u8");
     let output = root.path().join("rendition-sync.part.mp4");
     let (_stop_tx, mut abort) = tokio::sync::oneshot::channel();
-    assert!(
+    assert_eq!(
         run_ffmpeg_with_offsets(
             Path::new("ffmpeg"),
             FfmpegInput {
@@ -640,7 +640,8 @@ async fn hls_separate_inputs_preserve_rendition_timestamp_offsets() {
         )
         .await
         .expect("finalize separate HLS renditions with source timestamps"),
-        "FFmpeg unexpectedly aborted separate HLS rendition finalization"
+        ManifestMuxOutcome::Finished,
+        "FFmpeg unexpectedly stopped separate HLS rendition finalization"
     );
 
     let starts = ffprobe_stream_start_times(Path::new("ffprobe"), &output);
@@ -678,7 +679,7 @@ async fn hls_separate_inputs_preserve_rendition_timestamp_offsets() {
     std::fs::write(&raw_audio, concat_track(&audio_dir)).expect("assemble raw audio track");
     let raw_output = root.path().join("raw-rendition-sync.part.mp4");
     let (_raw_stop_tx, mut raw_abort) = tokio::sync::oneshot::channel();
-    assert!(
+    assert_eq!(
         run_ffmpeg_with_offsets(
             Path::new("ffmpeg"),
             FfmpegInput {
@@ -696,7 +697,8 @@ async fn hls_separate_inputs_preserve_rendition_timestamp_offsets() {
         )
         .await
         .expect("finalize raw HLS track parts with preserved timestamps"),
-        "FFmpeg unexpectedly aborted raw HLS track finalization"
+        ManifestMuxOutcome::Finished,
+        "FFmpeg unexpectedly stopped raw HLS track finalization"
     );
     let raw_starts = ffprobe_stream_start_times(Path::new("ffprobe"), &raw_output);
     let raw_video_start = *raw_starts
@@ -3354,7 +3356,7 @@ async fn dash_per_track_timestamp_offsets_align_fragmented_mp4_inputs() {
 
     let output = root.path().join("dash-pto-output.part.mp4");
     let (_stop_tx, mut abort) = tokio::sync::oneshot::channel();
-    assert!(
+    assert_eq!(
         run_ffmpeg_with_offsets(
             Path::new("ffmpeg"),
             FfmpegInput {
@@ -3372,7 +3374,8 @@ async fn dash_per_track_timestamp_offsets_align_fragmented_mp4_inputs() {
         )
         .await
         .expect("finalize independently offset DASH tracks"),
-        "DASH FFmpeg timestamp-offset finalization unexpectedly aborted"
+        ManifestMuxOutcome::Finished,
+        "DASH FFmpeg timestamp-offset finalization unexpectedly stopped"
     );
 
     let output_starts = ffprobe_stream_start_times(ffprobe, &output);

@@ -2736,10 +2736,6 @@ pub(crate) fn live_info_json_args(path: Option<&std::path::Path>) -> Vec<String>
     }
 }
 
-#[expect(
-    clippy::too_many_arguments,
-    reason = "mirrors run_unified_ytdlp so both attempts keep the same cancellation contract"
-)]
 /// Resolve a live capture stop while preserving media when the sender disappears.
 fn live_capture_abort_result<E>(result: Result<StopIntent, E>) -> (bool, bool) {
     match crate::video::stop_intent_or_pause(result) {
@@ -2748,6 +2744,10 @@ fn live_capture_abort_result<E>(result: Result<StopIntent, E>) -> (bool, bool) {
     }
 }
 
+#[expect(
+    clippy::too_many_arguments,
+    reason = "mirrors run_unified_ytdlp so both attempts keep the same cancellation contract"
+)]
 pub(crate) async fn run_live_ytdlp(
     youtube_bin: &Path,
     ffmpeg_bin: &Path,

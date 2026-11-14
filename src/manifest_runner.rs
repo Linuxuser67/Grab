@@ -2117,23 +2117,11 @@ async fn finalize_manifest_download(
         );
         let subtitle_directory = staging.join("subtitles");
         for (track, filename, track_directory, should_clean) in [
-            (
-                TrackKind::Video,
-                video_filename,
-                video_dir,
-                true,
-            ),
-            (
-                TrackKind::Audio,
-                audio_filename,
-                audio_dir,
-                has_audio,
-            ),
+            (TrackKind::Video, video_filename, video_dir, true),
+            (TrackKind::Audio, audio_filename, audio_dir, has_audio),
             (
                 TrackKind::Subtitles,
-                TrackKind::Subtitles.part_filename(
-                    TrackFileFormat::Mp4,
-                ),
+                TrackKind::Subtitles.part_filename(TrackFileFormat::Mp4),
                 subtitle_directory.as_path(),
                 has_destination_subtitles,
             ),

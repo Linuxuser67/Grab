@@ -578,7 +578,7 @@ fn resolve_manifest_ffmpeg(dirs: &[PathBuf]) -> Result<PathBuf, ManifestRunError
 
 /// Result of preparing a native manifest attempt, including an early user stop.
 enum ManifestPreparationOutcome {
-    Ready(ManifestPreparation),
+    Ready(Box<ManifestPreparation>),
     Stopped(crate::video::StopIntent),
 }
 
@@ -798,7 +798,7 @@ async fn prepare_manifest_attempt(
     let concurrency = job.connections.clamp(1, MAX_RESOURCE_CONNECTIONS);
     let downloaded = Arc::new(AtomicU64::new(finish_marker_bytes.unwrap_or(0)));
 
-    Ok(ManifestPreparationOutcome::Ready(ManifestPreparation {
+    Ok(ManifestPreparationOutcome::Ready(Box::new(ManifestPreparation {
         staging,
         dest_dir,
         output_part,
@@ -813,7 +813,7 @@ async fn prepare_manifest_attempt(
         finish_requested,
         concurrency,
         downloaded,
-    }))
+    })))
 }
 
 /// Resolved manifest tracks and the network client used to transfer them.
@@ -2061,7 +2061,7 @@ pub(crate) async fn run_manifest_download(
         concurrency,
         downloaded,
     } = match prepare_manifest_attempt(&job, &tx, &mut abort).await? {
-        ManifestPreparationOutcome::Ready(preparation) => preparation,
+        ManifestPreparationOutcome::Ready(preparation) => *preparation,
         ManifestPreparationOutcome::Stopped(crate::video::StopIntent::Pause) => {
             return Ok(ManifestOutcome::Paused);
         }

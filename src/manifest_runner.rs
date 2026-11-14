@@ -947,66 +947,37 @@ where
                 if let Some(sender) = audio_abort.take() {
                     let _ = sender.send(intent);
                 }
-                match (video_finished, audio_finished) {
-                    (false, false) => {
-                        let _ = tokio::join!(&mut video, &mut audio);
-                    }
-                    (false, true) => {
-                        let _ = (&mut video).await;
-                    }
-                    (true, false) => {
-                        let _ = (&mut audio).await;
-                    }
-                    (true, true) => {}
+                if video_finished {
+                    let _ = (&mut audio).await;
+                } else if audio_finished {
+                    let _ = (&mut video).await;
+                } else {
+                    let _ = tokio::join!(&mut video, &mut audio);
                 }
                 return Ok(false);
             }
             result = &mut video, if !video_finished => {
                 video_finished = true;
-                match result {
-                    Ok(true) => {}
-                    Ok(false) => {
-                        if let Some(sender) = audio_abort.take() {
-                            let _ = sender.send(crate::video::StopIntent::Pause);
-                        }
-                        if !audio_finished {
-                            let _ = (&mut audio).await;
-                        }
-                        return Ok(false);
+                if !matches!(&result, Ok(true)) {
+                    if let Some(sender) = audio_abort.take() {
+                        let _ = sender.send(crate::video::StopIntent::Pause);
                     }
-                    Err(error) => {
-                        if let Some(sender) = audio_abort.take() {
-                            let _ = sender.send(crate::video::StopIntent::Pause);
-                        }
-                        if !audio_finished {
-                            let _ = (&mut audio).await;
-                        }
-                        return Err(error);
+                    if !audio_finished {
+                        let _ = (&mut audio).await;
                     }
+                    return result;
                 }
             }
             result = &mut audio, if !audio_finished => {
                 audio_finished = true;
-                match result {
-                    Ok(true) => {}
-                    Ok(false) => {
-                        if let Some(sender) = video_abort.take() {
-                            let _ = sender.send(crate::video::StopIntent::Pause);
-                        }
-                        if !video_finished {
-                            let _ = (&mut video).await;
-                        }
-                        return Ok(false);
+                if !matches!(&result, Ok(true)) {
+                    if let Some(sender) = video_abort.take() {
+                        let _ = sender.send(crate::video::StopIntent::Pause);
                     }
-                    Err(error) => {
-                        if let Some(sender) = video_abort.take() {
-                            let _ = sender.send(crate::video::StopIntent::Pause);
-                        }
-                        if !video_finished {
-                            let _ = (&mut video).await;
-                        }
-                        return Err(error);
+                    if !video_finished {
+                        let _ = (&mut video).await;
                     }
+                    return result;
                 }
             }
         }

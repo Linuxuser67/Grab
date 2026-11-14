@@ -1941,7 +1941,7 @@ async fn sweep_live_capture(
         Exit::Delivered | Exit::DestClaimed | Exit::NothingRecorded
     ) {
         let _ = tokio::fs::remove_file(out).await;
-        let _ = tokio::fs::remove_file(part).await;
+        remove_scratch_file_if_present(&part).await;
     }
     let _ = tokio::fs::remove_file(state).await;
     if let Staging::Sweep = staging_mode
@@ -2332,6 +2332,19 @@ fn claim_staging_name(
     }
 }
 
+/// Remove a row-owned scratch file when present, logging unexpected cleanup failures.
+async fn remove_scratch_file_if_present(path: &Path) {
+    if let Err(error) = tokio::fs::remove_file(path).await
+        && error.kind() != std::io::ErrorKind::NotFound
+    {
+        tracing::debug!(
+            path = %path.display(),
+            error = %error,
+            "could not remove scratch file"
+        );
+    }
+}
+
 /// Claim a live capture's staging name and perform its synchronous
 /// destination preflight. This operation runs on Tokio's blocking pool.
 fn prepare_live_staging(
@@ -2466,7 +2479,7 @@ pub(crate) async fn run_live_ytdlp(
     // Record the chosen staging name in the manifest for crash cleanup.
     // The manifest is the ownership proof: without it, a leftover .part
     // is never swept (acceptable — the manifest is written before the download).
-    let _ = write_manifest(
+    if let Err(error) = write_manifest(
         staging,
         job.item_id,
         &VideoManifest {
@@ -2482,7 +2495,13 @@ pub(crate) async fn run_live_ytdlp(
             dest_dir: None,
         },
     )
-    .await;
+    .await
+    {
+        // The manifest is the ownership proof for this staging name. Do not
+        // start a recorder when it could not be persisted.
+        remove_scratch_file_if_present(&out.with_extension(format!("{ext}.part"))).await;
+        return Err(VideoError::staging(error));
+    }
     // Reclaim partial remuxes from attempts that died mid-ffmpeg. The sweep
     // scans the destination directory, so keep it off the Tokio worker.
     let staging_for_sweep = staging.to_path_buf();
@@ -2520,7 +2539,7 @@ pub(crate) async fn run_live_ytdlp(
     };
     // Reclaim a previous run's crash debris (the normal path deletes it below).
     if live_info_path.is_none() {
-        let _ = tokio::fs::remove_file(live_info_json_path(job.item_id)).await;
+        remove_scratch_file_if_present(&live_info_json_path(job.item_id)).await;
     }
     // Deleted on drop: the attempt loop has early returns (quiesce failure,
     // nothing recorded) that would otherwise leak it.
@@ -2529,9 +2548,9 @@ pub(crate) async fn run_live_ytdlp(
     let src = 'attempt: loop {
         let attempt: &VideoJob = downgraded.as_ref().unwrap_or(job);
         // Fresh shell per attempt: a stale output or state file must never survive into a retry, or yt-dlp resumes fragment N against a deleted shell (corrupt recording).
-        let _ = tokio::fs::remove_file(&out).await;
-        let _ = tokio::fs::remove_file(&part).await;
-        let _ = tokio::fs::remove_file(&state).await;
+        remove_scratch_file_if_present(&out).await;
+        remove_scratch_file_if_present(&part).await;
+        remove_scratch_file_if_present(&state).await;
         // The builder argv ends with `-- <page URL>`: nothing may be appended
         // after it — anything past `--` becomes a positional URL. Splice the
         // --load-info-json pair before the terminator, then insert the guarded

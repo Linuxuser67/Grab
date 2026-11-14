@@ -2077,6 +2077,7 @@ fn youtube_cookie_player_client_args(
 /// YouTube requests. Explicit extractor arguments always take precedence.
 pub(crate) fn ytdlp_identity_args(
     cookies_browser: &str,
+    handoff_cookie_file: Option<&std::path::Path>,
     user_agent: Option<&str>,
     page_url: &str,
 ) -> Vec<String> {
@@ -2091,7 +2092,7 @@ pub(crate) fn ytdlp_identity_args(
     args.extend(ytdlp_runtime_args(page_url, find_deno().as_deref()));
     if let Some(extractor_args) = youtube_cookie_player_client_args(
         page_url,
-        cookie_spec.is_some() || user_agent.is_some(),
+        cookie_spec.is_some() || handoff_cookie_file.is_some(),
         extra_args.is_some(),
     ) {
         args.push("--extractor-args".to_string());

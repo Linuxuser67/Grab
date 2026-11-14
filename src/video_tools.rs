@@ -2086,16 +2086,17 @@ pub(crate) fn ytdlp_identity_args(
     let mut args = Vec::new();
     let extra_args =
         validated_ytdlp_extractor_args(&crate::settings::AppSettings::new().ytdlp_extractor_args());
+    let has_custom_extractor_args = extra_args.is_some();
     let cookie_spec = cookies_browser_spec(cookies_browser);
-    if let Some(extra_args) = extra_args.as_ref() {
+    if let Some(extra_args) = extra_args {
         args.push("--extractor-args".to_string());
-        args.push(extra_args.clone());
+        args.push(extra_args);
     }
     args.extend(ytdlp_runtime_args(page_url, find_deno().as_deref()));
     if let Some(extractor_args) = youtube_cookie_player_client_args(
         page_url,
         cookie_spec.is_some() || handoff_cookie_file.is_some(),
-        extra_args.is_some(),
+        has_custom_extractor_args,
     ) {
         args.push("--extractor-args".to_string());
         args.push(extractor_args.to_string());

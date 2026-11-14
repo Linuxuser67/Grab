@@ -64,7 +64,7 @@
           <li>Update dependencies to their latest stable releases.</li>
           <li>Native HLS: accept fMP4 init segments with codec sample entries and mixed-case playlist types.</li>
           <li>Native HLS: reuse the manifest preview cache across staged cookie handoffs.</li>
-          <li>Native DASH: align static tracks with presentation offsets and bounded XLink.</li>
+          <li>Native DASH: align static tracks with presentation offsets; unsupported XLink and indexed SegmentBase manifests fall back to yt-dlp.</li>
           <li>UI: multi-file selection and queue-all actions.</li>
         </ul>
       </description>

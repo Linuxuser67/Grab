@@ -2212,16 +2212,14 @@ pub(crate) async fn resolve_subtitle_lang(
         biased;
         _ = &mut *abort => {
             drain.abort();
-            let _ = child.kill().await;
-            let _ = child.wait().await;
+            finish_subtitle_probe_child(&mut child, &mut group).await;
             return Err(());
         }
         res = tokio::time::timeout(SUBTITLE_PROBE_TIMEOUT, child.wait()) => res,
     };
     if !matches!(status, Ok(Ok(s)) if s.success()) {
         drain.abort();
-        let _ = child.kill().await;
-        let _ = child.wait().await;
+        finish_subtitle_probe_child(&mut child, &mut group).await;
         tracing::warn!("subtitle probe failed; downloading without subtitles");
         return Ok(None);
     };
@@ -2254,6 +2252,20 @@ pub(crate) async fn resolve_subtitle_lang(
         tracing::debug!("video offers no subtitles in the preferred language or English");
     }
     Ok(lang)
+}
+
+/// Finish a subtitle probe without ever signalling a process-group ID after its
+/// leader has been reaped. If the wait timed out or was cancelled, reap the live
+/// leader and its group; if wait already returned, only disarm the stale guard.
+async fn finish_subtitle_probe_child(
+    child: &mut tokio::process::Child,
+    group: &mut ProcessGroupGuard,
+) {
+    if child.id().is_some() {
+        reap_child(child, group).await;
+    } else {
+        group.disarm();
+    }
 }
 
 /// File-growth watcher for live captures: announces "Recording…" once the

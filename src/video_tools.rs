@@ -2062,12 +2062,18 @@ fn ytdlp_runtime_args(page_url: &str, deno_path: Option<&Path>) -> Vec<String> {
 /// default client chain without `web_embedded` when a cookie source is present
 /// unless the user supplied custom extractor arguments; anonymous requests
 /// keep yt-dlp's unmodified defaults.
+fn has_custom_youtube_extractor_args(extra_args: Option<&str>) -> bool {
+    extra_args
+        .and_then(|args| args.split_once(':'))
+        .is_some_and(|(key, _)| key.eq_ignore_ascii_case("youtube"))
+}
+
 fn youtube_cookie_player_client_args(
     page_url: &str,
     has_cookie_source: bool,
-    has_custom_extractor_args: bool,
+    has_custom_youtube_args: bool,
 ) -> Option<&'static str> {
-    (is_youtube_url(page_url) && has_cookie_source && !has_custom_extractor_args)
+    (is_youtube_url(page_url) && has_cookie_source && !has_custom_youtube_args)
         .then_some("youtube:player_client=default,-web_embedded")
 }
 
@@ -2086,7 +2092,8 @@ pub(crate) fn ytdlp_identity_args(
     let mut args = Vec::new();
     let extra_args =
         validated_ytdlp_extractor_args(&crate::settings::AppSettings::new().ytdlp_extractor_args());
-    let has_custom_extractor_args = extra_args.is_some();
+    let has_custom_youtube_args =
+        has_custom_youtube_extractor_args(extra_args.as_deref());
     let cookie_spec = cookies_browser_spec(cookies_browser);
     if let Some(extra_args) = extra_args {
         args.push("--extractor-args".to_string());
@@ -2096,7 +2103,7 @@ pub(crate) fn ytdlp_identity_args(
     if let Some(extractor_args) = youtube_cookie_player_client_args(
         page_url,
         cookie_spec.is_some() || handoff_cookie_file.is_some(),
-        has_custom_extractor_args,
+        has_custom_youtube_args,
     ) {
         args.push("--extractor-args".to_string());
         args.push(extractor_args.to_string());
@@ -2118,8 +2125,8 @@ pub(crate) fn ytdlp_identity_args(
 #[cfg(test)]
 mod extractor_args_compat_tests {
     use super::{
-        gallery_cookies_browser_spec_for_profile, validated_ytdlp_extractor_args,
-        youtube_cookie_player_client_args, ytdlp_runtime_args,
+        gallery_cookies_browser_spec_for_profile, has_custom_youtube_extractor_args,
+        validated_ytdlp_extractor_args, youtube_cookie_player_client_args, ytdlp_runtime_args,
     };
     use std::path::Path;
 
@@ -2158,6 +2165,17 @@ mod extractor_args_compat_tests {
         );
         assert!(gallery_cookies_browser_spec_for_profile("whale", None).is_none());
         assert!(gallery_cookies_browser_spec_for_profile("none", None).is_none());
+    }
+
+    #[test]
+    fn custom_extractor_arguments_only_override_the_youtube_workaround_for_youtube() {
+        assert!(!has_custom_youtube_extractor_args(Some(
+            "instagram:api_version=sample"
+        )));
+        assert!(has_custom_youtube_extractor_args(Some(
+            "youtube:player_client=android"
+        )));
+        assert!(!has_custom_youtube_extractor_args(None));
     }
 
     #[test]

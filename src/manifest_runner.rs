@@ -911,6 +911,25 @@ struct ManifestStaticTransfer<'a> {
     abort: &'a mut tokio::sync::oneshot::Receiver<crate::video::StopIntent>,
 }
 
+/// Keep both track errors and prefer terminal/retryable errors over fallback.
+fn combine_parallel_track_errors(
+    video: ManifestRunError,
+    audio: ManifestRunError,
+) -> ManifestRunError {
+    let message = format!("video track: {video}; audio track: {audio}");
+    if matches!(&video, ManifestRunError::Failed(_))
+        || matches!(&audio, ManifestRunError::Failed(_))
+    {
+        ManifestRunError::Failed(message)
+    } else if matches!(&video, ManifestRunError::Retryable(_))
+        || matches!(&audio, ManifestRunError::Retryable(_))
+    {
+        ManifestRunError::Retryable(message)
+    } else {
+        ManifestRunError::Unsupported(message)
+    }
+}
+
 /// Run a static video/audio track pair concurrently and forward stop intent to both.
 async fn transfer_parallel_manifest_tracks<Video, Audio>(
     video: Video,
@@ -959,25 +978,43 @@ where
             result = &mut video, if !video_finished => {
                 video_finished = true;
                 if !matches!(&result, Ok(true)) {
-                    if let Some(sender) = audio_abort.take() {
-                        let _ = sender.send(crate::video::StopIntent::Pause);
-                    }
-                    if !audio_finished {
-                        let _ = (&mut audio).await;
-                    }
-                    return result;
+                    let video_error = result.err();
+                    let audio_error = if !audio_finished {
+                        if let Some(sender) = audio_abort.take() {
+                            let _ = sender.send(crate::video::StopIntent::Pause);
+                        }
+                        (&mut audio).await.err()
+                    } else {
+                        None
+                    };
+                    return match (video_error, audio_error) {
+                        (Some(video_error), Some(audio_error)) => {
+                            Err(combine_parallel_track_errors(video_error, audio_error))
+                        }
+                        (Some(error), None) | (None, Some(error)) => Err(error),
+                        (None, None) => Ok(false),
+                    };
                 }
             }
             result = &mut audio, if !audio_finished => {
                 audio_finished = true;
                 if !matches!(&result, Ok(true)) {
-                    if let Some(sender) = video_abort.take() {
-                        let _ = sender.send(crate::video::StopIntent::Pause);
-                    }
-                    if !video_finished {
-                        let _ = (&mut video).await;
-                    }
-                    return result;
+                    let audio_error = result.err();
+                    let video_error = if !video_finished {
+                        if let Some(sender) = video_abort.take() {
+                            let _ = sender.send(crate::video::StopIntent::Pause);
+                        }
+                        (&mut video).await.err()
+                    } else {
+                        None
+                    };
+                    return match (video_error, audio_error) {
+                        (Some(video_error), Some(audio_error)) => {
+                            Err(combine_parallel_track_errors(video_error, audio_error))
+                        }
+                        (Some(error), None) | (None, Some(error)) => Err(error),
+                        (None, None) => Ok(false),
+                    };
                 }
             }
         }
@@ -1095,6 +1132,70 @@ mod parallel_manifest_track_tests {
         assert!(matches!(
             result,
             Err(ManifestRunError::Failed(message)) if message == "video track failed"
+        ));
+    }
+
+    #[tokio::test]
+    async fn static_track_pair_preserves_audio_error_after_video_fails() {
+        let (_keep_stop_sender, mut abort) = tokio::sync::oneshot::channel();
+        let (video_abort, _video_abort_receiver) = tokio::sync::oneshot::channel();
+        let (audio_abort, audio_abort_receiver) = tokio::sync::oneshot::channel();
+        let video = async {
+            Err(ManifestRunError::Unsupported(
+                "video format is unsupported".to_string(),
+            ))
+        };
+        let audio = async move {
+            assert_eq!(
+                audio_abort_receiver.await.expect("peer pause is forwarded"),
+                crate::video::StopIntent::Pause
+            );
+            Err(ManifestRunError::Retryable(
+                "audio request timed out".to_string(),
+            ))
+        };
+
+        let result =
+            transfer_parallel_manifest_tracks(video, audio, &mut abort, video_abort, audio_abort)
+                .await;
+
+        assert!(matches!(
+            result,
+            Err(ManifestRunError::Retryable(message))
+                if message.contains("video format is unsupported")
+                    && message.contains("audio request timed out")
+        ));
+    }
+
+    #[tokio::test]
+    async fn static_track_pair_preserves_video_error_after_audio_fails() {
+        let (_keep_stop_sender, mut abort) = tokio::sync::oneshot::channel();
+        let (video_abort, video_abort_receiver) = tokio::sync::oneshot::channel();
+        let (audio_abort, _audio_abort_receiver) = tokio::sync::oneshot::channel();
+        let video = async move {
+            assert_eq!(
+                video_abort_receiver.await.expect("peer pause is forwarded"),
+                crate::video::StopIntent::Pause
+            );
+            Err(ManifestRunError::Failed(
+                "video staging write failed".to_string(),
+            ))
+        };
+        let audio = async {
+            Err(ManifestRunError::Unsupported(
+                "audio representation is unsupported".to_string(),
+            ))
+        };
+
+        let result =
+            transfer_parallel_manifest_tracks(video, audio, &mut abort, video_abort, audio_abort)
+                .await;
+
+        assert!(matches!(
+            result,
+            Err(ManifestRunError::Failed(message))
+                if message.contains("video staging write failed")
+                    && message.contains("audio representation is unsupported")
         ));
     }
 }
@@ -2106,6 +2207,49 @@ struct ManifestFinalization<'a> {
 ///
 /// The staging data is retained on every failure before publication so the queue
 /// can retry without downloading already completed resources.
+fn pending_manifest_stop_intent(
+    abort: &mut tokio::sync::oneshot::Receiver<crate::video::StopIntent>,
+) -> Option<crate::video::StopIntent> {
+    match abort.try_recv() {
+        Err(tokio::sync::oneshot::error::TryRecvError::Empty) => None,
+        result => Some(crate::video::stop_intent_or_pause(result)),
+    }
+}
+
+#[cfg(test)]
+mod manifest_finalization_stop_tests {
+    use super::*;
+
+    #[test]
+    fn empty_stop_channel_does_not_interrupt_finalization() {
+        let (_sender, mut receiver) = tokio::sync::oneshot::channel();
+        assert_eq!(pending_manifest_stop_intent(&mut receiver), None);
+    }
+
+    #[test]
+    fn pending_stop_intents_are_preserved() {
+        for intent in [
+            crate::video::StopIntent::Pause,
+            crate::video::StopIntent::Finish,
+            crate::video::StopIntent::Discard,
+        ] {
+            let (sender, mut receiver) = tokio::sync::oneshot::channel();
+            sender.send(intent).expect("queue stop intent");
+            assert_eq!(pending_manifest_stop_intent(&mut receiver), Some(intent));
+        }
+    }
+
+    #[test]
+    fn closed_stop_channel_defaults_to_pause() {
+        let (sender, mut receiver) = tokio::sync::oneshot::channel();
+        drop(sender);
+        assert_eq!(
+            pending_manifest_stop_intent(&mut receiver),
+            Some(crate::video::StopIntent::Pause)
+        );
+    }
+}
+
 async fn finalize_manifest_download(
     context: ManifestFinalization<'_>,
 ) -> Result<ManifestOutcome, ManifestRunError> {
@@ -2125,8 +2269,10 @@ async fn finalize_manifest_download(
         ffmpeg,
         downloaded,
     } = context;
-    if abort.try_recv().is_ok() {
-        return Ok(ManifestOutcome::Aborted);
+    match pending_manifest_stop_intent(&mut abort) {
+        Some(crate::video::StopIntent::Pause) => return Ok(ManifestOutcome::Paused),
+        Some(crate::video::StopIntent::Discard) => return Ok(ManifestOutcome::Aborted),
+        Some(crate::video::StopIntent::Finish) | None => {}
     }
     tx.send(EngineMsg::Phase("Merging audio and video…".to_string()))
         .ok();
@@ -2290,7 +2436,7 @@ async fn finalize_manifest_download(
         ),
         _ => (None, None),
     };
-    if !run_ffmpeg_with_offsets(
+    match run_ffmpeg_with_offsets(
         &ffmpeg,
         FfmpegInput {
             path: &video_input,
@@ -2311,7 +2457,9 @@ async fn finalize_manifest_download(
     )
     .await?
     {
-        return Ok(ManifestOutcome::Aborted);
+        ManifestMuxOutcome::Finished => {}
+        ManifestMuxOutcome::Paused => return Ok(ManifestOutcome::Paused),
+        ManifestMuxOutcome::Aborted => return Ok(ManifestOutcome::Aborted),
     }
 
     // Validate and size the muxed file before the delivery commit. After the
@@ -4107,22 +4255,25 @@ async fn run_ffmpeg(
     output: &Path,
     abort: &mut tokio::sync::oneshot::Receiver<crate::video::StopIntent>,
 ) -> Result<bool, ManifestRunError> {
-    run_ffmpeg_with_offsets(
-        ffmpeg,
-        FfmpegInput {
-            path: video_input,
-            timestamp_offset: None,
-        },
-        audio_input.map(|path| FfmpegInput {
-            path,
-            timestamp_offset: None,
-        }),
-        InputTimestampPolicy::Normalize,
-        subtitles,
-        output,
-        abort,
-    )
-    .await
+    Ok(matches!(
+        run_ffmpeg_with_offsets(
+            ffmpeg,
+            FfmpegInput {
+                path: video_input,
+                timestamp_offset: None,
+            },
+            audio_input.map(|path| FfmpegInput {
+                path,
+                timestamp_offset: None,
+            }),
+            InputTimestampPolicy::Normalize,
+            subtitles,
+            output,
+            abort,
+        )
+        .await?,
+        ManifestMuxOutcome::Finished
+    ))
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -4140,6 +4291,24 @@ fn mpegts_embedded_subtitle_error() -> ManifestRunError {
     )
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ManifestMuxOutcome {
+    Finished,
+    Paused,
+    Aborted,
+}
+
+async fn stop_ffmpeg_for_intent(
+    child: &mut tokio::process::Child,
+    stderr_task: tokio::task::JoinHandle<String>,
+    outcome: ManifestMuxOutcome,
+) -> ManifestMuxOutcome {
+    let _ = child.kill().await;
+    let _ = child.wait().await;
+    let _ = stderr_task.await;
+    outcome
+}
+
 async fn run_ffmpeg_with_offsets(
     ffmpeg: &Path,
     video_input: FfmpegInput<'_>,
@@ -4148,7 +4317,7 @@ async fn run_ffmpeg_with_offsets(
     subtitles: SubtitleOutput<'_>,
     output: &Path,
     abort: &mut tokio::sync::oneshot::Receiver<crate::video::StopIntent>,
-) -> Result<bool, ManifestRunError> {
+) -> Result<ManifestMuxOutcome, ManifestRunError> {
     let output_container = manifest_output_container(output)?;
     if output_container == ManifestContainer::Ts && subtitles.input.is_some() && subtitles.embed {
         return Err(mpegts_embedded_subtitle_error());
@@ -4255,12 +4424,27 @@ async fn run_ffmpeg_with_offsets(
     });
     let status = tokio::select! {
         biased;
-        _ = abort => {
-            let _ = child.kill().await;
-            let _ = child.wait().await;
-            let _ = stderr_task.await;
-            return Ok(false);
-        }
+        stop = &mut *abort => match crate::video::stop_intent_or_pause(stop) {
+            crate::video::StopIntent::Finish => child.wait().await.map_err(|error| {
+                ManifestRunError::Failed(format!("FFmpeg could not finish: {error}"))
+            })?,
+            crate::video::StopIntent::Pause => {
+                return Ok(stop_ffmpeg_for_intent(
+                    &mut child,
+                    stderr_task,
+                    ManifestMuxOutcome::Paused,
+                )
+                .await);
+            }
+            crate::video::StopIntent::Discard => {
+                return Ok(stop_ffmpeg_for_intent(
+                    &mut child,
+                    stderr_task,
+                    ManifestMuxOutcome::Aborted,
+                )
+                .await);
+            }
+        },
         status = child.wait() => status.map_err(|error| {
             ManifestRunError::Failed(format!("FFmpeg could not finish: {error}"))
         })?,
@@ -4274,12 +4458,87 @@ async fn run_ffmpeg_with_offsets(
         }
         return Err(mux_failure_error(&log));
     }
-    Ok(true)
+    Ok(ManifestMuxOutcome::Finished)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(unix)]
+    fn fake_ffmpeg(directory: &Path) -> PathBuf {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let path = directory.join("fake-ffmpeg");
+        std::fs::write(&path, "#!/bin/sh\nexec sleep 0.1\n").expect("write fake FFmpeg executable");
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o700))
+            .expect("make fake FFmpeg executable");
+        path
+    }
+
+    #[cfg(unix)]
+    async fn mux_with_stop_intent(intent: Option<crate::video::StopIntent>) -> ManifestMuxOutcome {
+        let directory = tempfile::tempdir().expect("create fake FFmpeg directory");
+        let ffmpeg = fake_ffmpeg(directory.path());
+        let output = directory.path().join("output.mp4");
+        let (sender, mut abort) = tokio::sync::oneshot::channel();
+        match intent {
+            Some(intent) => sender.send(intent).expect("queue FFmpeg stop intent"),
+            None => drop(sender),
+        }
+
+        tokio::time::timeout(
+            Duration::from_secs(3),
+            run_ffmpeg_with_offsets(
+                &ffmpeg,
+                FfmpegInput {
+                    path: Path::new("unused-video-input"),
+                    timestamp_offset: None,
+                },
+                None,
+                InputTimestampPolicy::Normalize,
+                SubtitleOutput::default(),
+                &output,
+                &mut abort,
+            ),
+        )
+        .await
+        .expect("fake FFmpeg must stop within the test deadline")
+        .expect("fake FFmpeg process should be handled")
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn ffmpeg_finish_intent_allows_mux_to_complete() {
+        assert_eq!(
+            mux_with_stop_intent(Some(crate::video::StopIntent::Finish)).await,
+            ManifestMuxOutcome::Finished
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn ffmpeg_pause_intent_stops_mux_and_preserves_staging() {
+        assert_eq!(
+            mux_with_stop_intent(Some(crate::video::StopIntent::Pause)).await,
+            ManifestMuxOutcome::Paused
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn ffmpeg_discard_intent_stops_mux() {
+        assert_eq!(
+            mux_with_stop_intent(Some(crate::video::StopIntent::Discard)).await,
+            ManifestMuxOutcome::Aborted
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn closed_ffmpeg_stop_channel_defaults_to_pause() {
+        assert_eq!(mux_with_stop_intent(None).await, ManifestMuxOutcome::Paused);
+    }
 
     #[test]
     fn ffmpeg_input_rejection_is_eligible_for_extractor_fallback() {

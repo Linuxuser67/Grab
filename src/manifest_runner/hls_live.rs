@@ -1109,11 +1109,14 @@ pub(super) async fn run_live_hls_tracks(
     } else {
         super::LiveHlsOutput::LocalPlaylist
     };
-    let Some(retained_bytes) = video.accumulator.resource_bytes().checked_add(
-        audio
-            .as_ref()
-            .map_or(0, |track| track.accumulator.resource_bytes()),
-    ) else {
+    let audio_resource_bytes = audio
+        .as_ref()
+        .map_or(0, |track| track.accumulator.resource_bytes());
+    let Some(retained_bytes) = video
+        .accumulator
+        .resource_bytes()
+        .checked_add(audio_resource_bytes)
+    else {
         return Ok(LiveHlsCapture::new(
             live_hls_byte_limit_outcome(video.accumulator.segment_count()),
             output,

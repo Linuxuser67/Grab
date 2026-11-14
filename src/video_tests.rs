@@ -10430,47 +10430,109 @@ fn an_hls_leg_honours_a_discard_before_its_commit() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+#[cfg(unix)]
 #[test]
-fn a_closed_stop_receiver_stops_delivery_rather_than_authorising_it() {
-    // `Empty` means "no stop yet" and carrying on is right. `Closed` means
-    // no sender remains to authorise anything, so it must fail closed.
-    let dir = std::env::temp_dir().join(format!("grab-gate-closed-{}", std::process::id()));
+fn a_closed_stop_receiver_preserves_an_in_flight_live_capture() {
+    use std::os::unix::fs::PermissionsExt as _;
+
+    let dir =
+        std::env::temp_dir().join(format!("grab-gate-closed-live-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).unwrap();
-    let fake_yt = fake_ytdlp_live(&dir, false);
+
+    let fake_yt = dir.join("fake-ytdlp-live-closed");
+    std::fs::write(
+        &fake_yt,
+        probe_guard(
+            r#"#!/bin/sh
+out=""
+prev=""
+for a in "$@"; do
+    if [ "$prev" = "-o" ]; then out="$a"; fi
+    prev="$a"
+done
+echo "[Grab];downloading;3;100;100;1000;5"
+printf 'tsbytes' > "$out.part"
+sleep 30 & wait
+"#,
+        ),
+    )
+    .unwrap();
+    std::fs::set_permissions(&fake_yt, std::fs::Permissions::from_mode(0o755)).unwrap();
+
     let fake_ff = fake_ffmpeg_copy(&dir);
     let staging = dir.clone();
     let mut job = live_test_job();
     job.dest = dir.join("v.mp4");
     let dest = job.dest.clone();
-
-    let gate = AttemptGate::new();
+    let gate = std::sync::Arc::new(AttemptGate::new());
     let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
-    // Sender dropped immediately: the receiver observes Closed.
     let (stop_tx, stop_rx) = tokio::sync::oneshot::channel::<StopIntent>();
-    drop(stop_tx);
-    let res = crate::runtime::tokio_rt().block_on(run_live_ytdlp(
-        &fake_yt,
-        &fake_ff,
-        &staging,
-        &job,
-        &gate,
-        "https://youtu.be/grabtest",
-        "h1080",
-        stop_rx,
-        std::time::Duration::from_secs(30),
-        tx,
-        None,
-    ));
+
+    let result = crate::runtime::tokio_rt().block_on(async {
+        let worker_yt = fake_yt.clone();
+        let worker_ff = fake_ff.clone();
+        let worker_staging = staging.clone();
+        let worker_job = job.clone();
+        let worker_gate = std::sync::Arc::clone(&gate);
+        let worker = tokio::spawn(async move {
+            run_live_ytdlp(
+                &worker_yt,
+                &worker_ff,
+                &worker_staging,
+                &worker_job,
+                &worker_gate,
+                "https://youtu.be/grabtest",
+                "h1080",
+                stop_rx,
+                std::time::Duration::from_secs(30),
+                tx,
+                None,
+            )
+            .await
+        });
+
+        let captured_part = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            loop {
+                let mut entries = tokio::fs::read_dir(&staging).await.unwrap();
+                while let Some(entry) = entries.next_entry().await.unwrap() {
+                    let path = entry.path();
+                    let is_capture_part = path
+                        .file_name()
+                        .and_then(|name| name.to_str())
+                        .is_some_and(|name| name.ends_with(".mp4.part"));
+                    if is_capture_part
+                        && tokio::fs::metadata(&path)
+                            .await
+                            .is_ok_and(|metadata| metadata.len() > 0)
+                    {
+                        return path;
+                    }
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            }
+        })
+        .await;
+        if captured_part.is_err() {
+            worker.abort();
+            let _ = worker.await;
+            panic!("the live recorder must write its partial before the sender closes");
+        }
+
+        // Close the manager sender only after the recorder has committed bytes.
+        drop(stop_tx);
+        tokio::time::timeout(std::time::Duration::from_secs(10), worker)
+            .await
+            .expect("the closed sender must not leave the capture running")
+            .expect("the live capture worker must not panic")
+    });
+
     assert!(
-        matches!(res, Ok(None)),
-        "a closed receiver must stop quietly, not deliver and not fail: {res:?}"
+        matches!(result, Ok(Some(size)) if size > 0),
+        "a closed sender must preserve and deliver the in-flight capture: {result:?}"
     );
-    assert!(
-        !gate.was_delivered(),
-        "a closed receiver authorised a delivery: nothing was left to permit it"
-    );
-    assert!(!dest.exists(), "a closed receiver delivered a file");
+    assert!(gate.was_delivered(), "the preserved capture must claim delivery");
+    assert_eq!(std::fs::read(&dest).unwrap(), b"tsbytes");
     let _ = std::fs::remove_dir_all(&dir);
 }
 

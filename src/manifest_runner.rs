@@ -74,6 +74,8 @@ const MAX_RESOURCE_CONNECTIONS: usize = 16;
 const HLS_STATIC_RESOURCE_CONNECTIONS: usize = 1;
 /// Keep only a small diagnostic tail from FFmpeg.
 const FFMPEG_LOG_LINES: usize = 32;
+/// Bound native manifest muxing, including a user-requested Finish while FFmpeg is running.
+const MANIFEST_MUX_TIMEOUT: Duration = Duration::from_secs(3600);
 /// Upper bound on the persisted dynamic DASH segment index.
 const MAX_DASH_LIVE_SEGMENTS: usize = crate::manifest_types::MAX_MANIFEST_SEGMENTS;
 /// Bound for a serialized dynamic DASH resume index.
@@ -4318,6 +4320,52 @@ async fn run_ffmpeg_with_offsets(
     output: &Path,
     abort: &mut tokio::sync::oneshot::Receiver<crate::video::StopIntent>,
 ) -> Result<ManifestMuxOutcome, ManifestRunError> {
+    run_ffmpeg_with_offsets_timeout(
+        ffmpeg,
+        video_input,
+        audio_input,
+        timestamp_policy,
+        subtitles,
+        output,
+        abort,
+        MANIFEST_MUX_TIMEOUT,
+    )
+    .await
+}
+
+async fn wait_for_manifest_mux(
+    child: &mut tokio::process::Child,
+    timeout: Duration,
+) -> Result<std::process::ExitStatus, ManifestRunError> {
+    match tokio::time::timeout(timeout, child.wait()).await {
+        Ok(Ok(status)) => Ok(status),
+        Ok(Err(error)) => {
+            let _ = child.kill().await;
+            let _ = child.wait().await;
+            Err(ManifestRunError::Failed(format!(
+                "FFmpeg could not finish: {error}"
+            )))
+        }
+        Err(_) => {
+            let _ = child.kill().await;
+            let _ = child.wait().await;
+            Err(ManifestRunError::Failed(format!(
+                "FFmpeg finalization exceeded its {timeout:?} time limit"
+            )))
+        }
+    }
+}
+
+async fn run_ffmpeg_with_offsets_timeout(
+    ffmpeg: &Path,
+    video_input: FfmpegInput<'_>,
+    audio_input: Option<FfmpegInput<'_>>,
+    timestamp_policy: InputTimestampPolicy,
+    subtitles: SubtitleOutput<'_>,
+    output: &Path,
+    abort: &mut tokio::sync::oneshot::Receiver<crate::video::StopIntent>,
+    mux_timeout: Duration,
+) -> Result<ManifestMuxOutcome, ManifestRunError> {
     let output_container = manifest_output_container(output)?;
     if output_container == ManifestContainer::Ts && subtitles.input.is_some() && subtitles.embed {
         return Err(mpegts_embedded_subtitle_error());
@@ -4425,9 +4473,9 @@ async fn run_ffmpeg_with_offsets(
     let status = tokio::select! {
         biased;
         stop = &mut *abort => match crate::video::stop_intent_or_pause(stop) {
-            crate::video::StopIntent::Finish => child.wait().await.map_err(|error| {
-                ManifestRunError::Failed(format!("FFmpeg could not finish: {error}"))
-            })?,
+            crate::video::StopIntent::Finish => {
+                wait_for_manifest_mux(&mut child, mux_timeout).await
+            },
             crate::video::StopIntent::Pause => {
                 return Ok(stop_ffmpeg_for_intent(
                     &mut child,
@@ -4445,9 +4493,15 @@ async fn run_ffmpeg_with_offsets(
                 .await);
             }
         },
-        status = child.wait() => status.map_err(|error| {
-            ManifestRunError::Failed(format!("FFmpeg could not finish: {error}"))
-        })?,
+        status = wait_for_manifest_mux(&mut child, mux_timeout) => status,
+    };
+    let status = match status {
+        Ok(status) => status,
+        Err(error) => {
+            stderr_task.abort();
+            let _ = stderr_task.await;
+            return Err(error);
+        }
     };
     let log = stderr_task.await.unwrap_or_default();
     if !status.success() {
@@ -4473,6 +4527,18 @@ mod tests {
         std::fs::write(&path, "#!/bin/sh\nexec sleep 0.1\n").expect("write fake FFmpeg executable");
         std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o700))
             .expect("make fake FFmpeg executable");
+        path
+    }
+
+    #[cfg(unix)]
+    fn fake_ffmpeg_that_hangs(directory: &Path) -> PathBuf {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let path = directory.join("fake-ffmpeg-hang");
+        std::fs::write(&path, "#!/bin/sh\nexec sleep 30\n")
+            .expect("write hanging fake FFmpeg executable");
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o700))
+            .expect("make hanging fake FFmpeg executable");
         path
     }
 
@@ -4514,6 +4580,42 @@ mod tests {
             mux_with_stop_intent(Some(crate::video::StopIntent::Finish)).await,
             ManifestMuxOutcome::Finished
         );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn ffmpeg_finish_intent_is_bounded_when_mux_stalls() {
+        let directory = tempfile::tempdir().expect("create fake FFmpeg directory");
+        let ffmpeg = fake_ffmpeg_that_hangs(directory.path());
+        let output = directory.path().join("output.mp4");
+        let (sender, mut abort) = tokio::sync::oneshot::channel();
+        sender
+            .send(crate::video::StopIntent::Finish)
+            .expect("queue Finish intent");
+
+        let result = tokio::time::timeout(
+            Duration::from_secs(3),
+            run_ffmpeg_with_offsets_timeout(
+                &ffmpeg,
+                FfmpegInput {
+                    path: Path::new("unused-video-input"),
+                    timestamp_offset: None,
+                },
+                None,
+                InputTimestampPolicy::Normalize,
+                SubtitleOutput::default(),
+                &output,
+                &mut abort,
+                Duration::from_millis(50),
+            ),
+        )
+        .await
+        .expect("a stalled mux must not outlive its configured deadline");
+
+        assert!(matches!(
+            result,
+            Err(ManifestRunError::Failed(message)) if message.contains("time limit")
+        ));
     }
 
     #[cfg(unix)]

@@ -2198,5 +2198,4 @@ impl DownloadManager {
             app.send_notification(Some(&format!("dl-{}", item.id())), &n);
         }
     }
-
 }

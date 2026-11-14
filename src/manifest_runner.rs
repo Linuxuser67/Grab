@@ -4278,6 +4278,12 @@ async fn run_ffmpeg(
     ))
 }
 
+#[derive(Clone, Copy)]
+struct ManifestMuxOptions {
+    timestamp_policy: InputTimestampPolicy,
+    timeout: Duration,
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum InputTimestampPolicy {
     /// Preserve the shared source PTS clock across separate HLS renditions.
@@ -4324,11 +4330,13 @@ async fn run_ffmpeg_with_offsets(
         ffmpeg,
         video_input,
         audio_input,
-        timestamp_policy,
+        ManifestMuxOptions {
+            timestamp_policy,
+            timeout: MANIFEST_MUX_TIMEOUT,
+        },
         subtitles,
         output,
         abort,
-        MANIFEST_MUX_TIMEOUT,
     )
     .await
 }
@@ -4360,11 +4368,10 @@ async fn run_ffmpeg_with_offsets_timeout(
     ffmpeg: &Path,
     video_input: FfmpegInput<'_>,
     audio_input: Option<FfmpegInput<'_>>,
-    timestamp_policy: InputTimestampPolicy,
+    options: ManifestMuxOptions,
     subtitles: SubtitleOutput<'_>,
     output: &Path,
     abort: &mut tokio::sync::oneshot::Receiver<crate::video::StopIntent>,
-    mux_timeout: Duration,
 ) -> Result<ManifestMuxOutcome, ManifestRunError> {
     let output_container = manifest_output_container(output)?;
     if output_container == ManifestContainer::Ts && subtitles.input.is_some() && subtitles.embed {
@@ -4376,7 +4383,7 @@ async fn run_ffmpeg_with_offsets_timeout(
         add_hls_staging_options(&mut command);
     }
     command.arg("-hide_banner").arg("-nostdin").arg("-n");
-    if timestamp_policy == InputTimestampPolicy::Preserve {
+    if options.timestamp_policy == InputTimestampPolicy::Preserve {
         command.arg("-copyts");
     }
     if let Some(offset) = video_input.timestamp_offset {
@@ -4474,7 +4481,7 @@ async fn run_ffmpeg_with_offsets_timeout(
         biased;
         stop = &mut *abort => match crate::video::stop_intent_or_pause(stop) {
             crate::video::StopIntent::Finish => {
-                wait_for_manifest_mux(&mut child, mux_timeout).await
+                wait_for_manifest_mux(&mut child, options.timeout).await
             },
             crate::video::StopIntent::Pause => {
                 return Ok(stop_ffmpeg_for_intent(
@@ -4602,11 +4609,13 @@ mod tests {
                     timestamp_offset: None,
                 },
                 None,
-                InputTimestampPolicy::Normalize,
+                ManifestMuxOptions {
+                    timestamp_policy: InputTimestampPolicy::Normalize,
+                    timeout: Duration::from_millis(50),
+                },
                 SubtitleOutput::default(),
                 &output,
                 &mut abort,
-                Duration::from_millis(50),
             ),
         )
         .await

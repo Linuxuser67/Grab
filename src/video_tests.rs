@@ -40,8 +40,7 @@ use crate::video_runner::{
     spawn_recording_watcher,
 };
 use crate::video_spawn::{
-    ProcessGroupGuard, fetch_raw_dump_json, fetch_video_page, reap_child,
-    ytdlp_command,
+    ProcessGroupGuard, fetch_raw_dump_json, fetch_video_page, reap_child, ytdlp_command,
 };
 use crate::video_staging::{
     ResumePlan, ResumeQuery, VideoManifest, clean_staging, collect_sidecar, dest_part_path,

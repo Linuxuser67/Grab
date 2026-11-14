@@ -2228,7 +2228,7 @@ mod extractor_args_compat_tests {
         assert_eq!(
             merge_youtube_extractor_args(None, Some("player_client=default,-web_embedded"),)
                 .as_deref(),
-            Some("player_client=default,-web_embedded"),
+            Some("youtube:player_client=default,-web_embedded"),
         );
     }
 

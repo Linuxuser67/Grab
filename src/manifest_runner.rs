@@ -798,22 +798,24 @@ async fn prepare_manifest_attempt(
     let concurrency = job.connections.clamp(1, MAX_RESOURCE_CONNECTIONS);
     let downloaded = Arc::new(AtomicU64::new(finish_marker_bytes.unwrap_or(0)));
 
-    Ok(ManifestPreparationOutcome::Ready(Box::new(ManifestPreparation {
-        staging,
-        dest_dir,
-        output_part,
-        video_dir,
-        audio_dir,
-        client,
-        tracks,
-        guarded_child_hosts,
-        has_audio,
-        live_hls,
-        live_dash,
-        finish_requested,
-        concurrency,
-        downloaded,
-    })))
+    Ok(ManifestPreparationOutcome::Ready(Box::new(
+        ManifestPreparation {
+            staging,
+            dest_dir,
+            output_part,
+            video_dir,
+            audio_dir,
+            client,
+            tracks,
+            guarded_child_hosts,
+            has_audio,
+            live_hls,
+            live_dash,
+            finish_requested,
+            concurrency,
+            downloaded,
+        },
+    )))
 }
 
 /// Resolved manifest tracks and the network client used to transfer them.

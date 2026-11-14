@@ -2059,14 +2059,15 @@ fn ytdlp_runtime_args(page_url: &str, deno_path: Option<&Path>) -> Vec<String> {
 
 /// YouTube's current web-embedded GVS experiment can return media URLs that
 /// fail with HTTP 403 for cookie-authenticated requests. Use yt-dlp's documented
-/// default client chain without `web_embedded` unless the user supplied custom
-/// extractor arguments; anonymous requests keep yt-dlp's unmodified defaults.
+/// default client chain without `web_embedded` when a cookie source is present
+/// unless the user supplied custom extractor arguments; anonymous requests
+/// keep yt-dlp's unmodified defaults.
 fn youtube_cookie_player_client_args(
     page_url: &str,
-    has_browser_cookies: bool,
+    has_cookie_source: bool,
     has_custom_extractor_args: bool,
 ) -> Option<&'static str> {
-    (is_youtube_url(page_url) && has_browser_cookies && !has_custom_extractor_args)
+    (is_youtube_url(page_url) && has_cookie_source && !has_custom_extractor_args)
         .then_some("youtube:player_client=default,-web_embedded")
 }
 
@@ -2074,7 +2075,8 @@ fn youtube_cookie_player_client_args(
 /// JS runtime pin for YouTube, cookie source, UA, then the page URL behind `--`.
 ///
 /// The web-embedded exclusion above is deliberately limited to cookie-backed
-/// YouTube requests. Explicit extractor arguments always take precedence.
+/// YouTube requests, including browser profiles and staged extension handoffs.
+/// Explicit extractor arguments always take precedence.
 pub(crate) fn ytdlp_identity_args(
     cookies_browser: &str,
     handoff_cookie_file: Option<&std::path::Path>,

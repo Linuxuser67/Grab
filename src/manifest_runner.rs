@@ -727,7 +727,7 @@ async fn prepare_manifest_attempt(
             }
         }
     }
-    let offline_tracks =
+    let mut offline_tracks =
         if (finish_requested || live_marker_exists) && job.source.kind == ManifestKind::Hls {
             restore_local_live_hls_tracks(&job.source.url, &video_dir, &audio_dir).await?
         } else if dash_live_requested && dash_live_state_exists(&video_dir).await? {
@@ -744,11 +744,14 @@ async fn prepare_manifest_attempt(
 
     let resolved = match await_manifest_operation_or_stop(
         abort,
-        resolve_manifest_tracks(job, offline_tracks, finish_requested),
+        resolve_manifest_tracks(job, &mut offline_tracks, finish_requested),
     )
     .await
     {
         Ok(result) => result?,
+        Err(crate::video::StopIntent::Finish) if offline_tracks.is_some() => {
+            resolve_manifest_tracks(job, &mut offline_tracks, true).await?
+        }
         Err(intent) => return Ok(ManifestPreparationOutcome::Stopped(intent)),
     };
     let ResolvedManifestTracks {
@@ -824,7 +827,7 @@ struct ResolvedManifestTracks {
 /// Resolve selected tracks, falling back to committed live resources when the source is gone.
 async fn resolve_manifest_tracks(
     job: &ManifestJob,
-    mut offline_tracks: Option<Tracks>,
+    offline_tracks: &mut Option<Tracks>,
     finish_requested: bool,
 ) -> Result<ResolvedManifestTracks, ManifestRunError> {
     let (client, force_offline) = if finish_requested {

@@ -5454,29 +5454,6 @@ exit 0
     bin
 }
 
-/// Test-only group SIGKILL on drop, so a failing abort test leaves no 600s orphan. Disarm once gone, so no recycled PGID is signalled.
-#[cfg(target_os = "linux")]
-struct GroupCleanup(Option<libc::pid_t>);
-
-#[cfg(target_os = "linux")]
-impl GroupCleanup {
-    fn disarm(&mut self) {
-        self.0 = None;
-    }
-}
-
-#[cfg(target_os = "linux")]
-impl Drop for GroupCleanup {
-    fn drop(&mut self) {
-        if let Some(pid) = self.0 {
-            // SAFETY: constant signal number; ESRCH (already dead) is harmless.
-            unsafe {
-                libc::killpg(pid, libc::SIGKILL);
-            }
-        }
-    }
-}
-
 /// Whether a pid can still execute: in `/proc` and not a zombie. Zombies stay visible until reaped, so pid-existence is the wrong oracle.
 /// Fails closed: only `NotFound` reads as dead, so missing procfs can't fake a kill.
 #[cfg(target_os = "linux")]
@@ -10539,9 +10516,8 @@ sleep 30 & wait
 }
 
 #[cfg(target_os = "linux")]
-#[test]
-fn group_quiescence_waits_until_all_descendants_exit() {
-    use std::os::unix::process::CommandExt as _;
+#[tokio::test]
+async fn group_quiescence_waits_until_all_descendants_exit() {
     let dir = std::env::temp_dir().join(format!("grab-quiesce-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).unwrap();
@@ -10556,13 +10532,17 @@ fn group_quiescence_waits_until_all_descendants_exit() {
         use std::os::unix::fs::PermissionsExt as _;
         std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
     }
-    let mut child = std::process::Command::new(&script)
+
+    let mut command = tokio::process::Command::new(&script);
+    command
         .env("GRAB_TEST_DESCENDANT_PID_FILE", &descendant_pid_file)
-        .process_group(0)
-        .spawn()
-        .expect("recorder process");
-    let pgid = child.id() as i32;
-    let mut cleanup = GroupCleanup(Some(pgid));
+        .process_group(0);
+    let mut child = command.spawn().expect("recorder process");
+    let pgid = child.id().expect("recorder process id") as i32;
+    let mut group_guard = crate::video_spawn::ProcessGroupGuard::new(&child);
+    let group = group_guard
+        .pgid()
+        .expect("retain process-group identity before reaping the leader");
     let descendant = read_pid(&descendant_pid_file);
     assert!(
         still_running(descendant),
@@ -10571,34 +10551,35 @@ fn group_quiescence_waits_until_all_descendants_exit() {
 
     // Start the group wait while the recorder and its descendant are alive.
     // It must remain pending until the group is explicitly killed.
-    let quiescence = crate::runtime::tokio_rt().spawn(await_group_quiescence(pgid));
-    crate::runtime::tokio_rt().block_on(async {
-        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
-        assert!(
-            !quiescence.is_finished(),
-            "quiescence returned while the recorder descendant was still running"
-        );
+    let quiescence = tokio::spawn(crate::video_spawn::await_group_quiescence(&group));
+    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    assert!(
+        !quiescence.is_finished(),
+        "quiescence returned while the recorder descendant was still running"
+    );
 
-        // SAFETY: constant signal number; the process group belongs to this test.
-        unsafe {
-            libc::killpg(pgid, libc::SIGKILL);
-        }
-        let status = child.wait().expect("reap recorder leader after group kill");
-        assert!(
-            !status.success(),
-            "the recorder leader should be killed with its group"
-        );
-        tokio::time::timeout(std::time::Duration::from_secs(5), quiescence)
-            .await
-            .expect("the killed recorder process group should become quiescent")
-            .expect("quiescence task should not panic");
-    });
+    // SAFETY: constant signal number; the process group belongs to this test.
+    let signal_result = unsafe { libc::killpg(pgid, libc::SIGKILL) };
+    assert_eq!(signal_result, 0, "the test-owned group must be terminated");
+    let status = child
+        .wait()
+        .await
+        .expect("reap recorder leader after group kill");
+    assert!(
+        !status.success(),
+        "the recorder leader should be killed with its group"
+    );
+    // The retained ProcessGroupId keeps the leader PID pinned for the wait,
+    // while the guard itself must stop owning a signal once the leader is reaped.
+    group_guard.disarm();
+    tokio::time::timeout(std::time::Duration::from_secs(5), quiescence)
+        .await
+        .expect("the killed recorder process group should become quiescent")
+        .expect("quiescence task should not panic");
     assert!(
         !still_running(descendant),
         "the child process must no longer be able to execute after group quiescence"
     );
-    cleanup.disarm();
-    drop(cleanup);
     let _ = std::fs::remove_dir_all(&dir);
 }
 

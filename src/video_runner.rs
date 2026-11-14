@@ -20,8 +20,9 @@ use crate::video_progress::{
 };
 use crate::video_quality::default_video_filename;
 use crate::video_spawn::{
-    LiveScratchGuard, ProcessGroupGuard, ProcessGroupId, discover_ytdlp_output, drain_stderr_to_tail,
-    fetch_video_page, join_drain, reap_child, spawn_piped_ytdlp, ytdlp_command,
+    LiveScratchGuard, ProcessGroupGuard, ProcessGroupId, discover_ytdlp_output,
+    drain_stderr_to_tail, fetch_video_page, join_drain, reap_child, spawn_piped_ytdlp,
+    ytdlp_command,
 };
 use crate::video_staging::{
     ResumePlan, ResumeQuery, VideoManifest, clean_staging_files, collect_sidecar, dest_part_path,
@@ -2085,7 +2086,8 @@ pub(crate) async fn remux_live_capture(
         let status = match wait_result {
             None => {
                 reap_child(&mut child, &mut group).await;
-                await_ytdlp_group_quiescence_or_abort(pgid.as_ref(), &[logs.abort_handle()]).await?;
+                await_ytdlp_group_quiescence_or_abort(pgid.as_ref(), &[logs.abort_handle()])
+                    .await?;
                 logs.abort();
                 let _ = tokio::fs::remove_file(&partial).await;
                 return Err(VideoError::part_failed("attempt discarded"));
@@ -2093,19 +2095,22 @@ pub(crate) async fn remux_live_capture(
             Some(Ok(Ok(status))) => {
                 // The leader is reaped; wait for any ffmpeg descendants before publishing the remux.
                 group.disarm();
-                await_ytdlp_group_quiescence_or_abort(pgid.as_ref(), &[logs.abort_handle()]).await?;
+                await_ytdlp_group_quiescence_or_abort(pgid.as_ref(), &[logs.abort_handle()])
+                    .await?;
                 status
             }
             Some(Ok(Err(e))) => {
                 reap_child(&mut child, &mut group).await;
-                await_ytdlp_group_quiescence_or_abort(pgid.as_ref(), &[logs.abort_handle()]).await?;
+                await_ytdlp_group_quiescence_or_abort(pgid.as_ref(), &[logs.abort_handle()])
+                    .await?;
                 join_drain(logs).await;
                 let _ = tokio::fs::remove_file(&partial).await;
                 return Err(VideoError::runtime(&e));
             }
             Some(Err(_)) => {
                 reap_child(&mut child, &mut group).await;
-                await_ytdlp_group_quiescence_or_abort(pgid.as_ref(), &[logs.abort_handle()]).await?;
+                await_ytdlp_group_quiescence_or_abort(pgid.as_ref(), &[logs.abort_handle()])
+                    .await?;
                 join_drain(logs).await;
                 let _ = tokio::fs::remove_file(&partial).await;
                 return Err(VideoError::part_failed("timed out finalizing"));
@@ -2233,7 +2238,11 @@ async fn sweep_live_capture(
 
 /// Reap the direct child and wait for its process group to stop writing before
 /// reclaiming capture scratch. Cleanup is constructed only after both waits.
-async fn reap_then_sweep<F, S, G>(reap: F, pgid: Option<&ProcessGroupId>, sweep: S) -> Result<(), VideoError>
+async fn reap_then_sweep<F, S, G>(
+    reap: F,
+    pgid: Option<&ProcessGroupId>,
+    sweep: S,
+) -> Result<(), VideoError>
 where
     F: std::future::Future<Output = ()>,
     S: FnOnce() -> G,

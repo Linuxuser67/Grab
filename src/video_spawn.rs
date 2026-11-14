@@ -830,10 +830,7 @@ pub(crate) async fn await_group_quiescence(group: &ProcessGroupId) -> bool {
 }
 
 #[cfg(target_os = "linux")]
-async fn await_group_quiescence_with_timeout(
-    group: &ProcessGroupId,
-    timeout: Duration,
-) -> bool {
+async fn await_group_quiescence_with_timeout(group: &ProcessGroupId, timeout: Duration) -> bool {
     let mut deadline = tokio::time::Instant::now() + timeout;
     let mut escalated = false;
     let mut delay = Duration::from_millis(20);

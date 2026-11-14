@@ -3382,7 +3382,7 @@ async fn fetch_hls_resource_to_writer(
 
         let mut stream = response.bytes_stream();
         let mut size = 0_u64;
-        let mut response_prefix = Vec::with_capacity(64);
+        let mut response_prefix = Vec::with_capacity(hls_live::LIVE_HLS_RESPONSE_PREFIX_BYTES);
         let mut response_prefix_checked = false;
         let pace_start = Instant::now();
         let mut paced = 0_u64;
@@ -3421,9 +3421,9 @@ async fn fetch_hls_resource_to_writer(
                     .await
                     .map_err(ManifestRunError::Failed)?;
             } else {
-                let prefix_bytes = (64 - response_prefix.len()).min(chunk.len());
+                let prefix_bytes = (hls_live::LIVE_HLS_RESPONSE_PREFIX_BYTES - response_prefix.len()).min(chunk.len());
                 response_prefix.extend_from_slice(&chunk[..prefix_bytes]);
-                if response_prefix.len() == 64 {
+                if response_prefix.len() == hls_live::LIVE_HLS_RESPONSE_PREFIX_BYTES {
                     if hls_live::is_obvious_text_error_body(&response_prefix) {
                         return Err(ManifestRunError::Unsupported(
                             "An HLS fragment response contains a text error body".to_string(),

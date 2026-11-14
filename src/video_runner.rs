@@ -702,6 +702,19 @@ fn phase_playlist(
     tx.send(crate::engine_msg::EngineMsg::Phase(detail)).ok();
 }
 
+/// Race a cancellable pre-download operation against the row's stop intent.
+/// Dropping the operation lets its owned process guards terminate probe children.
+async fn await_video_operation_or_stop<T>(
+    abort: &mut oneshot::Receiver<StopIntent>,
+    operation: impl std::future::Future<Output = T>,
+) -> Result<T, StopIntent> {
+    tokio::select! {
+        biased;
+        intent = &mut *abort => Err(crate::video::stop_intent_or_pause(intent)),
+        result = operation => Ok(result),
+    }
+}
+
 async fn run_video_download_inner(
     mut job: VideoJob,
     gate: &std::sync::Arc<AttemptGate>,
@@ -777,16 +790,30 @@ async fn run_video_download_inner(
     }
     if video.is_none() {
         for attempt in 0u32..3 {
-            match fetch_video_page(
-                &youtube_bin,
-                &job.page_url,
-                &job.cookies_browser,
-                Duration::from_secs(300),
-                job.proxy.as_ref(),
-                job.playlist_item_id.as_deref(),
+            let fetched = match await_video_operation_or_stop(
+                &mut abort,
+                fetch_video_page(
+                    &youtube_bin,
+                    &job.page_url,
+                    &job.cookies_browser,
+                    Duration::from_secs(300),
+                    job.proxy.as_ref(),
+                    job.playlist_item_id.as_deref(),
+                ),
             )
             .await
             {
+                Ok(result) => result,
+                Err(intent) => {
+                    tracing::debug!(
+                        item_id = job.item_id,
+                        ?intent,
+                        "video resolution stopped before media transfer"
+                    );
+                    return Ok(VideoOutcome::Aborted);
+                }
+            };
+            match fetched {
                 Ok(FetchedVideo::Single {
                     video: v,
                     playlist_index: index,
@@ -803,7 +830,15 @@ async fn run_video_download_inner(
                 Ok(FetchedVideo::Playlist(pl)) => return Ok(VideoOutcome::Expand(pl.into())),
                 Err(e) if attempt + 1 < 3 => {
                     tracing::info!("video resolve failed, retrying: {e}");
-                    tokio::time::sleep(Duration::from_secs(u64::from(attempt) + 1)).await;
+                    if await_video_operation_or_stop(
+                        &mut abort,
+                        tokio::time::sleep(Duration::from_secs(u64::from(attempt) + 1)),
+                    )
+                    .await
+                    .is_err()
+                    {
+                        return Ok(VideoOutcome::Aborted);
+                    }
                 }
                 Err(e) => return Err(e),
             }

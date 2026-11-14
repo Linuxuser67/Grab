@@ -2118,7 +2118,10 @@ pub(crate) fn ytdlp_identity_args(
         validated_ytdlp_extractor_args(&crate::settings::AppSettings::new().ytdlp_extractor_args());
     let custom_youtube_args = custom_youtube_extractor_args(extra_args.as_deref());
     let cookie_spec = cookies_browser_spec(cookies_browser);
-    if let Some(extra_args) = extra_args.as_deref().filter(|_| custom_youtube_args.is_none()) {
+    if let Some(extra_args) = extra_args
+        .as_deref()
+        .filter(|_| custom_youtube_args.is_none())
+    {
         args.push("--extractor-args".to_string());
         args.push(extra_args.to_string());
     }
@@ -2219,19 +2222,13 @@ mod extractor_args_compat_tests {
             Some("youtube:lang=en;player_client=default,-web_embedded"),
         );
         assert_eq!(
-            merge_youtube_extractor_args(
-                Some("youtube:player_client=android"),
-                None,
-            )
-            .as_deref(),
+            merge_youtube_extractor_args(Some("youtube:player_client=android"), None,)
+                .as_deref(),
             Some("youtube:player_client=android"),
         );
         assert_eq!(
-            merge_youtube_extractor_args(
-                None,
-                Some("player_client=default,-web_embedded"),
-            )
-            .as_deref(),
+            merge_youtube_extractor_args(None, Some("player_client=default,-web_embedded"),)
+                .as_deref(),
             Some("player_client=default,-web_embedded"),
         );
     }

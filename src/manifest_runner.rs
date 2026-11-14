@@ -1032,15 +1032,9 @@ mod parallel_manifest_track_tests {
         let (audio_abort, _audio_abort_receiver) = tokio::sync::oneshot::channel();
 
         assert!(
-            transfer_parallel_manifest_tracks(
-                video,
-                audio,
-                &mut abort,
-                video_abort,
-                audio_abort,
-            )
-            .await
-            .expect("both track transfers should complete")
+            transfer_parallel_manifest_tracks(video, audio, &mut abort, video_abort, audio_abort,)
+                .await
+                .expect("both track transfers should complete")
         );
     }
 
@@ -1051,30 +1045,28 @@ mod parallel_manifest_track_tests {
         let (audio_abort, audio_abort_receiver) = tokio::sync::oneshot::channel();
         let video = async move {
             assert_eq!(
-                video_abort_receiver.await.expect("video stop should be forwarded"),
+                video_abort_receiver
+                    .await
+                    .expect("video stop should be forwarded"),
                 crate::video::StopIntent::Finish
             );
             Ok(false)
         };
         let audio = async move {
             assert_eq!(
-                audio_abort_receiver.await.expect("audio stop should be forwarded"),
+                audio_abort_receiver
+                    .await
+                    .expect("audio stop should be forwarded"),
                 crate::video::StopIntent::Finish
             );
             Ok(false)
         };
 
-        let transfer = transfer_parallel_manifest_tracks(
-            video,
-            audio,
-            &mut abort,
-            video_abort,
-            audio_abort,
-        );
-        let (result, sent) = tokio::join!(
-            transfer,
-            async move { stop_sender.send(crate::video::StopIntent::Finish) }
-        );
+        let transfer =
+            transfer_parallel_manifest_tracks(video, audio, &mut abort, video_abort, audio_abort);
+        let (result, sent) = tokio::join!(transfer, async move {
+            stop_sender.send(crate::video::StopIntent::Finish)
+        });
 
         assert!(sent.is_ok(), "the manager stop signal should be accepted");
         assert!(!result.expect("stopped track transfers should not fail"));
@@ -1088,20 +1080,17 @@ mod parallel_manifest_track_tests {
         let video = async { Err(ManifestRunError::Failed("video track failed".to_string())) };
         let audio = async move {
             assert_eq!(
-                audio_abort_receiver.await.expect("peer stop should be forwarded"),
+                audio_abort_receiver
+                    .await
+                    .expect("peer stop should be forwarded"),
                 crate::video::StopIntent::Pause
             );
             Ok(false)
         };
 
-        let result = transfer_parallel_manifest_tracks(
-            video,
-            audio,
-            &mut abort,
-            video_abort,
-            audio_abort,
-        )
-        .await;
+        let result =
+            transfer_parallel_manifest_tracks(video, audio, &mut abort, video_abort, audio_abort)
+                .await;
 
         assert!(matches!(
             result,
@@ -1323,10 +1312,8 @@ async fn transfer_static_manifest_tracks(
                     // Share the configured request budget evenly across both active tracks.
                     let (video_connections, audio_connections) =
                         split_manifest_track_connections(concurrency);
-                    let (video_abort_sender, mut video_abort) =
-                        tokio::sync::oneshot::channel();
-                    let (audio_abort_sender, mut audio_abort) =
-                        tokio::sync::oneshot::channel();
+                    let (video_abort_sender, mut video_abort) = tokio::sync::oneshot::channel();
+                    let (audio_abort_sender, mut audio_abort) = tokio::sync::oneshot::channel();
                     let video_transfer = fetch_and_write_dash_track(ManifestDashTrackTransfer {
                         client,
                         staging,

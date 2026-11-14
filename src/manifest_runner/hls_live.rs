@@ -9,20 +9,19 @@ async fn read_local_live_hls_plan(
     directory: &Path,
 ) -> Result<Option<HlsPlan>, ManifestRunError> {
     let path = directory.join("local.m3u8");
-    let metadata = match tokio::fs::symlink_metadata(&path).await {
-        Ok(metadata) => metadata,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
-        Err(error) => {
-            return Err(ManifestRunError::Failed(format!(
+    let Some(metadata) = super::inspect_staged_regular_file(&path)
+        .await
+        .map_err(|error| match error {
+            super::StagedFileError::NotRegularFile => ManifestRunError::Failed(
+                "The staged live HLS playlist is not a regular file".to_string(),
+            ),
+            super::StagedFileError::Io(error) => ManifestRunError::Failed(format!(
                 "Could not inspect the staged live HLS playlist: {error}"
-            )));
-        }
+            )),
+        })?
+    else {
+        return Ok(None);
     };
-    if metadata.file_type().is_symlink() || !metadata.is_file() {
-        return Err(ManifestRunError::Failed(
-            "The staged live HLS playlist is not a regular file".to_string(),
-        ));
-    }
     if metadata.len() > crate::manifest::MAX_HLS_LOCAL_PLAYLIST_BYTES as u64 {
         return Err(ManifestRunError::Failed(
             "The staged live HLS playlist exceeds its size limit".to_string(),
@@ -61,18 +60,19 @@ pub(super) async fn restore_local_live_hls_tracks(
 
 pub(super) async fn read_live_hls_marker(directory: &Path) -> Result<bool, String> {
     let marker = directory.join(LIVE_HLS_MARKER_NAME);
-    let metadata = match tokio::fs::symlink_metadata(&marker).await {
-        Ok(metadata) => metadata,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
-        Err(error) => {
-            return Err(format!(
-                "Could not inspect live HLS staging marker: {error}"
-            ));
-        }
+    let Some(metadata) = super::inspect_staged_regular_file(&marker)
+        .await
+        .map_err(|error| match error {
+            super::StagedFileError::NotRegularFile => {
+                "The live HLS staging marker is not a regular file".to_string()
+            }
+            super::StagedFileError::Io(error) => {
+                format!("Could not inspect live HLS staging marker: {error}")
+            }
+        })?
+    else {
+        return Ok(false);
     };
-    if metadata.file_type().is_symlink() || !metadata.is_file() {
-        return Err("The live HLS staging marker is not a regular file".to_string());
-    }
     if metadata.len() != LIVE_HLS_MARKER_CONTENT.len() as u64 {
         return Err("The live HLS staging marker has an unsupported version".to_string());
     }
@@ -105,18 +105,23 @@ pub(super) async fn load_live_hls_track(
     directory: &Path,
 ) -> Result<LiveHlsTrack, ManifestRunError> {
     let local_playlist = directory.join("local.m3u8");
-    let mut accumulator = match tokio::fs::symlink_metadata(&local_playlist).await {
-        Ok(metadata) if metadata.file_type().is_symlink() || !metadata.is_file() => {
-            return Err(ManifestRunError::Failed(
+    let metadata = super::inspect_staged_regular_file(&local_playlist)
+        .await
+        .map_err(|error| match error {
+            super::StagedFileError::NotRegularFile => ManifestRunError::Failed(
                 "The staged live HLS playlist is not a regular file".to_string(),
-            ));
-        }
-        Ok(metadata) if metadata.len() > crate::manifest::MAX_HLS_LOCAL_PLAYLIST_BYTES as u64 => {
+            ),
+            super::StagedFileError::Io(error) => ManifestRunError::Failed(format!(
+                "Could not inspect the staged live HLS recording: {error}"
+            )),
+        })?;
+    let mut accumulator = match metadata {
+        Some(metadata) if metadata.len() > crate::manifest::MAX_HLS_LOCAL_PLAYLIST_BYTES as u64 => {
             return Err(ManifestRunError::Failed(
                 "The staged live HLS playlist exceeds its size limit".to_string(),
             ));
         }
-        Ok(_) => {
+        Some(_) => {
             let bytes = tokio::fs::read(&local_playlist).await.map_err(|error| {
                 ManifestRunError::Failed(format!(
                     "Could not read the staged live HLS recording: {error}"
@@ -128,12 +133,7 @@ pub(super) async fn load_live_hls_track(
                 ))
             })?
         }
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => HlsLiveAccumulator::new(),
-        Err(error) => {
-            return Err(ManifestRunError::Failed(format!(
-                "Could not inspect the staged live HLS recording: {error}"
-            )));
-        }
+        None => HlsLiveAccumulator::new(),
     };
 
     let current_resources: std::collections::HashMap<&str, &HlsResource> = plan
@@ -148,20 +148,17 @@ pub(super) async fn load_live_hls_track(
     let mut total_resource_bytes = 0_u64;
     for filename in restored_names {
         let path = directory.join(&filename);
-        let metadata = match tokio::fs::symlink_metadata(&path).await {
-            Ok(metadata) if metadata.file_type().is_symlink() || !metadata.is_file() => {
-                return Err(ManifestRunError::Failed(
-                    "A staged live HLS resource is not a regular file".to_string(),
-                ));
-            }
-            Ok(metadata) => Some(metadata),
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
-            Err(error) => {
-                return Err(ManifestRunError::Failed(format!(
-                    "Could not inspect a staged live HLS resource: {error}"
-                )));
-            }
-        };
+        let metadata =
+            super::inspect_staged_regular_file(&path)
+                .await
+                .map_err(|error| match error {
+                    super::StagedFileError::NotRegularFile => ManifestRunError::Failed(
+                        "A staged live HLS resource is not a regular file".to_string(),
+                    ),
+                    super::StagedFileError::Io(error) => ManifestRunError::Failed(format!(
+                        "Could not inspect a staged live HLS resource: {error}"
+                    )),
+                })?;
         let expected = current_resources.get(filename.as_str()).copied();
         let is_key = accumulator.is_key_resource(&filename)
             || expected.is_some_and(|resource| resource.kind == HlsResourceKind::Key);
@@ -243,11 +240,10 @@ async fn missing_hls_resources(
     let mut missing = Vec::new();
     for resource in resources {
         let path = directory.join(&resource.filename);
-        match tokio::fs::symlink_metadata(&path).await {
-            Ok(metadata) if metadata.file_type().is_file() => {
-                let size = metadata.len();
+        match super::inspect_staged_regular_file(&path).await {
+            Ok(Some(metadata)) => {
                 let valid_size = super::staged_resource_size_ok(
-                    size,
+                    metadata.len(),
                     resource.range,
                     resource.kind == HlsResourceKind::Key,
                 );
@@ -259,15 +255,13 @@ async fn missing_hls_resources(
                 })?;
                 missing.push(resource.clone());
             }
-            Ok(_) => {
+            Ok(None) => missing.push(resource.clone()),
+            Err(super::StagedFileError::NotRegularFile) => {
                 return Err(ManifestRunError::Unsupported(
                     "A staged HLS resource path is not a regular file".to_string(),
                 ));
             }
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-                missing.push(resource.clone());
-            }
-            Err(error) => {
+            Err(super::StagedFileError::Io(error)) => {
                 return Err(manifest_storage_error(
                     "Could not inspect a staged HLS resource",
                     error,
@@ -285,14 +279,19 @@ async fn fetched_hls_resource_bytes(
     let mut total = 0_u64;
     for resource in resources {
         let path = directory.join(&resource.filename);
-        let metadata = tokio::fs::symlink_metadata(&path).await.map_err(|error| {
-            manifest_storage_error("Could not inspect a fetched live HLS resource", error)
-        })?;
-        if metadata.file_type().is_symlink() || !metadata.is_file() {
-            return Err(ManifestRunError::Unsupported(
-                "A fetched live HLS resource is not a regular file".to_string(),
-            ));
-        }
+        let metadata = super::inspect_staged_regular_file(&path)
+            .await
+            .map_err(|error| match error {
+                super::StagedFileError::NotRegularFile => ManifestRunError::Unsupported(
+                    "A fetched live HLS resource is not a regular file".to_string(),
+                ),
+                super::StagedFileError::Io(error) => {
+                    manifest_storage_error("Could not inspect a fetched live HLS resource", error)
+                }
+            })?
+            .ok_or_else(|| {
+                ManifestRunError::Failed("A fetched live HLS resource is missing".to_string())
+            })?;
         let size = metadata.len();
         if !super::staged_resource_size_ok(
             size,

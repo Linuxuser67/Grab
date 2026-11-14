@@ -1904,18 +1904,16 @@ async fn finalize_manifest_download(
             let path = staging
                 .join("subtitles")
                 .join(TrackKind::Subtitles.part_filename(TrackFileFormat::Vtt));
-            match tokio::fs::symlink_metadata(&path).await {
-                Ok(metadata) if !metadata.file_type().is_symlink() && metadata.is_file() => {
-                    Some(path)
-                }
-                Ok(_) => {
+            match inspect_staged_regular_file(&path).await {
+                Ok(Some(_)) => Some(path),
+                Ok(None) => None,
+                Err(StagedFileError::NotRegularFile) => {
                     return Err(ManifestRunError::Failed(
                         "The normalized DASH subtitle staging path is not a regular file"
                             .to_string(),
                     ));
                 }
-                Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
-                Err(error) => {
+                Err(StagedFileError::Io(error)) => {
                     return Err(ManifestRunError::Failed(format!(
                         "Could not inspect normalized DASH subtitle staging: {error}"
                     )));
@@ -2350,17 +2348,43 @@ const LIVE_HLS_MARKER_CONTENT: &[u8] = b"grab-live-hls-v1\n";
 const LIVE_FINISH_MARKER_NAME: &str = "live-capture.finished";
 const LIVE_FINISH_MARKER_VERSION: &str = "grab-live-finish-v1";
 
+#[derive(Debug)]
+pub(super) enum StagedFileError {
+    NotRegularFile,
+    Io(std::io::Error),
+}
+
+pub(super) async fn inspect_staged_regular_file(
+    path: &Path,
+) -> Result<Option<std::fs::Metadata>, StagedFileError> {
+    match tokio::fs::symlink_metadata(path).await {
+        Ok(metadata) if metadata.file_type().is_symlink() || !metadata.is_file() => {
+            Err(StagedFileError::NotRegularFile)
+        }
+        Ok(metadata) => Ok(Some(metadata)),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(StagedFileError::Io(error)),
+    }
+}
+
 /// Read the durable finish intent and committed-byte count for a live capture.
 async fn read_live_finish_marker(directory: &Path) -> Result<Option<u64>, String> {
     let marker = directory.join(LIVE_FINISH_MARKER_NAME);
-    let metadata = match tokio::fs::symlink_metadata(&marker).await {
-        Ok(metadata) => metadata,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
-        Err(error) => {
-            return Err(format!("Could not inspect live finish marker: {error}"));
-        }
+    let Some(metadata) =
+        inspect_staged_regular_file(&marker)
+            .await
+            .map_err(|error| match error {
+                StagedFileError::NotRegularFile => {
+                    "The live finish marker is not a supported regular file".to_string()
+                }
+                StagedFileError::Io(error) => {
+                    format!("Could not inspect live finish marker: {error}")
+                }
+            })?
+    else {
+        return Ok(None);
     };
-    if metadata.file_type().is_symlink() || !metadata.is_file() || metadata.len() > 128 {
+    if metadata.len() > 128 {
         return Err("The live finish marker is not a supported regular file".to_string());
     }
     let contents = tokio::fs::read(&marker)
@@ -2980,21 +3004,25 @@ async fn fetch_resource_once(
         ));
     }
     let target = directory.join(&resource.filename);
-    if let Ok(metadata) = tokio::fs::symlink_metadata(&target).await {
-        if metadata.file_type().is_symlink() || !metadata.is_file() {
+    match inspect_staged_regular_file(&target).await {
+        Ok(Some(metadata)) => {
+            if staged_resource_size_ok(metadata.len(), resource.range, resource.key) {
+                let size = metadata.len();
+                let total = reserve_download_bytes(downloaded, size)?;
+                tx.send(progress_message(total)).ok();
+                return Ok(size);
+            }
+            tokio::fs::remove_file(&target).await.map_err(|error| {
+                manifest_storage_error("Could not reset an incomplete manifest resource", error)
+            })?;
+        }
+        Ok(None) => {}
+        Err(StagedFileError::NotRegularFile) => {
             return Err(ManifestRunError::Failed(
                 "A manifest resource path is not a regular file".to_string(),
             ));
         }
-        if staged_resource_size_ok(metadata.len(), resource.range, resource.key) {
-            let size = metadata.len();
-            let total = reserve_download_bytes(downloaded, size)?;
-            tx.send(progress_message(total)).ok();
-            return Ok(size);
-        }
-        tokio::fs::remove_file(&target).await.map_err(|error| {
-            manifest_storage_error("Could not reset an incomplete manifest resource", error)
-        })?;
+        Err(StagedFileError::Io(_)) => {}
     }
 
     let part = directory.join(format!("{}.part", resource.filename));
@@ -5722,6 +5750,43 @@ mod integration_tests;
 #[cfg(test)]
 #[path = "manifest_runner_sample_aes_tests.rs"]
 mod sample_aes_tests;
+
+#[cfg(test)]
+mod staged_file_inspection_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn staged_file_inspection_distinguishes_missing_regular_and_nonregular_paths() {
+        let directory = tempfile::tempdir().expect("create staging directory");
+        let missing = directory.path().join("missing");
+        assert!(
+            inspect_staged_regular_file(&missing)
+                .await
+                .expect("inspect missing staged file")
+                .is_none()
+        );
+
+        let regular = directory.path().join("regular");
+        tokio::fs::write(&regular, b"staged")
+            .await
+            .expect("write regular staged file");
+        assert!(
+            inspect_staged_regular_file(&regular)
+                .await
+                .expect("inspect regular staged file")
+                .is_some()
+        );
+
+        let nonregular = directory.path().join("directory");
+        tokio::fs::create_dir(&nonregular)
+            .await
+            .expect("create non-regular staged path");
+        assert!(matches!(
+            inspect_staged_regular_file(&nonregular).await,
+            Err(StagedFileError::NotRegularFile)
+        ));
+    }
+}
 
 #[cfg(test)]
 mod staged_resource_size_tests {

@@ -2737,10 +2737,10 @@ pub(crate) fn live_info_json_args(path: Option<&std::path::Path>) -> Vec<String>
 }
 
 /// Resolve a live capture stop while preserving media when the sender disappears.
-fn live_capture_abort_result<E>(result: Result<StopIntent, E>) -> (bool, bool) {
+fn live_capture_abort_result<E>(result: Result<crate::video::StopIntent, E>) -> (bool, bool) {
     match crate::video::stop_intent_or_pause(result) {
-        StopIntent::Pause | StopIntent::Finish => (true, false),
-        StopIntent::Discard => (true, true),
+        crate::video::StopIntent::Pause | crate::video::StopIntent::Finish => (true, false),
+        crate::video::StopIntent::Discard => (true, true),
     }
 }
 

@@ -1036,7 +1036,7 @@ fn closed_live_capture_stop_channel_preserves_recorded_media() {
 #[test]
 fn explicit_live_capture_discard_does_not_adopt_recorded_media() {
     assert_eq!(
-        live_capture_abort_result(Ok(StopIntent::Discard)),
+        live_capture_abort_result(Ok(crate::video::StopIntent::Discard)),
         (true, true)
     );
 }
@@ -1044,11 +1044,11 @@ fn explicit_live_capture_discard_does_not_adopt_recorded_media() {
 #[test]
 fn live_capture_pause_and_finish_preserve_recorded_media() {
     assert_eq!(
-        live_capture_abort_result(Ok(StopIntent::Pause)),
+        live_capture_abort_result(Ok(crate::video::StopIntent::Pause)),
         (true, false)
     );
     assert_eq!(
-        live_capture_abort_result(Ok(StopIntent::Finish)),
+        live_capture_abort_result(Ok(crate::video::StopIntent::Finish)),
         (true, false)
     );
 }

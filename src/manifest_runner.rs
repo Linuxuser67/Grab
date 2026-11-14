@@ -4255,22 +4255,25 @@ async fn run_ffmpeg(
     output: &Path,
     abort: &mut tokio::sync::oneshot::Receiver<crate::video::StopIntent>,
 ) -> Result<bool, ManifestRunError> {
-    run_ffmpeg_with_offsets(
-        ffmpeg,
-        FfmpegInput {
-            path: video_input,
-            timestamp_offset: None,
-        },
-        audio_input.map(|path| FfmpegInput {
-            path,
-            timestamp_offset: None,
-        }),
-        InputTimestampPolicy::Normalize,
-        subtitles,
-        output,
-        abort,
-    )
-    .await
+    Ok(matches!(
+        run_ffmpeg_with_offsets(
+            ffmpeg,
+            FfmpegInput {
+                path: video_input,
+                timestamp_offset: None,
+            },
+            audio_input.map(|path| FfmpegInput {
+                path,
+                timestamp_offset: None,
+            }),
+            InputTimestampPolicy::Normalize,
+            subtitles,
+            output,
+            abort,
+        )
+        .await?,
+        ManifestMuxOutcome::Finished
+    ))
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]

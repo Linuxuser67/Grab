@@ -126,7 +126,9 @@ pub(crate) async fn fetch_raw_dump_json(
         tokio::spawn(async move { read_bounded(stream, limit).await })
     }
     let out_task = drain(stdout, MAX_STDOUT_BYTES);
+    let _out_drain = AbortOnDrop(out_task.abort_handle());
     let err_task = drain(stderr, MAX_STDERR_BYTES);
+    let _err_drain = AbortOnDrop(err_task.abort_handle());
     let status = match tokio::time::timeout(timeout, child.wait()).await {
         Ok(Ok(status)) => {
             group.disarm();

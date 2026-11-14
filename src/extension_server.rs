@@ -545,8 +545,16 @@ fn serialize_handoff_cookies(url: &str, cookies: &[Cookie]) -> Option<(String, u
     for cookie in cookies {
         // Netscape fields are tab-delimited; strip all Unicode control chars,
         // not only ASCII tabs/newlines, before serializing.
-        let name: String = cookie.name.chars().filter(|character| !character.is_control()).collect();
-        let value: String = cookie.value.chars().filter(|character| !character.is_control()).collect();
+        let name: String = cookie
+            .name
+            .chars()
+            .filter(|character| !character.is_control())
+            .collect();
+        let value: String = cookie
+            .value
+            .chars()
+            .filter(|character| !character.is_control())
+            .collect();
         if name.is_empty() {
             continue;
         }
@@ -582,7 +590,10 @@ fn serialize_handoff_cookies(url: &str, cookies: &[Cookie]) -> Option<(String, u
         } else {
             "FALSE"
         };
-        let expiry = cookie.expiration_date.map(|timestamp| timestamp as i64).unwrap_or(0);
+        let expiry = cookie
+            .expiration_date
+            .map(|timestamp| timestamp as i64)
+            .unwrap_or(0);
         content.push_str(&format!(
             "{domain}\t{tailmatch}\t{path}\t{secure}\t{expiry}\t{name}\t{value}\n"
         ));
@@ -596,7 +607,9 @@ struct PendingCookieFile(Option<PathBuf>);
 
 impl PendingCookieFile {
     fn into_path(mut self) -> PathBuf {
-        self.0.take().expect("pending cookie file retains its path until transferred")
+        self.0
+            .take()
+            .expect("pending cookie file retains its path until transferred")
     }
 }
 

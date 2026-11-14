@@ -40,7 +40,7 @@ use crate::video_runner::{
     spawn_recording_watcher,
 };
 use crate::video_spawn::{
-    ProcessGroupGuard, await_group_quiescence, fetch_raw_dump_json, fetch_video_page, reap_child,
+    ProcessGroupGuard, fetch_raw_dump_json, fetch_video_page, reap_child,
     ytdlp_command,
 };
 use crate::video_staging::{
@@ -5452,6 +5452,31 @@ exit 0
         std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755)).unwrap();
     }
     bin
+}
+
+/// Test-only group SIGKILL on drop, so a failing abort test leaves no long-running orphan.
+/// Disarm once the group is gone, so no recycled PGID is signalled.
+#[cfg(target_os = "linux")]
+struct GroupCleanup(Option<libc::pid_t>);
+
+#[cfg(target_os = "linux")]
+impl GroupCleanup {
+    fn disarm(&mut self) {
+        self.0 = None;
+    }
+}
+
+#[cfg(target_os = "linux")]
+impl Drop for GroupCleanup {
+    fn drop(&mut self) {
+        if let Some(pid) = self.0 {
+            // SAFETY: this helper is constructed only with the leader PID of
+            // a process group spawned by the current test.
+            unsafe {
+                libc::killpg(pid, libc::SIGKILL);
+            }
+        }
+    }
 }
 
 /// Whether a pid can still execute: in `/proc` and not a zombie. Zombies stay visible until reaped, so pid-existence is the wrong oracle.

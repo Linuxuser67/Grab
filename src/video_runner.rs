@@ -407,6 +407,7 @@ async fn run_video_playlist_download_inner(
     crate::video_spawn::apply_guarded_proxy_env(&mut cmd, guarded_proxy.as_deref());
     let (mut child, stdout, stderr) = spawn_piped_ytdlp(cmd)?;
     let mut group = ProcessGroupGuard::new(&child);
+    let pgid = group.pgid();
 
     let last_progress = Arc::new(std::sync::Mutex::new(std::time::Instant::now()));
     let last_progress_reader = Arc::clone(&last_progress);
@@ -579,6 +580,7 @@ async fn run_video_playlist_download_inner(
             biased;
             intent = &mut abort => {
                 reap_child(&mut child, &mut group).await;
+                await_ytdlp_group_quiescence(pgid).await;
                 progress.abort();
                 logs.abort();
                 let _intent = intent.ok();
@@ -587,10 +589,12 @@ async fn run_video_playlist_download_inner(
             waited = await_child(&mut child, merging_snapshot, remaining, MERGE_WALL_CLOCK) => match waited {
                 Ok(Ok(status)) => {
                     group.disarm();
+                    await_ytdlp_group_quiescence(pgid).await;
                     break status;
                 }
                 Ok(Err(error)) => {
                     reap_child(&mut child, &mut group).await;
+                    await_ytdlp_group_quiescence(pgid).await;
                     progress.abort();
                     logs.abort();
                     return Err(VideoError::runtime(&error));

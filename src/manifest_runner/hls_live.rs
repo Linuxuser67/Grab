@@ -1088,7 +1088,9 @@ pub(super) async fn run_live_hls_tracks(
             destination: destination.to_path_buf(),
             item_id,
             track: crate::manifest_destination::TrackKind::Video,
-            filename: "video-track.ts",
+            filename: crate::manifest_destination::TrackKind::Video.part_filename(
+                crate::manifest_destination::TrackFileFormat::Ts,
+            ),
         });
         if let Some(track) = audio.as_mut() {
             track.destination_part = Some(LiveHlsDestination {
@@ -1096,7 +1098,9 @@ pub(super) async fn run_live_hls_tracks(
                 destination: destination.to_path_buf(),
                 item_id,
                 track: crate::manifest_destination::TrackKind::Audio,
-                filename: "audio-track.ts",
+                filename: crate::manifest_destination::TrackKind::Audio.part_filename(
+                    crate::manifest_destination::TrackFileFormat::Ts,
+                ),
             });
         }
     }

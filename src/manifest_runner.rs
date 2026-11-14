@@ -5677,7 +5677,9 @@ mod staged_file_atomic_tests {
         .expect("atomically replace playlist");
 
         assert_eq!(
-            tokio::fs::read(&target).await.expect("read published playlist"),
+            tokio::fs::read(&target)
+                .await
+                .expect("read published playlist"),
             b"new playlist"
         );
         assert!(
@@ -5709,7 +5711,9 @@ mod staged_file_atomic_tests {
             "no-replace publication must reject an existing target"
         );
         assert_eq!(
-            tokio::fs::read(&target).await.expect("read existing marker"),
+            tokio::fs::read(&target)
+                .await
+                .expect("read existing marker"),
             b"existing marker"
         );
         assert!(

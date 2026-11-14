@@ -20,6 +20,7 @@ use crate::manifest::{
     HlsLiveAccumulator, HlsPlan, HlsResource, HlsResourceKind, ManifestByteRange,
     dash::{DashPresentation, DashRepresentationPlan, DashResource, DashResourceKind},
 };
+use crate::manifest_destination::{TrackFileFormat, TrackKind};
 use crate::manifest_intake::ManifestLookup;
 #[cfg(test)]
 use crate::manifest_intake::NativeManifest;
@@ -427,7 +428,7 @@ struct LiveHlsDestination {
     staging: PathBuf,
     destination: PathBuf,
     item_id: u64,
-    track: crate::manifest_destination::TrackKind,
+    track: TrackKind,
     filename: &'static str,
 }
 
@@ -516,7 +517,7 @@ impl DashLiveState {
 struct DashLiveDestination {
     destination: PathBuf,
     item_id: u64,
-    track: crate::manifest_destination::TrackKind,
+    track: TrackKind,
 }
 
 #[derive(Debug)]
@@ -943,10 +944,10 @@ async fn transfer_static_manifest_tracks(
                     staging,
                     plan: video.as_ref(),
                     directory: video_dir,
-                    filename: "video-track.ts",
+                    filename: TrackKind::Video.part_filename(TrackFileFormat::Ts),
                     destination,
                     item_id,
-                    track: crate::manifest_destination::TrackKind::Video,
+                    track: TrackKind::Video,
                     tx,
                     downloaded,
                     abort,
@@ -961,10 +962,10 @@ async fn transfer_static_manifest_tracks(
                         staging,
                         plan: audio.as_ref(),
                         directory: audio_dir,
-                        filename: "audio-track.ts",
+                        filename: TrackKind::Audio.part_filename(TrackFileFormat::Ts),
                         destination,
                         item_id,
-                        track: crate::manifest_destination::TrackKind::Audio,
+                        track: TrackKind::Audio,
                         tx,
                         downloaded,
                         abort,
@@ -1048,10 +1049,10 @@ async fn transfer_static_manifest_tracks(
                 staging,
                 plan: video.as_ref(),
                 directory: video_dir,
-                filename: "video-track.mp4",
+                filename: TrackKind::Video.part_filename(TrackFileFormat::Mp4),
                 destination,
                 item_id,
-                track: crate::manifest_destination::TrackKind::Video,
+                track: TrackKind::Video,
                 connections: concurrency,
                 tx,
                 downloaded,
@@ -1067,10 +1068,10 @@ async fn transfer_static_manifest_tracks(
                     staging,
                     plan: audio,
                     directory: audio_dir,
-                    filename: "audio-track.mp4",
+                    filename: TrackKind::Audio.part_filename(TrackFileFormat::Mp4),
                     destination,
                     item_id,
-                    track: crate::manifest_destination::TrackKind::Audio,
+                    track: TrackKind::Audio,
                     connections: concurrency,
                     tx,
                     downloaded,
@@ -1111,10 +1112,10 @@ async fn transfer_static_manifest_tracks(
                     staging,
                     plan: subtitle,
                     directory: &subtitle_dir,
-                    filename: "subtitle-track.mp4",
+                    filename: TrackKind::Subtitles.part_filename(TrackFileFormat::Mp4),
                     destination,
                     item_id,
-                    track: crate::manifest_destination::TrackKind::Subtitles,
+                    track: TrackKind::Subtitles,
                     connections: concurrency,
                     tx,
                     downloaded,
@@ -1129,14 +1130,16 @@ async fn transfer_static_manifest_tracks(
                         staging.to_path_buf(),
                         destination.to_path_buf(),
                         item_id,
-                        crate::manifest_destination::TrackKind::Subtitles,
+                        TrackKind::Subtitles,
                     )
                     .await
                     .map_err(ManifestRunError::Failed)?
                 } else {
-                    subtitle_dir.join("subtitle-track.mp4")
+                    subtitle_dir.join(TrackKind::Subtitles.part_filename(TrackFileFormat::Mp4))
                 };
-                let output = staging.join("subtitles/subtitle-track.vtt");
+                let output = staging
+                    .join("subtitles")
+                    .join(TrackKind::Subtitles.part_filename(TrackFileFormat::Vtt));
                 match tokio::task::spawn_blocking(move || extractor(&source, &output, &codecs))
                     .await
                 {
@@ -1203,7 +1206,7 @@ async fn cleanup_manifest_destination_part_if_present(
     destination: &Path,
     item_id: u64,
     track_directory: &Path,
-    track: crate::manifest_destination::TrackKind,
+    track: TrackKind,
     filename: &str,
 ) -> Result<(), ManifestRunError> {
     let part = crate::manifest_destination::part_path_async(
@@ -1260,8 +1263,8 @@ async fn cleanup_static_destination_parts_after_fallback(
                 destination,
                 item_id,
                 video_dir,
-                crate::manifest_destination::TrackKind::Video,
-                "video-track.ts",
+                TrackKind::Video,
+                TrackKind::Video.part_filename(TrackFileFormat::Ts),
             )
             .await?;
             if audio.is_some() {
@@ -1270,8 +1273,8 @@ async fn cleanup_static_destination_parts_after_fallback(
                     destination,
                     item_id,
                     audio_dir,
-                    crate::manifest_destination::TrackKind::Audio,
-                    "audio-track.ts",
+                    TrackKind::Audio,
+                    TrackKind::Audio.part_filename(TrackFileFormat::Ts),
                 )
                 .await?;
             }
@@ -1284,8 +1287,8 @@ async fn cleanup_static_destination_parts_after_fallback(
                 destination,
                 item_id,
                 video_dir,
-                crate::manifest_destination::TrackKind::Video,
-                "video-track.mp4",
+                TrackKind::Video,
+                TrackKind::Video.part_filename(TrackFileFormat::Mp4),
             )
             .await?;
             if audio.is_some() {
@@ -1294,8 +1297,8 @@ async fn cleanup_static_destination_parts_after_fallback(
                     destination,
                     item_id,
                     audio_dir,
-                    crate::manifest_destination::TrackKind::Audio,
-                    "audio-track.mp4",
+                    TrackKind::Audio,
+                    TrackKind::Audio.part_filename(TrackFileFormat::Mp4),
                 )
                 .await?;
             }
@@ -1306,8 +1309,8 @@ async fn cleanup_static_destination_parts_after_fallback(
                     destination,
                     item_id,
                     &subtitle_directory,
-                    crate::manifest_destination::TrackKind::Subtitles,
-                    "subtitle-track.mp4",
+                    TrackKind::Subtitles,
+                    TrackKind::Subtitles.part_filename(TrackFileFormat::Mp4),
                 )
                 .await?;
             }
@@ -1387,8 +1390,8 @@ async fn prepare_live_hls_finalization(
                         destination,
                         item_id,
                         audio_dir,
-                        crate::manifest_destination::TrackKind::Audio,
-                        "audio-track.ts",
+                        TrackKind::Audio,
+                        TrackKind::Audio.part_filename(TrackFileFormat::Ts),
                     )
                     .await?;
                 }
@@ -1418,8 +1421,8 @@ async fn prepare_live_hls_finalization(
             destination,
             item_id,
             audio_dir,
-            crate::manifest_destination::TrackKind::Audio,
-            "audio-track.ts",
+            TrackKind::Audio,
+            TrackKind::Audio.part_filename(TrackFileFormat::Ts),
         )
         .await?;
     }
@@ -1569,7 +1572,7 @@ async fn prepare_live_dash_finalization(
             staging.to_path_buf(),
             dest_dir.to_path_buf(),
             item_id,
-            crate::manifest_destination::TrackKind::Audio,
+            TrackKind::Audio,
         )
         .await
         .map_err(ManifestRunError::Failed)?;
@@ -1858,7 +1861,7 @@ async fn finalize_manifest_download(
             staging.to_path_buf(),
             job.dest.clone(),
             job.item_id,
-            crate::manifest_destination::TrackKind::Video,
+            TrackKind::Video,
         )
         .await
         .map_err(ManifestRunError::Failed)?
@@ -1866,7 +1869,7 @@ async fn finalize_manifest_download(
         match &tracks {
             Tracks::Hls { .. } => video_dir.join("local.m3u8"),
             Tracks::Dash { .. } | Tracks::DashLiveOffline { .. } => {
-                video_dir.join("video-track.mp4")
+                video_dir.join(TrackKind::Video.part_filename(TrackFileFormat::Mp4))
             }
         }
     };
@@ -1876,14 +1879,16 @@ async fn finalize_manifest_download(
                 staging.to_path_buf(),
                 job.dest.clone(),
                 job.item_id,
-                crate::manifest_destination::TrackKind::Audio,
+                TrackKind::Audio,
             )
             .await
             .map_err(ManifestRunError::Failed)?
         } else {
             match job.source.kind {
                 ManifestKind::Hls => audio_dir.join("local.m3u8"),
-                ManifestKind::Dash => audio_dir.join("audio-track.mp4"),
+                ManifestKind::Dash => {
+                    audio_dir.join(TrackKind::Audio.part_filename(TrackFileFormat::Mp4))
+                }
             }
         })
     } else {
@@ -1896,7 +1901,9 @@ async fn finalize_manifest_download(
         Tracks::Dash {
             subtitle: Some(_), ..
         } => {
-            let path = staging.join("subtitles/subtitle-track.vtt");
+            let path = staging
+                .join("subtitles")
+                .join(TrackKind::Subtitles.part_filename(TrackFileFormat::Vtt));
             match tokio::fs::symlink_metadata(&path).await {
                 Ok(metadata) if !metadata.file_type().is_symlink() && metadata.is_file() => {
                     Some(path)
@@ -1919,10 +1926,10 @@ async fn finalize_manifest_download(
     };
     if destination_parts {
         for (track, should_verify) in [
-            (crate::manifest_destination::TrackKind::Video, true),
-            (crate::manifest_destination::TrackKind::Audio, has_audio),
+            (TrackKind::Video, true),
+            (TrackKind::Audio, has_audio),
             (
-                crate::manifest_destination::TrackKind::Subtitles,
+                TrackKind::Subtitles,
                 matches!(
                     &tracks,
                     Tracks::Dash {
@@ -2064,9 +2071,15 @@ async fn finalize_manifest_download(
     let mut destination_parts_cleaned = true;
     if destination_parts {
         let (video_filename, audio_filename) = if matches!(&tracks, Tracks::Hls { .. }) {
-            ("video-track.ts", "audio-track.ts")
+            (
+                TrackKind::Video.part_filename(TrackFileFormat::Ts),
+                TrackKind::Audio.part_filename(TrackFileFormat::Ts),
+            )
         } else {
-            ("video-track.mp4", "audio-track.mp4")
+            (
+                TrackKind::Video.part_filename(TrackFileFormat::Mp4),
+                TrackKind::Audio.part_filename(TrackFileFormat::Mp4),
+            )
         };
         let has_destination_subtitles = matches!(
             &tracks,
@@ -2077,21 +2090,11 @@ async fn finalize_manifest_download(
         );
         let subtitle_directory = staging.join("subtitles");
         for (track, filename, track_directory, should_clean) in [
+            (TrackKind::Video, video_filename, video_dir, true),
+            (TrackKind::Audio, audio_filename, audio_dir, has_audio),
             (
-                crate::manifest_destination::TrackKind::Video,
-                video_filename,
-                video_dir,
-                true,
-            ),
-            (
-                crate::manifest_destination::TrackKind::Audio,
-                audio_filename,
-                audio_dir,
-                has_audio,
-            ),
-            (
-                crate::manifest_destination::TrackKind::Subtitles,
-                "subtitle-track.mp4",
+                TrackKind::Subtitles,
+                TrackKind::Subtitles.part_filename(TrackFileFormat::Mp4),
                 subtitle_directory.as_path(),
                 has_destination_subtitles,
             ),
@@ -3225,7 +3228,7 @@ struct ManifestDashTrackTransfer<'a> {
     filename: &'a str,
     destination: &'a Path,
     item_id: u64,
-    track: crate::manifest_destination::TrackKind,
+    track: TrackKind,
     connections: usize,
     tx: &'a tokio::sync::mpsc::UnboundedSender<EngineMsg>,
     downloaded: &'a Arc<AtomicU64>,
@@ -3275,7 +3278,7 @@ struct ManifestHlsTrackTransfer<'a> {
     filename: &'a str,
     destination: &'a Path,
     item_id: u64,
-    track: crate::manifest_destination::TrackKind,
+    track: TrackKind,
     tx: &'a tokio::sync::mpsc::UnboundedSender<EngineMsg>,
     downloaded: &'a Arc<AtomicU64>,
     abort: &'a mut tokio::sync::oneshot::Receiver<crate::video::StopIntent>,
@@ -3541,7 +3544,7 @@ struct ManifestOrderedTrackTransfer<'a> {
     filename: &'a str,
     destination: &'a Path,
     item_id: u64,
-    track: crate::manifest_destination::TrackKind,
+    track: TrackKind,
     connections: usize,
     tx: &'a tokio::sync::mpsc::UnboundedSender<EngineMsg>,
     downloaded: &'a Arc<AtomicU64>,
@@ -4147,7 +4150,7 @@ segment-2.ts
                 filename: "video-track.ts",
                 destination: &destination,
                 item_id: 84,
-                track: crate::manifest_destination::TrackKind::Video,
+                track: TrackKind::Video,
                 tx: &tx,
                 downloaded: &downloaded,
                 abort: &mut abort,
@@ -4161,7 +4164,7 @@ segment-2.ts
             staging.path(),
             &destination,
             84,
-            crate::manifest_destination::TrackKind::Video,
+            TrackKind::Video,
         )
         .expect("resolve visible HLS destination part");
         let mut expected = first;
@@ -4276,7 +4279,7 @@ segment-2.m4s
                 filename: "video-track.ts",
                 destination: &destination,
                 item_id: 85,
-                track: crate::manifest_destination::TrackKind::Video,
+                track: TrackKind::Video,
                 tx: &tx,
                 downloaded: &downloaded,
                 abort: &mut abort,
@@ -4290,7 +4293,7 @@ segment-2.m4s
             staging.path(),
             &destination,
             85,
-            crate::manifest_destination::TrackKind::Video,
+            TrackKind::Video,
         )
         .expect("resolve visible fMP4 destination part");
         assert_eq!(
@@ -4611,7 +4614,7 @@ segment-2.m4s
                 filename: "video-track.mp4",
                 destination: &destination,
                 item_id: 42,
-                track: crate::manifest_destination::TrackKind::Video,
+                track: TrackKind::Video,
                 connections: 2,
                 tx: &tx,
                 downloaded: &downloaded,
@@ -4628,7 +4631,7 @@ segment-2.m4s
             staging.path(),
             &destination,
             42,
-            crate::manifest_destination::TrackKind::Video,
+            TrackKind::Video,
         )
         .expect("resolve assembled DASH part");
         assert_eq!(
@@ -4643,7 +4646,7 @@ segment-2.m4s
             &video_dir,
             &destination,
             42,
-            crate::manifest_destination::TrackKind::Video,
+            TrackKind::Video,
             "video-track.mp4",
         )
         .await
@@ -4656,7 +4659,7 @@ segment-2.m4s
             staging.path(),
             &destination,
             42,
-            crate::manifest_destination::TrackKind::Video,
+            TrackKind::Video,
         )
         .expect("resolve destination part after cleanup");
         let part_name = part_path

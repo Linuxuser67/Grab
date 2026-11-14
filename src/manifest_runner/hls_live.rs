@@ -870,7 +870,9 @@ pub(super) async fn complete_saved_live_hls_destination_parts(
         destination: destination.to_path_buf(),
         item_id,
         track: crate::manifest_destination::TrackKind::Video,
-        filename: "video-track.ts",
+        filename: crate::manifest_destination::TrackKind::Video.part_filename(
+                crate::manifest_destination::TrackFileFormat::Ts,
+            ),
     });
     if let Some(intent) = append_live_hls_destination_part(&video, abort).await? {
         return Ok(Some(intent));
@@ -886,7 +888,9 @@ pub(super) async fn complete_saved_live_hls_destination_parts(
             destination: destination.to_path_buf(),
             item_id,
             track: crate::manifest_destination::TrackKind::Audio,
-            filename: "audio-track.ts",
+            filename: crate::manifest_destination::TrackKind::Audio.part_filename(
+                    crate::manifest_destination::TrackFileFormat::Ts,
+                ),
         });
         if let Some(intent) = append_live_hls_destination_part(&audio, abort).await? {
             return Ok(Some(intent));

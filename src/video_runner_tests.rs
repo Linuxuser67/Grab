@@ -622,11 +622,11 @@ fn drain_with_timeout_aborts_lingering_task() {
                 }
             }
         }
-        let lingering: tokio::task::JoinHandle<Vec<u8>> = tokio::spawn(async move {
-            let _guard = AbortGuard(Some(tx));
-            std::future::pending::<()>().await;
-            unreachable!("a lingering drain never resolves on its own")
-        });
+        let lingering: tokio::task::JoinHandle<std::io::Result<Vec<u8>>> =
+            tokio::spawn(async move {
+                let _guard = AbortGuard(Some(tx));
+                std::future::pending::<std::io::Result<Vec<u8>>>().await
+            });
         let result = drain_with_timeout(lingering, std::time::Duration::from_millis(50)).await;
         assert!(
             result.is_none(),

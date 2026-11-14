@@ -1016,11 +1016,14 @@ fn ytdlp_spawn_identity_at(cookies_browser: &str, page_url: &str, now: SystemTim
                 entry.path.to_string_lossy().into_owned(),
             ];
             args.extend(crate::video_tools::ytdlp_identity_args(
-                "none", user_agent, page_url,
+                "none",
+                Some(&entry.path),
+                user_agent,
+                page_url,
             ));
             args
         }
-        _ => crate::video_tools::ytdlp_identity_args(cookies_browser, user_agent, page_url),
+        _ => crate::video_tools::ytdlp_identity_args(cookies_browser, None, user_agent, page_url),
     }
 }
 

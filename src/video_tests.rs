@@ -3109,7 +3109,11 @@ fn ffmpeg_version_token_takes_word_after_version() {
 
 #[test]
 fn ytdlp_identity_args_pins_deno_for_youtube_with_cookies() {
-    let args = ytdlp_identity_args("firefox", None, "https://www.youtube.com/watch?v=abc");
+    let args = ytdlp_identity_args("firefox", None, None, "https://www.youtube.com/watch?v=abc");
+    assert!(
+        args.iter()
+            .any(|arg| arg == "youtube:player_client=default,-web_embedded")
+    );
     let pos = args
         .iter()
         .position(|a| a == "--no-js-runtimes")
@@ -3137,7 +3141,7 @@ fn ytdlp_identity_args_skips_deno_pin_off_youtube() {
         ("firefox", "https://x.com/u/status/1"),
         ("none", "https://www.fakeyoutube.com/watch?v=abc"),
     ] {
-        let args = ytdlp_identity_args(browser, None, url);
+        let args = ytdlp_identity_args(browser, None, None, url);
         assert!(
             !args.iter().any(|a| a == "--no-js-runtimes"),
             "no js pin for browser={browser} url={url}"
@@ -3659,7 +3663,7 @@ fn fetch_video_page_parses_dump_json() {
 #[test]
 fn identity_args_order_and_trim() {
     // No forced extractor override; trim user-agent and keep `--` + page last.
-    let argv = ytdlp_identity_args("none", Some("  Grab/1  "), "https://x.com/u/status/1");
+    let argv = ytdlp_identity_args("none", None, Some("  Grab/1  "), "https://x.com/u/status/1");
     assert_eq!(
         argv,
         vec![
@@ -3669,7 +3673,7 @@ fn identity_args_order_and_trim() {
             "https://x.com/u/status/1".to_string(),
         ]
     );
-    let argv = ytdlp_identity_args("none", None, "https://x.com/u/status/1");
+    let argv = ytdlp_identity_args("none", None, None, "https://x.com/u/status/1");
     assert_eq!(
         argv,
         vec!["--".to_string(), "https://x.com/u/status/1".to_string()]
@@ -3679,7 +3683,7 @@ fn identity_args_order_and_trim() {
 #[test]
 fn identity_args_do_not_force_a_youtube_player_client() {
     // Keep yt-dlp's evolving defaults unless the user configures an override.
-    let argv = ytdlp_identity_args("none", None, "https://youtu.be/abc");
+    let argv = ytdlp_identity_args("none", None, None, "https://youtu.be/abc");
     assert!(
         !argv
             .iter()

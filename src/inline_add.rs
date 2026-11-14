@@ -577,17 +577,15 @@ async fn lookup_media_inner(
     let host = crate::video_probe::page_host(&url);
     let native_started = std::time::Instant::now();
     let native_url = url.clone();
-    let native_browser = browser.clone();
     let native_proxy = proxy.clone();
     let native_future = async move {
-        let result =
-            crate::manifest_intake::lookup(&native_url, &native_browser, native_proxy.as_ref())
-                .await
-                .and_then(|manifest| {
-                    manifest.ok_or_else(|| {
-                        gettext("The URL did not resolve to a supported HLS or DASH manifest")
-                    })
-                });
+        let result = crate::manifest_intake::lookup(&native_url, native_proxy.as_ref())
+            .await
+            .and_then(|manifest| {
+                manifest.ok_or_else(|| {
+                    gettext("The URL did not resolve to a supported HLS or DASH manifest")
+                })
+            });
         (result, native_started.elapsed().as_millis() as u64)
     };
 

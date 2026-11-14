@@ -911,10 +911,7 @@ struct ManifestStaticTransfer<'a> {
     abort: &'a mut tokio::sync::oneshot::Receiver<crate::video::StopIntent>,
 }
 
-/// Transfer selected static HLS/DASH resources and assemble their local track inputs.
-///
-/// Returns `false` when the attempt was stopped before all selected tracks were staged.
-/// Run a static video/audio track pair side by side while forwarding stop intent to both.
+/// Run a static video/audio track pair concurrently and forward stop intent to both.
 async fn transfer_parallel_manifest_tracks<Video, Audio>(
     video: Video,
     audio: Audio,
@@ -1116,6 +1113,9 @@ mod parallel_manifest_track_tests {
     }
 }
 
+/// Transfer selected static HLS/DASH resources and assemble their local track inputs.
+///
+/// Returns `false` when the attempt was stopped before all selected tracks were staged.
 async fn transfer_static_manifest_tracks(
     context: ManifestStaticTransfer<'_>,
 ) -> Result<bool, ManifestRunError> {

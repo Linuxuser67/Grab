@@ -702,8 +702,8 @@ fn phase_playlist(
     tx.send(crate::engine_msg::EngineMsg::Phase(detail)).ok();
 }
 
-/// Race a cancellable pre-download operation against the row's stop intent.
-/// Dropping the operation lets its owned process guards terminate probe children.
+/// Race pre-download setup or probing against the row's stop intent.
+/// Dropping the waiter cancels child probes; Deno provisioning is process-lifetime work.
 async fn await_video_operation_or_stop<T>(
     abort: &mut oneshot::Receiver<StopIntent>,
     operation: impl std::future::Future<Output = T>,
@@ -730,10 +730,37 @@ async fn run_video_download_inner(
     // Keep the canonical path: `discover_unified_output` compares a canonicalized `after_move` against it (symlinked roots would otherwise fail closed).
     let staging = ensure_staging_dir_in(&loc.root, &loc.dir)?;
     let libs = resolve_libraries()?;
-    let (yt_version, ff_version) = ensure_tool_versions(&libs).await?;
-    // Deno is Grab's JavaScript runtime for YouTube; make sure it's
-    // installed before a YouTube spawn that may need to solve JS challenges.
-    crate::video_tools::ensure_deno(&job.page_url).await?;
+    let (yt_version, ff_version) = match
+        await_video_operation_or_stop(&mut abort, ensure_tool_versions(&libs)).await
+    {
+        Ok(result) => result?,
+        Err(intent) => {
+            tracing::debug!(
+                item_id = job.item_id,
+                ?intent,
+                "video attempt stopped during tool version checks"
+            );
+            return Ok(VideoOutcome::Aborted);
+        }
+    };
+    // Deno provisioning runs on Grab's process-lifetime runtime, so dropping
+    // this waiter is safe even when the install itself must continue.
+    match await_video_operation_or_stop(
+        &mut abort,
+        crate::video_tools::ensure_deno(&job.page_url),
+    )
+    .await
+    {
+        Ok(result) => result?,
+        Err(intent) => {
+            tracing::debug!(
+                item_id = job.item_id,
+                ?intent,
+                "video attempt stopped during Deno setup"
+            );
+            return Ok(VideoOutcome::Aborted);
+        }
+    }
     tracing::debug!(
         item_id = job.item_id,
         host = %page_host(&job.page_url),

@@ -908,8 +908,16 @@ async fn run_video_download_inner(
     );
     if let Some(hls) = hls_sel {
         // An abort during resolve is stop-before-start: for live rows nobody waits on a message, so report instead of going quiet (the pump tail would fail the row either way).
-        if job.is_live && abort.try_recv().is_ok() {
-            return Err(VideoError::interrupted());
+        if job.is_live {
+            match abort.try_recv() {
+                Ok(_) => return Err(VideoError::interrupted()),
+                Err(oneshot::error::TryRecvError::Closed) => {
+                    // The owner has gone away before capture starts; do not
+                    // launch a recorder for a row that can no longer receive it.
+                    return Ok(VideoOutcome::Aborted);
+                }
+                Err(oneshot::error::TryRecvError::Empty) => {}
+            }
         }
         tracing::debug!(
             item_id = job.item_id,
@@ -2728,6 +2736,14 @@ pub(crate) fn live_info_json_args(path: Option<&std::path::Path>) -> Vec<String>
     }
 }
 
+/// Resolve a live capture stop while preserving media when the sender disappears.
+fn live_capture_abort_result<E>(result: Result<crate::video::StopIntent, E>) -> (bool, bool) {
+    match crate::video::stop_intent_or_pause(result) {
+        crate::video::StopIntent::Pause | crate::video::StopIntent::Finish => (true, false),
+        crate::video::StopIntent::Discard => (true, true),
+    }
+}
+
 #[expect(
     clippy::too_many_arguments,
     reason = "mirrors run_unified_ytdlp so both attempts keep the same cancellation contract"
@@ -2958,15 +2974,10 @@ pub(crate) async fn run_live_ytdlp(
                         &[progress.abort_handle(), logs.abort_handle()],
                     )
                     .await?;
-                    break match intent {
-                        Ok(StopIntent::Finish | StopIntent::Pause) => (true, false),
-                        Ok(StopIntent::Discard) => (true, true),
-                        Err(_) => {
-                            // No sender remains to authorise anything: fail closed. Claim the gate so the pre-rename commit below cannot deliver either.
-                            let _ = gate.discard();
-                            (true, true)
-                        }
-                    };
+                    // A dropped manager sender is a conservative pause, not
+                    // an implicit row removal. Explicit Discard is the only
+                    // stop intent that may suppress the captured media.
+                    break live_capture_abort_result(intent);
                 }
                 waited = tokio::time::timeout(remaining, child.wait()) => {
                     match waited {

@@ -1829,7 +1829,6 @@ impl DownloadManager {
         self.pump(item, id, generation, rx);
     }
 
-    /// Populate the per-owner lookup cache once from the persisted job state.
 
 }
 

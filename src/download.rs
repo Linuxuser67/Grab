@@ -2396,6 +2396,7 @@ impl DownloadManager {
 }
 
 impl DownloadManager {
+    /// Populate the per-owner lookup cache once from the persisted job state.
     fn ensure_gallery_file_row_index(&self, owner_id: u64) -> bool {
         if self.gallery_file_row_index.borrow().contains_key(&owner_id) {
             return true;

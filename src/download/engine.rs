@@ -1525,13 +1525,13 @@ enum PreparedSpawn {
 
 /// Video-page spawn inputs, bundled so the field list doesn't trip clippy's too-many-arguments lint.
 pub(super) struct SpawnVideoParams {
-    item: DownloadItem,
-    page_url: String,
-    quality: String,
-    audio_only: bool,
-    video_format_id: Option<String>,
-    is_live: bool,
-    playlist_item_id: Option<String>,
+    pub(super) item: DownloadItem,
+    pub(super) page_url: String,
+    pub(super) quality: String,
+    pub(super) audio_only: bool,
+    pub(super) video_format_id: Option<String>,
+    pub(super) is_live: bool,
+    pub(super) playlist_item_id: Option<String>,
 }
 
 impl DownloadManager {

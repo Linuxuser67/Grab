@@ -1,5 +1,4 @@
 use super::*;
-use crate::engine_msg::EngineMsg;
 use crate::download_fetch::{
     AttemptFail, FetchCtx, StartMode, accepts_content_range, backoff_delay, fetch_piece,
     filename_from_content_disposition, has_holes, open_partial, rejects_unexpected_restart,
@@ -8,14 +7,14 @@ use crate::download_fetch::{
 use crate::download_intake::{MAX_URL_LEN, normalize_url};
 use crate::download_net::{
     DownloadOptions, PROXY_MODE_DIRECT, PROXY_MODE_SYSTEM, http_client, http_client_for,
-    normalize_no_proxy,
-    proxy_mode_index, proxy_mode_labels, proxy_mode_value, proxy_type_index, proxy_type_labels,
-    proxy_type_value,
+    normalize_no_proxy, proxy_mode_index, proxy_mode_labels, proxy_mode_value, proxy_type_index,
+    proxy_type_labels, proxy_type_value,
 };
 use crate::download_pieces::{BLOCK_CELLS, SegmentState, aggregate, plan_pieces, split_count};
 use crate::download_rate::{fmt_eta, format_amounts, live_rate_limit, parse_rate};
 use crate::download_row::DownloadItem;
 use crate::download_store::{QUEUE_VERSION, StoredItem, StoredQueue};
+use crate::engine_msg::EngineMsg;
 use crate::file_names::{
     PIECE_MAX, PIECE_MIN, dedupe_filename, filename_from_url, path_size, piece_len,
     rename_noreplace, restrict_filename_ascii, shorten_filename,

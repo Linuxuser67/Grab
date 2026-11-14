@@ -241,7 +241,7 @@ impl DownloadManager {
         Self::serialize_snapshot(queue)
     }
 
-    fn serialize_snapshot(queue: StoredQueue) -> Option<String> {
+    pub(super) fn serialize_snapshot(queue: StoredQueue) -> Option<String> {
         match serde_json::to_string(&queue) {
             Ok(text) => Some(text),
             Err(error) => {

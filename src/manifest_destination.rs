@@ -1137,7 +1137,7 @@ mod tests {
     }
 
     #[test]
-    fn track_part_filenames_follow_track_and_container_format() {
+    fn track_part_filenames_follow_track_and_file_format() {
         assert_eq!(
             TrackKind::Video.part_filename(TrackFileFormat::Ts),
             "video-track.ts"

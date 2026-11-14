@@ -2964,11 +2964,9 @@ async fn fetch_resource_once(
             tx.send(progress_message(total)).ok();
             return Ok(size);
         }
-        tokio::fs::remove_file(&target)
-            .await
-            .map_err(|error| {
-                manifest_storage_error("Could not reset an incomplete manifest resource", error)
-            })?;
+        tokio::fs::remove_file(&target).await.map_err(|error| {
+            manifest_storage_error("Could not reset an incomplete manifest resource", error)
+        })?;
     }
 
     let part = directory.join(format!("{}.part", resource.filename));

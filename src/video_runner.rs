@@ -1941,7 +1941,7 @@ async fn sweep_live_capture(
         Exit::Delivered | Exit::DestClaimed | Exit::NothingRecorded
     ) {
         let _ = tokio::fs::remove_file(out).await;
-        remove_scratch_file_if_present(&part).await;
+        remove_scratch_file_if_present(part).await;
     }
     let _ = tokio::fs::remove_file(state).await;
     if let Staging::Sweep = staging_mode

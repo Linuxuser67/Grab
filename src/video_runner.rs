@@ -920,10 +920,7 @@ async fn run_video_download_inner(
         total: if single {
             audio_sel.size
         } else {
-            match (video_sel.as_ref().and_then(|s| s.size), audio_sel.size) {
-                (video, audio) => combined_format_size(video, audio),
-                _ => None,
-            }
+            combined_format_size(video_sel.as_ref().and_then(|s| s.size), audio_sel.size)
         },
     };
     let plan = resume_plan(&query);

@@ -1013,6 +1013,32 @@ where
     }
 }
 
+/// Split a multi-track DASH request budget without exceeding its configured total.
+fn split_manifest_track_connections(connections: usize) -> (usize, usize) {
+    let total = connections.clamp(2, MAX_RESOURCE_CONNECTIONS);
+    (total.div_ceil(2), total / 2)
+}
+
+#[cfg(test)]
+mod manifest_track_connection_tests {
+    use super::*;
+
+    #[test]
+    fn split_track_connection_budget_is_positive_and_bounded() {
+        for configured in 2..=MAX_RESOURCE_CONNECTIONS {
+            let (video, audio) = split_manifest_track_connections(configured);
+            assert!(video >= 1);
+            assert!(audio >= 1);
+            assert_eq!(video + audio, configured);
+        }
+
+        assert_eq!(
+            split_manifest_track_connections(MAX_RESOURCE_CONNECTIONS + 1),
+            (MAX_RESOURCE_CONNECTIONS / 2, MAX_RESOURCE_CONNECTIONS / 2)
+        );
+    }
+}
+
 #[cfg(test)]
 mod parallel_manifest_track_tests {
     use super::*;
@@ -1285,50 +1311,90 @@ async fn transfer_static_manifest_tracks(
             ..
         } => {
             if let Some(audio) = audio {
-                // Keep the aggregate request count bounded while giving each track a worker.
-                let total_connections = concurrency.clamp(2, MAX_RESOURCE_CONNECTIONS);
-                let video_connections = total_connections.div_ceil(2);
-                let audio_connections = total_connections / 2;
-                let (video_abort_sender, mut video_abort) = tokio::sync::oneshot::channel();
-                let (audio_abort_sender, mut audio_abort) = tokio::sync::oneshot::channel();
-                let video_transfer = fetch_and_write_dash_track(ManifestDashTrackTransfer {
-                    client,
-                    staging,
-                    plan: video.as_ref(),
-                    directory: video_dir,
-                    filename: TrackKind::Video.part_filename(TrackFileFormat::Mp4),
-                    destination,
-                    item_id,
-                    track: TrackKind::Video,
-                    connections: video_connections,
-                    tx,
-                    downloaded,
-                    abort: &mut video_abort,
-                });
-                let audio_transfer = fetch_and_write_dash_track(ManifestDashTrackTransfer {
-                    client,
-                    staging,
-                    plan: audio,
-                    directory: audio_dir,
-                    filename: TrackKind::Audio.part_filename(TrackFileFormat::Mp4),
-                    destination,
-                    item_id,
-                    track: TrackKind::Audio,
-                    connections: audio_connections,
-                    tx,
-                    downloaded,
-                    abort: &mut audio_abort,
-                });
-                if !transfer_parallel_manifest_tracks(
-                    video_transfer,
-                    audio_transfer,
-                    abort,
-                    video_abort_sender,
-                    audio_abort_sender,
-                )
-                .await?
-                {
-                    return Ok(false);
+                if concurrency == 1 {
+                    if !fetch_and_write_dash_track(ManifestDashTrackTransfer {
+                        client,
+                        staging,
+                        plan: video.as_ref(),
+                        directory: video_dir,
+                        filename: TrackKind::Video.part_filename(TrackFileFormat::Mp4),
+                        destination,
+                        item_id,
+                        track: TrackKind::Video,
+                        connections: concurrency,
+                        tx,
+                        downloaded,
+                        abort,
+                    })
+                    .await?
+                    {
+                        return Ok(false);
+                    }
+                    if !fetch_and_write_dash_track(ManifestDashTrackTransfer {
+                        client,
+                        staging,
+                        plan: audio,
+                        directory: audio_dir,
+                        filename: TrackKind::Audio.part_filename(TrackFileFormat::Mp4),
+                        destination,
+                        item_id,
+                        track: TrackKind::Audio,
+                        connections: concurrency,
+                        tx,
+                        downloaded,
+                        abort,
+                    })
+                    .await?
+                    {
+                        return Ok(false);
+                    }
+                } else {
+                    // Share the configured request budget evenly across both active tracks.
+                    let (video_connections, audio_connections) =
+                        split_manifest_track_connections(concurrency);
+                    let (video_abort_sender, mut video_abort) =
+                        tokio::sync::oneshot::channel();
+                    let (audio_abort_sender, mut audio_abort) =
+                        tokio::sync::oneshot::channel();
+                    let video_transfer = fetch_and_write_dash_track(ManifestDashTrackTransfer {
+                        client,
+                        staging,
+                        plan: video.as_ref(),
+                        directory: video_dir,
+                        filename: TrackKind::Video.part_filename(TrackFileFormat::Mp4),
+                        destination,
+                        item_id,
+                        track: TrackKind::Video,
+                        connections: video_connections,
+                        tx,
+                        downloaded,
+                        abort: &mut video_abort,
+                    });
+                    let audio_transfer = fetch_and_write_dash_track(ManifestDashTrackTransfer {
+                        client,
+                        staging,
+                        plan: audio,
+                        directory: audio_dir,
+                        filename: TrackKind::Audio.part_filename(TrackFileFormat::Mp4),
+                        destination,
+                        item_id,
+                        track: TrackKind::Audio,
+                        connections: audio_connections,
+                        tx,
+                        downloaded,
+                        abort: &mut audio_abort,
+                    });
+                    if !transfer_parallel_manifest_tracks(
+                        video_transfer,
+                        audio_transfer,
+                        abort,
+                        video_abort_sender,
+                        audio_abort_sender,
+                    )
+                    .await?
+                    {
+                        return Ok(false);
+                    }
                 }
             } else if !fetch_and_write_dash_track(ManifestDashTrackTransfer {
                 client,

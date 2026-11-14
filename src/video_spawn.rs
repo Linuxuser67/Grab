@@ -740,7 +740,10 @@ fn process_group_and_state(stat: &str) -> Option<(libc::pid_t, char)> {
 /// staging alive while any live descendant remains in the process group.
 #[cfg(target_os = "linux")]
 pub(crate) async fn await_group_quiescence(pgid: i32) {
-    while process_group_has_live_members(pgid) {
+    while tokio::task::spawn_blocking(move || process_group_has_live_members(pgid))
+        .await
+        .unwrap_or(true)
+    {
         tokio::time::sleep(std::time::Duration::from_millis(20)).await;
     }
 }
@@ -801,6 +804,24 @@ pub(crate) fn discover_ytdlp_output(dest: &Path, after_move: Option<&str>) -> Op
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn process_group_stat_parser_handles_parentheses_in_command_name() {
+        assert_eq!(
+            process_group_and_state("123 (yt-dlp (worker)) S 1 456 7"),
+            Some((456, 'S'))
+        );
+    }
+
+    #[test]
+    fn process_group_scan_observes_the_current_process() {
+        // SAFETY: getpgrp has no preconditions and only returns the caller's process-group ID.
+        let pgid = unsafe { libc::getpgrp() };
+        assert!(
+            process_group_has_live_members(pgid),
+            "the current process must keep its own process group live"
+        );
+    }
 
     #[test]
     fn guarded_proxy_validation_leaves_credentials_out_of_argv_and_rejects_overrides() {

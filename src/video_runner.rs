@@ -1489,7 +1489,8 @@ async fn try_merge_dash_partials(
     Some(size)
 }
 
-/// Only a deliberate Finish publishes partial DASH tracks; Pause leaves them resumable in staging.
+/// Publish partial DASH tracks only on `Finish`.
+/// `Pause` leaves them in staging so the next attempt can resume.
 fn should_merge_dash_partials(abort_intent: Option<StopIntent>) -> bool {
     matches!(abort_intent, Some(StopIntent::Finish))
 }

@@ -3242,14 +3242,18 @@ impl DownloadManager {
             }
         }
         if restorable.is_empty() {
-            let (filename, error) = &failures[0];
+            let Some((filename, error)) = failures.first() else {
+                return Ok(0);
+            };
+            let total_text = total.to_string();
+            let failed_text = failures.len().to_string();
             return Err(format_gettext_template(
                 &gettext(
                     "Restored 0 of {total} downloads; {failed} could not be restored. First failure for {filename}: {error}",
                 ),
                 &[
-                    ("total", &total.to_string()),
-                    ("failed", &failures.len().to_string()),
+                    ("total", &total_text),
+                    ("failed", &failed_text),
                     ("filename", filename),
                     ("error", error),
                 ],

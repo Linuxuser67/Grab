@@ -437,6 +437,7 @@ impl DownloadManager {
         true
     }
 
+    /// Remove a row unless an asynchronous Trash operation currently owns it.
     pub fn remove(self: &Rc<Self>, id: u64) {
         let _ = self.try_remove(id);
     }

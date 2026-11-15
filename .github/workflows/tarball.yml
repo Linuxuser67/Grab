@@ -17,7 +17,9 @@ on:
         required: true
 
 jobs:
-  tarball:
+  build-tarball:
+    permissions:
+      contents: read
     strategy:
       fail-fast: false
       matrix:
@@ -28,12 +30,11 @@ jobs:
             tarball_arch: aarch64
     runs-on: ${{ matrix.runs-on }}
     timeout-minutes: 90
-    permissions:
-      contents: write
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ github.event.release.tag_name || inputs.tag }}
+          persist-credentials: false
 
       # A release tag must carry metadata matching its version, and HEAD
       # must be that tag: otherwise the artifacts below are built from a
@@ -101,7 +102,7 @@ jobs:
             cd \"$PWD\"
             export PATH=\"/usr/lib/sdk/rust-stable/bin:\$PATH\"
             export CARGO_HOME=\"$PWD/.cargo-home\" CARGO_TARGET_DIR=\"$PWD/build-target\"
-            cargo vendor vendor
+            cargo vendor --locked vendor
             mkdir -p .cargo
             printf '[source.crates-io]\nreplace-with = \"vendored-sources\"\n[source.vendored-sources]\ndirectory = \"vendor\"\n' > .cargo/config.toml
             meson setup build --prefix=/usr --buildtype=release
@@ -112,9 +113,8 @@ jobs:
             glib-compile-schemas \"$PWD/staging/usr/share/glib-2.0/schemas\"
             "
 
-      - name: Pack and attach to the release
+      - name: Pack tarball
         env:
-          GH_TOKEN: ${{ github.token }}
           TAG: ${{ github.event.release.tag_name || inputs.tag }}
           TARBALL_ARCH: ${{ matrix.tarball_arch }}
         run: |
@@ -124,4 +124,34 @@ jobs:
           tar tzf "$TARBALL" | head -8
           ls -lh "$TARBALL"
           test -f "staging/usr/bin/grab"
-          gh release upload "$TAG" "$TARBALL" --clobber
+
+      - name: Upload tarball build artifact
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: Grab-tarball-${{ matrix.tarball_arch }}
+          path: Grab-*.tar.gz
+          if-no-files-found: error
+
+  publish:
+    needs: build-tarball
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Download architecture tarballs
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          pattern: Grab-tarball-*
+          path: artifacts
+          merge-multiple: true
+
+      - name: Attach tarballs to the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.event.release.tag_name || inputs.tag }}
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+          tarballs=(artifacts/Grab-*.tar.gz)
+          test "${#tarballs[@]}" -eq 2
+          gh release upload "$TAG" "${tarballs[@]}" --clobber

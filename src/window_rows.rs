@@ -45,10 +45,7 @@ mod failure_feedback_tests {
 
     #[test]
     fn first_active_failure_opens_the_details_dialog() {
-        assert_eq!(
-            failure_feedback(true, true, false),
-            FailureFeedback::Dialog
-        );
+        assert_eq!(failure_feedback(true, true, false), FailureFeedback::Dialog);
     }
 
     #[test]
@@ -1590,8 +1587,8 @@ pub(crate) fn build_row(
     // Pop the failure dialog on the first transition to Failed per attempt
     // (not on every refresh: the notify fires once per status change).
     // Subsequent active-window failures use a toast instead of stacking
-    // dialogs. Inactive windows receive no in-app toast; the configured desktop
-    // completion notification and persistent row status remain available.
+    // dialogs. Inactive windows receive no in-app toast; the failed row remains
+    // visible in the queue when the window is shown again.
     // Dialog liveness via glib::WeakRef (closed dialogs stop upgrading);
     // main-thread-only state in thread_local (connect_notify_local).
     {
@@ -1616,7 +1613,8 @@ pub(crate) fn build_row(
                 match failure_feedback(first, window_active, dialog_open) {
                     FailureFeedback::Dialog => {
                         if let Some(row) = row_weak.upgrade() {
-                            let dialog = show_failure_dialog(row.upcast_ref::<gtk4::Widget>(), item);
+                            let dialog =
+                                show_failure_dialog(row.upcast_ref::<gtk4::Widget>(), item);
                             FAILURE_DIALOG.with(|d| {
                                 *d.borrow_mut() = Some(dialog.downgrade());
                             });

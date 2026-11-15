@@ -400,9 +400,9 @@ fn gallery_retry_invalidates_the_previous_attempt_generation() {
     manager.epoch.borrow_mut().insert(id, 1);
     assert!(manager.is_current(id, 1));
 
-    // A retry increments the epoch before its receiver starts consuming
-    // messages; the previous receiver must become a no-op immediately.
-    manager.epoch.borrow_mut().insert(id, 2);
+    // Stopping a gallery row invalidates the receiver synchronously, before
+    // its worker aborts and any already-buffered message can be consumed.
+    manager.invalidate_gallery_attempt(id);
     assert!(!manager.is_current(id, 1));
     assert!(manager.is_current(id, 2));
 }

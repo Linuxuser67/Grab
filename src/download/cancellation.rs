@@ -108,6 +108,12 @@ impl DownloadManager {
 
     /// Stop the engine for `id` without touching the row. Live rows receive the requested intent and complete through the pump; returns whether the engine was actually stopped.
     pub(super) fn stop_engine(&self, id: u64, intent: crate::video::StopIntent) -> bool {
+        // The gallery receiver is a separate GLib task from the subprocess
+        // handle. Invalidate it synchronously before stopping the worker so
+        // already-buffered messages cannot mutate a cancelled/parked row.
+        if self.gallery_jobs.borrow().contains_key(&id) {
+            self.invalidate_gallery_attempt(id);
+        }
         self.stop_video_worker(id, intent);
         if self.live_rows.borrow().contains(&id) {
             return false;
@@ -136,6 +142,12 @@ impl DownloadManager {
             });
         }
         true
+    }
+
+    /// Invalidate the independent GLib message receiver for one gallery attempt.
+    fn invalidate_gallery_attempt(&self, id: u64) {
+        let next = self.epoch.borrow().get(&id).copied().unwrap_or(0) + 1;
+        self.epoch.borrow_mut().insert(id, next);
     }
 
     /// Stop the engine for `id`, keeping file, bitmap and progress, and mark it queued. Live rows only signal (see `stop_engine`).

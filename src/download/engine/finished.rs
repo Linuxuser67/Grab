@@ -267,6 +267,5 @@ impl DownloadManager {
                 });
             }
         }
-        return;
     }
 }

@@ -692,6 +692,37 @@ fn recording_watcher_guard_aborts_on_drop() {
 /// Staging claim skips existing base files: if the user has Title.1.mp4,
 /// the claim must choose Title.1-1.mp4 and leave Title.1.mp4 byte-identical.
 /// Regression test for the live-staging collision data loss.
+#[cfg(unix)]
+#[test]
+fn staging_claim_skips_dangling_symlink() {
+    use std::os::unix::fs::symlink;
+
+    let dir = std::env::temp_dir().join(format!(
+        "grab-staging-dangling-symlink-{}",
+        std::process::id()
+    ));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+
+    let occupied = dir.join("Title.1.mp4");
+    symlink(dir.join("missing-target"), &occupied).unwrap();
+    let dest = dir.join("Title.mp4");
+
+    let (out, staging_name) = claim_staging_name(&dest, 1, "mp4").unwrap();
+    assert_eq!(staging_name, "Title.1-1.mp4");
+    assert_eq!(out, dir.join("Title.1-1.mp4"));
+    assert!(
+        std::fs::symlink_metadata(&occupied)
+            .unwrap()
+            .file_type()
+            .is_symlink(),
+        "the user's dangling symlink must remain untouched"
+    );
+    assert!(dir.join("Title.1-1.mp4.part").exists());
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 #[test]
 fn staging_claim_skips_existing_base_file() {
     let dir = std::env::temp_dir().join(format!("grab-staging-claim-{}", std::process::id()));

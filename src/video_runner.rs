@@ -2551,6 +2551,16 @@ impl Drop for RecordingWatcherGuard {
     }
 }
 
+/// Treat every directory entry, including a dangling symlink, as occupied.
+/// Metadata errors other than NotFound fail closed rather than reusing the path.
+fn staging_path_is_occupied(path: &Path) -> std::io::Result<bool> {
+    match std::fs::symlink_metadata(path) {
+        Ok(_) => Ok(true),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
+        Err(error) => Err(error),
+    }
+}
+
 /// Claim a staging name for a live capture: `Title.mp4`, `Title-1.mp4`, ...
 /// Returns the base path and the file name. The `.part` file is atomically
 /// claimed via `create_new`; the base name is derived from it.
@@ -2588,15 +2598,22 @@ fn claim_staging_name(
             }
             continue;
         }
-        // Never claim a base name that already exists: the .part claim
-        // is atomic, but the base file belongs to the user. If
-        // Title.1.mp4 exists, skip to Title.1-1.mp4.
-        if path.exists() {
-            n += 1;
-            if n > 1000 {
-                return Err(VideoError::staging("too many conflicting files"));
+        // Never claim a base name that already exists: this includes dangling
+        // symlinks, which Path::exists() would incorrectly report as absent.
+        match staging_path_is_occupied(&path) {
+            Ok(false) => {}
+            Ok(true) => {
+                n += 1;
+                if n > 1000 {
+                    return Err(VideoError::staging("too many conflicting files"));
+                }
+                continue;
             }
-            continue;
+            Err(error) => {
+                return Err(VideoError::staging(format!(
+                    "cannot inspect staging candidate: {error}"
+                )));
+            }
         }
         let part = dir.join(format!("{name}.part"));
         // Claim the .part name atomically; the base name is derived from it.
@@ -2606,19 +2623,25 @@ fn claim_staging_name(
             .open(&part)
         {
             Ok(_) => {
-                // TOCTOU re-validation: the base may have appeared between the
-                // exists() check above and the atomic .part claim (user file
-                // or another claimer racing). If it did, drop our claim and
-                // try the next name — never adopt a foreign base file.
-                if path.exists() {
-                    let _ = std::fs::remove_file(&part);
-                    n += 1;
-                    if n > 1000 {
-                        return Err(VideoError::staging("too many conflicting files"));
+                // Revalidate with symlink_metadata after claiming .part:
+                // a foreign file or dangling symlink may have appeared since
+                // the first check. Never adopt or overwrite that entry.
+                match staging_path_is_occupied(&path) {
+                    Ok(false) => return Ok((path, name)),
+                    Ok(true) => {
+                        let _ = std::fs::remove_file(&part);
+                        n += 1;
+                        if n > 1000 {
+                            return Err(VideoError::staging("too many conflicting files"));
+                        }
                     }
-                    continue;
+                    Err(error) => {
+                        let _ = std::fs::remove_file(&part);
+                        return Err(VideoError::staging(format!(
+                            "cannot recheck staging candidate: {error}"
+                        )));
+                    }
                 }
-                return Ok((path, name));
             }
             Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
                 n += 1;

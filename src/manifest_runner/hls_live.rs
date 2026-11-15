@@ -1007,28 +1007,47 @@ async fn finish_after_live_hls_continuity_loss(
     ))
 }
 
-#[expect(
-    clippy::too_many_arguments,
-    reason = "the runner coordinates the selected renditions, storage paths, progress, host policy, and shared stop signal"
-)]
+/// Inputs for polling and finalizing one live HLS rendition pair.
+pub(super) struct LiveHlsTrackRun<'a> {
+    pub(super) client: &'a reqwest::Client,
+    pub(super) source_url: &'a str,
+    pub(super) destination_dir: &'a Path,
+    pub(super) destination: &'a Path,
+    pub(super) item_id: u64,
+    pub(super) staging: &'a Path,
+    pub(super) video_plan: &'a HlsPlan,
+    pub(super) audio_plan: Option<&'a HlsPlan>,
+    pub(super) finish_only: bool,
+    pub(super) video_dir: &'a Path,
+    pub(super) audio_dir: &'a Path,
+    pub(super) connections: usize,
+    pub(super) tx: &'a tokio::sync::mpsc::UnboundedSender<EngineMsg>,
+    pub(super) downloaded: &'a Arc<AtomicU64>,
+    pub(super) guarded_child_hosts: &'a mut crate::download_net::PublicResolutionSet,
+    pub(super) abort: &'a mut tokio::sync::oneshot::Receiver<crate::video::StopIntent>,
+}
+
 pub(super) async fn run_live_hls_tracks(
-    client: &reqwest::Client,
-    source_url: &str,
-    destination_dir: &Path,
-    destination: &Path,
-    item_id: u64,
-    staging: &Path,
-    video_plan: &HlsPlan,
-    audio_plan: Option<&HlsPlan>,
-    finish_only: bool,
-    video_dir: &Path,
-    audio_dir: &Path,
-    connections: usize,
-    tx: &tokio::sync::mpsc::UnboundedSender<EngineMsg>,
-    downloaded: &Arc<AtomicU64>,
-    guarded_child_hosts: &mut crate::download_net::PublicResolutionSet,
-    abort: &mut tokio::sync::oneshot::Receiver<crate::video::StopIntent>,
+    context: LiveHlsTrackRun<'_>,
 ) -> Result<LiveHlsCapture, ManifestRunError> {
+    let LiveHlsTrackRun {
+        client,
+        source_url,
+        destination_dir,
+        destination,
+        item_id,
+        staging,
+        video_plan,
+        audio_plan,
+        finish_only,
+        video_dir,
+        audio_dir,
+        connections,
+        tx,
+        downloaded,
+        guarded_child_hosts,
+        abort,
+    } = context;
     let mut video = load_live_hls_track(video_plan, video_dir).await?;
     let mut audio = match audio_plan {
         Some(plan) => Some(load_live_hls_track(plan, audio_dir).await?),

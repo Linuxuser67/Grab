@@ -1994,6 +1994,21 @@ fn next_live_remux_attempt(
     }
 }
 
+/// Reap a failed live-remux child, wait for its process group to stop writing,
+/// then remove only the partial output owned by this attempt.
+async fn abandon_live_remux_attempt(
+    child: &mut tokio::process::Child,
+    group: &mut ProcessGroupGuard,
+    pgid: Option<&ProcessGroupId>,
+    drain: tokio::task::AbortHandle,
+    partial: &Path,
+) -> Result<(), VideoError> {
+    reap_child(child, group).await;
+    await_ytdlp_group_quiescence_or_abort(pgid, &[drain]).await?;
+    let _ = tokio::fs::remove_file(partial).await;
+    Ok(())
+}
+
 /// Remux a stopped live capture into place. ffmpeg writes `<dest>.part` and the result is renamed to `dest` only on success: a bare `final.<n>.<ext>` is always worth keeping, a `.part` never is.
 pub(crate) async fn remux_live_capture(
     ffmpeg_bin: &Path,
@@ -2078,11 +2093,15 @@ pub(crate) async fn remux_live_capture(
         };
         let status = match wait_result {
             None => {
-                reap_child(&mut child, &mut group).await;
-                await_ytdlp_group_quiescence_or_abort(pgid.as_ref(), &[logs.abort_handle()])
-                    .await?;
+                abandon_live_remux_attempt(
+                    &mut child,
+                    &mut group,
+                    pgid.as_ref(),
+                    logs.abort_handle(),
+                    &partial,
+                )
+                .await?;
                 logs.abort();
-                let _ = tokio::fs::remove_file(&partial).await;
                 return Err(VideoError::part_failed("attempt discarded"));
             }
             Some(Ok(Ok(status))) => {
@@ -2093,19 +2112,27 @@ pub(crate) async fn remux_live_capture(
                 status
             }
             Some(Ok(Err(e))) => {
-                reap_child(&mut child, &mut group).await;
-                await_ytdlp_group_quiescence_or_abort(pgid.as_ref(), &[logs.abort_handle()])
-                    .await?;
+                abandon_live_remux_attempt(
+                    &mut child,
+                    &mut group,
+                    pgid.as_ref(),
+                    logs.abort_handle(),
+                    &partial,
+                )
+                .await?;
                 join_drain(logs).await;
-                let _ = tokio::fs::remove_file(&partial).await;
                 return Err(VideoError::runtime(&e));
             }
             Some(Err(_)) => {
-                reap_child(&mut child, &mut group).await;
-                await_ytdlp_group_quiescence_or_abort(pgid.as_ref(), &[logs.abort_handle()])
-                    .await?;
+                abandon_live_remux_attempt(
+                    &mut child,
+                    &mut group,
+                    pgid.as_ref(),
+                    logs.abort_handle(),
+                    &partial,
+                )
+                .await?;
                 join_drain(logs).await;
-                let _ = tokio::fs::remove_file(&partial).await;
                 return Err(VideoError::part_failed("timed out finalizing"));
             }
         };

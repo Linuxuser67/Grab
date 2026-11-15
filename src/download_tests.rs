@@ -6406,6 +6406,49 @@ exit 0
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+
+#[test]
+fn retry_failed_counts_only_rows_that_are_still_requeued() {
+    let (_queue_lock, _main_loop_lock) = test_locks();
+    let _queue_file = test_queue_file("retry-failed-count");
+    let manager = DownloadManager::new(gio::ListStore::new::<DownloadItem>(), test_settings());
+    // Keep the test rows queued without starting real network attempts.
+    manager.draining.set(true);
+    let first_id = 983_000 + std::process::id() as u64;
+    let second_id = first_id + 1;
+    let first = DownloadItem::new(
+        first_id,
+        "https://example.test/first",
+        "first.bin",
+        "/tmp",
+    );
+    first.set_status(DownloadStatus::Failed);
+    let second = DownloadItem::new(
+        second_id,
+        "https://example.test/second",
+        "second.bin",
+        "/tmp",
+    );
+    second.set_status(DownloadStatus::Failed);
+    manager.store().append(&first);
+    manager.store().append(&second);
+
+    // Re-enter the manager during the first row's status notification, as a
+    // UI observer can, and remove a later candidate before it is retried.
+    let weak_manager = Rc::downgrade(&manager);
+    first.connect_status_notify(move |item| {
+        if item.status() == DownloadStatus::Queued
+            && let Some(manager) = weak_manager.upgrade()
+        {
+            manager.remove(second_id);
+        }
+    });
+
+    assert_eq!(manager.retry_failed(), 1);
+    assert_eq!(first.status(), DownloadStatus::Queued);
+    assert!(manager.find(second_id).is_none());
+}
+
 #[test]
 fn clear_finished_drops_only_done() {
     let _lock = lock_queue_file();
@@ -10517,4 +10560,45 @@ fn unremove_many_restores_collection_members_with_one_queue_refresh() {
             .all(|item| item.group() == Some(group.clone())),
         "every restored child must retain its collection identity"
     );
+}
+
+#[test]
+fn trash_ownership_excludes_remove_clear_finished_and_undo() {
+    let (_queue_lock, _main_loop_lock) = test_locks();
+    let _queue_file = test_queue_file("trash-ownership");
+    let manager = DownloadManager::new(gio::ListStore::new::<DownloadItem>(), test_settings());
+    let id = 982_000 + std::process::id() as u64;
+    let item = DownloadItem::new(
+        id,
+        "https://example.test/finished",
+        "finished.bin",
+        "/tmp",
+    );
+    item.set_status(DownloadStatus::Done);
+    manager.store().append(&item);
+    let snapshot = RemovedSnapshot::capture(&manager, &item);
+
+    crate::runtime::lock_recover(&manager.trash_in_progress).insert(id);
+
+    assert!(manager.is_trashing(id));
+    assert_eq!(manager.finished_count(), 0);
+    assert!(manager.finished_snapshots().is_empty());
+
+    assert!(!manager.try_remove(id), "single removal must be rejected");
+    manager.remove(id);
+    assert!(manager.find(id).is_some(), "single removal must be rejected");
+    assert_eq!(manager.remove_many(&[id]), 0, "bulk removal must be rejected");
+    assert_eq!(manager.clear_finished(), 0);
+    assert!(manager.find(id).is_some(), "Clear Finished must preserve the row");
+
+    let single_undo = crate::runtime::tokio_rt()
+        .block_on(manager.unremove_async(snapshot.clone()));
+    assert!(single_undo.is_err(), "single Undo must reject a row owned by Trash");
+    let bulk_undo = crate::runtime::tokio_rt()
+        .block_on(manager.unremove_many_async(vec![snapshot]));
+    assert!(bulk_undo.is_err(), "bulk Undo must reject a row owned by Trash");
+
+    crate::runtime::lock_recover(&manager.trash_in_progress).remove(&id);
+    manager.remove(id);
+    assert!(manager.find(id).is_none(), "removal is allowed after Trash releases the row");
 }

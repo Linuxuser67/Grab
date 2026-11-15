@@ -453,6 +453,7 @@ fn refresh_row(
     can_pause_live: bool,
     can_finish_live: bool,
     is_manifest_download: bool,
+    is_trashing: bool,
 ) {
     let frac = item.progress().clamp(0.0, 1.0);
     let active = item.status() == DownloadStatus::Downloading;
@@ -517,6 +518,8 @@ fn refresh_row(
     w.reveal_btn.set_visible(done);
     w.delete_btn
         .set_visible(done || live_capturing || manifest_download);
+    w.delete_btn.set_sensitive(!is_trashing);
+    w.remove_btn.set_sensitive(!is_trashing);
     let delete_tip = if live_capturing {
         gettext("Delete Recording")
     } else if manifest_download {
@@ -1338,6 +1341,7 @@ pub(crate) fn build_row(
             m_sync.can_pause_live_capture(it.id()),
             m_sync.can_finish_live_recording(it.id()),
             m_sync.is_manifest_download(it.id()),
+            m_sync.is_trashing(it.id()),
         );
     };
     let u1 = updater.clone();
@@ -1371,6 +1375,7 @@ pub(crate) fn build_row(
         manager.can_pause_live_capture(item.id()),
         manager.can_finish_live_recording(item.id()),
         manager.is_manifest_download(item.id()),
+        manager.is_trashing(item.id()),
     );
     // Indeterminate activity runs on wall-clock, not progress ticks:
     // resolving ("Resolving media…") emits no property changes, so a pulse
@@ -1479,16 +1484,20 @@ pub(crate) fn build_row(
                 }));
                 return;
             }
-            // Trash can involve directory walks or a cross-volume copy. Keep
-            // the row responsive and prevent duplicate submissions while the
-            // blocking operation is in flight.
+            // Trash can involve directory walks or a cross-volume copy.
+            // Disable both competing row actions while the manager owns it.
             button.set_sensitive(false);
+            let remove_button = remove_btn.clone();
+            remove_button.set_sensitive(false);
             let button = button.clone();
             let m = Rc::clone(&m);
             let t = Rc::clone(&t);
             glib::spawn_future_local(async move {
                 let result = m.delete_download_async(id).await;
-                button.set_sensitive(true);
+                if result.is_err() {
+                    button.set_sensitive(true);
+                    remove_button.set_sensitive(true);
+                }
                 match result {
                     Err(e) => t.add_toast(crate::ui_util::plain_toast(&e)),
                     Ok(()) => t.add_toast(crate::ui_util::plain_toast(&gettext("Moved to Trash"))),
@@ -1503,7 +1512,11 @@ pub(crate) fn build_row(
             let Some(it) = m.find(id) else { return };
             let snapshot = RemovedSnapshot::capture(&m, &it);
             let name = snapshot.filename.clone();
-            m.remove(id);
+            // A queued click may arrive after Trash has claimed the row. Do
+            // not offer Undo unless the manager actually removed that row.
+            if !m.try_remove(id) {
+                return;
+            }
             let message =
                 crate::ui_util::format_template(&gettext("Removed {name}"), &[("name", &name)]);
             let toast = crate::ui_util::plain_toast(&message);

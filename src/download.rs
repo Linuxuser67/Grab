@@ -459,6 +459,8 @@ pub struct DownloadManager {
     /// Aborted workers whose task has not finished dropping its owned resources yet.
     /// These rows cannot be restarted, but do not consume a global download slot.
     stopping: std::sync::Arc<std::sync::Mutex<HashSet<u64>>>,
+    /// Rows whose completed outputs are currently being moved to the desktop Trash.
+    trash_in_progress: std::sync::Arc<std::sync::Mutex<HashSet<u64>>>,
     /// Rows whose filesystem preparation is in flight; these consume scheduler slots too.
     preparing: RefCell<HashSet<u64>>,
     /// Filesystem-preparation task handles; abort them on manager drop so thread-bound GLib futures cannot leak into another test's context.
@@ -561,6 +563,9 @@ enum Stop {
 
 #[derive(Debug, Clone)]
 pub(crate) struct RemovedSnapshot {
+    /// Identity of the live row when the snapshot was captured. Used to reject
+    /// stale Undo while that row is still owned by an in-flight Trash operation.
+    pub id: u64,
     pub url: String,
     pub dest_dir: String,
     pub filename: String,
@@ -583,11 +588,19 @@ pub(crate) struct RemovedSnapshot {
     pub gallery_job: Option<crate::gallery_argv::GalleryJob>,
 }
 
+fn trash_in_progress_error(filename: &str) -> String {
+    format_gettext_template(
+        &gettext("Cannot restore {filename} while it is being moved to Trash"),
+        &[("filename", filename)],
+    )
+}
+
 impl RemovedSnapshot {
     /// Capture all state needed to reconstruct a removed queue row.
     pub(crate) fn capture(manager: &DownloadManager, item: &DownloadItem) -> Self {
         let id = item.id();
         Self {
+            id,
             url: item.url().to_string(),
             dest_dir: item.dest_dir().to_string(),
             filename: item.filename().to_string(),
@@ -824,6 +837,7 @@ impl DownloadManager {
             settings,
             running: RefCell::new(HashMap::new()),
             stopping: std::sync::Arc::new(std::sync::Mutex::new(HashSet::new())),
+            trash_in_progress: std::sync::Arc::new(std::sync::Mutex::new(HashSet::new())),
             preparing: RefCell::new(HashSet::new()),
             preparation_handles: RefCell::new(HashMap::new()),
             pump_handles: RefCell::new(HashMap::new()),
@@ -3215,7 +3229,34 @@ impl DownloadManager {
             return Ok(0);
         }
 
-        let directories = snapshots
+        // Keep Undo useful for the remaining rows in a bulk action while
+        // excluding any row whose Trash worker currently owns its files.
+        let mut failures = Vec::new();
+        let mut restorable = Vec::with_capacity(total);
+        for snapshot in snapshots {
+            if self.is_trashing(snapshot.id) {
+                let error = trash_in_progress_error(&snapshot.filename);
+                failures.push((snapshot.filename, error));
+            } else {
+                restorable.push(snapshot);
+            }
+        }
+        if restorable.is_empty() {
+            let (filename, error) = &failures[0];
+            return Err(format_gettext_template(
+                &gettext(
+                    "Restored 0 of {total} downloads; {failed} could not be restored. First failure for {filename}: {error}",
+                ),
+                &[
+                    ("total", &total.to_string()),
+                    ("failed", &failures.len().to_string()),
+                    ("filename", filename),
+                    ("error", error),
+                ],
+            ));
+        }
+
+        let directories = restorable
             .iter()
             .map(|snapshot| snapshot.dest_dir.clone())
             .collect::<HashSet<_>>();
@@ -3241,8 +3282,12 @@ impl DownloadManager {
 
         let _batch = self.batch_guard();
         let mut restored = 0;
-        let mut failures = Vec::new();
-        for snapshot in snapshots {
+        for snapshot in restorable {
+            if self.is_trashing(snapshot.id) {
+                let error = trash_in_progress_error(&snapshot.filename);
+                failures.push((snapshot.filename, error));
+                continue;
+            }
             match listings.get(&snapshot.dest_dir) {
                 Some(Ok(existing)) => {
                     self.unremove_with_listing(snapshot, existing);
@@ -3284,6 +3329,9 @@ impl DownloadManager {
         self: &Rc<Self>,
         snap: RemovedSnapshot,
     ) -> Result<DownloadItem, String> {
+        if self.is_trashing(snap.id) {
+            return Err(trash_in_progress_error(&snap.filename));
+        }
         let dir = snap.dest_dir.clone();
         let existing = gio::spawn_blocking(move || {
             crate::video_staging::try_dir_file_names(std::path::Path::new(&dir))
@@ -3303,6 +3351,9 @@ impl DownloadManager {
                 &[("error", &message)],
             )
         })?;
+        if self.is_trashing(snap.id) {
+            return Err(trash_in_progress_error(&snap.filename));
+        }
         Ok(self.unremove_with_listing(snap, &existing))
     }
 
@@ -3480,7 +3531,7 @@ impl DownloadManager {
         let visible_finished = self.finished_count();
         let finished_owners = self
             .owners()
-            .filter(|item| item.status() == DownloadStatus::Done)
+            .filter(|item| item.status() == DownloadStatus::Done && !self.is_trashing(item.id()))
             .map(|item| item.id())
             .collect::<Vec<_>>();
         self.drop_finished_rows(&finished_owners);
@@ -3505,25 +3556,37 @@ impl DownloadManager {
         let items = self.items().collect::<Vec<_>>();
         let done_owner_ids = items
             .iter()
-            .filter(|item| !item.is_collection_child() && item.status() == DownloadStatus::Done)
+            .filter(|item| {
+                !item.is_collection_child()
+                    && item.status() == DownloadStatus::Done
+                    && !self.is_trashing(item.id())
+            })
             .map(DownloadItem::id)
             .collect::<HashSet<_>>();
         let owners_with_children = items
             .iter()
-            .filter(|item| item.is_collection_child())
+            .filter(|item| item.is_collection_child() && !self.is_trashing(item.id()))
             .filter_map(|item| item.group().map(|group| group.id()))
             .collect::<HashSet<_>>();
 
         let finished_owners = items
             .iter()
-            .filter(|item| !item.is_collection_child() && item.status() == DownloadStatus::Done)
+            .filter(|item| {
+                !item.is_collection_child()
+                    && item.status() == DownloadStatus::Done
+                    && !self.is_trashing(item.id())
+            })
             .filter(|item| {
                 !item.is_collection_parent() || !owners_with_children.contains(&item.id())
             })
             .count();
         let finished_children = items
             .iter()
-            .filter(|item| item.is_collection_child() && item.status() == DownloadStatus::Done)
+            .filter(|item| {
+                item.is_collection_child()
+                    && item.status() == DownloadStatus::Done
+                    && !self.is_trashing(item.id())
+            })
             .filter(|item| {
                 item.group()
                     .is_some_and(|group| done_owner_ids.contains(&group.id()))
@@ -3536,7 +3599,7 @@ impl DownloadManager {
     /// Snapshots of every finished row, in list order, for Clear Finished's Undo.
     pub fn finished_snapshots(&self) -> Vec<RemovedSnapshot> {
         self.owners()
-            .filter(|it| it.status() == DownloadStatus::Done)
+            .filter(|it| it.status() == DownloadStatus::Done && !self.is_trashing(it.id()))
             .map(|item| RemovedSnapshot::capture(self, &item))
             .collect()
     }
@@ -3544,16 +3607,22 @@ impl DownloadManager {
     /// Drop finished owners and all their passive child rows with one
     /// ListStore walk. Destination files remain untouched.
     fn drop_finished_rows(&self, owner_ids: &[u64]) {
-        let owner_ids = owner_ids.iter().copied().collect::<HashSet<_>>();
-        if owner_ids.is_empty() {
+        let requested_owner_ids = owner_ids.iter().copied().collect::<HashSet<_>>();
+        if requested_owner_ids.is_empty() {
             return;
         }
 
         let owner_items = self
             .owners()
-            .filter(|item| owner_ids.contains(&item.id()))
+            .filter(|item| {
+                requested_owner_ids.contains(&item.id()) && !self.is_trashing(item.id())
+            })
             .map(|item| (item.id(), item))
             .collect::<HashMap<_, _>>();
+        let owner_ids = owner_items.keys().copied().collect::<HashSet<_>>();
+        if owner_ids.is_empty() {
+            return;
+        }
         for item in owner_items.values() {
             if crate::torrent::is_torrent(&item.url()) {
                 crate::torrent::forget_download(item.id());

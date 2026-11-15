@@ -381,19 +381,32 @@ impl DownloadManager {
         true
     }
 
-    /// Re-queue a failed or cancelled download.
-    pub fn retry(self: &Rc<Self>, id: u64) {
+    /// Re-queue one failed or cancelled download and report whether it changed.
+    fn retry_inner(self: &Rc<Self>, id: u64) -> bool {
         if let Some(item) = self.find(id)
             && self.requeue_failed_item(&item)
         {
             self.persist_queue();
             self.changed();
             self.start_next();
+            true
+        } else {
+            false
         }
     }
 
+    /// Re-queue a failed or cancelled download.
+    pub fn retry(self: &Rc<Self>, id: u64) {
+        let _ = self.retry_inner(id);
+    }
+
     /// Remove every row in a collection from the list with one queue update.
+    /// Refuse the whole batch if Trash owns any member, keeping its Undo
+    /// snapshot and the actual removal set in sync.
     pub fn remove_many(self: &Rc<Self>, ids: &[u64]) -> usize {
+        if ids.iter().any(|&id| self.is_trashing(id)) {
+            return 0;
+        }
         let mut removed = 0;
         for &id in ids {
             if self.find(id).is_none() {
@@ -413,11 +426,19 @@ impl DownloadManager {
     /// Remove a row from the queue. Non-video partials remain available to Undo;
     /// page-video and native-manifest staging is discarded after its worker stops,
     /// so Undo re-resolves or restarts those attempts from the beginning.
-    pub fn remove(self: &Rc<Self>, id: u64) {
+    pub(crate) fn try_remove(self: &Rc<Self>, id: u64) -> bool {
+        if self.is_trashing(id) || self.find(id).is_none() {
+            return false;
+        }
         self.remove_inner(id);
         self.persist_queue();
         self.changed();
         self.start_next();
+        true
+    }
+
+    pub fn remove(self: &Rc<Self>, id: u64) {
+        let _ = self.try_remove(id);
     }
 
     /// Remove one row without publishing an intermediate queue state. Bulk
@@ -509,8 +530,9 @@ impl DownloadManager {
         self.for_matching(
             |s| matches!(s, DownloadStatus::Failed | DownloadStatus::Cancelled),
             |m, id| {
-                m.retry(id);
-                n += 1;
+                if m.retry_inner(id) {
+                    n += 1;
+                }
             },
         );
         n

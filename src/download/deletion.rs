@@ -6,6 +6,24 @@ use gtk4::gio;
 use gtk4::gio::prelude::*;
 use std::rc::Rc;
 
+/// Shared ownership marker for one Trash operation. The blocking worker holds
+/// a clone, so cancelling its UI future cannot release the row prematurely.
+#[derive(Clone)]
+struct TrashLease {
+    _inner: std::sync::Arc<TrashLeaseInner>,
+}
+
+struct TrashLeaseInner {
+    rows: std::sync::Arc<std::sync::Mutex<std::collections::HashSet<u64>>>,
+    id: u64,
+}
+
+impl Drop for TrashLeaseInner {
+    fn drop(&mut self) {
+        crate::runtime::lock_recover(&self.rows).remove(&self.id);
+    }
+}
+
 #[derive(Debug)]
 enum DeleteOperation {
     Gallery {
@@ -120,6 +138,28 @@ fn execute_delete_operation(operation: DeleteOperation) -> Result<(), String> {
 }
 
 impl DownloadManager {
+    /// Whether a row is exclusively owned by a Trash operation.
+    pub(crate) fn is_trashing(&self, id: u64) -> bool {
+        crate::runtime::lock_recover(&self.trash_in_progress).contains(&id)
+    }
+
+    fn claim_trash(&self, id: u64) -> Result<TrashLease, String> {
+        if self.find(id).is_none() {
+            return Err(gettext("Download not found"));
+        }
+        let mut rows = crate::runtime::lock_recover(&self.trash_in_progress);
+        if !rows.insert(id) {
+            return Err(gettext("This download is already being moved to Trash"));
+        }
+        drop(rows);
+        Ok(TrashLease {
+            _inner: std::sync::Arc::new(TrashLeaseInner {
+                rows: std::sync::Arc::clone(&self.trash_in_progress),
+                id,
+            }),
+        })
+    }
+
     pub(super) fn gallery_trash_target(
         item: &DownloadItem,
         job: &crate::gallery_argv::GalleryJob,
@@ -186,6 +226,7 @@ impl DownloadManager {
     /// Move downloaded files to Trash on a blocking worker, then update the
     /// queue model on GTK. Errors are display-ready.
     pub async fn delete_download_async(self: &Rc<Self>, id: u64) -> Result<(), String> {
+        let lease = self.claim_trash(id)?;
         let item = self.find(id).ok_or_else(|| gettext("Download not found"))?;
         let operation = self.prepare_delete_operation(id, &item);
         let torrent_url = match &operation {
@@ -194,18 +235,66 @@ impl DownloadManager {
         };
         let filename = item.filename().to_string();
 
-        gio::spawn_blocking(move || execute_delete_operation(operation))
-            .await
-            .map_err(|_| {
-                format!("Could not move {filename} to Trash: background task panicked")
-            })??;
+        let worker_lease = lease.clone();
+        let result = gio::spawn_blocking(move || {
+            let _lease = worker_lease;
+            execute_delete_operation(operation)
+        })
+        .await
+        .map_err(|_| format!("Could not move {filename} to Trash: background task panicked"))
+        .and_then(|result| result);
+
+        if let Err(error) = result {
+            drop(lease);
+            self.changed();
+            return Err(error);
+        }
 
         // This only schedules teardown on Tokio; retain the original ordering
         // and do it only after trash/archive operations have succeeded.
         if torrent_url.is_some() {
             crate::torrent::forget_download(id);
         }
-        self.remove(id);
+        // Public remove() rejects a row while this lease is held. Complete
+        // the operation through the internal path, then release the claim.
+        self.remove_inner(id);
+        self.persist_queue();
+        drop(lease);
+        self.changed();
+        self.start_next();
         Ok(())
+    }
+}
+
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn trash_lease_outlives_the_ui_future_while_worker_is_running() {
+        let id = 42;
+        let rows = std::sync::Arc::new(std::sync::Mutex::new(
+            std::collections::HashSet::from([id]),
+        ));
+        let ui_lease = TrashLease {
+            _inner: std::sync::Arc::new(TrashLeaseInner {
+                rows: std::sync::Arc::clone(&rows),
+                id,
+            }),
+        };
+        let worker_lease = ui_lease.clone();
+
+        drop(ui_lease);
+        assert!(
+            crate::runtime::lock_recover(&rows).contains(&id),
+            "dropping the UI future must not release the worker's claim"
+        );
+
+        drop(worker_lease);
+        assert!(
+            !crate::runtime::lock_recover(&rows).contains(&id),
+            "the final lease must release the row"
+        );
     }
 }

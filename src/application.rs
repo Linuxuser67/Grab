@@ -1099,15 +1099,14 @@ fn register_actions(
                             if n == 0 {
                                 return;
                             }
-                            let toast = crate::ui_util::plain_toast(&ngettext_count(
+                            let message = ngettext_count(
                                 "Cleared finished download",
                                 "Cleared {n} finished downloads",
                                 n,
-                            ));
-                            toast.set_button_label(Some(&gettext("Undo")));
+                            );
                             let m2 = manager.clone();
                             let undo_toasts = toasts.clone();
-                            toast.connect_button_clicked(move |_| {
+                            let toast = crate::ui_util::undo_toast(&message, move || {
                                 let manager = Rc::clone(&m2);
                                 let toasts = undo_toasts.clone();
                                 let snapshots = snapshots.clone();

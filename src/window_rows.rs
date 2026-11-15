@@ -867,15 +867,10 @@ pub(crate) fn build_download_group_row(
                 return;
             }
 
-            let toast = crate::ui_util::plain_toast(&ngettext_count(
-                "Removed {n} item",
-                "Removed {n} items",
-                count,
-            ));
-            toast.set_button_label(Some(&gettext("Undo")));
+            let message = ngettext_count("Removed {n} item", "Removed {n} items", count);
             let manager = Rc::clone(&manager);
             let undo_toasts = Rc::clone(&toasts);
-            toast.connect_button_clicked(move |_| {
+            let toast = crate::ui_util::undo_toast(&message, move || {
                 let snapshots = snapshots.clone();
                 let manager = Rc::clone(&manager);
                 let toasts = Rc::clone(&undo_toasts);
@@ -1506,11 +1501,9 @@ pub(crate) fn build_row(
             m.remove(id);
             let message =
                 crate::ui_util::format_template(&gettext("Removed {name}"), &[("name", &name)]);
-            let toast = crate::ui_util::plain_toast(&message);
-            toast.set_button_label(Some(&gettext("Undo")));
             let m2 = Rc::clone(&m);
             let undo_toasts = Rc::clone(&t);
-            toast.connect_button_clicked(move |_| {
+            let toast = crate::ui_util::undo_toast(&message, move || {
                 let manager = Rc::clone(&m2);
                 let toasts = Rc::clone(&undo_toasts);
                 let snapshot = snapshot.clone();

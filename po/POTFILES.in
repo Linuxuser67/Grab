@@ -18,6 +18,7 @@ src/manifest_intake.rs
 src/manifest_plan.rs
 src/preferences.rs
 src/torrent.rs
+src/ui_util.rs
 src/video.rs
 src/video_prefs.rs
 src/video_probe.rs

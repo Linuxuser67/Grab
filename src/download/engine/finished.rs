@@ -15,9 +15,7 @@ impl DownloadManager {
         size: u64,
         url: String,
     ) {
-        if item.status() != DownloadStatus::Cancelled
-            && item.status() != DownloadStatus::Paused
-        {
+        if item.status() != DownloadStatus::Cancelled && item.status() != DownloadStatus::Paused {
             // A pause keeps its pending name: resumed single-stream attempts never re-suggest.
             let pending = this.pending_names.borrow_mut().remove(&id);
             // Drop the strong manager reference across the blocking directory
@@ -30,9 +28,7 @@ impl DownloadManager {
                 let listing_dir = dir.clone();
                 drop(this);
                 let existing = match gio::spawn_blocking(move || {
-                    crate::video_staging::dir_file_names(std::path::Path::new(
-                        &listing_dir,
-                    ))
+                    crate::video_staging::dir_file_names(std::path::Path::new(&listing_dir))
                 })
                 .await
                 {
@@ -65,8 +61,7 @@ impl DownloadManager {
                 // claim-then-move it. Keep GTK objects on this context and send
                 // only plain paths/candidate names to the blocking worker.
                 if existing.iter().any(|entry| entry == &current) {
-                    match this.reserve_final_name_candidates(&dir, &name, &existing)
-                    {
+                    match this.reserve_final_name_candidates(&dir, &name, &existing) {
                         Some((candidates, mut claims)) => {
                             let old_path = item.file_path();
                             let worker_old_path = old_path.clone();
@@ -103,14 +98,10 @@ impl DownloadManager {
                                 // The manager is gone. Restore the original path
                                 // when possible rather than leaving an untracked move.
                                 if let Some(final_name) = adopted {
-                                    let moved_path = std::path::Path::new(&dir)
-                                        .join(&final_name);
+                                    let moved_path = std::path::Path::new(&dir).join(&final_name);
                                     let rollback_old_path = old_path.clone();
                                     let rollback = gio::spawn_blocking(move || {
-                                        rename_noreplace(
-                                            &moved_path,
-                                            &rollback_old_path,
-                                        )
+                                        rename_noreplace(&moved_path, &rollback_old_path)
                                     })
                                     .await;
                                     if !matches!(rollback, Ok(Ok(()))) {
@@ -131,21 +122,15 @@ impl DownloadManager {
                                 let row_removed = this.find(id).is_none();
                                 let update_detached_path = stopped || row_removed;
                                 if let Some(final_name) = adopted {
-                                    let moved_path = std::path::Path::new(&dir)
-                                        .join(&final_name);
+                                    let moved_path = std::path::Path::new(&dir).join(&final_name);
                                     let rollback_moved_path = moved_path.clone();
                                     let rollback_old_path = old_path.clone();
                                     drop(this);
                                     let rollback = gio::spawn_blocking(move || {
-                                        rename_noreplace(
-                                            &rollback_moved_path,
-                                            &rollback_old_path,
-                                        )
+                                        rename_noreplace(&rollback_moved_path, &rollback_old_path)
                                     })
                                     .await;
-                                    if !matches!(rollback, Ok(Ok(())))
-                                        && update_detached_path
-                                    {
+                                    if !matches!(rollback, Ok(Ok(()))) && update_detached_path {
                                         item.set_filename(final_name);
                                         if row_removed {
                                             // Removal already reserved old_path. Keep the
@@ -206,8 +191,8 @@ impl DownloadManager {
             let torrent_dest_dir = item.dest_dir().to_string();
             let torrent_output_dir = item.output_dir().to_string();
             let torrent_filename = item.filename().to_string();
-            let sizing_guard = cleanup_torrent
-                .then(|| super::SizingGuard::new(Rc::clone(&this.sizing_inflight)));
+            let sizing_guard =
+                cleanup_torrent.then(|| super::SizingGuard::new(Rc::clone(&this.sizing_inflight)));
             let weak_manager = Rc::downgrade(&this);
             let weak_item = item.downgrade();
             item.set_progress(1.0);
@@ -252,16 +237,12 @@ impl DownloadManager {
                     })
                     .await;
                     if cleanup_torrent
-                        && let (Ok(Some(size)), Some(manager), Some(item)) = (
-                            measured_size,
-                            weak_manager.upgrade(),
-                            weak_item.upgrade(),
-                        )
+                        && let (Ok(Some(size)), Some(manager), Some(item)) =
+                            (measured_size, weak_manager.upgrade(), weak_item.upgrade())
                         && manager.find(id).is_some()
                     {
                         item.set_detail(
-                            gettext("Finished • {size}")
-                                .replace("{size}", &fmt_bytes(size)),
+                            gettext("Finished • {size}").replace("{size}", &fmt_bytes(size)),
                         );
                     }
                 });

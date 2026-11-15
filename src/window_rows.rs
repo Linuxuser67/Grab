@@ -21,6 +21,46 @@ thread_local! {
         const { std::cell::RefCell::new(None) };
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum FailureFeedback {
+    Dialog,
+    Toast,
+    None,
+}
+
+/// Select feedback appropriate to whether the app window is in use.
+fn failure_feedback(first: bool, window_active: bool, dialog_open: bool) -> FailureFeedback {
+    if !window_active {
+        FailureFeedback::None
+    } else if first && !dialog_open {
+        FailureFeedback::Dialog
+    } else {
+        FailureFeedback::Toast
+    }
+}
+
+#[cfg(test)]
+mod failure_feedback_tests {
+    use super::*;
+
+    #[test]
+    fn first_active_failure_opens_the_details_dialog() {
+        assert_eq!(failure_feedback(true, true, false), FailureFeedback::Dialog);
+    }
+
+    #[test]
+    fn subsequent_active_failures_use_toasts_instead_of_stacking_dialogs() {
+        assert_eq!(failure_feedback(false, true, false), FailureFeedback::Toast);
+        assert_eq!(failure_feedback(true, true, true), FailureFeedback::Toast);
+    }
+
+    #[test]
+    fn inactive_window_does_not_queue_in_app_feedback() {
+        assert_eq!(failure_feedback(true, false, false), FailureFeedback::None);
+        assert_eq!(failure_feedback(false, false, true), FailureFeedback::None);
+    }
+}
+
 fn icon_button(icon: &str, tooltip: &str) -> gtk4::Button {
     let b = gtk4::Button::builder()
         .icon_name(icon)
@@ -1560,9 +1600,9 @@ pub(crate) fn build_row(
     }
     // Pop the failure dialog on the first transition to Failed per attempt
     // (not on every refresh: the notify fires once per status change).
-    // Subsequent failures of the same attempt show a toast instead; a dialog
-    // already open suppresses new ones (bulk-failure coalescing); hidden or
-    // inactive windows get a toast, never a focus-stealing present().
+    // Subsequent active-window failures use a toast instead of stacking
+    // dialogs. Inactive windows receive no in-app toast; the failed row remains
+    // visible in the queue when the window is shown again.
     // Dialog liveness via glib::WeakRef (closed dialogs stop upgrading);
     // main-thread-only state in thread_local (connect_notify_local).
     {
@@ -1584,22 +1624,25 @@ pub(crate) fn build_row(
                         .and_then(|weak| weak.upgrade())
                         .is_some()
                 });
-                if first && window_active && !dialog_open {
-                    if let Some(row) = row_weak.upgrade() {
-                        let dialog = show_failure_dialog(row.upcast_ref::<gtk4::Widget>(), item);
-                        FAILURE_DIALOG.with(|d| {
-                            *d.borrow_mut() = Some(dialog.downgrade());
-                        });
+                match failure_feedback(first, window_active, dialog_open) {
+                    FailureFeedback::Dialog => {
+                        if let Some(row) = row_weak.upgrade() {
+                            let dialog =
+                                show_failure_dialog(row.upcast_ref::<gtk4::Widget>(), item);
+                            FAILURE_DIALOG.with(|d| {
+                                *d.borrow_mut() = Some(dialog.downgrade());
+                            });
+                        }
                     }
-                } else {
-                    // Repeat failure, backgrounded window, or dialog already
-                    // open: toast instead of stacking presents.
-                    let filename = item.filename();
-                    let message = crate::ui_util::format_template(
-                        &gettext("Download failed: {name}"),
-                        &[("name", filename.as_str())],
-                    );
-                    toasts.add_toast(crate::ui_util::plain_toast(&message));
+                    FailureFeedback::Toast => {
+                        let filename = item.filename();
+                        let message = crate::ui_util::format_template(
+                            &gettext("Download failed: {name}"),
+                            &[("name", filename.as_str())],
+                        );
+                        toasts.add_toast(crate::ui_util::plain_toast(&message));
+                    }
+                    FailureFeedback::None => {}
                 }
             } else {
                 notified.set(false);

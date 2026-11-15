@@ -3227,9 +3227,7 @@ impl DownloadManager {
         }
         let paths = snapshots
             .iter()
-            .map(|snapshot| {
-                std::path::Path::new(&snapshot.dest_dir).join(&snapshot.filename)
-            })
+            .map(|snapshot| std::path::Path::new(&snapshot.dest_dir).join(&snapshot.filename))
             .collect::<Vec<_>>();
         let _operation_guard = self.begin_undo(&paths)?;
 

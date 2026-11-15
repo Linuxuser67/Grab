@@ -10670,7 +10670,6 @@ fn trash_rejects_remove_clear_finished_and_undo_until_the_worker_finishes() {
     let _ = std::fs::remove_dir_all(&dest);
 }
 
-
 #[test]
 fn undo_and_trash_serialize_on_the_same_output_path() {
     let (_queue_lock, _main_loop_lock) = test_locks();
@@ -10707,17 +10706,13 @@ fn undo_and_trash_serialize_on_the_same_output_path() {
         .begin_trash(id)
         .expect("Trash can claim the destination after Undo completes");
     assert!(
-        manager
-            .begin_undo(std::slice::from_ref(&path))
-            .is_err(),
+        manager.begin_undo(std::slice::from_ref(&path)).is_err(),
         "Undo must not start while Trash owns the destination"
     );
     drop(trash_guard);
 
     assert!(
-        manager
-            .begin_undo(std::slice::from_ref(&path))
-            .is_ok(),
+        manager.begin_undo(std::slice::from_ref(&path)).is_ok(),
         "Undo may claim the destination after Trash is cancelled"
     );
     let _ = std::fs::remove_dir_all(&dest);

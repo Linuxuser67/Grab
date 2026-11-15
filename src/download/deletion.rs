@@ -290,7 +290,9 @@ impl DownloadManager {
         {
             let mut active_paths = self.file_operations_in_progress.borrow_mut();
             if locked_paths.iter().any(|path| active_paths.contains(path)) {
-                return Err(gettext("A download destination is busy with another operation"));
+                return Err(gettext(
+                    "A download destination is busy with another operation",
+                ));
             }
             active_paths.extend(locked_paths.iter().cloned());
         }

@@ -181,19 +181,16 @@ impl DownloadManager {
         };
         if let Some(group_id) = group_id {
             scope.push(group_id);
-            scope.extend(
-                self.items()
-                    .filter(|member| {
-                        member.id() == group_id
-                            || member.group().is_some_and(|group| group.id() == group_id)
-                    })
-                    .map(|member| member.id()),
-            );
         }
         let destination = item.file_path();
         scope.extend(
             self.items()
-                .filter(|member| member.file_path() == destination)
+                .filter(|member| {
+                    group_id.is_some_and(|group_id| {
+                        member.id() == group_id
+                            || member.group().is_some_and(|group| group.id() == group_id)
+                    }) || member.file_path() == destination
+                })
                 .map(|member| member.id()),
         );
         scope.sort_unstable();
@@ -228,10 +225,13 @@ impl DownloadManager {
     pub(crate) fn begin_trash(self: &Rc<Self>, id: u64) -> Result<TrashOperationGuard, String> {
         let item = self.find(id).ok_or_else(|| gettext("Download not found"))?;
         let locked_ids = self.trash_scope(id, &item);
-        let locked_paths = locked_ids
-            .iter()
-            .filter_map(|locked_id| self.find(*locked_id).map(|row| row.file_path()))
+        let mut locked_paths = self
+            .items()
+            .filter(|row| locked_ids.binary_search(&row.id()).is_ok())
+            .map(|row| row.file_path())
             .collect::<Vec<_>>();
+        locked_paths.sort_unstable();
+        locked_paths.dedup();
         {
             let mut active = self.trash_in_progress.borrow_mut();
             let mut active_paths = self.trash_paths_in_progress.borrow_mut();

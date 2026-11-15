@@ -10583,7 +10583,7 @@ fn hold_trash_worker(manager: &DownloadManager) -> TrashWorkerBarrier {
 }
 
 #[test]
-fn trash_serializes_remove_and_clear_finished_until_the_file_move_commits() {
+fn trash_rejects_remove_clear_finished_and_undo_until_the_worker_finishes() {
     let (_queue_lock, _main_loop_lock) = test_locks();
     let _queue_file = test_queue_file("trash-remove-race");
     let dest = std::env::temp_dir().join(format!("grab-trash-race-{}", std::process::id()));
@@ -10611,52 +10611,48 @@ fn trash_serializes_remove_and_clear_finished_until_the_file_move_commits() {
     });
 
     barrier.wait_until_entered();
-    assert!(manager.is_trash_blocked(id));
-    assert!(!manager.try_remove(id), "Remove must not bypass Trash");
-    assert_eq!(
-        manager.remove_many(&[id]),
-        0,
-        "bulk Remove must not bypass Trash"
-    );
-    assert_eq!(
-        manager.clear_finished(),
-        0,
-        "Clear Finished must not capture a row owned by Trash"
-    );
-    assert!(
-        manager.finished_snapshots().is_empty(),
-        "no Undo snapshot may be made while Trash owns the row"
-    );
-    assert!(
-        manager.find(id).is_some(),
-        "the queue row must remain until the Trash worker returns"
-    );
-    assert!(
-        glib::MainContext::default()
-            .block_on(manager.unremove_async(undo_snapshot.clone()))
-            .is_err(),
-        "single-row Undo must not restore a Trash-owned destination"
-    );
-    assert!(
-        glib::MainContext::default()
-            .block_on(manager.unremove_many_async(vec![undo_snapshot]))
-            .is_err(),
-        "bulk Undo must not restore a Trash-owned destination"
-    );
-    assert_eq!(
-        manager.store().n_items(),
-        1,
-        "Undo attempts must not create a duplicate row during Trash"
-    );
+    let row_blocked = manager.is_trash_blocked(id);
+    let remove_rejected = !manager.try_remove(id);
+    let bulk_remove_count = manager.remove_many(&[id]);
+    let clear_finished_count = manager.clear_finished();
+    let undo_snapshots = manager.finished_snapshots();
+    let row_still_present = manager.find(id).is_some();
+    let single_undo_rejected = glib::MainContext::default()
+        .block_on(manager.unremove_async(undo_snapshot.clone()))
+        .is_err();
+    let bulk_undo_rejected = glib::MainContext::default()
+        .block_on(manager.unremove_many_async(vec![undo_snapshot]))
+        .is_err();
+    let row_count_during_trash = manager.store().n_items();
 
     barrier.release();
     let result = glib::MainContext::default()
         .block_on(async { done_rx.await.expect("Trash task reports its result") });
+
     assert!(result.is_ok());
+    assert!(row_blocked);
+    assert!(remove_rejected, "Remove must not bypass Trash");
+    assert_eq!(bulk_remove_count, 0, "bulk Remove must not bypass Trash");
+    assert_eq!(
+        clear_finished_count, 0,
+        "Clear Finished must not capture a row owned by Trash"
+    );
+    assert!(
+        undo_snapshots.is_empty(),
+        "no Undo snapshot may be made while Trash owns the row"
+    );
+    assert!(row_still_present, "Trash keeps the queue row until completion");
+    assert!(single_undo_rejected, "single Undo must respect the Trash path lock");
+    assert!(bulk_undo_rejected, "bulk Undo must respect the Trash path lock");
+    assert_eq!(
+        row_count_during_trash, 1,
+        "Undo attempts must not create a duplicate row during Trash"
+    );
     assert!(
         manager.find(id).is_none(),
         "successful Trash removes the row only after the worker completes"
     );
+    assert_eq!(manager.store().n_items(), 0, "no duplicate row may survive Trash");
     assert!(!manager.is_trash_blocked(id));
     let _ = std::fs::remove_dir_all(&dest);
 }

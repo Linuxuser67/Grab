@@ -742,10 +742,7 @@ pub(crate) fn apply_torrent_limits(s: &crate::settings::AppSettings) {
 ///
 /// Returns an error if the destination is not a regular file, is shorter than the
 /// recorded completed prefix, or cannot be truncated and synced.
-pub(crate) fn truncate_to_prefix(
-    path: &std::path::Path,
-    st: &SegmentState,
-) -> std::io::Result<()> {
+pub(crate) fn truncate_to_prefix(path: &std::path::Path, st: &SegmentState) -> std::io::Result<()> {
     let prefix = st.prefix_len();
     let file = std_open_nofollow(
         |options| {
@@ -1600,7 +1597,10 @@ mod destination_ownership_tests {
         truncate_to_prefix(&destination, &state).expect("truncate to completed prefix");
 
         let bytes = std::fs::read(&destination).expect("read truncated destination");
-        assert_eq!(u64::try_from(bytes.len()).expect("file size fits u64"), prefix);
+        assert_eq!(
+            u64::try_from(bytes.len()).expect("file size fits u64"),
+            prefix
+        );
         assert!(bytes.iter().all(|byte| *byte == 0xa5));
     }
 

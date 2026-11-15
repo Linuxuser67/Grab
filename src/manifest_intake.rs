@@ -34,7 +34,7 @@ const MANIFEST_RETRY_BASE_DELAY: Duration = Duration::from_millis(250);
 const MANIFEST_PREVIEW_CACHE_TTL: Duration = Duration::from_secs(5 * 60);
 const MANIFEST_PREVIEW_CACHE_CAPACITY: usize = 32;
 
-#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+#[derive(Clone, PartialEq, Eq, Hash)]
 struct ManifestPreviewCacheKey {
     url: String,
     handoff_cookie_hash: Option<[u8; 32]>,

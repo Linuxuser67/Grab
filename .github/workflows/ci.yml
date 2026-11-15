@@ -108,6 +108,33 @@ jobs:
           # warnings while the picker streams entries) must fail the step,
           # not just scroll past in the log.
           ! grep -q "Gtk-CRITICAL" /tmp/ui-tests.log
+  # The release artifacts build with the Flatpak SDK's rust-stable
+  # extension (Rust 1.98.0), not with latest stable. Compile once with the
+  # MSRV so a dependency bump cannot land a lockfile that only builds on
+  # the CI toolchain.
+  msrv:
+    runs-on: ubuntu-latest
+    container: fedora:44
+    steps:
+      - name: Install system dependencies
+        run: dnf install -y git gcc pkg-config gtk4-devel libadwaita-devel gettext
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          # No job pushes or fetches; don't persist the token in git config.
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
+        with:
+          toolchain: 1.98.0
+      - name: Cache Cargo registry
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: .cargo-home/registry
+          key: msrv-cargo-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}
+          restore-keys: |
+            msrv-cargo-${{ runner.os }}-
+      - name: Use shared Cargo registry path
+        run: echo "CARGO_HOME=$GITHUB_WORKSPACE/.cargo-home" >> "$GITHUB_ENV"
+      - run: cargo check --locked --all-targets
   # Guards the module structure: sentrux enforces the architectural rules
   # in .sentrux/rules.toml (currently: zero import cycles). Pinned to
   # v0.5.7 so an upstream release can't silently change the verdict; runs

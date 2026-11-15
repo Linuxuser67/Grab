@@ -507,10 +507,9 @@ pub struct DownloadManager {
     reservations: std::sync::Arc<std::sync::Mutex<Reservations>>,
     /// Finalizers reclaiming a removed row's scratch, by row. A worker abort handle is kept when one had to be awaited; aborting the finalizer detaches it (#180).
     discards: RefCell<HashMap<u64, PendingDiscard>>,
-    /// Rows locked by an in-flight Trash operation, including their collection scope.
-    trash_in_progress: RefCell<HashSet<u64>>,
-    /// Output paths locked by Trash, also preventing stale Undo snapshots from racing it.
-    file_operations_in_progress: RefCell<HashSet<std::path::PathBuf>>,
+    /// Rows and output paths locked by Trash or Undo. A cloneable lease keeps
+    /// the lock set alive until detached filesystem workers have exited.
+    operation_locks: std::sync::Arc<std::sync::Mutex<deletion::OperationLocks>>,
     /// Rows currently capturing a live stream. Pause/cancel/park only signal these; the worker finalizes and its message drives the row.
     live_rows: RefCell<std::collections::HashSet<u64>>,
     /// Rows whose engine ever started (session-only, persisted on [`StoredItem`]):
@@ -717,6 +716,19 @@ impl Drop for BatchGuard {
     }
 }
 
+/// Schedule a GTK-side refresh after an operation lease is released by a worker.
+fn notify_operation_locks_changed() {
+    glib::idle_add(|| {
+        MANAGER_WEAK.with(|slot| {
+            if let Some(manager) = slot.borrow().as_ref().and_then(std::rc::Weak::upgrade) {
+                manager.changed();
+                manager.start_next();
+            }
+        });
+        glib::ControlFlow::Break
+    });
+}
+
 /// Wake the queue from any thread: schedules a one-shot `start_next()` on the
 /// main loop. Uses `idle_add` (thread-safe) with a `Send` closure that captures
 /// nothing — it finds the manager via a thread-local set in `new()`. The source
@@ -856,8 +868,9 @@ impl DownloadManager {
             gates: RefCell::new(HashMap::new()),
             reservations: std::sync::Arc::new(std::sync::Mutex::new(Reservations::default())),
             discards: RefCell::new(HashMap::new()),
-            trash_in_progress: RefCell::new(HashSet::new()),
-            file_operations_in_progress: RefCell::new(HashSet::new()),
+            operation_locks: std::sync::Arc::new(std::sync::Mutex::new(
+                deletion::OperationLocks::default(),
+            )),
             live_rows: RefCell::new(std::collections::HashSet::new()),
             draining: Cell::new(false),
             sizing_inflight: Rc::new(Cell::new(0)),

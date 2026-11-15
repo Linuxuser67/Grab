@@ -10671,6 +10671,133 @@ fn trash_rejects_remove_clear_finished_and_undo_until_the_worker_finishes() {
 }
 
 #[test]
+fn cancelled_trash_future_keeps_operation_locks_until_worker_exits() {
+    let (_queue_lock, _main_loop_lock) = test_locks();
+    let _queue_file = test_queue_file("trash-detached-worker-lock");
+    let dest = tempfile::tempdir().expect("create Trash destination");
+    let manager = DownloadManager::new(gio::ListStore::new::<DownloadItem>(), test_settings());
+    let id = 901;
+    let item = DownloadItem::new(
+        id,
+        "https://example.test/detached.bin",
+        "detached.bin",
+        dest.path().to_string_lossy().as_ref(),
+    );
+    item.set_status(DownloadStatus::Done);
+    manager.store().append(&item);
+
+    let guard = manager.begin_trash(id).expect("claim Trash operation");
+    let barrier = hold_trash_worker(&manager);
+    let task_manager = Rc::clone(&manager);
+    let task = glib::spawn_future_local(async move {
+        let _ = task_manager.delete_download_with_guard(id, guard).await;
+    });
+    barrier.wait_until_entered();
+
+    task.abort();
+    // Poll the cancelled GLib future so its async-owned lease is dropped.
+    glib::MainContext::default().iteration(false);
+    assert!(
+        manager.is_trash_blocked(id),
+        "the detached blocking worker must keep the row locked after its waiter is cancelled"
+    );
+    assert!(
+        manager.begin_undo(&[item.file_path()]).is_err(),
+        "Undo must not claim the destination while the detached worker still owns it"
+    );
+
+    barrier.release();
+    let context = glib::MainContext::default();
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    while manager.is_trash_blocked(id) {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the worker lease must release after the blocking closure exits"
+        );
+        context.iteration(false);
+        std::thread::sleep(Duration::from_millis(1));
+    }
+    assert!(
+        manager.begin_undo(&[item.file_path()]).is_ok(),
+        "Undo may claim the destination once the blocking worker exits"
+    );
+}
+
+#[test]
+fn trash_scope_locks_transitive_collections_sharing_an_output_path() {
+    let (_queue_lock, _main_loop_lock) = test_locks();
+    let _queue_file = test_queue_file("trash-transitive-collection-lock");
+    let dest = tempfile::tempdir().expect("create collection destination");
+    let manager = DownloadManager::new(gio::ListStore::new::<DownloadItem>(), test_settings());
+
+    let owner_a_id = 910;
+    let owner_b_id = 920;
+    let group_a = crate::download_store::DownloadGroup::try_new(owner_a_id, "Collection A")
+        .expect("valid collection A");
+    let group_b = crate::download_store::DownloadGroup::try_new(owner_b_id, "Collection B")
+        .expect("valid collection B");
+    let owner_a = DownloadItem::new(
+        owner_a_id,
+        "https://example.test/collection-a",
+        "Collection A",
+        dest.path().to_string_lossy().as_ref(),
+    );
+    owner_a.set_is_collection_owner(true);
+    owner_a.set_status(DownloadStatus::Done);
+    let owner_b = DownloadItem::new(
+        owner_b_id,
+        "https://example.test/collection-b",
+        "Collection B",
+        dest.path().to_string_lossy().as_ref(),
+    );
+    owner_b.set_is_collection_owner(true);
+    owner_b.set_status(DownloadStatus::Done);
+
+    let child_a = DownloadItem::new(
+        911,
+        "https://example.test/a/shared",
+        "shared.bin",
+        dest.path().to_string_lossy().as_ref(),
+    );
+    child_a.set_is_collection_child(true);
+    child_a.set_group(Some(group_a));
+    child_a.set_status(DownloadStatus::Done);
+    let child_b = DownloadItem::new(
+        921,
+        "https://example.test/b/shared",
+        "shared.bin",
+        dest.path().to_string_lossy().as_ref(),
+    );
+    child_b.set_is_collection_child(true);
+    child_b.set_group(Some(group_b));
+    child_b.set_status(DownloadStatus::Done);
+
+    for row in [&owner_a, &child_a, &owner_b, &child_b] {
+        manager.store().append(row);
+    }
+    let guard = manager.begin_trash(child_a.id()).expect("claim collection A");
+    for id in [owner_a_id, child_a.id(), owner_b_id, child_b.id()] {
+        assert!(
+            manager.is_trash_blocked(id),
+            "transitive path/collection closure must lock row {id}"
+        );
+    }
+    assert_eq!(
+        manager.clear_finished(),
+        0,
+        "Clear Finished must not drop owners or passive children in either locked collection"
+    );
+    assert_eq!(manager.store().n_items(), 4);
+    drop(guard);
+    assert!(!manager.is_trash_blocked(owner_b_id));
+    assert!(
+        manager.clear_finished() > 0,
+        "Clear Finished can proceed after the shared operation lease is released"
+    );
+    assert_eq!(manager.store().n_items(), 0);
+}
+
+#[test]
 fn undo_and_trash_serialize_on_the_same_output_path() {
     let (_queue_lock, _main_loop_lock) = test_locks();
     let _queue_file = test_queue_file("trash-undo-serialization");

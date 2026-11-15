@@ -268,7 +268,8 @@ pub fn build_window(
     search_bar.set_widget_name("download-search-bar");
     search_bar.connect_entry(&search);
     search_bar.set_key_capture_widget(Some(&window));
-    search_bar.set_margin_top(12);
+    // No top margin: the search bar hugs the header bar like GNOME's own
+    // inline search bars instead of floating in a gap below it.
     search_bar.set_margin_bottom(12);
     search_bar.set_margin_start(12);
     search_bar.set_margin_end(12);
@@ -410,7 +411,8 @@ pub fn build_window(
     queued_section.set_widget_name("download-section-queued");
     downloaded_section.set_widget_name("download-section-downloaded");
     let content = gtk4::Box::new(gtk4::Orientation::Vertical, 12);
-    content.set_margin_top(12);
+    // No top margin: the download list starts directly below the header bar,
+    // matching the inline add card that already sits flush against it.
     content.set_margin_bottom(12);
     content.set_margin_start(12);
     content.set_margin_end(12);

@@ -20,6 +20,12 @@ use gtk4::{gio, glib};
 use std::rc::Rc;
 use std::time::{Duration, Instant};
 
+/// Playlist file events are attempt-scoped: after pause/cancel the owner
+/// status changes synchronously, so buffered terminal events must be ignored.
+fn can_apply_playlist_file_event(item: &DownloadItem) -> bool {
+    item.is_collection_owner() && item.status() == DownloadStatus::Downloading
+}
+
 impl DownloadManager {
     pub(super) fn start_next(self: &Rc<Self>) {
         // Startup restore runs asynchronously in production. Don't start a newly
@@ -794,10 +800,8 @@ impl DownloadManager {
                             let torrent_dest_dir = item.dest_dir().to_string();
                             let torrent_output_dir = item.output_dir().to_string();
                             let torrent_filename = item.filename().to_string();
-                            let torrent_sizing = Rc::clone(&this.sizing_inflight);
-                            if cleanup_torrent {
-                                torrent_sizing.set(torrent_sizing.get() + 1);
-                            }
+                            let sizing_guard = cleanup_torrent
+                                .then(|| super::SizingGuard::new(Rc::clone(&this.sizing_inflight)));
                             let weak_manager = Rc::downgrade(&this);
                             let weak_item = item.downgrade();
                             item.set_progress(1.0);
@@ -814,6 +818,9 @@ impl DownloadManager {
                             if (keep_server_date && mtime.is_some()) || cleanup_torrent {
                                 let worker_url = url.clone();
                                 glib::spawn_future_local(async move {
+                                    // RAII balances the test-visible in-flight counter if
+                                    // this fire-and-forget GLib future is cancelled.
+                                    let _sizing_guard = sizing_guard;
                                     let measured_size = gio::spawn_blocking(move || {
                                         if keep_server_date
                                             && let Some(time) = mtime
@@ -839,7 +846,6 @@ impl DownloadManager {
                                     })
                                     .await;
                                     if cleanup_torrent {
-                                        torrent_sizing.set(torrent_sizing.get().saturating_sub(1));
                                         if let (Ok(Some(size)), Some(manager), Some(item)) = (
                                             measured_size,
                                             weak_manager.upgrade(),
@@ -1123,9 +1129,7 @@ impl DownloadManager {
                             file_id,
                             filename: _filename,
                         } => {
-                            if item.is_collection_owner()
-                                && item.status() == DownloadStatus::Downloading
-                            {
+                            if can_apply_playlist_file_event(&item) {
                                 this.upsert_video_playlist_file_row(
                                     &item,
                                     &file_id,
@@ -1144,8 +1148,7 @@ impl DownloadManager {
                             downloaded,
                             total,
                         } => {
-                            if item.is_collection_owner()
-                                && item.status() == DownloadStatus::Downloading
+                            if can_apply_playlist_file_event(&item)
                                 && last_playlist_progress_refresh
                                     .is_none_or(|last| last.elapsed() >= Duration::from_millis(100))
                             {
@@ -1181,7 +1184,7 @@ impl DownloadManager {
                             path,
                             size,
                         } => {
-                            if item.is_collection_owner() {
+                            if can_apply_playlist_file_event(&item) {
                                 this.upsert_video_playlist_file_row(
                                     &item,
                                     &file_id,
@@ -1197,7 +1200,7 @@ impl DownloadManager {
                             }
                         }
                         crate::engine_msg::PlaylistFileEvent::Failed { file_id, error } => {
-                            if item.is_collection_owner() {
+                            if can_apply_playlist_file_event(&item) {
                                 this.upsert_video_playlist_file_row(
                                     &item,
                                     &file_id,
@@ -2208,5 +2211,40 @@ impl DownloadManager {
             n.set_default_action_and_target_value("app.present", None);
             app.send_notification(Some(&format!("dl-{}", item.id())), &n);
         }
+    }
+}
+
+#[cfg(test)]
+mod playlist_file_event_tests {
+    use super::*;
+
+    #[test]
+    fn playlist_file_events_are_ignored_after_pause_or_cancel() {
+        let item = DownloadItem::new(1, "https://example.test/list", "List", "/tmp");
+        item.set_is_collection_owner(true);
+
+        for status in [
+            DownloadStatus::Queued,
+            DownloadStatus::Scheduled,
+            DownloadStatus::Downloading,
+            DownloadStatus::Paused,
+            DownloadStatus::Done,
+            DownloadStatus::Failed,
+            DownloadStatus::Cancelled,
+        ] {
+            item.set_status(status);
+            assert_eq!(
+                can_apply_playlist_file_event(&item),
+                status == DownloadStatus::Downloading,
+                "playlist event acceptance must follow the owner attempt status: {status:?}"
+            );
+        }
+
+        item.set_status(DownloadStatus::Downloading);
+        item.set_is_collection_owner(false);
+        assert!(
+            !can_apply_playlist_file_event(&item),
+            "a non-owner row must not accept playlist file events"
+        );
     }
 }

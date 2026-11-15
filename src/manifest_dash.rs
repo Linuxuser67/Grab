@@ -349,6 +349,19 @@ impl DashTemplate {
     fn is_low_latency(&self) -> bool {
         !self.availability_time_complete
     }
+
+    fn maximum_segment_duration(&self) -> Result<Duration, DashError> {
+        let ticks = if let Some(timeline) = &self.timeline {
+            timeline
+                .iter()
+                .map(|entry| entry.duration)
+                .max()
+        } else {
+            self.duration_ticks
+        }
+        .ok_or(DashError::UnsupportedAddressing)?;
+        ticks_to_duration(ticks, self.timescale)
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -742,6 +755,7 @@ pub(crate) fn parse_dash_manifest_at(
                             is_dynamic,
                             template.availability_time_offset,
                             template.availability_time_complete,
+                            template.maximum_segment_duration()?,
                         )?;
                         low_latency::validate_template_mime(
                             template.is_low_latency(),
@@ -1863,13 +1877,7 @@ fn effective_template(
         .transpose()?
         .unwrap_or_default();
     let availability_time_complete = availability_time_complete.unwrap_or(true);
-    low_latency::validate_template_availability(
-        is_dynamic,
-        availability_time_offset,
-        availability_time_complete,
-    )?;
-
-    Ok(DashTemplate {
+    let template = DashTemplate {
         media,
         initialization,
         start_number: start_number.unwrap_or(1),
@@ -1881,7 +1889,15 @@ fn effective_template(
         availability_time_offset,
         availability_time_complete,
         period_duration,
-    })
+    };
+    low_latency::validate_template_availability(
+        is_dynamic,
+        template.availability_time_offset,
+        template.availability_time_complete,
+        template.maximum_segment_duration()?,
+    )?;
+
+    Ok(template)
 }
 
 fn effective_list(

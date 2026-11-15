@@ -16,9 +16,12 @@ pub(super) fn validate_template_availability(
     is_dynamic: bool,
     availability_time_offset: Duration,
     availability_time_complete: bool,
+    maximum_segment_duration: Duration,
 ) -> Result<(), DashError> {
     if (!is_dynamic && (!availability_time_offset.is_zero() || !availability_time_complete))
-        || (!availability_time_complete && availability_time_offset.is_zero())
+        || (!availability_time_complete
+            && (availability_time_offset.is_zero()
+                || availability_time_offset > maximum_segment_duration))
     {
         return Err(DashError::UnsupportedAddressing);
     }

@@ -112,7 +112,7 @@ fn shorter_segment_timeline_on_refresh_does_not_invalidate_availability_offset()
     let initial_body = dynamic_mpd(
         r#"<SegmentTemplate timescale="1" startNumber="1"
                            initialization="init.mp4" media="seg-$Number$"
-                           availabilityTimeOffset="3"
+                           availabilityTimeOffset="2"
                            availabilityTimeComplete="false">
   <SegmentTimeline><S t="0" d="4" r="-1"/></SegmentTimeline>
 </SegmentTemplate>"#,
@@ -261,28 +261,30 @@ fn dynamic_segment_template_inherits_and_bounds_availability_attributes() {
         "availabilityTimeOffset=\"2\"",
         "availabilityTimeOffset=\"4.1\"",
     );
-    assert!(
+    assert_eq!(
         parse_dash_manifest_at(
             BASE_URL,
             &over_segment_offset,
             SystemTime::UNIX_EPOCH + Duration::from_secs(6),
         )
-        .is_ok(),
-        "a segment-duration change must not invalidate a finite, bounded offset"
+        .err(),
+        Some(DashError::UnsupportedAddressing),
+        "the chunk availability offset must not exceed the longest declared segment duration"
     );
 
     let large_offset = inherited.replace(
         "availabilityTimeOffset=\"2\"",
         "availabilityTimeOffset=\"300.001\"",
     );
-    assert!(
+    assert_eq!(
         parse_dash_manifest_at(
             BASE_URL,
             &large_offset,
             SystemTime::UNIX_EPOCH + Duration::from_secs(6),
         )
-        .is_ok(),
-        "a large finite offset is accepted when the planner can bound the resource window"
+        .err(),
+        Some(DashError::UnsupportedAddressing),
+        "an availability offset larger than the segment duration is unsupported"
     );
 
     let non_finite = inherited.replace(

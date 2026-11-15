@@ -257,11 +257,10 @@ impl DownloadManager {
                     gate.wait_for_rollbacks().await;
                     let remove_delivered_orphan = gate.was_delivered();
                     cleanup_discarded_files(final_dest.clone(), id, remove_delivered_orphan).await;
-                    if let Ok(mut r) = reservations.lock() {
-                        r.remove(&dest);
-                        if final_dest != dest {
-                            r.remove(&final_dest);
-                        }
+                    let mut r = crate::runtime::lock_recover(&reservations);
+                    r.remove(&dest);
+                    if final_dest != dest {
+                        r.remove(&final_dest);
                     }
                     // The destination is free: wake the queue on the main
                     // thread so a row parked by `unremove()` starts now
@@ -284,11 +283,10 @@ impl DownloadManager {
                 let finalizer = crate::runtime::tokio_rt().spawn(async move {
                     let final_dest = pump_path_rx.await.unwrap_or_else(|_| dest.clone());
                     cleanup_discarded_files(final_dest.clone(), id, false).await;
-                    if let Ok(mut r) = reservations.lock() {
-                        r.remove(&dest);
-                        if final_dest != dest {
-                            r.remove(&final_dest);
-                        }
+                    let mut r = crate::runtime::lock_recover(&reservations);
+                    r.remove(&dest);
+                    if final_dest != dest {
+                        r.remove(&final_dest);
                     }
                     wake_queue();
                 });

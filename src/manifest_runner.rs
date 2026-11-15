@@ -41,8 +41,8 @@ use dash_live::{dash_live_state_exists, run_live_dash_tracks};
 #[cfg(test)]
 use hls_live::{apply_live_hls_snapshot, load_live_hls_track, write_live_playlist};
 use hls_live::{
-    ensure_live_hls_marker, read_live_hls_marker, restore_local_live_hls_tracks,
-    run_live_hls_tracks,
+    LiveHlsTrackRun, ensure_live_hls_marker, read_live_hls_marker,
+    restore_local_live_hls_tracks, run_live_hls_tracks,
 };
 
 /// Upper bound for one media resource, independent of a server-supplied length.
@@ -1828,24 +1828,24 @@ async fn prepare_live_hls_finalization(
         abort,
     } = context;
 
-    let capture = run_live_hls_tracks(
+    let capture = run_live_hls_tracks(LiveHlsTrackRun {
         client,
         source_url,
-        dest_dir,
+        destination_dir: dest_dir,
         destination,
         item_id,
         staging,
-        video,
-        audio,
+        video_plan: video,
+        audio_plan: audio,
         finish_only,
         video_dir,
         audio_dir,
-        concurrency,
+        connections: concurrency,
         tx,
         downloaded,
-        guarded_child_hosts,
-        abort,
-    )
+        guarded_child_hosts: &mut *guarded_child_hosts,
+        abort: &mut *abort,
+    })
     .await?;
 
     let destination_parts = capture.output == LiveHlsOutput::DestinationParts;

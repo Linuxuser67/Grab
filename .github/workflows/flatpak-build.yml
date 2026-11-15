@@ -1,9 +1,9 @@
 name: Flatpak build
 
-# Shared build chain for release bundles and PR test bundles. Every build
-# is pristine (--force-clean, no SDK cache): validation must never depend
-# on what a previous run left behind. Release mode attaches the bundle to
-# the release; test mode uploads it as a workflow artifact instead.
+# Shared read-only build chain for release bundles and local test bundles.
+# Every build is pristine (--force-clean, no SDK cache): validation must never
+# depend on what a previous run left behind. The caller publishes a validated
+# artifact in a separate, short-lived write-enabled job.
 on:
   workflow_call:
     inputs:
@@ -16,18 +16,21 @@ on:
         default: true
         type: boolean
       release-tag:
-        description: "Attach the bundle here; empty uploads an artifact instead"
+        description: "Validate the release tag before building"
         default: ""
         type: string
 
 jobs:
   bundle:
+    permissions:
+      contents: read
     runs-on: ubuntu-latest
     timeout-minutes: 90
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ inputs.ref }}
+          persist-credentials: false
 
       # Release mode: the tag's metadata (version, metainfo release,
       # HEAD) must agree before anything is built and published.
@@ -110,17 +113,7 @@ jobs:
       - name: Bundle
         run: flatpak build-bundle flatpak-repo Grab.flatpak io.github.linuxuser67.Grab
 
-      - name: Attach to the release
-        if: inputs.release-tag != ''
-        env:
-          GH_TOKEN: ${{ github.token }}
-          TAG: ${{ inputs.release-tag }}
-        run: |
-          ls -lh Grab.flatpak
-          gh release upload "$TAG" Grab.flatpak --clobber
-
-      - name: Upload test bundle
-        if: inputs.release-tag == ''
+      - name: Upload build artifact for the caller
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: Grab.flatpak

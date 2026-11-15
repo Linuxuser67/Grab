@@ -10582,14 +10582,6 @@ fn hold_trash_worker(manager: &DownloadManager) -> TrashWorkerBarrier {
     TrashWorkerBarrier { entered, released }
 }
 
-struct TaskDropSignal(std::sync::mpsc::Sender<()>);
-
-impl Drop for TaskDropSignal {
-    fn drop(&mut self) {
-        let _ = self.0.send(());
-    }
-}
-
 #[test]
 fn trash_rejects_remove_clear_finished_and_undo_until_the_worker_finishes() {
     let (_queue_lock, _main_loop_lock) = test_locks();
@@ -10696,34 +10688,20 @@ fn cancelled_trash_future_keeps_operation_locks_until_worker_exits() {
 
     let guard = manager.begin_trash(id).expect("claim Trash operation");
     let barrier = hold_trash_worker(&manager);
-    let task_manager = Rc::clone(&manager);
-    let (task_dropped_tx, task_dropped_rx) = std::sync::mpsc::channel();
-    let task = glib::spawn_future_local(async move {
-        let _drop_signal = TaskDropSignal(task_dropped_tx);
-        let _ = task_manager.delete_download_with_guard(id, guard).await;
-    });
-    barrier.wait_until_entered();
-
-    task.abort();
-    // Wait until the awaiting future is actually dropped, not merely marked
-    // for cancellation. At this point only the blocking worker owns a lease.
-    let context = glib::MainContext::default();
-    let cancel_deadline = std::time::Instant::now() + Duration::from_secs(5);
-    loop {
-        match task_dropped_rx.try_recv() {
-            Ok(()) => break,
-            Err(std::sync::mpsc::TryRecvError::Disconnected) => {
-                panic!("cancelled Trash future exited without dropping its task guard");
+    let mut trash_future = Box::pin(manager.delete_download_with_guard(id, guard));
+    // Poll once so the future starts its Tokio blocking worker, then discard
+    // the awaiting future just as a cancelled UI task would.
+    glib::MainContext::default().block_on(std::future::poll_fn(|context| {
+        match std::future::Future::poll(trash_future.as_mut(), context) {
+            std::task::Poll::Pending => std::task::Poll::Ready(()),
+            std::task::Poll::Ready(result) => {
+                panic!("Trash worker finished before the test barrier: {result:?}");
             }
-            Err(std::sync::mpsc::TryRecvError::Empty) => {}
         }
-        assert!(
-            std::time::Instant::now() < cancel_deadline,
-            "cancelled Trash future must drop its async lease"
-        );
-        context.iteration(false);
-        std::thread::sleep(std::time::Duration::from_millis(1));
-    }
+    }));
+    barrier.wait_until_entered();
+    drop(trash_future);
+    let context = glib::MainContext::default();
     assert!(
         manager.is_trash_blocked(id),
         "the blocking worker must keep the row locked after its waiter is cancelled"
@@ -10840,6 +10818,45 @@ fn trash_scope_locks_transitive_collections_sharing_an_output_path() {
         "Clear Finished can proceed after the shared operation lease is released"
     );
     assert_eq!(manager.store().n_items(), 0);
+}
+
+#[test]
+fn delayed_trash_lock_refresh_does_not_target_a_replacement_manager() {
+    let (_queue_lock, _main_loop_lock) = test_locks();
+    let _queue_file = test_queue_file("trash-lock-notification-owner");
+
+    let original = DownloadManager::new(gio::ListStore::new::<DownloadItem>(), test_settings());
+    let item = DownloadItem::new(
+        930,
+        "https://example.test/original.bin",
+        "original.bin",
+        "/tmp",
+    );
+    item.set_status(DownloadStatus::Done);
+    original.store().append(&item);
+    let guard = original
+        .begin_trash(item.id())
+        .expect("claim original manager's Trash lock");
+    drop(guard);
+
+    // The release notification is queued on the GLib context. Replacing the
+    // thread-local manager before dispatch must not send that old refresh to
+    // this new manager.
+    let replacement =
+        DownloadManager::new(gio::ListStore::new::<DownloadItem>(), test_settings());
+    let refreshes = Rc::new(Cell::new(0));
+    let observed = Rc::clone(&refreshes);
+    replacement.set_on_change(move || observed.set(observed.get() + 1));
+
+    let context = glib::MainContext::default();
+    for _ in 0..4 {
+        context.iteration(false);
+    }
+    assert_eq!(
+        refreshes.get(),
+        0,
+        "a delayed lock-release notification must remain bound to its owning manager"
+    );
 }
 
 #[test]

@@ -717,14 +717,20 @@ impl Drop for BatchGuard {
 }
 
 /// Schedule a GTK-side refresh after an operation lease is released by a worker.
-fn notify_operation_locks_changed() {
-    glib::idle_add(|| {
-        MANAGER_WEAK.with(|slot| {
-            if let Some(manager) = slot.borrow().as_ref().and_then(std::rc::Weak::upgrade) {
-                manager.changed();
-                manager.start_next();
-            }
-        });
+fn notify_operation_locks_changed(
+    locks: std::sync::Weak<std::sync::Mutex<deletion::OperationLocks>>,
+) {
+    glib::idle_add(move || {
+        if let Some(expected_locks) = locks.upgrade() {
+            MANAGER_WEAK.with(|slot| {
+                if let Some(manager) = slot.borrow().as_ref().and_then(std::rc::Weak::upgrade)
+                    && std::sync::Arc::ptr_eq(&manager.operation_locks, &expected_locks)
+                {
+                    manager.changed();
+                    manager.start_next();
+                }
+            });
+        }
         glib::ControlFlow::Break
     });
 }

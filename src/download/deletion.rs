@@ -43,7 +43,7 @@ impl Drop for OperationLockLeaseInner {
             }
         }
         if self.notify_on_release {
-            super::notify_operation_locks_changed();
+            super::notify_operation_locks_changed(Arc::downgrade(&self.locks));
         }
     }
 }

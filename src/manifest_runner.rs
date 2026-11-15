@@ -179,8 +179,19 @@ fn subtitle_mux_unsupported(log: &str) -> bool {
 
 /// Whether FFmpeg rejected the input presentation rather than its output destination.
 fn ffmpeg_rejected_input(log: &str) -> bool {
-    log.to_ascii_lowercase()
-        .contains("invalid data found when processing input")
+    let log = log.to_ascii_lowercase();
+    [
+        // Generic demuxer rejection.
+        "invalid data found when processing input",
+        // Missing or truncated container headers.
+        "moov atom not found",
+        "ebml header parsing failed",
+        "error reading header",
+        // The demuxer opened the resource but could not identify its media streams.
+        "could not find codec parameters for stream",
+    ]
+    .iter()
+    .any(|message| log.contains(message))
 }
 
 /// Classify a failed FFmpeg pass: unsupported source media falls back to yt-dlp,
@@ -4739,6 +4750,21 @@ mod tests {
             mux_failure_error("Could not open input: Invalid data found when processing input"),
             ManifestRunError::Unsupported(_)
         ));
+    }
+
+    #[test]
+    fn ffmpeg_container_and_stream_header_rejections_are_eligible_for_fallback() {
+        for log in [
+            "[mov,mp4,m4a,3gp,3g2,mj2 @ 0x1] moov atom not found",
+            "[matroska,webm @ 0x1] EBML header parsing failed",
+            "[mov @ 0x1] error reading header: End of file",
+            "[mov @ 0x1] Could not find codec parameters for stream 0",
+        ] {
+            assert!(
+                matches!(mux_failure_error(log), ManifestRunError::Unsupported(_)),
+                "input rejection should fall back: {log}"
+            );
+        }
     }
 
     #[test]

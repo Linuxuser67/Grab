@@ -1509,7 +1509,7 @@ pub(crate) fn build_row(
                         button.set_sensitive(true);
                         group_remove_btn.set_sensitive(true);
                         t.add_toast(crate::ui_util::plain_toast(&e));
-                    },
+                    }
                     Ok(()) => t.add_toast(crate::ui_util::plain_toast(&gettext("Moved to Trash"))),
                 }
             });

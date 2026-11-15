@@ -1298,24 +1298,24 @@ async fn saved_live_hls_capture_finalizes_without_contacting_the_origin() {
     let downloaded = Arc::new(AtomicU64::new(0));
     let mut guarded_child_hosts = crate::download_net::PublicResolutionSet::default();
     let (_stop_tx, mut abort) = tokio::sync::oneshot::channel();
-    let outcome = run_live_hls_tracks(
-        &client,
-        "https://origin.example.test/master.m3u8",
-        root.path(),
-        &destination,
-        0,
-        root.path(),
-        &local_plan,
-        None,
-        false,
-        &video_dir,
-        &audio_dir,
-        1,
-        &tx,
-        &downloaded,
-        &mut guarded_child_hosts,
-        &mut abort,
-    )
+    let outcome = run_live_hls_tracks(LiveHlsTrackRun {
+        client: &client,
+        source_url: "https://origin.example.test/master.m3u8",
+        destination_dir: root.path(),
+        destination: &destination,
+        item_id: 0,
+        staging: root.path(),
+        video_plan: &local_plan,
+        audio_plan: None,
+        finish_only: false,
+        video_dir: &video_dir,
+        audio_dir: &audio_dir,
+        connections: 1,
+        tx: &tx,
+        downloaded: &downloaded,
+        guarded_child_hosts: &mut guarded_child_hosts,
+        abort: &mut abort,
+    })
     .await
     .expect("finalize stored capture without a network request");
 
@@ -1328,24 +1328,24 @@ async fn saved_live_hls_capture_finalizes_without_contacting_the_origin() {
     );
 
     let (_finish_tx, mut finish_abort) = tokio::sync::oneshot::channel();
-    let finish_outcome = run_live_hls_tracks(
-        &client,
-        "https://origin.example.test/master.m3u8",
-        root.path(),
-        &destination,
-        0,
-        root.path(),
-        &local_plan,
-        None,
-        true,
-        &video_dir,
-        &audio_dir,
-        1,
-        &tx,
-        &downloaded,
-        &mut guarded_child_hosts,
-        &mut finish_abort,
-    )
+    let finish_outcome = run_live_hls_tracks(LiveHlsTrackRun {
+        client: &client,
+        source_url: "https://origin.example.test/master.m3u8",
+        destination_dir: root.path(),
+        destination: &destination,
+        item_id: 0,
+        staging: root.path(),
+        video_plan: &local_plan,
+        audio_plan: None,
+        finish_only: true,
+        video_dir: &video_dir,
+        audio_dir: &audio_dir,
+        connections: 1,
+        tx: &tx,
+        downloaded: &downloaded,
+        guarded_child_hosts: &mut guarded_child_hosts,
+        abort: &mut finish_abort,
+    })
     .await
     .expect("resume a durable finish without polling the source");
     assert_eq!(finish_outcome.outcome, LiveHlsCaptureOutcome::Finish);
@@ -2120,24 +2120,24 @@ async fn live_hls_pause_keeps_the_last_committed_window() {
         .send(crate::video::StopIntent::Finish)
         .expect("queue finish after pausing the committed capture");
     let mut guarded_child_hosts = crate::download_net::PublicResolutionSet::default();
-    let finished = run_live_hls_tracks(
-        &client,
-        "https://origin.example.test/live.m3u8",
-        root.path(),
-        &destination,
-        0,
-        root.path(),
-        &first,
-        None,
-        false,
-        &video_dir,
-        &audio_dir,
-        1,
-        &tx,
-        &downloaded,
-        &mut guarded_child_hosts,
-        &mut finish_abort,
-    )
+    let finished = run_live_hls_tracks(LiveHlsTrackRun {
+        client: &client,
+        source_url: "https://origin.example.test/live.m3u8",
+        destination_dir: root.path(),
+        destination: &destination,
+        item_id: 0,
+        staging: root.path(),
+        video_plan: &first,
+        audio_plan: None,
+        finish_only: false,
+        video_dir: &video_dir,
+        audio_dir: &audio_dir,
+        connections: 1,
+        tx: &tx,
+        downloaded: &downloaded,
+        guarded_child_hosts: &mut guarded_child_hosts,
+        abort: &mut finish_abort,
+    })
     .await
     .expect("finish the restored live HLS capture");
     assert_eq!(finished.outcome, LiveHlsCaptureOutcome::Finish);
@@ -2202,24 +2202,24 @@ async fn live_hls_runner_returns_paused_without_finalizing() {
         .expect("queue pause before the first live HLS request");
     let mut guarded_child_hosts = crate::download_net::PublicResolutionSet::default();
 
-    let outcome = run_live_hls_tracks(
-        &client,
-        "https://origin.example.test/live.m3u8",
-        root.path(),
-        root.path(),
-        0,
-        root.path(),
-        &plan,
-        None,
-        false,
-        &video_dir,
-        &audio_dir,
-        1,
-        &tx,
-        &downloaded,
-        &mut guarded_child_hosts,
-        &mut abort,
-    )
+    let outcome = run_live_hls_tracks(LiveHlsTrackRun {
+        client: &client,
+        source_url: "https://origin.example.test/live.m3u8",
+        destination_dir: root.path(),
+        destination: root.path(),
+        item_id: 0,
+        staging: root.path(),
+        video_plan: &plan,
+        audio_plan: None,
+        finish_only: false,
+        video_dir: &video_dir,
+        audio_dir: &audio_dir,
+        connections: 1,
+        tx: &tx,
+        downloaded: &downloaded,
+        guarded_child_hosts: &mut guarded_child_hosts,
+        abort: &mut abort,
+    })
     .await
     .expect("pause the live HLS runner");
 

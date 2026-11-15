@@ -81,9 +81,12 @@ fn parse_event_u64(raw: &str) -> Option<u64> {
     if let Ok(value) = serde_json::from_str::<u64>(raw) {
         return Some(value);
     }
-    let value = serde_json::from_str::<f64>(raw)
-        .ok()
-        .or_else(|| serde_json::from_str::<String>(raw).ok()?.parse::<f64>().ok())?;
+    let value = serde_json::from_str::<f64>(raw).ok().or_else(|| {
+        serde_json::from_str::<String>(raw)
+            .ok()?
+            .parse::<f64>()
+            .ok()
+    })?;
     (value.is_finite() && value >= 0.0).then_some(value as u64)
 }
 

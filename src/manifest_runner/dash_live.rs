@@ -622,6 +622,18 @@ async fn dash_live_resource_needs_fetch(
     }
 }
 
+/// Index existing segment numbers once so a refreshed MPD does not scan the
+/// entire accumulated recording for every remote segment.
+fn dash_live_segment_indices(
+    segments: &[DashLiveSegment],
+) -> std::collections::HashMap<u64, usize> {
+    let mut indices = std::collections::HashMap::with_capacity(segments.len());
+    for (index, segment) in segments.iter().enumerate() {
+        indices.entry(segment.number).or_insert(index);
+    }
+    indices
+}
+
 #[expect(
     clippy::too_many_arguments,
     reason = "one rendition update shares its client, cancellation, progress and aggregate byte-budget context"
@@ -686,6 +698,7 @@ pub(super) async fn apply_dash_live_snapshot(
         }
     }
 
+    let mut segment_indices = dash_live_segment_indices(&candidate.segments);
     let mut previous_remote_number = None;
     for resource in plan
         .resources
@@ -708,12 +721,8 @@ pub(super) async fn apply_dash_live_snapshot(
         if first_number.is_some_and(|first| number < first) {
             continue;
         }
-        if let Some(existing) = candidate
-            .segments
-            .iter()
-            .find(|segment| segment.number == number)
-        {
-            if existing.filename != resource.filename {
+        if let Some(index) = segment_indices.get(&number).copied() {
+            if candidate.segments[index].filename != resource.filename {
                 tracing::warn!(
                     representation = %plan.representation.live_key,
                     segment_number = number,
@@ -745,10 +754,12 @@ pub(super) async fn apply_dash_live_snapshot(
                 );
                 return Ok(DashLiveUpdateOutcome::ContinuityLost);
             }
+            let index = candidate.segments.len();
             candidate.segments.push(DashLiveSegment {
                 number,
                 filename: resource.filename.clone(),
             });
+            segment_indices.insert(number, index);
         }
 
         let resource_is_committed = committed_resource_names.contains(resource.filename.as_str());
@@ -1372,5 +1383,35 @@ pub(super) async fn run_live_dash_tracks(
         if dash_presentation_ended(&current_video_plan.presentation) {
             finish_capture!(DashLiveCaptureOutcome::Ended);
         }
+    }
+}
+
+#[cfg(test)]
+mod dash_live_segment_index_tests {
+    use super::*;
+
+    #[test]
+    fn segment_index_preserves_first_match_and_tracks_unique_numbers() {
+        let segments = vec![
+            DashLiveSegment {
+                number: 10,
+                filename: "first.bin".to_string(),
+            },
+            DashLiveSegment {
+                number: 11,
+                filename: "second.bin".to_string(),
+            },
+            DashLiveSegment {
+                number: 10,
+                filename: "duplicate.bin".to_string(),
+            },
+        ];
+
+        let indices = dash_live_segment_indices(&segments);
+
+        assert_eq!(indices.get(&10), Some(&0));
+        assert_eq!(indices.get(&11), Some(&1));
+        assert_eq!(indices.get(&12), None);
+        assert_eq!(segments[*indices.get(&10).unwrap()].filename, "first.bin");
     }
 }

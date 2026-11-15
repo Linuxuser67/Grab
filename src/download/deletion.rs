@@ -238,9 +238,7 @@ impl DownloadManager {
             if locked_ids
                 .iter()
                 .any(|locked_id| active.contains(locked_id))
-                || locked_paths
-                    .iter()
-                    .any(|path| active_paths.contains(path))
+                || locked_paths.iter().any(|path| active_paths.contains(path))
             {
                 return Err(gettext("This download is already being moved to Trash"));
             }

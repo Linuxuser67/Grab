@@ -6,10 +6,10 @@ use crate::file_names::is_url_derived_name;
 use crate::runtime::lock_recover;
 use crate::video_argv::{
     PlaylistRunSelection, VideoJob, apply_proxy_env, container_truth_name, dash_merge_argv,
-    fallback_to_live_edge, hls_download_argv, live_capture_argv, live_from_start_unsupported,
-    live_remux_argv, merge_output_ext, playlist_download_argv, playlist_scope_args, proxy_cli_args,
-    unified_download_argv, unified_format_spec, unified_output_template, unified_staging_prefix,
-    write_manifest,
+    fallback_to_live_edge, hls_download_argv_with_subtitles, live_capture_argv,
+    live_from_start_unsupported, live_remux_argv, merge_output_ext, playlist_download_argv,
+    playlist_scope_args, proxy_cli_args, unified_download_argv_with_subtitles, unified_format_spec,
+    unified_output_template, unified_staging_prefix, write_manifest,
 };
 use crate::video_plan::{StreamPlan, plan_streams};
 use crate::video_probe::page_host;
@@ -1523,19 +1523,20 @@ pub(crate) async fn run_unified_ytdlp(
     // Resolve the subtitle language against what the video actually offers
     // (preferred, else English, else none) before the media argv is built.
     // An abort here stops the download; a probe failure just drops subtitles.
-    let mut job = job.clone();
-    job.subtitles = match resolve_subtitle_lang(youtube_bin, &job, abort, playlist_index).await {
-        Ok(lang) => lang,
-        Err(()) => return Ok(None),
-    };
-    let mut argv = unified_download_argv(
-        &job,
+    let subtitle_language =
+        match resolve_subtitle_lang(youtube_bin, job, abort, playlist_index).await {
+            Ok(language) => language,
+            Err(()) => return Ok(None),
+        };
+    let mut argv = unified_download_argv_with_subtitles(
+        job,
         spec,
         merging,
         &merge_ext,
         ffmpeg_bin,
         &out_template,
         playlist_index,
+        subtitle_language.as_deref(),
     );
     // Skip re-extraction: the probe's info JSON is reused via --load-info-json.
     // The JSON is only loaded when the Video was built from it (see the
@@ -3345,12 +3346,19 @@ pub(crate) async fn run_hls_ytdlp(
     // Resolve the subtitle language against what the video actually offers
     // (preferred, else English, else none) before the media argv is built.
     // An abort here stops the download; a probe failure just drops subtitles.
-    let mut job = job.clone();
-    job.subtitles = match resolve_subtitle_lang(youtube_bin, &job, abort, playlist_index).await {
-        Ok(lang) => lang,
-        Err(()) => return Ok(None),
-    };
-    let argv = hls_download_argv(&job, hls_format_id, ffmpeg_bin, &job.dest, playlist_index);
+    let subtitle_language =
+        match resolve_subtitle_lang(youtube_bin, job, abort, playlist_index).await {
+            Ok(language) => language,
+            Err(()) => return Ok(None),
+        };
+    let argv = hls_download_argv_with_subtitles(
+        job,
+        hls_format_id,
+        ffmpeg_bin,
+        &job.dest,
+        playlist_index,
+        subtitle_language.as_deref(),
+    );
     let guarded_proxy = crate::video_spawn::guard_untrusted_args(&argv)?;
     let mut cmd = ytdlp_command(youtube_bin).await;
     cmd.args(&argv);

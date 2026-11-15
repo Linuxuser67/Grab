@@ -20,6 +20,16 @@ use gtk4::{gio, glib};
 use std::rc::Rc;
 use std::time::{Duration, Instant};
 
+/// Playlist file events are attempt-scoped: after pause/cancel the owner
+/// status changes synchronously, and a retry starts a new generation.
+fn can_apply_playlist_file_event(
+    is_collection_owner: bool,
+    status: DownloadStatus,
+    attempt_is_current: bool,
+) -> bool {
+    attempt_is_current && is_collection_owner && status == DownloadStatus::Downloading
+}
+
 impl DownloadManager {
     pub(super) fn start_next(self: &Rc<Self>) {
         // Startup restore runs asynchronously in production. Don't start a newly
@@ -794,10 +804,8 @@ impl DownloadManager {
                             let torrent_dest_dir = item.dest_dir().to_string();
                             let torrent_output_dir = item.output_dir().to_string();
                             let torrent_filename = item.filename().to_string();
-                            let torrent_sizing = Rc::clone(&this.sizing_inflight);
-                            if cleanup_torrent {
-                                torrent_sizing.set(torrent_sizing.get() + 1);
-                            }
+                            let sizing_guard = cleanup_torrent
+                                .then(|| super::SizingGuard::new(Rc::clone(&this.sizing_inflight)));
                             let weak_manager = Rc::downgrade(&this);
                             let weak_item = item.downgrade();
                             item.set_progress(1.0);
@@ -814,6 +822,9 @@ impl DownloadManager {
                             if (keep_server_date && mtime.is_some()) || cleanup_torrent {
                                 let worker_url = url.clone();
                                 glib::spawn_future_local(async move {
+                                    // Keep the in-flight count balanced when this
+                                    // fire-and-forget future completes or is cancelled.
+                                    let _sizing_guard = sizing_guard;
                                     let measured_size = gio::spawn_blocking(move || {
                                         if keep_server_date
                                             && let Some(time) = mtime
@@ -838,19 +849,18 @@ impl DownloadManager {
                                         }
                                     })
                                     .await;
-                                    if cleanup_torrent {
-                                        torrent_sizing.set(torrent_sizing.get().saturating_sub(1));
-                                        if let (Ok(Some(size)), Some(manager), Some(item)) = (
+                                    if cleanup_torrent
+                                        && let (Ok(Some(size)), Some(manager), Some(item)) = (
                                             measured_size,
                                             weak_manager.upgrade(),
                                             weak_item.upgrade(),
-                                        ) && manager.find(id).is_some()
-                                        {
-                                            item.set_detail(
-                                                gettext("Finished • {size}")
-                                                    .replace("{size}", &fmt_bytes(size)),
-                                            );
-                                        }
+                                        )
+                                        && manager.find(id).is_some()
+                                    {
+                                        item.set_detail(
+                                            gettext("Finished • {size}")
+                                                .replace("{size}", &fmt_bytes(size)),
+                                        );
                                     }
                                 });
                             }
@@ -1123,9 +1133,11 @@ impl DownloadManager {
                             file_id,
                             filename: _filename,
                         } => {
-                            if item.is_collection_owner()
-                                && item.status() == DownloadStatus::Downloading
-                            {
+                            if can_apply_playlist_file_event(
+                                item.is_collection_owner(),
+                                item.status(),
+                                this.is_current(id, generation),
+                            ) {
                                 this.upsert_video_playlist_file_row(
                                     &item,
                                     &file_id,
@@ -1144,10 +1156,12 @@ impl DownloadManager {
                             downloaded,
                             total,
                         } => {
-                            if item.is_collection_owner()
-                                && item.status() == DownloadStatus::Downloading
-                                && last_playlist_progress_refresh
-                                    .is_none_or(|last| last.elapsed() >= Duration::from_millis(100))
+                            if can_apply_playlist_file_event(
+                                item.is_collection_owner(),
+                                item.status(),
+                                this.is_current(id, generation),
+                            ) && last_playlist_progress_refresh
+                                .is_none_or(|last| last.elapsed() >= Duration::from_millis(100))
                             {
                                 let progress = total
                                     .filter(|total| *total > 0)
@@ -1181,7 +1195,11 @@ impl DownloadManager {
                             path,
                             size,
                         } => {
-                            if item.is_collection_owner() {
+                            if can_apply_playlist_file_event(
+                                item.is_collection_owner(),
+                                item.status(),
+                                this.is_current(id, generation),
+                            ) {
                                 this.upsert_video_playlist_file_row(
                                     &item,
                                     &file_id,
@@ -1197,7 +1215,11 @@ impl DownloadManager {
                             }
                         }
                         crate::engine_msg::PlaylistFileEvent::Failed { file_id, error } => {
-                            if item.is_collection_owner() {
+                            if can_apply_playlist_file_event(
+                                item.is_collection_owner(),
+                                item.status(),
+                                this.is_current(id, generation),
+                            ) {
                                 this.upsert_video_playlist_file_row(
                                     &item,
                                     &file_id,
@@ -2208,5 +2230,38 @@ impl DownloadManager {
             n.set_default_action_and_target_value("app.present", None);
             app.send_notification(Some(&format!("dl-{}", item.id())), &n);
         }
+    }
+}
+
+#[cfg(test)]
+mod playlist_file_event_tests {
+    use super::*;
+
+    #[test]
+    fn playlist_file_events_require_a_current_downloading_owner() {
+        for status in [
+            DownloadStatus::Queued,
+            DownloadStatus::Scheduled,
+            DownloadStatus::Downloading,
+            DownloadStatus::Paused,
+            DownloadStatus::Done,
+            DownloadStatus::Failed,
+            DownloadStatus::Cancelled,
+        ] {
+            assert_eq!(
+                can_apply_playlist_file_event(true, status, true),
+                status == DownloadStatus::Downloading,
+                "event acceptance must follow the owner status: {status:?}"
+            );
+        }
+
+        assert!(
+            !can_apply_playlist_file_event(true, DownloadStatus::Downloading, false),
+            "buffered events from a replaced attempt must be ignored after retry"
+        );
+        assert!(
+            !can_apply_playlist_file_event(false, DownloadStatus::Downloading, true),
+            "non-owner rows must not accept playlist file events"
+        );
     }
 }

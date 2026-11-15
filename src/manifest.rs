@@ -2308,9 +2308,15 @@ segment-2.ts
     #[test]
     fn packed_audio_and_opaque_hls_segments_have_no_mpegts_container_hint() {
         for segment_uri in ["audio.aac", "audio.mp3", "segment"] {
-            let body = format!(
-                "#EXTM3U\\n#EXT-X-TARGETDURATION:6\\n#EXTINF:6,\\n{segment_uri}\\n#EXT-X-ENDLIST\\n"
-            );
+            let body = [
+                "#EXTM3U",
+                "#EXT-X-TARGETDURATION:6",
+                "#EXTINF:6,",
+                segment_uri,
+                "#EXT-X-ENDLIST",
+                "",
+            ]
+            .join("\\n");
             let plan = plan_hls_media_playlist(BASE_URL, body.as_bytes())
                 .expect("valid packed-audio or opaque HLS media playlist");
             assert_eq!(

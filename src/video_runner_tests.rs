@@ -1100,3 +1100,195 @@ fn destination_preflight_allows_missing_and_rejects_regular_files() {
     );
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+#[cfg(unix)]
+fn spawn_supervision_child() -> (tokio::process::Child, ProcessGroupGuard) {
+    let mut command = tokio::process::Command::new("sleep");
+    command
+        .arg("30")
+        .process_group(0)
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null());
+    let child = command.spawn().expect("spawn supervision test child");
+    let group = ProcessGroupGuard::new(&child);
+    (child, group)
+}
+
+#[cfg(unix)]
+fn pending_supervision_drains() -> (
+    tokio::task::JoinHandle<()>,
+    tokio::task::JoinHandle<()>,
+    [tokio::task::AbortHandle; 2],
+) {
+    let progress = tokio::spawn(std::future::pending::<()>());
+    let logs = tokio::spawn(std::future::pending::<()>());
+    let drains = [progress.abort_handle(), logs.abort_handle()];
+    (progress, logs, drains)
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn ytdlp_supervision_returns_completed_status_after_group_quiescence() {
+    let mut command = tokio::process::Command::new("true");
+    command.process_group(0);
+    let mut child = command.spawn().expect("spawn completed child");
+    let mut group = ProcessGroupGuard::new(&child);
+    let pgid = group.pgid();
+    let (_abort_sender, mut abort) = tokio::sync::oneshot::channel::<StopIntent>();
+    let last_progress = std::sync::Mutex::new(std::time::Instant::now());
+    let merging = std::sync::atomic::AtomicBool::new(false);
+    let (progress, logs, drains) = pending_supervision_drains();
+
+    let mut supervision = YtdlpSupervision {
+        child: &mut child,
+        group: &mut group,
+        pgid: pgid.as_ref(),
+        abort: &mut abort,
+        last_progress: &last_progress,
+        merging: &merging,
+        stall_timeout: Duration::from_secs(2),
+        merge_timeout: Duration::from_secs(2),
+        drains: &drains,
+    };
+    let result = supervision.wait().await.expect("completed child result");
+    drop(supervision);
+
+    assert!(
+        matches!(result, YtdlpSupervisionOutcome::Exited(status) if status.success()),
+        "a clean child exit must be returned after process-group quiescence"
+    );
+    assert!(!group.is_armed(), "a reaped child must disarm its guard");
+    progress.abort();
+    logs.abort();
+    let _ = progress.await;
+    let _ = logs.await;
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn ytdlp_supervision_preserves_explicit_stop_intent() {
+    let (mut child, mut group) = spawn_supervision_child();
+    let pgid = group.pgid();
+    let (abort_sender, mut abort) = tokio::sync::oneshot::channel::<StopIntent>();
+    abort_sender
+        .send(StopIntent::Pause)
+        .expect("supervision receiver is waiting");
+    let last_progress = std::sync::Mutex::new(std::time::Instant::now());
+    let merging = std::sync::atomic::AtomicBool::new(false);
+    let (progress, logs, drains) = pending_supervision_drains();
+
+    let mut supervision = YtdlpSupervision {
+        child: &mut child,
+        group: &mut group,
+        pgid: pgid.as_ref(),
+        abort: &mut abort,
+        last_progress: &last_progress,
+        merging: &merging,
+        stall_timeout: Duration::from_secs(30),
+        merge_timeout: Duration::from_secs(30),
+        drains: &drains,
+    };
+    let result = supervision.wait().await.expect("abort supervision result");
+    drop(supervision);
+
+    assert!(
+        matches!(
+            result,
+            YtdlpSupervisionOutcome::Aborted(Some(StopIntent::Pause))
+        ),
+        "the stop reason must reach the caller unchanged"
+    );
+    assert!(child.id().is_none(), "abort must reap the child");
+    assert!(!group.is_armed(), "abort must disarm the child-group guard");
+    assert!(
+        progress.await.is_err(),
+        "abort must stop the progress reader"
+    );
+    assert!(logs.await.is_err(), "abort must stop the log reader");
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn ytdlp_supervision_terminates_a_silent_child_at_the_stall_deadline() {
+    let (mut child, mut group) = spawn_supervision_child();
+    let pgid = group.pgid();
+    let (_abort_sender, mut abort) = tokio::sync::oneshot::channel::<StopIntent>();
+    let last_progress = std::sync::Mutex::new(std::time::Instant::now());
+    let merging = std::sync::atomic::AtomicBool::new(false);
+    let (progress, logs, drains) = pending_supervision_drains();
+
+    let mut supervision = YtdlpSupervision {
+        child: &mut child,
+        group: &mut group,
+        pgid: pgid.as_ref(),
+        abort: &mut abort,
+        last_progress: &last_progress,
+        merging: &merging,
+        stall_timeout: Duration::from_millis(20),
+        merge_timeout: Duration::from_secs(30),
+        drains: &drains,
+    };
+    let result = tokio::time::timeout(Duration::from_secs(5), supervision.wait())
+        .await
+        .expect("stall supervision must finish promptly")
+        .expect("stall supervision must not fail quiescence");
+    drop(supervision);
+
+    assert!(
+        matches!(result, YtdlpSupervisionOutcome::Stalled),
+        "silence past the stall deadline must be terminal"
+    );
+    assert!(child.id().is_none(), "stall must reap the child");
+    assert!(!group.is_armed(), "stall must disarm the child-group guard");
+    assert!(
+        progress.await.is_err(),
+        "stall must stop the progress reader"
+    );
+    assert!(logs.await.is_err(), "stall must stop the log reader");
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn ytdlp_supervision_applies_the_merge_wall_clock_after_merge_starts() {
+    let (mut child, mut group) = spawn_supervision_child();
+    let pgid = group.pgid();
+    let (_abort_sender, mut abort) = tokio::sync::oneshot::channel::<StopIntent>();
+    let last_progress = std::sync::Mutex::new(std::time::Instant::now());
+    let merging = std::sync::atomic::AtomicBool::new(true);
+    let (progress, logs, drains) = pending_supervision_drains();
+
+    let mut supervision = YtdlpSupervision {
+        child: &mut child,
+        group: &mut group,
+        pgid: pgid.as_ref(),
+        abort: &mut abort,
+        last_progress: &last_progress,
+        merging: &merging,
+        stall_timeout: Duration::from_secs(30),
+        merge_timeout: Duration::from_millis(20),
+        drains: &drains,
+    };
+    let result = tokio::time::timeout(Duration::from_secs(5), supervision.wait())
+        .await
+        .expect("merge timeout supervision must finish promptly")
+        .expect("merge timeout must quiesce its child group");
+    drop(supervision);
+
+    assert!(
+        matches!(result, YtdlpSupervisionOutcome::MergeTimedOut),
+        "an active merge that exceeds its wall-clock must fail"
+    );
+    assert!(child.id().is_none(), "merge timeout must reap the child");
+    assert!(
+        !group.is_armed(),
+        "merge timeout must disarm the child-group guard"
+    );
+    assert!(
+        progress.await.is_err(),
+        "merge timeout must stop the progress reader"
+    );
+    assert!(
+        logs.await.is_err(),
+        "merge timeout must stop the log reader"
+    );
+}

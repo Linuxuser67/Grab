@@ -10641,9 +10641,18 @@ fn trash_rejects_remove_clear_finished_and_undo_until_the_worker_finishes() {
         undo_snapshots.is_empty(),
         "no Undo snapshot may be made while Trash owns the row"
     );
-    assert!(row_still_present, "Trash keeps the queue row until completion");
-    assert!(single_undo_rejected, "single Undo must respect the Trash path lock");
-    assert!(bulk_undo_rejected, "bulk Undo must respect the Trash path lock");
+    assert!(
+        row_still_present,
+        "Trash keeps the queue row until completion"
+    );
+    assert!(
+        single_undo_rejected,
+        "single Undo must respect the Trash path lock"
+    );
+    assert!(
+        bulk_undo_rejected,
+        "bulk Undo must respect the Trash path lock"
+    );
     assert_eq!(
         row_count_during_trash, 1,
         "Undo attempts must not create a duplicate row during Trash"
@@ -10652,7 +10661,11 @@ fn trash_rejects_remove_clear_finished_and_undo_until_the_worker_finishes() {
         manager.find(id).is_none(),
         "successful Trash removes the row only after the worker completes"
     );
-    assert_eq!(manager.store().n_items(), 0, "no duplicate row may survive Trash");
+    assert_eq!(
+        manager.store().n_items(),
+        0,
+        "no duplicate row may survive Trash"
+    );
     assert!(!manager.is_trash_blocked(id));
     let _ = std::fs::remove_dir_all(&dest);
 }

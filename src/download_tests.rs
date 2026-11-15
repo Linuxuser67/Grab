@@ -10760,23 +10760,33 @@ fn trash_scope_locks_transitive_collections_sharing_an_output_path() {
         dest.path().to_string_lossy().as_ref(),
     );
     child_a.set_is_collection_child(true);
-    child_a.set_group(Some(group_a));
+    child_a.set_group(Some(group_a.clone()));
     child_a.set_status(DownloadStatus::Done);
+    // This sibling exposes a second path linking collection A to collection B.
+    let child_a_secondary = DownloadItem::new(
+        912,
+        "https://example.test/a/secondary",
+        "secondary.bin",
+        dest.path().to_string_lossy().as_ref(),
+    );
+    child_a_secondary.set_is_collection_child(true);
+    child_a_secondary.set_group(Some(group_a));
+    child_a_secondary.set_status(DownloadStatus::Done);
     let child_b = DownloadItem::new(
         921,
-        "https://example.test/b/shared",
-        "shared.bin",
+        "https://example.test/b/secondary",
+        "secondary.bin",
         dest.path().to_string_lossy().as_ref(),
     );
     child_b.set_is_collection_child(true);
     child_b.set_group(Some(group_b));
     child_b.set_status(DownloadStatus::Done);
 
-    for row in [&owner_a, &child_a, &owner_b, &child_b] {
+    for row in [&owner_a, &child_a, &child_a_secondary, &owner_b, &child_b] {
         manager.store().append(row);
     }
     let guard = manager.begin_trash(child_a.id()).expect("claim collection A");
-    for id in [owner_a_id, child_a.id(), owner_b_id, child_b.id()] {
+    for id in [owner_a_id, child_a.id(), child_a_secondary.id(), owner_b_id, child_b.id()] {
         assert!(
             manager.is_trash_blocked(id),
             "transitive path/collection closure must lock row {id}"
@@ -10787,7 +10797,7 @@ fn trash_scope_locks_transitive_collections_sharing_an_output_path() {
         0,
         "Clear Finished must not drop owners or passive children in either locked collection"
     );
-    assert_eq!(manager.store().n_items(), 4);
+    assert_eq!(manager.store().n_items(), 5);
     drop(guard);
     assert!(!manager.is_trash_blocked(owner_b_id));
     assert!(

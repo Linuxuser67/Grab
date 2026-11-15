@@ -196,8 +196,8 @@ impl DownloadManager {
     /// collection membership or an identical output path.
     fn trash_scope(&self, id: u64, item: &DownloadItem) -> Vec<u64> {
         let rows = self.items().collect::<Vec<_>>();
-        let destination = item.file_path();
         let mut locked_ids = std::collections::HashSet::from([id]);
+        let mut locked_paths = std::collections::HashSet::from([item.file_path()]);
         let mut locked_groups = std::collections::HashSet::new();
         let initial_group = if item.is_collection_parent() {
             Some(id)
@@ -209,8 +209,8 @@ impl DownloadManager {
         }
 
         // A duplicate-path row can pull in its own collection, which can
-        // contain another duplicate path. Close the set before queue actions
-        // are allowed to inspect it.
+        // expose another path shared with a third collection. Expand paths,
+        // groups, and rows together until the complete lock scope is stable.
         loop {
             let mut changed = false;
             for member in &rows {
@@ -219,13 +219,15 @@ impl DownloadManager {
                 } else {
                     member.group_id()
                 };
+                let member_path = member.file_path();
                 let connected = locked_ids.contains(&member.id())
                     || member_group.is_some_and(|group_id| locked_groups.contains(&group_id))
-                    || member.file_path() == destination;
+                    || locked_paths.contains(&member_path);
                 if !connected {
                     continue;
                 }
                 changed |= locked_ids.insert(member.id());
+                changed |= locked_paths.insert(member_path);
                 if let Some(group_id) = member_group {
                     changed |= locked_groups.insert(group_id);
                 }

@@ -3830,22 +3830,22 @@ impl DownloadManager {
         } else {
             // Truncating a partially written segmented file is filesystem I/O;
             // keep it off GTK's main context just like the task joins above.
-            let ids: Vec<u64> = self.segment_state.borrow().keys().cloned().collect();
-            let truncations: Vec<_> = ids
+            let truncations: Vec<_> = self
+                .segment_state
+                .borrow()
                 .iter()
-                .filter_map(|id| {
+                .filter_map(|(id, state)| {
                     let item = self.find(*id)?;
-                    let state = self.segment_state.borrow().get(id).cloned()?;
-                    Some((item.file_path(), state))
+                    Some((*id, item.file_path(), state.clone()))
                 })
                 .collect();
             match tokio_rt()
                 .spawn_blocking(move || {
                     let mut reconciled = Vec::with_capacity(truncations.len());
                     let mut failures = Vec::new();
-                    for (path, state) in truncations {
+                    for (id, path, state) in truncations {
                         match truncate_to_prefix(&path, &state) {
-                            Ok(()) => reconciled.push(path),
+                            Ok(()) => reconciled.push(id),
                             Err(error) => failures.push((path, error)),
                         }
                     }
@@ -3855,17 +3855,9 @@ impl DownloadManager {
             {
                 Ok((reconciled, failures)) => {
                     let mut states = self.segment_state.borrow_mut();
-                    for path in reconciled {
-                        if let Some((id, _)) = self
-                            .items
-                            .borrow()
-                            .iter()
-                            .find(|item| item.file_path() == path)
-                            .map(|item| (item.id(), item.file_path()))
-                        {
-                            if let Some(state) = states.get_mut(&id) {
-                                state.forget_beyond_prefix();
-                            }
+                    for id in reconciled {
+                        if let Some(state) = states.get_mut(&id) {
+                            state.forget_beyond_prefix();
                         }
                     }
                     for (path, error) in failures {
@@ -3877,6 +3869,8 @@ impl DownloadManager {
                     }
                 }
                 Err(error) => {
+                    // Keep the original bitmaps if the worker cannot report
+                    // which destinations were durably reconciled.
                     tracing::warn!(
                         error = %error,
                         "shutdown: partial-file reconciliation worker failed"

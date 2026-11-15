@@ -488,18 +488,43 @@ impl HlsPlan {
             return None;
         }
 
-        Some(
-            if self
-                .local_playlist
-                .segments
-                .iter()
-                .any(|segment| segment.map.is_some())
-            {
-                crate::media_types::ManifestContainer::Mp4
-            } else {
-                crate::media_types::ManifestContainer::Ts
-            },
-        )
+        if self
+            .local_playlist
+            .segments
+            .iter()
+            .any(|segment| segment.map.is_some())
+        {
+            return Some(crate::media_types::ManifestContainer::Mp4);
+        }
+
+        // Without EXT-X-MAP, a playlist can still contain packed audio or
+        // opaque segment URLs. Do not label those streams as MPEG-TS merely
+        // because they lack an initialization section.
+        let mut segment_resources = self
+            .resources
+            .iter()
+            .filter(|resource| resource.kind == HlsResourceKind::Segment);
+        if self
+            .resources
+            .iter()
+            .filter(|resource| resource.kind == HlsResourceKind::Segment)
+            .count()
+            != self.local_playlist.segments.len()
+        {
+            return None;
+        }
+
+        segment_resources
+            .all(|resource| {
+                resource
+                    .url
+                    .path()
+                    .rsplit('/')
+                    .next()
+                    .and_then(|filename| filename.rsplit_once('.'))
+                    .is_some_and(|(_, extension)| extension.eq_ignore_ascii_case("ts"))
+            })
+            .then_some(crate::media_types::ManifestContainer::Ts)
     }
 
     /// Whether the playlist can be concatenated as a plain MPEG-TS byte stream.
@@ -2286,6 +2311,28 @@ segment-2.ts
             plan.output_container(),
             Some(crate::media_types::ManifestContainer::Ts)
         );
+    }
+
+    #[test]
+    fn packed_audio_and_opaque_hls_segments_have_no_mpegts_container_hint() {
+        for segment_uri in ["audio.aac", "audio.mp3", "segment"] {
+            let body = [
+                "#EXTM3U",
+                "#EXT-X-TARGETDURATION:6",
+                "#EXTINF:6,",
+                segment_uri,
+                "#EXT-X-ENDLIST",
+                "",
+            ]
+            .join("\n");
+            let plan = plan_hls_media_playlist(BASE_URL, body.as_bytes())
+                .expect("valid packed-audio or opaque HLS media playlist");
+            assert_eq!(
+                plan.output_container(),
+                None,
+                "segment URI {segment_uri:?} is not sufficient evidence of MPEG-TS"
+            );
+        }
     }
 
     #[test]

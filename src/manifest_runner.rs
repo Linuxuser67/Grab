@@ -1375,8 +1375,20 @@ async fn transfer_static_manifest_tracks(
                 if let Some(audio) = audio {
                     let (video_abort_sender, mut video_abort) = tokio::sync::oneshot::channel();
                     let (audio_abort_sender, mut audio_abort) = tokio::sync::oneshot::channel();
-                    let video_transfer = fetch_and_write_hls_track(track_context.hls_track(video.as_ref(), video_dir, TrackKind::Video.part_filename(TrackFileFormat::Ts), TrackKind::Video, &mut video_abort));
-                    let audio_transfer = fetch_and_write_hls_track(track_context.hls_track(audio.as_ref(), audio_dir, TrackKind::Audio.part_filename(TrackFileFormat::Ts), TrackKind::Audio, &mut audio_abort));
+                    let video_transfer = fetch_and_write_hls_track(track_context.hls_track(
+                        video.as_ref(),
+                        video_dir,
+                        TrackKind::Video.part_filename(TrackFileFormat::Ts),
+                        TrackKind::Video,
+                        &mut video_abort,
+                    ));
+                    let audio_transfer = fetch_and_write_hls_track(track_context.hls_track(
+                        audio.as_ref(),
+                        audio_dir,
+                        TrackKind::Audio.part_filename(TrackFileFormat::Ts),
+                        TrackKind::Audio,
+                        &mut audio_abort,
+                    ));
                     if !transfer_parallel_manifest_tracks(
                         video_transfer,
                         audio_transfer,
@@ -1388,7 +1400,13 @@ async fn transfer_static_manifest_tracks(
                     {
                         return Ok(false);
                     }
-                } else if !fetch_and_write_hls_track(track_context.hls_track(video.as_ref(), video_dir, TrackKind::Video.part_filename(TrackFileFormat::Ts), TrackKind::Video, abort))
+                } else if !fetch_and_write_hls_track(track_context.hls_track(
+                    video.as_ref(),
+                    video_dir,
+                    TrackKind::Video.part_filename(TrackFileFormat::Ts),
+                    TrackKind::Video,
+                    abort,
+                ))
                 .await?
                 {
                     return Ok(false);
@@ -1481,12 +1499,26 @@ async fn transfer_static_manifest_tracks(
         } => {
             if let Some(audio) = audio {
                 if concurrency == 1 {
-                    if !fetch_and_write_dash_track(track_context.dash_track(video.as_ref(), video_dir, TrackKind::Video.part_filename(TrackFileFormat::Mp4), TrackKind::Video, concurrency, abort))
+                    if !fetch_and_write_dash_track(track_context.dash_track(
+                        video.as_ref(),
+                        video_dir,
+                        TrackKind::Video.part_filename(TrackFileFormat::Mp4),
+                        TrackKind::Video,
+                        concurrency,
+                        abort,
+                    ))
                     .await?
                     {
                         return Ok(false);
                     }
-                    if !fetch_and_write_dash_track(track_context.dash_track(audio, audio_dir, TrackKind::Audio.part_filename(TrackFileFormat::Mp4), TrackKind::Audio, concurrency, abort))
+                    if !fetch_and_write_dash_track(track_context.dash_track(
+                        audio,
+                        audio_dir,
+                        TrackKind::Audio.part_filename(TrackFileFormat::Mp4),
+                        TrackKind::Audio,
+                        concurrency,
+                        abort,
+                    ))
                     .await?
                     {
                         return Ok(false);
@@ -1497,8 +1529,22 @@ async fn transfer_static_manifest_tracks(
                         split_manifest_track_connections(concurrency);
                     let (video_abort_sender, mut video_abort) = tokio::sync::oneshot::channel();
                     let (audio_abort_sender, mut audio_abort) = tokio::sync::oneshot::channel();
-                    let video_transfer = fetch_and_write_dash_track(track_context.dash_track(video.as_ref(), video_dir, TrackKind::Video.part_filename(TrackFileFormat::Mp4), TrackKind::Video, video_connections, &mut video_abort));
-                    let audio_transfer = fetch_and_write_dash_track(track_context.dash_track(audio, audio_dir, TrackKind::Audio.part_filename(TrackFileFormat::Mp4), TrackKind::Audio, audio_connections, &mut audio_abort));
+                    let video_transfer = fetch_and_write_dash_track(track_context.dash_track(
+                        video.as_ref(),
+                        video_dir,
+                        TrackKind::Video.part_filename(TrackFileFormat::Mp4),
+                        TrackKind::Video,
+                        video_connections,
+                        &mut video_abort,
+                    ));
+                    let audio_transfer = fetch_and_write_dash_track(track_context.dash_track(
+                        audio,
+                        audio_dir,
+                        TrackKind::Audio.part_filename(TrackFileFormat::Mp4),
+                        TrackKind::Audio,
+                        audio_connections,
+                        &mut audio_abort,
+                    ));
                     if !transfer_parallel_manifest_tracks(
                         video_transfer,
                         audio_transfer,
@@ -1511,7 +1557,14 @@ async fn transfer_static_manifest_tracks(
                         return Ok(false);
                     }
                 }
-            } else if !fetch_and_write_dash_track(track_context.dash_track(video.as_ref(), video_dir, TrackKind::Video.part_filename(TrackFileFormat::Mp4), TrackKind::Video, concurrency, abort))
+            } else if !fetch_and_write_dash_track(track_context.dash_track(
+                video.as_ref(),
+                video_dir,
+                TrackKind::Video.part_filename(TrackFileFormat::Mp4),
+                TrackKind::Video,
+                concurrency,
+                abort,
+            ))
             .await?
             {
                 return Ok(false);
@@ -1542,7 +1595,14 @@ async fn transfer_static_manifest_tracks(
                                 .to_string(),
                         ));
                     };
-                if !fetch_and_write_dash_track(track_context.dash_track(subtitle, &subtitle_dir, TrackKind::Subtitles.part_filename(TrackFileFormat::Mp4), TrackKind::Subtitles, concurrency, abort))
+                if !fetch_and_write_dash_track(track_context.dash_track(
+                    subtitle,
+                    &subtitle_dir,
+                    TrackKind::Subtitles.part_filename(TrackFileFormat::Mp4),
+                    TrackKind::Subtitles,
+                    concurrency,
+                    abort,
+                ))
                 .await?
                 {
                     return Ok(false);

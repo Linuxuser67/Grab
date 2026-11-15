@@ -500,7 +500,7 @@ impl HlsPlan {
         // Without EXT-X-MAP, a playlist can still contain packed audio or
         // opaque segment URLs. Do not label those streams as MPEG-TS merely
         // because they lack an initialization section.
-        let segment_resources = self
+        let mut segment_resources = self
             .resources
             .iter()
             .filter(|resource| resource.kind == HlsResourceKind::Segment);

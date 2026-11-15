@@ -1312,10 +1312,9 @@ impl DownloadManager {
                                     // Leave the bitmap intact and let the pump mark the row failed.
                                     break;
                                 }
-                                Err(error) => {
+                                Err(_) => {
                                     tracing::warn!(
                                         path = %path.display(),
-                                        error = %error,
                                         "segmented-file truncation worker failed before single-stream fallback"
                                     );
                                     // Leave the bitmap intact and let the pump mark the row failed.

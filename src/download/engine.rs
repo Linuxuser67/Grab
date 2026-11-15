@@ -1871,6 +1871,36 @@ impl DownloadManager {
 }
 
 impl DownloadManager {
+    /// Reconcile an active gallery attempt whose worker exited without a terminal message.
+    ///
+    /// Pause, cancel, removal and shutdown invalidate or drain the attempt before
+    /// closing its channel, so only an unexpected exit of the current worker can
+    /// transition a still-downloading owner to Failed.
+    pub(super) fn finish_gallery_worker_without_result(
+        self: &Rc<Self>,
+        item: &DownloadItem,
+        id: u64,
+        generation: u64,
+    ) {
+        if self.draining.get() || !self.is_current(id, generation) {
+            return;
+        }
+
+        self.running.borrow_mut().remove(&id);
+        if item.status() == DownloadStatus::Downloading {
+            let detail = gettext("Download interrupted");
+            item.set_detail(detail.clone());
+            item.set_error_log(detail.clone());
+            self.finish_gallery_file_rows(id, DownloadStatus::Failed);
+            item.set_status(DownloadStatus::Failed);
+            self.notify_finished(item, Err(detail));
+        }
+
+        self.changed();
+        self.persist_queue();
+        self.start_next();
+    }
+
     /// Spawn one gallery-dl process for the collection owner.
     /// Progress and file lifecycle events are bridged to the GTK main thread;
     /// the handle owns collection-wide pause, cancel and concurrency control.
@@ -2012,6 +2042,7 @@ impl DownloadManager {
         let total = item.gallery_file_count();
         gtk4::glib::spawn_future_local(async move {
             let mut last_progress_refresh = Instant::now();
+            let mut received_finished = false;
             while let Some(msg) = rx.recv().await {
                 // Check before applying any buffered update. In particular, an
                 // old Finished must not remove the new attempt's running handle.
@@ -2129,6 +2160,7 @@ impl DownloadManager {
                         }
                     }
                     GalleryMsg::Finished(result) => {
+                        received_finished = true;
                         // Remove from running registry.
                         this.running.borrow_mut().remove(&item_c.id());
                         match result {
@@ -2199,6 +2231,9 @@ impl DownloadManager {
                         break;
                     }
                 }
+            }
+            if !received_finished {
+                this.finish_gallery_worker_without_result(&item_c, id, generation);
             }
         });
     }

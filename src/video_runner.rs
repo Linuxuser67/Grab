@@ -575,87 +575,29 @@ async fn run_video_playlist_download_inner(
     let logs = drain_stderr_to_tail(stderr);
     let timeout = Duration::from_secs(300);
 
-    let status = loop {
-        let merging_snapshot = merging.load(std::sync::atomic::Ordering::SeqCst);
-        let remaining = timeout.saturating_sub(stall_elapsed(&last_progress));
-        tokio::select! {
-            biased;
-            intent = &mut abort => {
-                reap_child(&mut child, &mut group).await;
-                await_ytdlp_group_quiescence_or_abort(
-                    pgid.as_ref(),
-                    &[progress.abort_handle(), logs.abort_handle()],
-                )
-                .await?;
-                progress.abort();
-                logs.abort();
-                let _intent = intent.ok();
-                return Ok(VideoOutcome::Aborted);
-            }
-            waited = await_child(&mut child, merging_snapshot, remaining, MERGE_WALL_CLOCK) => match waited {
-                Ok(Ok(status)) => {
-                    group.disarm();
-                    await_ytdlp_group_quiescence_or_abort(
-                        pgid.as_ref(),
-                        &[progress.abort_handle(), logs.abort_handle()],
-                    )
-                    .await?;
-                    break status;
-                }
-                Ok(Err(error)) => {
-                    reap_child(&mut child, &mut group).await;
-                    await_ytdlp_group_quiescence_or_abort(
-                        pgid.as_ref(),
-                        &[progress.abort_handle(), logs.abort_handle()],
-                    )
-                    .await?;
-                    progress.abort();
-                    logs.abort();
-                    return Err(VideoError::runtime(&error));
-                }
-                Err(_)
-                    if stall_elapsed(&last_progress) >= timeout
-                        && !merging.load(std::sync::atomic::Ordering::SeqCst) =>
-                {
-                    reap_child(&mut child, &mut group).await;
-                    await_ytdlp_group_quiescence_or_abort(
-                        pgid.as_ref(),
-                        &[progress.abort_handle(), logs.abort_handle()],
-                    )
-                    .await?;
-                    progress.abort();
-                    logs.abort();
-                    return Err(VideoError::part_failed("stalled"));
-                }
-                Err(_)
-                    if merging_snapshot
-                        && merging.load(std::sync::atomic::Ordering::SeqCst) =>
-                {
-                    match child.try_wait() {
-                        Ok(Some(status)) => {
-                            group.disarm();
-                            await_ytdlp_group_quiescence_or_abort(
-                                pgid.as_ref(),
-                                &[progress.abort_handle(), logs.abort_handle()],
-                            )
-                            .await?;
-                            break status;
-                        }
-                        _ => {
-                            reap_child(&mut child, &mut group).await;
-                            await_ytdlp_group_quiescence_or_abort(
-                                pgid.as_ref(),
-                                &[progress.abort_handle(), logs.abort_handle()],
-                            )
-                            .await?;
-                            progress.abort();
-                            logs.abort();
-                            return Err(VideoError::part_failed("playlist merge timed out"));
-                        }
-                    }
-                }
-                Err(_) => {}
-            },
+    let drain_handles = [progress.abort_handle(), logs.abort_handle()];
+    let supervised = {
+        let mut supervision = YtdlpSupervision {
+            child: &mut child,
+            group: &mut group,
+            pgid: pgid.as_ref(),
+            abort: &mut abort,
+            last_progress: &last_progress,
+            merging: &merging,
+            stall_timeout: timeout,
+            merge_timeout: MERGE_WALL_CLOCK,
+            drains: &drain_handles,
+        };
+        supervision.wait().await?
+    };
+    let status = match supervised {
+        YtdlpSupervisionOutcome::Exited(status) => status,
+        YtdlpSupervisionOutcome::Aborted(_) => return Ok(VideoOutcome::Aborted),
+        YtdlpSupervisionOutcome::Stalled => {
+            return Err(VideoError::part_failed("stalled"));
+        }
+        YtdlpSupervisionOutcome::MergeTimedOut => {
+            return Err(VideoError::part_failed("playlist merge timed out"));
         }
     };
 
@@ -1729,6 +1671,105 @@ pub(crate) async fn await_child(
     }
 }
 
+/// Terminal result of supervising a yt-dlp child process group.
+enum YtdlpSupervisionOutcome {
+    Exited(std::process::ExitStatus),
+    Aborted(Option<crate::video::StopIntent>),
+    Stalled,
+    MergeTimedOut,
+}
+
+/// Shared watchdog and process-group lifecycle for yt-dlp download attempts.
+struct YtdlpSupervision<'a> {
+    child: &'a mut tokio::process::Child,
+    group: &'a mut ProcessGroupGuard,
+    pgid: Option<&'a ProcessGroupId>,
+    abort: &'a mut oneshot::Receiver<crate::video::StopIntent>,
+    last_progress: &'a std::sync::Mutex<std::time::Instant>,
+    merging: &'a std::sync::atomic::AtomicBool,
+    stall_timeout: Duration,
+    merge_timeout: Duration,
+    drains: &'a [tokio::task::AbortHandle],
+}
+
+impl YtdlpSupervision<'_> {
+    /// Wait for completion, stop intent, silence timeout, or merge timeout.
+    ///
+    /// The process group is quiescent before any terminal outcome is returned.
+    async fn wait(&mut self) -> Result<YtdlpSupervisionOutcome, VideoError> {
+        loop {
+            let merging_snapshot = self.merging.load(std::sync::atomic::Ordering::SeqCst);
+            let remaining = self
+                .stall_timeout
+                .saturating_sub(stall_elapsed(self.last_progress));
+
+            tokio::select! {
+                biased;
+                intent = &mut *self.abort => {
+                    reap_child(self.child, self.group).await;
+                    await_ytdlp_group_quiescence_or_abort(self.pgid, self.drains).await?;
+                    self.abort_drains();
+                    return Ok(YtdlpSupervisionOutcome::Aborted(intent.ok()));
+                }
+                waited = await_child(
+                    self.child,
+                    merging_snapshot,
+                    remaining,
+                    self.merge_timeout,
+                ) => match waited {
+                    Ok(Ok(status)) => {
+                        self.group.disarm();
+                        await_ytdlp_group_quiescence_or_abort(self.pgid, self.drains).await?;
+                        return Ok(YtdlpSupervisionOutcome::Exited(status));
+                    }
+                    Ok(Err(error)) => {
+                        reap_child(self.child, self.group).await;
+                        await_ytdlp_group_quiescence_or_abort(self.pgid, self.drains).await?;
+                        self.abort_drains();
+                        return Err(VideoError::runtime(&error));
+                    }
+                    Err(_)
+                        if stall_elapsed(self.last_progress) >= self.stall_timeout
+                            && !self.merging.load(std::sync::atomic::Ordering::SeqCst) =>
+                    {
+                        reap_child(self.child, self.group).await;
+                        await_ytdlp_group_quiescence_or_abort(self.pgid, self.drains).await?;
+                        self.abort_drains();
+                        return Ok(YtdlpSupervisionOutcome::Stalled);
+                    }
+                    Err(_)
+                        if merging_snapshot
+                            && self.merging.load(std::sync::atomic::Ordering::SeqCst) =>
+                    {
+                        match self.child.try_wait() {
+                            Ok(Some(status)) => {
+                                self.group.disarm();
+                                await_ytdlp_group_quiescence_or_abort(self.pgid, self.drains).await?;
+                                return Ok(YtdlpSupervisionOutcome::Exited(status));
+                            }
+                            _ => {
+                                reap_child(self.child, self.group).await;
+                                await_ytdlp_group_quiescence_or_abort(self.pgid, self.drains).await?;
+                                self.abort_drains();
+                                return Ok(YtdlpSupervisionOutcome::MergeTimedOut);
+                            }
+                        }
+                    }
+                    // Progress landed mid-wait, or the merge started while
+                    // parked: re-arm with the current deadline and merge state.
+                    Err(_) => {}
+                },
+            }
+        }
+    }
+
+    fn abort_drains(&self) {
+        for drain in self.drains {
+            drain.abort();
+        }
+    }
+}
+
 /// One yt-dlp spawn: parse template progress, collect the log tail, capture `--print after_move:filepath`. `Ok((None, _))` is a user abort (the caller stays quiet). `on_merge` fires once on the first merge line. `timeout` is a stall budget, not a wall clock: any stdout line resets it, so only silence kills the attempt. The stall deadline gives way to a generous merge wall-clock once the merge starts (see `await_child`).
 async fn run_ytdlp_attempt(
     youtube_bin: &Path,
@@ -1827,102 +1868,29 @@ async fn run_ytdlp_attempt(
         }
         String::from_utf8_lossy(&tail).into_owned()
     });
-    let status = loop {
-        // Each wait runs only until the stall deadline; a progress line pushes the deadline out, so a progressing download is never killed. Once merging, `await_child` swaps the stall deadline for the merge wall-clock. The snapshot only
-        // sizes this wait; the kill decision re-reads the live flag.
-        let merging_snapshot = merging.load(std::sync::atomic::Ordering::SeqCst);
-        let remaining = timeout.saturating_sub(stall_elapsed(&last_progress));
-        tokio::select! {
-            biased;
-            intent = &mut *abort => {
-                reap_child(&mut child, &mut group).await;
-                await_ytdlp_group_quiescence_or_abort(
-                    pgid.as_ref(),
-                    &[progress.abort_handle(), logs.abort_handle()],
-                )
-                .await?;
-                progress.abort();
-                logs.abort();
-                // Preserve the abort intent: the caller may merge partials on Preserve.
-                let intent = intent.ok();
-                return Ok((None, None, intent));
-            }
-            waited = await_child(&mut child, merging_snapshot, remaining, MERGE_WALL_CLOCK) => match waited {
-                Ok(Ok(status)) => {
-                    // The leader is reaped; wait for any ffmpeg descendants before reading or publishing their output.
-                    group.disarm();
-                    await_ytdlp_group_quiescence_or_abort(
-                        pgid.as_ref(),
-                        &[progress.abort_handle(), logs.abort_handle()],
-                    )
-                    .await?;
-                    break status;
-                }
-                Ok(Err(e)) => {
-                    reap_child(&mut child, &mut group).await;
-                    await_ytdlp_group_quiescence_or_abort(
-                        pgid.as_ref(),
-                        &[progress.abort_handle(), logs.abort_handle()],
-                    )
-                    .await?;
-                    progress.abort();
-                    logs.abort();
-                    return Err(VideoError::runtime(&e));
-                }
-                // The merge marker can land while `await_child` is parked on a
-                // pre-merge snapshot: re-read the live flag before killing, or a
-                // silent merge dies exactly one budget after its marker line.
-                Err(_)
-                    if stall_elapsed(&last_progress) >= timeout
-                        && !merging.load(std::sync::atomic::Ordering::SeqCst) =>
-                {
-                    reap_child(&mut child, &mut group).await;
-                    await_ytdlp_group_quiescence_or_abort(
-                        pgid.as_ref(),
-                        &[progress.abort_handle(), logs.abort_handle()],
-                    )
-                    .await?;
-                    progress.abort();
-                    logs.abort();
-                    return Err(VideoError::part_failed("stalled"));
-                }
-                // The merge wall-clock expired while a merge was genuinely
-                // underway (the wait started after the merge marker and the
-                // live flag still agrees): reap the hung merge and fail the
-                // part instead of parking the row forever. A merge that
-                // finished in the same instant still counts.
-                Err(_)
-                    if merging_snapshot
-                        && merging.load(std::sync::atomic::Ordering::SeqCst) =>
-                {
-                    match child.try_wait() {
-                        Ok(Some(status)) => {
-                            group.disarm();
-                            await_ytdlp_group_quiescence_or_abort(
-                                pgid.as_ref(),
-                                &[progress.abort_handle(), logs.abort_handle()],
-                            )
-                            .await?;
-                            break status;
-                        }
-                        _ => {
-                            reap_child(&mut child, &mut group).await;
-                            await_ytdlp_group_quiescence_or_abort(
-                                pgid.as_ref(),
-                                &[progress.abort_handle(), logs.abort_handle()],
-                            )
-                            .await?;
-                            progress.abort();
-                            logs.abort();
-                            return Err(VideoError::part_failed("merge timed out"));
-                        }
-                    }
-                }
-                // Progress landed mid-wait, or the merge started while parked:
-                // loop back and re-arm (the next wait uses the merge wall-clock
-                // once merging).
-                Err(_) => {}
-            },
+    let drain_handles = [progress.abort_handle(), logs.abort_handle()];
+    let supervised = {
+        let mut supervision = YtdlpSupervision {
+            child: &mut child,
+            group: &mut group,
+            pgid: pgid.as_ref(),
+            abort: &mut *abort,
+            last_progress: &last_progress,
+            merging: &merging,
+            stall_timeout: timeout,
+            merge_timeout: MERGE_WALL_CLOCK,
+            drains: &drain_handles,
+        };
+        supervision.wait().await?
+    };
+    let status = match supervised {
+        YtdlpSupervisionOutcome::Exited(status) => status,
+        YtdlpSupervisionOutcome::Aborted(intent) => return Ok((None, None, intent)),
+        YtdlpSupervisionOutcome::Stalled => {
+            return Err(VideoError::part_failed("stalled"));
+        }
+        YtdlpSupervisionOutcome::MergeTimedOut => {
+            return Err(VideoError::part_failed("merge timed out"));
         }
     };
     let after_move = progress.await.unwrap_or_default();
@@ -3435,100 +3403,32 @@ pub(crate) async fn run_hls_ytdlp(
     // deadline out, so a progressing download is never killed. Once merging,
     // `await_child` swaps the stall deadline for the merge wall-clock. The snapshot only sizes
     // each wait; the kill decision re-reads the live flag.
-    let status = loop {
-        let merging_snapshot = merging.load(std::sync::atomic::Ordering::SeqCst);
-        let remaining = timeout.saturating_sub(stall_elapsed(&last_progress));
-        tokio::select! {
-            biased;
-            _ = &mut *abort => {
-                reap_child(&mut child, &mut group).await;
-                await_ytdlp_group_quiescence_or_abort(
-                    pgid.as_ref(),
-                    &[progress.abort_handle(), logs.abort_handle()],
-                )
-                .await?;
-                progress.abort();
-                logs.abort();
-                sweep_staging_preserving_recordings(staging, job.item_id);
-                // Staging is the dest dir itself: never remove it or its parent.
-                return Ok(None);
-            }
-            waited = await_child(&mut child, merging_snapshot, remaining, MERGE_WALL_CLOCK) => match waited {
-                Ok(Ok(status)) => {
-                    // The leader is reaped; wait for any ffmpeg descendants before inspecting the output.
-                    group.disarm();
-                    await_ytdlp_group_quiescence_or_abort(
-                        pgid.as_ref(),
-                        &[progress.abort_handle(), logs.abort_handle()],
-                    )
-                    .await?;
-                    break status;
-                }
-                Ok(Err(e)) => {
-                    reap_child(&mut child, &mut group).await;
-                    await_ytdlp_group_quiescence_or_abort(
-                        pgid.as_ref(),
-                        &[progress.abort_handle(), logs.abort_handle()],
-                    )
-                    .await?;
-                    progress.abort();
-                    logs.abort();
-                    return Err(VideoError::runtime(&e));
-                }
-                // The merge marker can land while `await_child` is parked on a
-                // pre-merge snapshot: re-read the live flag before killing, or a
-                // silent merge dies exactly one budget after its marker line.
-                Err(_)
-                    if stall_elapsed(&last_progress) >= timeout
-                        && !merging.load(std::sync::atomic::Ordering::SeqCst) =>
-                {
-                    reap_child(&mut child, &mut group).await;
-                    await_ytdlp_group_quiescence_or_abort(
-                        pgid.as_ref(),
-                        &[progress.abort_handle(), logs.abort_handle()],
-                    )
-                    .await?;
-                    progress.abort();
-                    logs.abort();
-                    return Err(VideoError::part_failed("stalled"));
-                }
-                // The merge wall-clock expired while a merge was genuinely
-                // underway (the wait started after the merge marker and the
-                // live flag still agrees): reap the hung merge and fail the
-                // part instead of parking the row forever. A merge that
-                // finished in the same instant still counts.
-                Err(_)
-                    if merging_snapshot
-                        && merging.load(std::sync::atomic::Ordering::SeqCst) =>
-                {
-                    match child.try_wait() {
-                        Ok(Some(status)) => {
-                            group.disarm();
-                            await_ytdlp_group_quiescence_or_abort(
-                                pgid.as_ref(),
-                                &[progress.abort_handle(), logs.abort_handle()],
-                            )
-                            .await?;
-                            break status;
-                        }
-                        _ => {
-                            reap_child(&mut child, &mut group).await;
-                            await_ytdlp_group_quiescence_or_abort(
-                                pgid.as_ref(),
-                                &[progress.abort_handle(), logs.abort_handle()],
-                            )
-                            .await?;
-                            progress.abort();
-                            logs.abort();
-                            return Err(VideoError::part_failed("merge timed out"));
-                        }
-                    }
-                }
-                // Progress landed mid-wait, or the merge started while parked:
-                // loop back and re-arm (the next wait uses the merge wall-clock
-                // once merging).
-                Err(_) => {}
-            },
+    let drain_handles = [progress.abort_handle(), logs.abort_handle()];
+    let supervised = {
+        let mut supervision = YtdlpSupervision {
+            child: &mut child,
+            group: &mut group,
+            pgid: pgid.as_ref(),
+            abort: &mut *abort,
+            last_progress: &last_progress,
+            merging: &merging,
+            stall_timeout: timeout,
+            merge_timeout: MERGE_WALL_CLOCK,
+            drains: &drain_handles,
+        };
+        supervision.wait().await?
+    };
+    let status = match supervised {
+        YtdlpSupervisionOutcome::Exited(status) => status,
+        YtdlpSupervisionOutcome::Aborted(_) => {
+            sweep_staging_preserving_recordings(staging, job.item_id);
+            return Ok(None);
+        }
+        YtdlpSupervisionOutcome::Stalled => {
+            return Err(VideoError::part_failed("stalled"));
+        }
+        YtdlpSupervisionOutcome::MergeTimedOut => {
+            return Err(VideoError::part_failed("merge timed out"));
         }
     };
     let after_move = progress.await.unwrap_or_default();

@@ -1160,8 +1160,7 @@ impl DownloadManager {
                                 item.is_collection_owner(),
                                 item.status(),
                                 this.is_current(id, generation),
-                            )
-                                && last_playlist_progress_refresh
+                            ) && last_playlist_progress_refresh
                                     .is_none_or(|last| last.elapsed() >= Duration::from_millis(100))
                             {
                                 let progress = total

@@ -318,13 +318,6 @@ impl DownloadManager {
         }
     }
 
-    /// Move downloaded files to Trash on a blocking worker, then update the
-    /// queue model on GTK. Errors are display-ready.
-    pub async fn delete_download_async(self: &Rc<Self>, id: u64) -> Result<(), String> {
-        let guard = self.begin_trash(id)?;
-        self.delete_download_with_guard(id, guard).await
-    }
-
     /// Run a Trash operation after its row and collection scope were claimed
     /// synchronously by the UI. The guard remains alive across the blocking
     /// worker and is only released after the queue row is removed.

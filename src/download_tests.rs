@@ -1235,12 +1235,12 @@ fn truncates_to_prefix() {
     let mut st = SegmentState::new(3 * PIECE_MIN);
     st.mark(0);
     st.mark(1);
-    truncate_to_prefix(&file, &st);
+    truncate_to_prefix(&file, &st).expect("truncate completed prefix");
     assert_eq!(std::fs::metadata(&file).unwrap().len(), 2 * PIECE_MIN);
-    truncate_to_prefix(&file, &st);
+    truncate_to_prefix(&file, &st).expect("truncate completed prefix");
     assert_eq!(std::fs::metadata(&file).unwrap().len(), 2 * PIECE_MIN);
     let st = SegmentState::new(3 * PIECE_MIN);
-    truncate_to_prefix(&file, &st);
+    truncate_to_prefix(&file, &st).expect("truncate completed prefix");
     assert_eq!(std::fs::metadata(&file).unwrap().len(), 0);
     let _ = std::fs::remove_dir_all(&dir);
 }

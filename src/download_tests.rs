@@ -11054,4 +11054,3 @@ fn destination_reservation_recovers_a_poisoned_mutex() {
     manager.release_dest(&destination);
     assert!(!manager.dest_reserved(&destination));
 }
-

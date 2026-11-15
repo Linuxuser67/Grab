@@ -853,10 +853,7 @@ pub(crate) fn build_download_group_row(
                 });
             let removal_ids =
                 collection_owner_id.map_or_else(|| ids.clone(), |owner_id| vec![owner_id]);
-            if removal_ids
-                .iter()
-                .any(|id| manager.is_trash_blocked(*id))
-            {
+            if removal_ids.iter().any(|id| manager.is_trash_blocked(*id)) {
                 return;
             }
             let snapshots = removal_ids

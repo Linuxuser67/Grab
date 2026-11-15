@@ -219,15 +219,15 @@ impl DownloadManager {
     }
 
     /// Claim the row synchronously, before its filesystem operation is spawned.
-    pub(crate) fn begin_trash(
-        self: &Rc<Self>,
-        id: u64,
-    ) -> Result<TrashOperationGuard, String> {
+    pub(crate) fn begin_trash(self: &Rc<Self>, id: u64) -> Result<TrashOperationGuard, String> {
         let item = self.find(id).ok_or_else(|| gettext("Download not found"))?;
         let locked_ids = self.trash_scope(id, &item);
         {
             let mut active = self.trash_in_progress.borrow_mut();
-            if locked_ids.iter().any(|locked_id| active.contains(locked_id)) {
+            if locked_ids
+                .iter()
+                .any(|locked_id| active.contains(locked_id))
+            {
                 return Err(gettext("This download is already being moved to Trash"));
             }
             active.extend(locked_ids.iter().copied());
@@ -341,9 +341,7 @@ impl DownloadManager {
             execute_delete_operation(operation)
         })
         .await
-        .map_err(|_| {
-            format!("Could not move {filename} to Trash: background task panicked")
-        })??;
+        .map_err(|_| format!("Could not move {filename} to Trash: background task panicked"))??;
 
         // This only schedules teardown on Tokio; retain the original ordering
         // and do it only after trash/archive operations have succeeded.

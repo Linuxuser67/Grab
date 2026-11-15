@@ -10519,7 +10519,6 @@ fn unremove_many_restores_collection_members_with_one_queue_refresh() {
     );
 }
 
-
 struct TrashWorkerBarrier {
     entered: std::sync::mpsc::Receiver<()>,
     released: Arc<(std::sync::Mutex<bool>, std::sync::Condvar)>,
@@ -10633,9 +10632,8 @@ fn trash_serializes_remove_and_clear_finished_until_the_file_move_commits() {
     );
 
     barrier.release();
-    let result = glib::MainContext::default().block_on(async {
-        done_rx.await.expect("Trash task reports its result")
-    });
+    let result = glib::MainContext::default()
+        .block_on(async { done_rx.await.expect("Trash task reports its result") });
     assert!(result.is_ok());
     assert!(
         manager.find(id).is_none(),

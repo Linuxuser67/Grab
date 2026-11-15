@@ -111,7 +111,7 @@ impl<R: tokio::io::AsyncRead + Unpin> YtdlpStdoutReader<R> {
                         false,
                     )
                 }
-        };
+            };
 
             if reached_eof {
                 self.eof = true;
@@ -435,7 +435,7 @@ async fn run_video_playlist_download_inner(
                     tracing::warn!(error = %error, "could not continue reading yt-dlp stdout");
                     break;
                 }
-        };
+            };
             *lock_recover(&last_progress_reader) = std::time::Instant::now();
             if is_ytdlp_merge_line(&line) {
                 merging_reader.store(true, std::sync::atomic::Ordering::SeqCst);
@@ -794,7 +794,7 @@ async fn run_video_download_inner(
                     );
                     return Ok(VideoOutcome::Aborted);
                 }
-        };
+            };
             match fetched {
                 Ok(FetchedVideo::Single {
                     video: v,
@@ -1111,7 +1111,7 @@ impl DashMergeTempDir {
                 Ok(()) => {
                     return Ok(Self {
                         path: Some(path),
-                    pgid: None,
+                        pgid: None,
                     });
                 }
                 Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
@@ -1521,7 +1521,7 @@ pub(crate) async fn run_unified_ytdlp(
             let shown = match total {
                 Some(t) if t > 0 => done.min(t),
                 _ => done,
-        };
+            };
             let prev = sent.load(Ordering::Relaxed);
             if shown.saturating_sub(prev) >= PROGRESS_GRANULARITY
                 || total.is_some_and(|t| t > 0 && shown >= t)
@@ -1815,7 +1815,7 @@ async fn run_ytdlp_attempt(
                     tracing::warn!(error = %error, "could not continue reading yt-dlp stdout");
                     break;
                 }
-        };
+            };
             *lock_recover(&last_progress_p) = std::time::Instant::now();
             if !merged && is_ytdlp_merge_line(&line) {
                 merged = true;
@@ -2127,7 +2127,7 @@ pub(crate) async fn remux_live_capture(
                     let _ = tokio::fs::remove_file(&partial).await;
                     Err(VideoError::runtime(&error))
                 }
-        };
+            };
         }
         let detail = last_log_line(&log_tail, "ffmpeg reported failure");
         let Some((next_with_bsf, next_repair_timestamps)) =
@@ -3372,7 +3372,7 @@ pub(crate) async fn run_hls_ytdlp(
                     tracing::warn!(error = %error, "could not continue reading yt-dlp stdout");
                     break;
                 }
-        };
+            };
             *lock_recover(&last_progress_p) = std::time::Instant::now();
             if is_ytdlp_merge_line(&line) && !merged {
                 merged = true;

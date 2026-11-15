@@ -605,8 +605,8 @@ fn subtitle_probe_cleanup_reaps_a_live_process_group() {
             std::time::Duration::from_secs(5),
             finish_subtitle_probe_child(&mut child, &mut group),
         )
-            .await
-            .expect("subtitle probe cleanup must reap a live child promptly");
+        .await
+        .expect("subtitle probe cleanup must reap a live child promptly");
 
         assert!(child.id().is_none(), "the live probe leader must be reaped");
         assert!(!group.is_armed(), "cleanup must disarm the group guard");
@@ -925,8 +925,8 @@ async fn video_resolution_stop_drops_the_pending_probe_future() {
         Err(StopIntent::Pause)
     );
     dropped_receiver
-            .await
-            .expect("stop intent must drop the pending probe future");
+        .await
+        .expect("stop intent must drop the pending probe future");
 }
 
 #[cfg(unix)]
@@ -1234,7 +1234,7 @@ async fn ytdlp_supervision_terminates_a_silent_child_at_the_stall_deadline() {
         tokio::time::timeout(Duration::from_secs(5), supervision.wait())
             .await
             .expect("stall supervision must finish promptly")
-        .expect("stall supervision must not fail quiescence")
+            .expect("stall supervision must not fail quiescence")
     };
 
     assert!(
@@ -1275,7 +1275,7 @@ async fn ytdlp_supervision_applies_the_merge_wall_clock_after_merge_starts() {
         tokio::time::timeout(Duration::from_secs(5), supervision.wait())
             .await
             .expect("merge timeout supervision must finish promptly")
-        .expect("merge timeout must quiesce its child group")
+            .expect("merge timeout must quiesce its child group")
     };
 
     assert!(

@@ -6,8 +6,7 @@ use crate::file_names::is_url_derived_name;
 use crate::runtime::lock_recover;
 use crate::video_argv::{
     LiveCaptureStart, PlaylistRunSelection, UnifiedDownloadOptions, VideoJob, apply_proxy_env,
-    container_truth_name,
-    dash_merge_argv, fallback_to_live_edge, hls_download_argv_with_subtitles,
+    container_truth_name, dash_merge_argv, fallback_to_live_edge, hls_download_argv_with_subtitles,
     live_capture_argv_with_mode, live_from_start_unsupported, live_remux_argv, merge_output_ext,
     playlist_download_argv, playlist_scope_args, proxy_cli_args,
     unified_download_argv_with_subtitles, unified_format_spec, unified_output_template,

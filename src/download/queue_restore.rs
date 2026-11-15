@@ -29,16 +29,29 @@ pub(super) struct PendingRestore {
     pub(super) gallery_job: Option<crate::gallery_argv::GalleryJob>,
 }
 
+/// Persisted paths must be absolute and may not contain parent traversal.
+/// Symlink components remain allowed: users can legitimately choose a symlinked
+/// download directory, but parent traversal must not redirect restore sweeps.
+fn is_normalized_absolute(path: &std::path::Path) -> bool {
+    path.is_absolute()
+        && path.components().all(|component| {
+            matches!(
+                component,
+                std::path::Component::RootDir | std::path::Component::Normal(_)
+            )
+        })
+}
+
 impl DownloadManager {
     /// Validate one persisted queue entry for restore. Invalid entries warn-skip; valid ones collect for the apply phase. Pure: never inserts or spawns.
     fn validate_stored_item(item: StoredItem) -> Option<PendingRestore> {
         // The recorded engine folder is only trusted when it sits directly inside the row's own dest.
         let output_dir = item.output_dir.clone().filter(|dir| {
             let folder = std::path::PathBuf::from(dir);
-            folder.is_absolute()
+            is_normalized_absolute(&folder)
                 && folder
                     .parent()
-                    .is_some_and(|p| p == std::path::Path::new(&item.dest_dir))
+                    .is_some_and(|parent| parent == std::path::Path::new(&item.dest_dir))
         });
         // Mirror restore_existing's cheap validations now, so the apply phase below cannot fail partway and strand engines.
         let item_url = match normalize_url(&item.url) {
@@ -63,7 +76,7 @@ impl DownloadManager {
             );
             return None;
         }
-        if !std::path::Path::new(&item.dest_dir).is_absolute() {
+        if !is_normalized_absolute(std::path::Path::new(&item.dest_dir)) {
             tracing::warn!(
                 "skipping queue entry: Invalid destination in queue: {}",
                 item.dest_dir
@@ -594,5 +607,29 @@ impl DownloadManager {
                 crate::torrent::sweep_session_orphans(&keep).await;
             });
         }
+    }
+}
+
+#[cfg(test)]
+mod path_validation_tests {
+    use super::is_normalized_absolute;
+    use std::path::Path;
+
+    #[test]
+    fn accepts_absolute_destinations_without_parent_traversal() {
+        assert!(is_normalized_absolute(Path::new("/")));
+        assert!(is_normalized_absolute(Path::new("/home/user/Downloads")));
+        assert!(is_normalized_absolute(Path::new("/home/user/./Downloads")));
+    }
+
+    #[test]
+    fn rejects_relative_and_parent_traversal_paths() {
+        assert!(!is_normalized_absolute(Path::new("Downloads")));
+        assert!(!is_normalized_absolute(Path::new(
+            "/home/user/Downloads/../.ssh"
+        )));
+        assert!(!is_normalized_absolute(Path::new(
+            "/home/user/Downloads/../../etc"
+        )));
     }
 }

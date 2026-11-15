@@ -637,7 +637,6 @@ mod path_validation_tests {
     }
 }
 
-
 #[cfg(test)]
 mod queue_read_tests {
     use super::DownloadManager;

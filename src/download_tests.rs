@@ -10518,3 +10518,129 @@ fn unremove_many_restores_collection_members_with_one_queue_refresh() {
         "every restored child must retain its collection identity"
     );
 }
+
+
+struct TrashWorkerBarrier {
+    entered: std::sync::mpsc::Receiver<()>,
+    released: Arc<(std::sync::Mutex<bool>, std::sync::Condvar)>,
+}
+
+impl TrashWorkerBarrier {
+    fn wait_until_entered(&self) {
+        let context = glib::MainContext::default();
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        loop {
+            match self.entered.try_recv() {
+                Ok(()) => return,
+                Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                    panic!("Trash worker exited before reaching the test barrier");
+                }
+                Err(std::sync::mpsc::TryRecvError::Empty) => {}
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "timed out waiting for the Trash worker"
+            );
+            context.iteration(false);
+            std::thread::sleep(std::time::Duration::from_millis(1));
+        }
+    }
+
+    fn release(&self) {
+        let (lock, changed) = &*self.released;
+        *lock
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = true;
+        changed.notify_all();
+    }
+}
+
+impl Drop for TrashWorkerBarrier {
+    fn drop(&mut self) {
+        self.release();
+    }
+}
+
+fn hold_trash_worker(manager: &DownloadManager) -> TrashWorkerBarrier {
+    let (entered_tx, entered) = std::sync::mpsc::channel();
+    let released = Arc::new((std::sync::Mutex::new(false), std::sync::Condvar::new()));
+    let worker_released = Arc::clone(&released);
+    manager
+        .trash_before_execute_hook
+        .borrow_mut()
+        .replace(Arc::new(move || {
+            let _ = entered_tx.send(());
+            let (lock, changed) = &*worker_released;
+            let mut released = lock
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            while !*released {
+                released = changed
+                    .wait(released)
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+            }
+        }));
+    TrashWorkerBarrier { entered, released }
+}
+
+#[test]
+fn trash_serializes_remove_and_clear_finished_until_the_file_move_commits() {
+    let (_queue_lock, _main_loop_lock) = test_locks();
+    let _queue_file = test_queue_file("trash-remove-race");
+    let dest = std::env::temp_dir().join(format!("grab-trash-race-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dest);
+    std::fs::create_dir_all(&dest).unwrap();
+
+    let manager = DownloadManager::new(gio::ListStore::new::<DownloadItem>(), test_settings());
+    let id = 7;
+    let item = DownloadItem::new(
+        id,
+        "https://example.test/finished.bin",
+        "finished.bin",
+        dest.to_string_lossy().as_ref(),
+    );
+    item.set_status(DownloadStatus::Done);
+    manager.store().append(&item);
+
+    let guard = manager.begin_trash(id).expect("claim Trash operation");
+    let barrier = hold_trash_worker(&manager);
+    let (done_tx, done_rx) = tokio::sync::oneshot::channel();
+    let task_manager = Rc::clone(&manager);
+    glib::spawn_future_local(async move {
+        let _ = done_tx.send(task_manager.delete_download_with_guard(id, guard).await);
+    });
+
+    barrier.wait_until_entered();
+    assert!(manager.is_trash_blocked(id));
+    assert!(!manager.try_remove(id), "Remove must not bypass Trash");
+    assert_eq!(
+        manager.remove_many(&[id]),
+        0,
+        "bulk Remove must not bypass Trash"
+    );
+    assert_eq!(
+        manager.clear_finished(),
+        0,
+        "Clear Finished must not capture a row owned by Trash"
+    );
+    assert!(
+        manager.finished_snapshots().is_empty(),
+        "no Undo snapshot may be made while Trash owns the row"
+    );
+    assert!(
+        manager.find(id).is_some(),
+        "the queue row must remain until the Trash worker returns"
+    );
+
+    barrier.release();
+    let result = glib::MainContext::default().block_on(async {
+        done_rx.await.expect("Trash task reports its result")
+    });
+    assert!(result.is_ok());
+    assert!(
+        manager.find(id).is_none(),
+        "successful Trash removes the row only after the worker completes"
+    );
+    assert!(!manager.is_trash_blocked(id));
+    let _ = std::fs::remove_dir_all(&dest);
+}

@@ -515,8 +515,10 @@ fn refresh_row(
         DownloadStatus::Failed | DownloadStatus::Cancelled
     ));
     w.reveal_btn.set_visible(done);
+    let trash_blocked = manager.is_trash_blocked(item.id());
     w.delete_btn
         .set_visible(done || live_capturing || manifest_download);
+    w.delete_btn.set_sensitive(!trash_blocked);
     let delete_tip = if live_capturing {
         gettext("Delete Recording")
     } else if manifest_download {
@@ -529,6 +531,7 @@ fn refresh_row(
         .update_property(&[gtk4::accessible::Property::Label(&delete_tip)]);
     w.remove_btn
         .set_visible(!live_capturing && !manifest_download);
+    w.remove_btn.set_sensitive(!trash_blocked);
     let (icon, tip) = if item.status() == DownloadStatus::Paused {
         ("media-playback-start-symbolic", gettext("Resume"))
     } else {
@@ -850,6 +853,12 @@ pub(crate) fn build_download_group_row(
                 });
             let removal_ids =
                 collection_owner_id.map_or_else(|| ids.clone(), |owner_id| vec![owner_id]);
+            if removal_ids
+                .iter()
+                .any(|id| manager.is_trash_blocked(*id))
+            {
+                return;
+            }
             let snapshots = removal_ids
                 .iter()
                 .filter_map(|id| {
@@ -936,8 +945,11 @@ impl DownloadGroupRow {
         });
         self.open_folder_btn.set_visible(one_destination);
         self.open_folder_btn.set_sensitive(one_destination);
+        let trash_blocked = group_items
+            .iter()
+            .any(|item| manager.is_trash_blocked(item.id()));
         self.remove_btn.set_visible(nonempty);
-        self.remove_btn.set_sensitive(nonempty);
+        self.remove_btn.set_sensitive(nonempty && !trash_blocked);
     }
 }
 
@@ -1464,7 +1476,7 @@ pub(crate) fn build_row(
     {
         let m = Rc::clone(manager);
         let t = Rc::clone(toasts);
-        delete_btn.connect_clicked(move |button| {
+        delete_btn.connect_clicked(move |_| {
             if m.is_live_video(id)
                 || m.find(id).is_some_and(|item| {
                     item.status() != DownloadStatus::Done && m.is_manifest_download(id)
@@ -1479,16 +1491,20 @@ pub(crate) fn build_row(
                 }));
                 return;
             }
-            // Trash can involve directory walks or a cross-volume copy. Keep
-            // the row responsive and prevent duplicate submissions while the
-            // blocking operation is in flight.
-            button.set_sensitive(false);
-            let button = button.clone();
+            // Claim the row and its collection synchronously before spawning
+            // the blocking Trash operation, so Remove and Clear Finished cannot
+            // race it on the GTK main thread.
+            let guard = match m.begin_trash(id) {
+                Ok(guard) => guard,
+                Err(error) => {
+                    t.add_toast(crate::ui_util::plain_toast(&error));
+                    return;
+                }
+            };
             let m = Rc::clone(&m);
             let t = Rc::clone(&t);
             glib::spawn_future_local(async move {
-                let result = m.delete_download_async(id).await;
-                button.set_sensitive(true);
+                let result = m.delete_download_with_guard(id, guard).await;
                 match result {
                     Err(e) => t.add_toast(crate::ui_util::plain_toast(&e)),
                     Ok(()) => t.add_toast(crate::ui_util::plain_toast(&gettext("Moved to Trash"))),
@@ -1503,7 +1519,9 @@ pub(crate) fn build_row(
             let Some(it) = m.find(id) else { return };
             let snapshot = RemovedSnapshot::capture(&m, &it);
             let name = snapshot.filename.clone();
-            m.remove(id);
+            if !m.try_remove(id) {
+                return;
+            }
             let message =
                 crate::ui_util::format_template(&gettext("Removed {name}"), &[("name", &name)]);
             let toast = crate::ui_util::plain_toast(&message);

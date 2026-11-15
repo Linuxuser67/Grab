@@ -396,7 +396,7 @@ impl DownloadManager {
     pub fn remove_many(self: &Rc<Self>, ids: &[u64]) -> usize {
         let mut removed = 0;
         for &id in ids {
-            if self.find(id).is_none() {
+            if self.find(id).is_none() || self.is_trash_blocked(id) {
                 continue;
             }
             self.remove_inner(id);
@@ -414,10 +414,20 @@ impl DownloadManager {
     /// page-video and native-manifest staging is discarded after its worker stops,
     /// so Undo re-resolves or restarts those attempts from the beginning.
     pub fn remove(self: &Rc<Self>, id: u64) {
+        let _ = self.try_remove(id);
+    }
+
+    /// Remove one row unless a Trash operation owns its row or collection.
+    /// Returns false when the row is absent or currently locked by Trash.
+    pub(crate) fn try_remove(self: &Rc<Self>, id: u64) -> bool {
+        if self.find(id).is_none() || self.is_trash_blocked(id) {
+            return false;
+        }
         self.remove_inner(id);
         self.persist_queue();
         self.changed();
         self.start_next();
+        true
     }
 
     /// Remove one row without publishing an intermediate queue state. Bulk

@@ -4,7 +4,56 @@ use super::{DownloadItem, DownloadManager};
 use gettextrs::gettext;
 use gtk4::gio;
 use gtk4::gio::prelude::*;
-use std::rc::Rc;
+use std::rc::{Rc, Weak};
+
+/// Keeps all rows in one collection locked until the Trash worker and its
+/// queue-model commit have both completed.
+pub(crate) struct TrashOperationGuard {
+    manager: Weak<DownloadManager>,
+    id: u64,
+    locked_ids: Vec<u64>,
+    active: bool,
+}
+
+impl TrashOperationGuard {
+    fn belongs_to(&self, manager: &Rc<DownloadManager>, id: u64) -> bool {
+        self.active
+            && self.id == id
+            && self
+                .manager
+                .upgrade()
+                .is_some_and(|owner| Rc::ptr_eq(&owner, manager))
+    }
+
+    /// Commit the successful Trash operation while its row lock is still held.
+    fn complete(mut self) {
+        if let Some(manager) = self.manager.upgrade() {
+            manager.remove_inner(self.id);
+            manager.release_trash_scope(&self.locked_ids);
+            self.active = false;
+            manager.persist_queue();
+            manager.changed();
+            manager.start_next();
+        } else {
+            self.active = false;
+        }
+    }
+}
+
+impl Drop for TrashOperationGuard {
+    fn drop(&mut self) {
+        if !self.active {
+            return;
+        }
+        if let Some(manager) = self.manager.upgrade() {
+            manager.release_trash_scope(&self.locked_ids);
+            self.active = false;
+            manager.changed();
+        } else {
+            self.active = false;
+        }
+    }
+}
 
 #[derive(Debug)]
 enum DeleteOperation {
@@ -120,6 +169,78 @@ fn execute_delete_operation(operation: DeleteOperation) -> Result<(), String> {
 }
 
 impl DownloadManager {
+    /// Return every row that must be locked together for a Trash operation.
+    /// Collection owners, children, and siblings share one serialization scope.
+    fn trash_scope(&self, id: u64, item: &DownloadItem) -> Vec<u64> {
+        let mut scope = vec![id];
+        let group_id = if item.is_collection_parent() {
+            Some(id)
+        } else {
+            item.group().map(|group| group.id())
+        };
+        if let Some(group_id) = group_id {
+            scope.push(group_id);
+            scope.extend(
+                self.items()
+                    .filter(|member| {
+                        member.id() == group_id
+                            || member.group().is_some_and(|group| group.id() == group_id)
+                    })
+                    .map(|member| member.id()),
+            );
+        }
+        scope.sort_unstable();
+        scope.dedup();
+        scope
+    }
+
+    fn release_trash_scope(&self, ids: &[u64]) {
+        let mut active = self.trash_in_progress.borrow_mut();
+        for id in ids {
+            active.remove(id);
+        }
+    }
+
+    /// Whether the row or its collection is currently owned by a Trash operation.
+    pub(crate) fn is_trash_blocked(&self, id: u64) -> bool {
+        let active = self.trash_in_progress.borrow();
+        if active.contains(&id) {
+            return true;
+        }
+        let Some(item) = self.find(id) else {
+            return false;
+        };
+        let group_id = if item.is_collection_parent() {
+            Some(id)
+        } else {
+            item.group().map(|group| group.id())
+        };
+        group_id.is_some_and(|group_id| active.contains(&group_id))
+    }
+
+    /// Claim the row synchronously, before its filesystem operation is spawned.
+    pub(crate) fn begin_trash(
+        self: &Rc<Self>,
+        id: u64,
+    ) -> Result<TrashOperationGuard, String> {
+        let item = self.find(id).ok_or_else(|| gettext("Download not found"))?;
+        let locked_ids = self.trash_scope(id, &item);
+        {
+            let mut active = self.trash_in_progress.borrow_mut();
+            if locked_ids.iter().any(|locked_id| active.contains(locked_id)) {
+                return Err(gettext("This download is already being moved to Trash"));
+            }
+            active.extend(locked_ids.iter().copied());
+        }
+        self.changed();
+        Ok(TrashOperationGuard {
+            manager: Rc::downgrade(self),
+            id,
+            locked_ids,
+            active: true,
+        })
+    }
+
     pub(super) fn gallery_trash_target(
         item: &DownloadItem,
         job: &crate::gallery_argv::GalleryJob,
@@ -186,6 +307,21 @@ impl DownloadManager {
     /// Move downloaded files to Trash on a blocking worker, then update the
     /// queue model on GTK. Errors are display-ready.
     pub async fn delete_download_async(self: &Rc<Self>, id: u64) -> Result<(), String> {
+        let guard = self.begin_trash(id)?;
+        self.delete_download_with_guard(id, guard).await
+    }
+
+    /// Run a Trash operation after its row and collection scope were claimed
+    /// synchronously by the UI. The guard remains alive across the blocking
+    /// worker and is only released after the queue row is removed.
+    pub(crate) async fn delete_download_with_guard(
+        self: &Rc<Self>,
+        id: u64,
+        guard: TrashOperationGuard,
+    ) -> Result<(), String> {
+        if !guard.belongs_to(self, id) {
+            return Err(gettext("Trash operation is no longer valid"));
+        }
         let item = self.find(id).ok_or_else(|| gettext("Download not found"))?;
         let operation = self.prepare_delete_operation(id, &item);
         let torrent_url = match &operation {
@@ -193,19 +329,28 @@ impl DownloadManager {
             _ => None,
         };
         let filename = item.filename().to_string();
+        #[cfg(test)]
+        let before_execute_hook = self.trash_before_execute_hook.borrow_mut().take();
+        #[cfg(not(test))]
+        let before_execute_hook: Option<std::sync::Arc<dyn Fn() + Send + Sync>> = None;
 
-        gio::spawn_blocking(move || execute_delete_operation(operation))
-            .await
-            .map_err(|_| {
-                format!("Could not move {filename} to Trash: background task panicked")
-            })??;
+        gio::spawn_blocking(move || {
+            if let Some(hook) = before_execute_hook {
+                hook();
+            }
+            execute_delete_operation(operation)
+        })
+        .await
+        .map_err(|_| {
+            format!("Could not move {filename} to Trash: background task panicked")
+        })??;
 
         // This only schedules teardown on Tokio; retain the original ordering
         // and do it only after trash/archive operations have succeeded.
         if torrent_url.is_some() {
             crate::torrent::forget_download(id);
         }
-        self.remove(id);
+        guard.complete();
         Ok(())
     }
 }

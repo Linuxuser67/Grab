@@ -145,7 +145,7 @@ impl DownloadManager {
     }
 
     /// Invalidate the independent GLib message receiver for one gallery attempt.
-    fn invalidate_gallery_attempt(&self, id: u64) {
+    pub(super) fn invalidate_gallery_attempt(&self, id: u64) {
         let next = self.epoch.borrow().get(&id).copied().unwrap_or(0) + 1;
         self.epoch.borrow_mut().insert(id, next);
     }

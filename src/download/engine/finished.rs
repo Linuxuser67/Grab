@@ -13,7 +13,7 @@ impl DownloadManager {
         id: u64,
         generation: u64,
         size: u64,
-        url: &str,
+        url: String,
     ) {
         if item.status() != DownloadStatus::Cancelled
             && item.status() != DownloadStatus::Paused

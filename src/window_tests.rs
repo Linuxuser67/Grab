@@ -3,7 +3,7 @@ use crate::inline_add::{fmt_item_duration, playlist_count_label};
 use crate::media_types::PlaylistKind;
 use crate::window_rows::{
     PulseTick, RowMedia, StopCopy, media_icon_failed, pulse_tick, row_media, should_pulse,
-    stop_copy,
+    stop_copy, stop_icon,
 };
 use gtk4::glib::object::Cast as _;
 use gtk4::prelude::*;
@@ -33,6 +33,22 @@ fn stop_copy_distinguishes_a_live_capture_from_a_discard() {
         stop_copy(true),
         StopCopy::FinishRecording,
         "a live capture is kept, so the copy must not read as a discard"
+    );
+}
+
+#[test]
+fn stop_icon_saves_a_live_capture_and_cancels_an_ordinary_download() {
+    // The glyph must match the action: finishing a live capture keeps the
+    // recording, so the stop square would read as "discard".
+    assert_eq!(
+        stop_icon(true),
+        "document-save-symbolic",
+        "a live capture is saved, so the button shows the save icon"
+    );
+    assert_eq!(
+        stop_icon(false),
+        "process-stop-symbolic",
+        "an ordinary download is discarded, so the stop icon stays"
     );
 }
 

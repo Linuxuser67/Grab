@@ -371,6 +371,13 @@ impl DownloadManager {
         }
     }
 
+    /// Test-only convenience wrapper for exercising the complete Trash worker.
+    #[cfg(test)]
+    pub async fn delete_download_async(self: &Rc<Self>, id: u64) -> Result<(), String> {
+        let guard = self.begin_trash(id)?;
+        self.delete_download_with_guard(id, guard).await
+    }
+
     /// Run a Trash operation after its row and collection scope were claimed
     /// synchronously by the UI. The guard remains alive across the blocking
     /// worker and is only released after the queue row is removed.

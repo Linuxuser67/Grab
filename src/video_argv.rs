@@ -485,14 +485,24 @@ pub(crate) fn live_hls_format_spec(quality: &str, _pinned: Option<&str>) -> Stri
     }
 }
 
+/// Starting position selected for a live HLS capture attempt.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum LiveCaptureStart {
+    /// Request the stream from its beginning.
+    FromStart,
+    /// Request only media available at the live edge.
+    LiveEdge,
+}
+
 /// yt-dlp argv for a live capture: kill-safe MPEG-TS, ffmpeg pinned as the
 /// live-HLS downloader per yt-dlp's own guidance ("Live HLS streams are not
 /// supported by the native downloader"). Pure.
-pub(crate) fn live_capture_argv(
+pub(crate) fn live_capture_argv_with_mode(
     job: &VideoJob,
     hls_format_id: &str,
     out: &Path,
     playlist_index: Option<usize>,
+    capture_start: LiveCaptureStart,
 ) -> Vec<String> {
     let mut args = vec!["--ignore-config".to_string()];
     args.extend(playlist_scope_args(playlist_index));
@@ -528,7 +538,7 @@ pub(crate) fn live_capture_argv(
         "--downloader-args".to_string(),
         crate::video_tools::LIVE_INPUT_DOWNLOADER_ARGS.to_string(),
     ]);
-    if job.is_live && job.live_from_start {
+    if capture_start == LiveCaptureStart::FromStart {
         args.push("--live-from-start".to_string());
     }
     args.extend(proxy_cli_args(job.proxy.as_ref()));
@@ -539,6 +549,27 @@ pub(crate) fn live_capture_argv(
         &job.page_url,
     ));
     args
+}
+
+/// Compatibility builder for tests that use the configured job start mode.
+#[cfg(test)]
+pub(crate) fn live_capture_argv(
+    job: &VideoJob,
+    hls_format_id: &str,
+    out: &Path,
+    playlist_index: Option<usize>,
+) -> Vec<String> {
+    live_capture_argv_with_mode(
+        job,
+        hls_format_id,
+        out,
+        playlist_index,
+        if job.is_live && job.live_from_start {
+            LiveCaptureStart::FromStart
+        } else {
+            LiveCaptureStart::LiveEdge
+        },
+    )
 }
 
 /// Clamp `PTS`/`DTS` pairs that movenc cannot represent as a signed 32-bit delta.
@@ -1098,5 +1129,68 @@ mod attempt_subtitle_language_tests {
         assert!(has_subtitle_language(&hls, "en"));
         assert!(!has_subtitle_language(&hls, "fr"));
         assert_eq!(job.subtitles.as_deref(), Some("fr"));
+    }
+}
+
+#[cfg(test)]
+mod live_capture_start_tests {
+    use super::*;
+
+    fn live_job() -> VideoJob {
+        VideoJob {
+            item_id: 7,
+            page_url: "https://example.test/live".to_string(),
+            playlist_item_id: None,
+            quality: "1080p".to_string(),
+            dest: PathBuf::from("/tmp/live.mp4"),
+            speed_limit: None,
+            keep_server_date: false,
+            video_format_id: None,
+            is_live: true,
+            live_from_start: true,
+            newest_codecs: false,
+            audio_only: false,
+            cookies_browser: "none".to_string(),
+            subtitles: None,
+            embed_subs: false,
+            sponsorblock_remove: false,
+            sponsorblock_mark: false,
+            remux_video: None,
+            embed_chapters: false,
+            proxy: None,
+            info_json: None,
+        }
+    }
+
+    #[test]
+    fn attempt_mode_controls_start_flag_without_mutating_probe_job() {
+        let job = live_job();
+        let output = Path::new("/tmp/live.mp4");
+
+        let from_start = live_capture_argv_with_mode(
+            &job,
+            "hls-1080p",
+            output,
+            None,
+            LiveCaptureStart::FromStart,
+        );
+        let live_edge = live_capture_argv_with_mode(
+            &job,
+            "hls-1080p",
+            output,
+            None,
+            LiveCaptureStart::LiveEdge,
+        );
+
+        assert!(
+            from_start.iter().any(|arg| arg == "--live-from-start"),
+            "FromStart must request the beginning of the live stream"
+        );
+        assert!(
+            !live_edge.iter().any(|arg| arg == "--live-from-start"),
+            "LiveEdge must omit the start-position option"
+        );
+        assert!(job.is_live);
+        assert!(job.live_from_start);
     }
 }

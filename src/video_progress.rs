@@ -76,11 +76,15 @@ fn parse_event_string(raw: &str) -> Option<String> {
     serde_json::from_str::<String>(raw).ok()
 }
 
-/// Decode a number or a JSON string containing a number.
+/// Decode a nonnegative JSON number, including floats, or a JSON string containing one.
 fn parse_event_u64(raw: &str) -> Option<u64> {
-    serde_json::from_str::<u64>(raw)
+    if let Ok(value) = serde_json::from_str::<u64>(raw) {
+        return Some(value);
+    }
+    let value = serde_json::from_str::<f64>(raw)
         .ok()
-        .or_else(|| serde_json::from_str::<String>(raw).ok()?.parse().ok())
+        .or_else(|| serde_json::from_str::<String>(raw).ok()?.parse::<f64>().ok())?;
+    (value.is_finite() && value >= 0.0).then_some(value as u64)
 }
 
 fn parse_event_index(raw: &str) -> Option<usize> {
@@ -421,6 +425,43 @@ mod playlist_event_tests {
                 file_id: "extractor;id;with;semicolons".to_string(),
                 playlist_index: 7,
                 filename: "/tmp/title; with \"quotes\"\ncontinued.mp4".to_string(),
+            })
+        );
+    }
+
+    #[test]
+    fn parses_float_estimates_and_rejects_invalid_numbers() {
+        use super::parse_event_u64;
+
+        assert_eq!(parse_event_u64("1234.75"), Some(1234));
+        assert_eq!(parse_event_u64(r#""1234.75""#), Some(1234));
+        assert_eq!(parse_event_u64("42"), Some(42));
+        assert_eq!(parse_event_u64(r#""42""#), Some(42));
+        assert_eq!(parse_event_u64("-1.0"), None);
+        assert_eq!(parse_event_u64(r#""NaN""#), None);
+        assert_eq!(parse_event_u64("1e100"), Some(u64::MAX));
+    }
+
+    #[test]
+    fn playlist_progress_uses_float_estimate_when_exact_total_is_unknown() {
+        let event = [
+            "@GRAB:testnonce:PROGRESS",
+            r#""abc123""#,
+            "4",
+            r#""downloading""#,
+            "128",
+            r#""NA""#,
+            "1234.75",
+        ]
+        .join("\t");
+
+        assert_eq!(
+            parse_ytdlp_playlist_event(&event, MARKER),
+            Some(YtdlpPlaylistEvent::Progress {
+                file_id: "abc123".to_string(),
+                playlist_index: 4,
+                downloaded: Some(128),
+                total: Some(1234),
             })
         );
     }

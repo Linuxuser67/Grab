@@ -500,21 +500,29 @@ impl HlsPlan {
         // Without EXT-X-MAP, a playlist can still contain packed audio or
         // opaque segment URLs. Do not label those streams as MPEG-TS merely
         // because they lack an initialization section.
-        self.local_playlist
-            .segments
+        let segment_resources = self
+            .resources
             .iter()
-            .all(|segment| {
-                self.playlist_url
-                    .join(&segment.uri)
-                    .ok()
-                    .and_then(|url| {
-                        url.path()
-                            .rsplit('/')
-                            .next()
-                            .and_then(|filename| filename.rsplit_once('.'))
-                            .map(|(_, extension)| extension.eq_ignore_ascii_case("ts"))
-                    })
-                    .unwrap_or(false)
+            .filter(|resource| resource.kind == HlsResourceKind::Segment);
+        if self
+            .resources
+            .iter()
+            .filter(|resource| resource.kind == HlsResourceKind::Segment)
+            .count()
+            != self.local_playlist.segments.len()
+        {
+            return None;
+        }
+
+        segment_resources
+            .all(|resource| {
+                resource
+                    .url
+                    .path()
+                    .rsplit('/')
+                    .next()
+                    .and_then(|filename| filename.rsplit_once('.'))
+                    .is_some_and(|(_, extension)| extension.eq_ignore_ascii_case("ts"))
             })
             .then_some(crate::media_types::ManifestContainer::Ts)
     }

@@ -245,7 +245,7 @@ impl DownloadManager {
         }
 
         match loaded {
-            Ok(Some(pending)) => {
+            Ok(Ok(Some(pending))) => {
                 manager.restore_dirty.set(false);
                 let directories = manager.restore_dirs_requiring_id_listing(&pending);
                 drop(manager);
@@ -321,7 +321,13 @@ impl DownloadManager {
                 Self::schedule_session_orphan_sweep(keep);
                 RestoreOutcome::Succeeded
             }
-            Ok(None) => RestoreOutcome::Succeeded,
+            Ok(Ok(None)) => RestoreOutcome::Succeeded,
+            Ok(Err(error)) => {
+                tracing::error!(
+                    "download queue could not be quarantined: {error}; preserving the saved queue"
+                );
+                RestoreOutcome::Failed
+            }
             Err(error) => {
                 tracing::error!(
                     "download queue restore worker failed: {error}; preserving the saved queue"
@@ -380,36 +386,56 @@ impl DownloadManager {
 
     /// File reading, size/version caps, JSON parsing, and pure stored-item
     /// validation run on a blocking worker. No GTK/GObject values are created.
-    fn load_restore_queue(queue_file: std::path::PathBuf) -> Option<Vec<PendingRestore>> {
+    fn load_restore_queue(
+        queue_file: std::path::PathBuf,
+    ) -> std::io::Result<Option<Vec<PendingRestore>>> {
         Self::sweep_stale_tmp_at(&queue_file);
-        if !queue_file.exists() {
-            return None;
+        let metadata = match std::fs::symlink_metadata(&queue_file) {
+            Ok(metadata) => metadata,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+            Err(error) => return Err(error),
+        };
+        // Never follow a queue symlink. Move the directory entry itself aside
+        // before allowing a later persist to create a regular queue file.
+        if metadata.file_type().is_symlink() {
+            tracing::warn!("quarantining symlinked download queue");
+            Self::quarantine_queue_at(&queue_file)?;
+            return Ok(None);
+        }
+        if !metadata.is_file() {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "download queue path is not a regular file",
+            ));
         }
 
         const MAX_QUEUE_BYTES: u64 = 10_000_000;
         const MAX_QUEUE_ITEMS: usize = 1000;
-        if std::fs::metadata(&queue_file)
-            .map(|m| m.len() > MAX_QUEUE_BYTES)
-            .unwrap_or(true)
-        {
+        if metadata.len() > MAX_QUEUE_BYTES {
             tracing::warn!("quarantining oversized download queue");
-            Self::quarantine_queue_at(&queue_file);
-            return None;
+            Self::quarantine_queue_at(&queue_file)?;
+            return Ok(None);
         }
-        let Ok(text) = std::fs::read_to_string(&queue_file) else {
-            tracing::warn!("quarantining unreadable download queue");
-            Self::quarantine_queue_at(&queue_file);
-            return None;
+        let text = match std::fs::read_to_string(&queue_file) {
+            Ok(text) => text,
+            Err(error) => {
+                tracing::warn!(error = %error, "quarantining unreadable download queue");
+                Self::quarantine_queue_at(&queue_file)?;
+                return Ok(None);
+            }
         };
-        let Ok(queue) = serde_json::from_str::<StoredQueue>(&text) else {
-            tracing::warn!("quarantining unreadable download queue");
-            Self::quarantine_queue_at(&queue_file);
-            return None;
+        let queue = match serde_json::from_str::<StoredQueue>(&text) {
+            Ok(queue) => queue,
+            Err(error) => {
+                tracing::warn!(error = %error, "quarantining unreadable download queue");
+                Self::quarantine_queue_at(&queue_file)?;
+                return Ok(None);
+            }
         };
         if queue.version == 0 || queue.version > QUEUE_VERSION {
             tracing::warn!("quarantining download queue version {}", queue.version);
-            Self::quarantine_queue_at(&queue_file);
-            return None;
+            Self::quarantine_queue_at(&queue_file)?;
+            return Ok(None);
         }
 
         // Preserve the existing policy: resumable entries first, then newest history.
@@ -429,12 +455,12 @@ impl DownloadManager {
                 .chain(done.into_iter().skip(skip))
                 .collect();
         }
-        Some(
+        Ok(Some(
             items
                 .into_iter()
                 .filter_map(Self::validate_stored_item)
                 .collect(),
-        )
+        ))
     }
 
     /// Apply validated rows to GTK's model and snapshot cleanup keep-sets.

@@ -8634,6 +8634,69 @@ fn gallery_job_fixture() -> crate::gallery_argv::GalleryJob {
 }
 
 #[test]
+fn gallery_file_row_lifecycle_updates_persisted_state_through_the_owner_index() {
+    let (_queue, _main) = test_locks();
+    let _queue_file = test_queue_file("gallery-file-row-lifecycle-index");
+    let manager = DownloadManager::new(gio::ListStore::new::<DownloadItem>(), test_settings());
+    let root = tempfile::tempdir().expect("gallery root");
+    let output_dir = root.path().join("Gallery");
+    std::fs::create_dir_all(&output_dir).expect("gallery output directory");
+    let page_url = "https://example.com/gallery";
+    let id = 960_000 + std::process::id() as u64;
+    let mut job = gallery_job_fixture();
+    job.item_id = id;
+    job.dest_dir = output_dir.clone();
+
+    let owner = DownloadItem::new(id, page_url, "Gallery", &root.path().to_string_lossy());
+    owner.set_is_gallery(true);
+    owner.set_group(crate::download_store::DownloadGroup::try_new(id, "Gallery"));
+    owner.set_status(DownloadStatus::Paused);
+    manager.gallery_jobs.borrow_mut().insert(id, job);
+    manager.store.append(&owner);
+
+    let path = output_dir.join("one.jpg").to_string_lossy().into_owned();
+    manager.upsert_gallery_file_row(
+        &owner,
+        &path,
+        DownloadStatus::Paused,
+        0.37,
+        "Paused",
+    );
+    manager.prepare_gallery_file_rows_for_attempt(id);
+
+    let child = manager
+        .items()
+        .find(|item| item.is_collection_child())
+        .expect("gallery child row");
+    assert_eq!(child.status(), DownloadStatus::Queued);
+    assert_eq!(child.progress(), 0.0);
+    {
+        let jobs = manager.gallery_jobs.borrow();
+        let state = &jobs.get(&id).expect("gallery job").file_rows[0];
+        assert_eq!(state.status, DownloadStatus::Queued);
+        assert_eq!(state.progress, 0.0);
+    }
+
+    manager.upsert_gallery_file_row(
+        &owner,
+        &path,
+        DownloadStatus::Downloading,
+        0.55,
+        "55%",
+    );
+    manager.finish_gallery_file_rows(id, DownloadStatus::Failed);
+
+    assert_eq!(child.status(), DownloadStatus::Failed);
+    assert!((child.progress() - 0.55).abs() < f64::EPSILON);
+    {
+        let jobs = manager.gallery_jobs.borrow();
+        let state = &jobs.get(&id).expect("gallery job").file_rows[0];
+        assert_eq!(state.status, DownloadStatus::Failed);
+        assert!((state.progress - 0.55).abs() < f64::EPSILON);
+    }
+}
+
+#[test]
 fn gallery_file_rows_are_persisted_with_owner_and_rehydrated() {
     let (_queue, _main) = test_locks();
     let _queue_file = test_queue_file("gallery-per-file-rows");

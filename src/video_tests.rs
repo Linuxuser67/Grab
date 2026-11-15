@@ -6,8 +6,8 @@ use crate::media_types::{
 };
 use crate::video::AttemptGate;
 use crate::video_argv::{
-    YTDLP_PROGRESS_TEMPLATE, apply_proxy_env, container_truth_name, dash_merge_argv,
-    fallback_to_live_edge, hls_download_argv, hls_format_spec, live_capture_argv,
+    LiveCaptureStart, YTDLP_PROGRESS_TEMPLATE, apply_proxy_env, container_truth_name,
+    dash_merge_argv, fallback_to_live_edge, hls_download_argv, hls_format_spec, live_capture_argv,
     live_from_start_unsupported, live_hls_format_spec, live_remux_argv, merge_output_ext,
     part_fallback_spec, playlist_scope_args, proxy_cli_args, unified_download_argv,
     unified_format_spec, unified_output_template,
@@ -7252,6 +7252,7 @@ fn live_capture_argv_pins_ffmpeg_location() {
         None,
         std::path::Path::new("/usr/bin/ffmpeg"),
         false,
+        LiveCaptureStart::LiveEdge,
     );
     let flag = argv
         .iter()
@@ -7268,6 +7269,7 @@ fn live_capture_argv_pins_ffmpeg_location() {
         None,
         std::path::Path::new("/usr/bin/ffmpeg"),
         true,
+        LiveCaptureStart::FromStart,
     );
     assert!(
         enabled

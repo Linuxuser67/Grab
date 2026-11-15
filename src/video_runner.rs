@@ -5,11 +5,12 @@ use crate::attempt_gate::AttemptGate;
 use crate::file_names::is_url_derived_name;
 use crate::runtime::lock_recover;
 use crate::video_argv::{
-    PlaylistRunSelection, VideoJob, apply_proxy_env, container_truth_name, dash_merge_argv,
-    fallback_to_live_edge, hls_download_argv_with_subtitles, live_capture_argv,
-    live_from_start_unsupported, live_remux_argv, merge_output_ext, playlist_download_argv,
-    playlist_scope_args, proxy_cli_args, unified_download_argv_with_subtitles, unified_format_spec,
-    unified_output_template, unified_staging_prefix, write_manifest,
+    LiveCaptureStart, PlaylistRunSelection, VideoJob, apply_proxy_env, container_truth_name,
+    dash_merge_argv, fallback_to_live_edge, hls_download_argv_with_subtitles,
+    live_capture_argv_with_mode, live_from_start_unsupported, live_remux_argv, merge_output_ext,
+    playlist_download_argv, playlist_scope_args, proxy_cli_args,
+    unified_download_argv_with_subtitles, unified_format_spec, unified_output_template,
+    unified_staging_prefix, write_manifest,
 };
 use crate::video_plan::{StreamPlan, plan_streams};
 use crate::video_probe::page_host;
@@ -2734,8 +2735,10 @@ pub(crate) fn live_capture_argv_with_ffmpeg(
     playlist_index: Option<usize>,
     ffmpeg_bin: &Path,
     extension_picky_supported: bool,
+    capture_start: LiveCaptureStart,
 ) -> Vec<String> {
-    let mut argv = live_capture_argv(job, hls_format_id, out, playlist_index);
+    let mut argv =
+        live_capture_argv_with_mode(job, hls_format_id, out, playlist_index, capture_start);
     if extension_picky_supported
         && let Some(input_args) = argv.iter_mut().find(|arg| arg.starts_with("ffmpeg_i:"))
     {
@@ -2886,9 +2889,14 @@ pub(crate) async fn run_live_ytdlp(
     // Deleted on drop: the attempt loop has early returns (quiesce failure,
     // nothing recorded) that would otherwise leak it.
     let _info_guard = InfoJsonGuard::new(live_info_path.clone());
-    let mut downgraded: Option<VideoJob> = None;
+    // The fallback changes one attempt option, not the queued job or its potentially large probe JSON.
+    let mut downgraded = false;
     let src = 'attempt: loop {
-        let attempt: &VideoJob = downgraded.as_ref().unwrap_or(job);
+        let capture_start = if job.is_live && job.live_from_start && !downgraded {
+            LiveCaptureStart::FromStart
+        } else {
+            LiveCaptureStart::LiveEdge
+        };
         // Fresh shell per attempt: a stale output or state file must never survive into a retry, or yt-dlp resumes fragment N against a deleted shell (corrupt recording).
         remove_scratch_file_if_present(&out).await;
         remove_scratch_file_if_present(&part).await;
@@ -2902,12 +2910,13 @@ pub(crate) async fn run_live_ytdlp(
         let extension_picky_supported =
             crate::video_tools::ffmpeg_supports_hls_extension_picky(ffmpeg_bin).await;
         let mut argv = live_capture_argv_with_ffmpeg(
-            attempt,
+            job,
             hls_format_id,
             &out,
             playlist_index,
             ffmpeg_bin,
             extension_picky_supported,
+            capture_start,
         );
         splice_before_terminator(&mut argv, live_info_json_args(live_info_path.as_deref()));
         let guarded_proxy = crate::video_spawn::guard_untrusted_args(&argv)?;
@@ -3025,19 +3034,17 @@ pub(crate) async fn run_live_ytdlp(
                                 // startup miss below).
                                 if live_from_start_unsupported(&log_tail)
                                     && fallback_to_live_edge(
-                                        attempt.is_live,
-                                        attempt.live_from_start,
+                                        job.is_live,
+                                        capture_start == LiveCaptureStart::FromStart,
                                         false,
-                                        downgraded.is_some(),
+                                        downgraded,
                                     )
                                 {
                                     tx.send(EngineMsg::Phase(gettext(
                                         "\"Live from start\" isn't available for this stream — recording from the live edge…",
                                     )))
                                     .ok();
-                                    let mut edge = job.clone();
-                                    edge.live_from_start = false;
-                                    downgraded = Some(edge);
+                                    downgraded = true;
                                     continue 'attempt;
                                 }
                                 // The recorder exited on its own with a failure: adopting
@@ -3137,18 +3144,16 @@ pub(crate) async fn run_live_ytdlp(
             // recordings are never discarded. Staging is untouched (nothing was
             // recorded); the terminal path below sweeps it.
             if fallback_to_live_edge(
-                attempt.is_live,
-                attempt.live_from_start,
+                job.is_live,
+                capture_start == LiveCaptureStart::FromStart,
                 aborted,
-                downgraded.is_some(),
+                downgraded,
             ) {
                 tx.send(EngineMsg::Phase(gettext(
                     "\"Live from start\" isn't available for this stream — recording from the live edge…",
                 )))
                 .ok();
-                let mut edge = job.clone();
-                edge.live_from_start = false;
-                downgraded = Some(edge);
+                downgraded = true;
                 continue;
             }
             // Nothing was recorded, so there is no media to salvage —

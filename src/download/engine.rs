@@ -1161,7 +1161,7 @@ impl DownloadManager {
                                 item.status(),
                                 this.is_current(id, generation),
                             ) && last_playlist_progress_refresh
-                                    .is_none_or(|last| last.elapsed() >= Duration::from_millis(100))
+                                .is_none_or(|last| last.elapsed() >= Duration::from_millis(100))
                             {
                                 let progress = total
                                     .filter(|total| *total > 0)

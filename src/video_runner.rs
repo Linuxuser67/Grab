@@ -1432,6 +1432,12 @@ async fn try_merge_dash_partials(
     Some(size)
 }
 
+/// Only an explicit discard may reclaim HLS VOD staging; pause, finish, and a
+/// closed stop channel leave the partials available for the next attempt.
+fn should_sweep_hls_staging_on_abort(intent: Option<StopIntent>) -> bool {
+    matches!(intent, Some(StopIntent::Discard))
+}
+
 /// Publish partial DASH tracks only on `Finish`.
 /// `Pause` leaves them in staging so the next attempt can resume.
 fn should_merge_dash_partials(abort_intent: Option<StopIntent>) -> bool {
@@ -3420,8 +3426,10 @@ pub(crate) async fn run_hls_ytdlp(
     };
     let status = match supervised {
         YtdlpSupervisionOutcome::Exited(status) => status,
-        YtdlpSupervisionOutcome::Aborted(_) => {
-            sweep_staging_preserving_recordings(staging, job.item_id);
+        YtdlpSupervisionOutcome::Aborted(intent) => {
+            if should_sweep_hls_staging_on_abort(intent) {
+                sweep_staging_preserving_recordings(staging, job.item_id);
+            }
             return Ok(None);
         }
         YtdlpSupervisionOutcome::Stalled => {

@@ -7,6 +7,14 @@ use super::*;
 use crate::video_argv::VideoJob;
 
 #[test]
+fn hls_vod_abort_sweeps_staging_only_for_discard_intent() {
+    assert!(!should_sweep_hls_staging_on_abort(Some(StopIntent::Pause)));
+    assert!(!should_sweep_hls_staging_on_abort(Some(StopIntent::Finish)));
+    assert!(should_sweep_hls_staging_on_abort(Some(StopIntent::Discard)));
+    assert!(!should_sweep_hls_staging_on_abort(None));
+}
+
+#[test]
 fn dash_partial_merge_only_runs_for_finish_intent() {
     assert!(should_merge_dash_partials(Some(StopIntent::Finish)));
     assert!(!should_merge_dash_partials(Some(StopIntent::Pause)));

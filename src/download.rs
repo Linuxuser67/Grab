@@ -14,7 +14,7 @@ use std::time::{Duration, Instant, SystemTime};
 
 mod cancellation;
 mod deletion;
-pub(crate) use deletion::TrashOperationGuard;
+pub(crate) use deletion::{TrashOperationGuard, UndoOperationGuard};
 mod engine;
 mod queue_persistence;
 mod queue_restore;

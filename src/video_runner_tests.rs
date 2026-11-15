@@ -6,6 +6,14 @@ use super::*;
 
 use crate::video_argv::VideoJob;
 
+#[test]
+fn dash_partial_merge_only_runs_for_finish_intent() {
+    assert!(should_merge_dash_partials(Some(StopIntent::Finish)));
+    assert!(!should_merge_dash_partials(Some(StopIntent::Pause)));
+    assert!(!should_merge_dash_partials(Some(StopIntent::Discard)));
+    assert!(!should_merge_dash_partials(None));
+}
+
 /// A removal that wins before the final claim must keep the partial in staging
 /// and must not create the final destination.
 #[test]

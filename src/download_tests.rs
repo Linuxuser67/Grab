@@ -10842,8 +10842,7 @@ fn delayed_trash_lock_refresh_does_not_target_a_replacement_manager() {
     // The release notification is queued on the GLib context. Replacing the
     // thread-local manager before dispatch must not send that old refresh to
     // this new manager.
-    let replacement =
-        DownloadManager::new(gio::ListStore::new::<DownloadItem>(), test_settings());
+    let replacement = DownloadManager::new(gio::ListStore::new::<DownloadItem>(), test_settings());
     let refreshes = Rc::new(Cell::new(0));
     let observed = Rc::clone(&refreshes);
     replacement.set_on_change(move || observed.set(observed.get() + 1));

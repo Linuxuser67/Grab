@@ -172,12 +172,11 @@ pub(crate) fn unified_output_template(staging: &Path, dest: &Path, item_id: u64)
     staging.join(format!("{}%(ext)s", unified_staging_prefix(dest, item_id)))
 }
 
-/// Shared argv tail for the VOD builders: subtitles, proxy, identity/cookie args.
-/// `job.subtitles` carries the already-resolved language (preferred if the
-/// video offers it, else the English fallback) — see `resolve_subtitle_lang`.
-fn push_vod_tail_args(args: &mut Vec<String>, job: &VideoJob) {
+/// Shared argv tail for the VOD builders: attempt-resolved subtitles, proxy, and identity/cookie args.
+/// Wrappers pass `job.subtitles`; runners pass the freshly resolved language separately.
+fn push_vod_tail_args(args: &mut Vec<String>, job: &VideoJob, subtitle_language: Option<&str>) {
     if !job.audio_only
-        && let Some(lang) = job.subtitles.as_deref()
+        && let Some(lang) = subtitle_language
     {
         args.extend(subtitle_cli_args(lang));
     }
@@ -210,6 +209,33 @@ pub(crate) fn unified_download_argv(
     ffmpeg_bin: &Path,
     out: &Path,
     playlist_index: Option<usize>,
+) -> Vec<String> {
+    unified_download_argv_with_subtitles(
+        job,
+        spec,
+        merging,
+        merge_ext,
+        ffmpeg_bin,
+        out,
+        playlist_index,
+        job.subtitles.as_deref(),
+    )
+}
+
+/// Build a unified-download argv with a subtitle language resolved for this attempt.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the subtitle language is resolved per attempt while all other inputs remain borrowed from VideoJob"
+)]
+pub(crate) fn unified_download_argv_with_subtitles(
+    job: &VideoJob,
+    spec: &str,
+    merging: bool,
+    merge_ext: &str,
+    ffmpeg_bin: &Path,
+    out: &Path,
+    playlist_index: Option<usize>,
+    subtitle_language: Option<&str>,
 ) -> Vec<String> {
     let mut args = vec!["--ignore-config".to_string()];
     args.extend(playlist_scope_args(playlist_index));
@@ -279,7 +305,7 @@ pub(crate) fn unified_download_argv(
         args.push("--remux-video".to_string());
         args.push(fmt.to_string());
     }
-    push_vod_tail_args(&mut args, job);
+    push_vod_tail_args(&mut args, job, subtitle_language);
     args
 }
 
@@ -644,13 +670,33 @@ pub(crate) fn live_from_start_unsupported(log: &str) -> bool {
     })
 }
 
-/// yt-dlp argv for one VOD HLS capture (planner-pinned variant id, merge/extract, proxy/identity). Pure.
+/// Compatibility builder for tests and callers that use the configured job subtitle.
+#[cfg(test)]
 pub(crate) fn hls_download_argv(
     job: &VideoJob,
     hls_format_id: &str,
     ffmpeg_bin: &Path,
     dest: &Path,
     playlist_index: Option<usize>,
+) -> Vec<String> {
+    hls_download_argv_with_subtitles(
+        job,
+        hls_format_id,
+        ffmpeg_bin,
+        dest,
+        playlist_index,
+        job.subtitles.as_deref(),
+    )
+}
+
+/// Build an HLS-download argv with a subtitle language resolved for this attempt.
+pub(crate) fn hls_download_argv_with_subtitles(
+    job: &VideoJob,
+    hls_format_id: &str,
+    ffmpeg_bin: &Path,
+    dest: &Path,
+    playlist_index: Option<usize>,
+    subtitle_language: Option<&str>,
 ) -> Vec<String> {
     let out_template = dest_part_path(dest, "hls", "%(ext)s");
     let mut args = vec!["--ignore-config".to_string()];
@@ -721,7 +767,7 @@ pub(crate) fn hls_download_argv(
         args.push("--remux-video".to_string());
         args.push(fmt.to_string());
     }
-    push_vod_tail_args(&mut args, job);
+    push_vod_tail_args(&mut args, job, subtitle_language);
     args
 }
 /// `--proxy` argv for one yt-dlp spawn (empty when direct; proxies carry no userinfo).
@@ -990,5 +1036,67 @@ mod playlist_argv_builder_tests {
             )
             .is_err()
         );
+    }
+}
+
+#[cfg(test)]
+mod attempt_subtitle_language_tests {
+    use super::*;
+
+    fn video_job() -> VideoJob {
+        VideoJob {
+            item_id: 7,
+            page_url: "https://example.test/video".to_string(),
+            playlist_item_id: None,
+            quality: "1080p".to_string(),
+            dest: PathBuf::from("/tmp/video.mp4"),
+            speed_limit: None,
+            keep_server_date: false,
+            video_format_id: None,
+            is_live: false,
+            live_from_start: false,
+            newest_codecs: false,
+            audio_only: false,
+            cookies_browser: "none".to_string(),
+            subtitles: Some("fr".to_string()),
+            embed_subs: false,
+            sponsorblock_remove: false,
+            sponsorblock_mark: false,
+            remux_video: None,
+            embed_chapters: false,
+            proxy: None,
+            info_json: None,
+        }
+    }
+
+    fn has_subtitle_language(args: &[String], language: &str) -> bool {
+        args.windows(2)
+            .any(|pair| pair[0] == "--sub-langs" && pair[1] == language)
+    }
+
+    #[test]
+    fn unified_and_hls_builders_accept_attempt_resolved_subtitles_without_mutating_job() {
+        let job = video_job();
+        let ffmpeg = Path::new("/usr/bin/ffmpeg");
+        let output = Path::new("/tmp/video.mp4");
+
+        let unified = unified_download_argv_with_subtitles(
+            &job,
+            "bv*+ba/b",
+            true,
+            "mp4",
+            ffmpeg,
+            output,
+            None,
+            Some("en"),
+        );
+        assert!(has_subtitle_language(&unified, "en"));
+        assert!(!has_subtitle_language(&unified, "fr"));
+
+        let hls =
+            hls_download_argv_with_subtitles(&job, "hls-720p", ffmpeg, output, None, Some("en"));
+        assert!(has_subtitle_language(&hls, "en"));
+        assert!(!has_subtitle_language(&hls, "fr"));
+        assert_eq!(job.subtitles.as_deref(), Some("fr"));
     }
 }

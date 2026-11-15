@@ -680,6 +680,11 @@ fn status_views_use_gnome_adaptive_view_switcher() {
             0,
             "the inline add card must sit directly below the header"
         );
+        assert_eq!(
+            inline_add_card.margin_bottom(),
+            0,
+            "the inline add card must not add a duplicate gap above the queue"
+        );
 
         let picker_child = gtk4::Box::new(gtk4::Orientation::Vertical, 0);
         let picker_page = libadwaita::NavigationPage::builder()

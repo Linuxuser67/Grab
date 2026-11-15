@@ -616,7 +616,7 @@ impl DownloadManager {
                             id,
                             generation,
                             size,
-                            &url,
+                            url.clone(),
                         )
                         .await;
                         done = true;

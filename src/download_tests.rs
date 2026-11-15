@@ -10582,6 +10582,14 @@ fn hold_trash_worker(manager: &DownloadManager) -> TrashWorkerBarrier {
     TrashWorkerBarrier { entered, released }
 }
 
+struct TaskDropSignal(std::sync::mpsc::Sender<()>);
+
+impl Drop for TaskDropSignal {
+    fn drop(&mut self) {
+        let _ = self.0.send(());
+    }
+}
+
 #[test]
 fn trash_rejects_remove_clear_finished_and_undo_until_the_worker_finishes() {
     let (_queue_lock, _main_loop_lock) = test_locks();
@@ -10689,17 +10697,36 @@ fn cancelled_trash_future_keeps_operation_locks_until_worker_exits() {
     let guard = manager.begin_trash(id).expect("claim Trash operation");
     let barrier = hold_trash_worker(&manager);
     let task_manager = Rc::clone(&manager);
+    let (task_dropped_tx, task_dropped_rx) = std::sync::mpsc::channel();
     let task = glib::spawn_future_local(async move {
+        let _drop_signal = TaskDropSignal(task_dropped_tx);
         let _ = task_manager.delete_download_with_guard(id, guard).await;
     });
     barrier.wait_until_entered();
 
     task.abort();
-    // Poll the cancelled GLib future so its async-owned lease is dropped.
-    glib::MainContext::default().iteration(false);
+    // Wait until the awaiting future is actually dropped, not merely marked
+    // for cancellation. At this point only the blocking worker owns a lease.
+    let context = glib::MainContext::default();
+    let cancel_deadline = std::time::Instant::now() + Duration::from_secs(5);
+    loop {
+        match task_dropped_rx.try_recv() {
+            Ok(()) => break,
+            Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                panic!("cancelled Trash future exited without dropping its task guard");
+            }
+            Err(std::sync::mpsc::TryRecvError::Empty) => {}
+        }
+        assert!(
+            std::time::Instant::now() < cancel_deadline,
+            "cancelled Trash future must drop its async lease"
+        );
+        context.iteration(false);
+        std::thread::sleep(std::time::Duration::from_millis(1));
+    }
     assert!(
         manager.is_trash_blocked(id),
-        "the detached blocking worker must keep the row locked after its waiter is cancelled"
+        "the blocking worker must keep the row locked after its waiter is cancelled"
     );
     assert!(
         manager.begin_undo(&[item.file_path()]).is_err(),

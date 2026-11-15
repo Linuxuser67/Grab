@@ -25,6 +25,7 @@ struct OperationLockLeaseInner {
     locks: Arc<Mutex<OperationLocks>>,
     row_ids: Vec<u64>,
     paths: Vec<std::path::PathBuf>,
+    notify_on_release: bool,
 }
 
 impl Drop for OperationLockLeaseInner {
@@ -41,7 +42,9 @@ impl Drop for OperationLockLeaseInner {
                 locks.paths.remove(path);
             }
         }
-        super::notify_operation_locks_changed();
+        if self.notify_on_release {
+            super::notify_operation_locks_changed();
+        }
     }
 }
 
@@ -248,6 +251,7 @@ impl DownloadManager {
         &self,
         locked_ids: Vec<u64>,
         locked_paths: Vec<std::path::PathBuf>,
+        notify_on_release: bool,
         busy_message: String,
     ) -> Result<OperationLockLease, String> {
         let mut locks = self
@@ -266,6 +270,7 @@ impl DownloadManager {
                 locks: Arc::clone(&self.operation_locks),
                 row_ids: locked_ids,
                 paths: locked_paths,
+                notify_on_release,
             }),
         })
     }
@@ -293,6 +298,7 @@ impl DownloadManager {
         let lease = self.claim_operation_locks(
             locked_ids,
             locked_paths,
+            true,
             gettext("This download is already being moved to Trash"),
         )?;
         self.changed();
@@ -322,6 +328,7 @@ impl DownloadManager {
         let lease = self.claim_operation_locks(
             locked_ids,
             locked_paths,
+            false,
             gettext("A download destination is busy with another operation"),
         )?;
         Ok(UndoOperationGuard { _lease: lease })
@@ -423,15 +430,16 @@ impl DownloadManager {
         // Keep the row/path locks alive even if this GLib future is dropped:
         // the blocking operation outlives its detached join handle.
         let worker_lease = guard.worker_lease();
-        gio::spawn_blocking(move || {
-            let _worker_lease = worker_lease;
-            if let Some(hook) = before_execute_hook {
-                hook();
-            }
-            execute_delete_operation(operation)
-        })
-        .await
-        .map_err(|_| format!("Could not move {filename} to Trash: background task panicked"))??;
+        crate::runtime::tokio_rt()
+            .spawn_blocking(move || {
+                let _worker_lease = worker_lease;
+                if let Some(hook) = before_execute_hook {
+                    hook();
+                }
+                execute_delete_operation(operation)
+            })
+            .await
+            .map_err(|_| format!("Could not move {filename} to Trash: background task panicked"))??;
 
         // This only schedules teardown on Tokio; retain the original ordering
         // and do it only after trash/archive operations have succeeded.

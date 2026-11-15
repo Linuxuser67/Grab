@@ -10785,8 +10785,16 @@ fn trash_scope_locks_transitive_collections_sharing_an_output_path() {
     for row in [&owner_a, &child_a, &child_a_secondary, &owner_b, &child_b] {
         manager.store().append(row);
     }
-    let guard = manager.begin_trash(child_a.id()).expect("claim collection A");
-    for id in [owner_a_id, child_a.id(), child_a_secondary.id(), owner_b_id, child_b.id()] {
+    let guard = manager
+        .begin_trash(child_a.id())
+        .expect("claim collection A");
+    for id in [
+        owner_a_id,
+        child_a.id(),
+        child_a_secondary.id(),
+        owner_b_id,
+        child_b.id(),
+    ] {
         assert!(
             manager.is_trash_blocked(id),
             "transitive path/collection closure must lock row {id}"

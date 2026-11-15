@@ -576,19 +576,20 @@ async fn run_video_playlist_download_inner(
     let timeout = Duration::from_secs(300);
 
     let drain_handles = [progress.abort_handle(), logs.abort_handle()];
-    let mut supervision = YtdlpSupervision {
-        child: &mut child,
-        group: &mut group,
-        pgid: pgid.as_ref(),
-        abort: &mut abort,
-        last_progress: &last_progress,
-        merging: &merging,
-        stall_timeout: timeout,
-        merge_timeout: MERGE_WALL_CLOCK,
-        drains: &drain_handles,
+    let supervised = {
+        let mut supervision = YtdlpSupervision {
+                child: &mut child,
+                group: &mut group,
+                pgid: pgid.as_ref(),
+                abort: &mut abort,
+                last_progress: &last_progress,
+                merging: &merging,
+                stall_timeout: timeout,
+                merge_timeout: MERGE_WALL_CLOCK,
+                drains: &drain_handles,
+            };
+        supervision.wait().await?
     };
-    let supervised = supervision.wait().await?;
-    drop(supervision);
     let status = match supervised {
         YtdlpSupervisionOutcome::Exited(status) => status,
         YtdlpSupervisionOutcome::Aborted(_) => return Ok(VideoOutcome::Aborted),
@@ -1868,19 +1869,20 @@ async fn run_ytdlp_attempt(
         String::from_utf8_lossy(&tail).into_owned()
     });
     let drain_handles = [progress.abort_handle(), logs.abort_handle()];
-    let mut supervision = YtdlpSupervision {
-        child: &mut child,
-        group: &mut group,
-        pgid: pgid.as_ref(),
-        abort: &mut *abort,
-        last_progress: &last_progress,
-        merging: &merging,
-        stall_timeout: timeout,
-        merge_timeout: MERGE_WALL_CLOCK,
-        drains: &drain_handles,
+    let supervised = {
+        let mut supervision = YtdlpSupervision {
+                child: &mut child,
+                group: &mut group,
+                pgid: pgid.as_ref(),
+                abort: &mut *abort,
+                last_progress: &last_progress,
+                merging: &merging,
+                stall_timeout: timeout,
+                merge_timeout: MERGE_WALL_CLOCK,
+                drains: &drain_handles,
+            };
+        supervision.wait().await?
     };
-    let supervised = supervision.wait().await?;
-    drop(supervision);
     let status = match supervised {
         YtdlpSupervisionOutcome::Exited(status) => status,
         YtdlpSupervisionOutcome::Aborted(intent) => return Ok((None, None, intent)),
@@ -3402,19 +3404,20 @@ pub(crate) async fn run_hls_ytdlp(
     // `await_child` swaps the stall deadline for the merge wall-clock. The snapshot only sizes
     // each wait; the kill decision re-reads the live flag.
     let drain_handles = [progress.abort_handle(), logs.abort_handle()];
-    let mut supervision = YtdlpSupervision {
-        child: &mut child,
-        group: &mut group,
-        pgid: pgid.as_ref(),
-        abort: &mut *abort,
-        last_progress: &last_progress,
-        merging: &merging,
-        stall_timeout: timeout,
-        merge_timeout: MERGE_WALL_CLOCK,
-        drains: &drain_handles,
+    let supervised = {
+        let mut supervision = YtdlpSupervision {
+                child: &mut child,
+                group: &mut group,
+                pgid: pgid.as_ref(),
+                abort: &mut *abort,
+                last_progress: &last_progress,
+                merging: &merging,
+                stall_timeout: timeout,
+                merge_timeout: MERGE_WALL_CLOCK,
+                drains: &drain_handles,
+            };
+        supervision.wait().await?
     };
-    let supervised = supervision.wait().await?;
-    drop(supervision);
     let status = match supervised {
         YtdlpSupervisionOutcome::Exited(status) => status,
         YtdlpSupervisionOutcome::Aborted(_) => {

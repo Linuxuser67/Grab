@@ -1139,19 +1139,20 @@ async fn ytdlp_supervision_returns_completed_status_after_group_quiescence() {
     let merging = std::sync::atomic::AtomicBool::new(false);
     let (progress, logs, drains) = pending_supervision_drains();
 
-    let mut supervision = YtdlpSupervision {
-        child: &mut child,
-        group: &mut group,
-        pgid: pgid.as_ref(),
-        abort: &mut abort,
-        last_progress: &last_progress,
-        merging: &merging,
-        stall_timeout: Duration::from_secs(2),
-        merge_timeout: Duration::from_secs(2),
-        drains: &drains,
+    let result = {
+        let mut supervision = YtdlpSupervision {
+                child: &mut child,
+                group: &mut group,
+                pgid: pgid.as_ref(),
+                abort: &mut abort,
+                last_progress: &last_progress,
+                merging: &merging,
+                stall_timeout: Duration::from_secs(2),
+                merge_timeout: Duration::from_secs(2),
+                drains: &drains,
+            };
+        supervision.wait().await.expect("completed child result")
     };
-    let result = supervision.wait().await.expect("completed child result");
-    drop(supervision);
 
     assert!(
         matches!(result, YtdlpSupervisionOutcome::Exited(status) if status.success()),
@@ -1177,19 +1178,20 @@ async fn ytdlp_supervision_preserves_explicit_stop_intent() {
     let merging = std::sync::atomic::AtomicBool::new(false);
     let (progress, logs, drains) = pending_supervision_drains();
 
-    let mut supervision = YtdlpSupervision {
-        child: &mut child,
-        group: &mut group,
-        pgid: pgid.as_ref(),
-        abort: &mut abort,
-        last_progress: &last_progress,
-        merging: &merging,
-        stall_timeout: Duration::from_secs(30),
-        merge_timeout: Duration::from_secs(30),
-        drains: &drains,
+    let result = {
+        let mut supervision = YtdlpSupervision {
+                child: &mut child,
+                group: &mut group,
+                pgid: pgid.as_ref(),
+                abort: &mut abort,
+                last_progress: &last_progress,
+                merging: &merging,
+                stall_timeout: Duration::from_secs(30),
+                merge_timeout: Duration::from_secs(30),
+                drains: &drains,
+            };
+        supervision.wait().await.expect("abort supervision result")
     };
-    let result = supervision.wait().await.expect("abort supervision result");
-    drop(supervision);
 
     assert!(
         matches!(
@@ -1217,22 +1219,23 @@ async fn ytdlp_supervision_terminates_a_silent_child_at_the_stall_deadline() {
     let merging = std::sync::atomic::AtomicBool::new(false);
     let (progress, logs, drains) = pending_supervision_drains();
 
-    let mut supervision = YtdlpSupervision {
-        child: &mut child,
-        group: &mut group,
-        pgid: pgid.as_ref(),
-        abort: &mut abort,
-        last_progress: &last_progress,
-        merging: &merging,
-        stall_timeout: Duration::from_millis(20),
-        merge_timeout: Duration::from_secs(30),
-        drains: &drains,
-    };
-    let result = tokio::time::timeout(Duration::from_secs(5), supervision.wait())
+    let result = {
+        let mut supervision = YtdlpSupervision {
+                child: &mut child,
+                group: &mut group,
+                pgid: pgid.as_ref(),
+                abort: &mut abort,
+                last_progress: &last_progress,
+                merging: &merging,
+                stall_timeout: Duration::from_millis(20),
+                merge_timeout: Duration::from_secs(30),
+                drains: &drains,
+            };
+        tokio::time::timeout(Duration::from_secs(5), supervision.wait())
         .await
         .expect("stall supervision must finish promptly")
-        .expect("stall supervision must not fail quiescence");
-    drop(supervision);
+        .expect("stall supervision must not fail quiescence")
+    };
 
     assert!(
         matches!(result, YtdlpSupervisionOutcome::Stalled),
@@ -1257,22 +1260,23 @@ async fn ytdlp_supervision_applies_the_merge_wall_clock_after_merge_starts() {
     let merging = std::sync::atomic::AtomicBool::new(true);
     let (progress, logs, drains) = pending_supervision_drains();
 
-    let mut supervision = YtdlpSupervision {
-        child: &mut child,
-        group: &mut group,
-        pgid: pgid.as_ref(),
-        abort: &mut abort,
-        last_progress: &last_progress,
-        merging: &merging,
-        stall_timeout: Duration::from_secs(30),
-        merge_timeout: Duration::from_millis(20),
-        drains: &drains,
-    };
-    let result = tokio::time::timeout(Duration::from_secs(5), supervision.wait())
+    let result = {
+        let mut supervision = YtdlpSupervision {
+                child: &mut child,
+                group: &mut group,
+                pgid: pgid.as_ref(),
+                abort: &mut abort,
+                last_progress: &last_progress,
+                merging: &merging,
+                stall_timeout: Duration::from_secs(30),
+                merge_timeout: Duration::from_millis(20),
+                drains: &drains,
+            };
+        tokio::time::timeout(Duration::from_secs(5), supervision.wait())
         .await
         .expect("merge timeout supervision must finish promptly")
-        .expect("merge timeout must quiesce its child group");
-    drop(supervision);
+        .expect("merge timeout must quiesce its child group")
+    };
 
     assert!(
         matches!(result, YtdlpSupervisionOutcome::MergeTimedOut),

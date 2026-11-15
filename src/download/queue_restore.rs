@@ -431,16 +431,19 @@ impl DownloadManager {
         }
         let text = match std::fs::read_to_string(&queue_file) {
             Ok(text) => text,
-            Err(error) => {
-                tracing::warn!(error = %error, "quarantining unreadable download queue");
+            // Invalid UTF-8 is damaged serialized data. Other read errors are
+            // transient filesystem failures: preserve the queue for the next launch.
+            Err(error) if error.kind() == std::io::ErrorKind::InvalidData => {
+                tracing::warn!(error = %error, "quarantining non-UTF-8 download queue");
                 Self::quarantine_queue_at(&queue_file)?;
                 return Ok(None);
             }
+            Err(error) => return Err(error),
         };
         let queue = match serde_json::from_str::<StoredQueue>(&text) {
             Ok(queue) => queue,
             Err(error) => {
-                tracing::warn!(error = %error, "quarantining unreadable download queue");
+                tracing::warn!(error = %error, "quarantining malformed download queue");
                 Self::quarantine_queue_at(&queue_file)?;
                 return Ok(None);
             }
@@ -631,5 +634,25 @@ mod path_validation_tests {
         assert!(!is_normalized_absolute(Path::new(
             "/home/user/Downloads/../../etc"
         )));
+    }
+}
+
+
+#[cfg(test)]
+mod queue_read_tests {
+    use super::DownloadManager;
+
+    #[test]
+    fn non_utf8_queue_is_quarantined_as_corrupt_data() {
+        let directory = tempfile::tempdir().expect("create queue directory");
+        let queue_file = directory.path().join("queue.json");
+        std::fs::write(&queue_file, [0xff, 0xfe]).expect("write non-UTF-8 queue");
+
+        let restored = DownloadManager::load_restore_queue(queue_file.clone())
+            .expect("corrupt serialized data is quarantined");
+
+        assert!(restored.is_none());
+        assert!(!queue_file.exists());
+        assert!(queue_file.with_extension("json.bak").is_file());
     }
 }

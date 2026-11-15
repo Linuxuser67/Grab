@@ -4317,13 +4317,11 @@ pub fn build_add_card(manager: Rc<DownloadManager>) -> AddCard {
         .build();
     let card = gtk4::Box::new(gtk4::Orientation::Vertical, 0);
     card.set_widget_name("inline-add-card");
-    card.set_margin_bottom(12);
     card.set_margin_start(12);
     card.set_margin_end(12);
     // No .card class: each AdwPreferencesGroup below renders as its own
-    // flush card (rows touch the group's edge, 12px internal row margins
-    // match the app's card padding). The 6px margins give the window
-    // spacing.
+    // flush card (rows touch the group's edge). Horizontal margins align
+    // the form with the main list; the list's top margin supplies the gap.
 
     // No in-card title: the card only opens from explicit "New Download"
     // affordances (+, Ctrl+N, the empty-state pill), so restating it is

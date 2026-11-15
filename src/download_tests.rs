@@ -10669,3 +10669,58 @@ fn trash_rejects_remove_clear_finished_and_undo_until_the_worker_finishes() {
     assert!(!manager.is_trash_blocked(id));
     let _ = std::fs::remove_dir_all(&dest);
 }
+
+
+#[test]
+fn undo_and_trash_serialize_on_the_same_output_path() {
+    let (_queue_lock, _main_loop_lock) = test_locks();
+    let _queue_file = test_queue_file("trash-undo-serialization");
+    let dest = std::env::temp_dir().join(format!(
+        "grab-trash-undo-serialization-{}",
+        std::process::id()
+    ));
+    let _ = std::fs::remove_dir_all(&dest);
+    std::fs::create_dir_all(&dest).unwrap();
+
+    let manager = DownloadManager::new(gio::ListStore::new::<DownloadItem>(), test_settings());
+    let id = 8;
+    let item = DownloadItem::new(
+        id,
+        "https://example.test/finished.bin",
+        "finished.bin",
+        dest.to_string_lossy().as_ref(),
+    );
+    item.set_status(DownloadStatus::Done);
+    manager.store().append(&item);
+    let undo_snapshot = RemovedSnapshot::capture(&manager, &item);
+    let path = item.file_path();
+
+    let undo_guard = manager
+        .begin_undo(std::slice::from_ref(&path))
+        .expect("Undo claims its destination before inspection");
+    assert!(
+        manager.begin_trash(id).is_err(),
+        "Trash must not start while Undo owns the destination"
+    );
+    drop(undo_guard);
+
+    let trash_guard = manager
+        .begin_trash(id)
+        .expect("Trash can claim the destination after Undo completes");
+    assert!(
+        manager
+            .begin_undo(std::slice::from_ref(&path))
+            .is_err(),
+        "Undo must not start while Trash owns the destination"
+    );
+    drop(trash_guard);
+
+    assert!(
+        manager
+            .begin_undo(std::slice::from_ref(&path))
+            .is_ok(),
+        "Undo may claim the destination after Trash is cancelled"
+    );
+    let _ = std::fs::remove_dir_all(&dest);
+    let _ = undo_snapshot;
+}

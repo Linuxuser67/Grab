@@ -510,7 +510,7 @@ pub struct DownloadManager {
     /// Rows locked by an in-flight Trash operation, including their collection scope.
     trash_in_progress: RefCell<HashSet<u64>>,
     /// Output paths locked by Trash, also preventing stale Undo snapshots from racing it.
-    trash_paths_in_progress: RefCell<HashSet<std::path::PathBuf>>,
+    file_operations_in_progress: RefCell<HashSet<std::path::PathBuf>>,
     /// Rows currently capturing a live stream. Pause/cancel/park only signal these; the worker finalizes and its message drives the row.
     live_rows: RefCell<std::collections::HashSet<u64>>,
     /// Rows whose engine ever started (session-only, persisted on [`StoredItem`]):
@@ -857,7 +857,7 @@ impl DownloadManager {
             reservations: std::sync::Arc::new(std::sync::Mutex::new(Reservations::default())),
             discards: RefCell::new(HashMap::new()),
             trash_in_progress: RefCell::new(HashSet::new()),
-            trash_paths_in_progress: RefCell::new(HashSet::new()),
+            file_operations_in_progress: RefCell::new(HashSet::new()),
             live_rows: RefCell::new(std::collections::HashSet::new()),
             draining: Cell::new(false),
             sizing_inflight: Rc::new(Cell::new(0)),
@@ -3225,12 +3225,13 @@ impl DownloadManager {
         if total == 0 {
             return Ok(0);
         }
-        if snapshots.iter().any(|snapshot| {
-            let path = std::path::Path::new(&snapshot.dest_dir).join(&snapshot.filename);
-            self.is_trash_path_blocked(&path)
-        }) {
-            return Err(gettext("A download is currently being moved to Trash"));
-        }
+        let paths = snapshots
+            .iter()
+            .map(|snapshot| {
+                std::path::Path::new(&snapshot.dest_dir).join(&snapshot.filename)
+            })
+            .collect::<Vec<_>>();
+        let _operation_guard = self.begin_undo(&paths)?;
 
         let directories = snapshots
             .iter()
@@ -3260,14 +3261,6 @@ impl DownloadManager {
         let mut restored = 0;
         let mut failures = Vec::new();
         for snapshot in snapshots {
-            let path = std::path::Path::new(&snapshot.dest_dir).join(&snapshot.filename);
-            if self.is_trash_path_blocked(&path) {
-                failures.push((
-                    snapshot.filename,
-                    gettext("This download is being moved to Trash"),
-                ));
-                continue;
-            }
             match listings.get(&snapshot.dest_dir) {
                 Some(Ok(existing)) => {
                     self.unremove_with_listing(snapshot, existing);
@@ -3310,9 +3303,7 @@ impl DownloadManager {
         snap: RemovedSnapshot,
     ) -> Result<DownloadItem, String> {
         let path = std::path::Path::new(&snap.dest_dir).join(&snap.filename);
-        if self.is_trash_path_blocked(&path) {
-            return Err(gettext("This download is currently being moved to Trash"));
-        }
+        let _operation_guard = self.begin_undo(std::slice::from_ref(&path))?;
         let dir = snap.dest_dir.clone();
         let existing = gio::spawn_blocking(move || {
             crate::video_staging::try_dir_file_names(std::path::Path::new(&dir))
@@ -3332,9 +3323,6 @@ impl DownloadManager {
                 &[("error", &message)],
             )
         })?;
-        if self.is_trash_path_blocked(&path) {
-            return Err(gettext("This download is currently being moved to Trash"));
-        }
         Ok(self.unremove_with_listing(snap, &existing))
     }
 

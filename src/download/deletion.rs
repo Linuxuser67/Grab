@@ -30,7 +30,8 @@ impl TrashOperationGuard {
     fn complete(mut self) {
         if let Some(manager) = self.manager.upgrade() {
             manager.remove_inner(self.id);
-            manager.release_trash_scope(&self.locked_ids, &self.locked_paths);
+            manager.release_trash_scope(&self.locked_ids);
+            manager.release_file_operation_paths(&self.locked_paths);
             self.active = false;
             manager.persist_queue();
             manager.changed();
@@ -47,7 +48,31 @@ impl Drop for TrashOperationGuard {
             return;
         }
         if let Some(manager) = self.manager.upgrade() {
-            manager.release_trash_scope(&self.locked_ids, &self.locked_paths);
+            manager.release_trash_scope(&self.locked_ids);
+            manager.release_file_operation_paths(&self.locked_paths);
+            self.active = false;
+            manager.changed();
+        } else {
+            self.active = false;
+        }
+    }
+}
+
+/// Holds destination paths while an Undo restore is inspecting and re-inserting rows.
+/// Trash claims the same paths, so the two asynchronous operations cannot overlap.
+pub(crate) struct UndoOperationGuard {
+    manager: Weak<DownloadManager>,
+    locked_paths: Vec<std::path::PathBuf>,
+    active: bool,
+}
+
+impl Drop for UndoOperationGuard {
+    fn drop(&mut self) {
+        if !self.active {
+            return;
+        }
+        if let Some(manager) = self.manager.upgrade() {
+            manager.release_file_operation_paths(&self.locked_paths);
             self.active = false;
             manager.changed();
         } else {
@@ -198,27 +223,32 @@ impl DownloadManager {
         scope
     }
 
-    fn release_trash_scope(&self, ids: &[u64], paths: &[std::path::PathBuf]) {
-        {
-            let mut active = self.trash_in_progress.borrow_mut();
-            for id in ids {
-                active.remove(id);
-            }
+    fn release_trash_scope(&self, ids: &[u64]) {
+        let mut active = self.trash_in_progress.borrow_mut();
+        for id in ids {
+            active.remove(id);
         }
-        let mut active_paths = self.trash_paths_in_progress.borrow_mut();
+    }
+
+    fn release_file_operation_paths(&self, paths: &[std::path::PathBuf]) {
+        let mut active_paths = self.file_operations_in_progress.borrow_mut();
         for path in paths {
             active_paths.remove(path);
         }
     }
 
-    /// Whether a destination is currently owned by a Trash operation.
-    pub(crate) fn is_trash_path_blocked(&self, path: &std::path::Path) -> bool {
-        self.trash_paths_in_progress.borrow().contains(path)
+    /// Whether an output path is currently claimed by Trash or Undo.
+    pub(crate) fn is_file_operation_blocked(&self, path: &std::path::Path) -> bool {
+        self.file_operations_in_progress.borrow().contains(path)
     }
 
-    /// Whether the row or its collection is currently owned by a Trash operation.
+    /// Whether the row or its output path is currently owned by another operation.
     pub(crate) fn is_trash_blocked(&self, id: u64) -> bool {
-        self.trash_in_progress.borrow().contains(&id)
+        if self.trash_in_progress.borrow().contains(&id) {
+            return true;
+        }
+        self.find(id)
+            .is_some_and(|item| self.is_file_operation_blocked(&item.file_path()))
     }
 
     /// Claim the row synchronously, before its filesystem operation is spawned.
@@ -234,7 +264,7 @@ impl DownloadManager {
         locked_paths.dedup();
         {
             let mut active = self.trash_in_progress.borrow_mut();
-            let mut active_paths = self.trash_paths_in_progress.borrow_mut();
+            let mut active_paths = self.file_operations_in_progress.borrow_mut();
             if locked_ids
                 .iter()
                 .any(|locked_id| active.contains(locked_id))
@@ -250,6 +280,30 @@ impl DownloadManager {
             manager: Rc::downgrade(self),
             id,
             locked_ids,
+            locked_paths,
+            active: true,
+        })
+    }
+
+    /// Claim all Undo destinations before starting directory inspection. The
+    /// guard holds them through model insertion, serializing Undo with Trash.
+    pub(crate) fn begin_undo(
+        self: &Rc<Self>,
+        paths: &[std::path::PathBuf],
+    ) -> Result<UndoOperationGuard, String> {
+        let mut locked_paths = paths.to_vec();
+        locked_paths.sort_unstable();
+        locked_paths.dedup();
+        {
+            let mut active_paths = self.file_operations_in_progress.borrow_mut();
+            if locked_paths.iter().any(|path| active_paths.contains(path)) {
+                return Err(gettext("A download destination is busy with another operation"));
+            }
+            active_paths.extend(locked_paths.iter().cloned());
+        }
+        self.changed();
+        Ok(UndoOperationGuard {
+            manager: Rc::downgrade(self),
             locked_paths,
             active: true,
         })

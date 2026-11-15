@@ -2,6 +2,7 @@ src/main.rs
 src/application.rs
 src/download.rs
 src/download/engine.rs
+src/download/engine/finished.rs
 src/download/scheduler.rs
 src/download/deletion.rs
 src/download/queue_restore.rs

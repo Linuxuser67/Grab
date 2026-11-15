@@ -273,7 +273,8 @@ mod tests {
     #[test]
     fn trash_lease_outlives_the_ui_future_while_worker_is_running() {
         let id = 42;
-        let rows = std::sync::Arc::new(std::sync::Mutex::new(std::collections::HashSet::from([id])));
+        let rows =
+            std::sync::Arc::new(std::sync::Mutex::new(std::collections::HashSet::from([id])));
         let ui_lease = TrashLease {
             _inner: std::sync::Arc::new(TrashLeaseInner {
                 rows: std::sync::Arc::clone(&rows),

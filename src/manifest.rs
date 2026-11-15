@@ -2316,7 +2316,7 @@ segment-2.ts
                 "#EXT-X-ENDLIST",
                 "",
             ]
-            .join("\\n");
+            .join("\n");
             let plan = plan_hls_media_playlist(BASE_URL, body.as_bytes())
                 .expect("valid packed-audio or opaque HLS media playlist");
             assert_eq!(

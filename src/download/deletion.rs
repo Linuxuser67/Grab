@@ -197,7 +197,7 @@ fn schedule_trash_completion(
     completion: tokio::sync::oneshot::Sender<Result<(), String>>,
     worker_lease: OperationLockLease,
 ) {
-    glib::idle_add(move || {
+    glib::idle_add_once(move || {
         let _keep_lease_until_commit = &worker_lease;
         if result.is_ok()
             && let Some(expected_locks) = locks.upgrade()
@@ -213,7 +213,6 @@ fn schedule_trash_completion(
             });
         }
         let _ = completion.send(result);
-        glib::ControlFlow::Break
     });
 }
 

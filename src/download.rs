@@ -3614,9 +3614,7 @@ impl DownloadManager {
 
         let owner_items = self
             .owners()
-            .filter(|item| {
-                requested_owner_ids.contains(&item.id()) && !self.is_trashing(item.id())
-            })
+            .filter(|item| requested_owner_ids.contains(&item.id()) && !self.is_trashing(item.id()))
             .map(|item| (item.id(), item))
             .collect::<HashMap<_, _>>();
         let owner_ids = owner_items.keys().copied().collect::<HashSet<_>>();

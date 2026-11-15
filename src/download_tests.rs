@@ -6406,7 +6406,6 @@ exit 0
     let _ = std::fs::remove_dir_all(&dir);
 }
 
-
 #[test]
 fn retry_failed_counts_only_rows_that_are_still_requeued() {
     let (_queue_lock, _main_loop_lock) = test_locks();
@@ -6416,12 +6415,7 @@ fn retry_failed_counts_only_rows_that_are_still_requeued() {
     manager.draining.set(true);
     let first_id = 983_000 + std::process::id() as u64;
     let second_id = first_id + 1;
-    let first = DownloadItem::new(
-        first_id,
-        "https://example.test/first",
-        "first.bin",
-        "/tmp",
-    );
+    let first = DownloadItem::new(first_id, "https://example.test/first", "first.bin", "/tmp");
     first.set_status(DownloadStatus::Failed);
     let second = DownloadItem::new(
         second_id,
@@ -10568,12 +10562,7 @@ fn trash_ownership_excludes_remove_clear_finished_and_undo() {
     let _queue_file = test_queue_file("trash-ownership");
     let manager = DownloadManager::new(gio::ListStore::new::<DownloadItem>(), test_settings());
     let id = 982_000 + std::process::id() as u64;
-    let item = DownloadItem::new(
-        id,
-        "https://example.test/finished",
-        "finished.bin",
-        "/tmp",
-    );
+    let item = DownloadItem::new(id, "https://example.test/finished", "finished.bin", "/tmp");
     item.set_status(DownloadStatus::Done);
     manager.store().append(&item);
     let snapshot = RemovedSnapshot::capture(&manager, &item);
@@ -10586,19 +10575,37 @@ fn trash_ownership_excludes_remove_clear_finished_and_undo() {
 
     assert!(!manager.try_remove(id), "single removal must be rejected");
     manager.remove(id);
-    assert!(manager.find(id).is_some(), "single removal must be rejected");
-    assert_eq!(manager.remove_many(&[id]), 0, "bulk removal must be rejected");
+    assert!(
+        manager.find(id).is_some(),
+        "single removal must be rejected"
+    );
+    assert_eq!(
+        manager.remove_many(&[id]),
+        0,
+        "bulk removal must be rejected"
+    );
     assert_eq!(manager.clear_finished(), 0);
-    assert!(manager.find(id).is_some(), "Clear Finished must preserve the row");
+    assert!(
+        manager.find(id).is_some(),
+        "Clear Finished must preserve the row"
+    );
 
-    let single_undo = crate::runtime::tokio_rt()
-        .block_on(manager.unremove_async(snapshot.clone()));
-    assert!(single_undo.is_err(), "single Undo must reject a row owned by Trash");
-    let bulk_undo = crate::runtime::tokio_rt()
-        .block_on(manager.unremove_many_async(vec![snapshot]));
-    assert!(bulk_undo.is_err(), "bulk Undo must reject a row owned by Trash");
+    let single_undo = crate::runtime::tokio_rt().block_on(manager.unremove_async(snapshot.clone()));
+    assert!(
+        single_undo.is_err(),
+        "single Undo must reject a row owned by Trash"
+    );
+    let bulk_undo =
+        crate::runtime::tokio_rt().block_on(manager.unremove_many_async(vec![snapshot]));
+    assert!(
+        bulk_undo.is_err(),
+        "bulk Undo must reject a row owned by Trash"
+    );
 
     crate::runtime::lock_recover(&manager.trash_in_progress).remove(&id);
     manager.remove(id);
-    assert!(manager.find(id).is_none(), "removal is allowed after Trash releases the row");
+    assert!(
+        manager.find(id).is_none(),
+        "removal is allowed after Trash releases the row"
+    );
 }

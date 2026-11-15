@@ -46,24 +46,35 @@ impl DownloadManager {
         }
     }
 
-    /// Move a broken queue file aside so the next persist starts fresh.
-    /// Uses the first free `queue.json.bak`, `queue.json.bak.1`, ... slot —
-    /// never clobbers a previous backup, never deletes.
-    pub(super) fn quarantine_queue_at(queue_file: &std::path::Path) {
+    /// Move a broken queue entry aside without replacing an existing backup.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when no backup name can be claimed or the source cannot
+    /// be moved. Callers must keep restore in the Failed state in that case.
+    pub(super) fn quarantine_queue_at(
+        queue_file: &std::path::Path,
+    ) -> std::io::Result<()> {
         let base = queue_file.with_extension("json.bak");
-        let mut target = base.clone();
-        let mut n = 0;
-        while target.exists() {
-            n += 1;
-            target = queue_file.with_extension(format!("json.bak.{n}"));
-            if n > 99 {
-                tracing::error!("too many queue backups; keeping broken queue in place");
-                return;
+        for index in 0..=99 {
+            let target = if index == 0 {
+                base.clone()
+            } else {
+                queue_file.with_extension(format!("json.bak.{index}"))
+            };
+            match crate::file_names::rename_noreplace_same_device(queue_file, &target) {
+                Ok(()) => return Ok(()),
+                Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
+                // The file may have been removed between inspection and rename.
+                // There is no longer a damaged queue to preserve.
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+                Err(error) => return Err(error),
             }
         }
-        if let Err(e) = std::fs::rename(queue_file, &target) {
-            tracing::error!("could not quarantine download queue: {e}");
-        }
+        Err(std::io::Error::new(
+            std::io::ErrorKind::AlreadyExists,
+            "too many download queue backups; keeping the damaged queue in place",
+        ))
     }
 
     pub(super) fn persist_queue(&self) {

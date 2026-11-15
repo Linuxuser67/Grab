@@ -917,6 +917,70 @@ fn invalid_utf8_queue_is_quarantined() {
     let _ = std::fs::remove_file(&qf);
 }
 
+
+#[test]
+fn corrupt_queue_is_preserved_when_quarantine_cannot_claim_a_backup() {
+    let _lock = lock_queue_file();
+    let qf = test_queue_file("quarantine-no-backup-slot");
+    let original = b"{not json; preserve these bytes";
+    std::fs::write(&qf, original).expect("write corrupt queue fixture");
+
+    // Occupy every backup name, including a dangling symlink. Quarantine must
+    // not replace any existing directory entry or treat a dangling link as free.
+    for index in 0..=99 {
+        let backup = if index == 0 {
+            qf.with_extension("json.bak")
+        } else {
+            qf.with_extension(format!("json.bak.{index}"))
+        };
+        if index == 0 {
+            #[cfg(unix)]
+            std::os::unix::fs::symlink(
+                backup.with_extension("missing-target"),
+                &backup,
+            )
+            .expect("create occupied dangling backup symlink");
+            #[cfg(not(unix))]
+            std::fs::write(&backup, b"occupied").expect("occupy backup name");
+        } else {
+            std::fs::write(&backup, b"occupied").expect("occupy backup name");
+        }
+    }
+
+    let manager = DownloadManager::new(
+        gio::ListStore::new::<DownloadItem>(),
+        test_settings(),
+    );
+    manager.restore_queue();
+    assert!(
+        manager.restore_failed(),
+        "a failed quarantine must fail restore rather than treating the queue as absent"
+    );
+    assert_eq!(
+        std::fs::read(&qf).expect("original queue remains"),
+        original,
+        "the unquarantined queue must remain byte-for-byte intact"
+    );
+
+    manager.persist_queue();
+    manager.persist_for_shutdown();
+    assert_eq!(
+        std::fs::read(&qf).expect("queue remains after shutdown"),
+        original,
+        "persistence must remain gated while restore has failed"
+    );
+
+    for index in 0..=99 {
+        let backup = if index == 0 {
+            qf.with_extension("json.bak")
+        } else {
+            qf.with_extension(format!("json.bak.{index}"))
+        };
+        let _ = std::fs::remove_file(backup);
+    }
+    let _ = std::fs::remove_file(qf);
+}
+
 #[test]
 fn shutdown_with_timeout_returns_promptly_with_stuck_finalizer() {
     // A wedged finalizer must not hang the GTK thread on quit: the join is

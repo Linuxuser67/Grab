@@ -180,18 +180,11 @@ fn subtitle_mux_unsupported(log: &str) -> bool {
 /// Whether FFmpeg rejected the input presentation rather than its output destination.
 fn ffmpeg_rejected_input(log: &str) -> bool {
     let log = log.to_ascii_lowercase();
-    [
-        // Generic demuxer rejection.
-        "invalid data found when processing input",
-        // Missing or truncated container headers.
-        "moov atom not found",
-        "ebml header parsing failed",
-        "error reading header",
-        // The demuxer opened the resource but could not identify its media streams.
-        "could not find codec parameters for stream",
-    ]
-    .iter()
-    .any(|message| log.contains(message))
+    log.contains("invalid data found when processing input")
+        || log.contains("moov atom not found")
+        || log.contains("ebml header parsing failed")
+        || log.contains("error reading header")
+        || log.contains("could not find codec parameters for stream")
 }
 
 /// Classify a failed FFmpeg pass: unsupported source media falls back to yt-dlp,
@@ -6689,5 +6682,31 @@ mod manifest_preparation_stop_tests {
         dropped_receiver
             .await
             .expect("stop intent must drop the pending manifest lookup");
+    }
+}
+
+
+#[cfg(test)]
+mod ffmpeg_rejected_input_tests {
+    use super::ffmpeg_rejected_input;
+
+    #[test]
+    fn recognizes_input_demuxer_and_container_header_rejections() {
+        for message in [
+            "Invalid data found when processing input",
+            "moov atom not found",
+            "EBML header parsing failed",
+            "Error reading header",
+            "Could not find codec parameters for stream 0",
+        ] {
+            assert!(ffmpeg_rejected_input(message), "message: {message}");
+        }
+    }
+
+    #[test]
+    fn does_not_classify_output_or_storage_failures_as_input_rejections() {
+        assert!(!ffmpeg_rejected_input("No space left on device"));
+        assert!(!ffmpeg_rejected_input("Could not write header"));
+        assert!(!ffmpeg_rejected_input("Unknown encoder"));
     }
 }

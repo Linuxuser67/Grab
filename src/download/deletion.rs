@@ -4,6 +4,7 @@ use super::{DownloadItem, DownloadManager};
 use gettextrs::gettext;
 use gtk4::gio;
 use gtk4::gio::prelude::*;
+use gtk4::glib;
 use std::rc::{Rc, Weak};
 use std::sync::{Arc, Mutex};
 
@@ -66,15 +67,6 @@ impl TrashOperationGuard {
 
     fn worker_lease(&self) -> OperationLockLease {
         self.lease.clone()
-    }
-
-    /// Commit the successful Trash operation while both async and worker leases are held.
-    fn complete(self) {
-        if let Some(manager) = self.manager.upgrade() {
-            manager.remove_inner(self.id);
-            manager.persist_queue();
-            manager.start_next();
-        }
     }
 }
 
@@ -194,6 +186,34 @@ fn execute_delete_operation(operation: DeleteOperation) -> Result<(), String> {
         }
     }
     Ok(())
+}
+
+/// Apply the Trash result on GTK even when the original async waiter is dropped.
+/// Keep the worker lease alive until the queue mutation has been committed.
+fn schedule_trash_completion(
+    locks: std::sync::Weak<Mutex<OperationLocks>>,
+    id: u64,
+    result: Result<(), String>,
+    completion: tokio::sync::oneshot::Sender<Result<(), String>>,
+    worker_lease: OperationLockLease,
+) {
+    glib::idle_add_once(move || {
+        let _keep_lease_until_commit = &worker_lease;
+        if result.is_ok()
+            && let Some(expected_locks) = locks.upgrade()
+        {
+            super::MANAGER_WEAK.with(|slot| {
+                if let Some(manager) = slot.borrow().as_ref().and_then(Weak::upgrade)
+                    && Arc::ptr_eq(&manager.operation_locks, &expected_locks)
+                {
+                    manager.remove_inner(id);
+                    manager.persist_queue();
+                    manager.start_next();
+                }
+            });
+        }
+        let _ = completion.send(result);
+    });
 }
 
 impl DownloadManager {
@@ -427,28 +447,28 @@ impl DownloadManager {
         #[cfg(not(test))]
         let before_execute_hook: Option<std::sync::Arc<dyn Fn() + Send + Sync>> = None;
 
-        // Keep the row/path locks alive even if this GLib future is dropped:
-        // the blocking operation outlives its detached join handle.
+        // The worker owns the lease through its GTK completion callback. This
+        // makes both the filesystem operation and its queue commit independent
+        // of the lifetime of the future awaiting this method.
         let worker_lease = guard.worker_lease();
+        let locks = Arc::downgrade(&self.operation_locks);
+        let (completion_tx, completion_rx) = tokio::sync::oneshot::channel();
         crate::runtime::tokio_rt()
             .spawn_blocking(move || {
-                let _worker_lease = worker_lease;
                 if let Some(hook) = before_execute_hook {
                     hook();
                 }
-                execute_delete_operation(operation)
+                let result = execute_delete_operation(operation);
+                if result.is_ok() && torrent_url.is_some() {
+                    crate::torrent::forget_download(id);
+                }
+                schedule_trash_completion(locks, id, result, completion_tx, worker_lease);
             })
             .await
-            .map_err(|_| {
-                format!("Could not move {filename} to Trash: background task panicked")
-            })??;
+            .map_err(|_| format!("Could not move {filename} to Trash: background task panicked"))?;
 
-        // This only schedules teardown on Tokio; retain the original ordering
-        // and do it only after trash/archive operations have succeeded.
-        if torrent_url.is_some() {
-            crate::torrent::forget_download(id);
-        }
-        guard.complete();
-        Ok(())
+        completion_rx.await.map_err(|_| {
+            format!("Could not move {filename} to Trash: completion was interrupted")
+        })?
     }
 }

@@ -10779,6 +10779,10 @@ fn cancelled_trash_future_keeps_operation_locks_until_worker_exits() {
         std::thread::sleep(Duration::from_millis(1));
     }
     assert!(
+        manager.find(id).is_none(),
+        "a successful detached Trash worker must remove its row even after its waiter is cancelled"
+    );
+    assert!(
         manager.begin_undo(&[item.file_path()]).is_ok(),
         "Undo may claim the destination once the blocking worker exits"
     );

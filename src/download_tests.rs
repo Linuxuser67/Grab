@@ -10692,7 +10692,6 @@ fn undo_and_trash_serialize_on_the_same_output_path() {
     );
     item.set_status(DownloadStatus::Done);
     manager.store().append(&item);
-    let undo_snapshot = RemovedSnapshot::capture(&manager, &item);
     let path = item.file_path();
 
     let undo_guard = manager
@@ -10722,5 +10721,4 @@ fn undo_and_trash_serialize_on_the_same_output_path() {
         "Undo may claim the destination after Trash is cancelled"
     );
     let _ = std::fs::remove_dir_all(&dest);
-    let _ = undo_snapshot;
 }

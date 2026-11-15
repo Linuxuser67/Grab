@@ -63,20 +63,13 @@ impl Drop for TrashOperationGuard {
 pub(crate) struct UndoOperationGuard {
     manager: Weak<DownloadManager>,
     locked_paths: Vec<std::path::PathBuf>,
-    active: bool,
 }
 
 impl Drop for UndoOperationGuard {
     fn drop(&mut self) {
-        if !self.active {
-            return;
-        }
         if let Some(manager) = self.manager.upgrade() {
             manager.release_file_operation_paths(&self.locked_paths);
-            self.active = false;
             manager.changed();
-        } else {
-            self.active = false;
         }
     }
 }
@@ -305,7 +298,6 @@ impl DownloadManager {
         Ok(UndoOperationGuard {
             manager: Rc::downgrade(self),
             locked_paths,
-            active: true,
         })
     }
 

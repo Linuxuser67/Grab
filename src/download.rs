@@ -14,6 +14,7 @@ use std::time::{Duration, Instant, SystemTime};
 
 mod cancellation;
 mod deletion;
+pub(crate) use deletion::TrashOperationGuard;
 mod engine;
 mod queue_persistence;
 mod queue_restore;
@@ -467,6 +468,8 @@ pub struct DownloadManager {
     pub(crate) pump_handles: RefCell<HashMap<u64, glib::JoinHandle<()>>>,
     #[cfg(test)]
     final_name_after_move_hook: RefCell<Option<std::sync::Arc<dyn Fn() + Send + Sync>>>,
+    #[cfg(test)]
+    trash_before_execute_hook: RefCell<Option<std::sync::Arc<dyn Fn() + Send + Sync>>>,
     next_id: Cell<u64>,
     on_change: RefCell<Option<Box<dyn Fn()>>>,
     batch: Cell<u32>,
@@ -504,6 +507,10 @@ pub struct DownloadManager {
     reservations: std::sync::Arc<std::sync::Mutex<Reservations>>,
     /// Finalizers reclaiming a removed row's scratch, by row. A worker abort handle is kept when one had to be awaited; aborting the finalizer detaches it (#180).
     discards: RefCell<HashMap<u64, PendingDiscard>>,
+    /// Rows locked by an in-flight Trash operation, including their collection scope.
+    trash_in_progress: RefCell<HashSet<u64>>,
+    /// Output paths locked by Trash, also preventing stale Undo snapshots from racing it.
+    file_operations_in_progress: RefCell<HashSet<std::path::PathBuf>>,
     /// Rows currently capturing a live stream. Pause/cancel/park only signal these; the worker finalizes and its message drives the row.
     live_rows: RefCell<std::collections::HashSet<u64>>,
     /// Rows whose engine ever started (session-only, persisted on [`StoredItem`]):
@@ -829,6 +836,8 @@ impl DownloadManager {
             pump_handles: RefCell::new(HashMap::new()),
             #[cfg(test)]
             final_name_after_move_hook: RefCell::new(None),
+            #[cfg(test)]
+            trash_before_execute_hook: RefCell::new(None),
             next_id: Cell::new(1),
             on_change: RefCell::new(None),
             batch: Cell::new(0),
@@ -847,6 +856,8 @@ impl DownloadManager {
             gates: RefCell::new(HashMap::new()),
             reservations: std::sync::Arc::new(std::sync::Mutex::new(Reservations::default())),
             discards: RefCell::new(HashMap::new()),
+            trash_in_progress: RefCell::new(HashSet::new()),
+            file_operations_in_progress: RefCell::new(HashSet::new()),
             live_rows: RefCell::new(std::collections::HashSet::new()),
             draining: Cell::new(false),
             sizing_inflight: Rc::new(Cell::new(0)),
@@ -3214,6 +3225,11 @@ impl DownloadManager {
         if total == 0 {
             return Ok(0);
         }
+        let paths = snapshots
+            .iter()
+            .map(|snapshot| std::path::Path::new(&snapshot.dest_dir).join(&snapshot.filename))
+            .collect::<Vec<_>>();
+        let _operation_guard = self.begin_undo(&paths)?;
 
         let directories = snapshots
             .iter()
@@ -3284,6 +3300,8 @@ impl DownloadManager {
         self: &Rc<Self>,
         snap: RemovedSnapshot,
     ) -> Result<DownloadItem, String> {
+        let path = std::path::Path::new(&snap.dest_dir).join(&snap.filename);
+        let _operation_guard = self.begin_undo(std::slice::from_ref(&path))?;
         let dir = snap.dest_dir.clone();
         let existing = gio::spawn_blocking(move || {
             crate::video_staging::try_dir_file_names(std::path::Path::new(&dir))
@@ -3480,7 +3498,9 @@ impl DownloadManager {
         let visible_finished = self.finished_count();
         let finished_owners = self
             .owners()
-            .filter(|item| item.status() == DownloadStatus::Done)
+            .filter(|item| {
+                item.status() == DownloadStatus::Done && !self.is_trash_blocked(item.id())
+            })
             .map(|item| item.id())
             .collect::<Vec<_>>();
         self.drop_finished_rows(&finished_owners);
@@ -3505,7 +3525,11 @@ impl DownloadManager {
         let items = self.items().collect::<Vec<_>>();
         let done_owner_ids = items
             .iter()
-            .filter(|item| !item.is_collection_child() && item.status() == DownloadStatus::Done)
+            .filter(|item| {
+                !item.is_collection_child()
+                    && item.status() == DownloadStatus::Done
+                    && !self.is_trash_blocked(item.id())
+            })
             .map(DownloadItem::id)
             .collect::<HashSet<_>>();
         let owners_with_children = items
@@ -3516,7 +3540,11 @@ impl DownloadManager {
 
         let finished_owners = items
             .iter()
-            .filter(|item| !item.is_collection_child() && item.status() == DownloadStatus::Done)
+            .filter(|item| {
+                !item.is_collection_child()
+                    && item.status() == DownloadStatus::Done
+                    && !self.is_trash_blocked(item.id())
+            })
             .filter(|item| {
                 !item.is_collection_parent() || !owners_with_children.contains(&item.id())
             })
@@ -3537,6 +3565,7 @@ impl DownloadManager {
     pub fn finished_snapshots(&self) -> Vec<RemovedSnapshot> {
         self.owners()
             .filter(|it| it.status() == DownloadStatus::Done)
+            .filter(|item| !self.is_trash_blocked(item.id()))
             .map(|item| RemovedSnapshot::capture(self, &item))
             .collect()
     }
@@ -3544,7 +3573,11 @@ impl DownloadManager {
     /// Drop finished owners and all their passive child rows with one
     /// ListStore walk. Destination files remain untouched.
     fn drop_finished_rows(&self, owner_ids: &[u64]) {
-        let owner_ids = owner_ids.iter().copied().collect::<HashSet<_>>();
+        let owner_ids = owner_ids
+            .iter()
+            .copied()
+            .filter(|id| !self.is_trash_blocked(*id))
+            .collect::<HashSet<_>>();
         if owner_ids.is_empty() {
             return;
         }

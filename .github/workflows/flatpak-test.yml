@@ -22,6 +22,8 @@ concurrency:
 
 jobs:
   bundle:
+    permissions:
+      contents: read
     uses: ./.github/workflows/flatpak-build.yml
     with:
       ref: ${{ inputs.ref }}

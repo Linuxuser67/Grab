@@ -4,6 +4,7 @@ use super::{DownloadItem, DownloadManager};
 use gettextrs::gettext;
 use gtk4::gio;
 use gtk4::gio::prelude::*;
+use gtk4::glib;
 use std::rc::{Rc, Weak};
 use std::sync::{Arc, Mutex};
 

@@ -6685,7 +6685,6 @@ mod manifest_preparation_stop_tests {
     }
 }
 
-
 #[cfg(test)]
 mod ffmpeg_rejected_input_tests {
     use super::ffmpeg_rejected_input;

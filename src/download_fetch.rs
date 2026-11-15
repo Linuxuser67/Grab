@@ -737,6 +737,11 @@ pub(crate) fn apply_torrent_limits(s: &crate::settings::AppSettings) {
 }
 
 /// Shrink `path` to the longest completed piece prefix before single-stream resume.
+///
+/// # Errors
+///
+/// Returns an error if the destination is not a regular file, is shorter than the
+/// recorded completed prefix, or cannot be truncated and synced.
 pub(crate) fn truncate_to_prefix(
     path: &std::path::Path,
     st: &SegmentState,
@@ -1418,8 +1423,8 @@ mod destination_ownership_tests {
         DestinationClaim, FetchCtx, FileIdentity, attempt_once, ensure_sized, single_loop,
         truncate_to_prefix,
     };
-    use crate::download_pieces::SegmentState;
     use crate::download_net::{DEFAULT_USER_AGENT, DownloadOptions};
+    use crate::download_pieces::SegmentState;
     use std::time::Duration;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
@@ -1578,7 +1583,6 @@ mod destination_ownership_tests {
         );
     }
 
-
     #[test]
     fn truncation_syncs_only_the_completed_piece_prefix() {
         let directory = tempfile::tempdir().expect("create destination directory");
@@ -1646,5 +1650,4 @@ mod destination_ownership_tests {
             original_len
         );
     }
-
 }

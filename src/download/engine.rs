@@ -22,10 +22,12 @@ use std::time::{Duration, Instant};
 
 /// Playlist file events are attempt-scoped: after pause/cancel the owner
 /// status changes synchronously, and a retry starts a new generation.
-fn can_apply_playlist_file_event(item: &DownloadItem, attempt_is_current: bool) -> bool {
-    attempt_is_current
-        && item.is_collection_owner()
-        && item.status() == DownloadStatus::Downloading
+fn can_apply_playlist_file_event(
+    is_collection_owner: bool,
+    status: DownloadStatus,
+    attempt_is_current: bool,
+) -> bool {
+    attempt_is_current && is_collection_owner && status == DownloadStatus::Downloading
 }
 
 impl DownloadManager {
@@ -1131,7 +1133,11 @@ impl DownloadManager {
                             file_id,
                             filename: _filename,
                         } => {
-                            if can_apply_playlist_file_event(&item, this.is_current(id, generation)) {
+                            if can_apply_playlist_file_event(
+                                item.is_collection_owner(),
+                                item.status(),
+                                this.is_current(id, generation),
+                            ) {
                                 this.upsert_video_playlist_file_row(
                                     &item,
                                     &file_id,
@@ -1150,7 +1156,11 @@ impl DownloadManager {
                             downloaded,
                             total,
                         } => {
-                            if can_apply_playlist_file_event(&item, this.is_current(id, generation))
+                            if can_apply_playlist_file_event(
+                                item.is_collection_owner(),
+                                item.status(),
+                                this.is_current(id, generation),
+                            )
                                 && last_playlist_progress_refresh
                                     .is_none_or(|last| last.elapsed() >= Duration::from_millis(100))
                             {
@@ -1186,7 +1196,11 @@ impl DownloadManager {
                             path,
                             size,
                         } => {
-                            if can_apply_playlist_file_event(&item, this.is_current(id, generation)) {
+                            if can_apply_playlist_file_event(
+                                item.is_collection_owner(),
+                                item.status(),
+                                this.is_current(id, generation),
+                            ) {
                                 this.upsert_video_playlist_file_row(
                                     &item,
                                     &file_id,
@@ -1202,7 +1216,11 @@ impl DownloadManager {
                             }
                         }
                         crate::engine_msg::PlaylistFileEvent::Failed { file_id, error } => {
-                            if can_apply_playlist_file_event(&item, this.is_current(id, generation)) {
+                            if can_apply_playlist_file_event(
+                                item.is_collection_owner(),
+                                item.status(),
+                                this.is_current(id, generation),
+                            ) {
                                 this.upsert_video_playlist_file_row(
                                     &item,
                                     &file_id,
@@ -2222,9 +2240,6 @@ mod playlist_file_event_tests {
 
     #[test]
     fn playlist_file_events_require_a_current_downloading_owner() {
-        let item = DownloadItem::new(1, "https://example.test/list", "List", "/tmp");
-        item.set_is_collection_owner(true);
-
         for status in [
             DownloadStatus::Queued,
             DownloadStatus::Scheduled,
@@ -2234,22 +2249,19 @@ mod playlist_file_event_tests {
             DownloadStatus::Failed,
             DownloadStatus::Cancelled,
         ] {
-            item.set_status(status);
             assert_eq!(
-                can_apply_playlist_file_event(&item, true),
+                can_apply_playlist_file_event(true, status, true),
                 status == DownloadStatus::Downloading,
                 "event acceptance must follow the owner status: {status:?}"
             );
         }
 
-        item.set_status(DownloadStatus::Downloading);
         assert!(
-            !can_apply_playlist_file_event(&item, false),
+            !can_apply_playlist_file_event(true, DownloadStatus::Downloading, false),
             "buffered events from a replaced attempt must be ignored after retry"
         );
-        item.set_is_collection_owner(false);
         assert!(
-            !can_apply_playlist_file_event(&item, true),
+            !can_apply_playlist_file_event(false, DownloadStatus::Downloading, true),
             "non-owner rows must not accept playlist file events"
         );
     }

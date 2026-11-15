@@ -2570,35 +2570,62 @@ impl DownloadManager {
 
     /// Re-queue transient child rows when a paused/failed gallery owner restarts.
     fn prepare_gallery_file_rows_for_attempt(&self, owner_id: u64) {
+        if !self.ensure_gallery_file_row_index(owner_id) {
+            return;
+        }
         let children = self
             .items()
             .filter(|item| {
                 item.is_collection_child()
-                    && item.group().is_some_and(|group| group.id() == owner_id)
+                    && item.group_id() == Some(owner_id)
                     && matches!(
                         item.status(),
                         DownloadStatus::Paused | DownloadStatus::Failed | DownloadStatus::Cancelled
                     )
             })
             .collect::<Vec<_>>();
+        let mut state_updates = Vec::with_capacity(children.len());
         for child in children {
             child.set_status(DownloadStatus::Queued);
             child.set_progress(0.0);
             child.set_detail(gettext("Queued"));
             let path = child.gallery_file_path();
-            if let Some(state) = self
-                .gallery_jobs
-                .borrow_mut()
-                .get_mut(&owner_id)
-                .and_then(|job| job.file_rows.iter_mut().find(|state| state.path == path))
+            if let Some(state_index) = self
+                .gallery_file_row_index
+                .borrow()
+                .get(&owner_id)
+                .and_then(|index| index.state_indices.get(&path))
+                .copied()
             {
-                state.status = DownloadStatus::Queued;
-                state.progress = 0.0;
+                state_updates.push((state_index, path));
             }
         }
-        if self.items().any(|item| {
-            item.is_collection_child() && item.group().is_some_and(|group| group.id() == owner_id)
-        }) {
+        if !state_updates.is_empty() {
+            let mut jobs = self.gallery_jobs.borrow_mut();
+            if let Some(job) = jobs.get_mut(&owner_id) {
+                for (state_index, path) in state_updates {
+                    let Some(state) = job
+                        .file_rows
+                        .get_mut(state_index)
+                        .filter(|state| state.path == path)
+                    else {
+                        tracing::warn!(
+                            gallery_id = owner_id,
+                            state_index,
+                            path,
+                            "gallery file state index is stale during attempt preparation"
+                        );
+                        continue;
+                    };
+                    state.status = DownloadStatus::Queued;
+                    state.progress = 0.0;
+                }
+            }
+        }
+        if self
+            .items()
+            .any(|item| item.is_collection_child() && item.group_id() == Some(owner_id))
+        {
             self.changed();
         }
     }
@@ -2606,15 +2633,18 @@ impl DownloadManager {
     /// Resolve files left active when the shared gallery-dl process pauses,
     /// cancels, succeeds, or fails.
     fn finish_gallery_file_rows(&self, owner_id: u64, status: DownloadStatus) {
+        if !self.ensure_gallery_file_row_index(owner_id) {
+            return;
+        }
         let children = self
             .items()
             .filter(|item| {
                 item.is_collection_child()
-                    && item.group().is_some_and(|group| group.id() == owner_id)
+                    && item.group_id() == Some(owner_id)
                     && item.status() == DownloadStatus::Downloading
             })
             .collect::<Vec<_>>();
-        let mut updated_paths = Vec::new();
+        let mut updated_paths = Vec::with_capacity(children.len());
         for item in children {
             if status == DownloadStatus::Done {
                 item.set_progress(1.0);
@@ -2627,17 +2657,48 @@ impl DownloadManager {
             item.set_status(status);
             updated_paths.push((item.gallery_file_path(), item.progress()));
         }
-        if let Some(job) = self.gallery_jobs.borrow_mut().get_mut(&owner_id) {
-            for (path, progress) in updated_paths {
-                if let Some(state) = job.file_rows.iter_mut().find(|state| state.path == path) {
+        let state_updates = {
+            let index = self.gallery_file_row_index.borrow();
+            let Some(index) = index.get(&owner_id) else {
+                return;
+            };
+            updated_paths
+                .into_iter()
+                .filter_map(|(path, progress)| {
+                    index
+                        .state_indices
+                        .get(&path)
+                        .copied()
+                        .map(|state_index| (state_index, path, progress))
+                })
+                .collect::<Vec<_>>()
+        };
+        if !state_updates.is_empty() {
+            let mut jobs = self.gallery_jobs.borrow_mut();
+            if let Some(job) = jobs.get_mut(&owner_id) {
+                for (state_index, path, progress) in state_updates {
+                    let Some(state) = job
+                        .file_rows
+                        .get_mut(state_index)
+                        .filter(|state| state.path == path)
+                    else {
+                        tracing::warn!(
+                            gallery_id = owner_id,
+                            state_index,
+                            path,
+                            "gallery file state index is stale during attempt finalization"
+                        );
+                        continue;
+                    };
                     state.status = status;
                     state.progress = progress;
                 }
             }
         }
-        if self.items().any(|item| {
-            item.is_collection_child() && item.group().is_some_and(|group| group.id() == owner_id)
-        }) {
+        if self
+            .items()
+            .any(|item| item.is_collection_child() && item.group_id() == Some(owner_id))
+        {
             self.changed();
         }
     }

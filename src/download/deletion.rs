@@ -71,7 +71,6 @@ impl Drop for UndoOperationGuard {
         if let Some(manager) = self.manager.upgrade() {
             manager.release_trash_scope(&self.locked_ids);
             manager.release_file_operation_paths(&self.locked_paths);
-            manager.changed();
         }
     }
 }
@@ -300,7 +299,6 @@ impl DownloadManager {
             active_ids.extend(locked_ids.iter().copied());
             active_paths.extend(locked_paths.iter().cloned());
         }
-        self.changed();
         Ok(UndoOperationGuard {
             manager: Rc::downgrade(self),
             locked_ids,

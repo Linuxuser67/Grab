@@ -1,6 +1,5 @@
 //! Queue decoding, validation, restoration and recovery for the download manager.
 
-#[cfg(not(test))]
 use super::RestoreTaskGuard;
 use super::{DownloadManager, DownloadStatus, RestoreOutcome, RestoreState};
 use crate::download_intake::normalize_url;
@@ -192,145 +191,143 @@ impl DownloadManager {
         let queue_file = Self::queue_file();
         self.restore_ready.send_replace(false);
         self.restore_state.set(RestoreState::Pending);
+        let weak = Rc::downgrade(self);
+
         #[cfg(test)]
         {
-            // Test fixtures keep restore synchronous, but share finalization and
-            // the same sweep implementation with production.
-            let pending = Self::load_restore_queue(queue_file);
-            if let Some(pending) = pending {
-                let directories = self.restore_dirs_requiring_id_listing(&pending);
-                let existing_by_dir = match Self::list_restore_destinations(directories) {
-                    Ok(existing) => existing,
-                    Err(error) => {
-                        tracing::error!(
-                            "download queue destination listing failed: {error}; preserving the saved queue"
-                        );
-                        self.finish_restore(RestoreOutcome::Failed);
-                        return;
-                    }
-                };
-                let plan = self.apply_restored_queue(pending, &existing_by_dir);
-                let keep = Self::run_restore_sweeps(plan);
-                Self::schedule_session_orphan_sweep(keep);
-            }
-            self.finish_restore(RestoreOutcome::Succeeded);
+            // Tests drive the same async orchestration used in production. The
+            // runtime workers, shutdown checks, panic handling and sweep gates
+            // therefore exercise the code that ships rather than a sync variant.
+            let mut completion = RestoreTaskGuard {
+                manager: weak.clone(),
+                finished: false,
+            };
+            let outcome = tokio_rt().block_on(Self::restore_queue_flow(weak, queue_file));
+            self.finish_restore(outcome);
+            completion.finished = true;
         }
+
         #[cfg(not(test))]
         {
-            let weak = Rc::downgrade(self);
             let task = glib::spawn_future_local(async move {
                 let mut completion = RestoreTaskGuard {
                     manager: weak.clone(),
                     finished: false,
                 };
-                let loaded = tokio_rt()
-                    .spawn_blocking(move || Self::load_restore_queue(queue_file))
-                    .await;
-                let Some(manager) = weak.upgrade() else {
-                    return;
-                };
-                // Close/Quit claims shutdown synchronously. Do not apply even a
-                // successfully decoded queue after that claim: preserve its file.
-                if manager.restore_should_abort() {
-                    manager.finish_restore(RestoreOutcome::Failed);
-                    completion.finished = true;
-                    return;
-                }
-                match loaded {
-                    Ok(Some(pending)) => {
-                        manager.restore_dirty.set(false);
-                        let directories = manager.restore_dirs_requiring_id_listing(&pending);
-                        let prepared = tokio_rt()
-                            .spawn_blocking(move || {
-                                Self::list_restore_destinations(directories)
-                                    .map(|existing_by_dir| (pending, existing_by_dir))
-                            })
-                            .await;
-                        let (pending, existing_by_dir) = match prepared {
-                            Ok(Ok(prepared)) => prepared,
-                            Ok(Err(error)) => {
-                                tracing::error!(
-                                    "download queue destination listing failed: {error}; preserving the saved queue"
-                                );
-                                manager.finish_restore(RestoreOutcome::Failed);
-                                completion.finished = true;
-                                return;
-                            }
-                            Err(error) => {
-                                tracing::error!(
-                                    "download queue destination listing task failed: {error}; preserving the saved queue"
-                                );
-                                manager.finish_restore(RestoreOutcome::Failed);
-                                completion.finished = true;
-                                return;
-                            }
-                        };
-                        // The main context yielded while legacy/duplicate ids were checked.
-                        if manager.restore_should_abort() {
-                            manager.finish_restore(RestoreOutcome::Failed);
-                            completion.finished = true;
-                            return;
-                        }
-                        let plan = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                            manager.apply_restored_queue(pending, &existing_by_dir)
-                        }));
-                        let plan = match plan {
-                            Ok(plan) => plan,
-                            Err(payload) => {
-                                let message = payload
-                                    .downcast_ref::<String>()
-                                    .map(String::as_str)
-                                    .or_else(|| payload.downcast_ref::<&str>().copied())
-                                    .unwrap_or("unknown panic");
-                                tracing::error!(
-                                    "download queue restore apply failed: {message}; preserving the saved queue"
-                                );
-                                manager.finish_restore(RestoreOutcome::Failed);
-                                completion.finished = true;
-                                return;
-                            }
-                        };
-                        // Destination directories may be network mounts. Keep
-                        // traversal/deletion off the GTK main context and do not
-                        // release the queue start gate until cleanup has finished.
-                        let swept = tokio_rt()
-                            .spawn_blocking(move || Self::run_restore_sweeps(plan))
-                            .await;
-                        let keep = match swept {
-                            Ok(keep) => keep,
-                            Err(e) => {
-                                tracing::error!(
-                                    "download queue restore cleanup failed: {e}; preserving the saved queue"
-                                );
-                                manager.finish_restore(RestoreOutcome::Failed);
-                                completion.finished = true;
-                                return;
-                            }
-                        };
-                        // Shutdown may have begun while the blocking sweeps ran.
-                        if manager.restore_should_abort() {
-                            manager.finish_restore(RestoreOutcome::Failed);
-                            completion.finished = true;
-                            return;
-                        }
-                        Self::schedule_session_orphan_sweep(keep);
-                        manager.finish_restore(RestoreOutcome::Succeeded);
-                    }
-                    Ok(None) => {
-                        manager.finish_restore(RestoreOutcome::Succeeded);
-                    }
-                    Err(e) => {
-                        tracing::error!(
-                            "download queue restore worker failed: {e}; preserving the saved queue"
-                        );
-                        manager.finish_restore(RestoreOutcome::Failed);
-                        completion.finished = true;
-                        return;
-                    }
+                let outcome = Self::restore_queue_flow(weak.clone(), queue_file).await;
+                if let Some(manager) = weak.upgrade() {
+                    manager.finish_restore(outcome);
                 }
                 completion.finished = true;
             });
             self.restore_task.replace(Some(task));
+        }
+    }
+
+    /// Shared production/test orchestration. Blocking filesystem work runs on
+    /// Tokio workers; model mutation and lifecycle checks remain on the owner
+    /// context. Re-upgrade the Weak after every await so no GTK-owned manager
+    /// value is retained across a worker handoff.
+    async fn restore_queue_flow(
+        weak: std::rc::Weak<DownloadManager>,
+        queue_file: std::path::PathBuf,
+    ) -> RestoreOutcome {
+        let loaded = tokio_rt()
+            .spawn_blocking(move || Self::load_restore_queue(queue_file))
+            .await;
+        let Some(manager) = weak.upgrade() else {
+            return RestoreOutcome::Failed;
+        };
+        // Close/Quit claims shutdown synchronously. Do not apply even a
+        // successfully decoded queue after that claim: preserve its file.
+        if manager.restore_should_abort() {
+            return RestoreOutcome::Failed;
+        }
+
+        match loaded {
+            Ok(Some(pending)) => {
+                manager.restore_dirty.set(false);
+                let directories = manager.restore_dirs_requiring_id_listing(&pending);
+                drop(manager);
+
+                let prepared = tokio_rt()
+                    .spawn_blocking(move || {
+                        Self::list_restore_destinations(directories)
+                            .map(|existing_by_dir| (pending, existing_by_dir))
+                    })
+                    .await;
+                let Some(manager) = weak.upgrade() else {
+                    return RestoreOutcome::Failed;
+                };
+                if manager.restore_should_abort() {
+                    return RestoreOutcome::Failed;
+                }
+                let (pending, existing_by_dir) = match prepared {
+                    Ok(Ok(prepared)) => prepared,
+                    Ok(Err(error)) => {
+                        tracing::error!(
+                            "download queue destination listing failed: {error}; preserving the saved queue"
+                        );
+                        return RestoreOutcome::Failed;
+                    }
+                    Err(error) => {
+                        tracing::error!(
+                            "download queue destination listing task failed: {error}; preserving the saved queue"
+                        );
+                        return RestoreOutcome::Failed;
+                    }
+                };
+
+                let plan = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    manager.apply_restored_queue(pending, &existing_by_dir)
+                }));
+                let plan = match plan {
+                    Ok(plan) => plan,
+                    Err(payload) => {
+                        let message = payload
+                            .downcast_ref::<String>()
+                            .map(String::as_str)
+                            .or_else(|| payload.downcast_ref::<&str>().copied())
+                            .unwrap_or("unknown panic");
+                        tracing::error!(
+                            "download queue restore apply failed: {message}; preserving the saved queue"
+                        );
+                        return RestoreOutcome::Failed;
+                    }
+                };
+                drop(manager);
+
+                // Destination directories may be network mounts. Keep traversal
+                // and cleanup off the GTK context and do not release intake until
+                // this blocking sweep has completed.
+                let swept = tokio_rt()
+                    .spawn_blocking(move || Self::run_restore_sweeps(plan))
+                    .await;
+                let Some(manager) = weak.upgrade() else {
+                    return RestoreOutcome::Failed;
+                };
+                if manager.restore_should_abort() {
+                    return RestoreOutcome::Failed;
+                }
+                let keep = match swept {
+                    Ok(keep) => keep,
+                    Err(error) => {
+                        tracing::error!(
+                            "download queue restore cleanup failed: {error}; preserving the saved queue"
+                        );
+                        return RestoreOutcome::Failed;
+                    }
+                };
+                Self::schedule_session_orphan_sweep(keep);
+                RestoreOutcome::Succeeded
+            }
+            Ok(None) => RestoreOutcome::Succeeded,
+            Err(error) => {
+                tracing::error!(
+                    "download queue restore worker failed: {error}; preserving the saved queue"
+                );
+                RestoreOutcome::Failed
+            }
         }
     }
 

@@ -515,10 +515,8 @@ fn refresh_row(
         DownloadStatus::Failed | DownloadStatus::Cancelled
     ));
     w.reveal_btn.set_visible(done);
-    let trash_blocked = manager.is_trash_blocked(item.id());
     w.delete_btn
         .set_visible(done || live_capturing || manifest_download);
-    w.delete_btn.set_sensitive(!trash_blocked);
     let delete_tip = if live_capturing {
         gettext("Delete Recording")
     } else if manifest_download {
@@ -531,7 +529,6 @@ fn refresh_row(
         .update_property(&[gtk4::accessible::Property::Label(&delete_tip)]);
     w.remove_btn
         .set_visible(!live_capturing && !manifest_download);
-    w.remove_btn.set_sensitive(!trash_blocked);
     let (icon, tip) = if item.status() == DownloadStatus::Paused {
         ("media-playback-start-symbolic", gettext("Resume"))
     } else {
@@ -1473,7 +1470,8 @@ pub(crate) fn build_row(
     {
         let m = Rc::clone(manager);
         let t = Rc::clone(toasts);
-        delete_btn.connect_clicked(move |_| {
+        let group_remove_btn = remove_btn.clone();
+        delete_btn.connect_clicked(move |button| {
             if m.is_live_video(id)
                 || m.find(id).is_some_and(|item| {
                     item.status() != DownloadStatus::Done && m.is_manifest_download(id)
@@ -1491,19 +1489,27 @@ pub(crate) fn build_row(
             // Claim the row and its collection synchronously before spawning
             // the blocking Trash operation, so Remove and Clear Finished cannot
             // race it on the GTK main thread.
-            let guard = match m.begin_trash(id) {
+            let guard: crate::download::TrashOperationGuard = match m.begin_trash(id) {
                 Ok(guard) => guard,
                 Err(error) => {
                     t.add_toast(crate::ui_util::plain_toast(&error));
                     return;
                 }
             };
+            button.set_sensitive(false);
+            group_remove_btn.set_sensitive(false);
+            let button = button.clone();
+            let group_remove_btn = group_remove_btn.clone();
             let m = Rc::clone(&m);
             let t = Rc::clone(&t);
             glib::spawn_future_local(async move {
                 let result = m.delete_download_with_guard(id, guard).await;
                 match result {
-                    Err(e) => t.add_toast(crate::ui_util::plain_toast(&e)),
+                    Err(e) => {
+                        button.set_sensitive(true);
+                        group_remove_btn.set_sensitive(true);
+                        t.add_toast(crate::ui_util::plain_toast(&e));
+                    },
                     Ok(()) => t.add_toast(crate::ui_util::plain_toast(&gettext("Moved to Trash"))),
                 }
             });

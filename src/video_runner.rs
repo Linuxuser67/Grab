@@ -1489,6 +1489,12 @@ async fn try_merge_dash_partials(
     Some(size)
 }
 
+/// Publish partial DASH tracks only on `Finish`.
+/// `Pause` leaves them in staging so the next attempt can resume.
+fn should_merge_dash_partials(abort_intent: Option<StopIntent>) -> bool {
+    matches!(abort_intent, Some(StopIntent::Finish))
+}
+
 #[expect(
     clippy::too_many_arguments,
     reason = "one attempt pipeline: splitting it would scatter cancellation and merge state"
@@ -1608,7 +1614,7 @@ pub(crate) async fn run_unified_ytdlp(
     let Some(()) = done else {
         // User abort: on Finish, try merging partial DASH parts into a
         // single file instead of abandoning them.
-        if matches!(abort_intent, Some(StopIntent::Finish | StopIntent::Pause))
+        if should_merge_dash_partials(abort_intent)
             && let Some(merged) =
                 try_merge_dash_partials(ffmpeg_bin, staging, &job.dest, &job.page_url, gate).await
         {

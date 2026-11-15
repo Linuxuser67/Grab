@@ -954,6 +954,66 @@ struct ManifestStaticTransfer<'a> {
     abort: &'a mut tokio::sync::oneshot::Receiver<crate::video::StopIntent>,
 }
 
+/// Common fields shared by every selected static manifest track transfer.
+struct ManifestStaticTrackContext<'a> {
+    client: &'a reqwest::Client,
+    staging: &'a Path,
+    destination: &'a Path,
+    item_id: u64,
+    tx: &'a tokio::sync::mpsc::UnboundedSender<EngineMsg>,
+    downloaded: &'a Arc<AtomicU64>,
+}
+
+impl ManifestStaticTrackContext<'_> {
+    fn hls_track<'a>(
+        &'a self,
+        plan: &'a HlsPlan,
+        directory: &'a Path,
+        filename: &'a str,
+        track: TrackKind,
+        abort: &'a mut tokio::sync::oneshot::Receiver<crate::video::StopIntent>,
+    ) -> ManifestHlsTrackTransfer<'a> {
+        ManifestHlsTrackTransfer {
+            client: self.client,
+            staging: self.staging,
+            plan,
+            directory,
+            filename,
+            destination: self.destination,
+            item_id: self.item_id,
+            track,
+            tx: self.tx,
+            downloaded: self.downloaded,
+            abort,
+        }
+    }
+
+    fn dash_track<'a>(
+        &'a self,
+        plan: &'a DashRepresentationPlan,
+        directory: &'a Path,
+        filename: &'a str,
+        track: TrackKind,
+        connections: usize,
+        abort: &'a mut tokio::sync::oneshot::Receiver<crate::video::StopIntent>,
+    ) -> ManifestDashTrackTransfer<'a> {
+        ManifestDashTrackTransfer {
+            client: self.client,
+            staging: self.staging,
+            plan,
+            directory,
+            filename,
+            destination: self.destination,
+            item_id: self.item_id,
+            track,
+            connections,
+            tx: self.tx,
+            downloaded: self.downloaded,
+            abort,
+        }
+    }
+}
+
 /// Keep both track errors: terminal failures win, then unsupported tracks
 /// trigger the yt-dlp fallback before a retry of a native pair that cannot work.
 fn combine_parallel_track_errors(
@@ -1296,6 +1356,14 @@ async fn transfer_static_manifest_tracks(
         downloaded,
         abort,
     } = context;
+    let track_context = ManifestStaticTrackContext {
+        client,
+        staging,
+        destination,
+        item_id,
+        tx,
+        downloaded,
+    };
     match tracks {
         Tracks::Hls {
             video,
@@ -1307,32 +1375,8 @@ async fn transfer_static_manifest_tracks(
                 if let Some(audio) = audio {
                     let (video_abort_sender, mut video_abort) = tokio::sync::oneshot::channel();
                     let (audio_abort_sender, mut audio_abort) = tokio::sync::oneshot::channel();
-                    let video_transfer = fetch_and_write_hls_track(ManifestHlsTrackTransfer {
-                        client,
-                        staging,
-                        plan: video.as_ref(),
-                        directory: video_dir,
-                        filename: TrackKind::Video.part_filename(TrackFileFormat::Ts),
-                        destination,
-                        item_id,
-                        track: TrackKind::Video,
-                        tx,
-                        downloaded,
-                        abort: &mut video_abort,
-                    });
-                    let audio_transfer = fetch_and_write_hls_track(ManifestHlsTrackTransfer {
-                        client,
-                        staging,
-                        plan: audio.as_ref(),
-                        directory: audio_dir,
-                        filename: TrackKind::Audio.part_filename(TrackFileFormat::Ts),
-                        destination,
-                        item_id,
-                        track: TrackKind::Audio,
-                        tx,
-                        downloaded,
-                        abort: &mut audio_abort,
-                    });
+                    let video_transfer = fetch_and_write_hls_track(track_context.hls_track(video.as_ref(), video_dir, TrackKind::Video.part_filename(TrackFileFormat::Ts), TrackKind::Video, &mut video_abort));
+                    let audio_transfer = fetch_and_write_hls_track(track_context.hls_track(audio.as_ref(), audio_dir, TrackKind::Audio.part_filename(TrackFileFormat::Ts), TrackKind::Audio, &mut audio_abort));
                     if !transfer_parallel_manifest_tracks(
                         video_transfer,
                         audio_transfer,
@@ -1344,19 +1388,7 @@ async fn transfer_static_manifest_tracks(
                     {
                         return Ok(false);
                     }
-                } else if !fetch_and_write_hls_track(ManifestHlsTrackTransfer {
-                    client,
-                    staging,
-                    plan: video.as_ref(),
-                    directory: video_dir,
-                    filename: TrackKind::Video.part_filename(TrackFileFormat::Ts),
-                    destination,
-                    item_id,
-                    track: TrackKind::Video,
-                    tx,
-                    downloaded,
-                    abort,
-                })
+                } else if !fetch_and_write_hls_track(track_context.hls_track(video.as_ref(), video_dir, TrackKind::Video.part_filename(TrackFileFormat::Ts), TrackKind::Video, abort))
                 .await?
                 {
                     return Ok(false);
@@ -1449,38 +1481,12 @@ async fn transfer_static_manifest_tracks(
         } => {
             if let Some(audio) = audio {
                 if concurrency == 1 {
-                    if !fetch_and_write_dash_track(ManifestDashTrackTransfer {
-                        client,
-                        staging,
-                        plan: video.as_ref(),
-                        directory: video_dir,
-                        filename: TrackKind::Video.part_filename(TrackFileFormat::Mp4),
-                        destination,
-                        item_id,
-                        track: TrackKind::Video,
-                        connections: concurrency,
-                        tx,
-                        downloaded,
-                        abort,
-                    })
+                    if !fetch_and_write_dash_track(track_context.dash_track(video.as_ref(), video_dir, TrackKind::Video.part_filename(TrackFileFormat::Mp4), TrackKind::Video, concurrency, abort))
                     .await?
                     {
                         return Ok(false);
                     }
-                    if !fetch_and_write_dash_track(ManifestDashTrackTransfer {
-                        client,
-                        staging,
-                        plan: audio,
-                        directory: audio_dir,
-                        filename: TrackKind::Audio.part_filename(TrackFileFormat::Mp4),
-                        destination,
-                        item_id,
-                        track: TrackKind::Audio,
-                        connections: concurrency,
-                        tx,
-                        downloaded,
-                        abort,
-                    })
+                    if !fetch_and_write_dash_track(track_context.dash_track(audio, audio_dir, TrackKind::Audio.part_filename(TrackFileFormat::Mp4), TrackKind::Audio, concurrency, abort))
                     .await?
                     {
                         return Ok(false);
@@ -1491,34 +1497,8 @@ async fn transfer_static_manifest_tracks(
                         split_manifest_track_connections(concurrency);
                     let (video_abort_sender, mut video_abort) = tokio::sync::oneshot::channel();
                     let (audio_abort_sender, mut audio_abort) = tokio::sync::oneshot::channel();
-                    let video_transfer = fetch_and_write_dash_track(ManifestDashTrackTransfer {
-                        client,
-                        staging,
-                        plan: video.as_ref(),
-                        directory: video_dir,
-                        filename: TrackKind::Video.part_filename(TrackFileFormat::Mp4),
-                        destination,
-                        item_id,
-                        track: TrackKind::Video,
-                        connections: video_connections,
-                        tx,
-                        downloaded,
-                        abort: &mut video_abort,
-                    });
-                    let audio_transfer = fetch_and_write_dash_track(ManifestDashTrackTransfer {
-                        client,
-                        staging,
-                        plan: audio,
-                        directory: audio_dir,
-                        filename: TrackKind::Audio.part_filename(TrackFileFormat::Mp4),
-                        destination,
-                        item_id,
-                        track: TrackKind::Audio,
-                        connections: audio_connections,
-                        tx,
-                        downloaded,
-                        abort: &mut audio_abort,
-                    });
+                    let video_transfer = fetch_and_write_dash_track(track_context.dash_track(video.as_ref(), video_dir, TrackKind::Video.part_filename(TrackFileFormat::Mp4), TrackKind::Video, video_connections, &mut video_abort));
+                    let audio_transfer = fetch_and_write_dash_track(track_context.dash_track(audio, audio_dir, TrackKind::Audio.part_filename(TrackFileFormat::Mp4), TrackKind::Audio, audio_connections, &mut audio_abort));
                     if !transfer_parallel_manifest_tracks(
                         video_transfer,
                         audio_transfer,
@@ -1531,20 +1511,7 @@ async fn transfer_static_manifest_tracks(
                         return Ok(false);
                     }
                 }
-            } else if !fetch_and_write_dash_track(ManifestDashTrackTransfer {
-                client,
-                staging,
-                plan: video.as_ref(),
-                directory: video_dir,
-                filename: TrackKind::Video.part_filename(TrackFileFormat::Mp4),
-                destination,
-                item_id,
-                track: TrackKind::Video,
-                connections: concurrency,
-                tx,
-                downloaded,
-                abort,
-            })
+            } else if !fetch_and_write_dash_track(track_context.dash_track(video.as_ref(), video_dir, TrackKind::Video.part_filename(TrackFileFormat::Mp4), TrackKind::Video, concurrency, abort))
             .await?
             {
                 return Ok(false);
@@ -1575,20 +1542,7 @@ async fn transfer_static_manifest_tracks(
                                 .to_string(),
                         ));
                     };
-                if !fetch_and_write_dash_track(ManifestDashTrackTransfer {
-                    client,
-                    staging,
-                    plan: subtitle,
-                    directory: &subtitle_dir,
-                    filename: TrackKind::Subtitles.part_filename(TrackFileFormat::Mp4),
-                    destination,
-                    item_id,
-                    track: TrackKind::Subtitles,
-                    connections: concurrency,
-                    tx,
-                    downloaded,
-                    abort,
-                })
+                if !fetch_and_write_dash_track(track_context.dash_track(subtitle, &subtitle_dir, TrackKind::Subtitles.part_filename(TrackFileFormat::Mp4), TrackKind::Subtitles, concurrency, abort))
                 .await?
                 {
                     return Ok(false);

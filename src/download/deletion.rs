@@ -12,6 +12,7 @@ pub(crate) struct TrashOperationGuard {
     manager: Weak<DownloadManager>,
     id: u64,
     locked_ids: Vec<u64>,
+    locked_paths: Vec<std::path::PathBuf>,
     active: bool,
 }
 
@@ -29,7 +30,7 @@ impl TrashOperationGuard {
     fn complete(mut self) {
         if let Some(manager) = self.manager.upgrade() {
             manager.remove_inner(self.id);
-            manager.release_trash_scope(&self.locked_ids);
+            manager.release_trash_scope(&self.locked_ids, &self.locked_paths);
             self.active = false;
             manager.persist_queue();
             manager.changed();
@@ -46,7 +47,7 @@ impl Drop for TrashOperationGuard {
             return;
         }
         if let Some(manager) = self.manager.upgrade() {
-            manager.release_trash_scope(&self.locked_ids);
+            manager.release_trash_scope(&self.locked_ids, &self.locked_paths);
             self.active = false;
             manager.changed();
         } else {
@@ -194,11 +195,22 @@ impl DownloadManager {
         scope
     }
 
-    fn release_trash_scope(&self, ids: &[u64]) {
-        let mut active = self.trash_in_progress.borrow_mut();
-        for id in ids {
-            active.remove(id);
+    fn release_trash_scope(&self, ids: &[u64], paths: &[std::path::PathBuf]) {
+        {
+            let mut active = self.trash_in_progress.borrow_mut();
+            for id in ids {
+                active.remove(id);
+            }
         }
+        let mut active_paths = self.trash_paths_in_progress.borrow_mut();
+        for path in paths {
+            active_paths.remove(path);
+        }
+    }
+
+    /// Whether a destination is currently owned by a Trash operation.
+    pub(crate) fn is_trash_path_blocked(&self, path: &std::path::Path) -> bool {
+        self.trash_paths_in_progress.borrow().contains(path)
     }
 
     /// Whether the row or its collection is currently owned by a Trash operation.
@@ -210,6 +222,9 @@ impl DownloadManager {
         let Some(item) = self.find(id) else {
             return false;
         };
+        if self.is_trash_path_blocked(&item.file_path()) {
+            return true;
+        }
         let group_id = if item.is_collection_parent() {
             Some(id)
         } else {
@@ -222,21 +237,31 @@ impl DownloadManager {
     pub(crate) fn begin_trash(self: &Rc<Self>, id: u64) -> Result<TrashOperationGuard, String> {
         let item = self.find(id).ok_or_else(|| gettext("Download not found"))?;
         let locked_ids = self.trash_scope(id, &item);
+        let locked_paths = locked_ids
+            .iter()
+            .filter_map(|locked_id| self.find(*locked_id).map(|row| row.file_path()))
+            .collect::<Vec<_>>();
         {
             let mut active = self.trash_in_progress.borrow_mut();
+            let mut active_paths = self.trash_paths_in_progress.borrow_mut();
             if locked_ids
                 .iter()
                 .any(|locked_id| active.contains(locked_id))
+                || locked_paths
+                    .iter()
+                    .any(|path| active_paths.contains(path))
             {
                 return Err(gettext("This download is already being moved to Trash"));
             }
             active.extend(locked_ids.iter().copied());
+            active_paths.extend(locked_paths.iter().cloned());
         }
         self.changed();
         Ok(TrashOperationGuard {
             manager: Rc::downgrade(self),
             id,
             locked_ids,
+            locked_paths,
             active: true,
         })
     }

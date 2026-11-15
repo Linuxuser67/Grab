@@ -10600,6 +10600,7 @@ fn trash_serializes_remove_and_clear_finished_until_the_file_move_commits() {
     );
     item.set_status(DownloadStatus::Done);
     manager.store().append(&item);
+    let undo_snapshot = RemovedSnapshot::capture(&manager, &item);
 
     let guard = manager.begin_trash(id).expect("claim Trash operation");
     let barrier = hold_trash_worker(&manager);
@@ -10629,6 +10630,23 @@ fn trash_serializes_remove_and_clear_finished_until_the_file_move_commits() {
     assert!(
         manager.find(id).is_some(),
         "the queue row must remain until the Trash worker returns"
+    );
+    assert!(
+        glib::MainContext::default()
+            .block_on(manager.unremove_async(undo_snapshot.clone()))
+            .is_err(),
+        "single-row Undo must not restore a Trash-owned destination"
+    );
+    assert!(
+        glib::MainContext::default()
+            .block_on(manager.unremove_many_async(vec![undo_snapshot]))
+            .is_err(),
+        "bulk Undo must not restore a Trash-owned destination"
+    );
+    assert_eq!(
+        manager.store().n_items(),
+        1,
+        "Undo attempts must not create a duplicate row during Trash"
     );
 
     barrier.release();

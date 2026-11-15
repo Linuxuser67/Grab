@@ -190,6 +190,12 @@ impl DownloadManager {
                     .map(|member| member.id()),
             );
         }
+        let destination = item.file_path();
+        scope.extend(
+            self.items()
+                .filter(|member| member.file_path() == destination)
+                .map(|member| member.id()),
+        );
         scope.sort_unstable();
         scope.dedup();
         scope
@@ -215,22 +221,7 @@ impl DownloadManager {
 
     /// Whether the row or its collection is currently owned by a Trash operation.
     pub(crate) fn is_trash_blocked(&self, id: u64) -> bool {
-        let active = self.trash_in_progress.borrow();
-        if active.contains(&id) {
-            return true;
-        }
-        let Some(item) = self.find(id) else {
-            return false;
-        };
-        if self.is_trash_path_blocked(&item.file_path()) {
-            return true;
-        }
-        let group_id = if item.is_collection_parent() {
-            Some(id)
-        } else {
-            item.group().map(|group| group.id())
-        };
-        group_id.is_some_and(|group_id| active.contains(&group_id))
+        self.trash_in_progress.borrow().contains(&id)
     }
 
     /// Claim the row synchronously, before its filesystem operation is spawned.

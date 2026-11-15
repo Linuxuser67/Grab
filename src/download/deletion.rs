@@ -68,7 +68,6 @@ impl TrashOperationGuard {
     fn worker_lease(&self) -> OperationLockLease {
         self.lease.clone()
     }
-
 }
 
 /// Holds Undo destinations while directory inspection and model insertion run.

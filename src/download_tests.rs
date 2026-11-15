@@ -10701,7 +10701,6 @@ fn cancelled_trash_future_keeps_operation_locks_until_worker_exits() {
     }));
     barrier.wait_until_entered();
     drop(trash_future);
-    let context = glib::MainContext::default();
     assert!(
         manager.is_trash_blocked(id),
         "the blocking worker must keep the row locked after its waiter is cancelled"

@@ -466,9 +466,7 @@ impl DownloadManager {
                 schedule_trash_completion(locks, id, result, completion_tx, worker_lease);
             })
             .await
-            .map_err(|_| {
-                format!("Could not move {filename} to Trash: background task panicked")
-            })?;
+            .map_err(|_| format!("Could not move {filename} to Trash: background task panicked"))?;
 
         completion_rx.await.map_err(|_| {
             format!("Could not move {filename} to Trash: completion was interrupted")

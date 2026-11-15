@@ -920,15 +920,13 @@ async fn poll_live_hls_track(
             );
             return Ok(LiveHlsSnapshotOutcome::RetryScheduled);
         }
-        Err(crate::manifest_intake::ManifestIntakeError::Unsupported(error))
-            if track.accumulator.segment_count() > 0 =>
-        {
-            tracing::warn!(
-                playlist = %diagnostic_url(&track.playlist_url),
-                error = %error,
-                "live HLS playlist is no longer supported; preserving captured media"
+        Err(crate::manifest_intake::ManifestIntakeError::Unsupported(error)) => {
+            return preserve_captured_or_fail(
+                track,
+                &track.playlist_url,
+                "live HLS playlist is no longer supported",
+                ManifestRunError::Unsupported(error.to_string()),
             );
-            return Ok(LiveHlsSnapshotOutcome::ContinuityLost);
         }
         Err(error) => return Err(error.into()),
     };
@@ -936,26 +934,20 @@ async fn poll_live_hls_track(
     if let Err(error) =
         guard_manifest_child_url(source_url, &plan.playlist_url, guarded_child_hosts)
     {
-        if track.accumulator.segment_count() > 0 {
-            tracing::warn!(
-                playlist = %diagnostic_url(&plan.playlist_url),
-                error = %error,
-                "live HLS playlist host is no longer eligible; preserving captured media"
-            );
-            return Ok(LiveHlsSnapshotOutcome::ContinuityLost);
-        }
-        return Err(ManifestRunError::Unsupported(error.to_string()));
+        return preserve_captured_or_fail(
+            track,
+            &plan.playlist_url,
+            "live HLS playlist host is no longer eligible",
+            ManifestRunError::Unsupported(error.to_string()),
+        );
     }
     if let Err(error) = guard_hls_resources(source_url, &plan, guarded_child_hosts) {
-        if track.accumulator.segment_count() > 0 {
-            tracing::warn!(
-                playlist = %diagnostic_url(&plan.playlist_url),
-                error = %error,
-                "live HLS resource host is no longer eligible; preserving captured media"
-            );
-            return Ok(LiveHlsSnapshotOutcome::ContinuityLost);
-        }
-        return Err(ManifestRunError::Unsupported(error.to_string()));
+        return preserve_captured_or_fail(
+            track,
+            &plan.playlist_url,
+            "live HLS resource host is no longer eligible",
+            ManifestRunError::Unsupported(error.to_string()),
+        );
     }
     apply_live_hls_snapshot(
         client,

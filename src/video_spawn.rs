@@ -658,9 +658,39 @@ pub(crate) fn kill_tree(child: &mut tokio::process::Child) {
     }
 }
 
-/// Identity for a spawned process group. On Linux, the pidfd keeps the
-/// original leader's PID reserved after wait() reaps it, preventing numeric
-/// PGID reuse before a bounded post-reap escalation.
+/// Send a signal to the process group anchored by its leader's pidfd.
+///
+/// Linux added PIDFD_SIGNAL_PROCESS_GROUP in 6.9. Older kernels reject the
+/// flag; callers must fail closed rather than fall back to a recyclable PGID.
+#[cfg(target_os = "linux")]
+fn pidfd_signal_process_group(
+    pidfd: &rustix::fd::OwnedFd,
+    signal: libc::c_int,
+) -> std::io::Result<()> {
+    const PIDFD_SIGNAL_PROCESS_GROUP: libc::c_uint = 1 << 2;
+
+    // SAFETY: pidfd is an owned pidfd opened for this process-group leader.
+    // The Linux syscall ABI takes a pidfd, signal, optional siginfo pointer,
+    // and flags; a null siginfo requests the ordinary signal form.
+    let result = unsafe {
+        libc::syscall(
+            libc::SYS_pidfd_send_signal,
+            std::os::fd::AsRawFd::as_raw_fd(pidfd),
+            signal,
+            std::ptr::null::<libc::siginfo_t>(),
+            PIDFD_SIGNAL_PROCESS_GROUP,
+        )
+    };
+    if result == -1 {
+        Err(std::io::Error::last_os_error())
+    } else {
+        Ok(())
+    }
+}
+
+/// Identity for a spawned process group. On Linux, retain a pidfd for the
+/// original group leader so post-reap signals can target the group through the
+/// kernel's stable struct pid, rather than looking up a recyclable numeric PGID.
 #[derive(Clone)]
 pub(crate) struct ProcessGroupId {
     pgid: libc::pid_t,
@@ -697,27 +727,28 @@ impl ProcessGroupId {
         self.pgid
     }
 
-    /// Kill remaining descendants only while a pidfd pins the original
-    /// leader's numeric identity. Without that pin, fail closed.
+    /// Kill remaining descendants through the leader pidfd. Never fall back
+    /// to a numeric process-group signal: the PGID may have been recycled.
     #[cfg(target_os = "linux")]
     fn kill_remaining_members(&self) -> bool {
-        if self.leader_pidfd.is_none() {
+        let Some(pidfd) = self.leader_pidfd.as_deref() else {
             tracing::warn!(
                 pgid = self.pgid,
                 "cannot safely escalate process-group quiescence without a leader pidfd"
             );
             return false;
-        }
-        let Some(pgid) = rustix::process::Pid::from_raw(self.pgid) else {
-            return false;
         };
-        match rustix::process::kill_process_group(pgid, rustix::process::Signal::KILL) {
-            Ok(()) | Err(rustix::io::Errno::SRCH) => true,
+        match pidfd_signal_process_group(pidfd, libc::SIGKILL) {
+            Ok(()) => true,
+            Err(error) if error.raw_os_error() == Some(libc::ESRCH) => true,
             Err(error) => {
+                // EINVAL on kernels before Linux 6.9 means the group-targeting
+                // pidfd flag is unsupported. Fail closed; a numeric-PGID
+                // fallback would reintroduce the reuse race this path must prevent.
                 tracing::warn!(
                     pgid = self.pgid,
                     error = %error,
-                    "could not terminate surviving process-group members"
+                    "could not safely terminate surviving process-group members through pidfd"
                 );
                 false
             }
@@ -1008,7 +1039,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn process_group_quiescence_escalates_after_the_initial_deadline() {
+    async fn process_group_quiescence_escalates_through_the_leader_pidfd() {
         let mut command = tokio::process::Command::new("sh");
         command
             .args(["-c", "sleep 30 & exit 0"])
@@ -1026,6 +1057,25 @@ mod tests {
             process_group_has_live_members(group.raw()),
             "the background descendant must remain after its leader exits"
         );
+
+        let pidfd = group
+            .leader_pidfd
+            .as_deref()
+            .expect("the test leader pidfd must have opened");
+        match pidfd_signal_process_group(pidfd, 0) {
+            Ok(()) => {}
+            Err(error) if error.raw_os_error() == Some(libc::EINVAL) => {
+                // Older kernels do not implement PIDFD_SIGNAL_PROCESS_GROUP.
+                // Clean up only this test-owned group while its descendant is
+                // known to be alive; production deliberately does not fall
+                // back to a numeric-PGID signal.
+                // SAFETY: this is the unique process group created above.
+                let result = unsafe { libc::kill(-group.raw(), libc::SIGKILL) };
+                assert_eq!(result, 0, "clean up the test-owned group");
+                return;
+            }
+            Err(error) => panic!("pidfd group signal support probe failed: {error}"),
+        }
 
         let started = tokio::time::Instant::now();
         assert!(

@@ -67,6 +67,11 @@ jobs:
             tarball-cargo-${{ runner.os }}-
       - name: Use shared Cargo registry path
         run: echo "CARGO_HOME=$GITHUB_WORKSPACE/.cargo-home" >> "$GITHUB_ENV"
+      # The Meson step builds with `cargo build --offline`, so the registry
+      # must already hold the locked crates and a current index. A
+      # lockfile change invalidates the cache key, and the restored
+      # fallback cache still lists the previous versions.
+      - run: cargo fetch --locked
       - name: Build and validate Meson metadata
         run: |
           meson setup build-metadata --buildtype=debug --prefix=/usr

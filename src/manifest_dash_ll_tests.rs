@@ -135,6 +135,28 @@ fn shorter_segment_timeline_on_refresh_does_not_invalidate_availability_offset()
 }
 
 #[test]
+fn low_latency_timeline_bounds_offset_by_longest_declared_segment() {
+    let body = dynamic_mpd(
+        r#"<SegmentTemplate timescale="1" startNumber="1"
+                           initialization="init.mp4" media="seg-$Number$"
+                           availabilityTimeOffset="3"
+                           availabilityTimeComplete="false">
+  <SegmentTimeline>
+    <S t="0" d="2"/>
+    <S t="2" d="4" r="-1"/>
+  </SegmentTimeline>
+</SegmentTemplate>"#,
+        r#"timeShiftBufferDepth="PT20S""#,
+    );
+
+    let manifest = parse_dash_manifest_at(BASE_URL, &body, dynamic_test_clock(120))
+        .expect("an offset within the longest declared segment duration should parse");
+    let plan = plan_dash_representation(&manifest, &manifest.video_representations[0].live_key)
+        .expect("the bounded low-latency representation should expand");
+    assert!(plan.low_latency);
+}
+
+#[test]
 fn dynamic_segment_template_uses_availability_offset_for_chunked_live_segment() {
     let body = r#"<MPD xmlns="urn:mpeg:dash:schema:mpd:2011"
      type="dynamic"

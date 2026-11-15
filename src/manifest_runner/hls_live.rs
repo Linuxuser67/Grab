@@ -748,6 +748,25 @@ fn live_hls_track_uses_plain_mpegts_resource_plan(track: &LiveHlsTrack) -> bool 
     track.accumulator.plain_mpegts_resource_names().is_some()
 }
 
+/// Create the visible destination-side part before the first live segment completes.
+///
+/// The owner record is persisted by open_owned_part_async; subsequent ordered
+/// appends reopen the same inode and retain their existing checkpoint semantics.
+async fn ensure_live_hls_destination_part(
+    destination: &LiveHlsDestination,
+) -> Result<(), ManifestRunError> {
+    let file = crate::manifest_destination::open_owned_part_async(
+        destination.staging.clone(),
+        destination.destination.clone(),
+        destination.item_id,
+        destination.track,
+    )
+    .await
+    .map_err(ManifestRunError::Failed)?;
+    drop(file);
+    Ok(())
+}
+
 async fn append_live_hls_destination_part(
     track: &LiveHlsTrack,
     abort: &mut tokio::sync::oneshot::Receiver<crate::video::StopIntent>,
@@ -1058,6 +1077,17 @@ pub(super) async fn run_live_hls_tracks(
                 track: TrackKind::Audio,
                 filename: TrackKind::Audio.part_filename(TrackFileFormat::Ts),
             });
+        }
+    }
+    if use_destination_parts {
+        if let Some(destination) = video.destination_part.as_ref() {
+            ensure_live_hls_destination_part(destination).await?;
+        }
+        if let Some(destination) = audio
+            .as_ref()
+            .and_then(|track| track.destination_part.as_ref())
+        {
+            ensure_live_hls_destination_part(destination).await?;
         }
     }
     let output = if use_destination_parts {

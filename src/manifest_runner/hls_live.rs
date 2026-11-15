@@ -1380,6 +1380,85 @@ mod destination_part_tests {
 
     const BASE_URL: &str = "https://cdn.example.test/live.m3u8";
 
+    #[tokio::test]
+    async fn live_hls_destination_parts_exist_before_the_first_segment_is_committed() {
+        let staging = tempfile::tempdir().expect("create live HLS staging");
+        let destination_dir = tempfile::tempdir().expect("create live HLS destination");
+        let destination = destination_dir.path().join("recording.mp4");
+        crate::manifest_destination::ensure_plan(staging.path(), &destination, 72, true, false)
+            .expect("persist live HLS destination plan");
+
+        let video = LiveHlsDestination {
+            staging: staging.path().to_path_buf(),
+            destination: destination.clone(),
+            item_id: 72,
+            track: TrackKind::Video,
+            filename: "video-track.ts",
+        };
+        let audio = LiveHlsDestination {
+            staging: staging.path().to_path_buf(),
+            destination: destination.clone(),
+            item_id: 72,
+            track: TrackKind::Audio,
+            filename: "audio-track.ts",
+        };
+        let video_part = crate::manifest_destination::part_path(
+            staging.path(),
+            &destination,
+            72,
+            TrackKind::Video,
+        )
+        .expect("resolve visible video part");
+        let audio_part = crate::manifest_destination::part_path(
+            staging.path(),
+            &destination,
+            72,
+            TrackKind::Audio,
+        )
+        .expect("resolve visible audio part");
+
+        assert!(!video_part.exists());
+        assert!(!audio_part.exists());
+
+        ensure_live_hls_destination_part(&video)
+            .await
+            .expect("create visible video part");
+        ensure_live_hls_destination_part(&audio)
+            .await
+            .expect("create visible audio part");
+
+        assert_eq!(
+            tokio::fs::metadata(&video_part)
+                .await
+                .expect("inspect visible video part")
+                .len(),
+            0,
+            "the destination-side video part exists while the first segment is still downloading"
+        );
+        assert_eq!(
+            tokio::fs::metadata(&audio_part)
+                .await
+                .expect("inspect visible audio part")
+                .len(),
+            0,
+            "the destination-side audio part exists while the first segment is still downloading"
+        );
+        assert!(
+            staging
+                .path()
+                .join("recording.72.video.part.owner.json")
+                .exists(),
+            "the visible video part must have a persisted ownership record"
+        );
+        assert!(
+            staging
+                .path()
+                .join("recording.72.audio.part.owner.json")
+                .exists(),
+            "the visible audio part must have a persisted ownership record"
+        );
+    }
+
     #[test]
     fn text_error_prefix_detection_is_conservative() {
         assert!(

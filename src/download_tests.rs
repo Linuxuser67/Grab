@@ -11033,3 +11033,24 @@ fn undo_and_trash_serialize_on_the_same_output_path() {
     );
     let _ = std::fs::remove_dir_all(&dest);
 }
+
+#[test]
+fn destination_reservation_recovers_a_poisoned_mutex() {
+    let (_queue_lock, _main_loop_lock) = test_locks();
+    let manager = DownloadManager::new(gio::ListStore::new::<DownloadItem>(), test_settings());
+    let destination = std::path::PathBuf::from("/tmp/grab-reservation-poison-test");
+    manager.reserve_dest(&destination);
+
+    let reservations = Arc::clone(&manager.reservations);
+    let poisoner = Arc::clone(&reservations);
+    let poison_result = std::thread::spawn(move || {
+        let _guard = poisoner.lock().expect("lock reservations before poisoning");
+        panic!("poison the destination reservation mutex");
+    })
+    .join();
+    assert!(poison_result.is_err());
+
+    assert!(manager.dest_reserved(&destination));
+    manager.release_dest(&destination);
+    assert!(!manager.dest_reserved(&destination));
+}

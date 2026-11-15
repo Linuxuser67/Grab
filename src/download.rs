@@ -2,7 +2,7 @@ use crate::file_names::{
     dedupe_filename, filename_from_url, fmt_bytes, name_stem, rename_noreplace,
     restrict_filename_ascii, sane_filename, shorten_filename,
 };
-use crate::runtime::tokio_rt;
+use crate::runtime::{lock_recover, tokio_rt};
 use gettextrs::gettext;
 use gtk4::gio::prelude::*;
 use gtk4::{gio, glib};
@@ -379,11 +379,10 @@ impl FinalNameReservations {
     /// Leave one reservation alive for a discard finalizer to release after it
     /// has swept the moved file and row-owned staging.
     fn retain_path(&mut self, retained: &std::path::Path) {
-        if let Ok(mut reservations) = self.reservations.lock() {
-            for path in self.paths.drain(..) {
-                if path.as_path() != retained {
-                    reservations.remove(&path);
-                }
+        let mut reservations = lock_recover(&self.reservations);
+        for path in self.paths.drain(..) {
+            if path.as_path() != retained {
+                reservations.remove(&path);
             }
         }
     }
@@ -391,10 +390,9 @@ impl FinalNameReservations {
 
 impl Drop for FinalNameReservations {
     fn drop(&mut self) {
-        if let Ok(mut reservations) = self.reservations.lock() {
-            for path in &self.paths {
-                reservations.remove(path);
-            }
+        let mut reservations = lock_recover(&self.reservations);
+        for path in &self.paths {
+            reservations.remove(path);
         }
         // A row restored through Undo may have been parked behind one of these claims.
         wake_queue();
@@ -1117,22 +1115,15 @@ impl DownloadManager {
 
     /// Whether `dest` has a row removal still tearing down (exact path and stem-wide sweep key).
     pub(crate) fn dest_reserved(&self, dest: &std::path::Path) -> bool {
-        self.reservations
-            .lock()
-            .map(|r| r.contains(dest))
-            .unwrap_or(false)
+        lock_recover(&self.reservations).contains(dest)
     }
 
     fn reserve_dest(&self, dest: &std::path::Path) {
-        if let Ok(mut r) = self.reservations.lock() {
-            r.insert(dest);
-        }
+        lock_recover(&self.reservations).insert(dest);
     }
 
     fn release_dest(&self, dest: &std::path::Path) {
-        if let Ok(mut r) = self.reservations.lock() {
-            r.remove(dest);
-        }
+        lock_recover(&self.reservations).remove(dest);
     }
 
     /// Whether the row is currently capturing a live stream.

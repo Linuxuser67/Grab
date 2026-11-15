@@ -52,9 +52,7 @@ impl DownloadManager {
     ///
     /// Returns an error when no backup name can be claimed or the source cannot
     /// be moved. Callers must keep restore in the Failed state in that case.
-    pub(super) fn quarantine_queue_at(
-        queue_file: &std::path::Path,
-    ) -> std::io::Result<()> {
+    pub(super) fn quarantine_queue_at(queue_file: &std::path::Path) -> std::io::Result<()> {
         let base = queue_file.with_extension("json.bak");
         for index in 0..=99 {
             let target = if index == 0 {

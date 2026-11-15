@@ -917,7 +917,6 @@ fn invalid_utf8_queue_is_quarantined() {
     let _ = std::fs::remove_file(&qf);
 }
 
-
 #[test]
 fn corrupt_queue_is_preserved_when_quarantine_cannot_claim_a_backup() {
     let _lock = lock_queue_file();
@@ -935,11 +934,8 @@ fn corrupt_queue_is_preserved_when_quarantine_cannot_claim_a_backup() {
         };
         if index == 0 {
             #[cfg(unix)]
-            std::os::unix::fs::symlink(
-                backup.with_extension("missing-target"),
-                &backup,
-            )
-            .expect("create occupied dangling backup symlink");
+            std::os::unix::fs::symlink(backup.with_extension("missing-target"), &backup)
+                .expect("create occupied dangling backup symlink");
             #[cfg(not(unix))]
             std::fs::write(&backup, b"occupied").expect("occupy backup name");
         } else {
@@ -947,10 +943,7 @@ fn corrupt_queue_is_preserved_when_quarantine_cannot_claim_a_backup() {
         }
     }
 
-    let manager = DownloadManager::new(
-        gio::ListStore::new::<DownloadItem>(),
-        test_settings(),
-    );
+    let manager = DownloadManager::new(gio::ListStore::new::<DownloadItem>(), test_settings());
     manager.restore_queue();
     assert!(
         manager.restore_failed(),

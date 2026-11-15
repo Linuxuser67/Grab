@@ -232,11 +232,6 @@ impl DownloadManager {
         }
     }
 
-    /// Whether an output path is currently claimed by Trash or Undo.
-    pub(crate) fn is_file_operation_blocked(&self, path: &std::path::Path) -> bool {
-        self.file_operations_in_progress.borrow().contains(path)
-    }
-
     /// Whether the row or its output path is currently owned by another operation.
     pub(crate) fn is_trash_blocked(&self, id: u64) -> bool {
         self.trash_in_progress.borrow().contains(&id)

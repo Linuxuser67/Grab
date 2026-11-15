@@ -192,7 +192,7 @@ impl DownloadManager {
             let torrent_output_dir = item.output_dir().to_string();
             let torrent_filename = item.filename().to_string();
             let sizing_guard =
-                cleanup_torrent.then(|| super::SizingGuard::new(Rc::clone(&this.sizing_inflight)));
+                cleanup_torrent.then(|| crate::download::SizingGuard::new(Rc::clone(&this.sizing_inflight)));
             let weak_manager = Rc::downgrade(&this);
             let weak_item = item.downgrade();
             item.set_progress(1.0);

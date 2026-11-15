@@ -483,6 +483,92 @@ fn restore_prepares_destination_listings_only_for_fallback_ids() {
 }
 
 #[test]
+fn async_restore_failure_preserves_the_saved_queue() {
+    let (_queue_lock, _main_loop_lock) = test_locks();
+    let queue_file = test_queue_file("async-restore-listing-failure");
+    let destination = std::env::temp_dir().join(format!(
+        "grab-restore-destination-file-{}",
+        std::process::id()
+    ));
+    std::fs::write(&destination, b"not a directory").unwrap();
+
+    let queue = StoredQueue {
+        version: QUEUE_VERSION,
+        items: vec![stored_row(
+            "https://example.test/file.bin",
+            &destination.to_string_lossy(),
+            "file.bin",
+            DownloadStatus::Paused,
+        )],
+    };
+    let bytes = serde_json::to_vec(&queue).unwrap();
+    std::fs::write(&queue_file, &bytes).unwrap();
+
+    let manager = DownloadManager::new(gio::ListStore::new::<DownloadItem>(), test_settings());
+    manager.restore_queue();
+
+    assert!(manager.restore_failed());
+    assert_eq!(manager.store().n_items(), 0);
+    assert_eq!(
+        std::fs::read(&queue_file).unwrap(),
+        bytes,
+        "an async restore failure must preserve the last known-good queue"
+    );
+
+    let _ = std::fs::remove_file(&destination);
+    let _ = std::fs::remove_file(&queue_file);
+}
+
+#[test]
+fn async_restore_observes_shutdown_before_applying_loaded_rows() {
+    let (_queue_lock, _main_loop_lock) = test_locks();
+    let queue_file = test_queue_file("async-restore-shutdown");
+    let queue = StoredQueue {
+        version: QUEUE_VERSION,
+        items: vec![stored_row(
+            "https://example.test/file.bin",
+            "/tmp/grab-restore-shutdown",
+            "file.bin",
+            DownloadStatus::Paused,
+        )],
+    };
+    let bytes = serde_json::to_vec(&queue).unwrap();
+    std::fs::write(&queue_file, &bytes).unwrap();
+
+    let manager = DownloadManager::new(gio::ListStore::new::<DownloadItem>(), test_settings());
+    manager.shutdown_started.set(true);
+    manager.restore_queue();
+
+    assert!(manager.restore_failed());
+    assert_eq!(manager.store().n_items(), 0);
+    assert_eq!(std::fs::read(&queue_file).unwrap(), bytes);
+
+    let _ = std::fs::remove_file(&queue_file);
+}
+
+#[test]
+fn restore_task_guard_fails_closed_and_releases_waiters_on_drop() {
+    let (_queue_lock, _main_loop_lock) = test_locks();
+    let _queue_file = test_queue_file("restore-task-guard-drop");
+    let manager = DownloadManager::new(gio::ListStore::new::<DownloadItem>(), test_settings());
+    manager.restore_state.set(RestoreState::Pending);
+    manager.restore_ready.send_replace(false);
+    let ready = manager.restore_ready.subscribe();
+
+    let guard = RestoreTaskGuard {
+        manager: Rc::downgrade(&manager),
+        finished: false,
+    };
+    drop(guard);
+
+    assert!(manager.restore_failed());
+    assert!(
+        *ready.borrow(),
+        "a cancelled restore must release intake waiters"
+    );
+}
+
+#[test]
 fn restore_destination_listing_reports_unreadable_directories() {
     let path = std::env::temp_dir().join(format!(
         "grab-restore-not-a-directory-{}-{}",

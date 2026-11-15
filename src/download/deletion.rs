@@ -5,74 +5,82 @@ use gettextrs::gettext;
 use gtk4::gio;
 use gtk4::gio::prelude::*;
 use std::rc::{Rc, Weak};
+use std::sync::{Arc, Mutex};
 
-/// Keeps all rows in one collection locked until the Trash worker and its
-/// queue-model commit have both completed.
+/// Shared ownership for rows and destinations claimed by Trash or Undo.
+#[derive(Default)]
+pub(super) struct OperationLocks {
+    rows: std::collections::HashSet<u64>,
+    paths: std::collections::HashSet<std::path::PathBuf>,
+}
+
+/// A cloneable lease: locks are released only after the last async or blocking
+/// operation that owns the lease has finished.
+#[derive(Clone)]
+struct OperationLockLease {
+    _inner: Arc<OperationLockLeaseInner>,
+}
+
+struct OperationLockLeaseInner {
+    locks: Arc<Mutex<OperationLocks>>,
+    row_ids: Vec<u64>,
+    paths: Vec<std::path::PathBuf>,
+    notify_on_release: bool,
+}
+
+impl Drop for OperationLockLeaseInner {
+    fn drop(&mut self) {
+        {
+            let mut locks = self
+                .locks
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            for id in &self.row_ids {
+                locks.rows.remove(id);
+            }
+            for path in &self.paths {
+                locks.paths.remove(path);
+            }
+        }
+        if self.notify_on_release {
+            super::notify_operation_locks_changed(Arc::downgrade(&self.locks));
+        }
+    }
+}
+
+/// Keeps the model row alive until a successful Trash worker commits its result.
 pub(crate) struct TrashOperationGuard {
     manager: Weak<DownloadManager>,
     id: u64,
-    locked_ids: Vec<u64>,
-    locked_paths: Vec<std::path::PathBuf>,
-    active: bool,
+    lease: OperationLockLease,
 }
 
 impl TrashOperationGuard {
     fn belongs_to(&self, manager: &Rc<DownloadManager>, id: u64) -> bool {
-        self.active
-            && self.id == id
+        self.id == id
             && self
                 .manager
                 .upgrade()
                 .is_some_and(|owner| Rc::ptr_eq(&owner, manager))
     }
 
-    /// Commit the successful Trash operation while its row lock is still held.
-    fn complete(mut self) {
+    fn worker_lease(&self) -> OperationLockLease {
+        self.lease.clone()
+    }
+
+    /// Commit the successful Trash operation while both async and worker leases are held.
+    fn complete(self) {
         if let Some(manager) = self.manager.upgrade() {
             manager.remove_inner(self.id);
-            manager.release_trash_scope(&self.locked_ids);
-            manager.release_file_operation_paths(&self.locked_paths);
-            self.active = false;
             manager.persist_queue();
-            manager.changed();
             manager.start_next();
-        } else {
-            self.active = false;
         }
     }
 }
 
-impl Drop for TrashOperationGuard {
-    fn drop(&mut self) {
-        if !self.active {
-            return;
-        }
-        if let Some(manager) = self.manager.upgrade() {
-            manager.release_trash_scope(&self.locked_ids);
-            manager.release_file_operation_paths(&self.locked_paths);
-            self.active = false;
-            manager.changed();
-        } else {
-            self.active = false;
-        }
-    }
-}
-
-/// Holds destination paths while an Undo restore is inspecting and re-inserting rows.
-/// Trash claims the same paths, so the two asynchronous operations cannot overlap.
+/// Holds Undo destinations while directory inspection and model insertion run.
 pub(crate) struct UndoOperationGuard {
-    manager: Weak<DownloadManager>,
-    locked_ids: Vec<u64>,
-    locked_paths: Vec<std::path::PathBuf>,
-}
-
-impl Drop for UndoOperationGuard {
-    fn drop(&mut self) {
-        if let Some(manager) = self.manager.upgrade() {
-            manager.release_trash_scope(&self.locked_ids);
-            manager.release_file_operation_paths(&self.locked_paths);
-        }
-    }
+    _lease: OperationLockLease,
 }
 
 #[derive(Debug)]
@@ -189,51 +197,91 @@ fn execute_delete_operation(operation: DeleteOperation) -> Result<(), String> {
 }
 
 impl DownloadManager {
-    /// Return every row that must be locked together for a Trash operation.
-    /// Collection owners, children, and siblings share one serialization scope.
+    /// Return every row transitively connected to a Trash destination through
+    /// collection membership or an identical output path.
     fn trash_scope(&self, id: u64, item: &DownloadItem) -> Vec<u64> {
-        let mut scope = vec![id];
-        let group_id = if item.is_collection_parent() {
+        let rows = self.items().collect::<Vec<_>>();
+        let mut locked_ids = std::collections::HashSet::from([id]);
+        let mut locked_paths = std::collections::HashSet::from([item.file_path()]);
+        let mut locked_groups = std::collections::HashSet::new();
+        let initial_group = if item.is_collection_parent() {
             Some(id)
         } else {
-            item.group().map(|group| group.id())
+            item.group_id()
         };
-        if let Some(group_id) = group_id {
-            scope.push(group_id);
+        if let Some(group_id) = initial_group {
+            locked_groups.insert(group_id);
         }
-        let destination = item.file_path();
-        scope.extend(
-            self.items()
-                .filter(|member| {
-                    group_id.is_some_and(|group_id| {
-                        member.id() == group_id
-                            || member.group().is_some_and(|group| group.id() == group_id)
-                    }) || member.file_path() == destination
-                })
-                .map(|member| member.id()),
-        );
+
+        // A duplicate-path row can pull in its own collection, which can
+        // expose another path shared with a third collection. Expand paths,
+        // groups, and rows together until the complete lock scope is stable.
+        loop {
+            let mut changed = false;
+            for member in &rows {
+                let member_group = if member.is_collection_parent() {
+                    Some(member.id())
+                } else {
+                    member.group_id()
+                };
+                let member_path = member.file_path();
+                let connected = locked_ids.contains(&member.id())
+                    || member_group.is_some_and(|group_id| locked_groups.contains(&group_id))
+                    || locked_paths.contains(&member_path);
+                if !connected {
+                    continue;
+                }
+                changed |= locked_ids.insert(member.id());
+                changed |= locked_paths.insert(member_path);
+                if let Some(group_id) = member_group {
+                    changed |= locked_groups.insert(group_id);
+                }
+            }
+            if !changed {
+                break;
+            }
+        }
+
+        let mut scope = locked_ids.into_iter().collect::<Vec<_>>();
         scope.sort_unstable();
-        scope.dedup();
         scope
     }
 
-    fn release_trash_scope(&self, ids: &[u64]) {
-        let mut active = self.trash_in_progress.borrow_mut();
-        for id in ids {
-            active.remove(id);
+    fn claim_operation_locks(
+        &self,
+        locked_ids: Vec<u64>,
+        locked_paths: Vec<std::path::PathBuf>,
+        notify_on_release: bool,
+        busy_message: String,
+    ) -> Result<OperationLockLease, String> {
+        let mut locks = self
+            .operation_locks
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if locked_ids.iter().any(|id| locks.rows.contains(id))
+            || locked_paths.iter().any(|path| locks.paths.contains(path))
+        {
+            return Err(busy_message);
         }
+        locks.rows.extend(locked_ids.iter().copied());
+        locks.paths.extend(locked_paths.iter().cloned());
+        Ok(OperationLockLease {
+            _inner: Arc::new(OperationLockLeaseInner {
+                locks: Arc::clone(&self.operation_locks),
+                row_ids: locked_ids,
+                paths: locked_paths,
+                notify_on_release,
+            }),
+        })
     }
 
-    fn release_file_operation_paths(&self, paths: &[std::path::PathBuf]) {
-        let mut active_paths = self.file_operations_in_progress.borrow_mut();
-        for path in paths {
-            active_paths.remove(path);
-        }
-    }
-
-    /// Whether the row or its output path is currently owned by another operation.
+    /// Whether the row is currently owned by Trash or Undo.
     pub(crate) fn is_trash_blocked(&self, id: u64) -> bool {
-        self.trash_in_progress.borrow().contains(&id)
+        self.operation_locks
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .rows
+            .contains(&id)
     }
 
     /// Claim the row synchronously, before its filesystem operation is spawned.
@@ -247,31 +295,22 @@ impl DownloadManager {
             .collect::<Vec<_>>();
         locked_paths.sort_unstable();
         locked_paths.dedup();
-        {
-            let mut active = self.trash_in_progress.borrow_mut();
-            let mut active_paths = self.file_operations_in_progress.borrow_mut();
-            if locked_ids
-                .iter()
-                .any(|locked_id| active.contains(locked_id))
-                || locked_paths.iter().any(|path| active_paths.contains(path))
-            {
-                return Err(gettext("This download is already being moved to Trash"));
-            }
-            active.extend(locked_ids.iter().copied());
-            active_paths.extend(locked_paths.iter().cloned());
-        }
+        let lease = self.claim_operation_locks(
+            locked_ids,
+            locked_paths,
+            true,
+            gettext("This download is already being moved to Trash"),
+        )?;
         self.changed();
         Ok(TrashOperationGuard {
             manager: Rc::downgrade(self),
             id,
-            locked_ids,
-            locked_paths,
-            active: true,
+            lease,
         })
     }
 
-    /// Claim all Undo destinations before starting directory inspection. The
-    /// guard holds them through model insertion, serializing Undo with Trash.
+    /// Claim all Undo destinations before starting directory inspection.
+    /// The lease also blocks Trash until model insertion has completed.
     pub(crate) fn begin_undo(
         self: &Rc<Self>,
         paths: &[std::path::PathBuf],
@@ -286,24 +325,13 @@ impl DownloadManager {
             .collect::<Vec<_>>();
         locked_ids.sort_unstable();
         locked_ids.dedup();
-        {
-            let mut active_ids = self.trash_in_progress.borrow_mut();
-            let mut active_paths = self.file_operations_in_progress.borrow_mut();
-            if locked_ids.iter().any(|id| active_ids.contains(id))
-                || locked_paths.iter().any(|path| active_paths.contains(path))
-            {
-                return Err(gettext(
-                    "A download destination is busy with another operation",
-                ));
-            }
-            active_ids.extend(locked_ids.iter().copied());
-            active_paths.extend(locked_paths.iter().cloned());
-        }
-        Ok(UndoOperationGuard {
-            manager: Rc::downgrade(self),
+        let lease = self.claim_operation_locks(
             locked_ids,
             locked_paths,
-        })
+            false,
+            gettext("A download destination is busy with another operation"),
+        )?;
+        Ok(UndoOperationGuard { _lease: lease })
     }
 
     pub(super) fn gallery_trash_target(
@@ -399,14 +427,21 @@ impl DownloadManager {
         #[cfg(not(test))]
         let before_execute_hook: Option<std::sync::Arc<dyn Fn() + Send + Sync>> = None;
 
-        gio::spawn_blocking(move || {
-            if let Some(hook) = before_execute_hook {
-                hook();
-            }
-            execute_delete_operation(operation)
-        })
-        .await
-        .map_err(|_| format!("Could not move {filename} to Trash: background task panicked"))??;
+        // Keep the row/path locks alive even if this GLib future is dropped:
+        // the blocking operation outlives its detached join handle.
+        let worker_lease = guard.worker_lease();
+        crate::runtime::tokio_rt()
+            .spawn_blocking(move || {
+                let _worker_lease = worker_lease;
+                if let Some(hook) = before_execute_hook {
+                    hook();
+                }
+                execute_delete_operation(operation)
+            })
+            .await
+            .map_err(|_| {
+                format!("Could not move {filename} to Trash: background task panicked")
+            })??;
 
         // This only schedules teardown on Tokio; retain the original ordering
         // and do it only after trash/archive operations have succeeded.

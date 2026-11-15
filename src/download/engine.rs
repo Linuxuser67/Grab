@@ -1883,6 +1883,12 @@ impl DownloadManager {
             }
         };
 
+        // Each retry owns a new generation. Buffered messages from an older
+        // gallery process must not update this row or release its replacement.
+        let id = item.id();
+        let generation = self.epoch.borrow().get(&id).copied().unwrap_or(0) + 1;
+        self.epoch.borrow_mut().insert(id, generation);
+
         // Channel for progress/finished messages (tokio -> glib).
         #[derive(Debug)]
         enum GalleryMsg {
@@ -1985,6 +1991,11 @@ impl DownloadManager {
         gtk4::glib::spawn_future_local(async move {
             let mut last_progress_refresh = Instant::now();
             while let Some(msg) = rx.recv().await {
+                // Check before applying any buffered update. In particular, an
+                // old Finished must not remove the new attempt's running handle.
+                if !this.is_current(id, generation) {
+                    break;
+                }
                 match msg {
                     GalleryMsg::Progress(update) => {
                         let done = update.files_done;

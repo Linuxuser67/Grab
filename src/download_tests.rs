@@ -390,6 +390,23 @@ fn test_settings() -> crate::settings::AppSettings {
 
 /// Fresh loopback port per call: a counter avoids pid collisions, a salt
 /// avoids stale listeners leaked by crashed runs.
+#[test]
+fn gallery_retry_invalidates_the_previous_attempt_generation() {
+    let (_queue_lock, _main_loop_lock) = test_locks();
+    let _queue_file = test_queue_file("gallery-attempt-generation");
+    let manager = DownloadManager::new(gio::ListStore::new::<DownloadItem>(), test_settings());
+    let id = 42;
+
+    manager.epoch.borrow_mut().insert(id, 1);
+    assert!(manager.is_current(id, 1));
+
+    // Stopping a gallery row invalidates the receiver synchronously, before
+    // its worker aborts and any already-buffered message can be consumed.
+    manager.invalidate_gallery_attempt(id);
+    assert!(!manager.is_current(id, 1));
+    assert!(manager.is_current(id, 2));
+}
+
 fn test_port(offset: u16) -> u16 {
     static NEXT: std::sync::atomic::AtomicU16 = std::sync::atomic::AtomicU16::new(0);
     static SALT: OnceLock<u64> = OnceLock::new();

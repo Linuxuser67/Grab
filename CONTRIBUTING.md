@@ -43,7 +43,7 @@ the HIG: <https://developer.gnome.org/hig/>.
 
 ```bash
 # 1. Bump version in Cargo.toml + metainfo, commit, push, tag (e.g. v1.2.0)
-# 2. Regen vendored sources only if Cargo.lock gained/lost crates:
+# 2. Regen vendored sources after every Cargo.lock change:
 python3 build-aux/gen-cargo-sources.py
 # 3. Smoke-test locally if you like (incremental, no force-clean, no bundle):
 flatpak run org.flatpak.Builder --user --install \

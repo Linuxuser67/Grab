@@ -3841,23 +3841,46 @@ impl DownloadManager {
                 .collect();
             match tokio_rt()
                 .spawn_blocking(move || {
+                    let mut reconciled = Vec::with_capacity(truncations.len());
+                    let mut failures = Vec::new();
                     for (path, state) in truncations {
-                        truncate_to_prefix(&path, &state);
+                        match truncate_to_prefix(&path, &state) {
+                            Ok(()) => reconciled.push(path),
+                            Err(error) => failures.push((path, error)),
+                        }
                     }
+                    (reconciled, failures)
                 })
                 .await
             {
-                Ok(()) => {
-                    for id in ids {
-                        if let Some(st) = self.segment_state.borrow_mut().get_mut(&id) {
-                            st.forget_beyond_prefix();
+                Ok((reconciled, failures)) => {
+                    let mut states = self.segment_state.borrow_mut();
+                    for path in reconciled {
+                        if let Some((id, _)) = self
+                            .items
+                            .borrow()
+                            .iter()
+                            .find(|item| item.file_path() == path)
+                            .map(|item| (item.id(), item.file_path()))
+                        {
+                            if let Some(state) = states.get_mut(&id) {
+                                state.forget_beyond_prefix();
+                            }
                         }
                     }
+                    for (path, error) in failures {
+                        tracing::warn!(
+                            path = %path.display(),
+                            error = %error,
+                            "shutdown: could not reconcile segmented destination"
+                        );
+                    }
                 }
-                Err(e) => {
-                    // Keep the original bitmap if we could not reconcile the
-                    // on-disk prefix; it is safer than persisting a false one.
-                    tracing::warn!("shutdown: partial-file reconciliation worker failed: {e}");
+                Err(error) => {
+                    tracing::warn!(
+                        error = %error,
+                        "shutdown: partial-file reconciliation worker failed"
+                    );
                 }
             }
         }

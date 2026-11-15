@@ -8655,13 +8655,7 @@ fn gallery_file_row_lifecycle_updates_persisted_state_through_the_owner_index() 
     manager.store.append(&owner);
 
     let path = output_dir.join("one.jpg").to_string_lossy().into_owned();
-    manager.upsert_gallery_file_row(
-        &owner,
-        &path,
-        DownloadStatus::Paused,
-        0.37,
-        "Paused",
-    );
+    manager.upsert_gallery_file_row(&owner, &path, DownloadStatus::Paused, 0.37, "Paused");
     manager.prepare_gallery_file_rows_for_attempt(id);
 
     let child = manager
@@ -8677,13 +8671,7 @@ fn gallery_file_row_lifecycle_updates_persisted_state_through_the_owner_index() 
         assert_eq!(state.progress, 0.0);
     }
 
-    manager.upsert_gallery_file_row(
-        &owner,
-        &path,
-        DownloadStatus::Downloading,
-        0.55,
-        "55%",
-    );
+    manager.upsert_gallery_file_row(&owner, &path, DownloadStatus::Downloading, 0.55, "55%");
     manager.finish_gallery_file_rows(id, DownloadStatus::Failed);
 
     assert_eq!(child.status(), DownloadStatus::Failed);

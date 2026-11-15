@@ -12,7 +12,7 @@ use crate::download_row::DownloadItem;
 use crate::download_store::DownloadStatus;
 use crate::engine_msg::{DEST_EXISTS, EngineMsg};
 use crate::file_names::{dedupe_filename, fmt_bytes, name_stem, rename_noreplace, sane_filename};
-use crate::runtime::tokio_rt;
+use crate::runtime::{lock_recover, tokio_rt};
 use crate::video::AttemptGate;
 use gettextrs::{gettext, ngettext};
 use gtk4::gio::prelude::*;
@@ -460,7 +460,7 @@ impl DownloadManager {
             .map(|item| (item.dest_dir().to_string(), item.filename().to_string()))
             .collect::<Vec<_>>();
         let reservations = std::sync::Arc::clone(&self.reservations);
-        let mut reserved = reservations.lock().ok()?;
+        let mut reserved = lock_recover(&reservations);
         let mut candidates = Vec::with_capacity(8);
         let directory = std::path::Path::new(dir);
 

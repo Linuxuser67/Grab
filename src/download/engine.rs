@@ -849,18 +849,18 @@ impl DownloadManager {
                                         }
                                     })
                                     .await;
-                                    if cleanup_torrent {
-                                        if let (Ok(Some(size)), Some(manager), Some(item)) = (
+                                    if cleanup_torrent
+                                        && let (Ok(Some(size)), Some(manager), Some(item)) = (
                                             measured_size,
                                             weak_manager.upgrade(),
                                             weak_item.upgrade(),
-                                        ) && manager.find(id).is_some()
-                                        {
-                                            item.set_detail(
-                                                gettext("Finished • {size}")
-                                                    .replace("{size}", &fmt_bytes(size)),
-                                            );
-                                        }
+                                        )
+                                        && manager.find(id).is_some()
+                                    {
+                                        item.set_detail(
+                                            gettext("Finished • {size}")
+                                                .replace("{size}", &fmt_bytes(size)),
+                                        );
                                     }
                                 });
                             }

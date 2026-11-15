@@ -17,7 +17,9 @@ pub(super) struct OperationLocks {
 /// A cloneable lease: locks are released only after the last async or blocking
 /// operation that owns the lease has finished.
 #[derive(Clone)]
-struct OperationLockLease(Arc<OperationLockLeaseInner>);
+struct OperationLockLease {
+    _inner: Arc<OperationLockLeaseInner>,
+}
 
 struct OperationLockLeaseInner {
     locks: Arc<Mutex<OperationLocks>>,
@@ -259,11 +261,13 @@ impl DownloadManager {
         }
         locks.rows.extend(locked_ids.iter().copied());
         locks.paths.extend(locked_paths.iter().cloned());
-        Ok(OperationLockLease(Arc::new(OperationLockLeaseInner {
-            locks: Arc::clone(&self.operation_locks),
-            row_ids: locked_ids,
-            paths: locked_paths,
-        })))
+        Ok(OperationLockLease {
+            _inner: Arc::new(OperationLockLeaseInner {
+                locks: Arc::clone(&self.operation_locks),
+                row_ids: locked_ids,
+                paths: locked_paths,
+            }),
+        })
     }
 
     /// Whether the row is currently owned by Trash or Undo.

@@ -212,31 +212,44 @@ pub(crate) fn unified_download_argv(
 ) -> Vec<String> {
     unified_download_argv_with_subtitles(
         job,
+        UnifiedDownloadOptions {
+            spec,
+            merging,
+            merge_ext,
+            ffmpeg_bin,
+            out,
+            playlist_index,
+            subtitle_language: job.subtitles.as_deref(),
+        },
+    )
+}
+
+/// Attempt-specific inputs for building one unified-download command.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct UnifiedDownloadOptions<'a> {
+    pub(crate) spec: &'a str,
+    pub(crate) merging: bool,
+    pub(crate) merge_ext: &'a str,
+    pub(crate) ffmpeg_bin: &'a Path,
+    pub(crate) out: &'a Path,
+    pub(crate) playlist_index: Option<usize>,
+    pub(crate) subtitle_language: Option<&'a str>,
+}
+
+/// Build a unified-download argv with a subtitle language resolved for this attempt.
+pub(crate) fn unified_download_argv_with_subtitles(
+    job: &VideoJob,
+    options: UnifiedDownloadOptions<'_>,
+) -> Vec<String> {
+    let UnifiedDownloadOptions {
         spec,
         merging,
         merge_ext,
         ffmpeg_bin,
         out,
         playlist_index,
-        job.subtitles.as_deref(),
-    )
-}
-
-/// Build a unified-download argv with a subtitle language resolved for this attempt.
-#[expect(
-    clippy::too_many_arguments,
-    reason = "the subtitle language is resolved per attempt while all other inputs remain borrowed from VideoJob"
-)]
-pub(crate) fn unified_download_argv_with_subtitles(
-    job: &VideoJob,
-    spec: &str,
-    merging: bool,
-    merge_ext: &str,
-    ffmpeg_bin: &Path,
-    out: &Path,
-    playlist_index: Option<usize>,
-    subtitle_language: Option<&str>,
-) -> Vec<String> {
+        subtitle_language,
+    } = options;
     let mut args = vec!["--ignore-config".to_string()];
     args.extend(playlist_scope_args(playlist_index));
     args.extend([
@@ -1113,13 +1126,15 @@ mod attempt_subtitle_language_tests {
 
         let unified = unified_download_argv_with_subtitles(
             &job,
-            "bv*+ba/b",
-            true,
-            "mp4",
-            ffmpeg,
-            output,
-            None,
-            Some("en"),
+            UnifiedDownloadOptions {
+                spec: "bv*+ba/b",
+                merging: true,
+                merge_ext: "mp4",
+                ffmpeg_bin: ffmpeg,
+                out: output,
+                playlist_index: None,
+                subtitle_language: Some("en"),
+            },
         );
         assert!(has_subtitle_language(&unified, "en"));
         assert!(!has_subtitle_language(&unified, "fr"));

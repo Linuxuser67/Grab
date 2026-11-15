@@ -5,8 +5,8 @@ use crate::attempt_gate::AttemptGate;
 use crate::file_names::is_url_derived_name;
 use crate::runtime::lock_recover;
 use crate::video_argv::{
-    LiveCaptureStart, PlaylistRunSelection, VideoJob, apply_proxy_env, container_truth_name,
-    dash_merge_argv, fallback_to_live_edge, hls_download_argv_with_subtitles,
+    LiveCaptureStart, PlaylistRunSelection, UnifiedDownloadOptions, VideoJob, apply_proxy_env,
+    container_truth_name, dash_merge_argv, fallback_to_live_edge, hls_download_argv_with_subtitles,
     live_capture_argv_with_mode, live_from_start_unsupported, live_remux_argv, merge_output_ext,
     playlist_download_argv, playlist_scope_args, proxy_cli_args,
     unified_download_argv_with_subtitles, unified_format_spec, unified_output_template,
@@ -1479,13 +1479,15 @@ pub(crate) async fn run_unified_ytdlp(
         };
     let mut argv = unified_download_argv_with_subtitles(
         job,
-        spec,
-        merging,
-        &merge_ext,
-        ffmpeg_bin,
-        &out_template,
-        playlist_index,
-        subtitle_language.as_deref(),
+        UnifiedDownloadOptions {
+            spec,
+            merging,
+            merge_ext: &merge_ext,
+            ffmpeg_bin,
+            out: &out_template,
+            playlist_index,
+            subtitle_language: subtitle_language.as_deref(),
+        },
     );
     // Skip re-extraction: the probe's info JSON is reused via --load-info-json.
     // The JSON is only loaded when the Video was built from it (see the

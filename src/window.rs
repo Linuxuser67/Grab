@@ -411,9 +411,8 @@ pub fn build_window(
     queued_section.set_widget_name("download-section-queued");
     downloaded_section.set_widget_name("download-section-downloaded");
     let content = gtk4::Box::new(gtk4::Orientation::Vertical, 12);
-    // The list's top margin is the gap under the header bar. The inline add
-    // card relies on it too: it has no bottom margin of its own.
-    content.set_margin_top(12);
+    // No top margin: the download list starts directly below the header bar,
+    // matching the inline add card that already sits flush against it.
     content.set_margin_bottom(12);
     content.set_margin_start(12);
     content.set_margin_end(12);

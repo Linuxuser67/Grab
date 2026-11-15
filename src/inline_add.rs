@@ -4321,7 +4321,7 @@ pub fn build_add_card(manager: Rc<DownloadManager>) -> AddCard {
     card.set_margin_end(12);
     // No .card class: each AdwPreferencesGroup below renders as its own
     // flush card (rows touch the group's edge). Horizontal margins align
-    // the form with the main list; the list's top margin supplies the gap.
+    // the form with the main list.
 
     // No in-card title: the card only opens from explicit "New Download"
     // affordances (+, Ctrl+N, the empty-state pill), so restating it is

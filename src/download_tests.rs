@@ -236,6 +236,74 @@ fn stored_row(url: &str, dest_dir: &str, filename: &str, status: DownloadStatus)
 }
 
 #[test]
+fn gallery_worker_exit_without_result_fails_current_owner_and_releases_slot() {
+    let _locks = test_locks();
+    let manager = DownloadManager::new(
+        gtk4::gio::ListStore::new::<DownloadItem>(),
+        crate::settings::AppSettings::new(),
+    );
+    // Keep this test isolated from the persistent queue file.
+    manager.restore_state.set(super::RestoreState::Pending);
+
+    let item = DownloadItem::new(
+        990_001,
+        "https://example.test/gallery",
+        "Gallery",
+        "/tmp/grab-gallery-worker-exit",
+    );
+    item.set_is_gallery(true);
+    item.set_status(DownloadStatus::Downloading);
+    manager.store().append(&item);
+
+    let id = item.id();
+    let generation = 7;
+    manager.epoch.borrow_mut().insert(id, generation);
+    manager
+        .running
+        .borrow_mut()
+        .insert(id, crate::runtime::tokio_rt().spawn(async {}));
+
+    manager.finish_gallery_worker_without_result(&item, id, generation);
+
+    assert_eq!(item.status(), DownloadStatus::Failed);
+    assert_eq!(item.detail(), gettext("Download interrupted"));
+    assert_eq!(item.error_log(), gettext("Download interrupted"));
+    assert!(
+        !manager.running.borrow().contains_key(&id),
+        "the completed worker must release its concurrency slot"
+    );
+}
+
+#[test]
+fn stale_or_draining_gallery_worker_exit_does_not_mutate_the_owner() {
+    let _locks = test_locks();
+    let manager = DownloadManager::new(
+        gtk4::gio::ListStore::new::<DownloadItem>(),
+        crate::settings::AppSettings::new(),
+    );
+    manager.restore_state.set(super::RestoreState::Pending);
+
+    let item = DownloadItem::new(
+        990_002,
+        "https://example.test/gallery",
+        "Gallery",
+        "/tmp/grab-gallery-worker-exit",
+    );
+    item.set_is_gallery(true);
+    item.set_status(DownloadStatus::Downloading);
+    manager.store().append(&item);
+    let id = item.id();
+    manager.epoch.borrow_mut().insert(id, 8);
+
+    manager.finish_gallery_worker_without_result(&item, id, 7);
+    assert_eq!(item.status(), DownloadStatus::Downloading);
+
+    manager.draining.set(true);
+    manager.finish_gallery_worker_without_result(&item, id, 8);
+    assert_eq!(item.status(), DownloadStatus::Downloading);
+}
+
+#[test]
 fn playlist_group_metadata_restores_with_each_child() {
     let (_queue_lock, _main_loop_lock) = test_locks();
     let queue_file = test_queue_file("playlist-group-restore");

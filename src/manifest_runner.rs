@@ -4346,6 +4346,17 @@ fn add_hls_staging_options(command: &mut tokio::process::Command) {
     ]);
 }
 
+fn add_hls_incremental_reload_options(command: &mut tokio::process::Command) {
+    // The local playlist intentionally remains open until Grab has fetched every
+    // segment. Do not let FFmpeg's default reload counters mistake a slow fetch
+    // for the end of the presentation.
+    command
+        .arg("-max_reload")
+        .arg(i32::MAX.to_string())
+        .arg("-m3u8_hold_counters")
+        .arg(i32::MAX.to_string());
+}
+
 #[derive(Clone, Copy, Default)]
 struct SubtitleOutput<'a> {
     input: Option<&'a Path>,
@@ -4524,6 +4535,9 @@ async fn run_ffmpeg_with_offsets_timeout(
     let mut command = tokio::process::Command::new(ffmpeg);
     if is_hls_playlist_input(video_input.path) {
         add_hls_staging_options(&mut command);
+        if overwrite_output {
+            add_hls_incremental_reload_options(&mut command);
+        }
     }
     command
         .arg("-hide_banner")

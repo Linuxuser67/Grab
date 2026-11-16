@@ -548,6 +548,15 @@ pub struct DownloadManager {
     /// Tests write synchronously and never use the channel.
     #[cfg_attr(test, allow(dead_code))]
     persist_tx: RefCell<Option<tokio::sync::watch::Sender<Option<StoredQueue>>>>,
+    /// Requests serialized with ordinary snapshots; acknowledgements mark durable writes.
+    #[cfg_attr(test, allow(dead_code))]
+    persist_flush_tx: RefCell<
+        Option<
+            tokio::sync::mpsc::UnboundedSender<
+                tokio::sync::oneshot::Sender<std::io::Result<()>>,
+            >,
+        >,
+    >,
     /// Handle for the queue persist task; awaited on shutdown after the final
     /// state is sent. Tests never spawn it.
     #[cfg_attr(test, allow(dead_code))]
@@ -829,17 +838,18 @@ impl DownloadManager {
         // `changed()` delivers the final value before the closed-channel Err,
         // so the last persist completes before shutdown awaits the task.
         #[cfg(not(test))]
-        let (persist_tx, persist_task) = {
+        let (persist_tx, persist_flush_tx, persist_task) = {
             let (tx, rx) = tokio::sync::watch::channel(None::<StoredQueue>);
-            let task = tokio_rt().spawn(Self::persist_task_loop(rx, |queue: StoredQueue| {
-                if let Some(text) = Self::serialize_snapshot(queue) {
-                    Self::write_queue_file(&text);
-                }
-            }));
-            (Some(tx), Some(task))
+            let (flush_tx, flush_rx) = tokio::sync::mpsc::unbounded_channel();
+            let task = tokio_rt().spawn(Self::persist_task_loop(
+                rx,
+                flush_rx,
+                Self::write_queue_snapshot,
+            ));
+            (Some(tx), Some(flush_tx), Some(task))
         };
         #[cfg(test)]
-        let (persist_tx, persist_task) = (None, None);
+        let (persist_tx, persist_flush_tx, persist_task) = (None, None, None);
 
         let (restore_ready, _) = tokio::sync::watch::channel(false);
         let this = Rc::new(Self {
@@ -892,6 +902,7 @@ impl DownloadManager {
             restore_task: RefCell::new(None),
             restore_ready,
             persist_tx: RefCell::new(persist_tx),
+            persist_flush_tx: RefCell::new(persist_flush_tx),
             persist_task: RefCell::new(persist_task),
         });
         // Publish the Weak for `wake_queue()`'s `Send` closure (see `MANAGER_WEAK`).
@@ -3896,6 +3907,7 @@ impl DownloadManager {
                 );
             }
             drop(self.persist_tx.borrow_mut().take());
+            drop(self.persist_flush_tx.borrow_mut().take());
             let persist_task = { self.persist_task.borrow_mut().take() };
             if let Some(task) = persist_task {
                 let (done_tx, done_rx) = tokio::sync::oneshot::channel();

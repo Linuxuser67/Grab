@@ -1083,8 +1083,8 @@ fn selected_manifest_output_container(
 }
 
 /// Keep the preview filename synchronized with the selected manifest variant.
-/// HLS master playlists intentionally have no child-container hint during
-/// preview, so they retain the same Matroska default used by enqueue.
+/// HLS masters use known MP4-compatible CODECS metadata; missing or unknown
+/// codec declarations retain the Matroska default without fetching child playlists.
 fn refresh_manifest_filename(step: &VideoStep) {
     let source_url = step
         .manifest

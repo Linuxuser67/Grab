@@ -2157,6 +2157,7 @@ pub(crate) async fn run_manifest_download(
             tracks,
             ffmpeg,
             downloaded,
+            connections: job.connections,
             client: &client,
         })
         .await;
@@ -2325,6 +2326,7 @@ struct ManifestIncrementalHlsVod<'a> {
     tracks: Tracks,
     ffmpeg: PathBuf,
     downloaded: Arc<AtomicU64>,
+    connections: usize,
     client: &'a reqwest::Client,
 }
 
@@ -2355,6 +2357,7 @@ async fn run_incremental_aes128_hls_vod(
         tracks,
         ffmpeg,
         downloaded,
+        connections,
         client,
     } = context;
     tx.send(EngineMsg::Phase("Downloading and decrypting HLS VOD…".to_string()))
@@ -2418,6 +2421,7 @@ async fn run_incremental_aes128_hls_vod(
             &fetch_tx,
             &fetch_downloaded,
             &mut fetch_abort,
+            connections,
             first_segment_tx,
             complete_tx,
         )

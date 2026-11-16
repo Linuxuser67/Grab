@@ -169,7 +169,8 @@ impl DownloadManager {
                 changed = rx.changed(), if watch_open => {
                     match changed {
                         Ok(()) => {
-                            if let Some(value) = rx.borrow_and_update().clone() {
+                            let snapshot = rx.borrow_and_update().clone();
+                            if let Some(value) = snapshot {
                                 let writer = write.clone();
                                 match tokio::task::spawn_blocking(move || writer(value)).await {
                                     Ok(Ok(())) => {}
@@ -190,7 +191,8 @@ impl DownloadManager {
                 request = flush_rx.recv(), if flush_open => {
                     match request {
                         Some(ack) => {
-                            let result = match rx.borrow_and_update().clone() {
+                            let snapshot = rx.borrow_and_update().clone();
+                            let result = match snapshot {
                                 Some(value) => {
                                     let writer = write.clone();
                                     match tokio::task::spawn_blocking(move || writer(value)).await {

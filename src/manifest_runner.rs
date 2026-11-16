@@ -5217,7 +5217,7 @@ mod tests {
                 None,
                 InputTimestampPolicy::Normalize,
                 SubtitleOutput::default(),
-                FfmpegOutput::StagedPath(output.clone()),
+                &output,
                 &mut abort,
             ),
         )

@@ -1402,10 +1402,7 @@ fn validate_hls_closed_caption_groups(
     {
         if !matches!(
             alternative.instream_id.as_ref(),
-            Some(
-                m3u8_rs::InstreamId::CC(1..=4)
-                    | m3u8_rs::InstreamId::Service(1..=63)
-            )
+            Some(m3u8_rs::InstreamId::CC(1..=4) | m3u8_rs::InstreamId::Service(1..=63))
         ) {
             return Err(ManifestError::UnsupportedPlaylist);
         }

@@ -2724,7 +2724,7 @@ async fn run_incremental_aes128_hls_vod(
                     let _ = finish_sender.send(crate::video::StopIntent::Finish);
                     remux_complete_aes128_vod_part(ManifestCompleteAes128Remux {
                         ffmpeg: &ffmpeg,
-                        playlist: &video_dir.join("local.m3u8"),
+                        playlist: &playlist_path,
                         staging,
                         destination: &job.dest,
                         item_id: job.item_id,
@@ -2736,7 +2736,7 @@ async fn run_incremental_aes128_hls_vod(
                 } else {
                     remux_complete_aes128_vod_part(ManifestCompleteAes128Remux {
                         ffmpeg: &ffmpeg,
-                        playlist: &video_dir.join("local.m3u8"),
+                        playlist: &playlist_path,
                         staging,
                         destination: &job.dest,
                         item_id: job.item_id,

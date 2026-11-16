@@ -91,7 +91,7 @@ fn hls_mp4_codec_kind(codec: &str) -> Option<HlsMp4CodecKind> {
         return Some(HlsMp4CodecKind::Audio);
     }
 
-    if ["wvtt", "stpp"]
+    if ["stpp"]
         .iter()
         .any(|supported| sample_entry.eq_ignore_ascii_case(supported))
     {
@@ -1346,14 +1346,14 @@ video/1080p.m3u8
                 "{codec}"
             );
         }
-        for codec in ["wvtt", "stpp.ttml.im1t"] {
+        for codec in ["stpp.ttml.im1t"] {
             assert_eq!(
                 hls_mp4_codec_kind(codec),
                 Some(HlsMp4CodecKind::Subtitle),
                 "{codec}"
             );
         }
-        for codec in ["vp8", "vorbis", "theora", "mp4a", ""] {
+        for codec in ["vp8", "vorbis", "theora", "mp4a", "wvtt", ""] {
             assert_eq!(hls_mp4_codec_kind(codec), None, "{codec}");
         }
     }

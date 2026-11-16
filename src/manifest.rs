@@ -1375,13 +1375,15 @@ fn validate_hls_rendition_groups(
             if alternative.autoselect {
                 // AUTOSELECT renditions in one group need distinct language,
                 // associated-language, forced, characteristics, and caption-service identities.
-                let caption_service = alternative.instream_id.as_ref().map(|instream_id| {
-                    match instream_id {
-                        m3u8_rs::InstreamId::CC(channel) => format!("CC{channel}"),
-                        m3u8_rs::InstreamId::Service(service) => format!("SERVICE{service}"),
-                        m3u8_rs::InstreamId::Other(value) => format!("OTHER:{value}"),
-                    }
-                });
+                let caption_service =
+                    alternative
+                        .instream_id
+                        .as_ref()
+                        .map(|instream_id| match instream_id {
+                            m3u8_rs::InstreamId::CC(channel) => format!("CC{channel}"),
+                            m3u8_rs::InstreamId::Service(service) => format!("SERVICE{service}"),
+                            m3u8_rs::InstreamId::Other(value) => format!("OTHER:{value}"),
+                        });
                 let signature = (
                     group_kind,
                     group,

@@ -2357,6 +2357,8 @@ async fn run_incremental_aes128_hls_vod(
         downloaded,
         client,
     } = context;
+    tx.send(EngineMsg::Phase("Downloading and decrypting HLS VOD…".to_string()))
+        .ok();
     let Tracks::Hls {
         video,
         audio: None,

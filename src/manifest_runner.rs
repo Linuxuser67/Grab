@@ -5609,6 +5609,126 @@ segment-2.ts
     }
 
     #[tokio::test]
+    async fn encrypted_hls_vod_publishes_growing_playlist_prefixes() {
+        use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+
+        let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0))
+            .await
+            .expect("bind encrypted HLS server");
+        let address = listener.local_addr().expect("encrypted HLS server address");
+        let key = vec![0x42; 16];
+        let first = valid_transport_stream(3, 0);
+        let second = valid_transport_stream(3, 3);
+        let key_response = key.clone();
+        let first_response = first.clone();
+        let second_response = second.clone();
+        let (release_second_tx, release_second_rx) = tokio::sync::oneshot::channel();
+        let server = tokio::spawn(async move {
+            for _ in 0..3 {
+                let (mut socket, _) = listener.accept().await.expect("accept encrypted HLS request");
+                let mut request = [0_u8; 1024];
+                let count = socket.read(&mut request).await.expect("read encrypted HLS request");
+                let request = String::from_utf8_lossy(&request[..count]);
+                let path = request.split_ascii_whitespace().nth(1).unwrap_or("/");
+                let payload = match path {
+                    "/key.bin" => &key_response,
+                    "/segment-1.ts" => &first_response,
+                    "/segment-2.ts" => {
+                        release_second_rx.await.expect("release second HLS segment");
+                        &second_response
+                    }
+                    _ => panic!("unexpected encrypted HLS resource path: {path}"),
+                };
+                let header = format!(
+                    "HTTP/1.1 200 OK\\r\\nContent-Length: {}\\r\\nConnection: close\\r\\n\\r\\n",
+                    payload.len()
+                );
+                socket.write_all(header.as_bytes()).await.expect("write encrypted HLS header");
+                socket.write_all(payload).await.expect("write encrypted HLS body");
+            }
+        });
+
+        let playlist = br#"#EXTM3U
+#EXT-X-VERSION:3
+#EXT-X-PLAYLIST-TYPE:VOD
+#EXT-X-TARGETDURATION:4
+#EXT-X-KEY:METHOD=AES-128,URI="key.bin",IV=0x00000000000000000000000000000001
+#EXTINF:4,
+segment-1.ts
+#EXTINF:4,
+segment-2.ts
+#EXT-X-ENDLIST
+"#;
+        let mut plan = crate::manifest::plan_hls_media_playlist(
+            "https://cdn.example.test/playlist.m3u8",
+            playlist,
+        )
+        .expect("plan encrypted HLS VOD playlist");
+        let mut segment_index = 0usize;
+        for resource in &mut plan.resources {
+            let path = match resource.kind {
+                crate::manifest::HlsResourceKind::Key => "/key.bin".to_string(),
+                crate::manifest::HlsResourceKind::Segment => {
+                    segment_index += 1;
+                    format!("/segment-{segment_index}.ts")
+                }
+                _ => panic!("unexpected resource in AES-128 MPEG-TS fixture"),
+            };
+            resource.url = url::Url::parse(&format!("http://{address}{path}"))
+                .expect("set local encrypted HLS resource URL");
+        }
+        assert!(plan.is_incremental_aes128_mpegts_vod_candidate());
+
+        let client = reqwest::Client::builder()
+            .no_proxy()
+            .build()
+            .expect("build direct encrypted HLS client");
+        let directory = tempfile::tempdir().expect("create encrypted HLS staging directory");
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+        let downloaded = Arc::new(AtomicU64::new(0));
+        let (_stop_tx, mut abort) = tokio::sync::oneshot::channel();
+        let (first_ready_tx, first_ready_rx) = tokio::sync::oneshot::channel();
+        let (complete_tx, complete_rx) = tokio::sync::oneshot::channel();
+        let fetch_client = client.clone();
+        let fetch_plan = plan.clone();
+        let fetch_directory = directory.path().to_path_buf();
+        let fetch_tx = tx.clone();
+        let fetch_downloaded = Arc::clone(&downloaded);
+        let fetch_task = tokio::spawn(async move {
+            fetch_hls_resources_incrementally(
+                &fetch_client,
+                &fetch_plan,
+                &fetch_directory,
+                &fetch_tx,
+                &fetch_downloaded,
+                &mut abort,
+                first_ready_tx,
+                complete_tx,
+            )
+            .await
+        });
+
+        first_ready_rx.await.expect("first growing playlist snapshot");
+        let first_snapshot = tokio::fs::read_to_string(directory.path().join("local.m3u8"))
+            .await
+            .expect("read first growing HLS playlist snapshot");
+        assert_eq!(first_snapshot.matches("#EXTINF:").count(), 1);
+        assert!(!first_snapshot.contains("#EXT-X-ENDLIST"));
+
+        release_second_tx.send(()).expect("release the final HLS segment");
+        complete_rx.await.expect("complete HLS playlist snapshot");
+        assert!(fetch_task.await.expect("join incremental HLS fetcher").expect("fetch encrypted HLS resources"));
+        server.await.expect("encrypted HLS server task");
+
+        let final_snapshot = tokio::fs::read_to_string(directory.path().join("local.m3u8"))
+            .await
+            .expect("read complete HLS playlist snapshot");
+        assert_eq!(final_snapshot.matches("#EXTINF:").count(), 2);
+        assert!(final_snapshot.contains("#EXT-X-ENDLIST"));
+        assert_eq!(downloaded.load(Ordering::Relaxed), (key.len() + first.len() + second.len()) as u64);
+    }
+
+    #[tokio::test]
     async fn static_hls_fmp4_fragments_grow_the_owned_destination_part_in_order() {
         use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
 

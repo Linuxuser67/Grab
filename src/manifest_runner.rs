@@ -3603,7 +3603,8 @@ async fn fetch_hls_resources_incrementally(
             crate::video::StopIntent::Pause | crate::video::StopIntent::Discard
         )
     }) {
-        tx.send(progress_message(downloaded.load(Ordering::Relaxed))).ok();
+        tx.send(progress_message(downloaded.load(Ordering::Relaxed)))
+            .ok();
         return Ok(false);
     }
 

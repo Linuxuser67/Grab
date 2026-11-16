@@ -6443,7 +6443,7 @@ segment-2.ts
                 },
                 ffmpeg: task_ffmpeg,
                 downloaded: task_downloaded,
-                connections: 4,
+                connections: 1,
                 client: &task_client,
             })
             .await

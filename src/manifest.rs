@@ -578,8 +578,8 @@ impl HlsPlan {
 
     /// Serialize only the committed segment prefix for an incremental local HLS input.
     ///
-    /// A growing snapshot deliberately omits `EXT-X-ENDLIST`, allowing FFmpeg to
-    /// reload the local playlist after it consumes the currently available segments.
+    /// A growing snapshot omits both `EXT-X-PLAYLIST-TYPE:VOD` and `EXT-X-ENDLIST`,
+    /// allowing FFmpeg to reload the local playlist after it consumes available segments.
     /// A complete snapshot is accepted only when it includes every segment in the local plan.
     /// Callers should publish bounded batches rather than reserialize the full playlist
     /// after every segment; each result is a complete snapshot suitable for atomic replace.
@@ -602,6 +602,9 @@ impl HlsPlan {
         let mut playlist = self.local_playlist.clone();
         playlist.segments.truncate(segment_count);
         playlist.end_list = finality == HlsPlaylistFinality::Complete;
+        if finality == HlsPlaylistFinality::Growing {
+            playlist.playlist_type = None;
+        }
 
         let mut output = Vec::new();
         playlist
@@ -3780,6 +3783,7 @@ two.ts
         assert_eq!(parsed.segments.len(), 1);
         assert!(parsed.segments[0].uri.starts_with("segment-"));
         assert!(parsed.segments[0].key.is_some());
+        assert!(parsed.playlist_type.is_none());
         assert!(!parsed.end_list);
 
         let complete = plan

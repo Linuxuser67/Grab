@@ -110,16 +110,19 @@ fn hls_variant_supports_mp4(variant: &HlsVariant) -> bool {
 
     let mut has_video = false;
     let mut has_audio = false;
+    let mut has_subtitle = false;
     for codec in codecs.split(',') {
         match hls_mp4_codec_kind(codec) {
             Some(HlsMp4CodecKind::Video) => has_video = true,
             Some(HlsMp4CodecKind::Audio) => has_audio = true,
-            Some(HlsMp4CodecKind::Subtitle) => {}
+            Some(HlsMp4CodecKind::Subtitle) => has_subtitle = true,
             None => return false,
         }
     }
 
-    has_video && (variant.audio_group.is_none() || has_audio)
+    has_video
+        && (variant.audio_group.is_none() || has_audio)
+        && (variant.subtitles_group.is_none() || has_subtitle)
 }
 
 /// Select the closest representation to the configured video-quality preference.
@@ -1274,6 +1277,31 @@ video/1080p.m3u8
         );
     }
 
+    #[test]
+    fn hls_master_requires_supported_codec_metadata_for_referenced_subtitle_groups() {
+        let compatible = br##"#EXTM3U
+#EXT-X-MEDIA:TYPE=SUBTITLES,GROUP-ID="subs",NAME="English",LANGUAGE="en",DEFAULT=YES,AUTOSELECT=YES,URI="subs/en.m3u8"
+#EXT-X-STREAM-INF:BANDWIDTH=2000000,SUBTITLES="subs",CODECS="avc1.640028,stpp.ttml.im1t"
+video/1080p.m3u8
+"##;
+        let missing = br##"#EXTM3U
+#EXT-X-MEDIA:TYPE=SUBTITLES,GROUP-ID="subs",NAME="English",LANGUAGE="en",DEFAULT=YES,AUTOSELECT=YES,URI="subs/en.m3u8"
+#EXT-X-STREAM-INF:BANDWIDTH=2000000,SUBTITLES="subs",CODECS="avc1.640028"
+video/1080p.m3u8
+"##;
+        let unsupported = br##"#EXTM3U
+#EXT-X-MEDIA:TYPE=SUBTITLES,GROUP-ID="subs",NAME="English",LANGUAGE="en",DEFAULT=YES,AUTOSELECT=YES,URI="subs/en.m3u8"
+#EXT-X-STREAM-INF:BANDWIDTH=2000000,SUBTITLES="subs",CODECS="avc1.640028,wvtt"
+video/1080p.m3u8
+"##;
+
+        assert_eq!(
+            selected_hls_master_output_container(compatible, 0),
+            Some(ManifestContainer::Mp4)
+        );
+        assert_eq!(selected_hls_master_output_container(missing, 0), None);
+        assert_eq!(selected_hls_master_output_container(unsupported, 0), None);
+    }
     #[test]
     fn hls_master_uses_the_selected_variant_codec_metadata() {
         let body = br##"#EXTM3U

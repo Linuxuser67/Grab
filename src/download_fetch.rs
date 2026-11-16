@@ -277,7 +277,7 @@ async fn single_loop(
             }
             Err(failure) => {
                 let message = match failure {
-                    // A changed object or failed durability check makes the partial unsafe to resume.
+                    // A changed object invalidates the partial and any bitmap describing it.
                     AttemptFail::Changed(e) => {
                         ctx.tx.send(EngineMsg::FailedVersion(e)).ok();
                         return;

@@ -3057,6 +3057,136 @@ pub(super) async fn write_staged_file_atomic(
     result
 }
 
+async fn fetch_resource_with_stop_intent(
+    client: &reqwest::Client,
+    resource: Resource,
+    directory: &Path,
+    tx: &tokio::sync::mpsc::UnboundedSender<EngineMsg>,
+    downloaded: &Arc<AtomicU64>,
+    abort: &mut tokio::sync::oneshot::Receiver<crate::video::StopIntent>,
+) -> Result<bool, ManifestRunError> {
+    let fetch = fetch_resource(client, resource, directory, tx, downloaded.as_ref());
+    tokio::pin!(fetch);
+    let mut stop_pending = true;
+    loop {
+        tokio::select! {
+            biased;
+            stop = &mut *abort, if stop_pending => {
+                stop_pending = false;
+                match crate::video::stop_intent_or_pause(stop) {
+                    crate::video::StopIntent::Finish => {}
+                    crate::video::StopIntent::Pause | crate::video::StopIntent::Discard => {
+                        tx.send(progress_message(downloaded.load(Ordering::Relaxed))).ok();
+                        return Ok(false);
+                    }
+                }
+            }
+            result = &mut fetch => {
+                result?;
+                return Ok(true);
+            }
+        }
+    }
+}
+
+async fn fetch_hls_resources_incrementally(
+    client: &reqwest::Client,
+    plan: &HlsPlan,
+    directory: &Path,
+    tx: &tokio::sync::mpsc::UnboundedSender<EngineMsg>,
+    downloaded: &Arc<AtomicU64>,
+    abort: &mut tokio::sync::oneshot::Receiver<crate::video::StopIntent>,
+    first_segment_ready: tokio::sync::oneshot::Sender<()>,
+    complete_ready: tokio::sync::oneshot::Sender<()>,
+) -> Result<bool, ManifestRunError> {
+    const MAX_PLAYLIST_SNAPSHOTS: usize = 512;
+
+    let resources = hls_resources(plan);
+    if resources.len() != plan.resources.len() {
+        return Err(ManifestRunError::Failed(
+            "The localized HLS resource plan changed while preparing incremental playback".to_string(),
+        ));
+    }
+    let total_segments = plan.segment_count();
+    if total_segments == 0 {
+        return Err(ManifestRunError::Failed(
+            "The selected HLS VOD playlist contains no media segments".to_string(),
+        ));
+    }
+    let batch_size = total_segments.div_ceil(MAX_PLAYLIST_SNAPSHOTS).max(1);
+    let mut completed_segments = 0usize;
+    let mut first_segment_ready = Some(first_segment_ready);
+
+    for (index, resource) in resources.into_iter().enumerate() {
+        if !fetch_resource_with_stop(
+            client,
+            resource,
+            directory,
+            tx,
+            downloaded,
+            abort,
+        )
+        .await?
+        {
+            return Ok(false);
+        }
+
+        if plan.resources[index].kind != crate::manifest::HlsResourceKind::Segment {
+            continue;
+        }
+        completed_segments += 1;
+        if completed_segments == 1 || completed_segments % batch_size == 0 {
+            let bytes = plan
+                .local_playlist_prefix_bytes(
+                    completed_segments,
+                    crate::manifest::HlsPlaylistFinality::Growing,
+                )
+                .map_err(|error| ManifestRunError::Failed(error.to_string()))?;
+            write_staged_file_atomic(
+                directory,
+                "local.m3u8.next",
+                "local.m3u8",
+                &bytes,
+                StagedPublish::Replace,
+            )
+            .await
+            .map_err(ManifestRunError::Failed)?;
+            if let Some(sender) = first_segment_ready.take() {
+                let _ = sender.send(());
+            }
+        }
+    }
+
+    if completed_segments != total_segments {
+        return Err(ManifestRunError::Failed(
+            "The incremental HLS transfer did not commit every planned media segment".to_string(),
+        ));
+    }
+    if pending_manifest_stop_intent(abort).is_some_and(|intent| {
+        matches!(intent, crate::video::StopIntent::Pause | crate::video::StopIntent::Discard)
+    }) {
+        return Ok(false);
+    }
+
+    let bytes = plan
+        .local_playlist_prefix_bytes(
+            total_segments,
+            crate::manifest::HlsPlaylistFinality::Complete,
+        )
+        .map_err(|error| ManifestRunError::Failed(error.to_string()))?;
+    write_staged_file_atomic(
+        directory,
+        "local.m3u8.next",
+        "local.m3u8",
+        &bytes,
+        StagedPublish::Replace,
+    )
+    .await
+    .map_err(ManifestRunError::Failed)?;
+    let _ = complete_ready.send(());
+    Ok(true)
+}
+
 async fn write_playlist(directory: &Path, plan: &HlsPlan) -> Result<(), String> {
     let bytes = plan
         .local_playlist_prefix_bytes(

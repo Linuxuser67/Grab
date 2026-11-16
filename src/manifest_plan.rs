@@ -55,31 +55,58 @@ pub(crate) fn dash_output_container(mime_type: Option<&str>) -> Option<ManifestC
 
 /// Codec classes that can be muxed into an ISO BMFF/MP4 output.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum HlsMp4CodecKind { Video, Audio, Subtitle }
+enum HlsMp4CodecKind {
+    Video,
+    Audio,
+    Subtitle,
+}
 
 /// Classify only codec identifiers with an established MP4 sample entry.
 /// Unknown identifiers deliberately retain the conservative Matroska default.
 fn hls_mp4_codec_kind(codec: &str) -> Option<HlsMp4CodecKind> {
     let codec = codec.trim();
-    if codec.is_empty() { return None; }
+    if codec.is_empty() {
+        return None;
+    }
+
     let (sample_entry, parameters) = codec.split_once('.').unwrap_or((codec, ""));
     let has_parameters = !parameters.is_empty();
+
     if has_parameters
-        && ["avc1", "avc3", "hvc1", "hev1", "av01", "vp09", "mp4v"]
-            .iter().any(|supported| sample_entry.eq_ignore_ascii_case(supported))
-    { return Some(HlsMp4CodecKind::Video); }
+        && [
+            "avc1", "avc3", "hvc1", "hev1", "av01", "vp09", "mp4v",
+        ]
+        .iter()
+        .any(|supported| sample_entry.eq_ignore_ascii_case(supported))
+    {
+        return Some(HlsMp4CodecKind::Video);
+    }
+
     if (sample_entry.eq_ignore_ascii_case("mp4a") && has_parameters)
-        || ["ac-3", "ec-3"].iter().any(|supported| codec.eq_ignore_ascii_case(supported))
-    { return Some(HlsMp4CodecKind::Audio); }
-    if ["wvtt", "stpp"].iter().any(|supported| sample_entry.eq_ignore_ascii_case(supported))
-    { return Some(HlsMp4CodecKind::Subtitle); }
+        || ["ac-3", "ec-3"]
+            .iter()
+            .any(|supported| codec.eq_ignore_ascii_case(supported))
+    {
+        return Some(HlsMp4CodecKind::Audio);
+    }
+
+    if ["wvtt", "stpp"]
+        .iter()
+        .any(|supported| sample_entry.eq_ignore_ascii_case(supported))
+    {
+        return Some(HlsMp4CodecKind::Subtitle);
+    }
+
     None
 }
 
 /// Require every advertised codec to be a known MP4 sample-entry family.
 /// A referenced separate audio group must declare an audio codec as well.
 fn hls_variant_supports_mp4(variant: &HlsVariant) -> bool {
-    let Some(codecs) = variant.codecs.as_deref() else { return false; };
+    let Some(codecs) = variant.codecs.as_deref() else {
+        return false;
+    };
+
     let mut has_video = false;
     let mut has_audio = false;
     for codec in codecs.split(',') {
@@ -90,6 +117,7 @@ fn hls_variant_supports_mp4(variant: &HlsVariant) -> bool {
             None => return false,
         }
     }
+
     has_video && (variant.audio_group.is_none() || has_audio)
 }
 /// Select the closest representation to the configured video-quality preference.
@@ -1202,8 +1230,11 @@ mod tests {
             source_url: source_url.to_string(),
             manifest: NativeManifest::HlsMaster(Box::new(master)),
         };
-        lookup.selected_source(&video_key, None, None)
-            .expect("selected HLS variant").output_container
+
+        lookup
+            .selected_source(&video_key, None, None)
+            .expect("selected HLS variant")
+            .output_container
     }
 
     #[test]
@@ -1213,7 +1244,11 @@ mod tests {
 #EXT-X-STREAM-INF:BANDWIDTH=2000000,AUDIO="audio",CODECS="avc1.640028,mp4a.40.2"
 video/1080p.m3u8
 "##;
-        assert_eq!(selected_hls_master_output_container(body), Some(ManifestContainer::Mp4));
+
+        assert_eq!(
+            selected_hls_master_output_container(body),
+            Some(ManifestContainer::Mp4)
+        );
     }
 
     #[test]
@@ -1248,21 +1283,39 @@ video/1080p.m3u8
     #[test]
     fn hls_mp4_codec_classifier_accepts_known_sample_entry_families_only() {
         for codec in [
-            "avc1.640028", "avc3.640028", "hvc1.1.6.L93.B0", "hev1.1.6.L93.B0",
-            "av01.0.08M.08", "vp09.00.10.08", "mp4v.20.9",
+            "avc1.640028",
+            "avc3.640028",
+            "hvc1.1.6.L93.B0",
+            "hev1.1.6.L93.B0",
+            "av01.0.08M.08",
+            "vp09.00.10.08",
+            "mp4v.20.9",
         ] {
-            assert_eq!(hls_mp4_codec_kind(codec), Some(HlsMp4CodecKind::Video), "{codec}");
+            assert_eq!(
+                hls_mp4_codec_kind(codec),
+                Some(HlsMp4CodecKind::Video),
+                "{codec}"
+            );
         }
         for codec in ["mp4a.40.2", "ac-3", "ec-3"] {
-            assert_eq!(hls_mp4_codec_kind(codec), Some(HlsMp4CodecKind::Audio), "{codec}");
+            assert_eq!(
+                hls_mp4_codec_kind(codec),
+                Some(HlsMp4CodecKind::Audio),
+                "{codec}"
+            );
         }
         for codec in ["wvtt", "stpp.ttml.im1t"] {
-            assert_eq!(hls_mp4_codec_kind(codec), Some(HlsMp4CodecKind::Subtitle), "{codec}");
+            assert_eq!(
+                hls_mp4_codec_kind(codec),
+                Some(HlsMp4CodecKind::Subtitle),
+                "{codec}"
+            );
         }
         for codec in ["vp8", "vorbis", "theora", "avc1", "mp4a", ""] {
             assert_eq!(hls_mp4_codec_kind(codec), None, "{codec}");
         }
     }
+
     #[test]
     fn hls_video_rendition_selection_resolves_the_selected_angle() {
         let body = br#"#EXTM3U

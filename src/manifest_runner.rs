@@ -2685,12 +2685,14 @@ async fn run_incremental_aes128_hls_vod(
         }
     };
     if !fetched {
-        return Ok(match stop_intent.unwrap_or(crate::video::StopIntent::Pause) {
-            crate::video::StopIntent::Pause | crate::video::StopIntent::Finish => {
-                ManifestOutcome::Paused
-            }
-            crate::video::StopIntent::Discard => ManifestOutcome::Aborted,
-        });
+        return Ok(
+            match stop_intent.unwrap_or(crate::video::StopIntent::Pause) {
+                crate::video::StopIntent::Pause | crate::video::StopIntent::Finish => {
+                    ManifestOutcome::Paused
+                }
+                crate::video::StopIntent::Discard => ManifestOutcome::Aborted,
+            },
+        );
     }
     if !complete_ready {
         return Err(ManifestRunError::Failed(

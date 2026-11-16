@@ -2429,17 +2429,17 @@ async fn run_incremental_aes128_hls_vod(
     let fetch_downloaded = Arc::clone(&downloaded);
     let mut fetch_abort = fetch_abort_rx;
     let mut fetch_task = tokio::spawn(async move {
-        fetch_hls_resources_incrementally(
-            &fetch_client,
-            &fetch_plan,
-            &fetch_directory,
-            &fetch_tx,
-            &fetch_downloaded,
-            &mut fetch_abort,
+        fetch_hls_resources_incrementally(IncrementalHlsFetch {
+            client: &fetch_client,
+            plan: &fetch_plan,
+            directory: &fetch_directory,
+            tx: &fetch_tx,
+            downloaded: fetch_downloaded.as_ref(),
+            abort: &mut fetch_abort,
             connections,
-            first_segment_tx,
-            complete_tx,
-        )
+            first_segment_ready: first_segment_tx,
+            complete_ready: complete_tx,
+        })
         .await
     });
     let mut fetch_result = None;
@@ -3467,17 +3467,33 @@ pub(super) async fn write_staged_file_atomic(
     result
 }
 
-async fn fetch_hls_resources_incrementally(
-    client: &reqwest::Client,
-    plan: &HlsPlan,
-    directory: &Path,
-    tx: &tokio::sync::mpsc::UnboundedSender<EngineMsg>,
-    downloaded: &Arc<AtomicU64>,
-    abort: &mut tokio::sync::oneshot::Receiver<crate::video::StopIntent>,
+struct IncrementalHlsFetch<'fetch> {
+    client: &'fetch reqwest::Client,
+    plan: &'fetch HlsPlan,
+    directory: &'fetch Path,
+    tx: &'fetch tokio::sync::mpsc::UnboundedSender<EngineMsg>,
+    downloaded: &'fetch AtomicU64,
+    abort: &'fetch mut tokio::sync::oneshot::Receiver<crate::video::StopIntent>,
     connections: usize,
     first_segment_ready: tokio::sync::oneshot::Sender<()>,
     complete_ready: tokio::sync::oneshot::Sender<()>,
+}
+
+async fn fetch_hls_resources_incrementally(
+    context: IncrementalHlsFetch<'_>,
 ) -> Result<bool, ManifestRunError> {
+    let IncrementalHlsFetch {
+        client,
+        plan,
+        directory,
+        tx,
+        downloaded,
+        abort,
+        connections,
+        first_segment_ready,
+        complete_ready,
+    } = context;
+
     /// Cap atomic playlist rewrites while keeping the visible output responsive for long VODs.
     const MAX_PLAYLIST_SNAPSHOTS: usize = 512;
 
@@ -3513,7 +3529,7 @@ async fn fetch_hls_resources_incrementally(
     let result = async {
         let jobs = futures_util::stream::iter(resources.into_iter().enumerate().map(
             |(index, resource)| async move {
-                fetch_resource(client, resource, directory, tx, downloaded.as_ref())
+                fetch_resource(client, resource, directory, tx, downloaded)
                     .await
                     .map(|_| index)
             },
@@ -5797,16 +5813,17 @@ segment-2.ts
         let fetch_tx = tx.clone();
         let fetch_downloaded = Arc::clone(&downloaded);
         let fetch_task = tokio::spawn(async move {
-            fetch_hls_resources_incrementally(
-                &fetch_client,
-                &fetch_plan,
-                &fetch_directory,
-                &fetch_tx,
-                &fetch_downloaded,
-                &mut abort,
-                first_ready_tx,
-                complete_tx,
-            )
+            fetch_hls_resources_incrementally(IncrementalHlsFetch {
+                client: &fetch_client,
+                plan: &fetch_plan,
+                directory: &fetch_directory,
+                tx: &fetch_tx,
+                downloaded: fetch_downloaded.as_ref(),
+                abort: &mut abort,
+                connections: 4,
+                first_segment_ready: first_ready_tx,
+                complete_ready: complete_tx,
+            })
             .await
         });
 
@@ -5846,7 +5863,7 @@ segment-2.ts
 
         let ffmpeg = match resolve_manifest_ffmpeg(&[PathBuf::from("/usr/bin")]) {
             Ok(path) => path,
-            Err(error) if !manifest_ffmpeg_is_required() => {
+            Err(error) if std::env::var_os("GRAB_REQUIRE_FFMPEG_MANIFEST").is_none() => {
                 tracing::debug!(%error, "skipping AES-128 HLS integration test without FFmpeg");
                 return;
             }

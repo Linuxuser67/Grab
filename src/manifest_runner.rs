@@ -5794,7 +5794,7 @@ segment-2.ts
     }
 
     #[tokio::test]
-    async fn ffmpeg_decrypts_aes128_hls_vod_into_an_owned_output_part() {
+    async fn ffmpeg_decrypts_aes128_hls_vod_while_owned_destination_part_grows() {
         use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
 
         let ffmpeg = match resolve_manifest_ffmpeg(&[PathBuf::from("/usr/bin")]) {
@@ -5867,29 +5867,85 @@ segment-2.ts
             .await
             .expect("bind AES-128 fixture server");
         let address = listener.local_addr().expect("AES-128 fixture server address");
-        let base_url = format!("http://{address}/playlist.m3u8");
-        let plan = crate::manifest::plan_hls_media_playlist(&base_url, &playlist)
-            .expect("plan generated AES-128 HLS VOD");
+        let mut plan = crate::manifest::plan_hls_media_playlist(
+            "https://cdn.example.test/playlist.m3u8",
+            &playlist,
+        )
+        .expect("plan generated AES-128 HLS VOD");
         assert!(plan.is_incremental_aes128_mpegts_vod_candidate());
+        assert!(plan.segment_count() >= 2, "fixture must contain multiple segments");
+
+        let mut segment_index = 0usize;
+        let mut final_segment_path = None;
+        for resource in &mut plan.resources {
+            let name = match resource.kind {
+                crate::manifest::HlsResourceKind::Key => "key.bin".to_string(),
+                crate::manifest::HlsResourceKind::Segment => {
+                    segment_index += 1;
+                    format!("segment{segment_index:03}.ts")
+                }
+                _ => panic!("unexpected resource in AES-128 MPEG-TS fixture"),
+            };
+            if resource.kind == crate::manifest::HlsResourceKind::Segment
+                && segment_index == plan.segment_count()
+            {
+                final_segment_path = Some(format!("/{name}"));
+            }
+            resource.url = Url::parse(&format!("http://{address}/{name}"))
+                .expect("set local AES-128 fixture resource URL");
+        }
+        let final_segment_path =
+            final_segment_path.expect("encrypted HLS fixture must have a final segment");
         let request_count = plan.resources.len();
         let fixture_root = fixture.path().to_path_buf();
+        let release_final_segment = Arc::new(tokio::sync::Notify::new());
+        let final_segment_requested = Arc::new(tokio::sync::Notify::new());
+        let server_release = Arc::clone(&release_final_segment);
+        let server_requested = Arc::clone(&final_segment_requested);
+        let server_final_path = final_segment_path.clone();
         let server = tokio::spawn(async move {
+            let mut responses = Vec::with_capacity(request_count);
             for _ in 0..request_count {
-                let (mut socket, _) = listener.accept().await.expect("accept AES-128 resource request");
-                let mut request = [0_u8; 1024];
-                let count = socket.read(&mut request).await.expect("read AES-128 resource request");
-                let request = String::from_utf8_lossy(&request[..count]);
-                let path = request.split_ascii_whitespace().nth(1).unwrap_or("/");
-                let name = path.trim_start_matches('/');
-                let payload = tokio::fs::read(fixture_root.join(name))
+                let (mut socket, _) = listener
+                    .accept()
                     .await
-                    .expect("read requested AES-128 fixture resource");
-                let header = format!(
-                    "HTTP/1.1 200 OK\\r\\nContent-Length: {}\\r\\nConnection: close\\r\\n\\r\\n",
-                    payload.len()
-                );
-                socket.write_all(header.as_bytes()).await.expect("write AES-128 response header");
-                socket.write_all(&payload).await.expect("write AES-128 response body");
+                    .expect("accept AES-128 resource request");
+                let fixture_root = fixture_root.clone();
+                let release = Arc::clone(&server_release);
+                let requested = Arc::clone(&server_requested);
+                let final_path = server_final_path.clone();
+                responses.push(tokio::spawn(async move {
+                    let mut request = [0_u8; 1024];
+                    let count = socket
+                        .read(&mut request)
+                        .await
+                        .expect("read AES-128 resource request");
+                    let request = String::from_utf8_lossy(&request[..count]);
+                    let path = request.split_ascii_whitespace().nth(1).unwrap_or("/");
+                    if path == final_path {
+                        requested.notify_one();
+                        release.notified().await;
+                    }
+                    let name = path.trim_start_matches('/');
+                    let payload = tokio::fs::read(fixture_root.join(name))
+                        .await
+                        .expect("read requested AES-128 fixture resource");
+                    let header = format!(
+                        "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                        payload.len()
+                    );
+                    socket
+                        .write_all(header.as_bytes())
+                        .await
+                        .expect("write AES-128 response header");
+                    socket
+                        .write_all(&payload)
+                        .await
+                        .expect("write AES-128 response body");
+                }));
+            }
+            for response in responses {
+                response.await.expect("join AES-128 response task");
             }
         });
 
@@ -5898,69 +5954,170 @@ segment-2.ts
             .build()
             .expect("build AES-128 fixture client");
         let staging = tempfile::tempdir().expect("create AES-128 HLS staging directory");
+        let destination_dir =
+            tempfile::tempdir().expect("create AES-128 destination directory");
+        let destination = destination_dir.path().join("encrypted-vod.ts");
+        let item_id = 73;
+        crate::manifest_destination::ensure_plan(
+            staging.path(),
+            &destination,
+            item_id,
+            false,
+            false,
+        )
+        .expect("persist destination ownership plan");
+        let part_path = crate::manifest_destination::part_path_async(
+            staging.path().to_path_buf(),
+            destination.clone(),
+            item_id,
+            TrackKind::Video,
+        )
+        .await
+        .expect("resolve owned destination part");
+        let output_file = crate::manifest_destination::open_owned_part_async(
+            staging.path().to_path_buf(),
+            destination.clone(),
+            item_id,
+            TrackKind::Video,
+        )
+        .await
+        .expect("create owned destination part");
+        assert_eq!(
+            tokio::fs::metadata(&part_path)
+                .await
+                .expect("stat newly owned destination part")
+                .len(),
+            0
+        );
+
         let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
         let downloaded = Arc::new(AtomicU64::new(0));
-        let (_stop_sender, mut abort) = tokio::sync::oneshot::channel();
+        let (_fetch_stop_sender, mut fetch_abort) = tokio::sync::oneshot::channel();
         let (first_tx, first_rx) = tokio::sync::oneshot::channel();
         let (complete_tx, complete_rx) = tokio::sync::oneshot::channel();
-        let fetch_result = fetch_hls_resources_incrementally(
-            &client,
-            &plan,
-            staging.path(),
-            &tx,
-            &downloaded,
-            &mut abort,
-            4,
-            first_tx,
-            complete_tx,
-        )
+        let fetch_client = client.clone();
+        let fetch_plan = plan.clone();
+        let fetch_directory = staging.path().to_path_buf();
+        let fetch_tx = tx.clone();
+        let fetch_downloaded = Arc::clone(&downloaded);
+        let fetch_task = tokio::spawn(async move {
+            fetch_hls_resources_incrementally(
+                &fetch_client,
+                &fetch_plan,
+                &fetch_directory,
+                &fetch_tx,
+                &fetch_downloaded,
+                &mut fetch_abort,
+                4,
+                first_tx,
+                complete_tx,
+            )
+            .await
+        });
+
+        first_rx
+            .await
+            .expect("first growing encrypted HLS playlist snapshot");
+        let first_snapshot = tokio::fs::read_to_string(staging.path().join("local.m3u8"))
+            .await
+            .expect("read first growing HLS playlist snapshot");
+        assert!(!first_snapshot.contains("#EXT-X-ENDLIST"));
+        assert!(first_snapshot.contains("#EXTINF:"));
+
+        let (_mux_stop_sender, mut mux_abort) = tokio::sync::oneshot::channel();
+        let ffmpeg_path = ffmpeg.clone();
+        let playlist_input = staging.path().join("local.m3u8");
+        let output_label = part_path.clone();
+        let output_container = manifest_output_container(&destination)
+            .expect("resolve the TS destination container");
+        let ffmpeg_task = tokio::spawn(async move {
+            run_ffmpeg_with_offsets_timeout(
+                &ffmpeg_path,
+                FfmpegInput {
+                    path: &playlist_input,
+                    timestamp_offset: None,
+                },
+                None,
+                ManifestMuxOptions {
+                    timestamp_policy: InputTimestampPolicy::Normalize,
+                    timeout: Some(Duration::from_secs(30)),
+                },
+                SubtitleOutput::default(),
+                FfmpegOutput::OwnedPart {
+                    file: output_file.into_std().await,
+                    container: output_container,
+                    label: output_label,
+                },
+                &mut mux_abort,
+            )
+            .await
+        });
+
+        final_segment_requested.notified().await;
+        assert!(
+            !fetch_task.is_finished(),
+            "the final segment must remain in flight while FFmpeg consumes the growing prefix"
+        );
+        let initial_growth = tokio::time::timeout(Duration::from_secs(15), async {
+            loop {
+                let size = tokio::fs::metadata(&part_path)
+                    .await
+                    .expect("stat visible destination part")
+                    .len();
+                if size > 0 {
+                    break size;
+                }
+                tokio::time::sleep(Duration::from_millis(25)).await;
+            }
+        })
         .await
-        .expect("fetch encrypted HLS resources");
-        assert!(fetch_result);
-        first_rx.await.expect("first incremental playlist snapshot");
-        complete_rx.await.expect("complete incremental playlist snapshot");
+        .expect("FFmpeg should write decrypted bytes before the final segment is released");
+        assert!(initial_growth > 0);
+        assert!(
+            !fetch_task.is_finished(),
+            "the destination part must grow while the final segment download is still blocked"
+        );
+
+        release_final_segment.notify_one();
+        complete_rx
+            .await
+            .expect("complete encrypted HLS playlist snapshot");
+        assert!(
+            fetch_task
+                .await
+                .expect("join incremental AES-128 fetcher")
+                .expect("fetch encrypted HLS resources")
+        );
+        assert_eq!(
+            ffmpeg_task
+                .await
+                .expect("join incremental AES-128 FFmpeg task")
+                .expect("FFmpeg should decrypt the growing AES-128 HLS playlist"),
+            ManifestMuxOutcome::Finished
+        );
         server.await.expect("AES-128 fixture server task");
 
-        let local_playlist = staging.path().join("local.m3u8");
-        let output = staging.path().join("decrypted.part");
-        let file = std::fs::OpenOptions::new()
-            .create_new(true)
-            .read(true)
-            .write(true)
-            .open(&output)
-            .expect("create decrypted output part");
-        let (_abort_sender, mut mux_abort) = tokio::sync::oneshot::channel();
-        let result = run_ffmpeg_with_offsets_timeout(
-            &ffmpeg,
-            FfmpegInput {
-                path: &local_playlist,
-                timestamp_offset: None,
-            },
-            None,
-            ManifestMuxOptions {
-                timestamp_policy: InputTimestampPolicy::Normalize,
-                timeout: Some(Duration::from_secs(30)),
-            },
-            SubtitleOutput::default(),
-            FfmpegOutput::OwnedPart {
-                file,
-                container: ManifestContainer::Ts,
-                label: output.clone(),
-            },
-            &mut mux_abort,
+        crate::manifest_destination::verify_owned_part_async(
+            staging.path().to_path_buf(),
+            destination.clone(),
+            item_id,
+            TrackKind::Video,
         )
         .await
-        .expect("FFmpeg should decrypt the AES-128 HLS playlist");
-        assert_eq!(result, ManifestMuxOutcome::Finished);
-        assert!(std::fs::metadata(&output).expect("stat decrypted output").len() > 0);
+        .expect("the growing output must remain the exact owned destination part");
+        let final_size = tokio::fs::metadata(&part_path)
+            .await
+            .expect("stat completed decrypted destination part")
+            .len();
+        assert!(final_size >= initial_growth);
 
         let verification = tokio::process::Command::new(&ffmpeg)
             .args(["-hide_banner", "-loglevel", "error", "-i"])
-            .arg(&output)
+            .arg(&part_path)
             .args(["-f", "null", "-"])
             .output()
             .await
-            .expect("verify decrypted transport stream");
+            .expect("verify decrypted destination transport stream");
         assert!(
             verification.status.success(),
             "decrypted AES-128 output is not readable: {}",

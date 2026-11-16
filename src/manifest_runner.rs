@@ -6635,7 +6635,7 @@ segment-2.ts
             "the discontinuity must keep this out of direct byte concatenation"
         );
         assert!(plan.is_incremental_clear_vod_candidate());
-        assert!(plan.segment_count() >= 2);
+        assert_eq!(plan.segment_count(), 2, "fixture should produce two media segments");
 
         let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0))
             .await
@@ -6676,7 +6676,7 @@ segment-2.ts
         let final_segment_path =
             final_segment_path.expect("fMP4 fixture has a final media segment");
         let request_count = plan.resources.len();
-        assert_eq!(request_count, 3, "one init map and two media segments");
+        assert_eq!(request_count, plan.segment_count() + 1, "one init map and two media segments");
 
         let release_final_segment = Arc::new(tokio::sync::Notify::new());
         let final_segment_requested = Arc::new(tokio::sync::Notify::new());
@@ -6703,7 +6703,7 @@ segment-2.ts
                         .expect("read fMP4 resource request");
                     let request = String::from_utf8_lossy(&request[..count]);
                     let path = request.split_ascii_whitespace().nth(1).unwrap_or("/");
-                    if path == final_path {
+                    if path == final_path.as_str() {
                         requested.notify_one();
                         release.notified().await;
                     }

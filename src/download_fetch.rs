@@ -795,9 +795,9 @@ async fn attempt_once(
         // Single-stream attempts complete before the UI persists progress/bitmap;
         // make the bytes durable first so a crash cannot resurrect a lost tail.
         file.sync_all().await.map_err(|error| {
-            // A sync failure leaves this tail untrusted. Do not retry at EOF:
-            // the next 416 could otherwise mistake the unsynced bytes for a full file.
-            AttemptFail::Changed(format!("Cannot sync file: {error}"))
+            // Keep the owned partial on storage errors. A 416 retry only completes it
+            // after its own sync succeeds, so a failed sync cannot report success.
+            AttemptFail::Retryable(format!("Cannot sync file: {error}"))
         })?;
         return match total {
             Some(total) if downloaded != total => {
@@ -1481,7 +1481,8 @@ pub fn filename_from_content_disposition(value: &str) -> Option<String> {
         if pname.trim().eq_ignore_ascii_case("filename*") {
             // RFC 5987: charset'language'percent-encoded-value. Honour the
             // common Latin-1 charset instead of decoding every value as UTF-8.
-            let mut fields = pval.splitn(3, '\'');
+            let extended_value = pval.trim().trim_matches('"');
+            let mut fields = extended_value.splitn(3, '\'');
             let charset = fields.next().unwrap_or("").trim().to_ascii_lowercase();
             let _language = fields.next();
             let value = fields.next().unwrap_or("").trim();

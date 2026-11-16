@@ -6734,12 +6734,12 @@ segment-2.ts
 
             let log_path = fixture.path().join("ffmpeg-verbose.log");
             let wrapper = fixture.path().join("ffmpeg-verbose-wrapper");
-            let real_ffmpeg = ffmpeg.display().to_string().replace('\\'', "'\\\\''");
-            let log_path_string = log_path.display().to_string().replace('\\'', "'\\\\''");
+            let real_ffmpeg = ffmpeg.display();
+            let log_path_string = log_path.display();
             std::fs::write(
                 &wrapper,
                 format!(
-                    "#!/bin/sh\\nexec '{real_ffmpeg}' -loglevel verbose \\"$@\\" 2>'{log_path_string}'\\n"
+                    "#!/bin/sh\nexec '{real_ffmpeg}' -loglevel verbose \"$@\" 2>'{log_path_string}'\n"
                 ),
             )
             .expect("write verbose FFmpeg wrapper");

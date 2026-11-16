@@ -7263,6 +7263,17 @@ segment-2.ts
             audio_plan.is_destination_assemblable_candidate(),
             "the simple audio rendition is still eligible for ordered resource fetching"
         );
+        assert!(
+            Tracks::Hls {
+                video: Box::new(video_plan.clone()),
+                audio: Some(Box::new(audio_plan.clone())),
+                subtitle: None,
+                subtitle_language: None,
+                subtitle_is_fmp4: false,
+            }
+            .uses_incremental_hls_vod(),
+            "a complex video rendition and a simple separate audio rendition must use incremental muxing"
+        );
 
         let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0))
             .await

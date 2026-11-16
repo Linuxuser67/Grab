@@ -6610,6 +6610,7 @@ segment-2.ts
 
         let fixture = tempfile::tempdir().expect("create fMP4 HLS fixture directory");
         let playlist_path = fixture.path().join("playlist.m3u8");
+        // Use FFmpeg's built-in encoder set; CI does not require an external x264 encoder.
         let generated = tokio::process::Command::new(&ffmpeg)
             .args([
                 "-hide_banner",

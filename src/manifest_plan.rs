@@ -53,6 +53,78 @@ pub(crate) fn dash_output_container(mime_type: Option<&str>) -> Option<ManifestC
     }
 }
 
+/// Codec classes supported by the app's minimum FFmpeg MP4 muxer.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum HlsMp4CodecKind {
+    Video,
+    Audio,
+    Subtitle,
+}
+
+/// Classify only codec identifiers with a supported MP4 sample entry.
+/// Unknown identifiers deliberately retain the conservative Matroska default.
+fn hls_mp4_codec_kind(codec: &str) -> Option<HlsMp4CodecKind> {
+    let codec = codec.trim();
+    if codec.is_empty() {
+        return None;
+    }
+
+    let (sample_entry, parameters) = codec.split_once('.').unwrap_or((codec, ""));
+    let has_parameters = !parameters.is_empty();
+
+    if ["avc1", "avc3", "hvc1", "hev1", "dvh1", "av01", "vp09"]
+        .iter()
+        .any(|supported| sample_entry.eq_ignore_ascii_case(supported))
+        || (sample_entry.eq_ignore_ascii_case("mp4v") && has_parameters)
+    {
+        return Some(HlsMp4CodecKind::Video);
+    }
+
+    if (sample_entry.eq_ignore_ascii_case("mp4a") && has_parameters)
+        || ["alac", "flac"]
+            .iter()
+            .any(|supported| sample_entry.eq_ignore_ascii_case(supported))
+        || ["ac-3", "ec-3"]
+            .iter()
+            .any(|supported| codec.eq_ignore_ascii_case(supported))
+    {
+        return Some(HlsMp4CodecKind::Audio);
+    }
+
+    if ["stpp"]
+        .iter()
+        .any(|supported| sample_entry.eq_ignore_ascii_case(supported))
+    {
+        return Some(HlsMp4CodecKind::Subtitle);
+    }
+
+    None
+}
+
+/// Require every advertised codec to be a known MP4 sample-entry family.
+/// A referenced separate audio group must declare an audio codec as well.
+fn hls_variant_supports_mp4(variant: &HlsVariant) -> bool {
+    let Some(codecs) = variant.codecs.as_deref() else {
+        return false;
+    };
+
+    let mut has_video = false;
+    let mut has_audio = false;
+    let mut has_subtitle = false;
+    for codec in codecs.split(',') {
+        match hls_mp4_codec_kind(codec) {
+            Some(HlsMp4CodecKind::Video) => has_video = true,
+            Some(HlsMp4CodecKind::Audio) => has_audio = true,
+            Some(HlsMp4CodecKind::Subtitle) => has_subtitle = true,
+            None => return false,
+        }
+    }
+
+    has_video
+        && (variant.audio_group.is_none() || has_audio)
+        && (variant.subtitles_group.is_none() || has_subtitle)
+}
+
 /// Select the closest representation to the configured video-quality preference.
 #[must_use]
 pub(crate) fn preferred_choice_index(choices: &[ManifestChoice], quality: &str) -> usize {
@@ -423,12 +495,18 @@ impl ManifestLookup {
             .and_then(|choice| choice.language)
             .as_deref()
             .and_then(normalize_subtitle_language);
-        // The preview already contains the complete media playlist for direct
-        // HLS and the selected representation MIME type for DASH. HLS master
-        // children are not fetched here, so keep their output conservative
-        // rather than performing a second network lookup during Add.
+        // HLS master previews use the selected variant's CODECS declaration;
+        // fetching child playlists again can consume one-shot URLs before download.
         let output_container = match &self.manifest {
-            NativeManifest::HlsMaster(_) => None,
+            NativeManifest::HlsMaster(master) => master
+                .variants
+                .iter()
+                .zip(hls_variant_keys(&master.variants))
+                .find_map(|(variant, key)| {
+                    (key.as_deref() == Some(representation_key.as_str())).then_some(variant)
+                })
+                .filter(|variant| hls_variant_supports_mp4(variant))
+                .map(|_| ManifestContainer::Mp4),
             NativeManifest::HlsMedia(plan) => plan.output_container(),
             NativeManifest::Dash(dash) => dash
                 .video_representations
@@ -1145,6 +1223,167 @@ mod tests {
             ManifestLookup::preferred_audio_choice_index(&default_choices),
             0
         );
+    }
+
+    fn selected_hls_master_output_container(
+        body: &[u8],
+        variant_index: usize,
+    ) -> Option<ManifestContainer> {
+        let source_url = "https://cdn.example.test/master.m3u8";
+        let master = crate::manifest::parse_hls_master_playlist(source_url, body)
+            .expect("valid HLS master playlist");
+        let variant_keys = hls_variant_keys(&master.variants);
+        let video_key = ManifestRepresentationKey::from(
+            variant_keys
+                .get(variant_index)
+                .and_then(Option::as_deref)
+                .expect("stable HLS video key"),
+        );
+        let lookup = ManifestLookup {
+            source_url: source_url.to_string(),
+            manifest: NativeManifest::HlsMaster(Box::new(master)),
+        };
+
+        lookup
+            .selected_source(&video_key, None, None)
+            .expect("selected HLS variant")
+            .output_container
+    }
+
+    #[test]
+    fn hls_master_selects_mp4_for_known_compatible_video_and_audio_codecs() {
+        let body = br##"#EXTM3U
+#EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID="audio",NAME="English",LANGUAGE="en",DEFAULT=YES,AUTOSELECT=YES,URI="audio/en.m3u8"
+#EXT-X-STREAM-INF:BANDWIDTH=2000000,AUDIO="audio",CODECS="avc1.640028,mp4a.40.2"
+video/1080p.m3u8
+"##;
+
+        assert_eq!(
+            selected_hls_master_output_container(body, 0),
+            Some(ManifestContainer::Mp4)
+        );
+    }
+
+    #[test]
+    fn hls_master_selects_mp4_for_a_compatible_video_only_variant() {
+        let body = br##"#EXTM3U
+#EXT-X-STREAM-INF:BANDWIDTH=2000000,CODECS="hvc1.1.6.L93.B0"
+video/1080p.m3u8
+"##;
+
+        assert_eq!(
+            selected_hls_master_output_container(body, 0),
+            Some(ManifestContainer::Mp4)
+        );
+    }
+
+    #[test]
+    fn hls_master_requires_supported_codec_metadata_for_referenced_subtitle_groups() {
+        let compatible = br##"#EXTM3U
+#EXT-X-MEDIA:TYPE=SUBTITLES,GROUP-ID="subs",NAME="English",LANGUAGE="en",DEFAULT=YES,AUTOSELECT=YES,URI="subs/en.m3u8"
+#EXT-X-STREAM-INF:BANDWIDTH=2000000,SUBTITLES="subs",CODECS="avc1.640028,stpp.ttml.im1t"
+video/1080p.m3u8
+"##;
+        let missing = br##"#EXTM3U
+#EXT-X-MEDIA:TYPE=SUBTITLES,GROUP-ID="subs",NAME="English",LANGUAGE="en",DEFAULT=YES,AUTOSELECT=YES,URI="subs/en.m3u8"
+#EXT-X-STREAM-INF:BANDWIDTH=2000000,SUBTITLES="subs",CODECS="avc1.640028"
+video/1080p.m3u8
+"##;
+        let unsupported = br##"#EXTM3U
+#EXT-X-MEDIA:TYPE=SUBTITLES,GROUP-ID="subs",NAME="English",LANGUAGE="en",DEFAULT=YES,AUTOSELECT=YES,URI="subs/en.m3u8"
+#EXT-X-STREAM-INF:BANDWIDTH=2000000,SUBTITLES="subs",CODECS="avc1.640028,wvtt"
+video/1080p.m3u8
+"##;
+
+        assert_eq!(
+            selected_hls_master_output_container(compatible, 0),
+            Some(ManifestContainer::Mp4)
+        );
+        assert_eq!(selected_hls_master_output_container(missing, 0), None);
+        assert_eq!(selected_hls_master_output_container(unsupported, 0), None);
+    }
+
+    #[test]
+    fn hls_master_uses_the_selected_variant_codec_metadata() {
+        let body = br##"#EXTM3U
+#EXT-X-STREAM-INF:BANDWIDTH=1000000,CODECS="vp8"
+video/low.m3u8
+#EXT-X-STREAM-INF:BANDWIDTH=2000000,CODECS="avc1.640028"
+video/high.m3u8
+"##;
+
+        assert_eq!(selected_hls_master_output_container(body, 0), None);
+        assert_eq!(
+            selected_hls_master_output_container(body, 1),
+            Some(ManifestContainer::Mp4)
+        );
+    }
+
+    #[test]
+    fn hls_master_keeps_mkv_default_when_codec_metadata_is_missing_or_incompatible() {
+        let cases: &[&[u8]] = &[
+            br##"#EXTM3U
+#EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID="audio",NAME="English",LANGUAGE="en",DEFAULT=YES,AUTOSELECT=YES,URI="audio/en.m3u8"
+#EXT-X-STREAM-INF:BANDWIDTH=2000000,AUDIO="audio"
+video/1080p.m3u8
+"##,
+            br##"#EXTM3U
+#EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID="audio",NAME="English",LANGUAGE="en",DEFAULT=YES,AUTOSELECT=YES,URI="audio/en.m3u8"
+#EXT-X-STREAM-INF:BANDWIDTH=2000000,AUDIO="audio",CODECS="avc1.640028,mp4a.40.2,vp8"
+video/1080p.m3u8
+"##,
+            br##"#EXTM3U
+#EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID="audio",NAME="English",LANGUAGE="en",DEFAULT=YES,AUTOSELECT=YES,URI="audio/en.m3u8"
+#EXT-X-STREAM-INF:BANDWIDTH=2000000,AUDIO="audio",CODECS="avc1.640028"
+video/1080p.m3u8
+"##,
+        ];
+
+        for body in cases {
+            assert_eq!(
+                selected_hls_master_output_container(body, 0),
+                None,
+                "missing/unknown codecs or an undeclared alternate-audio codec retain MKV"
+            );
+        }
+    }
+
+    #[test]
+    fn hls_mp4_codec_classifier_accepts_known_sample_entry_families_only() {
+        for codec in [
+            "avc1.640028",
+            "avc3.640028",
+            "hvc1.1.6.L93.B0",
+            "hev1.1.6.L93.B0",
+            "dvh1.05.01",
+            "av01.0.08M.08",
+            "vp09.00.10.08",
+            "mp4v.20.9",
+            "avc1",
+            "hvc1",
+        ] {
+            assert_eq!(
+                hls_mp4_codec_kind(codec),
+                Some(HlsMp4CodecKind::Video),
+                "{codec}"
+            );
+        }
+        for codec in ["mp4a.40.2", "ac-3", "ec-3", "alac", "fLaC"] {
+            assert_eq!(
+                hls_mp4_codec_kind(codec),
+                Some(HlsMp4CodecKind::Audio),
+                "{codec}"
+            );
+        }
+        let codec = "stpp.ttml.im1t";
+        assert_eq!(
+            hls_mp4_codec_kind(codec),
+            Some(HlsMp4CodecKind::Subtitle),
+            "{codec}"
+        );
+        for codec in ["vp8", "vorbis", "theora", "mp4a", "wvtt", ""] {
+            assert_eq!(hls_mp4_codec_kind(codec), None, "{codec}");
+        }
     }
 
     #[test]

@@ -3133,6 +3133,9 @@ impl DownloadManager {
             }
         }
         // Persist the bitmap too: a kill while paused must resume segmented.
+        // shortcut: a crash immediately after a mid-attempt pause can still lose
+        // page-cache bytes that the bitmap marks done; workers fsync at attempt
+        // completion, not on abort, to avoid a sync on every progress tick.
         self.persist_queue();
         self.changed();
         self.start_next();

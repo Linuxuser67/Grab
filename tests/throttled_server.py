@@ -29,12 +29,15 @@ class H(BaseHTTPRequestHandler):
     def do_GET(self):
         requested = self.headers.get("Range")
         if_range = self.headers.get("If-Range")
+        user_agent = self.headers.get("User-Agent")
         with open(RANGELOG, "a") as log:
-            # Log format: "range=<range>|if-range=<value>" for assertions.
+            # Log format: "range=<range>|if-range=<value>|ua=<value>" for assertions.
             # "full" if no Range header.
             range_part = requested or "full"
             if_range_part = if_range or "none"
-            log.write(f"range={range_part}|if-range={if_range_part}\n")
+            log.write(
+                f"range={range_part}|if-range={if_range_part}|ua={user_agent}\n"
+            )
         start, end, is_range = 0, len(DATA) - 1, False
         if requested and requested.startswith("bytes="):
             is_range = True

@@ -1417,7 +1417,7 @@ fn validate_hls_closed_caption_groups(
         match variant.closed_captions.as_ref() {
             None | Some(m3u8_rs::ClosedCaptionGroupId::None) => {}
             Some(m3u8_rs::ClosedCaptionGroupId::GroupId(group))
-                if declared_groups.contains(group.as_str()) =>
+                if declared_groups.contains(&group.as_str()) =>
             {
                 referenced_groups.insert(group.as_str());
             }

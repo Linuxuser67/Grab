@@ -577,6 +577,8 @@ impl HlsPlan {
     /// A growing snapshot deliberately omits `EXT-X-ENDLIST`, allowing FFmpeg to
     /// reload the local playlist after it consumes the currently available segments.
     /// A complete snapshot is accepted only for the full, finite source playlist.
+    /// Callers should publish bounded batches rather than reserialize the full playlist
+    /// after every segment; each result is a complete snapshot suitable for atomic replace.
     ///
     /// # Errors
     /// Returns an error if the prefix exceeds the source playlist or a complete

@@ -74,6 +74,8 @@ pub(crate) enum ManifestError {
     DurationOverflow,
     #[error("could not serialize the local HLS playlist")]
     Serialize,
+    #[error("the requested HLS playlist prefix is invalid")]
+    InvalidPlaylistPrefix,
     #[error("the live HLS recording reached a bounded capture limit")]
     LiveCaptureLimit,
     #[error("LL-HLS parent duration does not match the accumulated part durations")]
@@ -371,6 +373,13 @@ pub(crate) struct HlsLowLatencyPlan {
     pub(crate) rendition_reports: Box<[hls_ll::HlsRenditionReport]>,
 }
 
+/// Whether a serialized HLS snapshot is still growing or is the complete presentation.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum HlsPlaylistFinality {
+    Growing,
+    Complete,
+}
+
 /// Validated HLS media playlist, ordered resources, and local FFmpeg input.
 #[derive(Clone, Debug)]
 pub(crate) struct HlsPlan {
@@ -558,6 +567,39 @@ impl HlsPlan {
     pub(crate) fn local_playlist_bytes(&self) -> Result<Vec<u8>, ManifestError> {
         let mut output = Vec::new();
         self.local_playlist
+            .write_to(&mut output)
+            .map_err(|_| ManifestError::Serialize)?;
+        Ok(output)
+    }
+
+    /// Serialize only the committed segment prefix for an incremental local HLS input.
+    ///
+    /// A growing snapshot deliberately omits `EXT-X-ENDLIST`, allowing FFmpeg to
+    /// reload the local playlist after it consumes the currently available segments.
+    /// A complete snapshot is accepted only for the full, finite source playlist.
+    ///
+    /// # Errors
+    /// Returns an error if the prefix exceeds the source playlist or a complete
+    /// snapshot is requested before every source segment is included.
+    pub(crate) fn local_playlist_prefix_bytes(
+        &self,
+        segment_count: usize,
+        finality: HlsPlaylistFinality,
+    ) -> Result<Vec<u8>, ManifestError> {
+        let total_segments = self.local_playlist.segments.len();
+        if segment_count > total_segments
+            || (finality == HlsPlaylistFinality::Complete
+                && (!self.end_list || segment_count != total_segments))
+        {
+            return Err(ManifestError::InvalidPlaylistPrefix);
+        }
+
+        let mut playlist = self.local_playlist.clone();
+        playlist.segments.truncate(segment_count);
+        playlist.end_list = finality == HlsPlaylistFinality::Complete;
+
+        let mut output = Vec::new();
+        playlist
             .write_to(&mut output)
             .map_err(|_| ManifestError::Serialize)?;
         Ok(output)
@@ -3707,6 +3749,50 @@ one.ts
             Some("https://cdn.example.test/keys/media.key")
         );
         assert_eq!(parsed.version, Some(5));
+    }
+
+    #[test]
+    fn incremental_aes_128_playlist_snapshots_publish_only_the_committed_prefix() {
+        let body = br#"#EXTM3U
+#EXT-X-TARGETDURATION:4
+#EXT-X-MEDIA-SEQUENCE:17
+#EXT-X-KEY:METHOD=AES-128,URI="key.bin",IV=0x00000000000000000000000000000001
+#EXTINF:2,
+one.ts
+#EXTINF:2,
+two.ts
+#EXT-X-ENDLIST
+"#;
+        let plan = plan_hls_media_playlist(BASE_URL, body)
+            .expect("AES-128 VOD playlist should produce an incremental plan");
+
+        let growing = plan
+            .local_playlist_prefix_bytes(1, HlsPlaylistFinality::Growing)
+            .expect("first committed segment should serialize as a growing playlist");
+        let parsed = m3u8_rs::parse_media_playlist_res(&growing)
+            .expect("growing local playlist should parse");
+        assert_eq!(parsed.media_sequence, 17);
+        assert_eq!(parsed.segments.len(), 1);
+        assert!(parsed.segments[0].uri.starts_with("segment-"));
+        assert!(parsed.segments[0].key.is_some());
+        assert!(!parsed.end_list);
+
+        let complete = plan
+            .local_playlist_prefix_bytes(2, HlsPlaylistFinality::Complete)
+            .expect("complete source playlist should serialize with ENDLIST");
+        let parsed = m3u8_rs::parse_media_playlist_res(&complete)
+            .expect("complete local playlist should parse");
+        assert_eq!(parsed.segments.len(), 2);
+        assert!(parsed.end_list);
+
+        assert_eq!(
+            plan.local_playlist_prefix_bytes(3, HlsPlaylistFinality::Growing),
+            Err(ManifestError::InvalidPlaylistPrefix)
+        );
+        assert_eq!(
+            plan.local_playlist_prefix_bytes(1, HlsPlaylistFinality::Complete),
+            Err(ManifestError::InvalidPlaylistPrefix)
+        );
     }
 
     #[test]

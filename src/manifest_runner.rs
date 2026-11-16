@@ -2143,7 +2143,7 @@ pub(crate) async fn run_manifest_download(
         ) => return Ok(ManifestOutcome::Aborted),
     };
     let mut _finish_stop_sender = None;
-    if !live_hls && !live_dash && tracks.uses_incremental_aes128_vod() {
+    if !live_hls && !live_dash && !has_audio && tracks.uses_incremental_aes128_vod() {
         return run_incremental_aes128_hls_vod(ManifestIncrementalHlsVod {
             job: &job,
             gate,

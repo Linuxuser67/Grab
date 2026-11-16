@@ -82,13 +82,15 @@ impl DownloadManager {
             self.restore_dirty.set(true);
             return;
         }
-        // `watch::send_replace` keeps only the latest value: rapid state changes
+        // watch::send_replace keeps only the latest value: rapid state changes
         // coalesce to a single write by the persist task.
         // Tests need determinism: they persist then immediately restore in a
         // new manager, so write synchronously in test builds.
         #[cfg(test)]
         if let Some(text) = self.serialize_queue() {
-            Self::write_queue_file(&text);
+            if let Err(error) = Self::write_queue_file(&text) {
+                tracing::error!(error = %error, "could not persist download queue");
+            }
         }
         #[cfg(not(test))]
         if let (Some(queue), Some(tx)) =
@@ -98,23 +100,117 @@ impl DownloadManager {
         }
     }
 
-    /// The persist task body: watches for new queue states and writes them.
-    /// Extracted for testing: `watch::changed()` delivers the final value before
-    /// the closed-channel Err, so dropping the sender after a final send guarantees
-    /// the last write lands.
+    /// Write the current GTK-owned queue snapshot and wait for its atomic file
+    /// replacement and parent-directory sync to complete.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when restore is incomplete, the writer is unavailable,
+    /// serialization fails, or the queue file cannot be durably replaced.
+    pub(super) async fn persist_queue_and_wait(&self) -> std::io::Result<()> {
+        if self.restore_state.get() != RestoreState::Ready {
+            return Err(std::io::Error::other(
+                "download queue restore has not completed",
+            ));
+        }
+        let queue = self.snapshot_queue_inner(true).ok_or_else(|| {
+            std::io::Error::other("could not snapshot the download queue")
+        })?;
+        #[cfg(test)]
+        {
+            let text = Self::serialize_snapshot(queue).ok_or_else(|| {
+                std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    "could not serialize the download queue",
+                )
+            })?;
+            Self::write_queue_file(&text)
+        }
+        #[cfg(not(test))]
+        {
+            let persist_tx = self
+                .persist_tx
+                .borrow()
+                .as_ref()
+                .cloned()
+                .ok_or_else(|| std::io::Error::other("download queue writer is unavailable"))?;
+            let flush_tx = self
+                .persist_flush_tx
+                .borrow()
+                .as_ref()
+                .cloned()
+                .ok_or_else(|| std::io::Error::other("download queue flush channel is unavailable"))?;
+            persist_tx.send_replace(Some(queue));
+            let (ack_tx, ack_rx) = tokio::sync::oneshot::channel();
+            flush_tx
+                .send(ack_tx)
+                .map_err(|_| std::io::Error::other("download queue writer stopped"))?;
+            ack_rx
+                .await
+                .map_err(|_| std::io::Error::other("download queue writer dropped its flush result"))?
+        }
+    }
+
+    /// Sole queue writer. Normal snapshots coalesce; explicit flush requests
+    /// force the latest snapshot through the same writer and report durability.
     pub(crate) async fn persist_task_loop<T>(
         mut rx: tokio::sync::watch::Receiver<Option<T>>,
-        write: impl Fn(T) + Clone + Send + 'static,
+        mut flush_rx: tokio::sync::mpsc::UnboundedReceiver<
+            tokio::sync::oneshot::Sender<std::io::Result<()>>,
+        >,
+        write: impl Fn(T) -> std::io::Result<()> + Clone + Send + 'static,
     ) where
         T: Clone + Send + 'static,
     {
-        while rx.changed().await.is_ok() {
-            let Some(value) = rx.borrow_and_update().clone() else {
-                continue;
-            };
-            // Queue serialization and disk I/O must not block GTK or the async runtime.
-            let write = write.clone();
-            let _ = tokio::task::spawn_blocking(move || write(value)).await;
+        let mut watch_open = true;
+        let mut flush_open = true;
+        while watch_open || flush_open {
+            tokio::select! {
+                changed = rx.changed(), if watch_open => {
+                    match changed {
+                        Ok(()) => {
+                            if let Some(value) = rx.borrow_and_update().clone() {
+                                let writer = write.clone();
+                                match tokio::task::spawn_blocking(move || writer(value)).await {
+                                    Ok(Ok(())) => {}
+                                    Ok(Err(error)) => tracing::error!(
+                                        error = %error,
+                                        "could not persist download queue"
+                                    ),
+                                    Err(error) => tracing::error!(
+                                        error = %error,
+                                        "download queue writer task failed"
+                                    ),
+                                }
+                            }
+                        }
+                        Err(_) => watch_open = false,
+                    }
+                }
+                request = flush_rx.recv(), if flush_open => {
+                    match request {
+                        Some(ack) => {
+                            let result = match rx.borrow_and_update().clone() {
+                                Some(value) => {
+                                    let writer = write.clone();
+                                    match tokio::task::spawn_blocking(move || writer(value)).await {
+                                        Ok(result) => result,
+                                        Err(error) => Err(std::io::Error::other(format!(
+                                            "download queue writer task failed: {error}"
+                                        ))),
+                                    }
+                                }
+                                None => Err(std::io::Error::new(
+                                    std::io::ErrorKind::InvalidData,
+                                    "download queue snapshot is unavailable",
+                                )),
+                            };
+                            let _ = ack.send(result);
+                        }
+                        None => flush_open = false,
+                    }
+                }
+            }
         }
     }
 
@@ -126,8 +222,9 @@ impl DownloadManager {
         #[cfg(test)]
         if self.restore_state.get() == RestoreState::Ready
             && let Some(text) = self.serialize_queue_inner(true)
+            && let Err(error) = Self::write_queue_file(&text)
         {
-            Self::write_queue_file(&text);
+            tracing::error!(error = %error, "shutdown: could not persist download queue");
         }
         #[cfg(not(test))]
         {
@@ -141,6 +238,7 @@ impl DownloadManager {
                 tx.send_replace(Some(queue));
             }
             drop(self.persist_tx.borrow_mut().take());
+            drop(self.persist_flush_tx.borrow_mut().take());
             // This fallback runs after the main loop has exited, when blocking
             // cannot freeze GTK. Bound the wait so a stalled disk cannot hang exit.
             if let Some(task) = self.persist_task.borrow_mut().take() {
@@ -262,55 +360,52 @@ impl DownloadManager {
         }
     }
 
-    /// Write the serialized queue atomically: temp file + sync_all + rename +
-    /// dir sync. The persist task is the sole writer, so writes are ordered by
-    /// construction. Runs via `spawn_blocking`, never on the async runtime or
-    /// the UI thread.
-    pub(super) fn write_queue_file(text: &str) {
+    /// Write the serialized queue atomically and sync both the file and its
+    /// containing directory before reporting success.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the directory, temporary file, write, sync, rename,
+    /// or directory sync fails.
+    pub(super) fn write_queue_file(text: &str) -> std::io::Result<()> {
+        use std::io::Write;
+        use std::os::unix::fs::OpenOptionsExt as _;
+
         // Resolve and prepare the parent here: this function runs on the writer
         // task (or synchronously in unit tests), not from the normal GTK path.
         let queue_file = Self::queue_file();
-        if let Some(parent) = queue_file.parent()
-            && let Err(e) = std::fs::create_dir_all(parent)
-        {
-            tracing::error!("could not create download queue directory: {e}");
-            return;
-        }
+        let parent = queue_file.parent().ok_or_else(|| {
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "download queue path has no parent directory",
+            )
+        })?;
+        std::fs::create_dir_all(parent)?;
+
         // Temp name is unique per write (PID + monotonic counter): a pre-existing
-        // symlink at this path cannot be predicted, and `create_new` refuses to
-        // follow symlinks or overwrite an existing file.
+        // symlink at this path cannot be predicted, and exclusive create refuses
+        // to follow symlinks or overwrite an existing file.
         let tmp = queue_file.with_extension(format!(
             "json.tmp.{}.{}",
             std::process::id(),
             QUEUE_TMP_COUNTER.fetch_add(1, Ordering::Relaxed)
         ));
-        let write_tmp = || -> std::io::Result<()> {
-            use std::io::Write;
-            use std::os::unix::fs::OpenOptionsExt as _;
-            let mut f = std::fs::OpenOptions::new()
+        let result = (|| {
+            let mut file = std::fs::OpenOptions::new()
                 .write(true)
                 .create_new(true)
                 // URLs can carry signed tokens: restrict to owner.
                 .mode(0o600)
                 .open(&tmp)?;
-            f.write_all(text.as_bytes())?;
-            f.sync_all()?;
+            file.write_all(text.as_bytes())?;
+            file.sync_all()?;
+            std::fs::rename(&tmp, &queue_file)?;
+            std::fs::File::open(parent)?.sync_all()?;
             Ok(())
-        };
-        match write_tmp() {
-            Ok(()) => {
-                if let Err(e) = std::fs::rename(&tmp, &queue_file) {
-                    tracing::error!("could not replace download queue: {e}");
-                    let _ = std::fs::remove_file(&tmp);
-                    return;
-                }
-                if let Some(parent) = queue_file.parent()
-                    && let Ok(dir) = std::fs::File::open(parent)
-                {
-                    let _ = dir.sync_all();
-                }
-            }
-            Err(e) => tracing::error!("could not persist download queue: {e}"),
+        })();
+        if result.is_err() {
+            let _ = std::fs::remove_file(&tmp);
         }
+        result
     }
 }

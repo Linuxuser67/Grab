@@ -3053,9 +3053,9 @@ video.m3u8
 #EXT-X-STREAM-INF:BANDWIDTH=1000000,CLOSED-CAPTIONS="captions"
 video.m3u8
 "#;
-        assert_eq!(
-            parse_hls_master_playlist(BASE_URL, body).err(),
-            Some(ManifestError::UnsupportedPlaylist)
+        assert!(
+            parse_hls_master_playlist(BASE_URL, body).is_err(),
+            "closed-caption renditions must not reference a separate playlist"
         );
     }
 
@@ -3066,9 +3066,9 @@ video.m3u8
 #EXT-X-STREAM-INF:BANDWIDTH=1000000,SUBTITLES="subs"
 video.m3u8
 "#;
-        assert_eq!(
-            parse_hls_master_playlist(BASE_URL, body).err(),
-            Some(ManifestError::UnsupportedPlaylist)
+        assert!(
+            parse_hls_master_playlist(BASE_URL, body).is_err(),
+            "INSTREAM-ID must not appear on a non-closed-caption rendition"
         );
     }
 

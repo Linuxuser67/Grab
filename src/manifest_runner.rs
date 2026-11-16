@@ -2444,7 +2444,7 @@ async fn run_incremental_aes128_hls_vod(
                 if ready.is_ok() {
                     break;
                 }
-                fetch_result = Some(fetch_task.await);
+                fetch_result = Some((&mut fetch_task).await);
                 break;
             }
             result = &mut fetch_task, if fetch_result.is_none() => {

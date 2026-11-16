@@ -469,10 +469,11 @@ async fn attempt_multi(
             let mut completed_indices = Vec::new();
             let mut unsynced_bytes = 0_u64;
             let mut last_rate_update = Instant::now();
-            // Keep pause/shutdown responsive without persisting completion for
-            // every 1 MiB piece. Progress is published only after each durable
-            // batch, so a pause triggered by visible progress has a safe bitmap.
-            const DURABLE_BATCH_BYTES: u64 = 4 * 1024 * 1024;
+            // Checkpoint four bitmap pieces at a time. Larger downloads use
+            // larger pieces, avoiding a fixed 4 MiB sync cadence on huge files.
+            // Progress is published only after a durable batch, so a pause
+            // triggered by visible progress has a safe bitmap.
+            let durable_batch_bytes = piece_len(total).saturating_mul(4);
             let mut rate = live_rate_limit();
             use tokio::io::{AsyncSeekExt as _, AsyncWriteExt as _};
             while let Some((offset, bytes, idx)) = wrx.recv().await {
@@ -491,7 +492,7 @@ async fn attempt_multi(
                     rate = live_rate_limit();
                     last_rate_update = Instant::now();
                 }
-                if unsynced_bytes >= DURABLE_BATCH_BYTES {
+                if unsynced_bytes >= durable_batch_bytes {
                     file.flush()
                         .await
                         .map_err(|e| format!("Cannot write file: {e}"))?;

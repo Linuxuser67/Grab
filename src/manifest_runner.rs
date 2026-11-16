@@ -2296,7 +2296,7 @@ pub(crate) async fn run_manifest_download(
     finalize_manifest_download(ManifestFinalization {
         job: &job,
         destination_parts: live_destination_parts || static_destination_parts,
-        output_already_muxed: false,
+        mode: ManifestFinalizationMode::MuxStagedTracks,
         gate,
         abort,
         tx: &tx,
@@ -2642,7 +2642,7 @@ async fn run_incremental_aes128_hls_vod(
     let result = finalize_manifest_download(ManifestFinalization {
         job,
         destination_parts: true,
-        output_already_muxed: true,
+        mode: ManifestFinalizationMode::PublishPreMuxedDestinationPart,
         gate,
         abort: finalizer_abort,
         tx,
@@ -2670,10 +2670,16 @@ async fn run_incremental_aes128_hls_vod(
 ///
 /// The staging data is retained on every failure before publication so a later
 /// user-initiated resume can reuse completed resources.
+#[derive(Clone, Copy)]
+enum ManifestFinalizationMode {
+    MuxStagedTracks,
+    PublishPreMuxedDestinationPart,
+}
+
 struct ManifestFinalization<'a> {
     job: &'a ManifestJob,
     destination_parts: bool,
-    output_already_muxed: bool,
+    mode: ManifestFinalizationMode,
     gate: Arc<crate::attempt_gate::AttemptGate>,
     abort: tokio::sync::oneshot::Receiver<crate::video::StopIntent>,
     tx: &'a tokio::sync::mpsc::UnboundedSender<EngineMsg>,
@@ -2741,7 +2747,7 @@ async fn finalize_manifest_download(
     let ManifestFinalization {
         job,
         destination_parts,
-        output_already_muxed,
+        mode,
         gate,
         mut abort,
         tx,
@@ -2761,7 +2767,7 @@ async fn finalize_manifest_download(
         Some(crate::video::StopIntent::Finish) | None => {}
     }
     tx.send(EngineMsg::Phase(
-        if output_already_muxed {
+        if matches!(mode, ManifestFinalizationMode::PublishPreMuxedDestinationPart) {
             "Finalizing downloaded stream…".to_string()
         } else {
             "Merging audio and video…".to_string()
@@ -2914,7 +2920,7 @@ async fn finalize_manifest_download(
             .await
             .map_err(ManifestRunError::Failed)?;
     }
-    if !output_already_muxed {
+    if matches!(mode, ManifestFinalizationMode::MuxStagedTracks) {
         let staged_bytes = downloaded.load(Ordering::Relaxed);
         // FFmpeg writes beside the staged segments, so check both the XDG state
         // filesystem (staged inputs plus mux output) and destination filesystem

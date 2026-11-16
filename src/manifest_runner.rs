@@ -6652,7 +6652,6 @@ segment-2.ts
             .expect("fMP4 fixture has a final media segment");
         let final_segment_path = format!("/{final_segment_filename}");
         for resource in &mut plan.resources {
-        for resource in &mut plan.resources {
             let source_name = resource
                 .url
                 .path()

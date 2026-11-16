@@ -2710,6 +2710,7 @@ async fn finalize_manifest_download(
     let ManifestFinalization {
         job,
         destination_parts,
+        output_already_muxed,
         gate,
         mut abort,
         tx,
@@ -2728,8 +2729,14 @@ async fn finalize_manifest_download(
         Some(crate::video::StopIntent::Discard) => return Ok(ManifestOutcome::Aborted),
         Some(crate::video::StopIntent::Finish) | None => {}
     }
-    tx.send(EngineMsg::Phase("Merging audio and video…".to_string()))
-        .ok();
+    tx.send(EngineMsg::Phase(
+        if output_already_muxed {
+            "Finalizing downloaded stream…".to_string()
+        } else {
+            "Merging audio and video…".to_string()
+        },
+    ))
+    .ok();
 
     let has_separate_hls_audio = has_audio && matches!(&tracks, Tracks::Hls { audio: Some(_), .. });
     let has_local_hls_renditions = has_separate_hls_audio

@@ -15,7 +15,7 @@ use url::Url;
 pub(crate) const MAX_MANIFEST_BYTES: usize = 4 * 1024 * 1024;
 /// Maximum video variants retained from an HLS master.
 pub(crate) const MAX_HLS_MASTER_VARIANTS: usize = 4_096;
-/// Maximum combined audio and subtitle renditions retained from an HLS master.
+/// Maximum combined audio, subtitle, and closed-caption renditions retained from an HLS master.
 pub(crate) const MAX_HLS_MASTER_RENDITIONS: usize = 4_096;
 
 #[path = "manifest_dash.rs"]
@@ -1350,6 +1350,9 @@ fn validate_hls_rendition_groups(
         if group.trim().is_empty() || alternative.name.trim().is_empty() {
             return Err(group_error);
         }
+        if alternative.forced && alternative.media_type != AlternativeMediaType::Subtitles {
+            return Err(group_error);
+        }
         if !names.insert((group_kind, group.clone(), alternative.name.clone())) {
             return Err(group_error);
         }
@@ -1371,7 +1374,16 @@ fn validate_hls_rendition_groups(
             }
             if alternative.autoselect {
                 // AUTOSELECT renditions in one group need distinct language,
-                // associated-language, forced, and characteristics signatures.
+                // associated-language, forced, characteristics, and caption-service identities.
+                let caption_service =
+                    alternative
+                        .instream_id
+                        .as_ref()
+                        .map(|instream_id| match instream_id {
+                            m3u8_rs::InstreamId::CC(channel) => format!("CC{channel}"),
+                            m3u8_rs::InstreamId::Service(service) => format!("SERVICE{service}"),
+                            m3u8_rs::InstreamId::Other(value) => format!("OTHER:{value}"),
+                        });
                 let signature = (
                     group_kind,
                     group,
@@ -1379,6 +1391,7 @@ fn validate_hls_rendition_groups(
                     alternative.assoc_language.clone(),
                     alternative.forced,
                     alternative.characteristics.clone(),
+                    caption_service,
                 );
                 if !autoselect_signatures.insert(signature) {
                     return Err(group_error);
@@ -1396,14 +1409,22 @@ fn validate_hls_closed_caption_groups(
     variants: &[m3u8_rs::VariantStream],
 ) -> Result<(), ManifestError> {
     let mut declared_groups = HashSet::new();
-    for alternative in alternatives
-        .iter()
-        .filter(|alternative| alternative.media_type == AlternativeMediaType::ClosedCaptions)
-    {
-        if !matches!(
-            alternative.instream_id.as_ref(),
-            Some(m3u8_rs::InstreamId::CC(1..=4) | m3u8_rs::InstreamId::Service(1..=63))
-        ) {
+    for alternative in alternatives {
+        if alternative.media_type != AlternativeMediaType::ClosedCaptions {
+            if alternative.instream_id.is_some() {
+                return Err(ManifestError::UnsupportedPlaylist);
+            }
+            continue;
+        }
+
+        // Closed captions are carried in the video segments, so they cannot
+        // have a separate media playlist URI.
+        if alternative.uri.is_some()
+            || !matches!(
+                alternative.instream_id.as_ref(),
+                Some(m3u8_rs::InstreamId::CC(1..=4) | m3u8_rs::InstreamId::Service(1..=63))
+            )
+        {
             return Err(ManifestError::UnsupportedPlaylist);
         }
         declared_groups.insert(alternative.group_id.as_str());
@@ -1710,13 +1731,20 @@ pub(crate) fn parse_hls_master_playlist(
         })
         .collect::<Result<Vec<_>, ManifestError>>()?;
 
+    let closed_caption_rendition_count = master
+        .alternatives
+        .iter()
+        .filter(|alternative| alternative.media_type == AlternativeMediaType::ClosedCaptions)
+        .count();
     if audio_renditions
         .len()
         .saturating_add(subtitle_renditions.len())
+        .saturating_add(closed_caption_rendition_count)
         > MAX_HLS_MASTER_RENDITIONS
     {
         return Err(ManifestError::Parse(
-            "HLS master contains too many audio and subtitle renditions".to_string(),
+            "HLS master contains too many audio, subtitle, and closed-caption renditions"
+                .to_string(),
         ));
     }
 
@@ -2967,7 +2995,7 @@ video.m3u8
     fn closed_caption_groups_are_accepted_when_declared_by_a_variant() {
         let body = br#"#EXTM3U
 #EXT-X-MEDIA:TYPE=CLOSED-CAPTIONS,GROUP-ID="captions",NAME="English",LANGUAGE="en",DEFAULT=YES,AUTOSELECT=YES,INSTREAM-ID="CC1"
-#EXT-X-MEDIA:TYPE=CLOSED-CAPTIONS,GROUP-ID="captions",NAME="English Service",LANGUAGE="en",INSTREAM-ID="SERVICE63"
+#EXT-X-MEDIA:TYPE=CLOSED-CAPTIONS,GROUP-ID="captions",NAME="English Service",LANGUAGE="en",AUTOSELECT=YES,INSTREAM-ID="SERVICE63"
 #EXT-X-STREAM-INF:BANDWIDTH=1000000,CLOSED-CAPTIONS="captions"
 video.m3u8
 "#;
@@ -3015,6 +3043,32 @@ video.m3u8
         assert_eq!(
             parse_hls_master_playlist(BASE_URL, body).err(),
             Some(ManifestError::UnsupportedPlaylist)
+        );
+    }
+
+    #[test]
+    fn closed_caption_renditions_cannot_reference_separate_playlists() {
+        let body = br#"#EXTM3U
+#EXT-X-MEDIA:TYPE=CLOSED-CAPTIONS,GROUP-ID="captions",NAME="English",LANGUAGE="en",INSTREAM-ID="CC1",URI="captions/en.m3u8"
+#EXT-X-STREAM-INF:BANDWIDTH=1000000,CLOSED-CAPTIONS="captions"
+video.m3u8
+"#;
+        assert!(
+            parse_hls_master_playlist(BASE_URL, body).is_err(),
+            "closed-caption renditions must not reference a separate playlist"
+        );
+    }
+
+    #[test]
+    fn instream_id_is_rejected_for_non_caption_renditions() {
+        let body = br#"#EXTM3U
+#EXT-X-MEDIA:TYPE=SUBTITLES,GROUP-ID="subs",NAME="English",LANGUAGE="en",URI="subs/en.m3u8",INSTREAM-ID="CC1"
+#EXT-X-STREAM-INF:BANDWIDTH=1000000,SUBTITLES="subs"
+video.m3u8
+"#;
+        assert!(
+            parse_hls_master_playlist(BASE_URL, body).is_err(),
+            "INSTREAM-ID must not appear on a non-closed-caption rendition"
         );
     }
 

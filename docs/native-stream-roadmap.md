@@ -46,6 +46,19 @@ in the fetch plan and the local FFmpeg playlist. The regenerated local playlist
 does not promise to preserve the original opaque cue metadata. DASH SCTE-35
 event metadata is likewise not used to reject or remove media segments.
 
+HLS caption and subtitle handling follows the media representation:
+CEA-608 (`CC1`–`CC4`) and CEA-708 (`SERVICE1`–`SERVICE63`) are declared
+through closed-caption rendition groups but remain in-band with the video
+segments, so the native finalizer keeps them with the copied video stream.
+External WebVTT text playlists retain the text-to-`mov_text` MP4 path and the
+existing SRT sidecar fallback. Subtitle playlists with `EXT-X-MAP` are
+treated as fMP4 regardless of their subtitle sample entry: the original
+subtitle codec is stream-copied into MP4, or kept in an MP4 sidecar when the
+selected output container cannot represent that fMP4 track. This avoids
+forcing IMSC1 text or CMAF WVTT through an SRT decoder. Live external HLS
+subtitle renditions remain unsupported; in-band closed captions are part of
+the live video stream.
+
 This is a deliberately bounded profile, not a claim of support for every HLS
 extension. Unknown parser tags and unsupported resource-affecting extensions
 fall back to yt-dlp. This includes VIDEO groups with unmatched variant

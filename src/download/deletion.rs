@@ -405,7 +405,12 @@ impl DownloadManager {
         let path = item.file_path();
         let sidecars = if self.video_sources.borrow().contains_key(&id) {
             crate::video_prefs::subtitle_content_languages()
-                .map(|lang| crate::video_staging::sidecar_path_for(&path, lang))
+                .flat_map(|lang| {
+                    [
+                        crate::video_staging::sidecar_path_for(&path, lang),
+                        crate::video_staging::sidecar_path_for_extension(&path, lang, "fmp4.mp4"),
+                    ]
+                })
                 .collect()
         } else {
             Vec::new()

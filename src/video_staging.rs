@@ -1324,11 +1324,7 @@ pub(crate) fn sidecar_path_for(output: &Path, lang: &str) -> PathBuf {
 }
 
 /// Build a sidecar path for a subtitle format that must retain its source container.
-pub(crate) fn sidecar_path_for_extension(
-    output: &Path,
-    lang: &str,
-    extension: &str,
-) -> PathBuf {
+pub(crate) fn sidecar_path_for_extension(output: &Path, lang: &str, extension: &str) -> PathBuf {
     let stem = output
         .file_stem()
         .map(|s| s.to_string_lossy().into_owned())
@@ -1345,12 +1341,7 @@ pub(crate) fn collect_sidecar(src: &Path, dest: &Path, lang: &str) {
 }
 
 /// Collect a sidecar without converting its source container.
-pub(crate) fn collect_sidecar_with_extension(
-    src: &Path,
-    dest: &Path,
-    lang: &str,
-    extension: &str,
-) {
+pub(crate) fn collect_sidecar_with_extension(src: &Path, dest: &Path, lang: &str, extension: &str) {
     if !src.exists() {
         return;
     }
@@ -3005,5 +2996,4 @@ mod tests {
             "an unrelated MP4 must not be treated as a subtitle sidecar"
         );
     }
-
 }

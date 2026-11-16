@@ -1310,12 +1310,25 @@ fn stem_has_subtitle_sidecar(names: &[String], stem: &str) -> bool {
     }
     names.iter().any(|n| {
         strip_stem_suffix(n, stem)
-            .and_then(|r| r.strip_suffix(".srt"))
+            .and_then(|suffix| {
+                suffix
+                    .strip_suffix(".srt")
+                    .or_else(|| suffix.strip_suffix(".imsc1.mp4"))
+            })
             .is_some_and(|lang| subtitle_content_languages().any(|l| l == lang))
     })
 }
 
 pub(crate) fn sidecar_path_for(output: &Path, lang: &str) -> PathBuf {
+    sidecar_path_for_extension(output, lang, "srt")
+}
+
+/// Build a sidecar path while retaining the source subtitle container when conversion is unsafe.
+pub(crate) fn sidecar_path_for_extension(
+    output: &Path,
+    lang: &str,
+    suffix: &str,
+) -> PathBuf {
     let stem = output
         .file_stem()
         .map(|s| s.to_string_lossy().into_owned())
@@ -1323,15 +1336,25 @@ pub(crate) fn sidecar_path_for(output: &Path, lang: &str) -> PathBuf {
     output
         .parent()
         .unwrap_or_else(|| Path::new(""))
-        .join(format!("{stem}.{lang}.srt"))
+        .join(format!("{stem}.{lang}.{suffix}"))
 }
 
 /// Best-effort sidecar collection (never fails the download; never clobbers an existing file).
 pub(crate) fn collect_sidecar(src: &Path, dest: &Path, lang: &str) {
+    collect_sidecar_with_extension(src, dest, lang, "srt");
+}
+
+/// Collect a sidecar using its preserved output suffix, without clobbering a foreign file.
+pub(crate) fn collect_sidecar_with_extension(
+    src: &Path,
+    dest: &Path,
+    lang: &str,
+    suffix: &str,
+) {
     if !src.exists() {
         return;
     }
-    let dst = sidecar_path_for(dest, lang);
+    let dst = sidecar_path_for_extension(dest, lang, suffix);
     // Never clobber a foreign sidecar that arrived mid-download; ours stays sweepable beside the part file.
     if let Err(e) = crate::file_names::rename_noreplace(src, &dst) {
         tracing::warn!(

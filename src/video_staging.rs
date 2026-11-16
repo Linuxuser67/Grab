@@ -2991,4 +2991,22 @@ mod tests {
         );
         let _ = std::fs::remove_dir_all(&dir);
     }
+    #[test]
+    fn imsc1_sidecars_keep_their_format_and_reserve_the_video_stem() {
+        let destination = Path::new("/downloads/film.mp4");
+        let sidecar = sidecar_path_for_extension(destination, "en", "imsc1.mp4");
+        assert_eq!(
+            sidecar,
+            PathBuf::from("/downloads/film.en.imsc1.mp4")
+        );
+        assert!(
+            stem_reserved_in(&["film.en.imsc1.mp4".to_string()], "film"),
+            "an existing IMSC1 sidecar must reserve the destination stem"
+        );
+        assert!(
+            !stem_reserved_in(&["film.en.mp4".to_string()], "film"),
+            "an unrelated MP4 must not be mistaken for an IMSC1 sidecar"
+        );
+    }
+
 }

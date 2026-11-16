@@ -2175,11 +2175,11 @@ pub(crate) async fn run_manifest_download(
         // Preserve AES-128's established configured concurrency. Complex clear
         // VOD stays sequential, matching the ordinary static-HLS resource path.
         let connections = match &tracks {
-            Tracks::Hls {
-                video,
-                audio: None,
-                ..
-            } if video.is_incremental_aes128_mpegts_vod_candidate() => job.connections,
+            Tracks::Hls { video, audio: None, .. }
+                if video.is_incremental_aes128_mpegts_vod_candidate() =>
+            {
+                job.connections
+            }
             _ => 1,
         };
         let result = run_incremental_hls_vod(ManifestIncrementalHlsVod {
@@ -2592,9 +2592,7 @@ async fn run_incremental_hls_vod(
     output_file
         .seek(std::io::SeekFrom::Start(0))
         .await
-        .map_err(|error| {
-            manifest_storage_error("Could not rewind the HLS output part", error)
-        })?;
+        .map_err(|error| manifest_storage_error("Could not rewind the HLS output part", error))?;
     output_file.sync_all().await.map_err(|error| {
         manifest_storage_error("Could not persist the empty HLS output part", error)
     })?;
@@ -2610,8 +2608,7 @@ async fn run_incremental_hls_vod(
         InputTimestampPolicy::Normalize
     };
 
-    let mut fetchers =
-        tokio::task::JoinSet::<(usize, Result<bool, ManifestRunError>)>::new();
+    let mut fetchers = tokio::task::JoinSet::<(usize, Result<bool, ManifestRunError>)>::new();
     let mut workers = Vec::with_capacity(if audio.is_some() { 2 } else { 1 });
     workers.push(spawn_incremental_hls_track_fetch(
         &mut fetchers,
@@ -2874,12 +2871,14 @@ async fn run_incremental_hls_vod(
         .iter()
         .any(|result| matches!(result, Some(Ok(false)) | None))
     {
-        return Ok(match stop_intent.unwrap_or(crate::video::StopIntent::Pause) {
-            crate::video::StopIntent::Pause | crate::video::StopIntent::Finish => {
-                ManifestOutcome::Paused
-            }
-            crate::video::StopIntent::Discard => ManifestOutcome::Aborted,
-        });
+        return Ok(
+            match stop_intent.unwrap_or(crate::video::StopIntent::Pause) {
+                crate::video::StopIntent::Pause | crate::video::StopIntent::Finish => {
+                    ManifestOutcome::Paused
+                }
+                crate::video::StopIntent::Discard => ManifestOutcome::Aborted,
+            },
+        );
     }
     if mux_outcome != ManifestMuxOutcome::Finished {
         return Ok(match mux_outcome {
@@ -2967,7 +2966,9 @@ async fn run_incremental_hls_vod(
     let audio = audio
         .map(|plan| {
             Arc::try_unwrap(plan).map_err(|_| {
-                ManifestRunError::Failed("incremental HLS audio plan still has active readers".to_string())
+                ManifestRunError::Failed(
+                    "incremental HLS audio plan still has active readers".to_string(),
+                )
             })
         })
         .transpose()?;
@@ -7249,10 +7250,7 @@ segment-2.ts
             .rfind("#EXTINF:")
             .expect("video fixture has a second segment");
         let mut discontinuous_video_playlist = video_playlist;
-        discontinuous_video_playlist.insert_str(
-            second_video_segment,
-            "#EXT-X-DISCONTINUITY\n",
-        );
+        discontinuous_video_playlist.insert_str(second_video_segment, "#EXT-X-DISCONTINUITY\n");
         std::fs::write(&video_playlist_path, &discontinuous_video_playlist)
             .expect("add a video discontinuity before the final segment");
 
@@ -7315,11 +7313,8 @@ segment-2.ts
                 served_video.join(&resource.filename),
             )
             .expect("copy video resource under its localized staging filename");
-            resource.url = Url::parse(&format!(
-                "http://{address}/video/{}",
-                resource.filename
-            ))
-            .expect("set local video resource URL");
+            resource.url = Url::parse(&format!("http://{address}/video/{}", resource.filename))
+                .expect("set local video resource URL");
         }
         for resource in &mut audio_plan.resources {
             let source_name = resource
@@ -7335,11 +7330,8 @@ segment-2.ts
                 served_audio.join(&resource.filename),
             )
             .expect("copy audio resource under its localized staging filename");
-            resource.url = Url::parse(&format!(
-                "http://{address}/audio/{}",
-                resource.filename
-            ))
-            .expect("set local audio resource URL");
+            resource.url = Url::parse(&format!("http://{address}/audio/{}", resource.filename))
+                .expect("set local audio resource URL");
         }
         let request_count = video_plan.resources.len() + audio_plan.resources.len();
         let release_final_video = Arc::new(tokio::sync::Notify::new());

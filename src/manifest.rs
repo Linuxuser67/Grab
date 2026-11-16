@@ -593,7 +593,8 @@ impl HlsPlan {
         finality: HlsPlaylistFinality,
     ) -> Result<Vec<u8>, ManifestError> {
         let total_segments = self.local_playlist.segments.len();
-        if segment_count > total_segments
+        if segment_count == 0
+            || segment_count > total_segments
             || (finality == HlsPlaylistFinality::Complete && segment_count != total_segments)
         {
             return Err(ManifestError::InvalidPlaylistPrefix);
@@ -3794,6 +3795,10 @@ two.ts
         assert_eq!(parsed.segments.len(), 2);
         assert!(parsed.end_list);
 
+        assert_eq!(
+            plan.local_playlist_prefix_bytes(0, HlsPlaylistFinality::Growing),
+            Err(ManifestError::InvalidPlaylistPrefix)
+        );
         assert_eq!(
             plan.local_playlist_prefix_bytes(3, HlsPlaylistFinality::Growing),
             Err(ManifestError::InvalidPlaylistPrefix)

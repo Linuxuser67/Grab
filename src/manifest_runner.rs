@@ -78,8 +78,6 @@ const FFMPEG_LOG_LINES: usize = 32;
 const MANIFEST_MUX_TIMEOUT: Duration = Duration::from_secs(3600);
 /// Hard upper bound for an incremental VOD mux, including the time spent waiting for segments.
 const INCREMENTAL_HLS_MUX_TIMEOUT: Duration = Duration::from_secs(7 * 24 * 60 * 60);
-/// Allow the fetcher to publish its completion signal immediately after the final playlist rename.
-const FINAL_PLAYLIST_SIGNAL_GRACE: Duration = Duration::from_secs(1);
 /// Upper bound on the persisted dynamic DASH segment index.
 const MAX_DASH_LIVE_SEGMENTS: usize = crate::manifest_types::MAX_MANIFEST_SEGMENTS;
 /// Bound for a serialized dynamic DASH resume index.
@@ -2353,6 +2351,80 @@ fn send_manifest_stop_intent(
     }
 }
 
+struct ManifestCompleteAes128Remux<'a> {
+    ffmpeg: &'a Path,
+    playlist: &'a Path,
+    staging: &'a Path,
+    destination: &'a Path,
+    item_id: u64,
+    part_path: &'a Path,
+    container: ManifestContainer,
+    abort: &'a mut tokio::sync::oneshot::Receiver<crate::video::StopIntent>,
+}
+
+async fn remux_complete_aes128_vod_part(
+    context: ManifestCompleteAes128Remux<'_>,
+) -> Result<ManifestMuxOutcome, ManifestRunError> {
+    use tokio::io::AsyncSeekExt as _;
+
+    let ManifestCompleteAes128Remux {
+        ffmpeg,
+        playlist,
+        staging,
+        destination,
+        item_id,
+        part_path,
+        container,
+        abort,
+    } = context;
+    let mut output_file = crate::manifest_destination::open_owned_part_async(
+        staging.to_path_buf(),
+        destination.to_path_buf(),
+        item_id,
+        TrackKind::Video,
+    )
+    .await
+    .map_err(ManifestRunError::Failed)?;
+    output_file.set_len(0).await.map_err(|error| {
+        manifest_storage_error("Could not reset the incomplete AES-128 output part", error)
+    })?;
+    output_file
+        .seek(std::io::SeekFrom::Start(0))
+        .await
+        .map_err(|error| {
+            manifest_storage_error("Could not rewind the AES-128 output part", error)
+        })?;
+    output_file.sync_all().await.map_err(|error| {
+        manifest_storage_error("Could not persist the reset AES-128 output part", error)
+    })?;
+
+    run_ffmpeg_with_offsets_timeout(
+        ffmpeg,
+        FfmpegInput {
+            path: playlist,
+            timestamp_offset: None,
+        },
+        None,
+        ManifestMuxOptions {
+            timestamp_policy: InputTimestampPolicy::Normalize,
+            timeout: Some(INCREMENTAL_HLS_MUX_TIMEOUT),
+        },
+        SubtitleOutput {
+            input: None,
+            embed: false,
+            sidecar: None,
+            is_fmp4: false,
+        },
+        FfmpegOutput::OwnedPart {
+            file: output_file.into_std().await,
+            container,
+            label: part_path.to_path_buf(),
+        },
+        abort,
+    )
+    .await
+}
+
 async fn run_incremental_aes128_hls_vod(
     context: ManifestIncrementalHlsVod<'_>,
 ) -> Result<ManifestOutcome, ManifestRunError> {
@@ -2502,6 +2574,7 @@ async fn run_incremental_aes128_hls_vod(
     let output_container = manifest_output_container(&job.dest)?;
     let ffmpeg_path = ffmpeg.clone();
     let playlist_path = video_dir.join("local.m3u8");
+    let ffmpeg_playlist_path = playlist_path.clone();
     let output_label = part_path.clone();
     let output_file = output_file.into_std().await;
     let mut ffmpeg_abort = ffmpeg_abort_rx;
@@ -2509,7 +2582,7 @@ async fn run_incremental_aes128_hls_vod(
         run_ffmpeg_with_offsets_timeout(
             &ffmpeg_path,
             FfmpegInput {
-                path: &playlist_path,
+                path: &ffmpeg_playlist_path,
                 timestamp_offset: None,
             },
             None,
@@ -2566,26 +2639,13 @@ async fn run_incremental_aes128_hls_vod(
                 }
             }
             result = &mut ffmpeg_task, if ffmpeg_result.is_none() => {
-                if matches!(&result, Ok(Ok(ManifestMuxOutcome::Finished)))
-                    && !complete_ready
-                    && !complete_signal_done
-                {
-                    complete_ready = tokio::time::timeout(
-                        FINAL_PLAYLIST_SIGNAL_GRACE,
-                        &mut complete_rx,
-                    )
-                    .await
-                    .is_ok_and(|signal| signal.is_ok());
-                    complete_signal_done = true;
-                }
                 ffmpeg_result = Some(result);
                 match &ffmpeg_result {
-                    Some(Ok(Ok(ManifestMuxOutcome::Finished))) if !complete_ready => {
+                    Some(Ok(Ok(ManifestMuxOutcome::Finished))) if fetch_result.is_none() => {
+                        // The fetch task is not complete yet. FFmpeg may have
+                        // interpreted the last growing snapshot as end-of-file;
+                        // remux the durable complete playlist before publication.
                         ffmpeg_exited_before_complete_playlist = true;
-                        send_manifest_stop_intent(
-                            &mut fetch_abort_tx,
-                            crate::video::StopIntent::Pause,
-                        );
                     }
                     Some(Ok(Err(_))) | Some(Err(_)) => {
                         send_manifest_stop_intent(
@@ -2612,13 +2672,9 @@ async fn run_incremental_aes128_hls_vod(
             crate::video::StopIntent::Finish => unreachable!(),
         });
     }
-    if ffmpeg_exited_before_complete_playlist {
-        return Err(ManifestRunError::Failed(
-            "FFmpeg exited before the complete HLS VOD playlist was published".to_string(),
-        ));
-    }
-
-    let fetched = match fetch_result.expect("fetch task must finish before publication") {
+    let fetched = match fetch_result.ok_or_else(|| {
+        ManifestRunError::Failed("The incremental HLS fetch task did not finish".to_string())
+    })? {
         Ok(Ok(fetched)) => fetched,
         Ok(Err(error)) => return Err(error),
         Err(error) => {
@@ -2627,7 +2683,26 @@ async fn run_incremental_aes128_hls_vod(
             )));
         }
     };
-    let mux_outcome = match ffmpeg_result.expect("FFmpeg task must finish before publication") {
+    if !fetched {
+        return Ok(
+            match stop_intent.unwrap_or(crate::video::StopIntent::Pause) {
+                crate::video::StopIntent::Pause | crate::video::StopIntent::Finish => {
+                    ManifestOutcome::Paused
+                }
+                crate::video::StopIntent::Discard => ManifestOutcome::Aborted,
+            },
+        );
+    }
+    if !complete_ready {
+        return Err(ManifestRunError::Failed(
+            "The complete HLS VOD playlist was not published after all segments were fetched"
+                .to_string(),
+        ));
+    }
+
+    let mux_outcome = match ffmpeg_result.ok_or_else(|| {
+        ManifestRunError::Failed("The incremental HLS FFmpeg task did not finish".to_string())
+    })? {
         Ok(Ok(outcome)) => outcome,
         Ok(Err(error)) => return Err(error),
         Err(error) => {
@@ -2637,14 +2712,50 @@ async fn run_incremental_aes128_hls_vod(
         }
     };
     match mux_outcome {
-        ManifestMuxOutcome::Finished if fetched && complete_ready => {}
+        ManifestMuxOutcome::Finished => {
+            if ffmpeg_exited_before_complete_playlist {
+                tracing::warn!(
+                    item_id = job.item_id,
+                    "FFmpeg exited on a growing AES-128 VOD snapshot; remuxing the completed playlist"
+                );
+                let remux_outcome = if abort_done {
+                    // Finish was already consumed by the fetch/mux supervisor.
+                    // Re-arm it for the completion-only remux.
+                    let (finish_sender, mut finish_abort) = tokio::sync::oneshot::channel();
+                    let _ = finish_sender.send(crate::video::StopIntent::Finish);
+                    remux_complete_aes128_vod_part(ManifestCompleteAes128Remux {
+                        ffmpeg: &ffmpeg,
+                        playlist: &playlist_path,
+                        staging,
+                        destination: &job.dest,
+                        item_id: job.item_id,
+                        part_path: &part_path,
+                        container: output_container,
+                        abort: &mut finish_abort,
+                    })
+                    .await?
+                } else {
+                    remux_complete_aes128_vod_part(ManifestCompleteAes128Remux {
+                        ffmpeg: &ffmpeg,
+                        playlist: &playlist_path,
+                        staging,
+                        destination: &job.dest,
+                        item_id: job.item_id,
+                        part_path: &part_path,
+                        container: output_container,
+                        abort: &mut abort,
+                    })
+                    .await?
+                };
+                match remux_outcome {
+                    ManifestMuxOutcome::Finished => {}
+                    ManifestMuxOutcome::Paused => return Ok(ManifestOutcome::Paused),
+                    ManifestMuxOutcome::Aborted => return Ok(ManifestOutcome::Aborted),
+                }
+            }
+        }
         ManifestMuxOutcome::Paused => return Ok(ManifestOutcome::Paused),
         ManifestMuxOutcome::Aborted => return Ok(ManifestOutcome::Aborted),
-        ManifestMuxOutcome::Finished => {
-            return Err(ManifestRunError::Failed(
-                "FFmpeg finished without receiving the complete HLS VOD playlist".to_string(),
-            ));
-        }
     }
 
     let video = Arc::try_unwrap(video).map_err(|_| {
@@ -6062,7 +6173,7 @@ segment-2.ts
     /// Shared body for the AES-128 incremental VOD integration test. The output
     /// container follows the destination extension, so exercise TS (the native
     /// MPEG-TS case) plus MP4/MKV written through the same owned part.
-    async fn assert_aes128_hls_vod_output(extension: &str) {
+    async fn assert_aes128_hls_vod_output(extension: &str, force_early_exit: bool) {
         use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
 
         let ffmpeg = match resolve_manifest_ffmpeg(&[PathBuf::from("/usr/bin")]) {
@@ -6131,6 +6242,23 @@ segment-2.ts
             "FFmpeg AES-128 fixture generation failed: {}",
             String::from_utf8_lossy(&generated.stderr)
         );
+        let forced_exit_counter = if force_early_exit {
+            use std::os::unix::fs::PermissionsExt as _;
+
+            let counter = fixture.path().join("ffmpeg-invocations");
+            let wrapper = fixture.path().join("ffmpeg-early-exit-wrapper");
+            let real_ffmpeg = ffmpeg.display().to_string().replace('\'', "'\\''");
+            let counter_path = counter.display().to_string().replace('\'', "'\\''");
+            let script = format!(
+                "#!/bin/sh\nif [ ! -f '{counter_path}' ]; then\n  printf '1' > '{counter_path}'\n  printf 'premature mux output'\n  exit 0\nfi\nprintf '2' > '{counter_path}'\nexec '{real_ffmpeg}' \"$@\"\n"
+            );
+            std::fs::write(&wrapper, script).expect("write early-exit FFmpeg wrapper");
+            std::fs::set_permissions(&wrapper, std::fs::Permissions::from_mode(0o700))
+                .expect("make early-exit FFmpeg wrapper executable");
+            Some((wrapper, counter))
+        } else {
+            None
+        };
         let playlist = std::fs::read(&playlist_path).expect("read generated encrypted playlist");
 
         let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0))
@@ -6291,7 +6419,9 @@ segment-2.ts
         let task_video_dir = video_dir;
         let task_audio_dir = audio_dir;
         let task_client = client;
-        let task_ffmpeg = ffmpeg.clone();
+        let task_ffmpeg = forced_exit_counter
+            .as_ref()
+            .map_or_else(|| ffmpeg.clone(), |(wrapper, _)| wrapper.clone());
         let task_downloaded = Arc::clone(&downloaded);
         let download_task = tokio::spawn(async move {
             run_incremental_aes128_hls_vod(ManifestIncrementalHlsVod {
@@ -6354,6 +6484,15 @@ segment-2.ts
             matches!(outcome, ManifestOutcome::Finished(size) if size > 0),
             "expected publication of a non-empty decrypted stream, got {outcome:?}"
         );
+        if let Some((_, counter)) = forced_exit_counter.as_ref() {
+            assert_eq!(
+                tokio::fs::read_to_string(counter)
+                    .await
+                    .expect("read FFmpeg invocation counter"),
+                "2",
+                "the completed-playlist recovery must run FFmpeg a second time"
+            );
+        }
         drop(stop_sender);
         server.await.expect("AES-128 fixture server task");
 
@@ -6393,17 +6532,23 @@ segment-2.ts
 
     #[tokio::test]
     async fn ffmpeg_decrypts_aes128_hls_vod_into_an_owned_ts_part() {
-        assert_aes128_hls_vod_output("ts").await;
+        assert_aes128_hls_vod_output("ts", false).await;
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn aes128_vod_remuxes_again_when_ffmpeg_exits_before_playlist_completion() {
+        assert_aes128_hls_vod_output("ts", true).await;
     }
 
     #[tokio::test]
     async fn ffmpeg_decrypts_aes128_hls_vod_into_an_owned_mp4_part() {
-        assert_aes128_hls_vod_output("mp4").await;
+        assert_aes128_hls_vod_output("mp4", false).await;
     }
 
     #[tokio::test]
     async fn ffmpeg_decrypts_aes128_hls_vod_into_an_owned_mkv_part() {
-        assert_aes128_hls_vod_output("mkv").await;
+        assert_aes128_hls_vod_output("mkv", false).await;
     }
 
     #[tokio::test]

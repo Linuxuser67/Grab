@@ -53,6 +53,45 @@ pub(crate) fn dash_output_container(mime_type: Option<&str>) -> Option<ManifestC
     }
 }
 
+/// Codec classes that can be muxed into an ISO BMFF/MP4 output.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum HlsMp4CodecKind { Video, Audio, Subtitle }
+
+/// Classify only codec identifiers with an established MP4 sample entry.
+/// Unknown identifiers deliberately retain the conservative Matroska default.
+fn hls_mp4_codec_kind(codec: &str) -> Option<HlsMp4CodecKind> {
+    let codec = codec.trim();
+    if codec.is_empty() { return None; }
+    let (sample_entry, parameters) = codec.split_once('.').unwrap_or((codec, ""));
+    let has_parameters = !parameters.is_empty();
+    if has_parameters
+        && ["avc1", "avc3", "hvc1", "hev1", "av01", "vp09", "mp4v"]
+            .iter().any(|supported| sample_entry.eq_ignore_ascii_case(supported))
+    { return Some(HlsMp4CodecKind::Video); }
+    if (sample_entry.eq_ignore_ascii_case("mp4a") && has_parameters)
+        || ["ac-3", "ec-3"].iter().any(|supported| codec.eq_ignore_ascii_case(supported))
+    { return Some(HlsMp4CodecKind::Audio); }
+    if ["wvtt", "stpp"].iter().any(|supported| sample_entry.eq_ignore_ascii_case(supported))
+    { return Some(HlsMp4CodecKind::Subtitle); }
+    None
+}
+
+/// Require every advertised codec to be a known MP4 sample-entry family.
+/// A referenced separate audio group must declare an audio codec as well.
+fn hls_variant_supports_mp4(variant: &HlsVariant) -> bool {
+    let Some(codecs) = variant.codecs.as_deref() else { return false; };
+    let mut has_video = false;
+    let mut has_audio = false;
+    for codec in codecs.split(',') {
+        match hls_mp4_codec_kind(codec) {
+            Some(HlsMp4CodecKind::Video) => has_video = true,
+            Some(HlsMp4CodecKind::Audio) => has_audio = true,
+            Some(HlsMp4CodecKind::Subtitle) => {}
+            None => return false,
+        }
+    }
+    has_video && (variant.audio_group.is_none() || has_audio)
+}
 /// Select the closest representation to the configured video-quality preference.
 #[must_use]
 pub(crate) fn preferred_choice_index(choices: &[ManifestChoice], quality: &str) -> usize {
@@ -423,16 +462,19 @@ impl ManifestLookup {
             .and_then(|choice| choice.language)
             .as_deref()
             .and_then(normalize_subtitle_language);
-        // The preview already contains the complete media playlist for direct
-        // HLS and the selected representation MIME type for DASH. HLS master
-        // children are not fetched here, so keep their output conservative
-        // rather than performing a second network lookup during Add.
+        // HLS master previews use the selected variant's CODECS declaration;
+        // fetching child playlists again can consume one-shot URLs before download.
         let output_container = match &self.manifest {
-            NativeManifest::HlsMaster(_) => None,
+            NativeManifest::HlsMaster(master) => master
+                .variants.iter().zip(hls_variant_keys(&master.variants))
+                .find_map(|(variant, key)| {
+                    (key.as_deref() == Some(representation_key.as_str())).then_some(variant)
+                })
+                .filter(|variant| hls_variant_supports_mp4(variant))
+                .map(|_| ManifestContainer::Mp4),
             NativeManifest::HlsMedia(plan) => plan.output_container(),
             NativeManifest::Dash(dash) => dash
-                .video_representations
-                .iter()
+                .video_representations.iter()
                 .find(|representation| representation.matches_key(representation_key.as_str()))
                 .and_then(|representation| {
                     dash_output_container(representation.mime_type.as_deref())

@@ -466,7 +466,10 @@ impl HlsPlan {
             || self.output_container() != Some(crate::media_types::ManifestContainer::Ts)
             || self.resources.iter().any(|resource| {
                 resource.range.is_some()
-                    || !matches!(resource.kind, HlsResourceKind::Key | HlsResourceKind::Segment)
+                    || !matches!(
+                        resource.kind,
+                        HlsResourceKind::Key | HlsResourceKind::Segment
+                    )
             })
         {
             return false;

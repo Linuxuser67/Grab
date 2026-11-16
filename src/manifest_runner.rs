@@ -4392,7 +4392,7 @@ async fn run_ffmpeg(
 #[derive(Clone, Copy)]
 struct ManifestMuxOptions {
     timestamp_policy: InputTimestampPolicy,
-    timeout: Duration,
+    timeout: Option<Duration>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -4443,10 +4443,10 @@ async fn run_ffmpeg_with_offsets(
         audio_input,
         ManifestMuxOptions {
             timestamp_policy,
-            timeout: MANIFEST_MUX_TIMEOUT,
+            timeout: Some(MANIFEST_MUX_TIMEOUT),
         },
         subtitles,
-        output,
+        FfmpegOutput::StagedPath(output.to_path_buf()),
         abort,
     )
     .await
@@ -4454,25 +4454,34 @@ async fn run_ffmpeg_with_offsets(
 
 async fn wait_for_manifest_mux(
     child: &mut tokio::process::Child,
-    timeout: Duration,
+    timeout: Option<Duration>,
 ) -> Result<std::process::ExitStatus, ManifestRunError> {
-    match tokio::time::timeout(timeout, child.wait()).await {
-        Ok(Ok(status)) => Ok(status),
-        Ok(Err(error)) => {
-            let _ = child.kill().await;
-            let _ = child.wait().await;
-            Err(ManifestRunError::Failed(format!(
-                "FFmpeg could not finish: {error}"
-            )))
-        }
-        Err(_) => {
-            let _ = child.kill().await;
-            let _ = child.wait().await;
-            Err(ManifestRunError::Failed(format!(
-                "FFmpeg finalization exceeded its {timeout:?} time limit"
-            )))
-        }
-    }
+    let status = match timeout {
+        Some(timeout) => match tokio::time::timeout(timeout, child.wait()).await {
+            Ok(status) => status,
+            Err(_) => {
+                let _ = child.kill().await;
+                let _ = child.wait().await;
+                return Err(ManifestRunError::Failed(format!(
+                    "FFmpeg finalization exceeded its {timeout:?} time limit"
+                )));
+            }
+        },
+        None => child.wait().await,
+    };
+    status.map_err(|error| {
+        let _ = child.start_kill();
+        ManifestRunError::Failed(format!("FFmpeg could not finish: {error}"))
+    })
+}
+
+enum FfmpegOutput {
+    StagedPath(PathBuf),
+    OwnedPart {
+        file: std::fs::File,
+        container: ManifestContainer,
+        label: PathBuf,
+    },
 }
 
 async fn run_ffmpeg_with_offsets_timeout(
@@ -4481,10 +4490,22 @@ async fn run_ffmpeg_with_offsets_timeout(
     audio_input: Option<FfmpegInput<'_>>,
     options: ManifestMuxOptions,
     subtitles: SubtitleOutput<'_>,
-    output: &Path,
+    output: FfmpegOutput,
     abort: &mut tokio::sync::oneshot::Receiver<crate::video::StopIntent>,
 ) -> Result<ManifestMuxOutcome, ManifestRunError> {
-    let output_container = manifest_output_container(output)?;
+    let (output_argument, output_container, output_label, overwrite_output, stdout) = match output {
+        FfmpegOutput::StagedPath(path) => {
+            let container = manifest_output_container(&path)?;
+            (path.clone(), container, path, false, std::process::Stdio::null())
+        }
+        FfmpegOutput::OwnedPart { file, container, label } => (
+            PathBuf::from("/proc/self/fd/1"),
+            container,
+            label,
+            true,
+            std::process::Stdio::from(file),
+        ),
+    };
     if output_container == ManifestContainer::Ts && subtitles.input.is_some() && subtitles.embed {
         return Err(mpegts_embedded_subtitle_error());
     }
@@ -4493,7 +4514,10 @@ async fn run_ffmpeg_with_offsets_timeout(
     if is_hls_playlist_input(video_input.path) {
         add_hls_staging_options(&mut command);
     }
-    command.arg("-hide_banner").arg("-nostdin").arg("-n");
+    command
+        .arg("-hide_banner")
+        .arg("-nostdin")
+        .arg(if overwrite_output { "-y" } else { "-n" });
     if options.timestamp_policy == InputTimestampPolicy::Preserve {
         command.arg("-copyts");
     }
@@ -4550,7 +4574,7 @@ async fn run_ffmpeg_with_offsets_timeout(
             command.args(["-f", "mpegts"]);
         }
     }
-    command.arg(output);
+    command.arg(&output_argument);
     if subtitles.input.is_some() && !subtitles.embed {
         let sidecar = subtitles.sidecar.ok_or_else(|| {
             ManifestRunError::Failed("Subtitle sidecar destination is missing".to_string())
@@ -4567,7 +4591,7 @@ async fn run_ffmpeg_with_offsets_timeout(
     }
     command
         .stdin(std::process::Stdio::null())
-        .stdout(std::process::Stdio::null())
+        .stdout(stdout)
         .stderr(std::process::Stdio::piped())
         .kill_on_drop(true);
     let mut child = command

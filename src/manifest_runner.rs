@@ -6623,7 +6623,7 @@ segment-2.ts
                 "4",
                 "-an",
                 "-c:v",
-                "libx264",
+                "mpeg2video",
                 "-pix_fmt",
                 "yuv420p",
                 "-g",

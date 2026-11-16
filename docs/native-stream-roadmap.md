@@ -67,9 +67,10 @@ has a declared audio codec. Missing or unknown codec metadata retains the MKV
 default. CODECS describes codec formats, not whether child segments use fMP4
 or MPEG-TS, so this is a conservative mux-compatibility decision rather than
 a claim that the master playlist identifies the segment container.
-The current sample-entry allowlist covers common AVC/HEVC/Dolby Vision/AV1/VP9
-and MJPEG/MPEG-4 Visual video identifiers; AAC, AC-3/E-AC-3, ALAC, APAC and FLAC audio
-identifiers; and WVTT/IMSC1 subtitle identifiers. Unknown identifiers
+The current sample-entry allowlist is limited to codec tags supported by the
+app's minimum FFmpeg MP4 muxer: AVC/HEVC (including `dvh1`), AV1 and VP9
+video; AAC, AC-3/E-AC-3, ALAC and FLAC audio; and WVTT/IMSC1 subtitles.
+Less common or unsupported identifiers, including unknown sample types,
 remain on the MKV fallback rather than being guessed as MP4-compatible.
 
 This is a deliberately bounded profile, not a claim of support for every HLS

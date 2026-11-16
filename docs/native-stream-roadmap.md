@@ -58,6 +58,7 @@ selected output container cannot represent that fMP4 track. This avoids
 forcing IMSC1 text or CMAF WVTT through an SRT decoder. Live external HLS
 subtitle renditions remain unsupported; in-band closed captions are part of
 the live video stream.
+
 HLS master previews do not fetch selected child playlists a second time just
 to choose an output suffix, because child URLs may be one-shot. Instead, Grab
 chooses MP4 only when the selected variant's CODECS declaration contains

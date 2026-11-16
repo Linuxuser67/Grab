@@ -6650,7 +6650,8 @@ segment-2.ts
             .find(|resource| resource.kind == crate::manifest::HlsResourceKind::Segment)
             .map(|resource| resource.filename.clone())
             .expect("fMP4 fixture has a final media segment");
-        let mut final_segment_path = None;
+        let final_segment_path = format!("/{final_segment_filename}");
+        for resource in &mut plan.resources {
         for resource in &mut plan.resources {
             let source_name = resource
                 .url
@@ -6665,16 +6666,9 @@ segment-2.ts
                 served_root.join(&resource.filename),
             )
             .expect("copy fixture resource under its localized filename");
-            if resource.kind == crate::manifest::HlsResourceKind::Segment
-                && resource.filename == final_segment_filename
-            {
-                final_segment_path = Some(format!("/{}", resource.filename));
-            }
             resource.url = Url::parse(&format!("http://{address}/{}", resource.filename))
                 .expect("set local fMP4 resource URL");
         }
-        let final_segment_path =
-            final_segment_path.expect("fMP4 fixture has a final media segment");
         let request_count = plan.resources.len();
         assert_eq!(request_count, plan.segment_count() + 1, "one init map and two media segments");
 

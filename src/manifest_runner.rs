@@ -2883,11 +2883,13 @@ async fn finalize_manifest_download(
             .await
             .map_err(ManifestRunError::Failed)?;
     }
-    let staged_bytes = downloaded.load(Ordering::Relaxed);
-    // FFmpeg writes beside the staged segments, so check both the XDG state
-    // filesystem (staged inputs plus mux output) and destination filesystem
-    // (the no-clobber cross-device publication fallback).
-    ensure_manifest_mux_spaces(staging, dest_dir, staged_bytes)?;
+    if !output_already_muxed {
+        let staged_bytes = downloaded.load(Ordering::Relaxed);
+        // FFmpeg writes beside the staged segments, so check both the XDG state
+        // filesystem (staged inputs plus mux output) and destination filesystem
+        // (the no-clobber cross-device publication fallback).
+        ensure_manifest_mux_spaces(staging, dest_dir, staged_bytes)?;
+    }
     let (video_timestamp_offset, audio_timestamp_offset) = match &tracks {
         Tracks::Dash { video, audio, .. } => (
             video.input_timestamp_offset.ffmpeg_argument(),

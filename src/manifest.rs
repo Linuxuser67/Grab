@@ -3813,7 +3813,9 @@ one.ts
 
         let bytes = plan
             .local_playlist_prefix_bytes(1, HlsPlaylistFinality::Complete)
-            .expect("the complete local snapshot can be finalized independently of source live state");
+            .expect(
+                "the complete local snapshot can be finalized independently of source live state",
+            );
         let parsed = m3u8_rs::parse_media_playlist_res(&bytes)
             .expect("finalized local playlist should parse");
         assert_eq!(parsed.segments.len(), 1);

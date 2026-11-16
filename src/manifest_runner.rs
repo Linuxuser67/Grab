@@ -5875,21 +5875,27 @@ segment-2.ts
         assert!(plan.is_incremental_aes128_mpegts_vod_candidate());
         assert!(plan.segment_count() >= 2, "fixture must contain multiple segments");
 
+        let total_segments = plan.segment_count();
         let mut segment_index = 0usize;
         let mut final_segment_path = None;
         for resource in &mut plan.resources {
-            let name = match resource.kind {
-                crate::manifest::HlsResourceKind::Key => "key.bin".to_string(),
+            let name = resource
+                .url
+                .path()
+                .rsplit('/')
+                .next()
+                .filter(|name| !name.is_empty())
+                .expect("planned AES-128 resource must have a filename")
+                .to_string();
+            match resource.kind {
+                crate::manifest::HlsResourceKind::Key => {}
                 crate::manifest::HlsResourceKind::Segment => {
                     segment_index += 1;
-                    format!("segment{segment_index:03}.ts")
+                    if segment_index == total_segments {
+                        final_segment_path = Some(format!("/{name}"));
+                    }
                 }
                 _ => panic!("unexpected resource in AES-128 MPEG-TS fixture"),
-            };
-            if resource.kind == crate::manifest::HlsResourceKind::Segment
-                && segment_index == plan.segment_count()
-            {
-                final_segment_path = Some(format!("/{name}"));
             }
             resource.url = Url::parse(&format!("http://{address}/{name}"))
                 .expect("set local AES-128 fixture resource URL");

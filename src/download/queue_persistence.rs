@@ -402,7 +402,7 @@ impl DownloadManager {
             std::process::id(),
             QUEUE_TMP_COUNTER.fetch_add(1, Ordering::Relaxed)
         ));
-        let result = (|| {
+        let result: std::io::Result<()> = (|| {
             let mut file = std::fs::OpenOptions::new()
                 .write(true)
                 .create_new(true)

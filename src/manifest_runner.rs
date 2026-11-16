@@ -2378,12 +2378,14 @@ fn send_manifest_stop_intent(
 
 struct ManifestCompleteHlsRemux<'a> {
     ffmpeg: &'a Path,
-    playlist: &'a Path,
+    video_playlist: &'a Path,
+    audio_playlist: Option<&'a Path>,
     staging: &'a Path,
     destination: &'a Path,
     item_id: u64,
     part_path: &'a Path,
     container: ManifestContainer,
+    timestamp_policy: InputTimestampPolicy,
     abort: &'a mut tokio::sync::oneshot::Receiver<crate::video::StopIntent>,
 }
 
@@ -2406,12 +2408,14 @@ async fn remux_complete_hls_vod_part(
 
     let ManifestCompleteHlsRemux {
         ffmpeg,
-        playlist,
+        video_playlist,
+        audio_playlist,
         staging,
         destination,
         item_id,
         part_path,
         container,
+        timestamp_policy,
         abort,
     } = context;
     let mut output_file = crate::manifest_destination::open_owned_part_async(
@@ -2436,12 +2440,15 @@ async fn remux_complete_hls_vod_part(
     run_ffmpeg_with_offsets_timeout(
         ffmpeg,
         FfmpegInput {
-            path: playlist,
+            path: video_playlist,
             timestamp_offset: None,
         },
-        None,
+        audio_playlist.map(|path| FfmpegInput {
+            path,
+            timestamp_offset: None,
+        }),
         ManifestMuxOptions {
-            timestamp_policy: InputTimestampPolicy::Normalize,
+            timestamp_policy,
             timeout: Some(INCREMENTAL_HLS_MUX_TIMEOUT),
         },
         SubtitleOutput {

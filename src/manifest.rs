@@ -1339,11 +1339,11 @@ fn validate_hls_rendition_groups(
             AlternativeMediaType::Audio => ("AUDIO", ManifestError::InvalidAudioGroup),
             AlternativeMediaType::Video => ("VIDEO", ManifestError::InvalidVideoGroup),
             AlternativeMediaType::Subtitles => ("SUBTITLES", ManifestError::InvalidSubtitleGroup),
-            // Closed captions are handled by a dedicated extraction/finalization
-            // path. Unknown rendition types must not be silently discarded.
-            AlternativeMediaType::ClosedCaptions | AlternativeMediaType::Other(_) => {
-                return Err(ManifestError::UnsupportedPlaylist);
+            AlternativeMediaType::ClosedCaptions => {
+                ("CLOSED-CAPTIONS", ManifestError::UnsupportedPlaylist)
             }
+            // Unknown rendition types must not be silently discarded.
+            AlternativeMediaType::Other(_) => return Err(ManifestError::UnsupportedPlaylist),
         };
         let group = alternative.group_id.clone();
 
@@ -1357,12 +1357,14 @@ fn validate_hls_rendition_groups(
             return Err(group_error);
         }
 
-        // AUTOSELECT selection semantics apply to audio and subtitle tracks.
+        // AUTOSELECT selection semantics apply to audio, subtitle, and caption tracks.
         // Apple multivariant examples may mark VIDEO angles DEFAULT=YES
         // without AUTOSELECT=YES.
         if matches!(
             &alternative.media_type,
-            AlternativeMediaType::Audio | AlternativeMediaType::Subtitles
+            AlternativeMediaType::Audio
+                | AlternativeMediaType::Subtitles
+                | AlternativeMediaType::ClosedCaptions
         ) {
             if alternative.default && !alternative.autoselect {
                 return Err(group_error);
@@ -1383,6 +1385,47 @@ fn validate_hls_rendition_groups(
                 }
             }
         }
+    }
+
+    Ok(())
+}
+
+/// Validate in-band CEA-608/708 declarations against the variant groups that use them.
+fn validate_hls_closed_caption_groups(
+    alternatives: &[m3u8_rs::AlternativeMedia],
+    variants: &[m3u8_rs::VariantStream],
+) -> Result<(), ManifestError> {
+    let mut declared_groups = HashSet::new();
+    for alternative in alternatives
+        .iter()
+        .filter(|alternative| alternative.media_type == AlternativeMediaType::ClosedCaptions)
+    {
+        if !matches!(
+            alternative.instream_id.as_ref(),
+            Some(m3u8_rs::InstreamId::CC(1..=4) | m3u8_rs::InstreamId::Service(1..=63))
+        ) {
+            return Err(ManifestError::UnsupportedPlaylist);
+        }
+        declared_groups.insert(alternative.group_id.as_str());
+    }
+
+    let mut referenced_groups = HashSet::new();
+    for variant in variants {
+        match variant.closed_captions.as_ref() {
+            None | Some(m3u8_rs::ClosedCaptionGroupId::None) => {}
+            Some(m3u8_rs::ClosedCaptionGroupId::GroupId(group))
+                if declared_groups.contains(&group.as_str()) =>
+            {
+                referenced_groups.insert(group.as_str());
+            }
+            Some(_) => return Err(ManifestError::UnsupportedPlaylist),
+        }
+    }
+
+    // A caption rendition that is never referenced by a variant would otherwise
+    // be silently accepted despite not belonging to a selectable presentation.
+    if declared_groups != referenced_groups {
+        return Err(ManifestError::UnsupportedPlaylist);
     }
 
     Ok(())
@@ -1457,14 +1500,7 @@ pub(crate) fn parse_hls_master_playlist(
         return Err(ManifestError::UnsupportedPlaylist);
     }
     validate_hls_rendition_groups(&master.alternatives)?;
-    if master.variants.iter().any(|variant| {
-        variant
-            .closed_captions
-            .as_ref()
-            .is_some_and(|group| !matches!(group, m3u8_rs::ClosedCaptionGroupId::None))
-    }) {
-        return Err(ManifestError::UnsupportedPlaylist);
-    }
+    validate_hls_closed_caption_groups(&master.alternatives, &master.variants)?;
 
     // Index VIDEO renditions once. The master is remote, untrusted input, so
     // expansion must be bounded before allocating one HlsVariant per choice.
@@ -2928,16 +2964,72 @@ video.m3u8
     }
 
     #[test]
-    fn closed_caption_renditions_are_not_silently_ignored() {
+    fn closed_caption_groups_are_accepted_when_declared_by_a_variant() {
         let body = br#"#EXTM3U
-#EXT-X-MEDIA:TYPE=CLOSED-CAPTIONS,GROUP-ID="captions",NAME="English",LANGUAGE="en",INSTREAM-ID="CC1"
+#EXT-X-MEDIA:TYPE=CLOSED-CAPTIONS,GROUP-ID="captions",NAME="English",LANGUAGE="en",DEFAULT=YES,AUTOSELECT=YES,INSTREAM-ID="CC1"
+#EXT-X-MEDIA:TYPE=CLOSED-CAPTIONS,GROUP-ID="captions",NAME="English Service",LANGUAGE="en",INSTREAM-ID="SERVICE63"
 #EXT-X-STREAM-INF:BANDWIDTH=1000000,CLOSED-CAPTIONS="captions"
+video.m3u8
+"#;
+        let master = parse_hls_master_playlist(BASE_URL, body)
+            .expect("a valid in-band closed-caption group should be accepted");
+
+        assert_eq!(master.variants.len(), 1);
+        assert_eq!(
+            master.variants[0].url.as_str(),
+            "https://cdn.example.test/path/video.m3u8"
+        );
+    }
+
+    #[test]
+    fn closed_caption_none_does_not_require_a_rendition_group() {
+        let body = br#"#EXTM3U
+#EXT-X-STREAM-INF:BANDWIDTH=1000000,CLOSED-CAPTIONS=NONE
+video.m3u8
+"#;
+        assert!(
+            parse_hls_master_playlist(BASE_URL, body).is_ok(),
+            "CLOSED-CAPTIONS=NONE explicitly declares no in-band captions"
+        );
+    }
+
+    #[test]
+    fn variants_must_reference_a_declared_closed_caption_group() {
+        let body = br#"#EXTM3U
+#EXT-X-STREAM-INF:BANDWIDTH=1000000,CLOSED-CAPTIONS="missing"
 video.m3u8
 "#;
         assert_eq!(
             parse_hls_master_playlist(BASE_URL, body).err(),
             Some(ManifestError::UnsupportedPlaylist)
         );
+    }
+
+    #[test]
+    fn closed_caption_groups_must_be_used_by_a_variant() {
+        let body = br#"#EXTM3U
+#EXT-X-MEDIA:TYPE=CLOSED-CAPTIONS,GROUP-ID="captions",NAME="English",LANGUAGE="en",INSTREAM-ID="CC1"
+#EXT-X-STREAM-INF:BANDWIDTH=1000000
+video.m3u8
+"#;
+        assert_eq!(
+            parse_hls_master_playlist(BASE_URL, body).err(),
+            Some(ManifestError::UnsupportedPlaylist)
+        );
+    }
+
+    #[test]
+    fn closed_caption_instream_ids_are_limited_to_supported_hls_values() {
+        for instream_id in ["CC0", "CC5", "SERVICE0", "SERVICE64", "OTHER"] {
+            let body = format!(
+                "#EXTM3U\n#EXT-X-MEDIA:TYPE=CLOSED-CAPTIONS,GROUP-ID=\"captions\",NAME=\"English\",LANGUAGE=\"en\",INSTREAM-ID=\"{instream_id}\"\n#EXT-X-STREAM-INF:BANDWIDTH=1000000,CLOSED-CAPTIONS=\"captions\"\nvideo.m3u8\n"
+            );
+            assert_eq!(
+                parse_hls_master_playlist(BASE_URL, body.as_bytes()).err(),
+                Some(ManifestError::UnsupportedPlaylist),
+                "unexpectedly accepted INSTREAM-ID={instream_id}"
+            );
+        }
     }
 
     #[test]

@@ -2363,6 +2363,7 @@ async fn remux_complete_aes128_vod_part(
     container: ManifestContainer,
     abort: &mut tokio::sync::oneshot::Receiver<crate::video::StopIntent>,
 ) -> Result<ManifestMuxOutcome, ManifestRunError> {
+    use tokio::io::AsyncSeekExt as _;
     let mut output_file = crate::manifest_destination::open_owned_part_async(
         staging.to_path_buf(),
         destination.to_path_buf(),
@@ -2628,13 +2629,15 @@ async fn run_incremental_aes128_hls_vod(
                     && !complete_ready
                     && !complete_signal_done
                 {
-                    complete_ready = tokio::time::timeout(
+                    if let Ok(signal) = tokio::time::timeout(
                         FINAL_PLAYLIST_SIGNAL_GRACE,
                         &mut complete_rx,
                     )
                     .await
-                    .is_ok_and(|signal| signal.is_ok());
-                    complete_signal_done = true;
+                    {
+                        complete_ready = signal.is_ok();
+                        complete_signal_done = true;
+                    }
                 }
                 ffmpeg_result = Some(result);
                 match &ffmpeg_result {

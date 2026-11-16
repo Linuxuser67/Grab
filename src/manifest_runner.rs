@@ -2150,9 +2150,7 @@ pub(crate) async fn run_manifest_download(
         // Preserve AES-128's established configured concurrency. Complex clear
         // VOD stays sequential, matching the ordinary static-HLS resource path.
         let connections = match &tracks {
-            Tracks::Hls { video, .. }
-                if video.is_incremental_aes128_mpegts_vod_candidate() =>
-            {
+            Tracks::Hls { video, .. } if video.is_incremental_aes128_mpegts_vod_candidate() => {
                 job.connections
             }
             _ => 1,
@@ -2374,10 +2372,7 @@ struct ManifestCompleteHlsRemux<'a> {
 }
 
 fn completed_incremental_hls_mux(
-    result: Result<
-        Result<ManifestMuxOutcome, ManifestRunError>,
-        tokio::task::JoinError,
-    >,
+    result: Result<Result<ManifestMuxOutcome, ManifestRunError>, tokio::task::JoinError>,
 ) -> Result<ManifestMuxOutcome, ManifestRunError> {
     match result {
         Ok(Ok(outcome)) => Ok(outcome),
@@ -2417,9 +2412,7 @@ async fn remux_complete_hls_vod_part(
     output_file
         .seek(std::io::SeekFrom::Start(0))
         .await
-        .map_err(|error| {
-            manifest_storage_error("Could not rewind the HLS output part", error)
-        })?;
+        .map_err(|error| manifest_storage_error("Could not rewind the HLS output part", error))?;
     output_file.sync_all().await.map_err(|error| {
         manifest_storage_error("Could not persist the reset HLS output part", error)
     })?;
@@ -2471,10 +2464,8 @@ async fn run_incremental_hls_vod(
         connections,
         client,
     } = context;
-    tx.send(EngineMsg::Phase(
-        "Downloading HLS VOD…".to_string(),
-    ))
-    .ok();
+    tx.send(EngineMsg::Phase("Downloading HLS VOD…".to_string()))
+        .ok();
     let Tracks::Hls {
         video,
         audio: None,
@@ -6664,8 +6655,8 @@ segment-2.ts
             String::from_utf8_lossy(&generated.stderr)
         );
 
-        let playlist = std::fs::read_to_string(&playlist_path)
-            .expect("read generated fMP4 HLS playlist");
+        let playlist =
+            std::fs::read_to_string(&playlist_path).expect("read generated fMP4 HLS playlist");
         let second_segment = playlist
             .rfind("#EXTINF:")
             .expect("fMP4 fixture has a second segment");
@@ -6684,7 +6675,11 @@ segment-2.ts
             "the discontinuity must keep this out of direct byte concatenation"
         );
         assert!(plan.is_incremental_clear_vod_candidate());
-        assert_eq!(plan.segment_count(), 2, "fixture should produce two media segments");
+        assert_eq!(
+            plan.segment_count(),
+            2,
+            "fixture should produce two media segments"
+        );
 
         let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0))
             .await
@@ -6718,7 +6713,11 @@ segment-2.ts
                 .expect("set local fMP4 resource URL");
         }
         let request_count = plan.resources.len();
-        assert_eq!(request_count, plan.segment_count() + 1, "one init map and two media segments");
+        assert_eq!(
+            request_count,
+            plan.segment_count() + 1,
+            "one init map and two media segments"
+        );
 
         let release_final_segment = Arc::new(tokio::sync::Notify::new());
         let final_segment_requested = Arc::new(tokio::sync::Notify::new());

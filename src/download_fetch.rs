@@ -736,20 +736,39 @@ pub(crate) fn apply_torrent_limits(s: &crate::settings::AppSettings) {
     );
 }
 
-/// Shrink `path` to the longest completed piece prefix (a single-stream resume appends at EOF, so holes must go). Only shrinks.
-pub(crate) fn truncate_to_prefix(path: &std::path::Path, st: &SegmentState) {
+/// Shrink `path` to the longest completed piece prefix before single-stream resume.
+///
+/// # Errors
+///
+/// Returns an error if the destination is not a regular file, is shorter than the
+/// recorded completed prefix, or cannot be truncated and synced.
+pub(crate) fn truncate_to_prefix(path: &std::path::Path, st: &SegmentState) -> std::io::Result<()> {
     let prefix = st.prefix_len();
-    if let Ok(md) = std::fs::metadata(path)
-        && md.len() > prefix
-        && let Ok(f) = std_open_nofollow(
-            |o| {
-                o.write(true);
-            },
-            path,
-        )
-    {
-        let _ = f.set_len(prefix);
+    let file = std_open_nofollow(
+        |options| {
+            options.write(true);
+        },
+        path,
+    )?;
+    let metadata = file.metadata()?;
+    if !metadata.is_file() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "segmented download destination is not a regular file",
+        ));
     }
+    if metadata.len() < prefix {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "segmented download is shorter than its completed resume prefix",
+        ));
+    }
+    if metadata.len() > prefix {
+        file.set_len(prefix)?;
+        // The caller clears the durable bitmap only after this sync succeeds.
+        file.sync_all()?;
+    }
+    Ok(())
 }
 
 /// Open for writing without truncating (truncating here would corrupt resumed pieces the bitmap claims as done).
@@ -1399,8 +1418,10 @@ const PIECE_TRIES: u32 = 3;
 mod destination_ownership_tests {
     use super::{
         DestinationClaim, FetchCtx, FileIdentity, attempt_once, ensure_sized, single_loop,
+        truncate_to_prefix,
     };
     use crate::download_net::{DEFAULT_USER_AGENT, DownloadOptions};
+    use crate::download_pieces::SegmentState;
     use std::time::Duration;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
@@ -1556,6 +1577,77 @@ mod destination_ownership_tests {
                 .await
                 .expect("read destination"),
             b"foreign sentinel"
+        );
+    }
+
+    #[test]
+    fn truncation_syncs_only_the_completed_piece_prefix() {
+        let directory = tempfile::tempdir().expect("create destination directory");
+        let destination = directory.path().join("download.bin");
+        let mut state = SegmentState::new(64 * 1024 * 1024);
+        state.mark(0);
+        let prefix = state.prefix_len();
+        let original_len = prefix + 4096;
+        std::fs::write(
+            &destination,
+            vec![0xa5; usize::try_from(original_len).expect("test file size fits usize")],
+        )
+        .expect("write segmented destination");
+
+        truncate_to_prefix(&destination, &state).expect("truncate to completed prefix");
+
+        let bytes = std::fs::read(&destination).expect("read truncated destination");
+        assert_eq!(
+            u64::try_from(bytes.len()).expect("file size fits u64"),
+            prefix
+        );
+        assert!(bytes.iter().all(|byte| *byte == 0xa5));
+    }
+
+    #[test]
+    fn truncation_refuses_a_file_shorter_than_the_completed_prefix() {
+        let directory = tempfile::tempdir().expect("create destination directory");
+        let destination = directory.path().join("download.bin");
+        let mut state = SegmentState::new(64 * 1024 * 1024);
+        state.mark(0);
+        let prefix = state.prefix_len();
+        std::fs::write(
+            &destination,
+            vec![0xa5; usize::try_from(prefix - 1).expect("test file size fits usize")],
+        )
+        .expect("write short destination");
+
+        assert!(truncate_to_prefix(&destination, &state).is_err());
+        assert_eq!(
+            std::fs::metadata(&destination)
+                .expect("inspect unchanged destination")
+                .len(),
+            prefix - 1
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn truncation_never_follows_a_destination_symlink() {
+        let directory = tempfile::tempdir().expect("create destination directory");
+        let target = directory.path().join("target.bin");
+        let link = directory.path().join("download.bin");
+        let mut state = SegmentState::new(64 * 1024 * 1024);
+        state.mark(0);
+        let original_len = state.prefix_len() + 4096;
+        std::fs::write(
+            &target,
+            vec![0xa5; usize::try_from(original_len).expect("test file size fits usize")],
+        )
+        .expect("write target");
+        std::os::unix::fs::symlink(&target, &link).expect("create destination symlink");
+
+        assert!(truncate_to_prefix(&link, &state).is_err());
+        assert_eq!(
+            std::fs::metadata(&target)
+                .expect("inspect symlink target")
+                .len(),
+            original_len
         );
     }
 }

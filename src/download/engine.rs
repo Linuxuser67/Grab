@@ -1282,11 +1282,10 @@ impl DownloadManager {
                             this.reserve_dest(&path);
                             let worker_path = path.clone();
                             drop(this);
-                            let truncated = gio::spawn_blocking(move || {
+                            let truncation = gio::spawn_blocking(move || {
                                 truncate_to_prefix(&worker_path, &state)
                             })
-                            .await
-                            .is_ok();
+                            .await;
                             let Some(this) = weak.upgrade() else {
                                 done = true;
                                 break;
@@ -1296,17 +1295,31 @@ impl DownloadManager {
                                 done = true;
                                 break;
                             }
-                            if truncated {
-                                this.segment_state.borrow_mut().remove(&id);
-                                this.persist_queue();
-                                this.start_next();
-                                drop(this);
-                                ack.send(()).await.ok();
-                            } else {
-                                tracing::warn!(path = %path.display(), "could not truncate segmented file before single-stream fallback");
-                                // Dropping ack tells the engine that fallback cannot safely proceed.
-                                done = true;
-                                break;
+                            match truncation {
+                                Ok(Ok(())) => {
+                                    this.segment_state.borrow_mut().remove(&id);
+                                    this.persist_queue();
+                                    this.start_next();
+                                    drop(this);
+                                    ack.send(()).await.ok();
+                                }
+                                Ok(Err(error)) => {
+                                    tracing::warn!(
+                                        path = %path.display(),
+                                        error = %error,
+                                        "could not truncate segmented file before single-stream fallback"
+                                    );
+                                    // Leave the bitmap intact and let the pump mark the row failed.
+                                    break;
+                                }
+                                Err(_) => {
+                                    tracing::warn!(
+                                        path = %path.display(),
+                                        "segmented-file truncation worker failed before single-stream fallback"
+                                    );
+                                    // Leave the bitmap intact and let the pump mark the row failed.
+                                    break;
+                                }
                             }
                         } else {
                             this.segment_state.borrow_mut().remove(&id);

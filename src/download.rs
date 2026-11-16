@@ -3821,34 +3821,51 @@ impl DownloadManager {
         } else {
             // Truncating a partially written segmented file is filesystem I/O;
             // keep it off GTK's main context just like the task joins above.
-            let ids: Vec<u64> = self.segment_state.borrow().keys().cloned().collect();
-            let truncations: Vec<_> = ids
+            let truncations: Vec<_> = self
+                .segment_state
+                .borrow()
                 .iter()
-                .filter_map(|id| {
+                .filter_map(|(id, state)| {
                     let item = self.find(*id)?;
-                    let state = self.segment_state.borrow().get(id).cloned()?;
-                    Some((item.file_path(), state))
+                    Some((*id, item.file_path(), state.clone()))
                 })
                 .collect();
             match tokio_rt()
                 .spawn_blocking(move || {
-                    for (path, state) in truncations {
-                        truncate_to_prefix(&path, &state);
+                    let mut reconciled = Vec::with_capacity(truncations.len());
+                    let mut failures = Vec::new();
+                    for (id, path, state) in truncations {
+                        match truncate_to_prefix(&path, &state) {
+                            Ok(()) => reconciled.push(id),
+                            Err(error) => failures.push((path, error)),
+                        }
                     }
+                    (reconciled, failures)
                 })
                 .await
             {
-                Ok(()) => {
-                    for id in ids {
-                        if let Some(st) = self.segment_state.borrow_mut().get_mut(&id) {
-                            st.forget_beyond_prefix();
+                Ok((reconciled, failures)) => {
+                    let mut states = self.segment_state.borrow_mut();
+                    for id in reconciled {
+                        if let Some(state) = states.get_mut(&id) {
+                            state.forget_beyond_prefix();
                         }
                     }
+                    for (path, error) in failures {
+                        tracing::warn!(
+                            path = %path.display(),
+                            error = %error,
+                            "shutdown: could not reconcile segmented destination"
+                        );
+                    }
                 }
-                Err(e) => {
-                    // Keep the original bitmap if we could not reconcile the
-                    // on-disk prefix; it is safer than persisting a false one.
-                    tracing::warn!("shutdown: partial-file reconciliation worker failed: {e}");
+                Err(error) => {
+                    // Keep the original bitmaps if the worker cannot report
+                    // which destinations were durably reconciled.
+                    tracing::warn!(
+                        error = %error,
+                        "shutdown: partial-file reconciliation worker failed"
+                    );
                 }
             }
         }

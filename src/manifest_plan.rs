@@ -1375,13 +1375,12 @@ video/1080p.m3u8
                 "{codec}"
             );
         }
-        for codec in ["stpp.ttml.im1t"] {
-            assert_eq!(
-                hls_mp4_codec_kind(codec),
-                Some(HlsMp4CodecKind::Subtitle),
-                "{codec}"
-            );
-        }
+        let codec = "stpp.ttml.im1t";
+        assert_eq!(
+            hls_mp4_codec_kind(codec),
+            Some(HlsMp4CodecKind::Subtitle),
+            "{codec}"
+        );
         for codec in ["vp8", "vorbis", "theora", "mp4a", "wvtt", ""] {
             assert_eq!(hls_mp4_codec_kind(codec), None, "{codec}");
         }

@@ -2404,18 +2404,18 @@ async fn run_incremental_aes128_hls_vod(
     )
     .await
     .map_err(ManifestRunError::Failed)?;
-    output_file
-        .set_len(0)
-        .await
-        .map_err(|error| manifest_storage_error("Could not reset the owned HLS output part", error))?;
+    output_file.set_len(0).await.map_err(|error| {
+        manifest_storage_error("Could not reset the owned HLS output part", error)
+    })?;
     output_file
         .seek(std::io::SeekFrom::Start(0))
         .await
-        .map_err(|error| manifest_storage_error("Could not rewind the owned HLS output part", error))?;
-    output_file
-        .sync_all()
-        .await
-        .map_err(|error| manifest_storage_error("Could not persist the empty HLS output part", error))?;
+        .map_err(|error| {
+            manifest_storage_error("Could not rewind the owned HLS output part", error)
+        })?;
+    output_file.sync_all().await.map_err(|error| {
+        manifest_storage_error("Could not persist the empty HLS output part", error)
+    })?;
 
     let (fetch_abort_tx, fetch_abort_rx) = tokio::sync::oneshot::channel();
     let (ffmpeg_abort_tx, ffmpeg_abort_rx) = tokio::sync::oneshot::channel();
@@ -3484,7 +3484,8 @@ async fn fetch_hls_resources_incrementally(
     let resources = hls_resources(plan);
     if resources.len() != plan.resources.len() {
         return Err(ManifestRunError::Failed(
-            "The localized HLS resource plan changed while preparing incremental playback".to_string(),
+            "The localized HLS resource plan changed while preparing incremental playback"
+                .to_string(),
         ));
     }
     let total_segments = plan.segment_count();
@@ -3584,7 +3585,8 @@ async fn fetch_hls_resources_incrementally(
             return Ok(false);
         }
         Err(error) => {
-            tx.send(progress_message(downloaded.load(Ordering::Relaxed))).ok();
+            tx.send(progress_message(downloaded.load(Ordering::Relaxed)))
+                .ok();
             return Err(error);
         }
         Ok(true) => {}

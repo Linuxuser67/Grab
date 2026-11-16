@@ -4016,6 +4016,11 @@ async fn fetch_hls_resources_incrementally(
                         .await
                         .map_err(ManifestRunError::Failed)?;
                         last_snapshot_segments = completed_segments;
+                        tracing::debug!(
+                            published_segments = completed_segments,
+                            total_segments,
+                            "published growing HLS VOD playlist snapshot"
+                        );
                         if let Some(sender) = first_segment_ready.take() {
                             let _ = sender.send(());
                         }
@@ -6557,7 +6562,13 @@ segment-2.ts
         );
 
         let total_segments = plan.segment_count();
+        let verify_incremental_growth = extension == "ts" && !force_early_exit;
+        assert!(
+            !verify_incremental_growth || total_segments >= 3,
+            "continuous-growth fixture must contain at least three segments"
+        );
         let mut segment_index = 0usize;
+        let mut second_segment_path = None;
         let mut final_segment_path = None;
         for resource in &mut plan.resources {
             let name = resource
@@ -6572,6 +6583,9 @@ segment-2.ts
                 crate::manifest::HlsResourceKind::Key => {}
                 crate::manifest::HlsResourceKind::Segment => {
                     segment_index += 1;
+                    if segment_index == 2 {
+                        second_segment_path = Some(format!("/{name}"));
+                    }
                     if segment_index == total_segments {
                         final_segment_path = Some(format!("/{name}"));
                     }
@@ -6581,16 +6595,25 @@ segment-2.ts
             resource.url = Url::parse(&format!("http://{address}/{name}"))
                 .expect("set local AES-128 fixture resource URL");
         }
+        let second_segment_path = second_segment_path
+            .expect("encrypted HLS fixture must have a second media segment");
         let final_segment_path =
             final_segment_path.expect("encrypted HLS fixture must have a final segment");
         let request_count = plan.resources.len();
         let fixture_root = fixture.path().to_path_buf();
+        let verify_incremental_growth_server = verify_incremental_growth;
+        let release_second_segment = Arc::new(tokio::sync::Notify::new());
+        let second_segment_requested = Arc::new(tokio::sync::Notify::new());
         let release_final_segment = Arc::new(tokio::sync::Notify::new());
         let final_segment_requested = Arc::new(tokio::sync::Notify::new());
-        let server_release = Arc::clone(&release_final_segment);
-        let server_requested = Arc::clone(&final_segment_requested);
+        let server_release_second = Arc::clone(&release_second_segment);
+        let server_requested_second = Arc::clone(&second_segment_requested);
+        let server_release_final = Arc::clone(&release_final_segment);
+        let server_requested_final = Arc::clone(&final_segment_requested);
+        let server_second_path = second_segment_path.clone();
         let server_final_path = final_segment_path.clone();
         let server = tokio::spawn(async move {
+            let verify_incremental_growth = verify_incremental_growth_server;
             let mut responses = Vec::with_capacity(request_count);
             for _ in 0..request_count {
                 let (mut socket, _) = listener
@@ -6598,8 +6621,11 @@ segment-2.ts
                     .await
                     .expect("accept AES-128 resource request");
                 let fixture_root = fixture_root.clone();
-                let release = Arc::clone(&server_release);
-                let requested = Arc::clone(&server_requested);
+                let release_second = Arc::clone(&server_release_second);
+                let requested_second = Arc::clone(&server_requested_second);
+                let release_final = Arc::clone(&server_release_final);
+                let requested_final = Arc::clone(&server_requested_final);
+                let second_path = server_second_path.clone();
                 let final_path = server_final_path.clone();
                 responses.push(tokio::spawn(async move {
                     let mut request = [0_u8; 1024];
@@ -6609,9 +6635,13 @@ segment-2.ts
                         .expect("read AES-128 resource request");
                     let request = String::from_utf8_lossy(&request[..count]);
                     let path = request.split_ascii_whitespace().nth(1).unwrap_or("/");
+                    if verify_incremental_growth && path == second_path.as_str() {
+                        requested_second.notify_one();
+                        release_second.notified().await;
+                    }
                     if path == final_path.as_str() {
-                        requested.notify_one();
-                        release.notified().await;
+                        requested_final.notify_one();
+                        release_final.notified().await;
                     }
                     let name = path.trim_start_matches('/');
                     let payload = tokio::fs::read(fixture_root.join(name))
@@ -6726,13 +6756,16 @@ segment-2.ts
             .await
         });
 
-        tokio::time::timeout(Duration::from_secs(10), final_segment_requested.notified())
-            .await
-            .expect("the final segment request should start while earlier segments are muxed");
-        assert!(
-            !download_task.is_finished(),
-            "the final segment must remain in flight while FFmpeg consumes the growing prefix"
-        );
+        if verify_incremental_growth {
+            tokio::time::timeout(Duration::from_secs(10), second_segment_requested.notified())
+                .await
+                .expect("the second AES-128 media segment request should start");
+        } else {
+            tokio::time::timeout(Duration::from_secs(10), final_segment_requested.notified())
+                .await
+                .expect("the final segment request should start while earlier segments are muxed");
+        }
+
         let initial_growth = tokio::time::timeout(Duration::from_secs(15), async {
             loop {
                 let size = tokio::fs::metadata(&part_path)
@@ -6746,13 +6779,38 @@ segment-2.ts
             }
         })
         .await
-        .expect("FFmpeg should write decrypted bytes before the final segment is released");
+        .expect("FFmpeg should write decrypted bytes before the blocked segment is released");
         assert!(initial_growth > 0);
+
+        if verify_incremental_growth {
+            release_second_segment.notify_one();
+            tokio::time::timeout(Duration::from_secs(10), final_segment_requested.notified())
+                .await
+                .expect("all middle segments should be fetched while the final segment is blocked");
+            let continued_growth = tokio::time::timeout(Duration::from_secs(20), async {
+                loop {
+                    let size = tokio::fs::metadata(&part_path)
+                        .await
+                        .expect("stat visible destination part")
+                        .len();
+                    if size > initial_growth {
+                        break size;
+                    }
+                    tokio::time::sleep(Duration::from_millis(25)).await;
+                }
+            })
+            .await
+            .expect("the destination part should grow beyond its first decrypted segment before the final segment is released");
+            assert!(
+                continued_growth > initial_growth,
+                "the destination part should continue growing as additional AES-128 segments become available"
+            );
+        }
+
         assert!(
             !download_task.is_finished(),
-            "the destination part must grow while the final segment download is still blocked"
+            "the final segment must remain in flight while FFmpeg consumes the growing prefix"
         );
-
         release_final_segment.notify_one();
         let outcome = download_task
             .await

@@ -1224,13 +1224,18 @@ mod tests {
         );
     }
 
-    fn selected_hls_master_output_container(body: &[u8]) -> Option<ManifestContainer> {
+    fn selected_hls_master_output_container(
+        body: &[u8],
+        variant_index: usize,
+    ) -> Option<ManifestContainer> {
         let source_url = "https://cdn.example.test/master.m3u8";
         let master = crate::manifest::parse_hls_master_playlist(source_url, body)
             .expect("valid HLS master playlist");
+        let variant_keys = hls_variant_keys(&master.variants);
         let video_key = ManifestRepresentationKey::from(
-            hls_variant_keys(&master.variants)[0]
-                .as_deref()
+            variant_keys
+                .get(variant_index)
+                .and_then(Option::as_deref)
                 .expect("stable HLS video key"),
         );
         let lookup = ManifestLookup {
@@ -1253,7 +1258,7 @@ video/1080p.m3u8
 "##;
 
         assert_eq!(
-            selected_hls_master_output_container(body),
+            selected_hls_master_output_container(body, 0),
             Some(ManifestContainer::Mp4)
         );
     }
@@ -1266,10 +1271,26 @@ video/1080p.m3u8
 "##;
 
         assert_eq!(
-            selected_hls_master_output_container(body),
+            selected_hls_master_output_container(body, 0),
             Some(ManifestContainer::Mp4)
         );
     }
+    #[test]
+    fn hls_master_uses_the_selected_variant_codec_metadata() {
+        let body = br##"#EXTM3U
+#EXT-X-STREAM-INF:BANDWIDTH=1000000,CODECS="vp8"
+video/low.m3u8
+#EXT-X-STREAM-INF:BANDWIDTH=2000000,CODECS="avc1.640028"
+video/high.m3u8
+"##;
+
+        assert_eq!(selected_hls_master_output_container(body, 0), None);
+        assert_eq!(
+            selected_hls_master_output_container(body, 1),
+            Some(ManifestContainer::Mp4)
+        );
+    }
+
     #[test]
     fn hls_master_keeps_mkv_default_when_codec_metadata_is_missing_or_incompatible() {
         let cases: &[&[u8]] = &[
@@ -1292,7 +1313,7 @@ video/1080p.m3u8
 
         for body in cases {
             assert_eq!(
-                selected_hls_master_output_container(body),
+                selected_hls_master_output_container(body, 0),
                 None,
                 "missing/unknown codecs or an undeclared alternate-audio codec retain MKV"
             );

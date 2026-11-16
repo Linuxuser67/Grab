@@ -14,11 +14,12 @@ on:
         required: false
         default: "main"
 
-# Same supersede rule as CI: a new push cancels the stale bundle build.
-# Manual dispatches (exact tags/SHAs) never cancel.
+# Serialize builds of the same requested ref. Running builds are never cancelled;
+# group on inputs.ref (github.ref is the workflow branch, not the branch/tag/SHA
+# being built).
 concurrency:
-  group: flatpak-test-${{ github.ref }}
-  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+  group: flatpak-test-${{ inputs.ref }}
+  cancel-in-progress: false
 
 jobs:
   bundle:

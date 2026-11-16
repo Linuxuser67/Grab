@@ -34,9 +34,16 @@ def render() -> tuple[str, int]:
     n = 0
     for pkg in lock["package"]:
         source = pkg.get("source", "")
-        if not source.startswith("registry+"):
-            print(f"SKIP non-registry package: {pkg['name']}", file=sys.stderr)
+        if not source:
+            # Path packages (the grab workspace crate) have no source and need no archive.
             continue
+        if not source.startswith("registry+"):
+            # A git/path dependency cannot be vendored by this registry-only script.
+            # Silent skipping would let --check pass while the offline build lacks the crate.
+            sys.exit(
+                f"ERROR: non-registry package {pkg['name']} has source {source}; "
+                "extend this generator before adding it to Cargo.lock"
+            )
         name, version = pkg["name"], pkg["version"]
         key = f"checksum {name} {version} ({source})"
         checksum = metadata.get(key, pkg.get("checksum"))

@@ -78,8 +78,6 @@ const FFMPEG_LOG_LINES: usize = 32;
 const MANIFEST_MUX_TIMEOUT: Duration = Duration::from_secs(3600);
 /// Hard upper bound for an incremental VOD mux, including the time spent waiting for segments.
 const INCREMENTAL_HLS_MUX_TIMEOUT: Duration = Duration::from_secs(7 * 24 * 60 * 60);
-/// Allow the fetcher to publish its completion signal immediately after the final playlist rename.
-const FINAL_PLAYLIST_SIGNAL_GRACE: Duration = Duration::from_secs(1);
 /// Upper bound on the persisted dynamic DASH segment index.
 const MAX_DASH_LIVE_SEGMENTS: usize = crate::manifest_types::MAX_MANIFEST_SEGMENTS;
 /// Bound for a serialized dynamic DASH resume index.
@@ -2625,27 +2623,12 @@ async fn run_incremental_aes128_hls_vod(
                 }
             }
             result = &mut ffmpeg_task, if ffmpeg_result.is_none() => {
-                if matches!(&result, Ok(Ok(ManifestMuxOutcome::Finished)))
-                    && !complete_ready
-                    && !complete_signal_done
-                {
-                    if let Ok(signal) = tokio::time::timeout(
-                        FINAL_PLAYLIST_SIGNAL_GRACE,
-                        &mut complete_rx,
-                    )
-                    .await
-                    {
-                        complete_ready = signal.is_ok();
-                        complete_signal_done = true;
-                    }
-                }
                 ffmpeg_result = Some(result);
                 match &ffmpeg_result {
                     Some(Ok(Ok(ManifestMuxOutcome::Finished))) if !complete_ready => {
-                        // FFmpeg can treat a growing AES-128 VOD snapshot as a
-                        // complete input and exit before the fetcher publishes
-                        // EXT-X-ENDLIST. Keep fetching; after the complete
-                        // playlist is committed, remux it from the beginning.
+                        // The process has already exited, so a completion
+                        // signal received afterwards cannot prove that FFmpeg
+                        // consumed the final playlist snapshot.
                         ffmpeg_exited_before_complete_playlist = true;
                     }
                     Some(Ok(Err(_))) | Some(Err(_)) => {

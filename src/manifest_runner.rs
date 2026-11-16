@@ -6727,9 +6727,28 @@ segment-2.ts
         let task_video_dir = video_dir;
         let task_audio_dir = audio_dir;
         let task_client = client;
-        let task_ffmpeg = forced_exit_counter
-            .as_ref()
-            .map_or_else(|| ffmpeg.clone(), |(wrapper, _)| wrapper.clone());
+        let (task_ffmpeg, ffmpeg_log_path) = if let Some((wrapper, _)) = forced_exit_counter.as_ref() {
+            (wrapper.clone(), None)
+        } else if verify_incremental_growth {
+            use std::os::unix::fs::PermissionsExt as _;
+
+            let log_path = fixture.path().join("ffmpeg-verbose.log");
+            let wrapper = fixture.path().join("ffmpeg-verbose-wrapper");
+            let real_ffmpeg = ffmpeg.display().to_string().replace('\\'', "'\\\\''");
+            let log_path_string = log_path.display().to_string().replace('\\'', "'\\\\''");
+            std::fs::write(
+                &wrapper,
+                format!(
+                    "#!/bin/sh\\nexec '{real_ffmpeg}' -loglevel verbose \\"$@\\" 2>'{log_path_string}'\\n"
+                ),
+            )
+            .expect("write verbose FFmpeg wrapper");
+            std::fs::set_permissions(&wrapper, std::fs::Permissions::from_mode(0o700))
+                .expect("make verbose FFmpeg wrapper executable");
+            (wrapper, Some(log_path))
+        } else {
+            (ffmpeg.clone(), None)
+        };
         let task_downloaded = Arc::clone(&downloaded);
         let download_task = tokio::spawn(async move {
             run_incremental_hls_vod(ManifestIncrementalHlsVod {
@@ -6787,7 +6806,17 @@ segment-2.ts
             tokio::time::timeout(Duration::from_secs(10), final_segment_requested.notified())
                 .await
                 .expect("all middle segments should be fetched while the final segment is blocked");
-            let continued_growth = tokio::time::timeout(Duration::from_secs(20), async {
+            let growing_snapshot = tokio::fs::read_to_string(staging.path().join("video/local.m3u8"))
+                .await
+                .expect("read final growing AES-128 playlist snapshot");
+            assert_eq!(
+                growing_snapshot.matches("#EXTINF:").count(),
+                total_segments - 1,
+                "the local playlist must expose every committed segment before the final segment"
+            );
+            assert!(!growing_snapshot.contains("#EXT-X-ENDLIST"));
+            assert!(!growing_snapshot.contains("#EXT-X-PLAYLIST-TYPE:VOD"));
+            let continued_growth_result = tokio::time::timeout(Duration::from_secs(20), async {
                 loop {
                     let size = tokio::fs::metadata(&part_path)
                         .await
@@ -6799,8 +6828,19 @@ segment-2.ts
                     tokio::time::sleep(Duration::from_millis(25)).await;
                 }
             })
-            .await
-            .expect("the destination part should grow beyond its first decrypted segment before the final segment is released");
+            .await;
+            let continued_growth = match continued_growth_result {
+                Ok(size) => size,
+                Err(_) => {
+                    let log = match ffmpeg_log_path.as_ref() {
+                        Some(path) => tokio::fs::read_to_string(path).await.unwrap_or_default(),
+                        None => String::new(),
+                    };
+                    panic!(
+                        "destination part did not grow beyond its first decrypted segment before final release (initial={initial_growth}); growing playlist:\\n{growing_snapshot}\\nFFmpeg verbose log:\\n{log}"
+                    );
+                }
+            };
             assert!(
                 continued_growth > initial_growth,
                 "the destination part should continue growing as additional AES-128 segments become available"

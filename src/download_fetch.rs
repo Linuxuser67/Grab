@@ -2,11 +2,11 @@
 //! The download manager spawns `run_download`; tests drive the pieces directly.
 
 use crate::content_range::{ParsedContentRange, parse_content_range};
-use crate::download_net::{DEFAULT_USER_AGENT, DownloadOptions};
+use crate::download_net::DownloadOptions;
 use crate::download_pieces::{SegmentState, plan_pieces};
 use crate::download_rate::{live_rate_limit, pace_chunk, parse_rate, progress_msg};
 use crate::engine_msg::{DEST_EXISTS, EngineMsg};
-use crate::file_names::{PIECE_MIN, percent_decode, piece_len, sane_filename};
+use crate::file_names::{PIECE_MIN, piece_len, sane_filename};
 use crate::runtime::lock_recover;
 use futures_util::StreamExt as _;
 use gettextrs::gettext;
@@ -181,7 +181,7 @@ pub(crate) async fn run_download(mut ctx: FetchCtx, connections: usize, mode: St
                 single_loop(&ctx, &mut tries, None, &mut claim).await;
                 return;
             }
-            match probe_ranges(&ctx.client, &ctx.url, timeout).await {
+            match probe_ranges(&ctx.client, &ctx.url, &ctx.user_agent, timeout).await {
                 Ok((total, validator)) => {
                     // The probe captured the session validator before any worker started.
                     // Persist it for cross-session resume, and use it for If-Range.
@@ -277,7 +277,7 @@ async fn single_loop(
             }
             Err(failure) => {
                 let message = match failure {
-                    // A changed object makes the partial bytes and any bitmap describe a dead version.
+                    // A changed object or failed durability check makes the partial unsafe to resume.
                     AttemptFail::Changed(e) => {
                         ctx.tx.send(EngineMsg::FailedVersion(e)).ok();
                         return;
@@ -350,7 +350,7 @@ async fn multi_loop(
                 return wait_for_fallback_ack(&mut ack_rx, FALLBACK_ACK_TIMEOUT).await;
             }
             Err(AttemptFail::Changed(e)) => {
-                // The probed object is gone: retries can never succeed, so fail terminally and let a later retry start fresh.
+                // The existing partial is invalid: discard it and let a later retry start fresh.
                 ctx.tx.send(EngineMsg::FailedVersion(e)).ok();
                 return false;
             }
@@ -467,6 +467,7 @@ async fn attempt_multi(
             let mut paced: u64 = 0;
             let mut last_sent = Instant::now();
             let mut written: u64 = 0;
+            let mut completed_indices = Vec::new();
             let mut rate = live_rate_limit();
             use tokio::io::{AsyncSeekExt as _, AsyncWriteExt as _};
             while let Some((offset, bytes, idx)) = wrx.recv().await {
@@ -478,8 +479,7 @@ async fn attempt_multi(
                     .map_err(|e| format!("Cannot write file: {e}"))?;
                 downloaded += bytes.len() as u64;
                 written += bytes.len() as u64;
-                ctx.tx.send(EngineMsg::PieceDone(idx)).ok();
-                st.mark(idx);
+                completed_indices.push(idx);
                 pace_chunk(&mut paced, pace_start, rate, bytes.len()).await;
                 // ~20fps row updates.
                 if last_sent.elapsed() >= Duration::from_millis(50) {
@@ -491,6 +491,11 @@ async fn attempt_multi(
             file.flush()
                 .await
                 .map_err(|e| format!("Cannot write file: {e}"))?;
+            // Make completed pieces durable before the bitmap is persisted;
+            // a crash after resume must not claim data still in the page cache.
+            file.sync_all()
+                .await
+                .map_err(|e| format!("Cannot sync file: {e}"))?;
             // Verify the path still references the file being written: a
             // swap during transfer must not go unnoticed.
             let fd_metadata = file
@@ -504,6 +509,13 @@ async fn attempt_multi(
                 || file_identity(&fd_metadata) != file_identity(&path_metadata)
             {
                 return Err("Destination file was replaced during download".to_string());
+            }
+            // Publish completion only after the bytes are durable and the path
+            // still names the file we wrote. An interrupted attempt leaves these
+            // pieces unmarked, so resume refetches them instead of trusting cache.
+            for idx in completed_indices {
+                st.mark(idx);
+                ctx.tx.send(EngineMsg::PieceDone(idx)).ok();
             }
             ctx.tx.send(progress_msg(downloaded, Some(total))).ok();
             Ok::<u64, String>(written)
@@ -600,26 +612,31 @@ async fn attempt_once(
             let still_owned = claim.verify(&ctx.dest).await.is_ok();
             // "Already complete" only with proof: matching length, unchanged inode,
             // unchanged local size, and fully allocated bytes.
-            if start > 0
+            let mut already_complete = start > 0
                 && still_owned
                 && claimed == Some(start)
                 && local_len(&ctx.dest).await == Some(start)
-                && !has_holes(&ctx.dest).await
-            {
-                return Ok(());
-            }
-            if claimed.is_none() && start > 0 && !restarted {
+                && !has_holes(&ctx.dest).await;
+            if !already_complete && claimed.is_none() && start > 0 && !restarted {
                 // Bare 416 with no usable Content-Range: confirm the length before resetting.
                 let hreq = stamp_request(ctx.client.head(&ctx.url), &ctx.user_agent, &ctx.url);
-                if let Ok(hresp) = execute_with_timeout(&ctx.client, hreq, ctx.timeout).await
-                    && hresp.status().is_success()
-                    && hresp.content_length() == Some(start)
-                    && claim.verify(&ctx.dest).await.is_ok()
-                    && local_len(&ctx.dest).await == Some(start)
-                    && !has_holes(&ctx.dest).await
-                {
-                    return Ok(());
+                if let Ok(hresp) = execute_with_timeout(&ctx.client, hreq, ctx.timeout).await {
+                    already_complete = hresp.status().is_success()
+                        && hresp.content_length() == Some(start)
+                        && claim.verify(&ctx.dest).await.is_ok()
+                        && local_len(&ctx.dest).await == Some(start)
+                        && !has_holes(&ctx.dest).await;
                 }
+            }
+            if already_complete {
+                // A complete-looking partial can come from an interrupted attempt.
+                // Sync it before accepting a 416 as proof of completion.
+                let file = claim.open_for_writing(&ctx.dest).await?;
+                file.sync_all()
+                    .await
+                    .map_err(|error| format!("Cannot sync file: {error}"))?;
+                claim.verify(&ctx.dest).await?;
+                return Ok(());
             }
             if restarted {
                 return Err(AttemptFail::Retryable(gettext(
@@ -775,6 +792,13 @@ async fn attempt_once(
         file.flush()
             .await
             .map_err(|error| format!("Cannot write file: {error}"))?;
+        // Single-stream attempts complete before the UI persists progress/bitmap;
+        // make the bytes durable first so a crash cannot resurrect a lost tail.
+        file.sync_all().await.map_err(|error| {
+            // A sync failure leaves this tail untrusted. Do not retry at EOF:
+            // the next 416 could otherwise mistake the unsynced bytes for a full file.
+            AttemptFail::Changed(format!("Cannot sync file: {error}"))
+        })?;
         return match total {
             Some(total) if downloaded != total => {
                 Err(AttemptFail::Retryable(gettext("Incomplete download")))
@@ -1043,8 +1067,6 @@ async fn ensure_sized(
     total: u64,
     claim: &mut DestinationClaim,
 ) -> Result<tokio::fs::File, AttemptFail> {
-    use std::io::ErrorKind::{FileTooLarge, StorageFull};
-
     let file = claim
         .open_for_writing(dest)
         .await
@@ -1057,11 +1079,9 @@ async fn ensure_sized(
         && let Err(error) = file.set_len(total).await
     {
         let message = format!("Cannot write file: {error}");
-        return Err(if matches!(error.kind(), StorageFull | FileTooLarge) {
-            AttemptFail::Throttled(message)
-        } else {
-            AttemptFail::Retryable(message)
-        });
+        // A full disk is not server throttling: switching to single-stream cannot
+        // free space. Keep it retryable so the row fails with the storage message.
+        return Err(AttemptFail::Retryable(message));
     }
     Ok(file)
 }
@@ -1180,11 +1200,12 @@ fn response_validators(
 async fn probe_ranges(
     client: &reqwest::Client,
     url: &str,
+    user_agent: &str,
     timeout: Duration,
 ) -> Result<(u64, crate::engine_msg::ValidatorInfo), String> {
     let req = stamp_request(
         client.get(url).header("Range", "bytes=0-0"),
-        DEFAULT_USER_AGENT,
+        user_agent,
         url,
     );
     let resp = execute_with_timeout(client, req, timeout).await?;
@@ -1276,7 +1297,7 @@ pub(crate) fn accepts_content_range(
     )
 }
 
-/// Why a piece or segmented attempt failed (throttled = downgrade to single-stream; changed = fail terminally, never retry).
+/// Why an attempt failed. `Changed` means the existing partial is no longer safe to resume.
 #[derive(Debug)]
 pub(crate) enum AttemptFail {
     Retryable(String),
@@ -1458,8 +1479,21 @@ pub fn filename_from_content_disposition(value: &str) -> Option<String> {
             continue;
         };
         if pname.trim().eq_ignore_ascii_case("filename*") {
-            let data = pval.split('\'').next_back().unwrap_or("").trim();
-            let name = percent_decode(basename(data));
+            // RFC 5987: charset'language'percent-encoded-value. Honour the
+            // common Latin-1 charset instead of decoding every value as UTF-8.
+            let mut fields = pval.splitn(3, '\'');
+            let charset = fields.next().unwrap_or("").trim().to_ascii_lowercase();
+            let _language = fields.next();
+            let value = fields.next().unwrap_or("").trim();
+            let bytes: Vec<u8> = percent_encoding::percent_decode_str(basename(value)).collect();
+            let name = match charset.as_str() {
+                "iso-8859-1" | "iso8859-1" | "latin1" => {
+                    bytes.into_iter().map(char::from).collect()
+                }
+                // Empty charset defaults to UTF-8; unknown charsets get a
+                // lossy UTF-8 best effort (std has no general charset decoder).
+                _ => String::from_utf8_lossy(&bytes).into_owned(),
+            };
             if sane_filename(&name) {
                 return Some(name);
             }

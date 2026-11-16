@@ -3822,8 +3822,9 @@ two.ts
             br#"#EXTM3U
 #EXT-X-TARGETDURATION:4
 #EXT-X-KEY:METHOD=AES-128,URI="key.bin"
+#EXT-X-BYTERANGE:188@0
 #EXTINF:2,
-2@0/one.ts
+one.ts
 #EXT-X-ENDLIST
 "#,
         ] {

@@ -5207,7 +5207,7 @@ mod tests {
                 None,
                 InputTimestampPolicy::Normalize,
                 SubtitleOutput::default(),
-                &output,
+                FfmpegOutput::StagedPath(output.clone()),
                 &mut abort,
             ),
         )
@@ -5247,7 +5247,7 @@ mod tests {
                 None,
                 ManifestMuxOptions {
                     timestamp_policy: InputTimestampPolicy::Normalize,
-                    timeout: Duration::from_millis(50),
+                    timeout: Some(Duration::from_millis(50)),
                 },
                 SubtitleOutput::default(),
                 &output,

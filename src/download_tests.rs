@@ -8782,15 +8782,18 @@ fn persist_task_loop_delivers_final_value_before_close() {
     let writes = Arc::new(Mutex::new(Vec::new()));
     let writes_clone = writes.clone();
     let (tx, rx) = tokio::sync::watch::channel(None::<String>);
+    let (flush_tx, flush_rx) = tokio::sync::mpsc::unbounded_channel();
     let task = crate::runtime::tokio_rt().spawn(async move {
-        crate::download::DownloadManager::persist_task_loop(rx, move |text| {
+        crate::download::DownloadManager::persist_task_loop(rx, flush_rx, move |text| {
             writes_clone.lock().unwrap().push(text);
+            Ok(())
         })
         .await;
     });
     tx.send_replace(Some("A".to_string()));
     tx.send_replace(Some("B".to_string()));
     drop(tx);
+    drop(flush_tx);
     crate::runtime::tokio_rt().block_on(task).unwrap();
     let writes = writes.lock().unwrap();
     assert_eq!(
@@ -8798,6 +8801,67 @@ fn persist_task_loop_delivers_final_value_before_close() {
         "B",
         "final value must be last write"
     );
+}
+
+#[test]
+fn persist_task_loop_acknowledges_only_after_durable_writer_returns() {
+    use std::sync::{Arc, Mutex};
+    let writes = Arc::new(Mutex::new(Vec::new()));
+    let writes_clone = writes.clone();
+    let (tx, rx) = tokio::sync::watch::channel(None::<String>);
+    let (flush_tx, flush_rx) = tokio::sync::mpsc::unbounded_channel();
+    let task = crate::runtime::tokio_rt().spawn(async move {
+        crate::download::DownloadManager::persist_task_loop(rx, flush_rx, move |text| {
+            writes_clone.lock().unwrap().push(text);
+            Ok(())
+        })
+        .await;
+    });
+
+    tx.send_replace(Some("checkpoint".to_string()));
+    let (ack_tx, ack_rx) = tokio::sync::oneshot::channel();
+    flush_tx.send(ack_tx).expect("queue flush request");
+    crate::runtime::tokio_rt()
+        .block_on(ack_rx)
+        .expect("queue writer sends acknowledgement")
+        .expect("durable queue write succeeds");
+
+    assert_eq!(
+        writes.lock().unwrap().as_slice(),
+        ["checkpoint"],
+        "the acknowledgement must follow the requested write"
+    );
+    drop(tx);
+    drop(flush_tx);
+    crate::runtime::tokio_rt().block_on(task).unwrap();
+}
+
+#[test]
+fn persist_task_loop_propagates_durable_writer_errors() {
+    let (tx, rx) = tokio::sync::watch::channel(None::<String>);
+    let (flush_tx, flush_rx) = tokio::sync::mpsc::unbounded_channel();
+    let task = crate::runtime::tokio_rt().spawn(async move {
+        crate::download::DownloadManager::persist_task_loop(rx, flush_rx, |_text| {
+            Err(std::io::Error::new(
+                std::io::ErrorKind::PermissionDenied,
+                "simulated queue write failure",
+            ))
+        })
+        .await;
+    });
+
+    tx.send_replace(Some("checkpoint".to_string()));
+    let (ack_tx, ack_rx) = tokio::sync::oneshot::channel();
+    flush_tx.send(ack_tx).expect("queue flush request");
+    let error = crate::runtime::tokio_rt()
+        .block_on(ack_rx)
+        .expect("queue writer sends acknowledgement")
+        .expect_err("durable writer error is returned");
+    assert_eq!(error.kind(), std::io::ErrorKind::PermissionDenied);
+
+    drop(tx);
+    drop(flush_tx);
+    crate::runtime::tokio_rt().block_on(task).unwrap();
 }
 
 #[test]

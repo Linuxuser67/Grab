@@ -2935,11 +2935,8 @@ async fn finalize_manifest_download(
     // Text WebVTT playlists can be normalized to the destination container.
     // fMP4 subtitle playlists retain their source codec in MP4 instead of
     // being decoded to SRT or converted to mov_text.
-    let embed_subtitles = embed_manifest_subtitles(
-        job.embed_subs,
-        output_container,
-        subtitle_is_fmp4,
-    );
+    let embed_subtitles =
+        embed_manifest_subtitles(job.embed_subs, output_container, subtitle_is_fmp4);
     let subtitle_sidecar = if subtitle_input.is_some() && !embed_subtitles {
         Some(if subtitle_is_fmp4 {
             crate::video_staging::sidecar_path_for_extension(
@@ -3213,9 +3210,7 @@ async fn resolve_tracks(
                     "Native live HLS subtitle renditions are not supported yet".to_string(),
                 ));
             }
-            let subtitle_is_fmp4 = subtitle
-                .as_deref()
-                .is_some_and(hls_subtitle_is_fmp4);
+            let subtitle_is_fmp4 = subtitle.as_deref().is_some_and(hls_subtitle_is_fmp4);
             Ok(Tracks::Hls {
                 video: Box::new(video),
                 audio: audio.map(Box::new),
@@ -5263,22 +5258,18 @@ async fn run_ffmpeg_with_offsets_timeout(
         let sidecar = subtitles.sidecar.ok_or_else(|| {
             ManifestRunError::Failed("Subtitle sidecar destination is missing".to_string())
         })?;
-        command
-            .arg("-map")
-            .arg(if audio_input.is_some() {
-                "2:s:0"
-            } else {
-                "1:s:0"
-            });
+        command.arg("-map").arg(if audio_input.is_some() {
+            "2:s:0"
+        } else {
+            "1:s:0"
+        });
         if subtitles.is_fmp4 {
             // Keep the source sample entry and initialization data intact.
             command
                 .args(["-c:s", "copy", "-movflags", "+faststart", "-f", "mp4"])
                 .arg(sidecar);
         } else {
-            command
-                .args(["-c:s", "srt", "-f", "srt"])
-                .arg(sidecar);
+            command.args(["-c:s", "srt", "-f", "srt"]).arg(sidecar);
         }
     }
     command
@@ -5474,11 +5465,15 @@ mod tests {
         )
         .await;
         assert!(
-            embedded_fmp4.windows(2).any(|pair| pair == ["-c:s", "copy"]),
+            embedded_fmp4
+                .windows(2)
+                .any(|pair| pair == ["-c:s", "copy"]),
             "fMP4 subtitles must be stream-copied into MP4: {embedded_fmp4:?}"
         );
         assert!(
-            !embedded_fmp4.windows(2).any(|pair| pair == ["-c:s", "mov_text"]),
+            !embedded_fmp4
+                .windows(2)
+                .any(|pair| pair == ["-c:s", "mov_text"]),
             "fMP4 subtitles must not be converted to mov_text"
         );
 
@@ -5494,7 +5489,9 @@ mod tests {
         )
         .await;
         assert!(
-            preserved_sidecar.windows(2).any(|pair| pair == ["-c:s", "copy"]),
+            preserved_sidecar
+                .windows(2)
+                .any(|pair| pair == ["-c:s", "copy"]),
             "fMP4 sidecars must retain the source codec: {preserved_sidecar:?}"
         );
         assert!(
@@ -5526,22 +5523,24 @@ mod tests {
             "text WebVTT must retain the MP4 mov_text conversion path: {webvtt:?}"
         );
 
-        let in_band_captions = run_ffmpeg_recording_args(
-            &ffmpeg,
-            &output,
-            SubtitleOutput::default(),
-        )
-        .await;
+        let in_band_captions =
+            run_ffmpeg_recording_args(&ffmpeg, &output, SubtitleOutput::default()).await;
         assert!(
-            in_band_captions.windows(2).any(|pair| pair == ["-map", "0:v:0?"]),
+            in_band_captions
+                .windows(2)
+                .any(|pair| pair == ["-map", "0:v:0?"]),
             "CEA-608/708 remain inside the copied HLS video stream: {in_band_captions:?}"
         );
         assert!(
-            in_band_captions.windows(2).any(|pair| pair == ["-c", "copy"]),
+            in_band_captions
+                .windows(2)
+                .any(|pair| pair == ["-c", "copy"]),
             "in-band caption user-data must not be transcoded away: {in_band_captions:?}"
         );
         assert!(
-            !in_band_captions.iter().any(|argument| argument.contains(":s:")),
+            !in_band_captions
+                .iter()
+                .any(|argument| argument.contains(":s:")),
             "in-band captions must not be treated as a separate subtitle playlist"
         );
     }
@@ -6604,11 +6603,31 @@ segment-2.m4s
 
     #[test]
     fn subtitle_embedding_respects_output_container_and_source_format() {
-        assert!(!embed_manifest_subtitles(true, ManifestContainer::Ts, false));
-        assert!(!embed_manifest_subtitles(false, ManifestContainer::Mp4, false));
-        assert!(embed_manifest_subtitles(true, ManifestContainer::Mp4, false));
-        assert!(embed_manifest_subtitles(true, ManifestContainer::Mkv, false));
-        assert!(!embed_manifest_subtitles(true, ManifestContainer::Mkv, true));
+        assert!(!embed_manifest_subtitles(
+            true,
+            ManifestContainer::Ts,
+            false
+        ));
+        assert!(!embed_manifest_subtitles(
+            false,
+            ManifestContainer::Mp4,
+            false
+        ));
+        assert!(embed_manifest_subtitles(
+            true,
+            ManifestContainer::Mp4,
+            false
+        ));
+        assert!(embed_manifest_subtitles(
+            true,
+            ManifestContainer::Mkv,
+            false
+        ));
+        assert!(!embed_manifest_subtitles(
+            true,
+            ManifestContainer::Mkv,
+            true
+        ));
         assert!(!embed_manifest_subtitles(true, ManifestContainer::Ts, true));
         assert!(embed_manifest_subtitles(true, ManifestContainer::Mp4, true));
     }

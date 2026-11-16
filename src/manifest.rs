@@ -1357,7 +1357,7 @@ fn validate_hls_rendition_groups(
             return Err(group_error);
         }
 
-        // AUTOSELECT selection semantics apply to audio and subtitle tracks.
+        // AUTOSELECT selection semantics apply to audio, subtitle, and caption tracks.
         // Apple multivariant examples may mark VIDEO angles DEFAULT=YES
         // without AUTOSELECT=YES.
         if matches!(
@@ -2970,6 +2970,7 @@ video.m3u8
     fn closed_caption_groups_are_accepted_when_declared_by_a_variant() {
         let body = br#"#EXTM3U
 #EXT-X-MEDIA:TYPE=CLOSED-CAPTIONS,GROUP-ID="captions",NAME="English",LANGUAGE="en",DEFAULT=YES,AUTOSELECT=YES,INSTREAM-ID="CC1"
+#EXT-X-MEDIA:TYPE=CLOSED-CAPTIONS,GROUP-ID="captions",NAME="English Service",LANGUAGE="en",INSTREAM-ID="SERVICE63"
 #EXT-X-STREAM-INF:BANDWIDTH=1000000,CLOSED-CAPTIONS="captions"
 video.m3u8
 "#;

@@ -3047,10 +3047,7 @@ pub(super) async fn write_staged_file_atomic(
 
 async fn write_playlist(directory: &Path, plan: &HlsPlan) -> Result<(), String> {
     let bytes = plan
-        .local_playlist_prefix_bytes(
-            plan.segment_count(),
-            crate::manifest::HlsPlaylistFinality::Complete,
-        )
+        .local_playlist_bytes()
         .map_err(|error| error.to_string())?;
     write_staged_file_atomic(
         directory,

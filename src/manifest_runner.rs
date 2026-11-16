@@ -2355,26 +2355,6 @@ fn send_manifest_stop_intent(
 async fn run_incremental_aes128_hls_vod(
     context: ManifestIncrementalHlsVod<'_>,
 ) -> Result<ManifestOutcome, ManifestRunError> {
-    let staging = context.staging.to_path_buf();
-    let destination = context.job.dest.clone();
-    let item_id = context.job.item_id;
-    let result = run_incremental_aes128_hls_vod_inner(context).await;
-    if matches!(&result, Err(ManifestRunError::Unsupported(_))) {
-        crate::manifest_destination::remove_owned_part_async(
-            staging,
-            destination,
-            item_id,
-            TrackKind::Video,
-        )
-        .await
-        .map_err(ManifestRunError::Failed)?;
-    }
-    result
-}
-
-async fn run_incremental_aes128_hls_vod_inner(
-    context: ManifestIncrementalHlsVod<'_>,
-) -> Result<ManifestOutcome, ManifestRunError> {
     use tokio::io::AsyncSeekExt as _;
 
     let ManifestIncrementalHlsVod {
@@ -6034,6 +6014,7 @@ segment-2.ts
         let task_video_dir = video_dir;
         let task_audio_dir = audio_dir;
         let task_client = client;
+        let task_ffmpeg = ffmpeg.clone();
         let task_downloaded = Arc::clone(&downloaded);
         let download_task = tokio::spawn(async move {
             run_incremental_aes128_hls_vod(ManifestIncrementalHlsVod {
@@ -6051,7 +6032,7 @@ segment-2.ts
                     subtitle: None,
                     subtitle_language: None,
                 },
-                ffmpeg,
+                ffmpeg: task_ffmpeg,
                 downloaded: task_downloaded,
                 connections: 4,
                 client: &task_client,

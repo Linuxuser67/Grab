@@ -72,11 +72,9 @@ fn hls_mp4_codec_kind(codec: &str) -> Option<HlsMp4CodecKind> {
     let (sample_entry, parameters) = codec.split_once('.').unwrap_or((codec, ""));
     let has_parameters = !parameters.is_empty();
 
-    if [
-        "avc1", "avc3", "hvc1", "hev1", "dvh1", "av01", "vp09",
-    ]
-    .iter()
-    .any(|supported| sample_entry.eq_ignore_ascii_case(supported))
+    if ["avc1", "avc3", "hvc1", "hev1", "dvh1", "av01", "vp09"]
+        .iter()
+        .any(|supported| sample_entry.eq_ignore_ascii_case(supported))
         || (sample_entry.eq_ignore_ascii_case("mp4v") && has_parameters)
     {
         return Some(HlsMp4CodecKind::Video);

@@ -5994,82 +5994,63 @@ segment-2.ts
         )
         .await
         .expect("resolve owned destination part");
-        let output_file = crate::manifest_destination::open_owned_part_async(
-            staging.path().to_path_buf(),
-            destination.clone(),
+        let video_dir = staging.path().join("video");
+        let audio_dir = staging.path().join("audio");
+        tokio::fs::create_dir(&video_dir)
+            .await
+            .expect("create HLS video staging directory");
+        tokio::fs::create_dir(&audio_dir)
+            .await
+            .expect("create HLS audio staging directory");
+
+        let job = ManifestJob {
             item_id,
-            TrackKind::Video,
-        )
-        .await
-        .expect("create owned destination part");
-        assert_eq!(
-            tokio::fs::metadata(&part_path)
-                .await
-                .expect("stat newly owned destination part")
-                .len(),
-            0
-        );
-
-        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+            source: crate::media_types::ManifestSource {
+                url: "https://cdn.example.test/playlist.m3u8".to_string(),
+                kind: ManifestKind::Hls,
+                representation_key: "hls-media".into(),
+                output_container: None,
+                audio_key: None,
+                subtitle_key: None,
+                subtitle_language: None,
+            },
+            dest: destination.clone(),
+            proxy: None,
+            cookies_browser: "none".to_string(),
+            connections: 4,
+            embed_subs: false,
+        };
+        let gate = crate::attempt_gate::AttemptGate::new();
         let downloaded = Arc::new(AtomicU64::new(0));
-        let (_fetch_stop_sender, mut fetch_abort) = tokio::sync::oneshot::channel();
-        let (first_tx, first_rx) = tokio::sync::oneshot::channel();
-        let (complete_tx, complete_rx) = tokio::sync::oneshot::channel();
-        let fetch_client = client.clone();
-        let fetch_plan = plan.clone();
-        let fetch_directory = staging.path().to_path_buf();
-        let fetch_tx = tx.clone();
-        let fetch_downloaded = Arc::clone(&downloaded);
-        let fetch_task = tokio::spawn(async move {
-            fetch_hls_resources_incrementally(
-                &fetch_client,
-                &fetch_plan,
-                &fetch_directory,
-                &fetch_tx,
-                &fetch_downloaded,
-                &mut fetch_abort,
-                4,
-                first_tx,
-                complete_tx,
-            )
-            .await
-        });
-
-        first_rx
-            .await
-            .expect("first growing encrypted HLS playlist snapshot");
-        let first_snapshot = tokio::fs::read_to_string(staging.path().join("local.m3u8"))
-            .await
-            .expect("read first growing HLS playlist snapshot");
-        assert!(!first_snapshot.contains("#EXT-X-ENDLIST"));
-        assert!(first_snapshot.contains("#EXTINF:"));
-
-        let (_mux_stop_sender, mut mux_abort) = tokio::sync::oneshot::channel();
-        let ffmpeg_path = ffmpeg.clone();
-        let playlist_input = staging.path().join("local.m3u8");
-        let output_label = part_path.clone();
-        let output_container = manifest_output_container(&destination)
-            .expect("resolve the TS destination container");
-        let ffmpeg_task = tokio::spawn(async move {
-            run_ffmpeg_with_offsets_timeout(
-                &ffmpeg_path,
-                FfmpegInput {
-                    path: &playlist_input,
-                    timestamp_offset: None,
+        let (stop_sender, abort) = tokio::sync::oneshot::channel();
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+        let task_staging = staging.path().to_path_buf();
+        let task_dest_dir = destination_dir.path().to_path_buf();
+        let task_video_dir = video_dir;
+        let task_audio_dir = audio_dir;
+        let task_client = client;
+        let task_downloaded = Arc::clone(&downloaded);
+        let download_task = tokio::spawn(async move {
+            run_incremental_aes128_hls_vod(ManifestIncrementalHlsVod {
+                job: &job,
+                gate,
+                abort,
+                tx: &tx,
+                staging: &task_staging,
+                dest_dir: &task_dest_dir,
+                video_dir: &task_video_dir,
+                audio_dir: &task_audio_dir,
+                tracks: Tracks::Hls {
+                    video: Box::new(plan),
+                    audio: None,
+                    subtitle: None,
+                    subtitle_language: None,
                 },
-                None,
-                ManifestMuxOptions {
-                    timestamp_policy: InputTimestampPolicy::Normalize,
-                    timeout: Some(Duration::from_secs(30)),
-                },
-                SubtitleOutput::default(),
-                FfmpegOutput::OwnedPart {
-                    file: output_file.into_std().await,
-                    container: output_container,
-                    label: output_label,
-                },
-                &mut mux_abort,
-            )
+                ffmpeg,
+                downloaded: task_downloaded,
+                connections: 4,
+                client: &task_client,
+            })
             .await
         });
 
@@ -6080,7 +6061,7 @@ segment-2.ts
         .await
         .expect("the final segment request should start while earlier segments are muxed");
         assert!(
-            !fetch_task.is_finished(),
+            !download_task.is_finished(),
             "the final segment must remain in flight while FFmpeg consumes the growing prefix"
         );
         let initial_growth = tokio::time::timeout(Duration::from_secs(15), async {
@@ -6099,46 +6080,47 @@ segment-2.ts
         .expect("FFmpeg should write decrypted bytes before the final segment is released");
         assert!(initial_growth > 0);
         assert!(
-            !fetch_task.is_finished(),
+            !download_task.is_finished(),
             "the destination part must grow while the final segment download is still blocked"
         );
 
         release_final_segment.notify_one();
-        complete_rx
+        let outcome = download_task
             .await
-            .expect("complete encrypted HLS playlist snapshot");
+            .expect("join incremental AES-128 VOD runner")
+            .expect("incremental AES-128 VOD runner should finish");
         assert!(
-            fetch_task
-                .await
-                .expect("join incremental AES-128 fetcher")
-                .expect("fetch encrypted HLS resources")
+            matches!(outcome, ManifestOutcome::Finished(size) if size > 0),
+            "expected publication of a non-empty decrypted stream, got {outcome:?}"
         );
-        assert_eq!(
-            ffmpeg_task
-                .await
-                .expect("join incremental AES-128 FFmpeg task")
-                .expect("FFmpeg should decrypt the growing AES-128 HLS playlist"),
-            ManifestMuxOutcome::Finished
-        );
+        drop(stop_sender);
         server.await.expect("AES-128 fixture server task");
 
-        crate::manifest_destination::verify_owned_part_async(
-            staging.path().to_path_buf(),
-            destination.clone(),
-            item_id,
-            TrackKind::Video,
-        )
-        .await
-        .expect("the growing output must remain the exact owned destination part");
-        let final_size = tokio::fs::metadata(&part_path)
+        let final_size = tokio::fs::metadata(&destination)
             .await
-            .expect("stat completed decrypted destination part")
+            .expect("stat published decrypted destination")
             .len();
         assert!(final_size >= initial_growth);
+        assert!(
+            tokio::fs::symlink_metadata(&part_path).await.is_err(),
+            "successful publication must move the owned destination part into place"
+        );
+        let part_name = part_path
+            .file_name()
+            .and_then(std::ffi::OsStr::to_str)
+            .expect("owned destination part has a UTF-8 filename");
+        assert!(
+            tokio::fs::symlink_metadata(
+                staging.path().join(format!("{part_name}.owner.json"))
+            )
+            .await
+            .is_err(),
+            "successful publication must remove the part ownership record"
+        );
 
         let verification = tokio::process::Command::new(&ffmpeg)
             .args(["-hide_banner", "-loglevel", "error", "-i"])
-            .arg(&part_path)
+            .arg(&destination)
             .args(["-f", "null", "-"])
             .output()
             .await

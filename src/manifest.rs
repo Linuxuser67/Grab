@@ -15,7 +15,7 @@ use url::Url;
 pub(crate) const MAX_MANIFEST_BYTES: usize = 4 * 1024 * 1024;
 /// Maximum video variants retained from an HLS master.
 pub(crate) const MAX_HLS_MASTER_VARIANTS: usize = 4_096;
-/// Maximum combined audio and subtitle renditions retained from an HLS master.
+/// Maximum combined audio, subtitle, and closed-caption renditions retained from an HLS master.
 pub(crate) const MAX_HLS_MASTER_RENDITIONS: usize = 4_096;
 
 #[path = "manifest_dash.rs"]
@@ -1711,13 +1711,20 @@ pub(crate) fn parse_hls_master_playlist(
         })
         .collect::<Result<Vec<_>, ManifestError>>()?;
 
+    let closed_caption_rendition_count = master
+        .alternatives
+        .iter()
+        .filter(|alternative| alternative.media_type == AlternativeMediaType::ClosedCaptions)
+        .count();
     if audio_renditions
         .len()
         .saturating_add(subtitle_renditions.len())
+        .saturating_add(closed_caption_rendition_count)
         > MAX_HLS_MASTER_RENDITIONS
     {
         return Err(ManifestError::Parse(
-            "HLS master contains too many audio and subtitle renditions".to_string(),
+            "HLS master contains too many audio, subtitle, and closed-caption renditions"
+                .to_string(),
         ));
     }
 

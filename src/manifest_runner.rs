@@ -2156,7 +2156,6 @@ pub(crate) async fn run_manifest_download(
             dest_dir: &dest_dir,
             video_dir: &video_dir,
             audio_dir: &audio_dir,
-            output_part,
             tracks,
             ffmpeg,
             downloaded,
@@ -2337,7 +2336,6 @@ struct ManifestIncrementalHlsVod<'a> {
     dest_dir: &'a Path,
     video_dir: &'a Path,
     audio_dir: &'a Path,
-    output_part: PathBuf,
     tracks: Tracks,
     ffmpeg: PathBuf,
     downloaded: Arc<AtomicU64>,
@@ -2357,6 +2355,26 @@ fn send_manifest_stop_intent(
 async fn run_incremental_aes128_hls_vod(
     context: ManifestIncrementalHlsVod<'_>,
 ) -> Result<ManifestOutcome, ManifestRunError> {
+    let staging = context.staging.to_path_buf();
+    let destination = context.job.dest.clone();
+    let item_id = context.job.item_id;
+    let result = run_incremental_aes128_hls_vod_inner(context).await;
+    if matches!(&result, Err(ManifestRunError::Unsupported(_))) {
+        crate::manifest_destination::remove_owned_part_async(
+            staging,
+            destination,
+            item_id,
+            TrackKind::Video,
+        )
+        .await
+        .map_err(ManifestRunError::Failed)?;
+    }
+    result
+}
+
+async fn run_incremental_aes128_hls_vod_inner(
+    context: ManifestIncrementalHlsVod<'_>,
+) -> Result<ManifestOutcome, ManifestRunError> {
     use tokio::io::AsyncSeekExt as _;
 
     let ManifestIncrementalHlsVod {
@@ -2368,7 +2386,6 @@ async fn run_incremental_aes128_hls_vod(
         dest_dir,
         video_dir,
         audio_dir,
-        output_part,
         tracks,
         ffmpeg,
         downloaded,

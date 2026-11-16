@@ -1069,10 +1069,10 @@ impl DownloadManager {
                         break;
                     }
                     EngineMsg::FailedVersion(e) => {
-                        // Server bytes changed mid-download: the resume bitmap describes a dead version, so drop it and re-probe fresh.
-                        // Clear the validator too: retrying with the dead ETag/Last-Modified would send a stale If-Range,
-                        // get 200 on every piece, and fail again permanently.
-                        // Explicitly delete the partial file: its bytes belong to the dead version and must not survive
+                        // The existing partial is no longer safe to resume: drop its bitmap and re-probe fresh.
+                        // Clear the validator too: a later retry must not attach an old validator to the new partial
+                        // or keep treating the invalid bytes as the old version.
+                        // Explicitly delete the partial file: its bytes are not trusted and must not survive
                         // into a retry (previously this was only emergent via 416/hole handling).
                         let invalid_path = item.file_path();
                         this.segment_state.borrow_mut().remove(&id);

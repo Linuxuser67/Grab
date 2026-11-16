@@ -5145,6 +5145,11 @@ async fn run_ffmpeg_with_offsets_timeout(
         command.arg("-i").arg(subtitle_input);
     }
     command.args(["-c", "copy"]);
+    if overwrite_output {
+        // The destination part is consumed by the UI while FFmpeg is still
+        // processing a growing playlist, so flush muxed packets to the file.
+        command.args(["-flush_packets", "1"]);
+    }
     if subtitles.input.is_some() && subtitles.embed {
         let subtitle_stream = if audio_input.is_some() {
             "2:s:0"

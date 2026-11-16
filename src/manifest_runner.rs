@@ -373,6 +373,18 @@ enum Tracks {
 }
 
 impl Tracks {
+    fn uses_incremental_aes128_vod(&self) -> bool {
+        matches!(
+            self,
+            Self::Hls {
+                video,
+                audio: None,
+                subtitle: None,
+                ..
+            } if video.is_incremental_aes128_mpegts_vod_candidate()
+        )
+    }
+
     fn uses_destination_parts(&self) -> bool {
         match self {
             Self::Hls { video, audio, .. } => {

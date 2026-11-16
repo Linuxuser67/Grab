@@ -2936,7 +2936,7 @@ async fn finalize_manifest_download(
         ),
         _ => (None, None),
     };
-    if !output_already_muxed {
+    if matches!(mode, ManifestFinalizationMode::MuxStagedTracks) {
         match run_ffmpeg_with_offsets(
             &ffmpeg,
             FfmpegInput {

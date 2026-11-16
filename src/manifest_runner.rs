@@ -2372,8 +2372,10 @@ async fn run_incremental_aes128_hls_vod(
         connections,
         client,
     } = context;
-    tx.send(EngineMsg::Phase("Downloading and decrypting HLS VOD…".to_string()))
-        .ok();
+    tx.send(EngineMsg::Phase(
+        "Downloading and decrypting HLS VOD…".to_string(),
+    ))
+    .ok();
     let Tracks::Hls {
         video,
         audio: None,
@@ -2478,10 +2480,14 @@ async fn run_incremental_aes128_hls_vod(
         match result {
             Ok(Ok(true)) => fetch_result = Some(Ok(Ok(true))),
             Ok(Ok(false)) => {
-                return Ok(match stop_intent.unwrap_or(crate::video::StopIntent::Pause) {
-                    crate::video::StopIntent::Pause | crate::video::StopIntent::Finish => ManifestOutcome::Paused,
-                    crate::video::StopIntent::Discard => ManifestOutcome::Aborted,
-                });
+                return Ok(
+                    match stop_intent.unwrap_or(crate::video::StopIntent::Pause) {
+                        crate::video::StopIntent::Pause | crate::video::StopIntent::Finish => {
+                            ManifestOutcome::Paused
+                        }
+                        crate::video::StopIntent::Discard => ManifestOutcome::Aborted,
+                    },
+                );
             }
             Ok(Err(error)) => return Err(error),
             Err(error) => {
@@ -2591,13 +2597,13 @@ async fn run_incremental_aes128_hls_vod(
         }
     }
 
-    if !abort_done
-        && let Some(intent) = pending_manifest_stop_intent(&mut abort)
-    {
+    if !abort_done && let Some(intent) = pending_manifest_stop_intent(&mut abort) {
         abort_done = true;
         stop_intent = Some(intent);
     }
-    if let Some(intent @ (crate::video::StopIntent::Pause | crate::video::StopIntent::Discard)) = stop_intent {
+    if let Some(intent @ (crate::video::StopIntent::Pause | crate::video::StopIntent::Discard)) =
+        stop_intent
+    {
         return Ok(match intent {
             crate::video::StopIntent::Pause => ManifestOutcome::Paused,
             crate::video::StopIntent::Discard => ManifestOutcome::Aborted,
@@ -2776,7 +2782,10 @@ async fn finalize_manifest_download(
         Some(crate::video::StopIntent::Finish) | None => {}
     }
     tx.send(EngineMsg::Phase(
-        if matches!(mode, ManifestFinalizationMode::PublishPreMuxedDestinationPart) {
+        if matches!(
+            mode,
+            ManifestFinalizationMode::PublishPreMuxedDestinationPart
+        ) {
             "Finalizing downloaded stream…".to_string()
         } else {
             "Merging audio and video…".to_string()
@@ -3570,7 +3579,8 @@ async fn fetch_hls_resources_incrementally(
 
     match result {
         Ok(false) => {
-            tx.send(progress_message(downloaded.load(Ordering::Relaxed))).ok();
+            tx.send(progress_message(downloaded.load(Ordering::Relaxed)))
+                .ok();
             return Ok(false);
         }
         Err(error) => {
@@ -3586,7 +3596,10 @@ async fn fetch_hls_resources_incrementally(
         ));
     }
     if pending_manifest_stop_intent(abort).is_some_and(|intent| {
-        matches!(intent, crate::video::StopIntent::Pause | crate::video::StopIntent::Discard)
+        matches!(
+            intent,
+            crate::video::StopIntent::Pause | crate::video::StopIntent::Discard
+        )
     }) {
         tx.send(progress_message(downloaded.load(Ordering::Relaxed))).ok();
         return Ok(false);
@@ -5069,9 +5082,19 @@ async fn run_ffmpeg_with_offsets_timeout(
     let (output_argument, output_container, output_label, overwrite_output, stdout) = match output {
         FfmpegOutput::StagedPath(path) => {
             let container = manifest_output_container(&path)?;
-            (path.clone(), container, path, false, std::process::Stdio::null())
+            (
+                path.clone(),
+                container,
+                path,
+                false,
+                std::process::Stdio::null(),
+            )
         }
-        FfmpegOutput::OwnedPart { file, container, label } => (
+        FfmpegOutput::OwnedPart {
+            file,
+            container,
+            label,
+        } => (
             PathBuf::from("/proc/self/fd/1"),
             container,
             label,
@@ -5711,14 +5734,20 @@ segment-2.ts
         let server = tokio::spawn(async move {
             let mut requests = Vec::with_capacity(request_count);
             for _ in 0..request_count {
-                let (mut socket, _) = listener.accept().await.expect("accept encrypted HLS request");
+                let (mut socket, _) = listener
+                    .accept()
+                    .await
+                    .expect("accept encrypted HLS request");
                 let release = Arc::clone(&server_release);
                 let key_response = key_response.clone();
                 let first_response = first_response.clone();
                 let second_response = second_response.clone();
                 requests.push(tokio::spawn(async move {
                     let mut request = [0_u8; 1024];
-                    let count = socket.read(&mut request).await.expect("read encrypted HLS request");
+                    let count = socket
+                        .read(&mut request)
+                        .await
+                        .expect("read encrypted HLS request");
                     let request = String::from_utf8_lossy(&request[..count]);
                     let path = request.split_ascii_whitespace().nth(1).unwrap_or("/");
                     let payload = match path {
@@ -5734,8 +5763,14 @@ segment-2.ts
                         "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
                         payload.len()
                     );
-                    socket.write_all(header.as_bytes()).await.expect("write encrypted HLS header");
-                    socket.write_all(&payload).await.expect("write encrypted HLS body");
+                    socket
+                        .write_all(header.as_bytes())
+                        .await
+                        .expect("write encrypted HLS header");
+                    socket
+                        .write_all(&payload)
+                        .await
+                        .expect("write encrypted HLS body");
                 }));
             }
             for request in requests {
@@ -5772,7 +5807,9 @@ segment-2.ts
             .await
         });
 
-        first_ready_rx.await.expect("first growing playlist snapshot");
+        first_ready_rx
+            .await
+            .expect("first growing playlist snapshot");
         let first_snapshot = tokio::fs::read_to_string(directory.path().join("local.m3u8"))
             .await
             .expect("read first growing HLS playlist snapshot");
@@ -5781,7 +5818,12 @@ segment-2.ts
 
         release_second.notify_one();
         complete_rx.await.expect("complete HLS playlist snapshot");
-        assert!(fetch_task.await.expect("join incremental HLS fetcher").expect("fetch encrypted HLS resources"));
+        assert!(
+            fetch_task
+                .await
+                .expect("join incremental HLS fetcher")
+                .expect("fetch encrypted HLS resources")
+        );
         server.await.expect("encrypted HLS server task");
 
         let final_snapshot = tokio::fs::read_to_string(directory.path().join("local.m3u8"))
@@ -5789,7 +5831,10 @@ segment-2.ts
             .expect("read complete HLS playlist snapshot");
         assert_eq!(final_snapshot.matches("#EXTINF:").count(), 2);
         assert!(final_snapshot.contains("#EXT-X-ENDLIST"));
-        assert_eq!(downloaded.load(Ordering::Relaxed), (key.len() + first.len() + second.len()) as u64);
+        assert_eq!(
+            downloaded.load(Ordering::Relaxed),
+            (key.len() + first.len() + second.len()) as u64
+        );
     }
 
     #[tokio::test]
@@ -5802,7 +5847,9 @@ segment-2.ts
                 tracing::debug!(%error, "skipping AES-128 HLS integration test without FFmpeg");
                 return;
             }
-            Err(error) => panic!("FFmpeg is required for the AES-128 HLS integration test: {error}"),
+            Err(error) => {
+                panic!("FFmpeg is required for the AES-128 HLS integration test: {error}")
+            }
         };
         let fixture = tempfile::tempdir().expect("create AES-128 HLS fixture directory");
         let key = vec![0x42; 16];
@@ -5865,14 +5912,19 @@ segment-2.ts
         let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0))
             .await
             .expect("bind AES-128 fixture server");
-        let address = listener.local_addr().expect("AES-128 fixture server address");
+        let address = listener
+            .local_addr()
+            .expect("AES-128 fixture server address");
         let mut plan = crate::manifest::plan_hls_media_playlist(
             "https://cdn.example.test/playlist.m3u8",
             &playlist,
         )
         .expect("plan generated AES-128 HLS VOD");
         assert!(plan.is_incremental_aes128_mpegts_vod_candidate());
-        assert!(plan.segment_count() >= 2, "fixture must contain multiple segments");
+        assert!(
+            plan.segment_count() >= 2,
+            "fixture must contain multiple segments"
+        );
 
         let total_segments = plan.segment_count();
         let mut segment_index = 0usize;
@@ -5959,8 +6011,7 @@ segment-2.ts
             .build()
             .expect("build AES-128 fixture client");
         let staging = tempfile::tempdir().expect("create AES-128 HLS staging directory");
-        let destination_dir =
-            tempfile::tempdir().expect("create AES-128 destination directory");
+        let destination_dir = tempfile::tempdir().expect("create AES-128 destination directory");
         let destination = destination_dir.path().join("encrypted-vod.ts");
         let item_id = 73;
         crate::manifest_destination::ensure_plan(
@@ -6040,12 +6091,9 @@ segment-2.ts
             .await
         });
 
-        tokio::time::timeout(
-            Duration::from_secs(10),
-            final_segment_requested.notified(),
-        )
-        .await
-        .expect("the final segment request should start while earlier segments are muxed");
+        tokio::time::timeout(Duration::from_secs(10), final_segment_requested.notified())
+            .await
+            .expect("the final segment request should start while earlier segments are muxed");
         assert!(
             !download_task.is_finished(),
             "the final segment must remain in flight while FFmpeg consumes the growing prefix"
@@ -6096,11 +6144,9 @@ segment-2.ts
             .and_then(std::ffi::OsStr::to_str)
             .expect("owned destination part has a UTF-8 filename");
         assert!(
-            tokio::fs::symlink_metadata(
-                staging.path().join(format!("{part_name}.owner.json"))
-            )
-            .await
-            .is_err(),
+            tokio::fs::symlink_metadata(staging.path().join(format!("{part_name}.owner.json")))
+                .await
+                .is_err(),
             "successful publication must remove the part ownership record"
         );
 

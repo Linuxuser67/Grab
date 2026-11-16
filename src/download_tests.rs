@@ -1315,6 +1315,11 @@ fn content_disposition_table() {
             "attachment; filename*=UTF-8''%E2%82%AC%20rates.pdf",
             Some("€ rates.pdf"),
         ),
+        // RFC 5987 Latin-1 charset (not UTF-8).
+        (
+            "attachment; filename*=\"ISO-8859-1''caf%E9.pdf\"",
+            Some("café.pdf"),
+        ),
         // Semicolon inside quotes is not a separator.
         (
             "attachment; filename=\"file;name.pdf\"",
@@ -8670,7 +8675,7 @@ fn probe_validator_sent_before_workers() {
             ..Default::default()
         },
         cookies: None,
-        user_agent: crate::download_net::DEFAULT_USER_AGENT.to_string(),
+        user_agent: "grab-probe-ua-test/1.0".to_string(),
         timeout: Duration::from_secs(30),
         tx,
         if_range: std::sync::Arc::new(std::sync::OnceLock::new()),
@@ -8708,6 +8713,15 @@ fn probe_validator_sent_before_workers() {
         info.etag.as_deref(),
         Some("\"probe-etag-456\""),
         "validator ETag must match the probe response"
+    );
+    let log = std::fs::read_to_string(dir.join("ranges.log")).unwrap_or_default();
+    let probe = log
+        .lines()
+        .find(|line| line.starts_with("range=bytes=0-0|"))
+        .unwrap_or_else(|| abort(&server, "the range probe never ran"));
+    assert!(
+        probe.contains("ua=grab-probe-ua-test/1.0"),
+        "the range probe must stamp the caller's User-Agent, not the default: {probe}"
     );
     cleanup(&server, &dir);
 }

@@ -3132,7 +3132,9 @@ impl DownloadManager {
                 );
             }
         }
-        // Persist the bitmap too: a kill while paused must resume segmented.
+        // Persist only completed segments. PieceDone is emitted after the writer
+        // syncs the attempt, so pieces from an interrupted attempt remain unmarked
+        // and are fetched again after resume; no fsync is needed per progress tick.
         self.persist_queue();
         self.changed();
         self.start_next();

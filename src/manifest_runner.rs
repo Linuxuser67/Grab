@@ -364,6 +364,7 @@ enum Tracks {
         audio: Option<Box<HlsPlan>>,
         subtitle: Option<Box<HlsPlan>>,
         subtitle_language: Option<String>,
+        subtitle_is_imsc1: bool,
     },
     Dash {
         video: Box<DashRepresentationPlan>,
@@ -2520,6 +2521,7 @@ async fn run_incremental_aes128_hls_vod(
                 input: None,
                 embed: false,
                 sidecar: None,
+                is_imsc1: false,
             },
             FfmpegOutput::OwnedPart {
                 file: output_file,
@@ -2671,6 +2673,7 @@ async fn run_incremental_aes128_hls_vod(
             audio: None,
             subtitle: None,
             subtitle_language: None,
+            subtitle_is_imsc1: false,
         },
         has_audio: false,
         ffmpeg,
@@ -2920,16 +2923,33 @@ async fn finalize_manifest_download(
                     .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-')
         })
         .unwrap_or("und");
+    let subtitle_is_imsc1 = matches!(
+        &tracks,
+        Tracks::Hls {
+            subtitle: Some(_),
+            subtitle_is_imsc1: true,
+            ..
+        }
+    );
     let output_container = manifest_output_container(&job.dest)?;
-    // MPEG-TS has inconsistent support for the WebVTT/TTML inputs normalized
-    // by Grab. Preserve the selected subtitles as an SRT sidecar instead of
-    // silently dropping them or failing the whole stream download.
-    let embed_subtitles = embed_manifest_subtitles(job.embed_subs, output_container);
+    // IMSC1 is an fMP4 TTML track. Preserve it in MP4 instead of asking
+    // FFmpeg to decode TTML (which it cannot); other containers use an
+    // independently published IMSC1 MP4 sidecar.
+    let embed_subtitles = embed_manifest_subtitles(
+        job.embed_subs,
+        output_container,
+        subtitle_is_imsc1,
+    );
     let subtitle_sidecar = if subtitle_input.is_some() && !embed_subtitles {
-        Some(crate::video_staging::sidecar_path_for(
-            &output_part,
-            subtitle_language,
-        ))
+        Some(if subtitle_is_imsc1 {
+            crate::video_staging::sidecar_path_for_extension(
+                &output_part,
+                subtitle_language,
+                "imsc1.mp4",
+            )
+        } else {
+            crate::video_staging::sidecar_path_for(&output_part, subtitle_language)
+        })
     } else {
         None
     };
@@ -2975,6 +2995,7 @@ async fn finalize_manifest_download(
                 input: subtitle_input.as_deref(),
                 embed: embed_subtitles,
                 sidecar: subtitle_sidecar.as_deref(),
+                is_imsc1: subtitle_is_imsc1,
             },
             &output_part,
             &mut abort,
@@ -3084,7 +3105,16 @@ async fn finalize_manifest_download(
     }
 
     if let Some(sidecar) = subtitle_sidecar.as_deref() {
-        crate::video_staging::collect_sidecar(sidecar, &job.dest, subtitle_language);
+        if subtitle_is_imsc1 {
+            crate::video_staging::collect_sidecar_with_extension(
+                sidecar,
+                &job.dest,
+                subtitle_language,
+                "imsc1.mp4",
+            );
+        } else {
+            crate::video_staging::collect_sidecar(sidecar, &job.dest, subtitle_language);
+        }
     }
     let parent = job.dest.parent().map(Path::to_path_buf);
     if let Some(parent) = parent {
@@ -3122,6 +3152,7 @@ async fn resolve_tracks(
                 audio: None,
                 subtitle: None,
                 subtitle_language: None,
+                subtitle_is_imsc1: false,
             })
         }
         ManifestDownloadPlan::HlsMaster(plan) => {
@@ -3130,6 +3161,7 @@ async fn resolve_tracks(
                 audio_url,
                 subtitle_url,
                 subtitle_language,
+                subtitle_is_imsc1,
                 inherited_variables,
             } = *plan;
             guard_manifest_child_url(&source.url, &video_url, guarded_child_hosts)?;
@@ -3187,6 +3219,7 @@ async fn resolve_tracks(
                 audio: audio.map(Box::new),
                 subtitle,
                 subtitle_language,
+                subtitle_is_imsc1,
             })
         }
         ManifestDownloadPlan::Dash {
@@ -3221,8 +3254,14 @@ async fn resolve_tracks(
 }
 
 /// Whether the selected subtitle rendition can be embedded in the chosen container.
-fn embed_manifest_subtitles(embed_requested: bool, output_container: ManifestContainer) -> bool {
-    embed_requested && output_container != ManifestContainer::Ts
+fn embed_manifest_subtitles(
+    embed_requested: bool,
+    output_container: ManifestContainer,
+    subtitle_is_imsc1: bool,
+) -> bool {
+    embed_requested
+        && output_container != ManifestContainer::Ts
+        && (!subtitle_is_imsc1 || output_container == ManifestContainer::Mp4)
 }
 
 fn guard_hls_resources(
@@ -4955,6 +4994,7 @@ struct SubtitleOutput<'a> {
     input: Option<&'a Path>,
     embed: bool,
     sidecar: Option<&'a Path>,
+    is_imsc1: bool,
 }
 
 #[derive(Clone, Copy)]
@@ -5183,18 +5223,20 @@ async fn run_ffmpeg_with_offsets_timeout(
         } else {
             "1:s:0"
         };
-        command.arg("-map").arg(subtitle_stream).args([
-            "-c:s",
-            match output_container {
-                ManifestContainer::Mp4 => "mov_text",
-                // Matroska preserves the source subtitle codec instead of
-                // forcing MP4's mov_text representation.
-                ManifestContainer::Mkv => "copy",
-                ManifestContainer::Ts => {
-                    return Err(mpegts_embedded_subtitle_error());
-                }
-            },
-        ]);
+        let subtitle_codec = match output_container {
+            ManifestContainer::Mp4 if subtitles.is_imsc1 => "copy",
+            ManifestContainer::Mp4 => "mov_text",
+            // Matroska preserves WebVTT and other source subtitle codecs.
+            // IMSC1 is routed to its own MP4 sidecar by the embedding policy.
+            ManifestContainer::Mkv => "copy",
+            ManifestContainer::Ts => {
+                return Err(mpegts_embedded_subtitle_error());
+            }
+        };
+        command
+            .arg("-map")
+            .arg(subtitle_stream)
+            .args(["-c:s", subtitle_codec]);
     }
     match output_container {
         ManifestContainer::Mp4 => {
@@ -5218,9 +5260,18 @@ async fn run_ffmpeg_with_offsets_timeout(
                 "2:s:0"
             } else {
                 "1:s:0"
-            })
-            .args(["-c:s", "srt", "-f", "srt"])
-            .arg(sidecar);
+            });
+        if subtitles.is_imsc1 {
+            // FFmpeg has no TTML decoder. Keep the original stpp track in
+            // a small MP4 sidecar rather than attempting a lossy conversion.
+            command
+                .args(["-c:s", "copy", "-movflags", "+faststart", "-f", "mp4"])
+                .arg(sidecar);
+        } else {
+            command
+                .args(["-c:s", "srt", "-f", "srt"])
+                .arg(sidecar);
+        }
     }
     command
         .stdin(std::process::Stdio::null())
@@ -6111,6 +6162,7 @@ segment-2.ts
                     audio: None,
                     subtitle: None,
                     subtitle_language: None,
+                    subtitle_is_imsc1: false,
                 },
                 ffmpeg: task_ffmpeg,
                 downloaded: task_downloaded,
@@ -6387,11 +6439,14 @@ segment-2.m4s
     }
 
     #[test]
-    fn mpegts_subtitles_use_a_sidecar_when_embedding_was_requested() {
-        assert!(!embed_manifest_subtitles(true, ManifestContainer::Ts));
-        assert!(!embed_manifest_subtitles(false, ManifestContainer::Mp4));
-        assert!(embed_manifest_subtitles(true, ManifestContainer::Mp4));
-        assert!(embed_manifest_subtitles(true, ManifestContainer::Mkv));
+    fn subtitles_use_a_sidecar_when_the_output_container_cannot_represent_them() {
+        assert!(!embed_manifest_subtitles(true, ManifestContainer::Ts, false));
+        assert!(!embed_manifest_subtitles(false, ManifestContainer::Mp4, false));
+        assert!(embed_manifest_subtitles(true, ManifestContainer::Mp4, false));
+        assert!(embed_manifest_subtitles(true, ManifestContainer::Mkv, false));
+        assert!(!embed_manifest_subtitles(true, ManifestContainer::Mkv, true));
+        assert!(!embed_manifest_subtitles(true, ManifestContainer::Ts, true));
+        assert!(embed_manifest_subtitles(true, ManifestContainer::Mp4, true));
     }
 
     #[test]
@@ -6448,6 +6503,7 @@ segment-2.m4s
                 input: Some(Path::new("subtitles.vtt")),
                 embed: true,
                 sidecar: None,
+                is_imsc1: false,
             },
             Path::new("output.ts"),
             &mut abort,

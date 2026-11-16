@@ -564,6 +564,10 @@ impl HlsPlan {
         })
     }
 
+    pub(crate) fn segment_count(&self) -> usize {
+        self.local_playlist.segments.len()
+    }
+
     pub(crate) fn local_playlist_bytes(&self) -> Result<Vec<u8>, ManifestError> {
         let mut output = Vec::new();
         self.local_playlist

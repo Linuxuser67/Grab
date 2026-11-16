@@ -2856,7 +2856,9 @@ async fn run_incremental_hls_vod(
         });
     }
     for result in &mut fetch_results {
-        if matches!(result, Some(Err(_))) && let Some(Err(error)) = result.take() {
+        if matches!(result, Some(Err(_)))
+            && let Some(Err(error)) = result.take()
+        {
             return Err(error);
         }
     }

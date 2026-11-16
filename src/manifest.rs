@@ -580,7 +580,7 @@ impl HlsPlan {
     ///
     /// A growing snapshot deliberately omits `EXT-X-ENDLIST`, allowing FFmpeg to
     /// reload the local playlist after it consumes the currently available segments.
-    /// A complete snapshot is accepted only for the full, finite source playlist.
+    /// A complete snapshot is accepted only when it includes every segment in the local plan.
     /// Callers should publish bounded batches rather than reserialize the full playlist
     /// after every segment; each result is a complete snapshot suitable for atomic replace.
     ///
@@ -594,8 +594,7 @@ impl HlsPlan {
     ) -> Result<Vec<u8>, ManifestError> {
         let total_segments = self.local_playlist.segments.len();
         if segment_count > total_segments
-            || (finality == HlsPlaylistFinality::Complete
-                && (!self.end_list || segment_count != total_segments))
+            || (finality == HlsPlaylistFinality::Complete && segment_count != total_segments)
         {
             return Err(ManifestError::InvalidPlaylistPrefix);
         }
@@ -3799,6 +3798,26 @@ two.ts
             plan.local_playlist_prefix_bytes(1, HlsPlaylistFinality::Complete),
             Err(ManifestError::InvalidPlaylistPrefix)
         );
+    }
+
+    #[test]
+    fn complete_local_snapshot_can_finalize_a_bounded_live_playlist() {
+        let body = br#"#EXTM3U
+#EXT-X-TARGETDURATION:4
+#EXTINF:2,
+one.ts
+"#;
+        let plan = plan_hls_media_playlist(BASE_URL, body)
+            .expect("live snapshot should produce a local plan");
+        assert!(!plan.end_list, "the source snapshot is still live");
+
+        let bytes = plan
+            .local_playlist_prefix_bytes(1, HlsPlaylistFinality::Complete)
+            .expect("the complete local snapshot can be finalized independently of source live state");
+        let parsed = m3u8_rs::parse_media_playlist_res(&bytes)
+            .expect("finalized local playlist should parse");
+        assert_eq!(parsed.segments.len(), 1);
+        assert!(parsed.end_list);
     }
 
     #[test]

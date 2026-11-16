@@ -4319,6 +4319,9 @@ pub fn build_add_card(manager: Rc<DownloadManager>) -> AddCard {
     card.set_widget_name("inline-add-card");
     card.set_margin_start(12);
     card.set_margin_end(12);
+    // The bottom margin supplies the 12px gap to the download list, keeping
+    // the form from sitting flush against it.
+    card.set_margin_bottom(12);
     // No .card class: each AdwPreferencesGroup below renders as its own
     // flush card (rows touch the group's edge). Horizontal margins align
     // the form with the main list.

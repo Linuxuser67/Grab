@@ -5688,7 +5688,6 @@ segment-2.ts
         }
         let request_count = plan.resources.len();
         assert!(plan.is_incremental_aes128_mpegts_vod_candidate());
-        let request_count = plan.resources.len();
         let server_release = Arc::clone(&release_second);
         let server = tokio::spawn(async move {
             let mut requests = Vec::with_capacity(request_count);

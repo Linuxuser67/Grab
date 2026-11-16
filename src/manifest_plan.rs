@@ -1302,6 +1302,7 @@ video/1080p.m3u8
         assert_eq!(selected_hls_master_output_container(missing, 0), None);
         assert_eq!(selected_hls_master_output_container(unsupported, 0), None);
     }
+
     #[test]
     fn hls_master_uses_the_selected_variant_codec_metadata() {
         let body = br##"#EXTM3U

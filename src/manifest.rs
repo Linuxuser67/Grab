@@ -1379,6 +1379,7 @@ fn validate_hls_rendition_groups(
                     alternative.assoc_language.clone(),
                     alternative.forced,
                     alternative.characteristics.clone(),
+                    alternative.instream_id.clone(),
                 );
                 if !autoselect_signatures.insert(signature) {
                     return Err(group_error);
@@ -2967,7 +2968,7 @@ video.m3u8
     fn closed_caption_groups_are_accepted_when_declared_by_a_variant() {
         let body = br#"#EXTM3U
 #EXT-X-MEDIA:TYPE=CLOSED-CAPTIONS,GROUP-ID="captions",NAME="English",LANGUAGE="en",DEFAULT=YES,AUTOSELECT=YES,INSTREAM-ID="CC1"
-#EXT-X-MEDIA:TYPE=CLOSED-CAPTIONS,GROUP-ID="captions",NAME="English Service",LANGUAGE="en",INSTREAM-ID="SERVICE63"
+#EXT-X-MEDIA:TYPE=CLOSED-CAPTIONS,GROUP-ID="captions",NAME="English Service",LANGUAGE="en",AUTOSELECT=YES,INSTREAM-ID="SERVICE63"
 #EXT-X-STREAM-INF:BANDWIDTH=1000000,CLOSED-CAPTIONS="captions"
 video.m3u8
 "#;

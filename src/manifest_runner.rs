@@ -2147,6 +2147,16 @@ pub(crate) async fn run_manifest_download(
     };
     let mut _finish_stop_sender = None;
     if !live_hls && !live_dash && !has_audio && tracks.uses_incremental_hls_vod() {
+        // Preserve AES-128's established configured concurrency. Complex clear
+        // VOD stays sequential, matching the ordinary static-HLS resource path.
+        let connections = match &tracks {
+            Tracks::Hls { video, .. }
+                if video.is_incremental_aes128_mpegts_vod_candidate() =>
+            {
+                job.connections
+            }
+            _ => 1,
+        };
         let result = run_incremental_hls_vod(ManifestIncrementalHlsVod {
             job: &job,
             gate,
@@ -2159,7 +2169,7 @@ pub(crate) async fn run_manifest_download(
             tracks,
             ffmpeg,
             downloaded,
-            connections: 1,
+            connections,
             client: &client,
         })
         .await;

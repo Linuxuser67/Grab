@@ -2631,11 +2631,8 @@ async fn run_incremental_aes128_hls_vod(
             )));
         }
     };
-    if !fetched {
-        return Ok(ManifestOutcome::Paused);
-    }
     match mux_outcome {
-        ManifestMuxOutcome::Finished if complete_ready => {}
+        ManifestMuxOutcome::Finished if fetched && complete_ready => {}
         ManifestMuxOutcome::Paused => return Ok(ManifestOutcome::Paused),
         ManifestMuxOutcome::Aborted => return Ok(ManifestOutcome::Aborted),
         ManifestMuxOutcome::Finished => {
@@ -6059,7 +6056,12 @@ segment-2.ts
             .await
         });
 
-        final_segment_requested.notified().await;
+        tokio::time::timeout(
+            Duration::from_secs(10),
+            final_segment_requested.notified(),
+        )
+        .await
+        .expect("the final segment request should start while earlier segments are muxed");
         assert!(
             !fetch_task.is_finished(),
             "the final segment must remain in flight while FFmpeg consumes the growing prefix"

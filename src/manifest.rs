@@ -527,6 +527,60 @@ impl HlsPlan {
         has_aes128
     }
 
+    /// Whether a complex, clear-content VOD can be consumed from a growing local
+    /// playlist while FFmpeg writes the user's destination-side partial file.
+    ///
+    /// Plain TS and one-init fMP4 playlists use the ordered byte-assembly path.
+    /// This path is for presentations that need FFmpeg to interpret playlist
+    /// boundaries, such as discontinuities or changing initialization maps.
+    /// Encrypted playlists, byte ranges, gaps, live reloads, and LL-HLS remain
+    /// on their existing specialized paths.
+    pub(crate) fn is_incremental_clear_vod_candidate(&self) -> bool {
+        if self.is_live
+            || !self.end_list
+            || self.low_latency.is_some()
+            || self.is_destination_assemblable_candidate()
+            || self.resources.is_empty()
+            || self.resources.iter().any(|resource| {
+                resource.range.is_some()
+                    || !matches!(
+                        resource.kind,
+                        HlsResourceKind::InitMap | HlsResourceKind::Segment
+                    )
+            })
+        {
+            return false;
+        }
+
+        let segment_resources = self
+            .resources
+            .iter()
+            .filter(|resource| resource.kind == HlsResourceKind::Segment)
+            .count();
+        if segment_resources != self.local_playlist.segments.len() {
+            return false;
+        }
+
+        if self.local_playlist.segments.iter().any(|segment| {
+            segment
+                .key
+                .as_ref()
+                .is_some_and(|key| key.method != KeyMethod::None)
+        }) {
+            return false;
+        }
+
+        let Ok(bytes) = self.local_playlist_bytes() else {
+            return false;
+        };
+        let Ok(playlist) = std::str::from_utf8(&bytes) else {
+            return false;
+        };
+        !playlist.lines().any(|line| {
+            line.starts_with("#EXT-X-BYTERANGE:") || line == "#EXT-X-GAP"
+        })
+    }
+
     /// Whether one leading `EXT-X-MAP` section followed by media segments can be
     /// byte-concatenated. A later map, byte range, key, or discontinuity would
     /// change the stream mid-track, so those keep the playlist-based path.
@@ -2717,6 +2771,89 @@ segment-2.m4s
         let plan = plan_hls_media_playlist(BASE_URL, discontinuous_map)
             .expect("discontinuous fMP4 playlist should still plan");
         assert!(!plan.is_destination_assemblable_candidate());
+    }
+
+    #[test]
+    fn incremental_clear_vod_candidate_accepts_discontinuities_and_changing_init_maps() {
+        let discontinuous = br#"#EXTM3U
+#EXT-X-VERSION:6
+#EXT-X-TARGETDURATION:4
+#EXT-X-MAP:URI="init.mp4"
+#EXTINF:4,
+segment-1.m4s
+#EXT-X-DISCONTINUITY
+#EXTINF:4,
+segment-2.m4s
+#EXT-X-ENDLIST
+"#;
+        let plan = plan_hls_media_playlist(BASE_URL, discontinuous)
+            .expect("discontinuous clear fMP4 playlist should plan");
+        assert!(!plan.is_destination_assemblable_candidate());
+        assert!(plan.is_incremental_clear_vod_candidate());
+
+        let changing_maps = br#"#EXTM3U
+#EXT-X-VERSION:6
+#EXT-X-TARGETDURATION:4
+#EXT-X-MAP:URI="init-1.mp4"
+#EXTINF:4,
+segment-1.m4s
+#EXT-X-DISCONTINUITY
+#EXT-X-MAP:URI="init-2.mp4"
+#EXTINF:4,
+segment-2.m4s
+#EXT-X-ENDLIST
+"#;
+        let plan = plan_hls_media_playlist(BASE_URL, changing_maps)
+            .expect("VOD with changing init maps should plan");
+        assert!(plan.is_incremental_clear_vod_candidate());
+        assert_eq!(
+            plan.resources
+                .iter()
+                .filter(|resource| resource.kind == HlsResourceKind::InitMap)
+                .count(),
+            2
+        );
+
+        let ranged = br#"#EXTM3U
+#EXT-X-VERSION:6
+#EXT-X-TARGETDURATION:4
+#EXT-X-MAP:URI="init.mp4"
+#EXTINF:4,
+#EXT-X-BYTERANGE:100@0
+segment.m4s
+#EXT-X-ENDLIST
+"#;
+        let plan = plan_hls_media_playlist(BASE_URL, ranged)
+            .expect("ranged fMP4 playlist should plan");
+        assert!(!plan.is_incremental_clear_vod_candidate());
+
+        let encrypted = br#"#EXTM3U
+#EXT-X-VERSION:6
+#EXT-X-TARGETDURATION:4
+#EXT-X-MAP:URI="init.mp4"
+#EXT-X-KEY:METHOD=AES-128,URI="key.bin",IV=0x00000000000000000000000000000001
+#EXTINF:4,
+segment.m4s
+#EXT-X-ENDLIST
+"#;
+        let plan = plan_hls_media_playlist(BASE_URL, encrypted)
+            .expect("encrypted fMP4 playlist should plan");
+        assert!(!plan.is_incremental_clear_vod_candidate());
+
+        let plain = br#"#EXTM3U
+#EXT-X-VERSION:6
+#EXT-X-TARGETDURATION:4
+#EXT-X-MAP:URI="init.mp4"
+#EXTINF:4,
+segment-1.m4s
+#EXTINF:4,
+segment-2.m4s
+#EXT-X-ENDLIST
+"#;
+        let plan = plan_hls_media_playlist(BASE_URL, plain)
+            .expect("simple fMP4 playlist should plan");
+        assert!(!plan.is_incremental_clear_vod_candidate());
+        assert!(plan.is_destination_assemblable_candidate());
     }
 
     #[test]

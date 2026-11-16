@@ -5656,9 +5656,7 @@ segment-2.ts
         let key_response = key.clone();
         let first_response = first.clone();
         let second_response = second.clone();
-        let (release_second_tx, release_second_rx) = tokio::sync::oneshot::channel();
-
-
+        let release_second = Arc::new(tokio::sync::Notify::new());
         let playlist = br#"#EXTM3U
 #EXT-X-VERSION:3
 #EXT-X-PLAYLIST-TYPE:VOD
@@ -5717,6 +5715,42 @@ segment-2.ts
             }
         });
         assert!(plan.is_incremental_aes128_mpegts_vod_candidate());
+        let request_count = plan.resources.len();
+        let server_release = Arc::clone(&release_second);
+        let server = tokio::spawn(async move {
+            let mut requests = Vec::with_capacity(request_count);
+            for _ in 0..request_count {
+                let (mut socket, _) = listener.accept().await.expect("accept encrypted HLS request");
+                let release = Arc::clone(&server_release);
+                let key_response = key_response.clone();
+                let first_response = first_response.clone();
+                let second_response = second_response.clone();
+                requests.push(tokio::spawn(async move {
+                    let mut request = [0_u8; 1024];
+                    let count = socket.read(&mut request).await.expect("read encrypted HLS request");
+                    let request = String::from_utf8_lossy(&request[..count]);
+                    let path = request.split_ascii_whitespace().nth(1).unwrap_or("/");
+                    let payload = match path {
+                        "/key.bin" => key_response,
+                        "/segment-1.ts" => first_response,
+                        "/segment-2.ts" => {
+                            release.notified().await;
+                            second_response
+                        }
+                        _ => panic!("unexpected encrypted HLS resource path: {path}"),
+                    };
+                    let header = format!(
+                        "HTTP/1.1 200 OK\\r\\nContent-Length: {}\\r\\nConnection: close\\r\\n\\r\\n",
+                        payload.len()
+                    );
+                    socket.write_all(header.as_bytes()).await.expect("write encrypted HLS header");
+                    socket.write_all(&payload).await.expect("write encrypted HLS body");
+                }));
+            }
+            for request in requests {
+                request.await.expect("join encrypted HLS response task");
+            }
+        });
 
         let client = reqwest::Client::builder()
             .no_proxy()
@@ -5754,7 +5788,7 @@ segment-2.ts
         assert_eq!(first_snapshot.matches("#EXTINF:").count(), 1);
         assert!(!first_snapshot.contains("#EXT-X-ENDLIST"));
 
-        release_second_tx.send(()).expect("release the final HLS segment");
+        release_second.notify_one();
         complete_rx.await.expect("complete HLS playlist snapshot");
         assert!(fetch_task.await.expect("join incremental HLS fetcher").expect("fetch encrypted HLS resources"));
         server.await.expect("encrypted HLS server task");

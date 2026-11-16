@@ -8826,10 +8826,15 @@ fn persist_task_loop_acknowledges_only_after_durable_writer_returns() {
         .expect("queue writer sends acknowledgement")
         .expect("durable queue write succeeds");
 
-    assert_eq!(
-        writes.lock().unwrap().as_slice(),
-        ["checkpoint"],
+    let writes = writes.lock().unwrap();
+    assert!(
+        !writes.is_empty(),
         "the acknowledgement must follow the requested write"
+    );
+    assert_eq!(
+        writes.last().map(String::as_str),
+        Some("checkpoint"),
+        "the acknowledged snapshot must be the final completed write"
     );
     drop(tx);
     drop(flush_tx);

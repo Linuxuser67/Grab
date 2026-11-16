@@ -799,6 +799,7 @@ async fn attempt_once(
             // after its own sync succeeds, so a failed sync cannot report success.
             AttemptFail::Retryable(format!("Cannot sync file: {error}"))
         })?;
+        claim.verify(&ctx.dest).await?;
         return match total {
             Some(total) if downloaded != total => {
                 Err(AttemptFail::Retryable(gettext("Incomplete download")))

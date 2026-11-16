@@ -5264,7 +5264,7 @@ async fn run_ffmpeg_with_offsets_timeout(
             "1:s:0"
         });
         if subtitles.is_fmp4 {
-            // Keep the source sample entry and initialization data intact.
+            // Preserve the source subtitle codec through stream-copy.
             command
                 .args(["-c:s", "copy", "-movflags", "+faststart", "-f", "mp4"])
                 .arg(sidecar);

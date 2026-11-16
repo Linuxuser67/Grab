@@ -376,6 +376,15 @@ enum Tracks {
 }
 
 impl Tracks {
+    fn supports_incremental_hls_vod_track(plan: &HlsPlan) -> bool {
+        !plan.is_live
+            && plan.end_list
+            && plan.low_latency.is_none()
+            && (plan.is_destination_assemblable_candidate()
+                || plan.is_incremental_clear_vod_candidate()
+                || plan.is_incremental_aes128_mpegts_vod_candidate())
+    }
+
     fn uses_incremental_hls_vod(&self) -> bool {
         let Self::Hls {
             video,
@@ -393,14 +402,14 @@ impl Tracks {
             return video_incremental;
         }
 
-        let video_supported = video_incremental || video.is_destination_assemblable_candidate();
+        let video_supported = Self::supports_incremental_hls_vod_track(video);
         let audio_incremental = audio.as_deref().is_some_and(|plan| {
             plan.is_incremental_clear_vod_candidate()
                 || plan.is_incremental_aes128_mpegts_vod_candidate()
         });
-        let audio_supported = audio.as_deref().is_none_or(|plan| {
-            audio_incremental || plan.is_destination_assemblable_candidate()
-        });
+        let audio_supported = audio
+            .as_deref()
+            .is_none_or(Self::supports_incremental_hls_vod_track);
 
         video_supported && audio_supported && (video_incremental || audio_incremental)
     }
@@ -2166,9 +2175,11 @@ pub(crate) async fn run_manifest_download(
         // Preserve AES-128's established configured concurrency. Complex clear
         // VOD stays sequential, matching the ordinary static-HLS resource path.
         let connections = match &tracks {
-            Tracks::Hls { video, .. } if video.is_incremental_aes128_mpegts_vod_candidate() => {
-                job.connections
-            }
+            Tracks::Hls {
+                video,
+                audio: None,
+                ..
+            } if video.is_incremental_aes128_mpegts_vod_candidate() => job.connections,
             _ => 1,
         };
         let result = run_incremental_hls_vod(ManifestIncrementalHlsVod {

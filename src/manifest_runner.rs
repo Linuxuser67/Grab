@@ -3467,8 +3467,17 @@ async fn fetch_hls_resources_incrementally(
     let batch_size = total_segments.div_ceil(MAX_PLAYLIST_SNAPSHOTS).max(1);
     let resource_count = resources.len();
     let mut completed = vec![false; resource_count];
+    let key_indices: Vec<_> = plan
+        .resources
+        .iter()
+        .enumerate()
+        .filter_map(|(index, resource)| {
+            (resource.kind == crate::manifest::HlsResourceKind::Key).then_some(index)
+        })
+        .collect();
     let mut next_to_commit = 0usize;
     let mut completed_segments = 0usize;
+    let mut last_snapshot_segments = 0usize;
     let mut first_segment_ready = Some(first_segment_ready);
 
     let result = async {
@@ -3510,28 +3519,34 @@ async fn fetch_hls_resources_incrementally(
                     while next_to_commit < resource_count && completed[next_to_commit] {
                         if plan.resources[next_to_commit].kind == crate::manifest::HlsResourceKind::Segment {
                             completed_segments += 1;
-                            if completed_segments == 1 || completed_segments % batch_size == 0 {
-                                let bytes = plan
-                                    .local_playlist_prefix_bytes(
-                                        completed_segments,
-                                        crate::manifest::HlsPlaylistFinality::Growing,
-                                    )
-                                    .map_err(|error| ManifestRunError::Failed(error.to_string()))?;
-                                write_staged_file_atomic(
-                                    directory,
-                                    "local.m3u8.next",
-                                    "local.m3u8",
-                                    &bytes,
-                                    StagedPublish::Replace,
-                                )
-                                .await
-                                .map_err(ManifestRunError::Failed)?;
-                                if let Some(sender) = first_segment_ready.take() {
-                                    let _ = sender.send(());
-                                }
-                            }
                         }
                         next_to_commit += 1;
+                    }
+                    let all_keys_ready = key_indices.iter().all(|index| completed[*index]);
+                    if all_keys_ready
+                        && completed_segments > last_snapshot_segments
+                        && (last_snapshot_segments == 0
+                            || completed_segments - last_snapshot_segments >= batch_size)
+                    {
+                        let bytes = plan
+                            .local_playlist_prefix_bytes(
+                                completed_segments,
+                                crate::manifest::HlsPlaylistFinality::Growing,
+                            )
+                            .map_err(|error| ManifestRunError::Failed(error.to_string()))?;
+                        write_staged_file_atomic(
+                            directory,
+                            "local.m3u8.next",
+                            "local.m3u8",
+                            &bytes,
+                            StagedPublish::Replace,
+                        )
+                        .await
+                        .map_err(ManifestRunError::Failed)?;
+                        last_snapshot_segments = completed_segments;
+                        if let Some(sender) = first_segment_ready.take() {
+                            let _ = sender.send(());
+                        }
                     }
                 }
             }

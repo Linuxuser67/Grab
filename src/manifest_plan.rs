@@ -53,7 +53,7 @@ pub(crate) fn dash_output_container(mime_type: Option<&str>) -> Option<ManifestC
     }
 }
 
-/// Codec classes that can be muxed into an ISO BMFF/MP4 output.
+/// Codec classes supported by the app's minimum FFmpeg MP4 muxer.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum HlsMp4CodecKind {
     Video,
@@ -61,7 +61,7 @@ enum HlsMp4CodecKind {
     Subtitle,
 }
 
-/// Classify only codec identifiers with an established MP4 sample entry.
+/// Classify only codec identifiers with a supported MP4 sample entry.
 /// Unknown identifiers deliberately retain the conservative Matroska default.
 fn hls_mp4_codec_kind(codec: &str) -> Option<HlsMp4CodecKind> {
     let codec = codec.trim();
@@ -73,7 +73,7 @@ fn hls_mp4_codec_kind(codec: &str) -> Option<HlsMp4CodecKind> {
     let has_parameters = !parameters.is_empty();
 
     if [
-        "avc1", "avc3", "hvc1", "hev1", "dvh1", "dvhe", "av01", "vp09", "mjpg",
+        "avc1", "avc3", "hvc1", "hev1", "dvh1", "av01", "vp09",
     ]
     .iter()
     .any(|supported| sample_entry.eq_ignore_ascii_case(supported))
@@ -83,7 +83,7 @@ fn hls_mp4_codec_kind(codec: &str) -> Option<HlsMp4CodecKind> {
     }
 
     if (sample_entry.eq_ignore_ascii_case("mp4a") && has_parameters)
-        || ["alac", "apac", "flac"]
+        || ["alac", "flac"]
             .iter()
             .any(|supported| sample_entry.eq_ignore_ascii_case(supported))
         || ["ac-3", "ec-3"]
@@ -1329,10 +1329,8 @@ video/1080p.m3u8
             "hvc1.1.6.L93.B0",
             "hev1.1.6.L93.B0",
             "dvh1.05.01",
-            "dvhe.05.01",
             "av01.0.08M.08",
             "vp09.00.10.08",
-            "mjpg",
             "mp4v.20.9",
             "avc1",
             "hvc1",
@@ -1343,7 +1341,7 @@ video/1080p.m3u8
                 "{codec}"
             );
         }
-        for codec in ["mp4a.40.2", "ac-3", "ec-3", "alac", "apac.31.00", "fLaC"] {
+        for codec in ["mp4a.40.2", "ac-3", "ec-3", "alac", "fLaC"] {
             assert_eq!(
                 hls_mp4_codec_kind(codec),
                 Some(HlsMp4CodecKind::Audio),

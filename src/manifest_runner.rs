@@ -5626,7 +5626,9 @@ segment-2.ts
     }
 
     #[tokio::test]
-    async fn encrypted_hls_vod_publishes_growing_playlist_prefixes() {
+    async fn aes128_hls_vod_publishes_growing_playlist_prefixes() {
+        // This test covers key/segment staging and ordered playlist publication;
+        // FFmpeg consumes the resulting local playlist in the production runner.
         use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
 
         let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0))

@@ -2560,8 +2560,11 @@ async fn run_incremental_aes128_hls_vod(
         }
     }
 
-    if !abort_done {
-        stop_intent = pending_manifest_stop_intent(&mut abort);
+    if !abort_done
+        && let Some(intent) = pending_manifest_stop_intent(&mut abort)
+    {
+        abort_done = true;
+        stop_intent = Some(intent);
     }
     if let Some(intent @ (crate::video::StopIntent::Pause | crate::video::StopIntent::Discard)) = stop_intent {
         return Ok(match intent {
@@ -2608,7 +2611,12 @@ async fn run_incremental_aes128_hls_vod(
         }
     }
 
-    let (finalizer_abort_sender, finalizer_abort) = tokio::sync::oneshot::channel();
+    let (finalizer_abort_sender, finalizer_abort) = if abort_done {
+        let (sender, receiver) = tokio::sync::oneshot::channel();
+        (Some(sender), receiver)
+    } else {
+        (None, abort)
+    };
     let result = finalize_manifest_download(ManifestFinalization {
         job,
         destination_parts: true,

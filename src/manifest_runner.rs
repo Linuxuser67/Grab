@@ -6251,7 +6251,7 @@ segment-2.ts
             let real_ffmpeg = ffmpeg.display().to_string().replace('\'', "'\\''");
             let counter_path = counter.display().to_string().replace('\'', "'\\''");
             let script = format!(
-                "#!/bin/sh\\nif [ ! -f '{counter_path}' ]; then\\n  printf '1' > '{counter_path}'\\n  printf 'premature mux output'\\n  exit 0\\nfi\\nprintf '2' > '{counter_path}'\\nexec '{real_ffmpeg}' \"$@\"\\n"
+                "#!/bin/sh\nif [ ! -f '{counter_path}' ]; then\n  printf '1' > '{counter_path}'\n  printf 'premature mux output'\n  exit 0\nfi\nprintf '2' > '{counter_path}'\nexec '{real_ffmpeg}' \"$@\"\n"
             );
             std::fs::write(&wrapper, script).expect("write early-exit FFmpeg wrapper");
             std::fs::set_permissions(&wrapper, std::fs::Permissions::from_mode(0o700))

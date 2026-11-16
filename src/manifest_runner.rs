@@ -377,16 +377,32 @@ enum Tracks {
 
 impl Tracks {
     fn uses_incremental_hls_vod(&self) -> bool {
-        matches!(
-            self,
-            Self::Hls {
-                video,
-                audio: None,
-                subtitle: None,
-                ..
-            } if video.is_incremental_aes128_mpegts_vod_candidate()
-                || video.is_incremental_clear_vod_candidate()
-        )
+        let Self::Hls {
+            video,
+            audio,
+            subtitle: None,
+            ..
+        } = self
+        else {
+            return false;
+        };
+
+        let video_incremental = video.is_incremental_aes128_mpegts_vod_candidate()
+            || video.is_incremental_clear_vod_candidate();
+        if audio.is_none() {
+            return video_incremental;
+        }
+
+        let video_supported = video_incremental || video.is_destination_assemblable_candidate();
+        let audio_incremental = audio.as_deref().is_some_and(|plan| {
+            plan.is_incremental_clear_vod_candidate()
+                || plan.is_incremental_aes128_mpegts_vod_candidate()
+        });
+        let audio_supported = audio.as_deref().is_none_or(|plan| {
+            audio_incremental || plan.is_destination_assemblable_candidate()
+        });
+
+        video_supported && audio_supported && (video_incremental || audio_incremental)
     }
 
     fn uses_destination_parts(&self) -> bool {
@@ -2146,7 +2162,7 @@ pub(crate) async fn run_manifest_download(
         ) => return Ok(ManifestOutcome::Aborted),
     };
     let mut _finish_stop_sender = None;
-    if !live_hls && !live_dash && !has_audio && tracks.uses_incremental_hls_vod() {
+    if !live_hls && !live_dash && tracks.uses_incremental_hls_vod() {
         // Preserve AES-128's established configured concurrency. Complex clear
         // VOD stays sequential, matching the ordinary static-HLS resource path.
         let connections = match &tracks {
@@ -5352,6 +5368,9 @@ async fn run_ffmpeg_with_offsets_timeout(
     if let Some(audio_input) = audio_input {
         if is_hls_playlist_input(audio_input.path) {
             add_hls_staging_options(&mut command);
+            if overwrite_output {
+                add_hls_incremental_reload_options(&mut command);
+            }
         }
         if let Some(offset) = audio_input.timestamp_offset {
             command.arg("-itsoffset").arg(offset);

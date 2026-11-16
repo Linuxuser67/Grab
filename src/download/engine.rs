@@ -1256,7 +1256,7 @@ impl DownloadManager {
                             this.reserve_dest(&path);
                             let worker_path = path.clone();
                             drop(this);
-                            let _ = gio::spawn_blocking(move || {
+                            let truncation = gio::spawn_blocking(move || {
                                 truncate_to_prefix(&worker_path, &state)
                             })
                             .await;
@@ -1268,6 +1268,19 @@ impl DownloadManager {
                             if !this.is_current(id, generation) {
                                 done = true;
                                 break;
+                            }
+                            match truncation {
+                                Ok(Ok(())) => {}
+                                Ok(Err(error)) => tracing::warn!(
+                                    path = %path.display(),
+                                    error = %error,
+                                    "could not truncate segmented destination to its completed prefix"
+                                ),
+                                Err(error) => tracing::warn!(
+                                    path = %path.display(),
+                                    error = %error,
+                                    "segmented destination truncation worker failed"
+                                ),
                             }
                             this.start_next();
                         }

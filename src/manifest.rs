@@ -462,9 +462,11 @@ impl HlsPlan {
     pub(crate) fn is_incremental_aes128_mpegts_vod_candidate(&self) -> bool {
         if self.is_live
             || !self.end_list
+            || self.low_latency.is_some()
             || self.output_container() != Some(crate::media_types::ManifestContainer::Ts)
             || self.resources.iter().any(|resource| {
-                resource.range.is_some() || resource.kind == HlsResourceKind::InitMap
+                resource.range.is_some()
+                    || !matches!(resource.kind, HlsResourceKind::Key | HlsResourceKind::Segment)
             })
         {
             return false;

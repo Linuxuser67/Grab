@@ -2175,11 +2175,9 @@ pub(crate) async fn run_manifest_download(
         // Preserve AES-128's established configured concurrency. Complex clear
         // VOD stays sequential, matching the ordinary static-HLS resource path.
         let connections = match &tracks {
-            Tracks::Hls { video, audio: None, .. }
-                if video.is_incremental_aes128_mpegts_vod_candidate() =>
-            {
-                job.connections
-            }
+            Tracks::Hls {
+                video, audio: None, ..
+            } if video.is_incremental_aes128_mpegts_vod_candidate() => job.connections,
             _ => 1,
         };
         let result = run_incremental_hls_vod(ManifestIncrementalHlsVod {

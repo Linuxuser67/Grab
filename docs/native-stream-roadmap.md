@@ -62,8 +62,7 @@ the live video stream.
 HLS master previews do not fetch selected child playlists a second time just
 to choose an output suffix, because child URLs may be one-shot. Instead, Grab
 chooses MP4 only when the selected variant's CODECS declaration contains
-recognized MP4 sample-entry families and any referenced separate audio group
-has a declared audio codec. Missing or unknown codec metadata retains the MKV
+recognized MP4 sample-entry families and any referenced separate audio or subtitle group has a declared compatible codec. Missing or unknown codec metadata retains the MKV
 default. CODECS describes codec formats, not whether child segments use fMP4
 or MPEG-TS, so this is a conservative mux-compatibility decision rather than
 a claim that the master playlist identifies the segment container.

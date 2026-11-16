@@ -3416,6 +3416,23 @@ async fn finalize_manifest_download(
         }
     }
     let mut destination_parts_cleaned = true;
+    if matches!(mode, ManifestFinalizationMode::PublishPreMuxedDestinationPart)
+        && !destination_parts
+        && let Err(error) = crate::manifest_destination::remove_owned_part_async(
+            staging.to_path_buf(),
+            job.dest.clone(),
+            job.item_id,
+            TrackKind::Video,
+        )
+        .await
+    {
+        destination_parts_cleaned = false;
+        tracing::warn!(
+            item_id = job.item_id,
+            error = %error,
+            "could not clean up the owned pre-muxed HLS destination part after publication"
+        );
+    }
     if destination_parts {
         let (video_filename, audio_filename) = if matches!(&tracks, Tracks::Hls { .. }) {
             (

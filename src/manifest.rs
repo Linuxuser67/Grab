@@ -1350,6 +1350,9 @@ fn validate_hls_rendition_groups(
         if group.trim().is_empty() || alternative.name.trim().is_empty() {
             return Err(group_error);
         }
+        if alternative.forced && alternative.media_type != AlternativeMediaType::Subtitles {
+            return Err(group_error);
+        }
         if !names.insert((group_kind, group.clone(), alternative.name.clone())) {
             return Err(group_error);
         }
@@ -1404,14 +1407,22 @@ fn validate_hls_closed_caption_groups(
     variants: &[m3u8_rs::VariantStream],
 ) -> Result<(), ManifestError> {
     let mut declared_groups = HashSet::new();
-    for alternative in alternatives
-        .iter()
-        .filter(|alternative| alternative.media_type == AlternativeMediaType::ClosedCaptions)
-    {
-        if !matches!(
-            alternative.instream_id.as_ref(),
-            Some(m3u8_rs::InstreamId::CC(1..=4) | m3u8_rs::InstreamId::Service(1..=63))
-        ) {
+    for alternative in alternatives {
+        if alternative.media_type != AlternativeMediaType::ClosedCaptions {
+            if alternative.instream_id.is_some() {
+                return Err(ManifestError::UnsupportedPlaylist);
+            }
+            continue;
+        }
+
+        // Closed captions are carried in the video segments, so they cannot
+        // have a separate media playlist URI.
+        if alternative.uri.is_some()
+            || !matches!(
+                alternative.instream_id.as_ref(),
+                Some(m3u8_rs::InstreamId::CC(1..=4) | m3u8_rs::InstreamId::Service(1..=63))
+            )
+        {
             return Err(ManifestError::UnsupportedPlaylist);
         }
         declared_groups.insert(alternative.group_id.as_str());
@@ -3025,6 +3036,32 @@ video.m3u8
         let body = br#"#EXTM3U
 #EXT-X-MEDIA:TYPE=CLOSED-CAPTIONS,GROUP-ID="captions",NAME="English",LANGUAGE="en",INSTREAM-ID="CC1"
 #EXT-X-STREAM-INF:BANDWIDTH=1000000
+video.m3u8
+"#;
+        assert_eq!(
+            parse_hls_master_playlist(BASE_URL, body).err(),
+            Some(ManifestError::UnsupportedPlaylist)
+        );
+    }
+
+    #[test]
+    fn closed_caption_renditions_cannot_reference_separate_playlists() {
+        let body = br#"#EXTM3U
+#EXT-X-MEDIA:TYPE=CLOSED-CAPTIONS,GROUP-ID="captions",NAME="English",LANGUAGE="en",INSTREAM-ID="CC1",URI="captions/en.m3u8"
+#EXT-X-STREAM-INF:BANDWIDTH=1000000,CLOSED-CAPTIONS="captions"
+video.m3u8
+"#;
+        assert_eq!(
+            parse_hls_master_playlist(BASE_URL, body).err(),
+            Some(ManifestError::UnsupportedPlaylist)
+        );
+    }
+
+    #[test]
+    fn instream_id_is_rejected_for_non_caption_renditions() {
+        let body = br#"#EXTM3U
+#EXT-X-MEDIA:TYPE=SUBTITLES,GROUP-ID="subs",NAME="English",LANGUAGE="en",URI="subs/en.m3u8",INSTREAM-ID="CC1"
+#EXT-X-STREAM-INF:BANDWIDTH=1000000,SUBTITLES="subs"
 video.m3u8
 "#;
         assert_eq!(

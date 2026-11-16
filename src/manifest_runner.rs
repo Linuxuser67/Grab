@@ -6643,6 +6643,13 @@ segment-2.ts
         let address = listener.local_addr().expect("fMP4 fixture server address");
         let served_root = fixture.path().join("served");
         std::fs::create_dir(&served_root).expect("create served resource directory");
+        let final_segment_filename = plan
+            .resources
+            .iter()
+            .rev()
+            .find(|resource| resource.kind == crate::manifest::HlsResourceKind::Segment)
+            .map(|resource| resource.filename.clone())
+            .expect("fMP4 fixture has a final media segment");
         let mut final_segment_path = None;
         for resource in &mut plan.resources {
             let source_name = resource
@@ -6659,16 +6666,7 @@ segment-2.ts
             )
             .expect("copy fixture resource under its localized filename");
             if resource.kind == crate::manifest::HlsResourceKind::Segment
-                && resource.filename
-                    == plan
-                        .resources
-                        .iter()
-                        .rev()
-                        .find(|candidate| {
-                            candidate.kind == crate::manifest::HlsResourceKind::Segment
-                        })
-                        .expect("final fMP4 segment resource")
-                        .filename
+                && resource.filename == final_segment_filename
             {
                 final_segment_path = Some(format!("/{}", resource.filename));
             }

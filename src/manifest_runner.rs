@@ -5640,7 +5640,7 @@ segment-2.ts
                     _ => panic!("unexpected encrypted HLS resource path: {path}"),
                 };
                 let header = format!(
-                    "HTTP/1.1 200 OK\\r\\nContent-Length: {}\\r\\nConnection: close\\r\\n\\r\\n",
+                    "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
                     payload.len()
                 );
                 socket.write_all(header.as_bytes()).await.expect("write encrypted HLS header");

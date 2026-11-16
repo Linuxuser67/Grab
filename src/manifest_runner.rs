@@ -5257,7 +5257,7 @@ mod tests {
                     timeout: Some(Duration::from_millis(50)),
                 },
                 SubtitleOutput::default(),
-                &output,
+                FfmpegOutput::StagedPath(output.clone()),
                 &mut abort,
             ),
         )

@@ -5623,30 +5623,7 @@ segment-2.ts
         let first_response = first.clone();
         let second_response = second.clone();
         let (release_second_tx, release_second_rx) = tokio::sync::oneshot::channel();
-        let server = tokio::spawn(async move {
-            for _ in 0..3 {
-                let (mut socket, _) = listener.accept().await.expect("accept encrypted HLS request");
-                let mut request = [0_u8; 1024];
-                let count = socket.read(&mut request).await.expect("read encrypted HLS request");
-                let request = String::from_utf8_lossy(&request[..count]);
-                let path = request.split_ascii_whitespace().nth(1).unwrap_or("/");
-                let payload = match path {
-                    "/key.bin" => &key_response,
-                    "/segment-1.ts" => &first_response,
-                    "/segment-2.ts" => {
-                        release_second_rx.await.expect("release second HLS segment");
-                        &second_response
-                    }
-                    _ => panic!("unexpected encrypted HLS resource path: {path}"),
-                };
-                let header = format!(
-                    "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
-                    payload.len()
-                );
-                socket.write_all(header.as_bytes()).await.expect("write encrypted HLS header");
-                socket.write_all(payload).await.expect("write encrypted HLS body");
-            }
-        });
+
 
         let playlist = br#"#EXTM3U
 #EXT-X-VERSION:3
@@ -5677,6 +5654,34 @@ segment-2.ts
             resource.url = url::Url::parse(&format!("http://{address}{path}"))
                 .expect("set local encrypted HLS resource URL");
         }
+        let request_count = plan.resources.len();
+        let server = tokio::spawn(async move {
+            let mut release_second_rx = Some(release_second_rx);
+            for _ in 0..request_count {
+                let (mut socket, _) = listener.accept().await.expect("accept encrypted HLS request");
+                let mut request = [0_u8; 1024];
+                let count = socket.read(&mut request).await.expect("read encrypted HLS request");
+                let request = String::from_utf8_lossy(&request[..count]);
+                let path = request.split_ascii_whitespace().nth(1).unwrap_or("/");
+                let payload = match path {
+                    "/key.bin" => &key_response,
+                    "/segment-1.ts" => &first_response,
+                    "/segment-2.ts" => {
+                        if let Some(release) = release_second_rx.take() {
+                            release.expect("release second HLS segment");
+                        }
+                        &second_response
+                    }
+                    _ => panic!("unexpected encrypted HLS resource path: {path}"),
+                };
+                let header = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                    payload.len()
+                );
+                socket.write_all(header.as_bytes()).await.expect("write encrypted HLS header");
+                socket.write_all(payload).await.expect("write encrypted HLS body");
+            }
+        });
         assert!(plan.is_incremental_aes128_mpegts_vod_candidate());
 
         let client = reqwest::Client::builder()

@@ -2154,7 +2154,6 @@ pub(crate) async fn run_manifest_download(
             audio_dir: &audio_dir,
             output_part,
             tracks,
-            has_audio,
             ffmpeg,
             downloaded,
             client: &client,
@@ -2323,7 +2322,6 @@ struct ManifestIncrementalHlsVod<'a> {
     audio_dir: &'a Path,
     output_part: PathBuf,
     tracks: Tracks,
-    has_audio: bool,
     ffmpeg: PathBuf,
     downloaded: Arc<AtomicU64>,
     client: &'a reqwest::Client,
@@ -2354,7 +2352,6 @@ async fn run_incremental_aes128_hls_vod(
         audio_dir,
         output_part,
         tracks,
-        has_audio,
         ffmpeg,
         downloaded,
         client,
@@ -2587,23 +2584,26 @@ async fn run_incremental_aes128_hls_vod(
             )));
         }
     };
-    if !fetched {
-        return Ok(ManifestOutcome::Paused);
-    }
-    match ffmpeg_result.expect("FFmpeg task must finish before publication") {
-        Ok(Ok(ManifestMuxOutcome::Finished)) if complete_ready => {}
-        Ok(Ok(ManifestMuxOutcome::Paused)) => return Ok(ManifestOutcome::Paused),
-        Ok(Ok(ManifestMuxOutcome::Aborted)) => return Ok(ManifestOutcome::Aborted),
-        Ok(Ok(ManifestMuxOutcome::Finished)) => {
-            return Err(ManifestRunError::Failed(
-                "FFmpeg finished without receiving the complete HLS VOD playlist".to_string(),
-            ));
-        }
+    let mux_outcome = match ffmpeg_result.expect("FFmpeg task must finish before publication") {
+        Ok(Ok(outcome)) => outcome,
         Ok(Err(error)) => return Err(error),
         Err(error) => {
             return Err(ManifestRunError::Failed(format!(
                 "FFmpeg HLS mux task failed: {error}"
             )));
+        }
+    };
+    if !fetched {
+        return Ok(ManifestOutcome::Paused);
+    }
+    match mux_outcome {
+        ManifestMuxOutcome::Finished if complete_ready => {}
+        ManifestMuxOutcome::Paused => return Ok(ManifestOutcome::Paused),
+        ManifestMuxOutcome::Aborted => return Ok(ManifestOutcome::Aborted),
+        ManifestMuxOutcome::Finished => {
+            return Err(ManifestRunError::Failed(
+                "FFmpeg finished without receiving the complete HLS VOD playlist".to_string(),
+            ));
         }
     }
 
@@ -2626,7 +2626,7 @@ async fn run_incremental_aes128_hls_vod(
             subtitle: None,
             subtitle_language: None,
         },
-        has_audio,
+        has_audio: false,
         ffmpeg,
         downloaded: downloaded.as_ref(),
     })

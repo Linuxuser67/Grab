@@ -5772,7 +5772,7 @@ segment-2.ts
         std::fs::write(
             &key_info,
             format!(
-                "key.bin\\n{}\\n0123456789abcdef0123456789abcdef\\n",
+                "key.bin\n{}\n0123456789abcdef0123456789abcdef\n",
                 key_path.display()
             ),
         )

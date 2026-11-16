@@ -76,6 +76,10 @@ const HLS_STATIC_RESOURCE_CONNECTIONS: usize = 1;
 const FFMPEG_LOG_LINES: usize = 32;
 /// Bound native manifest muxing, including a user-requested Finish while FFmpeg is running.
 const MANIFEST_MUX_TIMEOUT: Duration = Duration::from_secs(3600);
+/// Hard upper bound for an incremental VOD mux, including the time spent waiting for segments.
+const INCREMENTAL_HLS_MUX_TIMEOUT: Duration = Duration::from_secs(7 * 24 * 60 * 60);
+/// Allow the fetcher to publish its completion signal immediately after the final playlist rename.
+const FINAL_PLAYLIST_SIGNAL_GRACE: Duration = Duration::from_secs(1);
 /// Upper bound on the persisted dynamic DASH segment index.
 const MAX_DASH_LIVE_SEGMENTS: usize = crate::manifest_types::MAX_MANIFEST_SEGMENTS;
 /// Bound for a serialized dynamic DASH resume index.
@@ -373,6 +377,18 @@ enum Tracks {
 }
 
 impl Tracks {
+    fn uses_incremental_aes128_vod(&self) -> bool {
+        matches!(
+            self,
+            Self::Hls {
+                video,
+                audio: None,
+                subtitle: None,
+                ..
+            } if video.is_incremental_aes128_mpegts_vod_candidate()
+        )
+    }
+
     fn uses_destination_parts(&self) -> bool {
         match self {
             Self::Hls { video, audio, .. } => {
@@ -2130,6 +2146,36 @@ pub(crate) async fn run_manifest_download(
         ) => return Ok(ManifestOutcome::Aborted),
     };
     let mut _finish_stop_sender = None;
+    if !live_hls && !live_dash && !has_audio && tracks.uses_incremental_aes128_vod() {
+        let result = run_incremental_aes128_hls_vod(ManifestIncrementalHlsVod {
+            job: &job,
+            gate,
+            abort,
+            tx: &tx,
+            staging: &staging,
+            dest_dir: &dest_dir,
+            video_dir: &video_dir,
+            audio_dir: &audio_dir,
+            tracks,
+            ffmpeg,
+            downloaded,
+            connections: job.connections,
+            client: &client,
+        })
+        .await;
+        if matches!(&result, Err(ManifestRunError::Unsupported(_))) {
+            cleanup_manifest_destination_part_if_present(
+                &staging,
+                &job.dest,
+                job.item_id,
+                &video_dir,
+                TrackKind::Video,
+                TrackKind::Video.part_filename(TrackFileFormat::Ts),
+            )
+            .await?;
+        }
+        return result;
+    }
     let static_destination_parts = !live_hls && !live_dash && tracks.uses_destination_parts();
     let mut live_destination_parts = live_dash;
     if live_hls {
@@ -2264,6 +2310,7 @@ pub(crate) async fn run_manifest_download(
     finalize_manifest_download(ManifestFinalization {
         job: &job,
         destination_parts: live_destination_parts || static_destination_parts,
+        mode: ManifestFinalizationMode::MuxStagedTracks,
         gate,
         abort,
         tx: &tx,
@@ -2280,13 +2327,374 @@ pub(crate) async fn run_manifest_download(
     .await
 }
 
+struct ManifestIncrementalHlsVod<'a> {
+    job: &'a ManifestJob,
+    gate: Arc<crate::attempt_gate::AttemptGate>,
+    abort: tokio::sync::oneshot::Receiver<crate::video::StopIntent>,
+    tx: &'a tokio::sync::mpsc::UnboundedSender<EngineMsg>,
+    staging: &'a Path,
+    dest_dir: &'a Path,
+    video_dir: &'a Path,
+    audio_dir: &'a Path,
+    tracks: Tracks,
+    ffmpeg: PathBuf,
+    downloaded: Arc<AtomicU64>,
+    connections: usize,
+    client: &'a reqwest::Client,
+}
+
+fn send_manifest_stop_intent(
+    sender: &mut Option<tokio::sync::oneshot::Sender<crate::video::StopIntent>>,
+    intent: crate::video::StopIntent,
+) {
+    if let Some(sender) = sender.take() {
+        let _ = sender.send(intent);
+    }
+}
+
+async fn run_incremental_aes128_hls_vod(
+    context: ManifestIncrementalHlsVod<'_>,
+) -> Result<ManifestOutcome, ManifestRunError> {
+    use tokio::io::AsyncSeekExt as _;
+
+    let ManifestIncrementalHlsVod {
+        job,
+        gate,
+        mut abort,
+        tx,
+        staging,
+        dest_dir,
+        video_dir,
+        audio_dir,
+        tracks,
+        ffmpeg,
+        downloaded,
+        connections,
+        client,
+    } = context;
+    tx.send(EngineMsg::Phase(
+        "Downloading and decrypting HLS VOD…".to_string(),
+    ))
+    .ok();
+    let Tracks::Hls {
+        video,
+        audio: None,
+        subtitle: None,
+        ..
+    } = tracks
+    else {
+        return Err(ManifestRunError::Failed(
+            "Incremental AES-128 HLS VOD requires one media playlist".to_string(),
+        ));
+    };
+
+    let part_path = crate::manifest_destination::part_path_async(
+        staging.to_path_buf(),
+        job.dest.clone(),
+        job.item_id,
+        TrackKind::Video,
+    )
+    .await
+    .map_err(ManifestRunError::Failed)?;
+    let mut output_file = crate::manifest_destination::open_owned_part_async(
+        staging.to_path_buf(),
+        job.dest.clone(),
+        job.item_id,
+        TrackKind::Video,
+    )
+    .await
+    .map_err(ManifestRunError::Failed)?;
+    output_file.set_len(0).await.map_err(|error| {
+        manifest_storage_error("Could not reset the owned HLS output part", error)
+    })?;
+    output_file
+        .seek(std::io::SeekFrom::Start(0))
+        .await
+        .map_err(|error| {
+            manifest_storage_error("Could not rewind the owned HLS output part", error)
+        })?;
+    output_file.sync_all().await.map_err(|error| {
+        manifest_storage_error("Could not persist the empty HLS output part", error)
+    })?;
+
+    let (fetch_abort_tx, fetch_abort_rx) = tokio::sync::oneshot::channel();
+    let (ffmpeg_abort_tx, ffmpeg_abort_rx) = tokio::sync::oneshot::channel();
+    let (first_segment_tx, mut first_segment_rx) = tokio::sync::oneshot::channel();
+    let (complete_tx, mut complete_rx) = tokio::sync::oneshot::channel();
+    let fetch_client = client.clone();
+    let video = Arc::from(video);
+    let fetch_plan = Arc::clone(&video);
+    let fetch_directory = video_dir.to_path_buf();
+    let fetch_tx = tx.clone();
+    let fetch_downloaded = Arc::clone(&downloaded);
+    let mut fetch_abort = fetch_abort_rx;
+    let mut fetch_task = tokio::spawn(async move {
+        fetch_hls_resources_incrementally(IncrementalHlsFetch {
+            client: &fetch_client,
+            plan: &fetch_plan,
+            directory: &fetch_directory,
+            tx: &fetch_tx,
+            downloaded: fetch_downloaded.as_ref(),
+            abort: &mut fetch_abort,
+            connections,
+            first_segment_ready: first_segment_tx,
+            complete_ready: complete_tx,
+        })
+        .await
+    });
+    let mut fetch_result = None;
+    let mut fetch_abort_tx = Some(fetch_abort_tx);
+    let mut ffmpeg_abort_tx = Some(ffmpeg_abort_tx);
+    let mut abort_done = false;
+    let mut stop_intent = None;
+
+    // Do not start FFmpeg until the first complete segment and its key are
+    // durable and the first growing local playlist snapshot has been published.
+    loop {
+        tokio::select! {
+            biased;
+            stop = &mut abort, if !abort_done => {
+                abort_done = true;
+                let intent = crate::video::stop_intent_or_pause(stop);
+                stop_intent = Some(intent);
+                if intent != crate::video::StopIntent::Finish {
+                    send_manifest_stop_intent(&mut fetch_abort_tx, intent);
+                    send_manifest_stop_intent(&mut ffmpeg_abort_tx, intent);
+                }
+            }
+            ready = &mut first_segment_rx => {
+                if ready.is_ok() {
+                    break;
+                }
+                fetch_result = Some((&mut fetch_task).await);
+                break;
+            }
+            result = &mut fetch_task, if fetch_result.is_none() => {
+                fetch_result = Some(result);
+                break;
+            }
+        }
+    }
+
+    if let Some(result) = fetch_result.take() {
+        match result {
+            Ok(Ok(true)) => fetch_result = Some(Ok(Ok(true))),
+            Ok(Ok(false)) => {
+                return Ok(
+                    match stop_intent.unwrap_or(crate::video::StopIntent::Pause) {
+                        crate::video::StopIntent::Pause | crate::video::StopIntent::Finish => {
+                            ManifestOutcome::Paused
+                        }
+                        crate::video::StopIntent::Discard => ManifestOutcome::Aborted,
+                    },
+                );
+            }
+            Ok(Err(error)) => return Err(error),
+            Err(error) => {
+                return Err(ManifestRunError::Failed(format!(
+                    "Incremental HLS resource task failed: {error}"
+                )));
+            }
+        }
+    }
+
+    let output_container = manifest_output_container(&job.dest)?;
+    let ffmpeg_path = ffmpeg.clone();
+    let playlist_path = video_dir.join("local.m3u8");
+    let output_label = part_path.clone();
+    let output_file = output_file.into_std().await;
+    let mut ffmpeg_abort = ffmpeg_abort_rx;
+    let mut ffmpeg_task = tokio::spawn(async move {
+        run_ffmpeg_with_offsets_timeout(
+            &ffmpeg_path,
+            FfmpegInput {
+                path: &playlist_path,
+                timestamp_offset: None,
+            },
+            None,
+            ManifestMuxOptions {
+                timestamp_policy: InputTimestampPolicy::Normalize,
+                timeout: Some(INCREMENTAL_HLS_MUX_TIMEOUT),
+            },
+            SubtitleOutput {
+                input: None,
+                embed: false,
+                sidecar: None,
+            },
+            FfmpegOutput::OwnedPart {
+                file: output_file,
+                container: output_container,
+                label: output_label,
+            },
+            &mut ffmpeg_abort,
+        )
+        .await
+    });
+
+    let mut ffmpeg_result = None;
+    let mut complete_ready = false;
+    let mut complete_signal_done = false;
+    let mut ffmpeg_exited_before_complete_playlist = false;
+    loop {
+        if fetch_result.is_some() && ffmpeg_result.is_some() {
+            break;
+        }
+        tokio::select! {
+            biased;
+            stop = &mut abort, if !abort_done => {
+                abort_done = true;
+                let intent = crate::video::stop_intent_or_pause(stop);
+                stop_intent = Some(intent);
+                if intent != crate::video::StopIntent::Finish {
+                    send_manifest_stop_intent(&mut fetch_abort_tx, intent);
+                    send_manifest_stop_intent(&mut ffmpeg_abort_tx, intent);
+                }
+            }
+            complete = &mut complete_rx, if !complete_signal_done => {
+                complete_signal_done = true;
+                complete_ready = complete.is_ok();
+            }
+            result = &mut fetch_task, if fetch_result.is_none() => {
+                fetch_result = Some(result);
+                if !matches!(fetch_result, Some(Ok(Ok(true)))) {
+                    send_manifest_stop_intent(
+                        &mut ffmpeg_abort_tx,
+                        crate::video::StopIntent::Pause,
+                    );
+                }
+            }
+            result = &mut ffmpeg_task, if ffmpeg_result.is_none() => {
+                if matches!(&result, Ok(Ok(ManifestMuxOutcome::Finished)))
+                    && !complete_ready
+                    && !complete_signal_done
+                {
+                    complete_ready = tokio::time::timeout(
+                        FINAL_PLAYLIST_SIGNAL_GRACE,
+                        &mut complete_rx,
+                    )
+                    .await
+                    .is_ok_and(|signal| signal.is_ok());
+                    complete_signal_done = true;
+                }
+                ffmpeg_result = Some(result);
+                match &ffmpeg_result {
+                    Some(Ok(Ok(ManifestMuxOutcome::Finished))) if !complete_ready => {
+                        ffmpeg_exited_before_complete_playlist = true;
+                        send_manifest_stop_intent(
+                            &mut fetch_abort_tx,
+                            crate::video::StopIntent::Pause,
+                        );
+                    }
+                    Some(Ok(Err(_))) | Some(Err(_)) => {
+                        send_manifest_stop_intent(
+                            &mut fetch_abort_tx,
+                            crate::video::StopIntent::Pause,
+                        );
+                    }
+                    _ => {}
+                }
+            }
+        }
+    }
+
+    if !abort_done && let Some(intent) = pending_manifest_stop_intent(&mut abort) {
+        abort_done = true;
+        stop_intent = Some(intent);
+    }
+    if let Some(intent @ (crate::video::StopIntent::Pause | crate::video::StopIntent::Discard)) =
+        stop_intent
+    {
+        return Ok(match intent {
+            crate::video::StopIntent::Pause => ManifestOutcome::Paused,
+            crate::video::StopIntent::Discard => ManifestOutcome::Aborted,
+            crate::video::StopIntent::Finish => unreachable!(),
+        });
+    }
+    if ffmpeg_exited_before_complete_playlist {
+        return Err(ManifestRunError::Failed(
+            "FFmpeg exited before the complete HLS VOD playlist was published".to_string(),
+        ));
+    }
+
+    let fetched = match fetch_result.expect("fetch task must finish before publication") {
+        Ok(Ok(fetched)) => fetched,
+        Ok(Err(error)) => return Err(error),
+        Err(error) => {
+            return Err(ManifestRunError::Failed(format!(
+                "Incremental HLS resource task failed: {error}"
+            )));
+        }
+    };
+    let mux_outcome = match ffmpeg_result.expect("FFmpeg task must finish before publication") {
+        Ok(Ok(outcome)) => outcome,
+        Ok(Err(error)) => return Err(error),
+        Err(error) => {
+            return Err(ManifestRunError::Failed(format!(
+                "FFmpeg HLS mux task failed: {error}"
+            )));
+        }
+    };
+    match mux_outcome {
+        ManifestMuxOutcome::Finished if fetched && complete_ready => {}
+        ManifestMuxOutcome::Paused => return Ok(ManifestOutcome::Paused),
+        ManifestMuxOutcome::Aborted => return Ok(ManifestOutcome::Aborted),
+        ManifestMuxOutcome::Finished => {
+            return Err(ManifestRunError::Failed(
+                "FFmpeg finished without receiving the complete HLS VOD playlist".to_string(),
+            ));
+        }
+    }
+
+    let video = Arc::try_unwrap(video).map_err(|_| {
+        ManifestRunError::Failed("incremental HLS plan still has active readers".to_string())
+    })?;
+    let (finalizer_abort_sender, finalizer_abort) = if abort_done {
+        let (sender, receiver) = tokio::sync::oneshot::channel();
+        (Some(sender), receiver)
+    } else {
+        (None, abort)
+    };
+    let result = finalize_manifest_download(ManifestFinalization {
+        job,
+        destination_parts: true,
+        mode: ManifestFinalizationMode::PublishPreMuxedDestinationPart,
+        gate,
+        abort: finalizer_abort,
+        tx,
+        staging,
+        dest_dir,
+        video_dir,
+        audio_dir,
+        output_part: part_path,
+        tracks: Tracks::Hls {
+            video: Box::new(video),
+            audio: None,
+            subtitle: None,
+            subtitle_language: None,
+        },
+        has_audio: false,
+        ffmpeg,
+        downloaded: downloaded.as_ref(),
+    })
+    .await;
+    drop(finalizer_abort_sender);
+    result
+}
+
 /// Mux the staged tracks, validate the output, and publish it without clobbering.
 ///
 /// The staging data is retained on every failure before publication so a later
 /// user-initiated resume can reuse completed resources.
+#[derive(Clone, Copy)]
+enum ManifestFinalizationMode {
+    MuxStagedTracks,
+    PublishPreMuxedDestinationPart,
+}
+
 struct ManifestFinalization<'a> {
     job: &'a ManifestJob,
     destination_parts: bool,
+    mode: ManifestFinalizationMode,
     gate: Arc<crate::attempt_gate::AttemptGate>,
     abort: tokio::sync::oneshot::Receiver<crate::video::StopIntent>,
     tx: &'a tokio::sync::mpsc::UnboundedSender<EngineMsg>,
@@ -2354,6 +2762,7 @@ async fn finalize_manifest_download(
     let ManifestFinalization {
         job,
         destination_parts,
+        mode,
         gate,
         mut abort,
         tx,
@@ -2372,8 +2781,17 @@ async fn finalize_manifest_download(
         Some(crate::video::StopIntent::Discard) => return Ok(ManifestOutcome::Aborted),
         Some(crate::video::StopIntent::Finish) | None => {}
     }
-    tx.send(EngineMsg::Phase("Merging audio and video…".to_string()))
-        .ok();
+    tx.send(EngineMsg::Phase(
+        if matches!(
+            mode,
+            ManifestFinalizationMode::PublishPreMuxedDestinationPart
+        ) {
+            "Finalizing downloaded stream…".to_string()
+        } else {
+            "Merging audio and video…".to_string()
+        },
+    ))
+    .ok();
 
     let has_separate_hls_audio = has_audio && matches!(&tracks, Tracks::Hls { audio: Some(_), .. });
     let has_local_hls_renditions = has_separate_hls_audio
@@ -2520,11 +2938,13 @@ async fn finalize_manifest_download(
             .await
             .map_err(ManifestRunError::Failed)?;
     }
-    let staged_bytes = downloaded.load(Ordering::Relaxed);
-    // FFmpeg writes beside the staged segments, so check both the XDG state
-    // filesystem (staged inputs plus mux output) and destination filesystem
-    // (the no-clobber cross-device publication fallback).
-    ensure_manifest_mux_spaces(staging, dest_dir, staged_bytes)?;
+    if matches!(mode, ManifestFinalizationMode::MuxStagedTracks) {
+        let staged_bytes = downloaded.load(Ordering::Relaxed);
+        // FFmpeg writes beside the staged segments, so check both the XDG state
+        // filesystem (staged inputs plus mux output) and destination filesystem
+        // (the no-clobber cross-device publication fallback).
+        ensure_manifest_mux_spaces(staging, dest_dir, staged_bytes)?;
+    }
     let (video_timestamp_offset, audio_timestamp_offset) = match &tracks {
         Tracks::Dash { video, audio, .. } => (
             video.input_timestamp_offset.ffmpeg_argument(),
@@ -2534,30 +2954,32 @@ async fn finalize_manifest_download(
         ),
         _ => (None, None),
     };
-    match run_ffmpeg_with_offsets(
-        &ffmpeg,
-        FfmpegInput {
-            path: &video_input,
-            timestamp_offset: video_timestamp_offset.as_deref(),
-        },
-        audio_input.as_deref().map(|path| FfmpegInput {
-            path,
-            timestamp_offset: audio_timestamp_offset.as_deref(),
-        }),
-        timestamp_policy,
-        SubtitleOutput {
-            input: subtitle_input.as_deref(),
-            embed: embed_subtitles,
-            sidecar: subtitle_sidecar.as_deref(),
-        },
-        &output_part,
-        &mut abort,
-    )
-    .await?
-    {
-        ManifestMuxOutcome::Finished => {}
-        ManifestMuxOutcome::Paused => return Ok(ManifestOutcome::Paused),
-        ManifestMuxOutcome::Aborted => return Ok(ManifestOutcome::Aborted),
+    if matches!(mode, ManifestFinalizationMode::MuxStagedTracks) {
+        match run_ffmpeg_with_offsets(
+            &ffmpeg,
+            FfmpegInput {
+                path: &video_input,
+                timestamp_offset: video_timestamp_offset.as_deref(),
+            },
+            audio_input.as_deref().map(|path| FfmpegInput {
+                path,
+                timestamp_offset: audio_timestamp_offset.as_deref(),
+            }),
+            timestamp_policy,
+            SubtitleOutput {
+                input: subtitle_input.as_deref(),
+                embed: embed_subtitles,
+                sidecar: subtitle_sidecar.as_deref(),
+            },
+            &output_part,
+            &mut abort,
+        )
+        .await?
+        {
+            ManifestMuxOutcome::Finished => {}
+            ManifestMuxOutcome::Paused => return Ok(ManifestOutcome::Paused),
+            ManifestMuxOutcome::Aborted => return Ok(ManifestOutcome::Aborted),
+        }
     }
 
     // Validate and size the muxed file before the delivery commit. After the
@@ -3043,6 +3465,182 @@ pub(super) async fn write_staged_file_atomic(
         let _ = remove_regular_file_if_present(&temporary).await;
     }
     result
+}
+
+struct IncrementalHlsFetch<'fetch> {
+    client: &'fetch reqwest::Client,
+    plan: &'fetch HlsPlan,
+    directory: &'fetch Path,
+    tx: &'fetch tokio::sync::mpsc::UnboundedSender<EngineMsg>,
+    downloaded: &'fetch AtomicU64,
+    abort: &'fetch mut tokio::sync::oneshot::Receiver<crate::video::StopIntent>,
+    connections: usize,
+    first_segment_ready: tokio::sync::oneshot::Sender<()>,
+    complete_ready: tokio::sync::oneshot::Sender<()>,
+}
+
+async fn fetch_hls_resources_incrementally(
+    context: IncrementalHlsFetch<'_>,
+) -> Result<bool, ManifestRunError> {
+    let IncrementalHlsFetch {
+        client,
+        plan,
+        directory,
+        tx,
+        downloaded,
+        abort,
+        connections,
+        first_segment_ready,
+        complete_ready,
+    } = context;
+
+    /// Cap atomic playlist rewrites while keeping the visible output responsive for long VODs.
+    const MAX_PLAYLIST_SNAPSHOTS: usize = 512;
+
+    let resources = hls_resources(plan);
+    if resources.len() != plan.resources.len() {
+        return Err(ManifestRunError::Failed(
+            "The localized HLS resource plan changed while preparing incremental playback"
+                .to_string(),
+        ));
+    }
+    let total_segments = plan.segment_count();
+    if total_segments == 0 {
+        return Err(ManifestRunError::Failed(
+            "The selected HLS VOD playlist contains no media segments".to_string(),
+        ));
+    }
+    let batch_size = total_segments.div_ceil(MAX_PLAYLIST_SNAPSHOTS).max(1);
+    let resource_count = resources.len();
+    let mut completed = vec![false; resource_count];
+    let key_indices: Vec<_> = plan
+        .resources
+        .iter()
+        .enumerate()
+        .filter_map(|(index, resource)| {
+            (resource.kind == crate::manifest::HlsResourceKind::Key).then_some(index)
+        })
+        .collect();
+    let mut next_to_commit = 0usize;
+    let mut completed_segments = 0usize;
+    let mut last_snapshot_segments = 0usize;
+    let mut first_segment_ready = Some(first_segment_ready);
+
+    let result = async {
+        let jobs = futures_util::stream::iter(resources.into_iter().enumerate().map(
+            |(index, resource)| async move {
+                fetch_resource(client, resource, directory, tx, downloaded)
+                    .await
+                    .map(|_| index)
+            },
+        ))
+        .buffer_unordered(connections.clamp(1, MAX_RESOURCE_CONNECTIONS));
+        tokio::pin!(jobs);
+        let mut stop_pending = true;
+
+        loop {
+            tokio::select! {
+                biased;
+                stop = &mut *abort, if stop_pending => {
+                    stop_pending = false;
+                    match crate::video::stop_intent_or_pause(stop) {
+                        crate::video::StopIntent::Finish => {}
+                        crate::video::StopIntent::Pause | crate::video::StopIntent::Discard => {
+                            break Ok(false);
+                        }
+                    }
+                }
+                result = jobs.next() => {
+                    let Some(result) = result else {
+                        break Ok(true);
+                    };
+                    let index = result?;
+                    completed[index] = true;
+                    while next_to_commit < resource_count && completed[next_to_commit] {
+                        if plan.resources[next_to_commit].kind == crate::manifest::HlsResourceKind::Segment {
+                            completed_segments += 1;
+                        }
+                        next_to_commit += 1;
+                    }
+                    let all_keys_ready = key_indices.iter().all(|index| completed[*index]);
+                    if all_keys_ready
+                        && completed_segments > last_snapshot_segments
+                        && (last_snapshot_segments == 0
+                            || completed_segments - last_snapshot_segments >= batch_size)
+                    {
+                        let bytes = plan
+                            .local_playlist_prefix_bytes(
+                                completed_segments,
+                                crate::manifest::HlsPlaylistFinality::Growing,
+                            )
+                            .map_err(|error| ManifestRunError::Failed(error.to_string()))?;
+                        write_staged_file_atomic(
+                            directory,
+                            "local.m3u8.next",
+                            "local.m3u8",
+                            &bytes,
+                            StagedPublish::Replace,
+                        )
+                        .await
+                        .map_err(ManifestRunError::Failed)?;
+                        last_snapshot_segments = completed_segments;
+                        if let Some(sender) = first_segment_ready.take() {
+                            let _ = sender.send(());
+                        }
+                    }
+                }
+            }
+        }
+    }
+    .await;
+
+    match result {
+        Ok(false) => {
+            tx.send(progress_message(downloaded.load(Ordering::Relaxed)))
+                .ok();
+            return Ok(false);
+        }
+        Err(error) => {
+            tx.send(progress_message(downloaded.load(Ordering::Relaxed)))
+                .ok();
+            return Err(error);
+        }
+        Ok(true) => {}
+    }
+
+    if completed_segments != total_segments {
+        return Err(ManifestRunError::Failed(
+            "The incremental HLS transfer did not commit every planned media segment".to_string(),
+        ));
+    }
+    if pending_manifest_stop_intent(abort).is_some_and(|intent| {
+        matches!(
+            intent,
+            crate::video::StopIntent::Pause | crate::video::StopIntent::Discard
+        )
+    }) {
+        tx.send(progress_message(downloaded.load(Ordering::Relaxed)))
+            .ok();
+        return Ok(false);
+    }
+
+    let bytes = plan
+        .local_playlist_prefix_bytes(
+            total_segments,
+            crate::manifest::HlsPlaylistFinality::Complete,
+        )
+        .map_err(|error| ManifestRunError::Failed(error.to_string()))?;
+    write_staged_file_atomic(
+        directory,
+        "local.m3u8.next",
+        "local.m3u8",
+        &bytes,
+        StagedPublish::Replace,
+    )
+    .await
+    .map_err(ManifestRunError::Failed)?;
+    let _ = complete_ready.send(());
+    Ok(true)
 }
 
 async fn write_playlist(directory: &Path, plan: &HlsPlan) -> Result<(), String> {
@@ -4334,6 +4932,19 @@ fn add_hls_staging_options(command: &mut tokio::process::Command) {
     ]);
 }
 
+fn add_hls_incremental_reload_options(command: &mut tokio::process::Command) {
+    // The local playlist intentionally remains open until Grab has fetched every
+    // segment. Do not let FFmpeg's default reload counters mistake a slow fetch
+    // for the end of the presentation.
+    command
+        .arg("-live_start_index")
+        .arg("0")
+        .arg("-max_reload")
+        .arg(i32::MAX.to_string())
+        .arg("-m3u8_hold_counters")
+        .arg(i32::MAX.to_string());
+}
+
 #[derive(Clone, Copy, Default)]
 struct SubtitleOutput<'a> {
     input: Option<&'a Path>,
@@ -4380,7 +4991,7 @@ async fn run_ffmpeg(
 #[derive(Clone, Copy)]
 struct ManifestMuxOptions {
     timestamp_policy: InputTimestampPolicy,
-    timeout: Duration,
+    timeout: Option<Duration>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -4431,10 +5042,10 @@ async fn run_ffmpeg_with_offsets(
         audio_input,
         ManifestMuxOptions {
             timestamp_policy,
-            timeout: MANIFEST_MUX_TIMEOUT,
+            timeout: Some(MANIFEST_MUX_TIMEOUT),
         },
         subtitles,
-        output,
+        FfmpegOutput::StagedPath(output.to_path_buf()),
         abort,
     )
     .await
@@ -4442,25 +5053,40 @@ async fn run_ffmpeg_with_offsets(
 
 async fn wait_for_manifest_mux(
     child: &mut tokio::process::Child,
-    timeout: Duration,
+    timeout: Option<Duration>,
 ) -> Result<std::process::ExitStatus, ManifestRunError> {
-    match tokio::time::timeout(timeout, child.wait()).await {
-        Ok(Ok(status)) => Ok(status),
-        Ok(Err(error)) => {
+    let status = match timeout {
+        Some(timeout) => match tokio::time::timeout(timeout, child.wait()).await {
+            Ok(status) => status,
+            Err(_) => {
+                let _ = child.kill().await;
+                let _ = child.wait().await;
+                return Err(ManifestRunError::Failed(format!(
+                    "FFmpeg finalization exceeded its {timeout:?} time limit"
+                )));
+            }
+        },
+        None => child.wait().await,
+    };
+    match status {
+        Ok(status) => Ok(status),
+        Err(error) => {
             let _ = child.kill().await;
             let _ = child.wait().await;
             Err(ManifestRunError::Failed(format!(
                 "FFmpeg could not finish: {error}"
             )))
         }
-        Err(_) => {
-            let _ = child.kill().await;
-            let _ = child.wait().await;
-            Err(ManifestRunError::Failed(format!(
-                "FFmpeg finalization exceeded its {timeout:?} time limit"
-            )))
-        }
     }
+}
+
+enum FfmpegOutput {
+    StagedPath(PathBuf),
+    OwnedPart {
+        file: std::fs::File,
+        container: ManifestContainer,
+        label: PathBuf,
+    },
 }
 
 async fn run_ffmpeg_with_offsets_timeout(
@@ -4469,19 +5095,52 @@ async fn run_ffmpeg_with_offsets_timeout(
     audio_input: Option<FfmpegInput<'_>>,
     options: ManifestMuxOptions,
     subtitles: SubtitleOutput<'_>,
-    output: &Path,
+    output: FfmpegOutput,
     abort: &mut tokio::sync::oneshot::Receiver<crate::video::StopIntent>,
 ) -> Result<ManifestMuxOutcome, ManifestRunError> {
-    let output_container = manifest_output_container(output)?;
+    let (output_argument, output_container, output_label, overwrite_output, stdout) = match output {
+        FfmpegOutput::StagedPath(path) => {
+            let container = manifest_output_container(&path)?;
+            (
+                path.clone(),
+                container,
+                path,
+                false,
+                std::process::Stdio::null(),
+            )
+        }
+        FfmpegOutput::OwnedPart {
+            file,
+            container,
+            label,
+        } => (
+            PathBuf::from("/proc/self/fd/1"),
+            container,
+            label,
+            true,
+            std::process::Stdio::from(file),
+        ),
+    };
     if output_container == ManifestContainer::Ts && subtitles.input.is_some() && subtitles.embed {
         return Err(mpegts_embedded_subtitle_error());
     }
 
+    tracing::debug!(
+        output = %output_label.display(),
+        output_container = ?output_container,
+        "starting FFmpeg manifest mux"
+    );
     let mut command = tokio::process::Command::new(ffmpeg);
     if is_hls_playlist_input(video_input.path) {
         add_hls_staging_options(&mut command);
+        if overwrite_output {
+            add_hls_incremental_reload_options(&mut command);
+        }
     }
-    command.arg("-hide_banner").arg("-nostdin").arg("-n");
+    command
+        .arg("-hide_banner")
+        .arg("-nostdin")
+        .arg(if overwrite_output { "-y" } else { "-n" });
     if options.timestamp_policy == InputTimestampPolicy::Preserve {
         command.arg("-copyts");
     }
@@ -4508,6 +5167,11 @@ async fn run_ffmpeg_with_offsets_timeout(
         command.arg("-i").arg(subtitle_input);
     }
     command.args(["-c", "copy"]);
+    if overwrite_output {
+        // The destination part is consumed by the UI while FFmpeg is still
+        // processing a growing playlist, so flush muxed packets to the file.
+        command.args(["-flush_packets", "1"]);
+    }
     if subtitles.input.is_some() && subtitles.embed {
         let subtitle_stream = if audio_input.is_some() {
             "2:s:0"
@@ -4538,7 +5202,7 @@ async fn run_ffmpeg_with_offsets_timeout(
             command.args(["-f", "mpegts"]);
         }
     }
-    command.arg(output);
+    command.arg(&output_argument);
     if subtitles.input.is_some() && !subtitles.embed {
         let sidecar = subtitles.sidecar.ok_or_else(|| {
             ManifestRunError::Failed("Subtitle sidecar destination is missing".to_string())
@@ -4555,7 +5219,7 @@ async fn run_ffmpeg_with_offsets_timeout(
     }
     command
         .stdin(std::process::Stdio::null())
-        .stdout(std::process::Stdio::null())
+        .stdout(stdout)
         .stderr(std::process::Stdio::piped())
         .kill_on_drop(true);
     let mut child = command
@@ -4688,6 +5352,58 @@ mod tests {
         );
     }
 
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn ffmpeg_owned_part_output_uses_the_inherited_file_descriptor() {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let directory = tempfile::tempdir().expect("create owned output directory");
+        let ffmpeg = directory.path().join("fake-ffmpeg-owned-output");
+        std::fs::write(
+            &ffmpeg,
+            "#!/bin/sh\nsaw_y=0\nlast=\nfor arg in \"$@\"; do\n  [ \"$arg\" = \"-y\" ] && saw_y=1\n  last=\"$arg\"\ndone\n[ \"$saw_y\" = \"1\" ] || exit 41\n[ \"$last\" = \"/proc/self/fd/1\" ] || exit 42\nprintf 'decrypted-output' > \"$last\"\n",
+        )
+        .expect("write fake FFmpeg executable");
+        std::fs::set_permissions(&ffmpeg, std::fs::Permissions::from_mode(0o700))
+            .expect("make fake FFmpeg executable");
+        let output = directory.path().join("video.part");
+        let file = std::fs::OpenOptions::new()
+            .create_new(true)
+            .read(true)
+            .write(true)
+            .open(&output)
+            .expect("create owned destination part");
+        let (_sender, mut abort) = tokio::sync::oneshot::channel();
+
+        let result = run_ffmpeg_with_offsets_timeout(
+            &ffmpeg,
+            FfmpegInput {
+                path: Path::new("unused-video-input"),
+                timestamp_offset: None,
+            },
+            None,
+            ManifestMuxOptions {
+                timestamp_policy: InputTimestampPolicy::Normalize,
+                timeout: Some(Duration::from_secs(3)),
+            },
+            SubtitleOutput::default(),
+            FfmpegOutput::OwnedPart {
+                file,
+                container: ManifestContainer::Mp4,
+                label: output.clone(),
+            },
+            &mut abort,
+        )
+        .await
+        .expect("FFmpeg should write through the owned descriptor");
+
+        assert_eq!(result, ManifestMuxOutcome::Finished);
+        assert_eq!(
+            std::fs::read(&output).expect("read the owned output part"),
+            b"decrypted-output"
+        );
+    }
+
     #[cfg(unix)]
     #[tokio::test]
     async fn ffmpeg_finish_intent_is_bounded_when_mux_stalls() {
@@ -4710,10 +5426,10 @@ mod tests {
                 None,
                 ManifestMuxOptions {
                     timestamp_policy: InputTimestampPolicy::Normalize,
-                    timeout: Duration::from_millis(50),
+                    timeout: Some(Duration::from_millis(50)),
                 },
                 SubtitleOutput::default(),
-                &output,
+                FfmpegOutput::StagedPath(output.clone()),
                 &mut abort,
             ),
         )
@@ -4983,6 +5699,489 @@ segment-2.ts
             "static HLS MPEG-TS resources must not be staged as individual files"
         );
         assert_eq!(downloaded.load(Ordering::Relaxed), 188 * 6);
+    }
+
+    #[tokio::test]
+    async fn aes128_hls_vod_publishes_growing_playlist_prefixes() {
+        // This test covers key/segment staging and ordered playlist publication;
+        // FFmpeg consumes the resulting local playlist in the production runner.
+        use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+
+        let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0))
+            .await
+            .expect("bind encrypted HLS server");
+        let address = listener.local_addr().expect("encrypted HLS server address");
+        let key = vec![0x42; 16];
+        let first = valid_transport_stream(3, 0);
+        let second = valid_transport_stream(3, 3);
+        let key_response = key.clone();
+        let first_response = first.clone();
+        let second_response = second.clone();
+        let release_second = Arc::new(tokio::sync::Notify::new());
+        let playlist = br#"#EXTM3U
+#EXT-X-VERSION:3
+#EXT-X-PLAYLIST-TYPE:VOD
+#EXT-X-TARGETDURATION:4
+#EXT-X-KEY:METHOD=AES-128,URI="key.bin",IV=0x00000000000000000000000000000001
+#EXTINF:4,
+segment-1.ts
+#EXTINF:4,
+segment-2.ts
+#EXT-X-ENDLIST
+"#;
+        let mut plan = crate::manifest::plan_hls_media_playlist(
+            "https://cdn.example.test/playlist.m3u8",
+            playlist,
+        )
+        .expect("plan encrypted HLS VOD playlist");
+        let mut segment_index = 0usize;
+        for resource in &mut plan.resources {
+            let path = match resource.kind {
+                crate::manifest::HlsResourceKind::Key => "/key.bin".to_string(),
+                crate::manifest::HlsResourceKind::Segment => {
+                    segment_index += 1;
+                    format!("/segment-{segment_index}.ts")
+                }
+                _ => panic!("unexpected resource in AES-128 MPEG-TS fixture"),
+            };
+            resource.url = url::Url::parse(&format!("http://{address}{path}"))
+                .expect("set local encrypted HLS resource URL");
+        }
+        let request_count = plan.resources.len();
+        assert!(plan.is_incremental_aes128_mpegts_vod_candidate());
+        let server_release = Arc::clone(&release_second);
+        let server = tokio::spawn(async move {
+            let mut requests = Vec::with_capacity(request_count);
+            for _ in 0..request_count {
+                let (mut socket, _) = listener
+                    .accept()
+                    .await
+                    .expect("accept encrypted HLS request");
+                let release = Arc::clone(&server_release);
+                let key_response = key_response.clone();
+                let first_response = first_response.clone();
+                let second_response = second_response.clone();
+                requests.push(tokio::spawn(async move {
+                    let mut request = [0_u8; 1024];
+                    let count = socket
+                        .read(&mut request)
+                        .await
+                        .expect("read encrypted HLS request");
+                    let request = String::from_utf8_lossy(&request[..count]);
+                    let path = request.split_ascii_whitespace().nth(1).unwrap_or("/");
+                    let payload = match path {
+                        "/key.bin" => key_response,
+                        "/segment-1.ts" => first_response,
+                        "/segment-2.ts" => {
+                            release.notified().await;
+                            second_response
+                        }
+                        _ => panic!("unexpected encrypted HLS resource path: {path}"),
+                    };
+                    let header = format!(
+                        "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                        payload.len()
+                    );
+                    socket
+                        .write_all(header.as_bytes())
+                        .await
+                        .expect("write encrypted HLS header");
+                    socket
+                        .write_all(&payload)
+                        .await
+                        .expect("write encrypted HLS body");
+                }));
+            }
+            for request in requests {
+                request.await.expect("join encrypted HLS response task");
+            }
+        });
+
+        let client = reqwest::Client::builder()
+            .no_proxy()
+            .build()
+            .expect("build direct encrypted HLS client");
+        let directory = tempfile::tempdir().expect("create encrypted HLS staging directory");
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+        let downloaded = Arc::new(AtomicU64::new(0));
+        let (_stop_tx, mut abort) = tokio::sync::oneshot::channel();
+        let (first_ready_tx, first_ready_rx) = tokio::sync::oneshot::channel();
+        let (complete_tx, complete_rx) = tokio::sync::oneshot::channel();
+        let fetch_client = client.clone();
+        let fetch_plan = plan.clone();
+        let fetch_directory = directory.path().to_path_buf();
+        let fetch_tx = tx.clone();
+        let fetch_downloaded = Arc::clone(&downloaded);
+        let fetch_task = tokio::spawn(async move {
+            fetch_hls_resources_incrementally(IncrementalHlsFetch {
+                client: &fetch_client,
+                plan: &fetch_plan,
+                directory: &fetch_directory,
+                tx: &fetch_tx,
+                downloaded: fetch_downloaded.as_ref(),
+                abort: &mut abort,
+                connections: 4,
+                first_segment_ready: first_ready_tx,
+                complete_ready: complete_tx,
+            })
+            .await
+        });
+
+        first_ready_rx
+            .await
+            .expect("first growing playlist snapshot");
+        let first_snapshot = tokio::fs::read_to_string(directory.path().join("local.m3u8"))
+            .await
+            .expect("read first growing HLS playlist snapshot");
+        assert_eq!(first_snapshot.matches("#EXTINF:").count(), 1);
+        assert!(!first_snapshot.contains("#EXT-X-ENDLIST"));
+
+        release_second.notify_one();
+        complete_rx.await.expect("complete HLS playlist snapshot");
+        assert!(
+            fetch_task
+                .await
+                .expect("join incremental HLS fetcher")
+                .expect("fetch encrypted HLS resources")
+        );
+        server.await.expect("encrypted HLS server task");
+
+        let final_snapshot = tokio::fs::read_to_string(directory.path().join("local.m3u8"))
+            .await
+            .expect("read complete HLS playlist snapshot");
+        assert_eq!(final_snapshot.matches("#EXTINF:").count(), 2);
+        assert!(final_snapshot.contains("#EXT-X-ENDLIST"));
+        assert_eq!(
+            downloaded.load(Ordering::Relaxed),
+            (key.len() + first.len() + second.len()) as u64
+        );
+    }
+
+    #[tokio::test]
+    async fn ffmpeg_decrypts_aes128_hls_vod_while_owned_destination_part_grows() {
+        use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+
+        let ffmpeg = match resolve_manifest_ffmpeg(&[PathBuf::from("/usr/bin")]) {
+            Ok(path) => path,
+            Err(error) if std::env::var_os("GRAB_REQUIRE_FFMPEG_MANIFEST").is_none() => {
+                tracing::debug!(%error, "skipping AES-128 HLS integration test without FFmpeg");
+                return;
+            }
+            Err(error) => {
+                panic!("FFmpeg is required for the AES-128 HLS integration test: {error}")
+            }
+        };
+        let fixture = tempfile::tempdir().expect("create AES-128 HLS fixture directory");
+        let key = vec![0x42; 16];
+        let key_path = fixture.path().join("key.bin");
+        std::fs::write(&key_path, &key).expect("write AES-128 fixture key");
+        let key_info = fixture.path().join("key-info.txt");
+        std::fs::write(
+            &key_info,
+            format!(
+                "key.bin\n{}\n0123456789abcdef0123456789abcdef\n",
+                key_path.display()
+            ),
+        )
+        .expect("write AES-128 HLS key info");
+        let playlist_path = fixture.path().join("playlist.m3u8");
+        let generated = tokio::process::Command::new(&ffmpeg)
+            .args([
+                "-hide_banner",
+                "-loglevel",
+                "error",
+                "-f",
+                "lavfi",
+                "-i",
+                "testsrc=size=64x64:rate=5",
+                "-t",
+                "12",
+                "-an",
+                "-c:v",
+                "mpeg2video",
+                "-pix_fmt",
+                "yuv420p",
+                "-g",
+                "5",
+                "-sc_threshold",
+                "0",
+                "-f",
+                "hls",
+                "-hls_time",
+                "1",
+                "-hls_list_size",
+                "0",
+                "-hls_playlist_type",
+                "vod",
+                "-hls_key_info_file",
+            ])
+            .arg(&key_info)
+            .arg("-hls_segment_filename")
+            .arg(fixture.path().join("segment%03d.ts"))
+            .arg(&playlist_path)
+            .output()
+            .await
+            .expect("run FFmpeg AES-128 HLS fixture generator");
+        assert!(
+            generated.status.success(),
+            "FFmpeg AES-128 fixture generation failed: {}",
+            String::from_utf8_lossy(&generated.stderr)
+        );
+        let playlist = std::fs::read(&playlist_path).expect("read generated encrypted playlist");
+
+        let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0))
+            .await
+            .expect("bind AES-128 fixture server");
+        let address = listener
+            .local_addr()
+            .expect("AES-128 fixture server address");
+        let mut plan = crate::manifest::plan_hls_media_playlist(
+            "https://cdn.example.test/playlist.m3u8",
+            &playlist,
+        )
+        .expect("plan generated AES-128 HLS VOD");
+        assert!(plan.is_incremental_aes128_mpegts_vod_candidate());
+        assert!(
+            plan.segment_count() >= 2,
+            "fixture must contain multiple segments"
+        );
+
+        let total_segments = plan.segment_count();
+        let mut segment_index = 0usize;
+        let mut final_segment_path = None;
+        for resource in &mut plan.resources {
+            let name = resource
+                .url
+                .path()
+                .rsplit('/')
+                .next()
+                .filter(|name| !name.is_empty())
+                .expect("planned AES-128 resource must have a filename")
+                .to_string();
+            match resource.kind {
+                crate::manifest::HlsResourceKind::Key => {}
+                crate::manifest::HlsResourceKind::Segment => {
+                    segment_index += 1;
+                    if segment_index == total_segments {
+                        final_segment_path = Some(format!("/{name}"));
+                    }
+                }
+                _ => panic!("unexpected resource in AES-128 MPEG-TS fixture"),
+            }
+            resource.url = Url::parse(&format!("http://{address}/{name}"))
+                .expect("set local AES-128 fixture resource URL");
+        }
+        let final_segment_path =
+            final_segment_path.expect("encrypted HLS fixture must have a final segment");
+        let request_count = plan.resources.len();
+        let fixture_root = fixture.path().to_path_buf();
+        let release_final_segment = Arc::new(tokio::sync::Notify::new());
+        let final_segment_requested = Arc::new(tokio::sync::Notify::new());
+        let server_release = Arc::clone(&release_final_segment);
+        let server_requested = Arc::clone(&final_segment_requested);
+        let server_final_path = final_segment_path.clone();
+        let server = tokio::spawn(async move {
+            let mut responses = Vec::with_capacity(request_count);
+            for _ in 0..request_count {
+                let (mut socket, _) = listener
+                    .accept()
+                    .await
+                    .expect("accept AES-128 resource request");
+                let fixture_root = fixture_root.clone();
+                let release = Arc::clone(&server_release);
+                let requested = Arc::clone(&server_requested);
+                let final_path = server_final_path.clone();
+                responses.push(tokio::spawn(async move {
+                    let mut request = [0_u8; 1024];
+                    let count = socket
+                        .read(&mut request)
+                        .await
+                        .expect("read AES-128 resource request");
+                    let request = String::from_utf8_lossy(&request[..count]);
+                    let path = request.split_ascii_whitespace().nth(1).unwrap_or("/");
+                    if path == final_path.as_str() {
+                        requested.notify_one();
+                        release.notified().await;
+                    }
+                    let name = path.trim_start_matches('/');
+                    let payload = tokio::fs::read(fixture_root.join(name))
+                        .await
+                        .expect("read requested AES-128 fixture resource");
+                    let header = format!(
+                        "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                        payload.len()
+                    );
+                    socket
+                        .write_all(header.as_bytes())
+                        .await
+                        .expect("write AES-128 response header");
+                    socket
+                        .write_all(&payload)
+                        .await
+                        .expect("write AES-128 response body");
+                }));
+            }
+            for response in responses {
+                response.await.expect("join AES-128 response task");
+            }
+        });
+
+        let client = reqwest::Client::builder()
+            .no_proxy()
+            .build()
+            .expect("build AES-128 fixture client");
+        let staging = tempfile::tempdir().expect("create AES-128 HLS staging directory");
+        let destination_dir = tempfile::tempdir().expect("create AES-128 destination directory");
+        let destination = destination_dir.path().join("encrypted-vod.ts");
+        let item_id = 73;
+        crate::manifest_destination::ensure_plan(
+            staging.path(),
+            &destination,
+            item_id,
+            false,
+            false,
+        )
+        .expect("persist destination ownership plan");
+        let part_path = crate::manifest_destination::part_path_async(
+            staging.path().to_path_buf(),
+            destination.clone(),
+            item_id,
+            TrackKind::Video,
+        )
+        .await
+        .expect("resolve owned destination part");
+        let video_dir = staging.path().join("video");
+        let audio_dir = staging.path().join("audio");
+        tokio::fs::create_dir(&video_dir)
+            .await
+            .expect("create HLS video staging directory");
+        tokio::fs::create_dir(&audio_dir)
+            .await
+            .expect("create HLS audio staging directory");
+
+        let job = ManifestJob {
+            item_id,
+            source: crate::media_types::ManifestSource {
+                url: "https://cdn.example.test/playlist.m3u8".to_string(),
+                kind: ManifestKind::Hls,
+                representation_key: "hls-media".into(),
+                output_container: None,
+                audio_key: None,
+                subtitle_key: None,
+                subtitle_language: None,
+            },
+            dest: destination.clone(),
+            proxy: None,
+            cookies_browser: "none".to_string(),
+            connections: 4,
+            embed_subs: false,
+        };
+        let gate = crate::attempt_gate::AttemptGate::new();
+        let downloaded = Arc::new(AtomicU64::new(0));
+        let (stop_sender, abort) = tokio::sync::oneshot::channel();
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+        let task_staging = staging.path().to_path_buf();
+        let task_dest_dir = destination_dir.path().to_path_buf();
+        let task_video_dir = video_dir;
+        let task_audio_dir = audio_dir;
+        let task_client = client;
+        let task_ffmpeg = ffmpeg.clone();
+        let task_downloaded = Arc::clone(&downloaded);
+        let download_task = tokio::spawn(async move {
+            run_incremental_aes128_hls_vod(ManifestIncrementalHlsVod {
+                job: &job,
+                gate,
+                abort,
+                tx: &tx,
+                staging: &task_staging,
+                dest_dir: &task_dest_dir,
+                video_dir: &task_video_dir,
+                audio_dir: &task_audio_dir,
+                tracks: Tracks::Hls {
+                    video: Box::new(plan),
+                    audio: None,
+                    subtitle: None,
+                    subtitle_language: None,
+                },
+                ffmpeg: task_ffmpeg,
+                downloaded: task_downloaded,
+                connections: 4,
+                client: &task_client,
+            })
+            .await
+        });
+
+        tokio::time::timeout(Duration::from_secs(10), final_segment_requested.notified())
+            .await
+            .expect("the final segment request should start while earlier segments are muxed");
+        assert!(
+            !download_task.is_finished(),
+            "the final segment must remain in flight while FFmpeg consumes the growing prefix"
+        );
+        let initial_growth = tokio::time::timeout(Duration::from_secs(15), async {
+            loop {
+                let size = tokio::fs::metadata(&part_path)
+                    .await
+                    .expect("stat visible destination part")
+                    .len();
+                if size > 0 {
+                    break size;
+                }
+                tokio::time::sleep(Duration::from_millis(25)).await;
+            }
+        })
+        .await
+        .expect("FFmpeg should write decrypted bytes before the final segment is released");
+        assert!(initial_growth > 0);
+        assert!(
+            !download_task.is_finished(),
+            "the destination part must grow while the final segment download is still blocked"
+        );
+
+        release_final_segment.notify_one();
+        let outcome = download_task
+            .await
+            .expect("join incremental AES-128 VOD runner")
+            .expect("incremental AES-128 VOD runner should finish");
+        assert!(
+            matches!(outcome, ManifestOutcome::Finished(size) if size > 0),
+            "expected publication of a non-empty decrypted stream, got {outcome:?}"
+        );
+        drop(stop_sender);
+        server.await.expect("AES-128 fixture server task");
+
+        let final_size = tokio::fs::metadata(&destination)
+            .await
+            .expect("stat published decrypted destination")
+            .len();
+        assert!(final_size >= initial_growth);
+        assert!(
+            tokio::fs::symlink_metadata(&part_path).await.is_err(),
+            "successful publication must move the owned destination part into place"
+        );
+        let part_name = part_path
+            .file_name()
+            .and_then(std::ffi::OsStr::to_str)
+            .expect("owned destination part has a UTF-8 filename");
+        assert!(
+            tokio::fs::symlink_metadata(staging.path().join(format!("{part_name}.owner.json")))
+                .await
+                .is_err(),
+            "successful publication must remove the part ownership record"
+        );
+
+        let verification = tokio::process::Command::new(&ffmpeg)
+            .args(["-hide_banner", "-loglevel", "error", "-i"])
+            .arg(&destination)
+            .args(["-f", "null", "-"])
+            .output()
+            .await
+            .expect("verify decrypted destination transport stream");
+        assert!(
+            verification.status.success(),
+            "decrypted AES-128 output is not readable: {}",
+            String::from_utf8_lossy(&verification.stderr)
+        );
     }
 
     #[tokio::test]

@@ -211,16 +211,49 @@ pub(crate) async fn run_download(mut ctx: FetchCtx, connections: usize, mode: St
                         if ctx
                             .tx
                             .send(EngineMsg::SegmentsInit { total, ack: ack_tx })
-                            .is_ok()
+                            .is_err()
                         {
-                            // Bounded: a consumer that never acks (tests, torn-down row) must not hang the engine.
-                            let _ =
-                                tokio::time::timeout(Duration::from_secs(2), ack_rx.recv()).await;
+                            return;
                         }
-                        if multi_loop(&ctx, total, None, connections, &mut tries, &mut claim).await
-                        {
-                            let mut single_tries = 3;
-                            single_loop(&ctx, &mut single_tries, Some(total), &mut claim).await;
+                        // A timed-out checkpoint falls back to a normal stream: no
+                        // sparse destination has been allocated, so this is safe.
+                        match tokio::time::timeout(Duration::from_secs(2), ack_rx.recv()).await {
+                            Ok(Some(())) => {
+                                if multi_loop(
+                                    &ctx,
+                                    total,
+                                    None,
+                                    connections,
+                                    &mut tries,
+                                    &mut claim,
+                                )
+                                .await
+                                {
+                                    let mut single_tries = 3;
+                                    single_loop(
+                                        &ctx,
+                                        &mut single_tries,
+                                        Some(total),
+                                        &mut claim,
+                                    )
+                                    .await;
+                                }
+                            }
+                            Ok(None) => return,
+                            Err(_) => {
+                                tracing::warn!(
+                                    url = %ctx.url,
+                                    "segmented-download checkpoint acknowledgement timed out; using single-stream mode"
+                                );
+                                let mut single_tries = 3;
+                                single_loop(
+                                    &ctx,
+                                    &mut single_tries,
+                                    Some(total),
+                                    &mut claim,
+                                )
+                                .await;
+                            }
                         }
                     }
                 }
@@ -323,9 +356,17 @@ async fn multi_loop(
             Err(AttemptFail::Throttled(_)) => {
                 let (ack_tx, mut ack_rx) = tokio::sync::mpsc::channel::<()>(1);
                 ctx.tx.send(EngineMsg::FallbackSingle { ack: ack_tx }).ok();
-                // Wait for the UI thread to truncate + drop the bitmap before single-stream resumes.
-                let _ = ack_rx.recv().await;
-                return true;
+                // The UI thread must durably checkpoint and truncate before
+                // single-stream can append to the destination.
+                if ack_rx.recv().await.is_some() {
+                    return true;
+                }
+                ctx.tx
+                    .send(EngineMsg::Failed(gettext(
+                        "Could not safely switch from segmented to single-stream download",
+                    )))
+                    .ok();
+                return false;
             }
             Err(AttemptFail::Changed(e)) => {
                 // The probed object is gone: retries can never succeed, so fail terminally and let a later retry start fresh.

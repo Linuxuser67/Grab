@@ -74,6 +74,8 @@ pub(crate) enum ManifestError {
     DurationOverflow,
     #[error("could not serialize the local HLS playlist")]
     Serialize,
+    #[error("the requested HLS playlist prefix is invalid")]
+    InvalidPlaylistPrefix,
     #[error("the live HLS recording reached a bounded capture limit")]
     LiveCaptureLimit,
     #[error("LL-HLS parent duration does not match the accumulated part durations")]
@@ -294,15 +296,6 @@ pub(crate) struct HlsResource {
     pub(crate) kind: HlsResourceKind,
 }
 
-/// One AES-128 encrypted MPEG-TS media segment and its localized key reference.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) struct HlsAes128Segment {
-    pub(crate) resource_filename: String,
-    pub(crate) key_filename: Option<String>,
-    pub(crate) iv: Option<String>,
-    pub(crate) media_sequence: u64,
-}
-
 /// A video variant advertised by an HLS master playlist.
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) struct HlsVariant {
@@ -380,6 +373,13 @@ pub(crate) struct HlsLowLatencyPlan {
     pub(crate) rendition_reports: Box<[hls_ll::HlsRenditionReport]>,
 }
 
+/// Whether a serialized HLS snapshot is still growing or is the complete presentation.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum HlsPlaylistFinality {
+    Growing,
+    Complete,
+}
+
 /// Validated HLS media playlist, ordered resources, and local FFmpeg input.
 #[derive(Clone, Debug)]
 pub(crate) struct HlsPlan {
@@ -452,98 +452,7 @@ impl HlsPlan {
     /// destination-visible part: plain MPEG-TS, or fMP4 with one leading init section.
     pub(crate) fn is_destination_assemblable_candidate(&self) -> bool {
         !self.resources.is_empty()
-            && (self.is_plain_mpegts_presentation()
-                || self.is_single_init_fmp4_presentation()
-                || self.aes128_mpegts_segments().is_some())
-    }
-
-    /// Return a validated per-segment AES-128 plan for finite MPEG-TS VOD playlists.
-    ///
-    /// The destination-part writer can commit decrypted segments in playlist order
-    /// only when every resource is a complete MPEG-TS object and no discontinuity,
-    /// initialization map, or byte range changes the concatenation semantics.
-    pub(crate) fn aes128_mpegts_segments(&self) -> Option<Vec<HlsAes128Segment>> {
-        if self.is_live || !self.end_list || self.output_container()? != crate::media_types::ManifestContainer::Ts {
-            return None;
-        }
-        if self.resources.iter().any(|resource| {
-            resource.range.is_some() || resource.kind == HlsResourceKind::InitMap
-        }) {
-            return None;
-        }
-        let playlist = std::str::from_utf8(&self.local_playlist_bytes().ok()?).ok()?;
-        if playlist.lines().any(|line| {
-            line == "#EXT-X-DISCONTINUITY"
-                || line.starts_with("#EXT-X-DISCONTINUITY-SEQUENCE:")
-                || line.starts_with("#EXT-X-BYTERANGE:")
-                || line.starts_with("#EXT-X-MAP:")
-                || line == "#EXT-X-GAP"
-        }) {
-            return None;
-        }
-
-        let segment_resources = self
-            .resources
-            .iter()
-            .filter(|resource| resource.kind == HlsResourceKind::Segment)
-            .collect::<Vec<_>>();
-        if segment_resources.len() != self.local_playlist.segments.len() {
-            return None;
-        }
-
-        let mut segments = Vec::with_capacity(segment_resources.len());
-        let mut has_aes128 = false;
-        for (index, (segment, resource)) in self
-            .local_playlist
-            .segments
-            .iter()
-            .zip(segment_resources)
-            .enumerate()
-        {
-            if segment.uri != resource.filename || segment.byte_range.is_some() || segment.map.is_some() {
-                return None;
-            }
-            let media_sequence = self
-                .local_playlist
-                .media_sequence
-                .checked_add(u64::try_from(index).ok()?)?;
-            let key_filename = match segment.key.as_ref() {
-                Some(key) if key.method == KeyMethod::None => None,
-                Some(key) if key.method == KeyMethod::AES128 => {
-                    if key
-                        .keyformat
-                        .as_deref()
-                        .is_some_and(|format| format != "identity")
-                        || key
-                            .keyformatversions
-                            .as_deref()
-                            .is_some_and(|versions| versions != "1")
-                    {
-                        return None;
-                    }
-                    let filename = key.uri.as_ref()?;
-                    if !self.resources.iter().any(|candidate| {
-                        candidate.kind == HlsResourceKind::Key
-                            && candidate.filename == *filename
-                            && candidate.range.is_none()
-                    }) {
-                        return None;
-                    }
-                    has_aes128 = true;
-                    Some(filename.clone())
-                }
-                Some(_) => return None,
-                None => None,
-            };
-            segments.push(HlsAes128Segment {
-                resource_filename: resource.filename.clone(),
-                key_filename,
-                iv: segment.key.as_ref().and_then(|key| key.iv.clone()),
-                media_sequence,
-            });
-        }
-
-        has_aes128.then_some(segments)
+            && (self.is_plain_mpegts_presentation() || self.is_single_init_fmp4_presentation())
     }
 
     /// Whether one leading `EXT-X-MAP` section followed by media segments can be
@@ -655,6 +564,10 @@ impl HlsPlan {
         })
     }
 
+    pub(crate) fn segment_count(&self) -> usize {
+        self.local_playlist.segments.len()
+    }
+
     pub(crate) fn local_playlist_bytes(&self) -> Result<Vec<u8>, ManifestError> {
         let mut output = Vec::new();
         self.local_playlist
@@ -663,6 +576,39 @@ impl HlsPlan {
         Ok(output)
     }
 
+    /// Serialize only the committed segment prefix for an incremental local HLS input.
+    ///
+    /// A growing snapshot deliberately omits `EXT-X-ENDLIST`, allowing FFmpeg to
+    /// reload the local playlist after it consumes the currently available segments.
+    /// A complete snapshot is accepted only when it includes every segment in the local plan.
+    /// Callers should publish bounded batches rather than reserialize the full playlist
+    /// after every segment; each result is a complete snapshot suitable for atomic replace.
+    ///
+    /// # Errors
+    /// Returns an error if the prefix exceeds the source playlist or a complete
+    /// snapshot is requested before every source segment is included.
+    pub(crate) fn local_playlist_prefix_bytes(
+        &self,
+        segment_count: usize,
+        finality: HlsPlaylistFinality,
+    ) -> Result<Vec<u8>, ManifestError> {
+        let total_segments = self.local_playlist.segments.len();
+        if segment_count > total_segments
+            || (finality == HlsPlaylistFinality::Complete && segment_count != total_segments)
+        {
+            return Err(ManifestError::InvalidPlaylistPrefix);
+        }
+
+        let mut playlist = self.local_playlist.clone();
+        playlist.segments.truncate(segment_count);
+        playlist.end_list = finality == HlsPlaylistFinality::Complete;
+
+        let mut output = Vec::new();
+        playlist
+            .write_to(&mut output)
+            .map_err(|_| ManifestError::Serialize)?;
+        Ok(output)
+    }
 }
 
 /// Bound ordinary live-HLS media segments retained by one recording.
@@ -3775,63 +3721,6 @@ two.ts
             m3u8_rs::parse_media_playlist_res(&bytes).expect("serialized playlist should parse");
         assert_eq!(parsed.version, Some(3));
         assert_eq!(parsed.target_duration, 3);
-    }
-
-    #[test]
-    fn plans_aes128_mpegts_vod_segments_with_key_rotation_and_iv_sequence() {
-        let body = br#"#EXTM3U
-#EXT-X-TARGETDURATION:4
-#EXT-X-MEDIA-SEQUENCE:17
-#EXT-X-KEY:METHOD=AES-128,URI="../keys/first.key",IV=0x00000000000000000000000000000001
-#EXTINF:2,
-one.ts
-#EXT-X-KEY:METHOD=AES-128,URI="../keys/second.key"
-#EXTINF:2,
-two.ts
-#EXT-X-ENDLIST
-"#;
-        let plan = plan_hls_media_playlist(BASE_URL, body)
-            .expect("AES-128 VOD playlist should produce a native plan");
-        let segments = plan
-            .aes128_mpegts_segments()
-            .expect("simple AES-128 MPEG-TS VOD should be destination-assemblable");
-
-        assert_eq!(segments.len(), 2);
-        assert_eq!(segments[0].media_sequence, 17);
-        assert_eq!(segments[0].iv.as_deref(), Some("0x00000000000000000000000000000001"));
-        assert!(segments[0].key_filename.as_deref().is_some_and(|name| name.starts_with("key-")));
-        assert_eq!(segments[1].media_sequence, 18);
-        assert_eq!(segments[1].iv, None, "the second segment derives its IV from media sequence");
-        assert_ne!(segments[0].key_filename, segments[1].key_filename);
-        assert!(plan.is_destination_assemblable_candidate());
-    }
-
-    #[test]
-    fn aes128_mpegts_destination_plan_rejects_discontinuities_and_byte_ranges() {
-        for body in [
-            br#"#EXTM3U
-#EXT-X-TARGETDURATION:4
-#EXT-X-KEY:METHOD=AES-128,URI="key.bin"
-#EXTINF:2,
-one.ts
-#EXT-X-DISCONTINUITY
-#EXTINF:2,
-two.ts
-#EXT-X-ENDLIST
-"# as &[u8],
-            br#"#EXTM3U
-#EXT-X-TARGETDURATION:4
-#EXT-X-KEY:METHOD=AES-128,URI="key.bin"
-#EXT-X-BYTERANGE:188@0
-#EXTINF:2,
-one.ts
-#EXT-X-ENDLIST
-"#,
-        ] {
-            let plan = plan_hls_media_playlist(BASE_URL, body)
-                .expect("the parser should retain these staged HLS plans");
-            assert!(plan.aes128_mpegts_segments().is_none());
-        }
     }
 
     #[test]

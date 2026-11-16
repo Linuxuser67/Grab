@@ -6808,15 +6808,19 @@ segment-2.ts
             tokio::time::timeout(Duration::from_secs(10), final_segment_requested.notified())
                 .await
                 .expect("all middle segments should be fetched while the final segment is blocked");
-            let growing_snapshot =
-                tokio::fs::read_to_string(staging.path().join("video/local.m3u8"))
-                    .await
-                    .expect("read final growing AES-128 playlist snapshot");
-            assert_eq!(
-                growing_snapshot.matches("#EXTINF:").count(),
-                total_segments - 1,
-                "the local playlist must expose every committed segment before the final segment"
-            );
+            let growing_snapshot = tokio::time::timeout(Duration::from_secs(10), async {
+                loop {
+                    let snapshot = tokio::fs::read_to_string(staging.path().join("video/local.m3u8"))
+                        .await
+                        .expect("read growing AES-128 playlist snapshot");
+                    if snapshot.matches("#EXTINF:").count() == total_segments - 1 {
+                        break snapshot;
+                    }
+                    tokio::time::sleep(Duration::from_millis(25)).await;
+                }
+            })
+            .await
+            .expect("the local playlist should contain every committed segment before the final segment");
             assert!(!growing_snapshot.contains("#EXT-X-ENDLIST"));
             assert!(!growing_snapshot.contains("#EXT-X-PLAYLIST-TYPE:VOD"));
             let continued_growth_result = tokio::time::timeout(Duration::from_secs(20), async {

@@ -2945,6 +2945,11 @@ async fn finalize_manifest_download(
         // (the no-clobber cross-device publication fallback).
         ensure_manifest_mux_spaces(staging, dest_dir, staged_bytes)?;
     }
+    // shortcut: the incremental mode has no space preflight here — its output grows
+    // in the owned part while segments are still arriving, and the final size is not
+    // known before fetch. ENOSPC surfaces as a storage error (mux_failure_error /
+    // manifest_storage_error) and the owned part is reset on retry; preflight only
+    // when encrypted segment sizes become available in the plan.
     let (video_timestamp_offset, audio_timestamp_offset) = match &tracks {
         Tracks::Dash { video, audio, .. } => (
             video.input_timestamp_offset.ffmpeg_argument(),
@@ -5857,8 +5862,10 @@ segment-2.ts
         );
     }
 
-    #[tokio::test]
-    async fn ffmpeg_decrypts_aes128_hls_vod_while_owned_destination_part_grows() {
+    /// Shared body for the AES-128 incremental VOD integration test. The output
+    /// container follows the destination extension, so exercise TS (the native
+    /// MPEG-TS case) plus MP4/MKV written through the same owned part.
+    async fn assert_aes128_hls_vod_output(extension: &str) {
         use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
 
         let ffmpeg = match resolve_manifest_ffmpeg(&[PathBuf::from("/usr/bin")]) {
@@ -6032,7 +6039,9 @@ segment-2.ts
             .expect("build AES-128 fixture client");
         let staging = tempfile::tempdir().expect("create AES-128 HLS staging directory");
         let destination_dir = tempfile::tempdir().expect("create AES-128 destination directory");
-        let destination = destination_dir.path().join("encrypted-vod.ts");
+        let destination = destination_dir
+            .path()
+            .join(format!("encrypted-vod.{extension}"));
         let item_id = 73;
         crate::manifest_destination::ensure_plan(
             staging.path(),
@@ -6176,12 +6185,27 @@ segment-2.ts
             .args(["-f", "null", "-"])
             .output()
             .await
-            .expect("verify decrypted destination transport stream");
+            .expect("verify decrypted destination output");
         assert!(
             verification.status.success(),
             "decrypted AES-128 output is not readable: {}",
             String::from_utf8_lossy(&verification.stderr)
         );
+    }
+
+    #[tokio::test]
+    async fn ffmpeg_decrypts_aes128_hls_vod_into_an_owned_ts_part() {
+        assert_aes128_hls_vod_output("ts").await;
+    }
+
+    #[tokio::test]
+    async fn ffmpeg_decrypts_aes128_hls_vod_into_an_owned_mp4_part() {
+        assert_aes128_hls_vod_output("mp4").await;
+    }
+
+    #[tokio::test]
+    async fn ffmpeg_decrypts_aes128_hls_vod_into_an_owned_mkv_part() {
+        assert_aes128_hls_vod_output("mkv").await;
     }
 
     #[tokio::test]

@@ -360,6 +360,16 @@ impl DownloadManager {
         }
     }
 
+    pub(super) fn write_queue_snapshot(queue: StoredQueue) -> std::io::Result<()> {
+        let text = Self::serialize_snapshot(queue).ok_or_else(|| {
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "could not serialize the download queue",
+            )
+        })?;
+        Self::write_queue_file(&text)
+    }
+
     /// Write the serialized queue atomically and sync both the file and its
     /// containing directory before reporting success.
     ///

@@ -2625,10 +2625,10 @@ async fn run_incremental_aes128_hls_vod(
             result = &mut ffmpeg_task, if ffmpeg_result.is_none() => {
                 ffmpeg_result = Some(result);
                 match &ffmpeg_result {
-                    Some(Ok(Ok(ManifestMuxOutcome::Finished))) if !complete_ready => {
-                        // The process has already exited, so a completion
-                        // signal received afterwards cannot prove that FFmpeg
-                        // consumed the final playlist snapshot.
+                    Some(Ok(Ok(ManifestMuxOutcome::Finished))) if fetch_result.is_none() => {
+                        // The fetch task is not complete yet. FFmpeg may have
+                        // interpreted the last growing snapshot as end-of-file;
+                        // remux the durable complete playlist before publication.
                         ffmpeg_exited_before_complete_playlist = true;
                     }
                     Some(Ok(Err(_))) | Some(Err(_)) => {

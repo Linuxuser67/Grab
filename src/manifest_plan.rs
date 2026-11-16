@@ -80,7 +80,10 @@ fn hls_mp4_codec_kind(codec: &str) -> Option<HlsMp4CodecKind> {
         return Some(HlsMp4CodecKind::Video);
     }
 
-    if (sample_entry.eq_ignore_ascii_case("mp4a") && has_parameters)
+    if (["mp4a", "alac", "apac", "flac"]
+        .iter()
+        .any(|supported| sample_entry.eq_ignore_ascii_case(supported))
+        && (sample_entry != "mp4a" || has_parameters)
         || ["ac-3", "ec-3"]
             .iter()
             .any(|supported| codec.eq_ignore_ascii_case(supported))
@@ -1254,6 +1257,18 @@ video/1080p.m3u8
     }
 
     #[test]
+    fn hls_master_selects_mp4_for_a_compatible_video_only_variant() {
+        let body = br##"#EXTM3U
+#EXT-X-STREAM-INF:BANDWIDTH=2000000,CODECS="hvc1.1.6.L93.B0"
+video/1080p.m3u8
+"##;
+
+        assert_eq!(
+            selected_hls_master_output_container(body),
+            Some(ManifestContainer::Mp4)
+        );
+    }
+    #[test]
     fn hls_master_keeps_mkv_default_when_codec_metadata_is_missing_or_incompatible() {
         let cases: &[&[u8]] = &[
             br##"#EXTM3U
@@ -1289,8 +1304,11 @@ video/1080p.m3u8
             "avc3.640028",
             "hvc1.1.6.L93.B0",
             "hev1.1.6.L93.B0",
+            "dvh1.05.01",
+            "dvhe.05.01",
             "av01.0.08M.08",
             "vp09.00.10.08",
+            "mjpg",
             "mp4v.20.9",
             "avc1",
             "hvc1",
@@ -1301,7 +1319,7 @@ video/1080p.m3u8
                 "{codec}"
             );
         }
-        for codec in ["mp4a.40.2", "ac-3", "ec-3"] {
+        for codec in ["mp4a.40.2", "ac-3", "ec-3", "alac", "apac.31.00", "fLaC"] {
             assert_eq!(
                 hls_mp4_codec_kind(codec),
                 Some(HlsMp4CodecKind::Audio),

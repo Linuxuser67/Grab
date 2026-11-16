@@ -15,7 +15,7 @@ use url::Url;
 pub(crate) const MAX_MANIFEST_BYTES: usize = 4 * 1024 * 1024;
 /// Maximum video variants retained from an HLS master.
 pub(crate) const MAX_HLS_MASTER_VARIANTS: usize = 4_096;
-/// Maximum combined audio and subtitle renditions retained from an HLS master.
+/// Maximum combined audio, subtitle, and closed-caption renditions retained from an HLS master.
 pub(crate) const MAX_HLS_MASTER_RENDITIONS: usize = 4_096;
 
 #[path = "manifest_dash.rs"]
@@ -1371,7 +1371,7 @@ fn validate_hls_rendition_groups(
             }
             if alternative.autoselect {
                 // AUTOSELECT renditions in one group need distinct language,
-                // associated-language, forced, and characteristics signatures.
+                // associated-language, forced, characteristics, and caption-service identities.
                 let signature = (
                     group_kind,
                     group,
@@ -1379,6 +1379,7 @@ fn validate_hls_rendition_groups(
                     alternative.assoc_language.clone(),
                     alternative.forced,
                     alternative.characteristics.clone(),
+                    alternative.instream_id.clone(),
                 );
                 if !autoselect_signatures.insert(signature) {
                     return Err(group_error);
@@ -1710,13 +1711,20 @@ pub(crate) fn parse_hls_master_playlist(
         })
         .collect::<Result<Vec<_>, ManifestError>>()?;
 
+    let closed_caption_rendition_count = master
+        .alternatives
+        .iter()
+        .filter(|alternative| alternative.media_type == AlternativeMediaType::ClosedCaptions)
+        .count();
     if audio_renditions
         .len()
         .saturating_add(subtitle_renditions.len())
+        .saturating_add(closed_caption_rendition_count)
         > MAX_HLS_MASTER_RENDITIONS
     {
         return Err(ManifestError::Parse(
-            "HLS master contains too many audio and subtitle renditions".to_string(),
+            "HLS master contains too many audio, subtitle, and closed-caption renditions"
+                .to_string(),
         ));
     }
 
@@ -2967,7 +2975,7 @@ video.m3u8
     fn closed_caption_groups_are_accepted_when_declared_by_a_variant() {
         let body = br#"#EXTM3U
 #EXT-X-MEDIA:TYPE=CLOSED-CAPTIONS,GROUP-ID="captions",NAME="English",LANGUAGE="en",DEFAULT=YES,AUTOSELECT=YES,INSTREAM-ID="CC1"
-#EXT-X-MEDIA:TYPE=CLOSED-CAPTIONS,GROUP-ID="captions",NAME="English Service",LANGUAGE="en",INSTREAM-ID="SERVICE63"
+#EXT-X-MEDIA:TYPE=CLOSED-CAPTIONS,GROUP-ID="captions",NAME="English Service",LANGUAGE="en",AUTOSELECT=YES,INSTREAM-ID="SERVICE63"
 #EXT-X-STREAM-INF:BANDWIDTH=1000000,CLOSED-CAPTIONS="captions"
 video.m3u8
 "#;

@@ -2373,6 +2373,21 @@ struct ManifestCompleteHlsRemux<'a> {
     abort: &'a mut tokio::sync::oneshot::Receiver<crate::video::StopIntent>,
 }
 
+fn completed_incremental_hls_mux(
+    result: Result<
+        Result<ManifestMuxOutcome, ManifestRunError>,
+        tokio::task::JoinError,
+    >,
+) -> Result<ManifestMuxOutcome, ManifestRunError> {
+    match result {
+        Ok(Ok(outcome)) => Ok(outcome),
+        Ok(Err(error)) => Err(error),
+        Err(error) => Err(ManifestRunError::Failed(format!(
+            "FFmpeg HLS mux task failed: {error}"
+        ))),
+    }
+}
+
 async fn remux_complete_hls_vod_part(
     context: ManifestCompleteHlsRemux<'_>,
 ) -> Result<ManifestMuxOutcome, ManifestRunError> {
@@ -2694,6 +2709,10 @@ async fn run_incremental_hls_vod(
             )));
         }
     };
+    let mux_outcome = completed_incremental_hls_mux(ffmpeg_result.ok_or_else(|| {
+        ManifestRunError::Failed("The incremental HLS FFmpeg task did not finish".to_string())
+    })?)?;
+
     if !fetched {
         return Ok(
             match stop_intent.unwrap_or(crate::video::StopIntent::Pause) {
@@ -2704,24 +2723,18 @@ async fn run_incremental_hls_vod(
             },
         );
     }
+    // The fetch task commits EXT-X-ENDLIST before returning true. Its signal can
+    // become ready in the same select cycle that records both task results, so
+    // consume it here as well before deciding the final playlist was missing.
+    if !complete_signal_done {
+        complete_ready = complete_rx.await.is_ok();
+    }
     if !complete_ready {
         return Err(ManifestRunError::Failed(
             "The complete HLS VOD playlist was not published after all segments were fetched"
                 .to_string(),
         ));
     }
-
-    let mux_outcome = match ffmpeg_result.ok_or_else(|| {
-        ManifestRunError::Failed("The incremental HLS FFmpeg task did not finish".to_string())
-    })? {
-        Ok(Ok(outcome)) => outcome,
-        Ok(Err(error)) => return Err(error),
-        Err(error) => {
-            return Err(ManifestRunError::Failed(format!(
-                "FFmpeg HLS mux task failed: {error}"
-            )));
-        }
-    };
     match mux_outcome {
         ManifestMuxOutcome::Finished => {
             if ffmpeg_exited_before_complete_playlist {
@@ -2844,6 +2857,32 @@ fn pending_manifest_stop_intent(
     match abort.try_recv() {
         Err(tokio::sync::oneshot::error::TryRecvError::Empty) => None,
         result => Some(crate::video::stop_intent_or_pause(result)),
+    }
+}
+
+#[cfg(test)]
+mod incremental_hls_mux_result_tests {
+    use super::*;
+
+    #[test]
+    fn ffmpeg_failure_is_preserved_for_the_download_attempt() {
+        let result = completed_incremental_hls_mux(Ok(Err(ManifestRunError::Failed(
+            "synthetic FFmpeg mux failure".to_string(),
+        ))));
+
+        assert!(matches!(
+            result,
+            Err(ManifestRunError::Failed(message))
+                if message == "synthetic FFmpeg mux failure"
+        ));
+    }
+
+    #[test]
+    fn completed_ffmpeg_outcome_is_preserved() {
+        assert!(matches!(
+            completed_incremental_hls_mux(Ok(Ok(ManifestMuxOutcome::Finished))),
+            Ok(ManifestMuxOutcome::Finished)
+        ));
     }
 }
 

@@ -2351,17 +2351,32 @@ fn send_manifest_stop_intent(
     }
 }
 
-async fn remux_complete_aes128_vod_part(
-    ffmpeg: &Path,
-    playlist: &Path,
-    staging: &Path,
-    destination: &Path,
+struct ManifestCompleteAes128Remux<'a> {
+    ffmpeg: &'a Path,
+    playlist: &'a Path,
+    staging: &'a Path,
+    destination: &'a Path,
     item_id: u64,
-    part_path: &Path,
+    part_path: &'a Path,
     container: ManifestContainer,
-    abort: &mut tokio::sync::oneshot::Receiver<crate::video::StopIntent>,
+    abort: &'a mut tokio::sync::oneshot::Receiver<crate::video::StopIntent>,
+}
+
+async fn remux_complete_aes128_vod_part(
+    context: ManifestCompleteAes128Remux<'_>,
 ) -> Result<ManifestMuxOutcome, ManifestRunError> {
     use tokio::io::AsyncSeekExt as _;
+
+    let ManifestCompleteAes128Remux {
+        ffmpeg,
+        playlist,
+        staging,
+        destination,
+        item_id,
+        part_path,
+        container,
+        abort,
+    } = context;
     let mut output_file = crate::manifest_destination::open_owned_part_async(
         staging.to_path_buf(),
         destination.to_path_buf(),
@@ -2707,28 +2722,28 @@ async fn run_incremental_aes128_hls_vod(
                     // Re-arm it for the completion-only remux.
                     let (finish_sender, mut finish_abort) = tokio::sync::oneshot::channel();
                     let _ = finish_sender.send(crate::video::StopIntent::Finish);
-                    remux_complete_aes128_vod_part(
-                        &ffmpeg,
-                        &video_dir.join("local.m3u8"),
+                    remux_complete_aes128_vod_part(ManifestCompleteAes128Remux {
+                        ffmpeg: &ffmpeg,
+                        playlist: &video_dir.join("local.m3u8"),
                         staging,
-                        &job.dest,
-                        job.item_id,
-                        &part_path,
-                        output_container,
-                        &mut finish_abort,
-                    )
+                        destination: &job.dest,
+                        item_id: job.item_id,
+                        part_path: &part_path,
+                        container: output_container,
+                        abort: &mut finish_abort,
+                    })
                     .await?
                 } else {
-                    remux_complete_aes128_vod_part(
-                        &ffmpeg,
-                        &video_dir.join("local.m3u8"),
+                    remux_complete_aes128_vod_part(ManifestCompleteAes128Remux {
+                        ffmpeg: &ffmpeg,
+                        playlist: &video_dir.join("local.m3u8"),
                         staging,
-                        &job.dest,
-                        job.item_id,
-                        &part_path,
-                        output_container,
-                        &mut abort,
-                    )
+                        destination: &job.dest,
+                        item_id: job.item_id,
+                        part_path: &part_path,
+                        container: output_container,
+                        abort: &mut abort,
+                    })
                     .await?
                 };
                 match remux_outcome {

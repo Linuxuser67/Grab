@@ -376,17 +376,42 @@ enum Tracks {
 }
 
 impl Tracks {
+    fn supports_incremental_hls_vod_track(plan: &HlsPlan) -> bool {
+        !plan.is_live
+            && plan.end_list
+            && plan.low_latency.is_none()
+            && (plan.is_destination_assemblable_candidate()
+                || plan.is_incremental_clear_vod_candidate()
+                || plan.is_incremental_aes128_mpegts_vod_candidate())
+    }
+
     fn uses_incremental_hls_vod(&self) -> bool {
-        matches!(
-            self,
-            Self::Hls {
-                video,
-                audio: None,
-                subtitle: None,
-                ..
-            } if video.is_incremental_aes128_mpegts_vod_candidate()
-                || video.is_incremental_clear_vod_candidate()
-        )
+        let Self::Hls {
+            video,
+            audio,
+            subtitle: None,
+            ..
+        } = self
+        else {
+            return false;
+        };
+
+        let video_incremental = video.is_incremental_aes128_mpegts_vod_candidate()
+            || video.is_incremental_clear_vod_candidate();
+        if audio.is_none() {
+            return video_incremental;
+        }
+
+        let video_supported = Self::supports_incremental_hls_vod_track(video);
+        let audio_incremental = audio.as_deref().is_some_and(|plan| {
+            plan.is_incremental_clear_vod_candidate()
+                || plan.is_incremental_aes128_mpegts_vod_candidate()
+        });
+        let audio_supported = audio
+            .as_deref()
+            .is_none_or(Self::supports_incremental_hls_vod_track);
+
+        video_supported && audio_supported && (video_incremental || audio_incremental)
     }
 
     fn uses_destination_parts(&self) -> bool {
@@ -2146,13 +2171,13 @@ pub(crate) async fn run_manifest_download(
         ) => return Ok(ManifestOutcome::Aborted),
     };
     let mut _finish_stop_sender = None;
-    if !live_hls && !live_dash && !has_audio && tracks.uses_incremental_hls_vod() {
+    if !live_hls && !live_dash && tracks.uses_incremental_hls_vod() {
         // Preserve AES-128's established configured concurrency. Complex clear
         // VOD stays sequential, matching the ordinary static-HLS resource path.
         let connections = match &tracks {
-            Tracks::Hls { video, .. } if video.is_incremental_aes128_mpegts_vod_candidate() => {
-                job.connections
-            }
+            Tracks::Hls {
+                video, audio: None, ..
+            } if video.is_incremental_aes128_mpegts_vod_candidate() => job.connections,
             _ => 1,
         };
         let result = run_incremental_hls_vod(ManifestIncrementalHlsVod {
@@ -2360,14 +2385,74 @@ fn send_manifest_stop_intent(
     }
 }
 
+struct ManifestIncrementalHlsTrackFetch {
+    index: usize,
+    client: reqwest::Client,
+    plan: Arc<HlsPlan>,
+    directory: PathBuf,
+    tx: tokio::sync::mpsc::UnboundedSender<EngineMsg>,
+    downloaded: Arc<AtomicU64>,
+    connections: usize,
+}
+
+struct ManifestIncrementalHlsFetchWorker {
+    index: usize,
+    first_segment_ready: Option<tokio::sync::oneshot::Receiver<()>>,
+    complete_ready: Option<tokio::sync::oneshot::Receiver<()>>,
+    abort_sender: Option<tokio::sync::oneshot::Sender<crate::video::StopIntent>>,
+}
+
+fn spawn_incremental_hls_track_fetch(
+    fetchers: &mut tokio::task::JoinSet<(usize, Result<bool, ManifestRunError>)>,
+    context: ManifestIncrementalHlsTrackFetch,
+) -> ManifestIncrementalHlsFetchWorker {
+    let ManifestIncrementalHlsTrackFetch {
+        index,
+        client,
+        plan,
+        directory,
+        tx,
+        downloaded,
+        connections,
+    } = context;
+    let (abort_sender, mut abort) = tokio::sync::oneshot::channel();
+    let (first_segment_sender, first_segment_ready) = tokio::sync::oneshot::channel();
+    let (complete_sender, complete_ready) = tokio::sync::oneshot::channel();
+
+    fetchers.spawn(async move {
+        let result = fetch_hls_resources_incrementally(IncrementalHlsFetch {
+            client: &client,
+            plan: &plan,
+            directory: &directory,
+            tx: &tx,
+            downloaded: downloaded.as_ref(),
+            abort: &mut abort,
+            connections,
+            first_segment_ready: first_segment_sender,
+            complete_ready: complete_sender,
+        })
+        .await;
+        (index, result)
+    });
+
+    ManifestIncrementalHlsFetchWorker {
+        index,
+        first_segment_ready: Some(first_segment_ready),
+        complete_ready: Some(complete_ready),
+        abort_sender: Some(abort_sender),
+    }
+}
+
 struct ManifestCompleteHlsRemux<'a> {
     ffmpeg: &'a Path,
-    playlist: &'a Path,
+    video_playlist: &'a Path,
+    audio_playlist: Option<&'a Path>,
     staging: &'a Path,
     destination: &'a Path,
     item_id: u64,
     part_path: &'a Path,
     container: ManifestContainer,
+    timestamp_policy: InputTimestampPolicy,
     abort: &'a mut tokio::sync::oneshot::Receiver<crate::video::StopIntent>,
 }
 
@@ -2390,12 +2475,14 @@ async fn remux_complete_hls_vod_part(
 
     let ManifestCompleteHlsRemux {
         ffmpeg,
-        playlist,
+        video_playlist,
+        audio_playlist,
         staging,
         destination,
         item_id,
         part_path,
         container,
+        timestamp_policy,
         abort,
     } = context;
     let mut output_file = crate::manifest_destination::open_owned_part_async(
@@ -2420,12 +2507,15 @@ async fn remux_complete_hls_vod_part(
     run_ffmpeg_with_offsets_timeout(
         ffmpeg,
         FfmpegInput {
-            path: playlist,
+            path: video_playlist,
             timestamp_offset: None,
         },
-        None,
+        audio_playlist.map(|path| FfmpegInput {
+            path,
+            timestamp_offset: None,
+        }),
         ManifestMuxOptions {
-            timestamp_policy: InputTimestampPolicy::Normalize,
+            timestamp_policy,
             timeout: Some(INCREMENTAL_HLS_MUX_TIMEOUT),
         },
         SubtitleOutput {
@@ -2468,13 +2558,13 @@ async fn run_incremental_hls_vod(
         .ok();
     let Tracks::Hls {
         video,
-        audio: None,
+        audio,
         subtitle: None,
         ..
     } = tracks
     else {
         return Err(ManifestRunError::Failed(
-            "Incremental HLS VOD requires one media playlist".to_string(),
+            "Incremental HLS VOD requires video and optional audio media playlists".to_string(),
         ));
     };
 
@@ -2500,47 +2590,84 @@ async fn run_incremental_hls_vod(
     output_file
         .seek(std::io::SeekFrom::Start(0))
         .await
-        .map_err(|error| {
-            manifest_storage_error("Could not rewind the owned HLS output part", error)
-        })?;
+        .map_err(|error| manifest_storage_error("Could not rewind the HLS output part", error))?;
     output_file.sync_all().await.map_err(|error| {
         manifest_storage_error("Could not persist the empty HLS output part", error)
     })?;
 
-    let (fetch_abort_tx, fetch_abort_rx) = tokio::sync::oneshot::channel();
-    let (ffmpeg_abort_tx, ffmpeg_abort_rx) = tokio::sync::oneshot::channel();
-    let (first_segment_tx, mut first_segment_rx) = tokio::sync::oneshot::channel();
-    let (complete_tx, mut complete_rx) = tokio::sync::oneshot::channel();
-    let fetch_client = client.clone();
     let video = Arc::from(video);
-    let fetch_plan = Arc::clone(&video);
-    let fetch_directory = video_dir.to_path_buf();
-    let fetch_tx = tx.clone();
-    let fetch_downloaded = Arc::clone(&downloaded);
-    let mut fetch_abort = fetch_abort_rx;
-    let mut fetch_task = tokio::spawn(async move {
-        fetch_hls_resources_incrementally(IncrementalHlsFetch {
-            client: &fetch_client,
-            plan: &fetch_plan,
-            directory: &fetch_directory,
-            tx: &fetch_tx,
-            downloaded: fetch_downloaded.as_ref(),
-            abort: &mut fetch_abort,
+    let audio = audio.map(Arc::from);
+    let video_playlist = video_dir.join("local.m3u8");
+    let audio_playlist = audio.as_ref().map(|_| audio_dir.join("local.m3u8"));
+    let timestamp_policy = if audio.is_some() {
+        // Separate HLS renditions share a source presentation timestamp clock.
+        InputTimestampPolicy::Preserve
+    } else {
+        InputTimestampPolicy::Normalize
+    };
+
+    let mut fetchers = tokio::task::JoinSet::<(usize, Result<bool, ManifestRunError>)>::new();
+    let mut workers = Vec::with_capacity(if audio.is_some() { 2 } else { 1 });
+    workers.push(spawn_incremental_hls_track_fetch(
+        &mut fetchers,
+        ManifestIncrementalHlsTrackFetch {
+            index: 0,
+            client: client.clone(),
+            plan: Arc::clone(&video),
+            directory: video_dir.to_path_buf(),
+            tx: tx.clone(),
+            downloaded: Arc::clone(&downloaded),
             connections,
-            first_segment_ready: first_segment_tx,
-            complete_ready: complete_tx,
-        })
-        .await
-    });
-    let mut fetch_result = None;
-    let mut fetch_abort_tx = Some(fetch_abort_tx);
-    let mut ffmpeg_abort_tx = Some(ffmpeg_abort_tx);
+        },
+    ));
+    if let Some(audio_plan) = audio.as_ref() {
+        workers.push(spawn_incremental_hls_track_fetch(
+            &mut fetchers,
+            ManifestIncrementalHlsTrackFetch {
+                index: 1,
+                client: client.clone(),
+                plan: Arc::clone(audio_plan),
+                directory: audio_dir.to_path_buf(),
+                tx: tx.clone(),
+                downloaded: Arc::clone(&downloaded),
+                // Keep each rendition sequential. The video and audio tracks
+                // themselves are fetched concurrently.
+                connections: 1,
+            },
+        ));
+    }
+
+    let track_count = workers.len();
+    let mut fetch_results = std::iter::repeat_with(|| None)
+        .take(track_count)
+        .collect::<Vec<Option<Result<bool, ManifestRunError>>>>();
+    let mut first_segment_events = futures_util::stream::FuturesUnordered::new();
+    for worker in &mut workers {
+        let index = worker.index;
+        let receiver = worker
+            .first_segment_ready
+            .take()
+            .expect("each incremental HLS track has one first-segment receiver");
+        first_segment_events.push(async move { (index, receiver.await) });
+    }
+    let mut first_segment_ready = vec![false; track_count];
+    let mut fetch_abort_tx = Some(Vec::new());
+    for worker in &mut workers {
+        if let Some(sender) = worker.abort_sender.take() {
+            fetch_abort_tx
+                .as_mut()
+                .expect("fetch abort senders are initialized")
+                .push(sender);
+        }
+    }
+    let (ffmpeg_abort_sender, mut ffmpeg_abort) = tokio::sync::oneshot::channel();
+    let mut ffmpeg_abort_tx = Some(ffmpeg_abort_sender);
     let mut abort_done = false;
     let mut stop_intent = None;
 
-    // Do not start FFmpeg until the first complete segment and its key are
-    // durable and the first growing local playlist snapshot has been published.
-    loop {
+    // Do not start FFmpeg until every selected rendition has published a
+    // complete first segment and its growing local playlist snapshot.
+    while first_segment_ready.iter().any(|ready| !ready) {
         tokio::select! {
             biased;
             stop = &mut abort, if !abort_done => {
@@ -2548,63 +2675,83 @@ async fn run_incremental_hls_vod(
                 let intent = crate::video::stop_intent_or_pause(stop);
                 stop_intent = Some(intent);
                 if intent != crate::video::StopIntent::Finish {
-                    send_manifest_stop_intent(&mut fetch_abort_tx, intent);
+                    if let Some(senders) = fetch_abort_tx.as_mut() {
+                        for sender in senders.drain(..) {
+                            let _ = sender.send(intent);
+                        }
+                    }
                     send_manifest_stop_intent(&mut ffmpeg_abort_tx, intent);
                 }
             }
-            ready = &mut first_segment_rx => {
-                if ready.is_ok() {
-                    break;
+            ready = futures_util::StreamExt::next(&mut first_segment_events),
+                if !first_segment_events.is_empty() =>
+            {
+                if let Some((index, result)) = ready
+                    && result.is_ok()
+                {
+                    first_segment_ready[index] = true;
                 }
-                fetch_result = Some((&mut fetch_task).await);
-                break;
             }
-            result = &mut fetch_task, if fetch_result.is_none() => {
-                fetch_result = Some(result);
-                break;
+            joined = fetchers.join_next(), if !fetchers.is_empty() => {
+                match joined {
+                    Some(Ok((index, Ok(true)))) => {
+                        fetch_results[index] = Some(Ok(true));
+                        first_segment_ready[index] = true;
+                    }
+                    Some(Ok((_, Ok(false)))) => {
+                        return Ok(
+                            match stop_intent.unwrap_or(crate::video::StopIntent::Pause) {
+                                crate::video::StopIntent::Pause | crate::video::StopIntent::Finish => {
+                                    ManifestOutcome::Paused
+                                }
+                                crate::video::StopIntent::Discard => ManifestOutcome::Aborted,
+                            },
+                        );
+                    }
+                    Some(Ok((_, Err(error)))) => return Err(error),
+                    Some(Err(error)) => {
+                        return Err(ManifestRunError::Failed(format!(
+                            "Incremental HLS track fetch task failed: {error}"
+                        )));
+                    }
+                    None => {}
+                }
             }
         }
     }
-
-    if let Some(result) = fetch_result.take() {
-        match result {
-            Ok(Ok(true)) => fetch_result = Some(Ok(Ok(true))),
-            Ok(Ok(false)) => {
-                return Ok(
-                    match stop_intent.unwrap_or(crate::video::StopIntent::Pause) {
-                        crate::video::StopIntent::Pause | crate::video::StopIntent::Finish => {
-                            ManifestOutcome::Paused
-                        }
-                        crate::video::StopIntent::Discard => ManifestOutcome::Aborted,
-                    },
-                );
-            }
-            Ok(Err(error)) => return Err(error),
-            Err(error) => {
-                return Err(ManifestRunError::Failed(format!(
-                    "Incremental HLS resource task failed: {error}"
-                )));
-            }
-        }
+    if !abort_done && let Some(intent) = pending_manifest_stop_intent(&mut abort) {
+        abort_done = true;
+        stop_intent = Some(intent);
+    }
+    if let Some(intent @ (crate::video::StopIntent::Pause | crate::video::StopIntent::Discard)) =
+        stop_intent
+    {
+        return Ok(match intent {
+            crate::video::StopIntent::Pause => ManifestOutcome::Paused,
+            crate::video::StopIntent::Discard => ManifestOutcome::Aborted,
+            crate::video::StopIntent::Finish => unreachable!(),
+        });
     }
 
     let output_container = manifest_output_container(&job.dest)?;
     let ffmpeg_path = ffmpeg.clone();
-    let playlist_path = video_dir.join("local.m3u8");
-    let ffmpeg_playlist_path = playlist_path.clone();
+    let ffmpeg_video_playlist = video_playlist.clone();
+    let ffmpeg_audio_playlist = audio_playlist.clone();
     let output_label = part_path.clone();
     let output_file = output_file.into_std().await;
-    let mut ffmpeg_abort = ffmpeg_abort_rx;
     let mut ffmpeg_task = tokio::spawn(async move {
         run_ffmpeg_with_offsets_timeout(
             &ffmpeg_path,
             FfmpegInput {
-                path: &ffmpeg_playlist_path,
+                path: &ffmpeg_video_playlist,
                 timestamp_offset: None,
             },
-            None,
+            ffmpeg_audio_playlist.as_deref().map(|path| FfmpegInput {
+                path,
+                timestamp_offset: None,
+            }),
             ManifestMuxOptions {
-                timestamp_policy: InputTimestampPolicy::Normalize,
+                timestamp_policy,
                 timeout: Some(INCREMENTAL_HLS_MUX_TIMEOUT),
             },
             SubtitleOutput {
@@ -2624,13 +2771,8 @@ async fn run_incremental_hls_vod(
     });
 
     let mut ffmpeg_result = None;
-    let mut complete_ready = false;
-    let mut complete_signal_done = false;
     let mut ffmpeg_exited_before_complete_playlist = false;
-    loop {
-        if fetch_result.is_some() && ffmpeg_result.is_some() {
-            break;
-        }
+    while fetch_results.iter().any(Option::is_none) || ffmpeg_result.is_none() {
         tokio::select! {
             biased;
             stop = &mut abort, if !abort_done => {
@@ -2638,37 +2780,63 @@ async fn run_incremental_hls_vod(
                 let intent = crate::video::stop_intent_or_pause(stop);
                 stop_intent = Some(intent);
                 if intent != crate::video::StopIntent::Finish {
-                    send_manifest_stop_intent(&mut fetch_abort_tx, intent);
+                    if let Some(senders) = fetch_abort_tx.as_mut() {
+                        for sender in senders.drain(..) {
+                            let _ = sender.send(intent);
+                        }
+                    }
                     send_manifest_stop_intent(&mut ffmpeg_abort_tx, intent);
                 }
             }
-            complete = &mut complete_rx, if !complete_signal_done => {
-                complete_signal_done = true;
-                complete_ready = complete.is_ok();
-            }
-            result = &mut fetch_task, if fetch_result.is_none() => {
-                fetch_result = Some(result);
-                if !matches!(fetch_result, Some(Ok(Ok(true)))) {
-                    send_manifest_stop_intent(
-                        &mut ffmpeg_abort_tx,
-                        crate::video::StopIntent::Pause,
-                    );
+            joined = fetchers.join_next(), if !fetchers.is_empty() => {
+                match joined {
+                    Some(Ok((index, result))) => {
+                        let should_stop = !matches!(&result, Ok(true));
+                        fetch_results[index] = Some(result);
+                        if should_stop {
+                            if let Some(senders) = fetch_abort_tx.as_mut() {
+                                for sender in senders.drain(..) {
+                                    let _ = sender.send(crate::video::StopIntent::Pause);
+                                }
+                            }
+                            send_manifest_stop_intent(&mut ffmpeg_abort_tx, crate::video::StopIntent::Pause);
+                        }
+                    }
+                    Some(Err(error)) => {
+                        let message = format!("Incremental HLS track fetch task failed: {error}");
+                        for result in &mut fetch_results {
+                            if result.is_none() {
+                                *result = Some(Err(ManifestRunError::Failed(message.clone())));
+                            }
+                        }
+                        fetchers.abort_all();
+                        if let Some(senders) = fetch_abort_tx.as_mut() {
+                            for sender in senders.drain(..) {
+                                let _ = sender.send(crate::video::StopIntent::Pause);
+                            }
+                        }
+                        send_manifest_stop_intent(&mut ffmpeg_abort_tx, crate::video::StopIntent::Pause);
+                    }
+                    None => {}
                 }
             }
             result = &mut ffmpeg_task, if ffmpeg_result.is_none() => {
                 ffmpeg_result = Some(result);
                 match &ffmpeg_result {
-                    Some(Ok(Ok(ManifestMuxOutcome::Finished))) if fetch_result.is_none() => {
-                        // The fetch task is not complete yet. FFmpeg may have
-                        // interpreted the last growing snapshot as end-of-file;
-                        // remux the durable complete playlist before publication.
+                    Some(Ok(Ok(ManifestMuxOutcome::Finished)))
+                        if fetch_results.iter().any(Option::is_none) =>
+                    {
+                        // FFmpeg can finish against a growing snapshot before
+                        // either rendition has committed its complete playlist.
+                        // Remux both complete playlists before publication.
                         ffmpeg_exited_before_complete_playlist = true;
                     }
                     Some(Ok(Err(_))) | Some(Err(_)) => {
-                        send_manifest_stop_intent(
-                            &mut fetch_abort_tx,
-                            crate::video::StopIntent::Pause,
-                        );
+                        if let Some(senders) = fetch_abort_tx.as_mut() {
+                            for sender in senders.drain(..) {
+                                let _ = sender.send(crate::video::StopIntent::Pause);
+                            }
+                        }
                     }
                     _ => {}
                 }
@@ -2689,22 +2857,20 @@ async fn run_incremental_hls_vod(
             crate::video::StopIntent::Finish => unreachable!(),
         });
     }
-    let fetched = match fetch_result.ok_or_else(|| {
-        ManifestRunError::Failed("The incremental HLS fetch task did not finish".to_string())
-    })? {
-        Ok(Ok(fetched)) => fetched,
-        Ok(Err(error)) => return Err(error),
-        Err(error) => {
-            return Err(ManifestRunError::Failed(format!(
-                "Incremental HLS resource task failed: {error}"
-            )));
+    for result in &mut fetch_results {
+        if matches!(result, Some(Err(_)))
+            && let Some(Err(error)) = result.take()
+        {
+            return Err(error);
         }
-    };
+    }
     let mux_outcome = completed_incremental_hls_mux(ffmpeg_result.ok_or_else(|| {
         ManifestRunError::Failed("The incremental HLS FFmpeg task did not finish".to_string())
     })?)?;
-
-    if !fetched {
+    if fetch_results
+        .iter()
+        .any(|result| matches!(result, Some(Ok(false)) | None))
+    {
         return Ok(
             match stop_intent.unwrap_or(crate::video::StopIntent::Pause) {
                 crate::video::StopIntent::Pause | crate::video::StopIntent::Finish => {
@@ -2714,68 +2880,99 @@ async fn run_incremental_hls_vod(
             },
         );
     }
-    // The fetch task commits EXT-X-ENDLIST before returning true. Its signal can
-    // become ready in the same select cycle that records both task results, so
-    // consume it here as well before deciding the final playlist was missing.
-    if !complete_signal_done {
-        complete_ready = complete_rx.await.is_ok();
+    if mux_outcome != ManifestMuxOutcome::Finished {
+        return Ok(match mux_outcome {
+            ManifestMuxOutcome::Paused => ManifestOutcome::Paused,
+            ManifestMuxOutcome::Aborted => ManifestOutcome::Aborted,
+            ManifestMuxOutcome::Finished => unreachable!(),
+        });
     }
-    if !complete_ready {
-        return Err(ManifestRunError::Failed(
-            "The complete HLS VOD playlist was not published after all segments were fetched"
-                .to_string(),
-        ));
+    for worker in &mut workers {
+        let Some(receiver) = worker.complete_ready.take() else {
+            return Err(ManifestRunError::Failed(
+                "An HLS rendition lost its completion receiver".to_string(),
+            ));
+        };
+        if receiver.await.is_err() {
+            return Err(ManifestRunError::Failed(
+                "An HLS rendition completed without publishing its complete VOD playlist"
+                    .to_string(),
+            ));
+        }
     }
+
     match mux_outcome {
-        ManifestMuxOutcome::Finished => {
-            if ffmpeg_exited_before_complete_playlist {
-                tracing::warn!(
-                    item_id = job.item_id,
-                    "FFmpeg exited on a growing HLS VOD snapshot; remuxing the completed playlist"
-                );
-                let remux_outcome = if abort_done {
-                    // Finish was already consumed by the fetch/mux supervisor.
-                    // Re-arm it for the completion-only remux.
-                    let (finish_sender, mut finish_abort) = tokio::sync::oneshot::channel();
-                    let _ = finish_sender.send(crate::video::StopIntent::Finish);
-                    remux_complete_hls_vod_part(ManifestCompleteHlsRemux {
-                        ffmpeg: &ffmpeg,
-                        playlist: &playlist_path,
-                        staging,
-                        destination: &job.dest,
-                        item_id: job.item_id,
-                        part_path: &part_path,
-                        container: output_container,
-                        abort: &mut finish_abort,
-                    })
-                    .await?
-                } else {
-                    remux_complete_hls_vod_part(ManifestCompleteHlsRemux {
-                        ffmpeg: &ffmpeg,
-                        playlist: &playlist_path,
-                        staging,
-                        destination: &job.dest,
-                        item_id: job.item_id,
-                        part_path: &part_path,
-                        container: output_container,
-                        abort: &mut abort,
-                    })
-                    .await?
-                };
-                match remux_outcome {
-                    ManifestMuxOutcome::Finished => {}
-                    ManifestMuxOutcome::Paused => return Ok(ManifestOutcome::Paused),
-                    ManifestMuxOutcome::Aborted => return Ok(ManifestOutcome::Aborted),
-                }
+        ManifestMuxOutcome::Finished if ffmpeg_exited_before_complete_playlist => {
+            tracing::warn!(
+                item_id = job.item_id,
+                audio = audio.is_some(),
+                "FFmpeg exited on a growing HLS VOD snapshot; remuxing the completed playlists"
+            );
+            let remux_outcome = if abort_done {
+                // Finish was already consumed by the fetch/mux supervisor.
+                // Re-arm it for the completion-only remux.
+                let (finish_sender, mut finish_abort) = tokio::sync::oneshot::channel();
+                let _ = finish_sender.send(crate::video::StopIntent::Finish);
+                remux_complete_hls_vod_part(ManifestCompleteHlsRemux {
+                    ffmpeg: &ffmpeg,
+                    video_playlist: &video_playlist,
+                    audio_playlist: audio_playlist.as_deref(),
+                    staging,
+                    destination: &job.dest,
+                    item_id: job.item_id,
+                    part_path: &part_path,
+                    container: output_container,
+                    timestamp_policy: if audio.is_some() {
+                        InputTimestampPolicy::Preserve
+                    } else {
+                        InputTimestampPolicy::Normalize
+                    },
+                    abort: &mut finish_abort,
+                })
+                .await?
+            } else {
+                remux_complete_hls_vod_part(ManifestCompleteHlsRemux {
+                    ffmpeg: &ffmpeg,
+                    video_playlist: &video_playlist,
+                    audio_playlist: audio_playlist.as_deref(),
+                    staging,
+                    destination: &job.dest,
+                    item_id: job.item_id,
+                    part_path: &part_path,
+                    container: output_container,
+                    timestamp_policy: if audio.is_some() {
+                        InputTimestampPolicy::Preserve
+                    } else {
+                        InputTimestampPolicy::Normalize
+                    },
+                    abort: &mut abort,
+                })
+                .await?
+            };
+            match remux_outcome {
+                ManifestMuxOutcome::Finished => {}
+                ManifestMuxOutcome::Paused => return Ok(ManifestOutcome::Paused),
+                ManifestMuxOutcome::Aborted => return Ok(ManifestOutcome::Aborted),
             }
         }
+        ManifestMuxOutcome::Finished => {}
         ManifestMuxOutcome::Paused => return Ok(ManifestOutcome::Paused),
         ManifestMuxOutcome::Aborted => return Ok(ManifestOutcome::Aborted),
     }
 
     let video = Arc::try_unwrap(video).map_err(|_| {
-        ManifestRunError::Failed("incremental HLS plan still has active readers".to_string())
+        ManifestRunError::Failed("incremental HLS video plan still has active readers".to_string())
     })?;
+    let audio = audio
+        .map(|plan| {
+            Arc::try_unwrap(plan).map_err(|_| {
+                ManifestRunError::Failed(
+                    "incremental HLS audio plan still has active readers".to_string(),
+                )
+            })
+        })
+        .transpose()?;
+    let has_audio = audio.is_some();
     let (finalizer_abort_sender, finalizer_abort) = if abort_done {
         let (sender, receiver) = tokio::sync::oneshot::channel();
         (Some(sender), receiver)
@@ -2784,7 +2981,9 @@ async fn run_incremental_hls_vod(
     };
     let result = finalize_manifest_download(ManifestFinalization {
         job,
-        destination_parts: true,
+        // The output part is already a single muxed file. No per-track
+        // destination parts were created by the incremental worker.
+        destination_parts: false,
         mode: ManifestFinalizationMode::PublishPreMuxedDestinationPart,
         gate,
         abort: finalizer_abort,
@@ -2796,12 +2995,12 @@ async fn run_incremental_hls_vod(
         output_part: part_path,
         tracks: Tracks::Hls {
             video: Box::new(video),
-            audio: None,
+            audio: audio.map(Box::new),
             subtitle: None,
             subtitle_language: None,
             subtitle_is_fmp4: false,
         },
-        has_audio: false,
+        has_audio,
         ffmpeg,
         downloaded: downloaded.as_ref(),
     })
@@ -3030,6 +3229,22 @@ async fn finalize_manifest_download(
         }
         _ => None,
     };
+    if matches!(
+        mode,
+        ManifestFinalizationMode::PublishPreMuxedDestinationPart
+    ) && !destination_parts
+    {
+        // Incremental muxing writes the final media stream directly into the
+        // owned video part; there are no separate audio/video track parts.
+        crate::manifest_destination::verify_owned_part_async(
+            staging.to_path_buf(),
+            job.dest.clone(),
+            job.item_id,
+            TrackKind::Video,
+        )
+        .await
+        .map_err(ManifestRunError::Failed)?;
+    }
     if destination_parts {
         for (track, should_verify) in [
             (TrackKind::Video, true),
@@ -3201,6 +3416,25 @@ async fn finalize_manifest_download(
         }
     }
     let mut destination_parts_cleaned = true;
+    if matches!(
+        mode,
+        ManifestFinalizationMode::PublishPreMuxedDestinationPart
+    ) && !destination_parts
+        && let Err(error) = crate::manifest_destination::remove_owned_part_async(
+            staging.to_path_buf(),
+            job.dest.clone(),
+            job.item_id,
+            TrackKind::Video,
+        )
+        .await
+    {
+        destination_parts_cleaned = false;
+        tracing::warn!(
+            item_id = job.item_id,
+            error = %error,
+            "could not clean up the owned pre-muxed HLS destination part after publication"
+        );
+    }
     if destination_parts {
         let (video_filename, audio_filename) = if matches!(&tracks, Tracks::Hls { .. }) {
             (
@@ -5352,6 +5586,9 @@ async fn run_ffmpeg_with_offsets_timeout(
     if let Some(audio_input) = audio_input {
         if is_hls_playlist_input(audio_input.path) {
             add_hls_staging_options(&mut command);
+            if overwrite_output {
+                add_hls_incremental_reload_options(&mut command);
+            }
         }
         if let Some(offset) = audio_input.timestamp_offset {
             command.arg("-itsoffset").arg(offset);
@@ -6910,6 +7147,408 @@ segment-2.ts
         assert!(
             verification.status.success(),
             "discontinuous fMP4 output is not readable: {}",
+            String::from_utf8_lossy(&verification.stderr)
+        );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn separate_audio_fmp4_vod_grows_one_owned_destination_part_while_fetching() {
+        use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+
+        let ffmpeg = match resolve_manifest_ffmpeg(&[PathBuf::from("/usr/bin")]) {
+            Ok(path) => path,
+            Err(error) if std::env::var_os("GRAB_REQUIRE_FFMPEG_MANIFEST").is_none() => {
+                tracing::debug!(%error, "skipping multi-rendition HLS integration test without FFmpeg");
+                return;
+            }
+            Err(error) => {
+                panic!("FFmpeg is required for the multi-rendition HLS integration test: {error}")
+            }
+        };
+
+        let fixture = tempfile::tempdir().expect("create multi-rendition fixture directory");
+        let video_source = fixture.path().join("video-source");
+        let audio_source = fixture.path().join("audio-source");
+        let served_video = fixture.path().join("served-video");
+        let served_audio = fixture.path().join("served-audio");
+        for directory in [&video_source, &audio_source, &served_video, &served_audio] {
+            std::fs::create_dir(directory).expect("create HLS fixture directory");
+        }
+        let video_playlist_path = video_source.join("playlist.m3u8");
+        let video_generated = tokio::process::Command::new(&ffmpeg)
+            .args([
+                "-hide_banner",
+                "-loglevel",
+                "error",
+                "-f",
+                "lavfi",
+                "-i",
+                "testsrc2=size=96x64:rate=12",
+                "-t",
+                "4",
+                "-an",
+                "-c:v",
+                "mpeg2video",
+                "-pix_fmt",
+                "yuv420p",
+                "-g",
+                "12",
+                "-sc_threshold",
+                "0",
+                "-f",
+                "hls",
+                "-hls_time",
+                "2",
+                "-hls_list_size",
+                "0",
+                "-hls_playlist_type",
+                "vod",
+                "-hls_segment_type",
+                "fmp4",
+                "-hls_fmp4_init_filename",
+                "init.mp4",
+                "-hls_segment_filename",
+            ])
+            .arg(video_source.join("segment-%03d.m4s"))
+            .arg(&video_playlist_path)
+            .output()
+            .await
+            .expect("generate fMP4 video rendition");
+        assert!(
+            video_generated.status.success(),
+            "FFmpeg video fixture generation failed: {}",
+            String::from_utf8_lossy(&video_generated.stderr)
+        );
+
+        let audio_playlist_path = audio_source.join("playlist.m3u8");
+        let audio_generated = tokio::process::Command::new(&ffmpeg)
+            .args([
+                "-hide_banner",
+                "-loglevel",
+                "error",
+                "-f",
+                "lavfi",
+                "-i",
+                "sine=frequency=1000:sample_rate=48000",
+                "-t",
+                "4",
+                "-vn",
+                "-c:a",
+                "aac",
+                "-b:a",
+                "96k",
+                "-f",
+                "hls",
+                "-hls_time",
+                "2",
+                "-hls_list_size",
+                "0",
+                "-hls_playlist_type",
+                "vod",
+                "-hls_segment_type",
+                "fmp4",
+                "-hls_fmp4_init_filename",
+                "init.mp4",
+                "-hls_segment_filename",
+            ])
+            .arg(audio_source.join("segment-%03d.m4s"))
+            .arg(&audio_playlist_path)
+            .output()
+            .await
+            .expect("generate fMP4 audio rendition");
+        assert!(
+            audio_generated.status.success(),
+            "FFmpeg audio fixture generation failed: {}",
+            String::from_utf8_lossy(&audio_generated.stderr)
+        );
+
+        let video_playlist = std::fs::read_to_string(&video_playlist_path)
+            .expect("read generated fMP4 video playlist");
+        let second_video_segment = video_playlist
+            .rfind("#EXTINF:")
+            .expect("video fixture has a second segment");
+        let mut discontinuous_video_playlist = video_playlist;
+        discontinuous_video_playlist.insert_str(second_video_segment, "#EXT-X-DISCONTINUITY\n");
+        std::fs::write(&video_playlist_path, &discontinuous_video_playlist)
+            .expect("add a video discontinuity before the final segment");
+
+        let mut video_plan = crate::manifest::plan_hls_media_playlist(
+            "https://cdn.example.test/video/playlist.m3u8",
+            discontinuous_video_playlist.as_bytes(),
+        )
+        .expect("plan discontinuous fMP4 video rendition");
+        let mut audio_plan = crate::manifest::plan_hls_media_playlist(
+            "https://cdn.example.test/audio/playlist.m3u8",
+            &std::fs::read(&audio_playlist_path).expect("read generated fMP4 audio playlist"),
+        )
+        .expect("plan fMP4 audio rendition");
+        assert!(
+            video_plan.is_incremental_clear_vod_candidate(),
+            "the video discontinuity must select playlist-aware muxing"
+        );
+        assert!(
+            audio_plan.is_destination_assemblable_candidate(),
+            "the simple audio rendition is still eligible for ordered resource fetching"
+        );
+        assert!(
+            Tracks::Hls {
+                video: Box::new(video_plan.clone()),
+                audio: Some(Box::new(audio_plan.clone())),
+                subtitle: None,
+                subtitle_language: None,
+                subtitle_is_fmp4: false,
+            }
+            .uses_incremental_hls_vod(),
+            "a complex video rendition and a simple separate audio rendition must use incremental muxing"
+        );
+
+        let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0))
+            .await
+            .expect("bind multi-rendition fixture server");
+        let address = listener
+            .local_addr()
+            .expect("multi-rendition fixture server address");
+        let final_video_filename = video_plan
+            .resources
+            .iter()
+            .rev()
+            .find(|resource| resource.kind == crate::manifest::HlsResourceKind::Segment)
+            .map(|resource| resource.filename.clone())
+            .expect("video fixture has a final media segment");
+        let final_video_path = format!("/video/{final_video_filename}");
+
+        for resource in &mut video_plan.resources {
+            let source_name = resource
+                .url
+                .path()
+                .rsplit('/')
+                .next()
+                .filter(|name| !name.is_empty())
+                .expect("video resource has a fixture filename")
+                .to_string();
+            std::fs::copy(
+                video_source.join(source_name),
+                served_video.join(&resource.filename),
+            )
+            .expect("copy video resource under its localized staging filename");
+            resource.url = Url::parse(&format!("http://{address}/video/{}", resource.filename))
+                .expect("set local video resource URL");
+        }
+        for resource in &mut audio_plan.resources {
+            let source_name = resource
+                .url
+                .path()
+                .rsplit('/')
+                .next()
+                .filter(|name| !name.is_empty())
+                .expect("audio resource has a fixture filename")
+                .to_string();
+            std::fs::copy(
+                audio_source.join(source_name),
+                served_audio.join(&resource.filename),
+            )
+            .expect("copy audio resource under its localized staging filename");
+            resource.url = Url::parse(&format!("http://{address}/audio/{}", resource.filename))
+                .expect("set local audio resource URL");
+        }
+        let request_count = video_plan.resources.len() + audio_plan.resources.len();
+        let release_final_video = Arc::new(tokio::sync::Notify::new());
+        let final_video_requested = Arc::new(tokio::sync::Notify::new());
+        let server_release = Arc::clone(&release_final_video);
+        let server_requested = Arc::clone(&final_video_requested);
+        let server_final_path = final_video_path.clone();
+        let server_video_root = served_video.clone();
+        let server_audio_root = served_audio.clone();
+        let server = tokio::spawn(async move {
+            let mut responses = Vec::with_capacity(request_count);
+            for _ in 0..request_count {
+                let (mut socket, _) = listener
+                    .accept()
+                    .await
+                    .expect("accept multi-rendition HLS resource request");
+                let video_root = server_video_root.clone();
+                let audio_root = server_audio_root.clone();
+                let release = Arc::clone(&server_release);
+                let requested = Arc::clone(&server_requested);
+                let final_path = server_final_path.clone();
+                responses.push(tokio::spawn(async move {
+                    let mut request = [0_u8; 1024];
+                    let count = socket
+                        .read(&mut request)
+                        .await
+                        .expect("read multi-rendition HLS request");
+                    let request = String::from_utf8_lossy(&request[..count]);
+                    let path = request.split_ascii_whitespace().nth(1).unwrap_or("/");
+                    if path == final_path.as_str() {
+                        requested.notify_one();
+                        release.notified().await;
+                    }
+                    let (root, name) = if let Some(name) = path.strip_prefix("/video/") {
+                        (video_root, name)
+                    } else if let Some(name) = path.strip_prefix("/audio/") {
+                        (audio_root, name)
+                    } else {
+                        panic!("unexpected multi-rendition resource path: {path}");
+                    };
+                    let payload = tokio::fs::read(root.join(name))
+                        .await
+                        .expect("read served multi-rendition fixture resource");
+                    let header = format!(
+                        "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                        payload.len()
+                    );
+                    socket
+                        .write_all(header.as_bytes())
+                        .await
+                        .expect("write multi-rendition response header");
+                    socket
+                        .write_all(&payload)
+                        .await
+                        .expect("write multi-rendition response body");
+                }));
+            }
+            for response in responses {
+                response.await.expect("join multi-rendition response task");
+            }
+        });
+
+        let client = reqwest::Client::builder()
+            .no_proxy()
+            .build()
+            .expect("build multi-rendition fixture client");
+        let staging = tempfile::tempdir().expect("create multi-rendition HLS staging directory");
+        let destination_dir =
+            tempfile::tempdir().expect("create multi-rendition destination directory");
+        let destination = destination_dir.path().join("separate-audio-vod.mp4");
+        let item_id = 92;
+        crate::manifest_destination::ensure_plan(
+            staging.path(),
+            &destination,
+            item_id,
+            true,
+            false,
+        )
+        .expect("persist multi-rendition destination ownership plan");
+        let part_path = crate::manifest_destination::part_path_async(
+            staging.path().to_path_buf(),
+            destination.clone(),
+            item_id,
+            TrackKind::Video,
+        )
+        .await
+        .expect("resolve combined destination partial");
+        let video_dir = staging.path().join("video");
+        let audio_dir = staging.path().join("audio");
+        tokio::fs::create_dir(&video_dir)
+            .await
+            .expect("create video staging directory");
+        tokio::fs::create_dir(&audio_dir)
+            .await
+            .expect("create audio staging directory");
+
+        let job = ManifestJob {
+            item_id,
+            source: crate::media_types::ManifestSource {
+                url: "https://cdn.example.test/master.m3u8".to_string(),
+                kind: ManifestKind::Hls,
+                representation_key: "hls-variant".into(),
+                output_container: Some(ManifestContainer::Mp4),
+                audio_key: Some("hls-audio".into()),
+                subtitle_key: None,
+                subtitle_language: None,
+            },
+            dest: destination.clone(),
+            proxy: None,
+            cookies_browser: "none".to_string(),
+            connections: 1,
+            embed_subs: false,
+        };
+        let gate = crate::attempt_gate::AttemptGate::new();
+        let downloaded = Arc::new(AtomicU64::new(0));
+        let (stop_sender, abort) = tokio::sync::oneshot::channel();
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+        let task_staging = staging.path().to_path_buf();
+        let task_dest_dir = destination_dir.path().to_path_buf();
+        let task_video_dir = video_dir;
+        let task_audio_dir = audio_dir;
+        let task_client = client;
+        let task_ffmpeg = ffmpeg.clone();
+        let task_downloaded = Arc::clone(&downloaded);
+        let download_task = tokio::spawn(async move {
+            run_incremental_hls_vod(ManifestIncrementalHlsVod {
+                job: &job,
+                gate,
+                abort,
+                tx: &tx,
+                staging: &task_staging,
+                dest_dir: &task_dest_dir,
+                video_dir: &task_video_dir,
+                audio_dir: &task_audio_dir,
+                tracks: Tracks::Hls {
+                    video: Box::new(video_plan),
+                    audio: Some(Box::new(audio_plan)),
+                    subtitle: None,
+                    subtitle_language: None,
+                    subtitle_is_fmp4: false,
+                },
+                ffmpeg: task_ffmpeg,
+                downloaded: task_downloaded,
+                connections: 1,
+                client: &task_client,
+            })
+            .await
+        });
+
+        tokio::time::timeout(Duration::from_secs(10), final_video_requested.notified())
+            .await
+            .expect("the final video segment request should start after the first video segment");
+        assert!(
+            !download_task.is_finished(),
+            "the combined download must remain active while the final video segment is blocked"
+        );
+        let initial_growth = tokio::time::timeout(Duration::from_secs(15), async {
+            loop {
+                let size = tokio::fs::metadata(&part_path)
+                    .await
+                    .expect("stat combined destination part")
+                    .len();
+                if size > 0 {
+                    break size;
+                }
+                tokio::time::sleep(Duration::from_millis(25)).await;
+            }
+        })
+        .await
+        .expect("FFmpeg should write the combined destination part before the final video segment is released");
+        assert!(initial_growth > 0);
+
+        release_final_video.notify_one();
+        let outcome = download_task
+            .await
+            .expect("join separate-audio HLS VOD runner")
+            .expect("separate-audio HLS VOD runner should finish");
+        assert!(
+            matches!(outcome, ManifestOutcome::Finished(size) if size > 0),
+            "expected publication of a non-empty combined stream, got {outcome:?}"
+        );
+        drop(stop_sender);
+        server.await.expect("multi-rendition fixture server task");
+
+        assert!(
+            tokio::fs::symlink_metadata(&part_path).await.is_err(),
+            "successful publication must move the owned combined part into place"
+        );
+        let verification = tokio::process::Command::new(&ffmpeg)
+            .args(["-hide_banner", "-loglevel", "error", "-i"])
+            .arg(&destination)
+            .args(["-map", "0:v:0", "-map", "0:a:0", "-f", "null", "-"])
+            .output()
+            .await
+            .expect("verify published audio/video HLS output");
+        assert!(
+            verification.status.success(),
+            "published output must contain readable video and audio: {}",
             String::from_utf8_lossy(&verification.stderr)
         );
     }

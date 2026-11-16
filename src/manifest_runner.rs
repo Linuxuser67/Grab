@@ -6595,8 +6595,8 @@ segment-2.ts
             resource.url = Url::parse(&format!("http://{address}/{name}"))
                 .expect("set local AES-128 fixture resource URL");
         }
-        let second_segment_path = second_segment_path
-            .expect("encrypted HLS fixture must have a second media segment");
+        let second_segment_path =
+            second_segment_path.expect("encrypted HLS fixture must have a second media segment");
         let final_segment_path =
             final_segment_path.expect("encrypted HLS fixture must have a final segment");
         let request_count = plan.resources.len();

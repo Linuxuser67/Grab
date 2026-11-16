@@ -2699,12 +2699,14 @@ async fn run_incremental_hls_vod(
                         first_segment_ready[index] = true;
                     }
                     Some(Ok((_, Ok(false)))) => {
-                        return Ok(match stop_intent.unwrap_or(crate::video::StopIntent::Pause) {
-                            crate::video::StopIntent::Pause | crate::video::StopIntent::Finish => {
-                                ManifestOutcome::Paused
-                            }
-                            crate::video::StopIntent::Discard => ManifestOutcome::Aborted,
-                        });
+                        return Ok(
+                            match stop_intent.unwrap_or(crate::video::StopIntent::Pause) {
+                                crate::video::StopIntent::Pause | crate::video::StopIntent::Finish => {
+                                    ManifestOutcome::Paused
+                                }
+                                crate::video::StopIntent::Discard => ManifestOutcome::Aborted,
+                            },
+                        );
                     }
                     Some(Ok((_, Err(error)))) => return Err(error),
                     Some(Err(error)) => {

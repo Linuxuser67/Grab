@@ -6447,14 +6447,14 @@ segment-2.m4s
     fn hls_subtitle_playlist_format_distinguishes_webvtt_from_imsc1() {
         let webvtt = crate::manifest::plan_hls_media_playlist(
             "https://cdn.example.test/subtitles/en.m3u8",
-            b"#EXTM3U\\n#EXT-X-TARGETDURATION:2\\n#EXTINF:2,\\nen-0.vtt\\n#EXT-X-ENDLIST\\n",
+            b"#EXTM3U\n#EXT-X-TARGETDURATION:2\n#EXTINF:2,\nen-0.vtt\n#EXT-X-ENDLIST\n",
         )
         .expect("plan a WebVTT subtitle playlist");
         assert!(!hls_subtitle_is_imsc1(&webvtt));
 
         let imsc1 = crate::manifest::plan_hls_media_playlist(
             "https://cdn.example.test/subtitles/en.m3u8",
-            b"#EXTM3U\\n#EXT-X-VERSION:7\\n#EXT-X-TARGETDURATION:2\\n#EXT-X-MAP:URI=\\\"init.mp4\\\"\\n#EXTINF:2,\\nen-0.m4s\\n#EXT-X-ENDLIST\\n",
+            b"#EXTM3U\n#EXT-X-VERSION:7\n#EXT-X-TARGETDURATION:2\n#EXT-X-MAP:URI=\"init.mp4\"\n#EXTINF:2,\nen-0.m4s\n#EXT-X-ENDLIST\n",
         )
         .expect("plan an IMSC1 fMP4 subtitle playlist");
         assert!(hls_subtitle_is_imsc1(&imsc1));

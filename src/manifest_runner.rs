@@ -6552,6 +6552,328 @@ segment-2.ts
         assert_aes128_hls_vod_output("mkv", false).await;
     }
 
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn discontinuous_clear_fmp4_vod_grows_owned_destination_part_while_fetching() {
+        use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+
+        let ffmpeg = match resolve_manifest_ffmpeg(&[PathBuf::from("/usr/bin")]) {
+            Ok(path) => path,
+            Err(error) if std::env::var_os("GRAB_REQUIRE_FFMPEG_MANIFEST").is_none() => {
+                tracing::debug!(%error, "skipping incremental fMP4 HLS integration test without FFmpeg");
+                return;
+            }
+            Err(error) => {
+                panic!("FFmpeg is required for the incremental fMP4 HLS integration test: {error}")
+            }
+        };
+
+        let fixture = tempfile::tempdir().expect("create fMP4 HLS fixture directory");
+        let playlist_path = fixture.path().join("playlist.m3u8");
+        let generated = tokio::process::Command::new(&ffmpeg)
+            .args([
+                "-hide_banner",
+                "-loglevel",
+                "error",
+                "-f",
+                "lavfi",
+                "-i",
+                "testsrc2=size=96x64:rate=12",
+                "-t",
+                "4",
+                "-an",
+                "-c:v",
+                "libx264",
+                "-pix_fmt",
+                "yuv420p",
+                "-g",
+                "12",
+                "-sc_threshold",
+                "0",
+                "-f",
+                "hls",
+                "-hls_time",
+                "2",
+                "-hls_list_size",
+                "0",
+                "-hls_playlist_type",
+                "vod",
+                "-hls_segment_type",
+                "fmp4",
+                "-hls_fmp4_init_filename",
+                "init.mp4",
+                "-hls_segment_filename",
+            ])
+            .arg(fixture.path().join("segment-%03d.m4s"))
+            .arg(&playlist_path)
+            .output()
+            .await
+            .expect("generate fMP4 HLS fixture");
+        assert!(
+            generated.status.success(),
+            "FFmpeg fMP4 fixture generation failed: {}",
+            String::from_utf8_lossy(&generated.stderr)
+        );
+
+        let playlist = std::fs::read_to_string(&playlist_path)
+            .expect("read generated fMP4 HLS playlist");
+        let second_segment = playlist
+            .rfind("#EXTINF:")
+            .expect("fMP4 fixture has a second segment");
+        let mut discontinuous_playlist = playlist;
+        discontinuous_playlist.insert_str(second_segment, "#EXT-X-DISCONTINUITY\n");
+        std::fs::write(&playlist_path, &discontinuous_playlist)
+            .expect("add a discontinuity before the final fMP4 segment");
+
+        let mut plan = crate::manifest::plan_hls_media_playlist(
+            "https://cdn.example.test/playlist.m3u8",
+            discontinuous_playlist.as_bytes(),
+        )
+        .expect("plan discontinuous fMP4 HLS VOD");
+        assert!(
+            !plan.is_destination_assemblable_candidate(),
+            "the discontinuity must keep this out of direct byte concatenation"
+        );
+        assert!(plan.is_incremental_clear_vod_candidate());
+        assert!(plan.segment_count() >= 2);
+
+        let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0))
+            .await
+            .expect("bind fMP4 fixture server");
+        let address = listener.local_addr().expect("fMP4 fixture server address");
+        let served_root = fixture.path().join("served");
+        std::fs::create_dir(&served_root).expect("create served resource directory");
+        let mut final_segment_path = None;
+        for resource in &mut plan.resources {
+            let source_name = resource
+                .url
+                .path()
+                .rsplit('/')
+                .next()
+                .filter(|name| !name.is_empty())
+                .expect("planned fMP4 resource has a filename")
+                .to_string();
+            std::fs::copy(
+                fixture.path().join(&source_name),
+                served_root.join(&resource.filename),
+            )
+            .expect("copy fixture resource under its localized filename");
+            if resource.kind == crate::manifest::HlsResourceKind::Segment
+                && resource.filename
+                    == plan
+                        .resources
+                        .iter()
+                        .rev()
+                        .find(|candidate| {
+                            candidate.kind == crate::manifest::HlsResourceKind::Segment
+                        })
+                        .expect("final fMP4 segment resource")
+                        .filename
+            {
+                final_segment_path = Some(format!("/{}", resource.filename));
+            }
+            resource.url = Url::parse(&format!("http://{address}/{}", resource.filename))
+                .expect("set local fMP4 resource URL");
+        }
+        let final_segment_path =
+            final_segment_path.expect("fMP4 fixture has a final media segment");
+        let request_count = plan.resources.len();
+        assert_eq!(request_count, 3, "one init map and two media segments");
+
+        let release_final_segment = Arc::new(tokio::sync::Notify::new());
+        let final_segment_requested = Arc::new(tokio::sync::Notify::new());
+        let server_release = Arc::clone(&release_final_segment);
+        let server_requested = Arc::clone(&final_segment_requested);
+        let server_final_path = final_segment_path.clone();
+        let server_root = served_root.clone();
+        let server = tokio::spawn(async move {
+            let mut responses = Vec::with_capacity(request_count);
+            for _ in 0..request_count {
+                let (mut socket, _) = listener
+                    .accept()
+                    .await
+                    .expect("accept fMP4 resource request");
+                let root = server_root.clone();
+                let release = Arc::clone(&server_release);
+                let requested = Arc::clone(&server_requested);
+                let final_path = server_final_path.clone();
+                responses.push(tokio::spawn(async move {
+                    let mut request = [0_u8; 1024];
+                    let count = socket
+                        .read(&mut request)
+                        .await
+                        .expect("read fMP4 resource request");
+                    let request = String::from_utf8_lossy(&request[..count]);
+                    let path = request.split_ascii_whitespace().nth(1).unwrap_or("/");
+                    if path == final_path {
+                        requested.notify_one();
+                        release.notified().await;
+                    }
+                    let name = path.trim_start_matches('/');
+                    let payload = tokio::fs::read(root.join(name))
+                        .await
+                        .expect("read served fMP4 fixture resource");
+                    let header = format!(
+                        "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                        payload.len()
+                    );
+                    socket
+                        .write_all(header.as_bytes())
+                        .await
+                        .expect("write fMP4 response header");
+                    socket
+                        .write_all(&payload)
+                        .await
+                        .expect("write fMP4 response body");
+                }));
+            }
+            for response in responses {
+                response.await.expect("join fMP4 response task");
+            }
+        });
+
+        let client = reqwest::Client::builder()
+            .no_proxy()
+            .build()
+            .expect("build fMP4 fixture client");
+        let staging = tempfile::tempdir().expect("create fMP4 HLS staging directory");
+        let destination_dir = tempfile::tempdir().expect("create fMP4 HLS destination directory");
+        let destination = destination_dir.path().join("discontinuous-vod.mp4");
+        let item_id = 91;
+        crate::manifest_destination::ensure_plan(
+            staging.path(),
+            &destination,
+            item_id,
+            false,
+            false,
+        )
+        .expect("persist fMP4 destination ownership plan");
+        let part_path = crate::manifest_destination::part_path_async(
+            staging.path().to_path_buf(),
+            destination.clone(),
+            item_id,
+            TrackKind::Video,
+        )
+        .await
+        .expect("resolve owned fMP4 destination part");
+        let video_dir = staging.path().join("video");
+        let audio_dir = staging.path().join("audio");
+        tokio::fs::create_dir(&video_dir)
+            .await
+            .expect("create fMP4 video staging directory");
+        tokio::fs::create_dir(&audio_dir)
+            .await
+            .expect("create fMP4 audio staging directory");
+
+        let job = ManifestJob {
+            item_id,
+            source: crate::media_types::ManifestSource {
+                url: "https://cdn.example.test/playlist.m3u8".to_string(),
+                kind: ManifestKind::Hls,
+                representation_key: "hls-media".into(),
+                output_container: Some(ManifestContainer::Mp4),
+                audio_key: None,
+                subtitle_key: None,
+                subtitle_language: None,
+            },
+            dest: destination.clone(),
+            proxy: None,
+            cookies_browser: "none".to_string(),
+            connections: 4,
+            embed_subs: false,
+        };
+        let gate = crate::attempt_gate::AttemptGate::new();
+        let downloaded = Arc::new(AtomicU64::new(0));
+        let (stop_sender, abort) = tokio::sync::oneshot::channel();
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+        let task_staging = staging.path().to_path_buf();
+        let task_dest_dir = destination_dir.path().to_path_buf();
+        let task_video_dir = video_dir;
+        let task_audio_dir = audio_dir;
+        let task_client = client;
+        let task_ffmpeg = ffmpeg.clone();
+        let task_downloaded = Arc::clone(&downloaded);
+        let download_task = tokio::spawn(async move {
+            run_incremental_hls_vod(ManifestIncrementalHlsVod {
+                job: &job,
+                gate,
+                abort,
+                tx: &tx,
+                staging: &task_staging,
+                dest_dir: &task_dest_dir,
+                video_dir: &task_video_dir,
+                audio_dir: &task_audio_dir,
+                tracks: Tracks::Hls {
+                    video: Box::new(plan),
+                    audio: None,
+                    subtitle: None,
+                    subtitle_language: None,
+                    subtitle_is_fmp4: false,
+                },
+                ffmpeg: task_ffmpeg,
+                downloaded: task_downloaded,
+                connections: 1,
+                client: &task_client,
+            })
+            .await
+        });
+
+        tokio::time::timeout(
+            std::time::Duration::from_secs(10),
+            final_segment_requested.notified(),
+        )
+        .await
+        .expect("the final fMP4 segment request should start while the first segment is muxed");
+        assert!(
+            !download_task.is_finished(),
+            "the final fMP4 segment must remain in flight while FFmpeg consumes the growing playlist"
+        );
+        let initial_growth = tokio::time::timeout(std::time::Duration::from_secs(15), async {
+            loop {
+                let size = tokio::fs::metadata(&part_path)
+                    .await
+                    .expect("stat fMP4 destination part")
+                    .len();
+                if size > 0 {
+                    break size;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+            }
+        })
+        .await
+        .expect("FFmpeg should write the destination part before the final segment is released");
+        assert!(initial_growth > 0);
+
+        release_final_segment.notify_one();
+        let outcome = download_task
+            .await
+            .expect("join incremental fMP4 HLS VOD runner")
+            .expect("incremental fMP4 HLS VOD runner should finish");
+        assert!(
+            matches!(outcome, ManifestOutcome::Finished(size) if size > 0),
+            "expected publication of a non-empty fMP4 stream, got {outcome:?}"
+        );
+        drop(stop_sender);
+        server.await.expect("fMP4 fixture server task");
+
+        assert!(
+            tokio::fs::symlink_metadata(&part_path).await.is_err(),
+            "successful publication must move the owned fMP4 destination part into place"
+        );
+        let verification = tokio::process::Command::new(&ffmpeg)
+            .args(["-hide_banner", "-loglevel", "error", "-i"])
+            .arg(&destination)
+            .args(["-f", "null", "-"])
+            .output()
+            .await
+            .expect("verify published discontinuous fMP4 output");
+        assert!(
+            verification.status.success(),
+            "discontinuous fMP4 output is not readable: {}",
+            String::from_utf8_lossy(&verification.stderr)
+        );
+    }
+
     #[tokio::test]
     async fn static_hls_fmp4_fragments_grow_the_owned_destination_part_in_order() {
         use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};

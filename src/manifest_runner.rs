@@ -2574,6 +2574,7 @@ async fn run_incremental_aes128_hls_vod(
     let output_container = manifest_output_container(&job.dest)?;
     let ffmpeg_path = ffmpeg.clone();
     let playlist_path = video_dir.join("local.m3u8");
+    let ffmpeg_playlist_path = playlist_path.clone();
     let output_label = part_path.clone();
     let output_file = output_file.into_std().await;
     let mut ffmpeg_abort = ffmpeg_abort_rx;
@@ -2581,7 +2582,7 @@ async fn run_incremental_aes128_hls_vod(
         run_ffmpeg_with_offsets_timeout(
             &ffmpeg_path,
             FfmpegInput {
-                path: &playlist_path,
+                path: &ffmpeg_playlist_path,
                 timestamp_offset: None,
             },
             None,

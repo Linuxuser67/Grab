@@ -2794,7 +2794,7 @@ async fn run_incremental_hls_vod(
             joined = fetchers.join_next(), if !fetchers.is_empty() => {
                 match joined {
                     Some(Ok((index, result))) => {
-                        let should_stop = !matches!(result, Ok(true));
+                        let should_stop = !matches!(&result, Ok(true));
                         fetch_results[index] = Some(result);
                         if should_stop {
                             if let Some(senders) = fetch_abort_tx.as_mut() {

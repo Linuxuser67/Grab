@@ -2408,7 +2408,8 @@ async fn run_incremental_aes128_hls_vod(
     let (first_segment_tx, mut first_segment_rx) = tokio::sync::oneshot::channel();
     let (complete_tx, mut complete_rx) = tokio::sync::oneshot::channel();
     let fetch_client = client.clone();
-    let fetch_plan = video.clone();
+    let video = Arc::from(video);
+    let fetch_plan = Arc::clone(&video);
     let fetch_directory = video_dir.to_path_buf();
     let fetch_tx = tx.clone();
     let fetch_downloaded = Arc::clone(&downloaded);
@@ -2629,6 +2630,9 @@ async fn run_incremental_aes128_hls_vod(
         }
     }
 
+    let video = Arc::try_unwrap(video).map_err(|_| {
+        ManifestRunError::Failed("incremental HLS plan still has active readers".to_string())
+    })?;
     let (finalizer_abort_sender, finalizer_abort) = if abort_done {
         let (sender, receiver) = tokio::sync::oneshot::channel();
         (Some(sender), receiver)
@@ -2648,7 +2652,7 @@ async fn run_incremental_aes128_hls_vod(
         audio_dir,
         output_part,
         tracks: Tracks::Hls {
-            video,
+            video: Box::new(video),
             audio: None,
             subtitle: None,
             subtitle_language: None,
@@ -3482,16 +3486,10 @@ async fn fetch_hls_resources_incrementally(
 
     let result = async {
         let jobs = futures_util::stream::iter(resources.into_iter().enumerate().map(
-            |(index, resource)| {
-                let client = client.clone();
-                let directory = directory.to_path_buf();
-                let tx = tx.clone();
-                let downloaded = Arc::clone(downloaded);
-                async move {
-                    fetch_resource(&client, resource, &directory, &tx, &downloaded)
-                        .await
-                        .map(|_| index)
-                }
+            |(index, resource)| async move {
+                fetch_resource(client, resource, directory, tx, downloaded.as_ref())
+                    .await
+                    .map(|_| index)
             },
         ))
         .buffer_unordered(connections.clamp(1, MAX_RESOURCE_CONNECTIONS));

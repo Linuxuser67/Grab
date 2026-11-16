@@ -2147,7 +2147,7 @@ pub(crate) async fn run_manifest_download(
     };
     let mut _finish_stop_sender = None;
     if !live_hls && !live_dash && !has_audio && tracks.uses_incremental_aes128_vod() {
-        return run_incremental_aes128_hls_vod(ManifestIncrementalHlsVod {
+        let result = run_incremental_aes128_hls_vod(ManifestIncrementalHlsVod {
             job: &job,
             gate,
             abort,
@@ -2164,6 +2164,18 @@ pub(crate) async fn run_manifest_download(
             client: &client,
         })
         .await;
+        if matches!(&result, Err(ManifestRunError::Unsupported(_))) {
+            cleanup_manifest_destination_part_if_present(
+                &staging,
+                &job.dest,
+                job.item_id,
+                &video_dir,
+                TrackKind::Video,
+                TrackKind::Video.part_filename(TrackFileFormat::Ts),
+            )
+            .await?;
+        }
+        return result;
     }
     let static_destination_parts = !live_hls && !live_dash && tracks.uses_destination_parts();
     let mut live_destination_parts = live_dash;
@@ -2474,7 +2486,7 @@ async fn run_incremental_aes128_hls_vod(
                     crate::video::StopIntent::Discard => ManifestOutcome::Aborted,
                 });
             }
-            Ok(Err(error)) => return Err(ManifestRunError::Failed(error.to_string())),
+            Ok(Err(error)) => return Err(error),
             Err(error) => {
                 return Err(ManifestRunError::Failed(format!(
                     "Incremental HLS resource task failed: {error}"
@@ -2653,7 +2665,7 @@ async fn run_incremental_aes128_hls_vod(
         dest_dir,
         video_dir,
         audio_dir,
-        output_part,
+        output_part: part_path,
         tracks: Tracks::Hls {
             video: Box::new(video),
             audio: None,

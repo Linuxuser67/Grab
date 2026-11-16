@@ -1322,7 +1322,12 @@ impl DownloadManager {
                                         error = %error,
                                         "could not truncate segmented file before single-stream fallback"
                                     );
-                                    // Leave the bitmap intact and let the pump mark the row failed.
+                                    // set_len may already have shortened the file before sync_all
+                                    // failed; keeping bits beyond the prefix could complete a
+                                    // short/sparse file on a later resume. Drop the bitmap.
+                                    this.segment_state.borrow_mut().remove(&id);
+                                    this.persist_queue();
+                                    // Leave ack unsent: the worker sees the closed channel and stops.
                                     break;
                                 }
                                 Err(_) => {
@@ -1330,7 +1335,9 @@ impl DownloadManager {
                                         path = %path.display(),
                                         "segmented-file truncation worker failed before single-stream fallback"
                                     );
-                                    // Leave the bitmap intact and let the pump mark the row failed.
+                                    this.segment_state.borrow_mut().remove(&id);
+                                    this.persist_queue();
+                                    // Leave ack unsent: the worker sees the closed channel and stops.
                                     break;
                                 }
                             }

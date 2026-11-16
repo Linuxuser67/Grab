@@ -275,15 +275,23 @@ async fn single_loop(
                 ctx.tx.send(EngineMsg::Finished { size }).ok();
                 return;
             }
-            Err(e) => {
+            Err(failure) => {
+                let message = match failure {
+                    // A changed object makes the partial bytes and any bitmap describe a dead version.
+                    AttemptFail::Changed(e) => {
+                        ctx.tx.send(EngineMsg::FailedVersion(e)).ok();
+                        return;
+                    }
+                    AttemptFail::Retryable(e) | AttemptFail::Throttled(e) => e,
+                };
                 // A destination this transfer cannot prove it owns is terminal; retries must not adopt it.
-                if e == DEST_EXISTS {
-                    ctx.tx.send(EngineMsg::Failed(e)).ok();
+                if message == DEST_EXISTS {
+                    ctx.tx.send(EngineMsg::Failed(message)).ok();
                     return;
                 }
                 *tries -= 1;
                 if *tries <= 0 {
-                    ctx.tx.send(EngineMsg::Failed(e)).ok();
+                    ctx.tx.send(EngineMsg::Failed(message)).ok();
                     return;
                 }
                 // Retryable transport failures use capped jittered backoff to spread reconnects.
@@ -292,6 +300,21 @@ async fn single_loop(
             }
         }
     }
+}
+
+const FALLBACK_ACK_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// Wait for the UI to confirm that the segmented file was truncated and the bitmap dropped.
+/// A closed ack (the handler drops `ack` on failure or `break`) or a stall must stop the
+/// worker: continuing single-stream after the row was failed leaves a detached writer behind.
+async fn wait_for_fallback_ack(
+    ack: &mut tokio::sync::mpsc::Receiver<()>,
+    timeout: Duration,
+) -> bool {
+    matches!(
+        tokio::time::timeout(timeout, ack.recv()).await,
+        Ok(Some(()))
+    )
 }
 
 /// Retry loop around segmented attempts (each retry refetches only still-missing pieces).
@@ -324,8 +347,7 @@ async fn multi_loop(
                 let (ack_tx, mut ack_rx) = tokio::sync::mpsc::channel::<()>(1);
                 ctx.tx.send(EngineMsg::FallbackSingle { ack: ack_tx }).ok();
                 // Wait for the UI thread to truncate + drop the bitmap before single-stream resumes.
-                let _ = ack_rx.recv().await;
-                return true;
+                return wait_for_fallback_ack(&mut ack_rx, FALLBACK_ACK_TIMEOUT).await;
             }
             Err(AttemptFail::Changed(e)) => {
                 // The probed object is gone: retries can never succeed, so fail terminally and let a later retry start fresh.
@@ -527,13 +549,13 @@ async fn attempt_once(
     ctx: &FetchCtx,
     expected_total: Option<u64>,
     claim: &mut DestinationClaim,
-) -> Result<(), String> {
+) -> Result<(), AttemptFail> {
     // At most one restart: a 416 may only trigger a single reset-and-retry.
     let mut restarted = false;
     loop {
         let start = match tokio::fs::symlink_metadata(&ctx.dest).await {
             Ok(metadata) if metadata.file_type().is_symlink() || !metadata.is_file() => {
-                return Err(DEST_EXISTS.to_string());
+                return Err(AttemptFail::Retryable(DEST_EXISTS.to_string()));
             }
             Ok(metadata) => {
                 claim.verify_metadata(&metadata)?;
@@ -541,12 +563,16 @@ async fn attempt_once(
             }
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
                 if claim.is_claimed() {
-                    return Err(DESTINATION_DISAPPEARED.to_string());
+                    return Err(AttemptFail::Retryable(DESTINATION_DISAPPEARED.to_string()));
                 }
                 0
             }
             // A stat failure is not an empty file: starting over would truncate bytes we may not own.
-            Err(error) => return Err(format!("Cannot inspect file: {error}")),
+            Err(error) => {
+                return Err(AttemptFail::Retryable(format!(
+                    "Cannot inspect file: {error}"
+                )));
+            }
         };
 
         let mut req = stamp_request(ctx.client.get(&ctx.url), &ctx.user_agent, &ctx.url);
@@ -596,7 +622,9 @@ async fn attempt_once(
                 }
             }
             if restarted {
-                return Err(gettext("Server rejects range requests"));
+                return Err(AttemptFail::Retryable(gettext(
+                    "Server rejects range requests",
+                )));
             }
 
             // Reset through the already-owned file descriptor. Never unlink a
@@ -607,17 +635,17 @@ async fn attempt_once(
                     .await
                     .map_err(|error| format!("Cannot reset partial download: {error}"))?;
             } else if tokio::fs::symlink_metadata(&ctx.dest).await.is_ok() {
-                return Err(DEST_EXISTS.to_string());
+                return Err(AttemptFail::Retryable(DEST_EXISTS.to_string()));
             }
             restarted = true;
             continue;
         }
         if !status.is_success() {
-            return Err(format!(
+            return Err(AttemptFail::Retryable(format!(
                 "HTTP {}: {}",
                 status.as_u16(),
                 status.canonical_reason().unwrap_or("error")
-            ));
+            )));
         }
         send_last_modified(&ctx.tx, &resp);
         // Keep one validator per transfer generation: a matching If-Range response
@@ -633,6 +661,15 @@ async fn attempt_once(
 
         let partial = start > 0 && status == reqwest::StatusCode::PARTIAL_CONTENT;
         if partial {
+            // A server may ignore If-Range and serve 206 for a changed object.
+            // Without this check the response would be appended to bytes from
+            // the old version, silently splicing two different files together.
+            if let Some(session) = ctx.if_range.get() {
+                let (_, etag, last_modified) = response_validators(&resp);
+                if validator_changed(session, etag.as_deref(), last_modified.as_deref()) {
+                    return Err(AttemptFail::Changed(gettext("File changed on server")));
+                }
+            }
             // A 206 must start at our requested offset; accepting another range
             // would splice unrelated bytes into the owned partial file.
             let cr = resp
@@ -640,7 +677,9 @@ async fn attempt_once(
                 .get(reqwest::header::CONTENT_RANGE)
                 .and_then(|v| v.to_str().ok());
             if !accepts_content_range(cr, start, expected_total) {
-                return Err(gettext("Server returned an unexpected range"));
+                return Err(AttemptFail::Retryable(gettext(
+                    "Server returned an unexpected range",
+                )));
             }
         }
         let total = response_total(
@@ -652,14 +691,18 @@ async fn attempt_once(
             start,
         );
         if rejects_unexpected_restart(partial, start, expected_total, resp.content_length()) {
-            return Err(gettext("Server returned an unexpected file size"));
+            return Err(AttemptFail::Retryable(gettext(
+                "Server returned an unexpected file size",
+            )));
         }
         if !partial
             && start > 0
             && let Some(length) = resp.content_length()
             && length < start
         {
-            return Err(gettext("Server restarted the download with a smaller file"));
+            return Err(AttemptFail::Retryable(gettext(
+                "Server restarted the download with a smaller file",
+            )));
         }
 
         let mut file = if partial {
@@ -696,14 +739,24 @@ async fn attempt_once(
         loop {
             let chunk = match tokio::time::timeout(ctx.timeout, stream.next()).await {
                 Ok(Some(Ok(chunk))) => chunk,
-                Ok(Some(Err(error))) => return Err(format!("Download interrupted: {error}")),
+                Ok(Some(Err(error))) => {
+                    return Err(AttemptFail::Retryable(format!(
+                        "Download interrupted: {error}"
+                    )));
+                }
                 Ok(None) => break,
-                Err(_) => return Err(gettext("Stalled connection timed out")),
+                Err(_) => {
+                    return Err(AttemptFail::Retryable(gettext(
+                        "Stalled connection timed out",
+                    )));
+                }
             };
             if chunk.is_empty() {
                 empty_streak += 1;
                 if empty_streak > 32 {
-                    return Err(gettext("Stalled connection timed out"));
+                    return Err(AttemptFail::Retryable(gettext(
+                        "Stalled connection timed out",
+                    )));
                 }
                 continue;
             }
@@ -723,7 +776,9 @@ async fn attempt_once(
             .await
             .map_err(|error| format!("Cannot write file: {error}"))?;
         return match total {
-            Some(total) if downloaded != total => Err(gettext("Incomplete download")),
+            Some(total) if downloaded != total => {
+                Err(AttemptFail::Retryable(gettext("Incomplete download")))
+            }
             _ => Ok(()),
         };
     }
@@ -1222,10 +1277,17 @@ pub(crate) fn accepts_content_range(
 }
 
 /// Why a piece or segmented attempt failed (throttled = downgrade to single-stream; changed = fail terminally, never retry).
+#[derive(Debug)]
 pub(crate) enum AttemptFail {
     Retryable(String),
     Throttled(String),
     Changed(String),
+}
+
+impl From<String> for AttemptFail {
+    fn from(message: String) -> Self {
+        Self::Retryable(message)
+    }
 }
 
 /// Fetch one `[start, end]` piece, retrying stalls (verifies the Content-Range total; never suggests server filenames).
@@ -1417,8 +1479,8 @@ const PIECE_TRIES: u32 = 3;
 #[cfg(test)]
 mod destination_ownership_tests {
     use super::{
-        DestinationClaim, FetchCtx, FileIdentity, attempt_once, ensure_sized, single_loop,
-        truncate_to_prefix,
+        AttemptFail, DestinationClaim, FetchCtx, FileIdentity, attempt_once, ensure_sized,
+        single_loop, truncate_to_prefix, wait_for_fallback_ack,
     };
     use crate::download_net::{DEFAULT_USER_AGENT, DownloadOptions};
     use crate::download_pieces::SegmentState;
@@ -1571,12 +1633,65 @@ mod destination_ownership_tests {
         let error = attempt_once(&context, None, &mut claim)
             .await
             .expect_err("an unowned file must be rejected before networking");
-        assert_eq!(error, crate::engine_msg::DEST_EXISTS);
+        assert!(
+            matches!(&error, AttemptFail::Retryable(message) if message == crate::engine_msg::DEST_EXISTS),
+            "expected a retryable ownership failure, got {error:?}"
+        );
         assert_eq!(
             tokio::fs::read(&destination)
                 .await
                 .expect("read destination"),
             b"foreign sentinel"
+        );
+    }
+
+    #[tokio::test]
+    async fn resume_rejects_a_206_for_a_changed_object() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind test listener");
+        let address = listener.local_addr().expect("listener address");
+        let server = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.expect("accept request");
+            read_request(&mut stream).await;
+            stream
+                .write_all(
+                    b"HTTP/1.1 206 Partial Content\r\nContent-Range: bytes 4-9/10\r\nContent-Length: 6\r\nETag: \"server-etag-v2\"\r\nConnection: close\r\n\r\nNEWDAT",
+                )
+                .await
+                .expect("write 206 response");
+        });
+
+        let directory = tempfile::tempdir().expect("create destination directory");
+        let destination = directory.path().join("download.bin");
+        tokio::fs::write(&destination, b"old-")
+            .await
+            .expect("write owned partial");
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+        let context = test_context(
+            format!("http://{address}/download.bin"),
+            destination.clone(),
+            tx,
+        );
+        let _ = context.if_range.set("\"client-etag-v1\"".to_string());
+        let mut claim = DestinationClaim::capture(&destination)
+            .await
+            .expect("capture owned partial");
+
+        let error = attempt_once(&context, None, &mut claim)
+            .await
+            .expect_err("a 206 from a changed object must fail");
+        assert!(
+            matches!(error, AttemptFail::Changed(_)),
+            "expected Changed, got {error:?}"
+        );
+        server.await.expect("server task");
+        assert_eq!(
+            tokio::fs::read(&destination)
+                .await
+                .expect("read destination"),
+            b"old-",
+            "the changed response must not be spliced onto the owned partial"
         );
     }
 
@@ -1623,6 +1738,26 @@ mod destination_ownership_tests {
                 .expect("inspect unchanged destination")
                 .len(),
             prefix - 1
+        );
+    }
+
+    #[tokio::test]
+    async fn fallback_ack_requires_an_explicit_success() {
+        let (tx, mut rx) = tokio::sync::mpsc::channel::<()>(1);
+        tx.send(()).await.expect("send fallback ack");
+        assert!(wait_for_fallback_ack(&mut rx, Duration::from_secs(1)).await);
+
+        let (tx, mut rx) = tokio::sync::mpsc::channel::<()>(1);
+        drop(tx);
+        assert!(
+            !wait_for_fallback_ack(&mut rx, Duration::from_secs(1)).await,
+            "a closed ack must stop the worker, not continue single-stream"
+        );
+
+        let (_tx, mut rx) = tokio::sync::mpsc::channel::<()>(1);
+        assert!(
+            !wait_for_fallback_ack(&mut rx, Duration::from_millis(10)).await,
+            "a stalled ack must not hang the worker"
         );
     }
 

@@ -2389,7 +2389,7 @@ struct ManifestIncrementalHlsTrackFetch {
 struct ManifestIncrementalHlsFetchWorker {
     index: usize,
     first_segment_ready: Option<tokio::sync::oneshot::Receiver<()>>,
-    complete_ready: tokio::sync::oneshot::Receiver<()>,
+    complete_ready: Option<tokio::sync::oneshot::Receiver<()>>,
     abort_sender: Option<tokio::sync::oneshot::Sender<crate::video::StopIntent>>,
 }
 
@@ -2429,7 +2429,7 @@ fn spawn_incremental_hls_track_fetch(
     ManifestIncrementalHlsFetchWorker {
         index,
         first_segment_ready: Some(first_segment_ready),
-        complete_ready,
+        complete_ready: Some(complete_ready),
         abort_sender: Some(abort_sender),
     }
 }
@@ -2654,12 +2654,8 @@ async fn run_incremental_hls_vod(
                 .push(sender);
         }
     }
-    let mut ffmpeg_abort_tx = Some({
-        let (sender, receiver) = tokio::sync::oneshot::channel();
-        (sender, receiver)
-    });
-    let (mut ffmpeg_abort_sender, mut ffmpeg_abort) =
-        ffmpeg_abort_tx.take().expect("FFmpeg abort channel is initialized");
+    let (ffmpeg_abort_sender, mut ffmpeg_abort) = tokio::sync::oneshot::channel();
+    let mut ffmpeg_abort_tx = Some(ffmpeg_abort_sender);
     let mut abort_done = false;
     let mut stop_intent = None;
 
@@ -2678,7 +2674,7 @@ async fn run_incremental_hls_vod(
                             let _ = sender.send(intent);
                         }
                     }
-                    let _ = ffmpeg_abort_sender.send(intent);
+                    send_manifest_stop_intent(&mut ffmpeg_abort_tx, intent);
                 }
             }
             ready = futures_util::StreamExt::next(&mut first_segment_events),
@@ -2782,7 +2778,7 @@ async fn run_incremental_hls_vod(
                             let _ = sender.send(intent);
                         }
                     }
-                    let _ = ffmpeg_abort_sender.send(intent);
+                    send_manifest_stop_intent(&mut ffmpeg_abort_tx, intent);
                 }
             }
             joined = fetchers.join_next(), if !fetchers.is_empty() => {
@@ -2796,7 +2792,7 @@ async fn run_incremental_hls_vod(
                                     let _ = sender.send(crate::video::StopIntent::Pause);
                                 }
                             }
-                            let _ = ffmpeg_abort_sender.send(crate::video::StopIntent::Pause);
+                            send_manifest_stop_intent(&mut ffmpeg_abort_tx, crate::video::StopIntent::Pause);
                         }
                     }
                     Some(Err(error)) => {
@@ -2813,7 +2809,7 @@ async fn run_incremental_hls_vod(
                                 let _ = sender.send(crate::video::StopIntent::Pause);
                             }
                         }
-                        let _ = ffmpeg_abort_sender.send(crate::video::StopIntent::Pause);
+                        send_manifest_stop_intent(&mut ffmpeg_abort_tx, crate::video::StopIntent::Pause);
                     }
                     None => {}
                 }
@@ -2855,18 +2851,11 @@ async fn run_incremental_hls_vod(
             crate::video::StopIntent::Finish => unreachable!(),
         });
     }
-    if let Some(error) = fetch_join_error {
-        return Err(ManifestRunError::Failed(error));
-    }
-    for result in &fetch_results {
-        if let Some(Err(error)) = result {
-            return Err(match std::mem::replace(
-                &mut fetch_results[0],
-                None,
-            ) {
-                Some(Err(error)) => error,
-                _ => ManifestRunError::Failed(error.to_string()),
-            });
+    for result in &mut fetch_results {
+        if matches!(result, Some(Err(_))) {
+            if let Some(Err(error)) = result.take() {
+                return Err(error);
+            }
         }
     }
     let mux_outcome = completed_incremental_hls_mux(ffmpeg_result.ok_or_else(|| {
@@ -2891,7 +2880,12 @@ async fn run_incremental_hls_vod(
         });
     }
     for worker in &mut workers {
-        if worker.complete_ready.await.is_err() {
+        let Some(receiver) = worker.complete_ready.take() else {
+            return Err(ManifestRunError::Failed(
+                "An HLS rendition lost its completion receiver".to_string(),
+            ));
+        };
+        if receiver.await.is_err() {
             return Err(ManifestRunError::Failed(
                 "An HLS rendition completed without publishing its complete VOD playlist"
                     .to_string(),

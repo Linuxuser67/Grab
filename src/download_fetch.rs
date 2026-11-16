@@ -465,9 +465,14 @@ async fn attempt_multi(
             ctx.tx.send(progress_msg(downloaded, Some(total))).ok();
             let pace_start = Instant::now();
             let mut paced: u64 = 0;
-            let mut last_sent = Instant::now();
             let mut written: u64 = 0;
             let mut completed_indices = Vec::new();
+            let mut unsynced_bytes = 0_u64;
+            let mut last_rate_update = Instant::now();
+            // Keep pause/shutdown responsive without persisting completion for
+            // every 1 MiB piece. Progress is published only after each durable
+            // batch, so a pause triggered by visible progress has a safe bitmap.
+            const DURABLE_BATCH_BYTES: u64 = 4 * 1024 * 1024;
             let mut rate = live_rate_limit();
             use tokio::io::{AsyncSeekExt as _, AsyncWriteExt as _};
             while let Some((offset, bytes, idx)) = wrx.recv().await {
@@ -479,25 +484,51 @@ async fn attempt_multi(
                     .map_err(|e| format!("Cannot write file: {e}"))?;
                 downloaded += bytes.len() as u64;
                 written += bytes.len() as u64;
+                unsynced_bytes = unsynced_bytes.saturating_add(bytes.len() as u64);
                 completed_indices.push(idx);
                 pace_chunk(&mut paced, pace_start, rate, bytes.len()).await;
-                // ~20fps row updates.
-                if last_sent.elapsed() >= Duration::from_millis(50) {
+                if last_rate_update.elapsed() >= Duration::from_millis(50) {
                     rate = live_rate_limit();
+                    last_rate_update = Instant::now();
+                }
+                if unsynced_bytes >= DURABLE_BATCH_BYTES {
+                    file.flush()
+                        .await
+                        .map_err(|e| format!("Cannot write file: {e}"))?;
+                    file.sync_data()
+                        .await
+                        .map_err(|e| format!("Cannot sync file: {e}"))?;
+                    // Verify the path still references the file being written
+                    // before publishing any completion from this batch.
+                    let fd_metadata = file
+                        .metadata()
+                        .await
+                        .map_err(|e| format!("Cannot inspect downloaded file: {e}"))?;
+                    let path_metadata = tokio::fs::symlink_metadata(&dest)
+                        .await
+                        .map_err(|e| format!("Cannot verify download destination: {e}"))?;
+                    if path_metadata.file_type().is_symlink()
+                        || file_identity(&fd_metadata) != file_identity(&path_metadata)
+                    {
+                        return Err("Destination file was replaced during download".to_string());
+                    }
+                    for idx in completed_indices.drain(..) {
+                        st.mark(idx);
+                        ctx.tx.send(EngineMsg::PieceDone(idx)).ok();
+                    }
+                    unsynced_bytes = 0;
                     ctx.tx.send(progress_msg(downloaded, Some(total))).ok();
-                    last_sent = Instant::now();
                 }
             }
             file.flush()
                 .await
                 .map_err(|e| format!("Cannot write file: {e}"))?;
-            // Make completed pieces durable before the bitmap is persisted;
-            // a crash after resume must not claim data still in the page cache.
+            // Finish with sync_all after the last batch, then publish any short
+            // final batch. Interrupted data not covered by a completed batch
+            // remains absent from the resume bitmap and will be fetched again.
             file.sync_all()
                 .await
                 .map_err(|e| format!("Cannot sync file: {e}"))?;
-            // Verify the path still references the file being written: a
-            // swap during transfer must not go unnoticed.
             let fd_metadata = file
                 .metadata()
                 .await
@@ -510,9 +541,6 @@ async fn attempt_multi(
             {
                 return Err("Destination file was replaced during download".to_string());
             }
-            // Publish completion only after the bytes are durable and the path
-            // still names the file we wrote. An interrupted attempt leaves these
-            // pieces unmarked, so resume refetches them instead of trusting cache.
             for idx in completed_indices {
                 st.mark(idx);
                 ctx.tx.send(EngineMsg::PieceDone(idx)).ok();

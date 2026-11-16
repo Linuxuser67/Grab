@@ -72,10 +72,10 @@ fn hls_mp4_codec_kind(codec: &str) -> Option<HlsMp4CodecKind> {
     let (sample_entry, parameters) = codec.split_once('.').unwrap_or((codec, ""));
     let has_parameters = !parameters.is_empty();
 
-    if has_parameters
-        && ["avc1", "avc3", "hvc1", "hev1", "av01", "vp09", "mp4v"]
-            .iter()
-            .any(|supported| sample_entry.eq_ignore_ascii_case(supported))
+    if ["avc1", "avc3", "hvc1", "hev1", "av01", "vp09"]
+        .iter()
+        .any(|supported| sample_entry.eq_ignore_ascii_case(supported))
+        || (sample_entry.eq_ignore_ascii_case("mp4v") && has_parameters)
     {
         return Some(HlsMp4CodecKind::Video);
     }
@@ -1292,6 +1292,8 @@ video/1080p.m3u8
             "av01.0.08M.08",
             "vp09.00.10.08",
             "mp4v.20.9",
+            "avc1",
+            "hvc1",
         ] {
             assert_eq!(
                 hls_mp4_codec_kind(codec),
@@ -1313,7 +1315,7 @@ video/1080p.m3u8
                 "{codec}"
             );
         }
-        for codec in ["vp8", "vorbis", "theora", "avc1", "mp4a", ""] {
+        for codec in ["vp8", "vorbis", "theora", "mp4a", ""] {
             assert_eq!(hls_mp4_codec_kind(codec), None, "{codec}");
         }
     }

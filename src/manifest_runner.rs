@@ -2276,6 +2276,7 @@ pub(crate) async fn run_manifest_download(
     finalize_manifest_download(ManifestFinalization {
         job: &job,
         destination_parts: live_destination_parts || static_destination_parts,
+        output_already_muxed: false,
         gate,
         abort,
         tx: &tx,
@@ -2299,6 +2300,7 @@ pub(crate) async fn run_manifest_download(
 struct ManifestFinalization<'a> {
     job: &'a ManifestJob,
     destination_parts: bool,
+    output_already_muxed: bool,
     gate: Arc<crate::attempt_gate::AttemptGate>,
     abort: tokio::sync::oneshot::Receiver<crate::video::StopIntent>,
     tx: &'a tokio::sync::mpsc::UnboundedSender<EngineMsg>,
@@ -2546,30 +2548,32 @@ async fn finalize_manifest_download(
         ),
         _ => (None, None),
     };
-    match run_ffmpeg_with_offsets(
-        &ffmpeg,
-        FfmpegInput {
-            path: &video_input,
-            timestamp_offset: video_timestamp_offset.as_deref(),
-        },
-        audio_input.as_deref().map(|path| FfmpegInput {
-            path,
-            timestamp_offset: audio_timestamp_offset.as_deref(),
-        }),
-        timestamp_policy,
-        SubtitleOutput {
-            input: subtitle_input.as_deref(),
-            embed: embed_subtitles,
-            sidecar: subtitle_sidecar.as_deref(),
-        },
-        &output_part,
-        &mut abort,
-    )
-    .await?
-    {
-        ManifestMuxOutcome::Finished => {}
-        ManifestMuxOutcome::Paused => return Ok(ManifestOutcome::Paused),
-        ManifestMuxOutcome::Aborted => return Ok(ManifestOutcome::Aborted),
+    if !output_already_muxed {
+        match run_ffmpeg_with_offsets(
+            &ffmpeg,
+            FfmpegInput {
+                path: &video_input,
+                timestamp_offset: video_timestamp_offset.as_deref(),
+            },
+            audio_input.as_deref().map(|path| FfmpegInput {
+                path,
+                timestamp_offset: audio_timestamp_offset.as_deref(),
+            }),
+            timestamp_policy,
+            SubtitleOutput {
+                input: subtitle_input.as_deref(),
+                embed: embed_subtitles,
+                sidecar: subtitle_sidecar.as_deref(),
+            },
+            &output_part,
+            &mut abort,
+        )
+        .await?
+        {
+            ManifestMuxOutcome::Finished => {}
+            ManifestMuxOutcome::Paused => return Ok(ManifestOutcome::Paused),
+            ManifestMuxOutcome::Aborted => return Ok(ManifestOutcome::Aborted),
+        }
     }
 
     // Validate and size the muxed file before the delivery commit. After the

@@ -3830,53 +3830,66 @@ impl DownloadManager {
                 "shutdown: async/pump join deadline elapsed; preserving the saved queue and skipping partial-file reconciliation"
             );
         } else {
-            // Truncating a partially written segmented file is filesystem I/O;
-            // keep it off GTK's main context just like the task joins above.
-            let truncations: Vec<_> = self
-                .segment_state
-                .borrow()
-                .iter()
-                .filter_map(|(id, state)| {
-                    let item = self.find(*id)?;
-                    Some((*id, item.file_path(), state.clone()))
-                })
-                .collect();
-            match tokio_rt()
-                .spawn_blocking(move || {
-                    let mut reconciled = Vec::with_capacity(truncations.len());
-                    let mut failures = Vec::new();
-                    for (id, path, state) in truncations {
-                        match truncate_to_prefix(&path, &state) {
-                            Ok(()) => reconciled.push(id),
-                            Err(error) => failures.push((path, error)),
-                        }
-                    }
-                    (reconciled, failures)
-                })
-                .await
-            {
-                Ok((reconciled, failures)) => {
-                    let mut states = self.segment_state.borrow_mut();
-                    for id in reconciled {
-                        if let Some(state) = states.get_mut(&id) {
-                            state.forget_beyond_prefix();
-                        }
-                    }
-                    for (path, error) in failures {
-                        tracing::warn!(
-                            path = %path.display(),
-                            error = %error,
-                            "shutdown: could not reconcile segmented destination"
-                        );
-                    }
+            // First make every saved bitmap conservative, then durably write
+            // that checkpoint. Only after it lands may a destination be shortened.
+            let truncations: Vec<_> = {
+                let mut states = self.segment_state.borrow_mut();
+                for state in states.values_mut() {
+                    state.forget_beyond_prefix();
                 }
-                Err(error) => {
-                    // Keep the original bitmaps if the worker cannot report
-                    // which destinations were durably reconciled.
-                    tracing::warn!(
+                states
+                    .iter()
+                    .filter_map(|(id, state)| {
+                        let item = self.find(*id)?;
+                        Some((*id, item.file_path(), state.clone()))
+                    })
+                    .collect()
+            };
+            if !truncations.is_empty() {
+                let checkpoint = tokio::time::timeout(
+                    Duration::from_secs(5),
+                    self.persist_queue_and_wait(),
+                )
+                .await;
+                match checkpoint {
+                    Ok(Ok(())) => {
+                        // Filesystem reconciliation stays off GTK. The durable
+                        // prefix-only bitmaps remain valid even if any truncate fails.
+                        let failures = tokio_rt()
+                            .spawn_blocking(move || {
+                                truncations
+                                    .into_iter()
+                                    .filter_map(|(_, path, state)| {
+                                        truncate_to_prefix(&path, &state)
+                                            .err()
+                                            .map(|error| (path, error))
+                                    })
+                                    .collect::<Vec<_>>()
+                            })
+                            .await;
+                        match failures {
+                            Ok(failures) => {
+                                for (path, error) in failures {
+                                    tracing::warn!(
+                                        path = %path.display(),
+                                        error = %error,
+                                        "shutdown: could not reconcile segmented destination"
+                                    );
+                                }
+                            }
+                            Err(error) => tracing::warn!(
+                                error = %error,
+                                "shutdown: partial-file reconciliation worker failed"
+                            ),
+                        }
+                    }
+                    Ok(Err(error)) => tracing::warn!(
                         error = %error,
-                        "shutdown: partial-file reconciliation worker failed"
-                    );
+                        "shutdown: could not durably checkpoint segmented files; skipping truncation"
+                    ),
+                    Err(_) => tracing::warn!(
+                        "shutdown: durable queue checkpoint timed out; skipping segmented-file truncation"
+                    ),
                 }
             }
         }

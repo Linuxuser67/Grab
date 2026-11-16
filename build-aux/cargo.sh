@@ -28,7 +28,7 @@ else
   profile="debug"
 fi
 # shellcheck disable=SC2086
-cargo build --offline $profile_flag \
+cargo build --offline --locked $profile_flag \
   ${CARGO_TARGET_DIR:+--target-dir "$CARGO_TARGET_DIR"}
 target_dir="${CARGO_TARGET_DIR:-$src/target}/$profile"
 cp "$target_dir/grab" "$out1"

@@ -76,6 +76,12 @@ def metainfo_release_versions() -> list[str]:
     return versions
 
 
+def _identifier(part: str) -> tuple[int, int | str]:
+    # Mirror check-bundle-contents.py: numeric identifiers sort before
+    # alphanumeric ones and never compare an int against a str.
+    return (0, int(part)) if part.isdigit() else (1, part)
+
+
 def version_key(version: str):
     # AppStream ordering: '~' sorts before everything, so 5.6.7~beta.3 < 5.6.7.
     # Normalize Cargo's '-' prerelease separator to AppStream's '~'.
@@ -86,10 +92,10 @@ def version_key(version: str):
     )
     if "~" in version:
         core, pre = version.split("~", 1)
-        core_tuple = tuple(int(p) if p.isdigit() else 0 for p in core.split("."))
-        pre_parts = tuple(int(p) if p.isdigit() else p for p in pre.split("."))
+        core_tuple = tuple(_identifier(p) for p in core.split("."))
+        pre_parts = tuple(_identifier(p) for p in pre.split("."))
         return (core_tuple, 0, pre_parts)
-    core_tuple = tuple(int(p) if p.isdigit() else 0 for p in version.split("."))
+    core_tuple = tuple(_identifier(p) for p in version.split("."))
     return (core_tuple, 1, ())
 
 

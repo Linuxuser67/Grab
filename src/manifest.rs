@@ -455,6 +455,73 @@ impl HlsPlan {
             && (self.is_plain_mpegts_presentation() || self.is_single_init_fmp4_presentation())
     }
 
+    /// Whether this finite AES-128 MPEG-TS VOD can be consumed incrementally by FFmpeg.
+    ///
+    /// Keep this separate from direct segment concatenation: FFmpeg must decrypt
+    /// the localized key/segment resources while the destination output part grows.
+    pub(crate) fn is_incremental_aes128_mpegts_vod_candidate(&self) -> bool {
+        if self.is_live
+            || !self.end_list
+            || self.output_container() != Some(crate::media_types::ManifestContainer::Ts)
+            || self.resources.iter().any(|resource| {
+                resource.range.is_some() || resource.kind == HlsResourceKind::InitMap
+            })
+        {
+            return false;
+        }
+
+        let Ok(bytes) = self.local_playlist_bytes() else {
+            return false;
+        };
+        let Ok(playlist) = std::str::from_utf8(&bytes) else {
+            return false;
+        };
+        if playlist.lines().any(|line| {
+            line == "#EXT-X-DISCONTINUITY"
+                || line.starts_with("#EXT-X-DISCONTINUITY-SEQUENCE:")
+                || line.starts_with("#EXT-X-BYTERANGE:")
+                || line.starts_with("#EXT-X-MAP:")
+                || line == "#EXT-X-GAP"
+        }) {
+            return false;
+        }
+
+        let mut has_aes128 = false;
+        for segment in &self.local_playlist.segments {
+            match segment.key.as_ref() {
+                Some(key) if key.method == KeyMethod::None => {}
+                Some(key) if key.method == KeyMethod::AES128 => {
+                    if key
+                        .keyformat
+                        .as_deref()
+                        .is_some_and(|format| format != "identity")
+                        || key
+                            .keyformatversions
+                            .as_deref()
+                            .is_some_and(|versions| versions != "1")
+                    {
+                        return false;
+                    }
+                    let Some(filename) = key.uri.as_deref() else {
+                        return false;
+                    };
+                    if !self.resources.iter().any(|resource| {
+                        resource.kind == HlsResourceKind::Key
+                            && resource.filename == filename
+                            && resource.range.is_none()
+                    }) {
+                        return false;
+                    }
+                    has_aes128 = true;
+                }
+                Some(_) => return false,
+                None => {}
+            }
+        }
+
+        has_aes128
+    }
+
     /// Whether one leading `EXT-X-MAP` section followed by media segments can be
     /// byte-concatenated. A later map, byte range, key, or discontinuity would
     /// change the stream mid-track, so those keep the playlist-based path.

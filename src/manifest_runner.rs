@@ -76,7 +76,10 @@ const HLS_STATIC_RESOURCE_CONNECTIONS: usize = 1;
 const FFMPEG_LOG_LINES: usize = 32;
 /// Bound native manifest muxing, including a user-requested Finish while FFmpeg is running.
 const MANIFEST_MUX_TIMEOUT: Duration = Duration::from_secs(3600);
+/// Hard upper bound for an incremental VOD mux, including the time spent waiting for segments.
 const INCREMENTAL_HLS_MUX_TIMEOUT: Duration = Duration::from_secs(7 * 24 * 60 * 60);
+/// Allow the fetcher to publish its completion signal immediately after the final playlist rename.
+const FINAL_PLAYLIST_SIGNAL_GRACE: Duration = Duration::from_secs(1);
 /// Upper bound on the persisted dynamic DASH segment index.
 const MAX_DASH_LIVE_SEGMENTS: usize = crate::manifest_types::MAX_MANIFEST_SEGMENTS;
 /// Bound for a serialized dynamic DASH resume index.
@@ -2551,7 +2554,7 @@ async fn run_incremental_aes128_hls_vod(
                     && !complete_signal_done
                 {
                     complete_ready = tokio::time::timeout(
-                        Duration::from_secs(1),
+                        FINAL_PLAYLIST_SIGNAL_GRACE,
                         &mut complete_rx,
                     )
                     .await
@@ -3460,6 +3463,7 @@ async fn fetch_hls_resources_incrementally(
     first_segment_ready: tokio::sync::oneshot::Sender<()>,
     complete_ready: tokio::sync::oneshot::Sender<()>,
 ) -> Result<bool, ManifestRunError> {
+    /// Cap atomic playlist rewrites while keeping the visible output responsive for long VODs.
     const MAX_PLAYLIST_SNAPSHOTS: usize = 512;
 
     let resources = hls_resources(plan);

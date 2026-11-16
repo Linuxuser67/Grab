@@ -1111,14 +1111,39 @@ impl DownloadManager {
                         this.segment_state
                             .borrow_mut()
                             .insert(id, SegmentState::new(total));
-                        // Queue the bitmap before the engine preallocates the
-                        // full-size file (it waits for this ack): a crash in
-                        // between would otherwise restore a full-size file with
-                        // no bitmap, and a 416 would pass it off as complete on
-                        // filesystems that zero-fill instead of leaving holes.
-                        this.persist_queue();
-                        drop(this);
-                        ack.send(()).await.ok();
+                        // The all-false bitmap must be on disk before the worker
+                        // preallocates a sparse destination.
+                        let checkpoint = this.persist_queue_and_wait().await;
+                        let Some(this) = weak.upgrade() else {
+                            done = true;
+                            break;
+                        };
+                        if !this.is_current(id, generation) {
+                            done = true;
+                            break;
+                        }
+                        match checkpoint {
+                            Ok(()) => {
+                                // A timed-out engine may already have switched to
+                                // single-stream mode. Clear the now-unused bitmap if
+                                // its receiver no longer accepts the acknowledgement.
+                                if ack.send(()).await.is_err() {
+                                    this.segment_state.borrow_mut().remove(&id);
+                                    this.persist_queue();
+                                }
+                            }
+                            Err(error) => {
+                                this.segment_state.borrow_mut().remove(&id);
+                                this.persist_queue();
+                                tracing::warn!(
+                                    row_id = id,
+                                    error = %error,
+                                    "could not durably checkpoint segmented download before allocation"
+                                );
+                                // Dropping ack tells the engine not to preallocate
+                                // or enter the segmented transfer path.
+                            }
+                        }
                     }
                     EngineMsg::PieceDone(idx) => {
                         if let Some(st) = this.segment_state.borrow_mut().get_mut(&id) {
@@ -1241,43 +1266,36 @@ impl DownloadManager {
                         }
                     }
                     EngineMsg::TruncatePrefix => {
-                        // Commit the matching bitmap first: Undo/retry during the worker must never see a
-                        // prefix-truncated file paired with bits beyond the first gap.
+                        // Persist a prefix-only bitmap before shortening the file:
+                        // a crash after set_len must never restore completed bits
+                        // for ranges that no longer exist.
                         let state = {
                             let mut states = this.segment_state.borrow_mut();
-                            states.get_mut(&id).map(|st| {
-                                st.forget_beyond_prefix();
-                                st.clone()
+                            states.get_mut(&id).map(|state| {
+                                state.forget_beyond_prefix();
+                                state.clone()
                             })
                         };
                         if let Some(state) = state {
-                            this.persist_queue();
-                            let path = item.file_path();
-                            this.reserve_dest(&path);
-                            let worker_path = path.clone();
-                            drop(this);
-                            let _ = gio::spawn_blocking(move || {
-                                truncate_to_prefix(&worker_path, &state)
-                            })
-                            .await;
+                            match this.persist_queue_and_wait().await {
+                                Ok(()) => {}
+                                Err(error) => {
+                                    tracing::warn!(
+                                        row_id = id,
+                                        error = %error,
+                                        "could not durably checkpoint segmented prefix before truncation"
+                                    );
+                                    continue;
+                                }
+                            }
                             let Some(this) = weak.upgrade() else {
                                 done = true;
                                 break;
                             };
-                            this.release_dest(&path);
                             if !this.is_current(id, generation) {
                                 done = true;
                                 break;
                             }
-                            this.start_next();
-                        }
-                    }
-                    EngineMsg::FallbackSingle { ack } => {
-                        // Keep the bitmap persisted until the sparse/segmented file is
-                        // actually truncated. A crash during the worker must still restore
-                        // with the bitmap rather than append to a file with holes.
-                        let segment_state = { this.segment_state.borrow().get(&id).cloned() };
-                        if let Some(state) = segment_state {
                             let path = item.file_path();
                             this.reserve_dest(&path);
                             let worker_path = path.clone();
@@ -1296,36 +1314,106 @@ impl DownloadManager {
                                 break;
                             }
                             match truncation {
-                                Ok(Ok(())) => {
-                                    this.segment_state.borrow_mut().remove(&id);
-                                    this.persist_queue();
-                                    this.start_next();
-                                    drop(this);
-                                    ack.send(()).await.ok();
-                                }
-                                Ok(Err(error)) => {
-                                    tracing::warn!(
-                                        path = %path.display(),
-                                        error = %error,
-                                        "could not truncate segmented file before single-stream fallback"
+                                Ok(Ok(())) => {}
+                                Ok(Err(error)) => tracing::warn!(
+                                    path = %path.display(),
+                                    error = %error,
+                                    "could not truncate segmented destination to its completed prefix"
+                                ),
+                                Err(error) => tracing::warn!(
+                                    path = %path.display(),
+                                    error = %error,
+                                    "segmented destination truncation worker failed"
+                                ),
+                            }
+                            this.start_next();
+                        }
+                    }
+                    EngineMsg::FallbackSingle { ack } => {
+                        // Commit only the contiguous prefix before touching the
+                        // sparse file. This checkpoint remains valid even if the
+                        // truncate succeeds but its subsequent sync reports an error.
+                        let prefix_state = {
+                            let mut states = this.segment_state.borrow_mut();
+                            states.get_mut(&id).map(|state| {
+                                state.forget_beyond_prefix();
+                                state.clone()
+                            })
+                        };
+                        let Some(prefix_state) = prefix_state else {
+                            tracing::warn!(
+                                row_id = id,
+                                "refusing single-stream fallback without a segmented resume bitmap"
+                            );
+                            break;
+                        };
+                        if let Err(error) = this.persist_queue_and_wait().await {
+                            tracing::warn!(
+                                row_id = id,
+                                error = %error,
+                                "could not durably checkpoint segmented prefix before single-stream fallback"
+                            );
+                            break;
+                        }
+                        let Some(this) = weak.upgrade() else {
+                            done = true;
+                            break;
+                        };
+                        if !this.is_current(id, generation) {
+                            done = true;
+                            break;
+                        }
+                        let path = item.file_path();
+                        this.reserve_dest(&path);
+                        let worker_path = path.clone();
+                        drop(this);
+                        let truncation = gio::spawn_blocking(move || {
+                            truncate_to_prefix(&worker_path, &prefix_state)
+                        })
+                        .await;
+                        let Some(this) = weak.upgrade() else {
+                            done = true;
+                            break;
+                        };
+                        this.release_dest(&path);
+                        if !this.is_current(id, generation) {
+                            done = true;
+                            break;
+                        }
+                        match truncation {
+                            Ok(Ok(())) => {
+                                // Keep the prefix bitmap until single-stream fallback
+                                // is acknowledged. A failed handoff can then resume
+                                // safely from the durable, conservative checkpoint.
+                                this.start_next();
+                                drop(this);
+                                if ack.send(()).await.is_err()
+                                    && let Some(this) = weak.upgrade()
+                                    && this.is_current(id, generation)
+                                {
+                                    tracing::debug!(
+                                        row_id = id,
+                                        "single-stream fallback receiver closed after truncation"
                                     );
-                                    // Leave the bitmap intact and let the pump mark the row failed.
-                                    break;
-                                }
-                                Err(_) => {
-                                    tracing::warn!(
-                                        path = %path.display(),
-                                        "segmented-file truncation worker failed before single-stream fallback"
-                                    );
-                                    // Leave the bitmap intact and let the pump mark the row failed.
-                                    break;
                                 }
                             }
-                        } else {
-                            this.segment_state.borrow_mut().remove(&id);
-                            this.persist_queue();
-                            drop(this);
-                            ack.send(()).await.ok();
+                            Ok(Err(error)) => {
+                                tracing::warn!(
+                                    path = %path.display(),
+                                    error = %error,
+                                    "could not truncate segmented file before single-stream fallback"
+                                );
+                                // Leave the prefix-only bitmap intact and fail the row.
+                                break;
+                            }
+                            Err(error) => {
+                                tracing::warn!(
+                                    path = %path.display(),
+                                    error = %error,
+                                    "segmented-file truncation worker failed before single-stream fallback"
+                                );
+                                break;
+                            }
                         }
                     }
                     EngineMsg::SuggestName(name) => {

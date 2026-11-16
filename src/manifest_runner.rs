@@ -6727,8 +6727,9 @@ segment-2.ts
         let task_video_dir = video_dir;
         let task_audio_dir = audio_dir;
         let task_client = client;
-        let (task_ffmpeg, ffmpeg_log_path) =
-            if let Some((wrapper, _)) = forced_exit_counter.as_ref() {
+        let (task_ffmpeg, ffmpeg_log_path) = if let Some((wrapper, _)) =
+            forced_exit_counter.as_ref()
+        {
             (wrapper.clone(), None)
         } else if verify_incremental_growth {
             use std::os::unix::fs::PermissionsExt as _;

@@ -23,6 +23,8 @@ pub(crate) struct HlsMasterDownloadPlan {
     pub(crate) audio_url: Option<Url>,
     pub(crate) subtitle_url: Option<Url>,
     pub(crate) subtitle_language: Option<String>,
+    /// The selected HLS subtitle is an IMSC1/TTML text track, not WebVTT.
+    pub(crate) subtitle_is_imsc1: bool,
     pub(crate) inherited_variables: Box<[(String, String)]>,
 }
 
@@ -450,6 +452,16 @@ impl ManifestLookup {
     }
 }
 
+/// Whether the selected HLS video variant declares an IMSC1 TTML subtitle codec.
+fn hls_variant_uses_imsc1_subtitles(variant: &HlsVariant) -> bool {
+    variant.codecs.as_deref().is_some_and(|codecs| {
+        codecs.split(',').any(|codec| {
+            let codec = codec.trim();
+            codec.eq_ignore_ascii_case("stpp.ttml.im1t") || codec.eq_ignore_ascii_case("stpp")
+        })
+    })
+}
+
 /// Apply the persisted selection to the freshly parsed manifest exactly once.
 ///
 /// The returned plan contains the selected representation and all DASH
@@ -554,6 +566,8 @@ pub(crate) fn download_plan(
                                 .flatten()
                             })
                     }),
+                    subtitle_is_imsc1: source.subtitle_key.is_some()
+                        && hls_variant_uses_imsc1_subtitles(variant),
                     inherited_variables: master.inherited_variables.clone(),
                 },
             )))
@@ -1255,6 +1269,53 @@ video/720.m3u8
             "https://cdn.example.test/subs/en.m3u8"
         );
         assert_eq!(plan.subtitle_language.as_deref(), Some("en"));
+        assert!(
+            !plan.subtitle_is_imsc1,
+            "a subtitle with no IMSC1 codec declaration must retain the WebVTT conversion path"
+        );
+    }
+
+    #[test]
+    fn hls_imsc1_subtitle_selection_preserves_the_ttml_sample_entry() {
+        for (codecs, expected) in [
+            ("avc1.64001f,wvtt", false),
+            ("avc1.64001f,stpp.ttml.im1t", true),
+            ("avc1.64001f,stpp", true),
+        ] {
+            let body = format!(
+                "#EXTM3U\\n#EXT-X-MEDIA:TYPE=SUBTITLES,GROUP-ID=\\\"subs\\\",NAME=\\\"English\\\",LANGUAGE=\\\"en\\\",DEFAULT=YES,AUTOSELECT=YES,URI=\\\"subs/en.m3u8\\\",STABLE-RENDITION-ID=\\\"subtitle-en\\\"\\n#EXT-X-STREAM-INF:BANDWIDTH=1000000,RESOLUTION=1280x720,CODECS=\\\"{codecs}\\\",SUBTITLES=\\\"subs\\\",STABLE-VARIANT-ID=\\\"variant-720\\\"\\nvideo/720.m3u8\\n"
+            );
+            let master = crate::manifest::parse_hls_master_playlist(
+                "https://cdn.example.test/master.m3u8",
+                body.as_bytes(),
+            )
+            .expect("valid HLS subtitle master playlist");
+            let video_key = ManifestRepresentationKey::from(
+                hls_variant_keys(&master.variants)[0]
+                    .as_deref()
+                    .expect("stable video key"),
+            );
+            let subtitle_key = ManifestSubtitleKey::from(
+                hls_subtitle_rendition_keys(&master.subtitle_renditions)[0]
+                    .as_deref()
+                    .expect("stable subtitle key"),
+            );
+            let lookup = ManifestLookup {
+                source_url: "https://cdn.example.test/master.m3u8".to_string(),
+                manifest: NativeManifest::HlsMaster(Box::new(master)),
+            };
+            let source = lookup
+                .selected_source(&video_key, None, Some(&subtitle_key))
+                .expect("selected subtitle should be validated");
+            let plan = download_plan(lookup, &source).expect("selected HLS subtitle plan");
+            let ManifestDownloadPlan::HlsMaster(plan) = plan else {
+                panic!("expected an HLS master plan");
+            };
+            assert_eq!(
+                plan.subtitle_is_imsc1, expected,
+                "unexpected IMSC1 classification for CODECS={codecs}"
+            );
+        }
     }
 
     #[test]

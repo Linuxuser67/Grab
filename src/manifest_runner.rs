@@ -4847,6 +4847,8 @@ fn add_hls_incremental_reload_options(command: &mut tokio::process::Command) {
     // segment. Do not let FFmpeg's default reload counters mistake a slow fetch
     // for the end of the presentation.
     command
+        .arg("-live_start_index")
+        .arg("0")
         .arg("-max_reload")
         .arg(i32::MAX.to_string())
         .arg("-m3u8_hold_counters")

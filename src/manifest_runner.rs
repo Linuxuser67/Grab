@@ -3416,8 +3416,10 @@ async fn finalize_manifest_download(
         }
     }
     let mut destination_parts_cleaned = true;
-    if matches!(mode, ManifestFinalizationMode::PublishPreMuxedDestinationPart)
-        && !destination_parts
+    if matches!(
+        mode,
+        ManifestFinalizationMode::PublishPreMuxedDestinationPart
+    ) && !destination_parts
         && let Err(error) = crate::manifest_destination::remove_owned_part_async(
             staging.to_path_buf(),
             job.dest.clone(),

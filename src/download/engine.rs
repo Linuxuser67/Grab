@@ -1278,7 +1278,7 @@ impl DownloadManager {
                                 ),
                                 Err(error) => tracing::warn!(
                                     path = %path.display(),
-                                    error = %error,
+                                    error = ?error,
                                     "segmented destination truncation worker failed"
                                 ),
                             }

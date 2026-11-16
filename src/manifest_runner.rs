@@ -2142,6 +2142,25 @@ pub(crate) async fn run_manifest_download(
         ) => return Ok(ManifestOutcome::Aborted),
     };
     let mut _finish_stop_sender = None;
+    if !live_hls && !live_dash && tracks.uses_incremental_aes128_vod() {
+        return run_incremental_aes128_hls_vod(ManifestIncrementalHlsVod {
+            job: &job,
+            gate,
+            abort,
+            tx: &tx,
+            staging: &staging,
+            dest_dir: &dest_dir,
+            video_dir: &video_dir,
+            audio_dir: &audio_dir,
+            output_part,
+            tracks,
+            has_audio,
+            ffmpeg,
+            downloaded,
+            client: &client,
+        })
+        .await;
+    }
     let static_destination_parts = !live_hls && !live_dash && tracks.uses_destination_parts();
     let mut live_destination_parts = live_dash;
     if live_hls {
@@ -2291,6 +2310,23 @@ pub(crate) async fn run_manifest_download(
         downloaded: &downloaded,
     })
     .await
+}
+
+struct ManifestIncrementalHlsVod<'a> {
+    job: &'a ManifestJob,
+    gate: Arc<crate::attempt_gate::AttemptGate>,
+    abort: tokio::sync::oneshot::Receiver<crate::video::StopIntent>,
+    tx: &'a tokio::sync::mpsc::UnboundedSender<EngineMsg>,
+    staging: &'a Path,
+    dest_dir: &'a Path,
+    video_dir: &'a Path,
+    audio_dir: &'a Path,
+    output_part: PathBuf,
+    tracks: Tracks,
+    has_audio: bool,
+    ffmpeg: PathBuf,
+    downloaded: Arc<AtomicU64>,
+    client: &'a reqwest::Client,
 }
 
 /// Mux the staged tracks, validate the output, and publish it without clobbering.

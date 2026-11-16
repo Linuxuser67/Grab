@@ -1275,6 +1275,7 @@ video/1080p.m3u8
             Some(ManifestContainer::Mp4)
         );
     }
+
     #[test]
     fn hls_master_uses_the_selected_variant_codec_metadata() {
         let body = br##"#EXTM3U

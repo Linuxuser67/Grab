@@ -5237,6 +5237,58 @@ mod tests {
 
     #[cfg(unix)]
     #[tokio::test]
+    async fn ffmpeg_owned_part_output_uses_the_inherited_file_descriptor() {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let directory = tempfile::tempdir().expect("create owned output directory");
+        let ffmpeg = directory.path().join("fake-ffmpeg-owned-output");
+        std::fs::write(
+            &ffmpeg,
+            "#!/bin/sh\nsaw_y=0\nlast=\nfor arg in \"$@\"; do\n  [ \"$arg\" = \"-y\" ] && saw_y=1\n  last=\"$arg\"\ndone\n[ \"$saw_y\" = \"1\" ] || exit 41\n[ \"$last\" = \"/proc/self/fd/1\" ] || exit 42\nprintf 'decrypted-output' > \"$last\"\n",
+        )
+        .expect("write fake FFmpeg executable");
+        std::fs::set_permissions(&ffmpeg, std::fs::Permissions::from_mode(0o700))
+            .expect("make fake FFmpeg executable");
+        let output = directory.path().join("video.part");
+        let file = std::fs::OpenOptions::new()
+            .create_new(true)
+            .read(true)
+            .write(true)
+            .open(&output)
+            .expect("create owned destination part");
+        let (_sender, mut abort) = tokio::sync::oneshot::channel();
+
+        let result = run_ffmpeg_with_offsets_timeout(
+            &ffmpeg,
+            FfmpegInput {
+                path: Path::new("unused-video-input"),
+                timestamp_offset: None,
+            },
+            None,
+            ManifestMuxOptions {
+                timestamp_policy: InputTimestampPolicy::Normalize,
+                timeout: Some(Duration::from_secs(3)),
+            },
+            SubtitleOutput::default(),
+            FfmpegOutput::OwnedPart {
+                file,
+                container: ManifestContainer::Mp4,
+                label: output.clone(),
+            },
+            &mut abort,
+        )
+        .await
+        .expect("FFmpeg should write through the owned descriptor");
+
+        assert_eq!(result, ManifestMuxOutcome::Finished);
+        assert_eq!(
+            std::fs::read(&output).expect("read the owned output part"),
+            b"decrypted-output"
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
     async fn ffmpeg_finish_intent_is_bounded_when_mux_stalls() {
         let directory = tempfile::tempdir().expect("create fake FFmpeg directory");
         let ffmpeg = fake_ffmpeg_that_hangs(directory.path());

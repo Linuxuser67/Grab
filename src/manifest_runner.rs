@@ -2621,7 +2621,7 @@ async fn run_incremental_aes128_hls_vod(
         audio_dir,
         output_part,
         tracks: Tracks::Hls {
-            video: Box::new(video),
+            video,
             audio: None,
             subtitle: None,
             subtitle_language: None,

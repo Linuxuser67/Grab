@@ -3807,6 +3807,7 @@ one.ts
 "#;
         let plan = plan_hls_media_playlist(BASE_URL, body)
             .expect("AES-128 VOD playlist should remain available to FFmpeg");
+        assert!(plan.is_incremental_aes128_mpegts_vod_candidate());
         let bytes = plan
             .local_playlist_bytes()
             .expect("playlist should serialize");

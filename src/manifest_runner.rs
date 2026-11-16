@@ -5848,7 +5848,7 @@ segment-2.ts
                 "-i",
                 "testsrc=size=64x64:rate=5",
                 "-t",
-                "3",
+                "12",
                 "-an",
                 "-c:v",
                 "mpeg2video",

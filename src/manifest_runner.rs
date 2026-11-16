@@ -2474,9 +2474,9 @@ async fn run_incremental_aes128_hls_vod(
         }
     }
 
-    if let Some(result) = fetch_result.as_ref() {
+    if let Some(result) = fetch_result.take() {
         match result {
-            Ok(Ok(true)) => {}
+            Ok(Ok(true)) => fetch_result = Some(Ok(Ok(true))),
             Ok(Ok(false)) => {
                 return Ok(match stop_intent.unwrap_or(crate::video::StopIntent::Pause) {
                     crate::video::StopIntent::Pause | crate::video::StopIntent::Finish => ManifestOutcome::Paused,

@@ -2541,6 +2541,18 @@ async fn run_incremental_aes128_hls_vod(
                 }
             }
             result = &mut ffmpeg_task, if ffmpeg_result.is_none() => {
+                if matches!(&result, Ok(Ok(ManifestMuxOutcome::Finished)))
+                    && !complete_ready
+                    && !complete_signal_done
+                {
+                    complete_ready = tokio::time::timeout(
+                        Duration::from_secs(1),
+                        &mut complete_rx,
+                    )
+                    .await
+                    .is_ok_and(|signal| signal.is_ok());
+                    complete_signal_done = true;
+                }
                 ffmpeg_result = Some(result);
                 match &ffmpeg_result {
                     Some(Ok(Ok(ManifestMuxOutcome::Finished))) if !complete_ready => {

@@ -5753,6 +5753,181 @@ segment-2.ts
     }
 
     #[tokio::test]
+    async fn ffmpeg_decrypts_aes128_hls_vod_into_an_owned_output_part() {
+        use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+
+        let ffmpeg = match resolve_manifest_ffmpeg(&[PathBuf::from("/usr/bin")]) {
+            Ok(path) => path,
+            Err(error) if !manifest_ffmpeg_is_required() => {
+                tracing::debug!(%error, "skipping AES-128 HLS integration test without FFmpeg");
+                return;
+            }
+            Err(error) => panic!("FFmpeg is required for the AES-128 HLS integration test: {error}"),
+        };
+        let fixture = tempfile::tempdir().expect("create AES-128 HLS fixture directory");
+        let key = vec![0x42; 16];
+        let key_path = fixture.path().join("key.bin");
+        std::fs::write(&key_path, &key).expect("write AES-128 fixture key");
+        let key_info = fixture.path().join("key-info.txt");
+        std::fs::write(
+            &key_info,
+            format!(
+                "key.bin\\n{}\\n0123456789abcdef0123456789abcdef\\n",
+                key_path.display()
+            ),
+        )
+        .expect("write AES-128 HLS key info");
+        let playlist_path = fixture.path().join("playlist.m3u8");
+        let generated = tokio::process::Command::new(&ffmpeg)
+            .args([
+                "-hide_banner",
+                "-loglevel",
+                "error",
+                "-f",
+                "lavfi",
+                "-i",
+                "testsrc=size=64x64:rate=5",
+                "-t",
+                "3",
+                "-an",
+                "-c:v",
+                "mpeg2video",
+                "-pix_fmt",
+                "yuv420p",
+                "-g",
+                "5",
+                "-sc_threshold",
+                "0",
+                "-f",
+                "hls",
+                "-hls_time",
+                "1",
+                "-hls_list_size",
+                "0",
+                "-hls_playlist_type",
+                "vod",
+                "-hls_key_info_file",
+            ])
+            .arg(&key_info)
+            .arg("-hls_segment_filename")
+            .arg(fixture.path().join("segment%03d.ts"))
+            .arg(&playlist_path)
+            .output()
+            .await
+            .expect("run FFmpeg AES-128 HLS fixture generator");
+        assert!(
+            generated.status.success(),
+            "FFmpeg AES-128 fixture generation failed: {}",
+            String::from_utf8_lossy(&generated.stderr)
+        );
+        let playlist = std::fs::read(&playlist_path).expect("read generated encrypted playlist");
+
+        let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0))
+            .await
+            .expect("bind AES-128 fixture server");
+        let address = listener.local_addr().expect("AES-128 fixture server address");
+        let base_url = format!("http://{address}/playlist.m3u8");
+        let plan = crate::manifest::plan_hls_media_playlist(&base_url, &playlist)
+            .expect("plan generated AES-128 HLS VOD");
+        assert!(plan.is_incremental_aes128_mpegts_vod_candidate());
+        let request_count = plan.resources.len();
+        let fixture_root = fixture.path().to_path_buf();
+        let server = tokio::spawn(async move {
+            for _ in 0..request_count {
+                let (mut socket, _) = listener.accept().await.expect("accept AES-128 resource request");
+                let mut request = [0_u8; 1024];
+                let count = socket.read(&mut request).await.expect("read AES-128 resource request");
+                let request = String::from_utf8_lossy(&request[..count]);
+                let path = request.split_ascii_whitespace().nth(1).unwrap_or("/");
+                let name = path.trim_start_matches('/');
+                let payload = tokio::fs::read(fixture_root.join(name))
+                    .await
+                    .expect("read requested AES-128 fixture resource");
+                let header = format!(
+                    "HTTP/1.1 200 OK\\r\\nContent-Length: {}\\r\\nConnection: close\\r\\n\\r\\n",
+                    payload.len()
+                );
+                socket.write_all(header.as_bytes()).await.expect("write AES-128 response header");
+                socket.write_all(&payload).await.expect("write AES-128 response body");
+            }
+        });
+
+        let client = reqwest::Client::builder()
+            .no_proxy()
+            .build()
+            .expect("build AES-128 fixture client");
+        let staging = tempfile::tempdir().expect("create AES-128 HLS staging directory");
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+        let downloaded = Arc::new(AtomicU64::new(0));
+        let (_stop_sender, mut abort) = tokio::sync::oneshot::channel();
+        let (first_tx, first_rx) = tokio::sync::oneshot::channel();
+        let (complete_tx, complete_rx) = tokio::sync::oneshot::channel();
+        let fetch_result = fetch_hls_resources_incrementally(
+            &client,
+            &plan,
+            staging.path(),
+            &tx,
+            &downloaded,
+            &mut abort,
+            4,
+            first_tx,
+            complete_tx,
+        )
+        .await
+        .expect("fetch encrypted HLS resources");
+        assert!(fetch_result);
+        first_rx.await.expect("first incremental playlist snapshot");
+        complete_rx.await.expect("complete incremental playlist snapshot");
+        server.await.expect("AES-128 fixture server task");
+
+        let local_playlist = staging.path().join("local.m3u8");
+        let output = staging.path().join("decrypted.part");
+        let file = std::fs::OpenOptions::new()
+            .create_new(true)
+            .read(true)
+            .write(true)
+            .open(&output)
+            .expect("create decrypted output part");
+        let (_abort_sender, mut mux_abort) = tokio::sync::oneshot::channel();
+        let result = run_ffmpeg_with_offsets_timeout(
+            &ffmpeg,
+            FfmpegInput {
+                path: &local_playlist,
+                timestamp_offset: None,
+            },
+            None,
+            ManifestMuxOptions {
+                timestamp_policy: InputTimestampPolicy::Normalize,
+                timeout: Some(Duration::from_secs(30)),
+            },
+            SubtitleOutput::default(),
+            FfmpegOutput::OwnedPart {
+                file,
+                container: ManifestContainer::Ts,
+                label: output.clone(),
+            },
+            &mut mux_abort,
+        )
+        .await
+        .expect("FFmpeg should decrypt the AES-128 HLS playlist");
+        assert_eq!(result, ManifestMuxOutcome::Finished);
+        assert!(std::fs::metadata(&output).expect("stat decrypted output").len() > 0);
+
+        let verification = tokio::process::Command::new(&ffmpeg)
+            .args(["-hide_banner", "-loglevel", "error", "-i"])
+            .arg(&output)
+            .args(["-f", "null", "-"])
+            .output()
+            .await
+            .expect("verify decrypted transport stream");
+        assert!(
+            verification.status.success(),
+            "decrypted AES-128 output is not readable: {}",
+            String::from_utf8_lossy(&verification.stderr)
+        );
+    }
+
+    #[tokio::test]
     async fn static_hls_fmp4_fragments_grow_the_owned_destination_part_in_order() {
         use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
 

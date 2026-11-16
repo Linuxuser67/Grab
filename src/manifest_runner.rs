@@ -2376,6 +2376,64 @@ fn send_manifest_stop_intent(
     }
 }
 
+struct ManifestIncrementalHlsTrackFetch {
+    index: usize,
+    client: reqwest::Client,
+    plan: Arc<HlsPlan>,
+    directory: PathBuf,
+    tx: tokio::sync::mpsc::UnboundedSender<EngineMsg>,
+    downloaded: Arc<AtomicU64>,
+    connections: usize,
+}
+
+struct ManifestIncrementalHlsFetchWorker {
+    index: usize,
+    first_segment_ready: Option<tokio::sync::oneshot::Receiver<()>>,
+    complete_ready: tokio::sync::oneshot::Receiver<()>,
+    abort_sender: Option<tokio::sync::oneshot::Sender<crate::video::StopIntent>>,
+}
+
+fn spawn_incremental_hls_track_fetch(
+    fetchers: &mut tokio::task::JoinSet<(usize, Result<bool, ManifestRunError>)>,
+    context: ManifestIncrementalHlsTrackFetch,
+) -> ManifestIncrementalHlsFetchWorker {
+    let ManifestIncrementalHlsTrackFetch {
+        index,
+        client,
+        plan,
+        directory,
+        tx,
+        downloaded,
+        connections,
+    } = context;
+    let (abort_sender, mut abort) = tokio::sync::oneshot::channel();
+    let (first_segment_sender, first_segment_ready) = tokio::sync::oneshot::channel();
+    let (complete_sender, complete_ready) = tokio::sync::oneshot::channel();
+
+    fetchers.spawn(async move {
+        let result = fetch_hls_resources_incrementally(IncrementalHlsFetch {
+            client: &client,
+            plan: &plan,
+            directory: &directory,
+            tx: &tx,
+            downloaded: downloaded.as_ref(),
+            abort: &mut abort,
+            connections,
+            first_segment_ready: first_segment_sender,
+            complete_ready: complete_sender,
+        })
+        .await;
+        (index, result)
+    });
+
+    ManifestIncrementalHlsFetchWorker {
+        index,
+        first_segment_ready: Some(first_segment_ready),
+        complete_ready,
+        abort_sender: Some(abort_sender),
+    }
+}
+
 struct ManifestCompleteHlsRemux<'a> {
     ffmpeg: &'a Path,
     video_playlist: &'a Path,

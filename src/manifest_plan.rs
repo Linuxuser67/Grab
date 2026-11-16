@@ -1189,6 +1189,80 @@ mod tests {
         );
     }
 
+    fn selected_hls_master_output_container(body: &[u8]) -> Option<ManifestContainer> {
+        let source_url = "https://cdn.example.test/master.m3u8";
+        let master = crate::manifest::parse_hls_master_playlist(source_url, body)
+            .expect("valid HLS master playlist");
+        let video_key = ManifestRepresentationKey::from(
+            hls_variant_keys(&master.variants)[0]
+                .as_deref()
+                .expect("stable HLS video key"),
+        );
+        let lookup = ManifestLookup {
+            source_url: source_url.to_string(),
+            manifest: NativeManifest::HlsMaster(Box::new(master)),
+        };
+        lookup.selected_source(&video_key, None, None)
+            .expect("selected HLS variant").output_container
+    }
+
+    #[test]
+    fn hls_master_selects_mp4_for_known_compatible_video_and_audio_codecs() {
+        let body = br##"#EXTM3U
+#EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID="audio",NAME="English",LANGUAGE="en",DEFAULT=YES,AUTOSELECT=YES,URI="audio/en.m3u8"
+#EXT-X-STREAM-INF:BANDWIDTH=2000000,AUDIO="audio",CODECS="avc1.640028,mp4a.40.2"
+video/1080p.m3u8
+"##;
+        assert_eq!(selected_hls_master_output_container(body), Some(ManifestContainer::Mp4));
+    }
+
+    #[test]
+    fn hls_master_keeps_mkv_default_when_codec_metadata_is_missing_or_incompatible() {
+        let cases: &[&[u8]] = &[
+            br##"#EXTM3U
+#EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID="audio",NAME="English",LANGUAGE="en",DEFAULT=YES,AUTOSELECT=YES,URI="audio/en.m3u8"
+#EXT-X-STREAM-INF:BANDWIDTH=2000000,AUDIO="audio"
+video/1080p.m3u8
+"##,
+            br##"#EXTM3U
+#EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID="audio",NAME="English",LANGUAGE="en",DEFAULT=YES,AUTOSELECT=YES,URI="audio/en.m3u8"
+#EXT-X-STREAM-INF:BANDWIDTH=2000000,AUDIO="audio",CODECS="avc1.640028,mp4a.40.2,vp8"
+video/1080p.m3u8
+"##,
+            br##"#EXTM3U
+#EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID="audio",NAME="English",LANGUAGE="en",DEFAULT=YES,AUTOSELECT=YES,URI="audio/en.m3u8"
+#EXT-X-STREAM-INF:BANDWIDTH=2000000,AUDIO="audio",CODECS="avc1.640028"
+video/1080p.m3u8
+"##,
+        ];
+
+        for body in cases {
+            assert_eq!(
+                selected_hls_master_output_container(body),
+                None,
+                "missing/unknown codecs or an undeclared alternate-audio codec retain MKV"
+            );
+        }
+    }
+
+    #[test]
+    fn hls_mp4_codec_classifier_accepts_known_sample_entry_families_only() {
+        for codec in [
+            "avc1.640028", "avc3.640028", "hvc1.1.6.L93.B0", "hev1.1.6.L93.B0",
+            "av01.0.08M.08", "vp09.00.10.08", "mp4v.20.9",
+        ] {
+            assert_eq!(hls_mp4_codec_kind(codec), Some(HlsMp4CodecKind::Video), "{codec}");
+        }
+        for codec in ["mp4a.40.2", "ac-3", "ec-3"] {
+            assert_eq!(hls_mp4_codec_kind(codec), Some(HlsMp4CodecKind::Audio), "{codec}");
+        }
+        for codec in ["wvtt", "stpp.ttml.im1t"] {
+            assert_eq!(hls_mp4_codec_kind(codec), Some(HlsMp4CodecKind::Subtitle), "{codec}");
+        }
+        for codec in ["vp8", "vorbis", "theora", "avc1", "mp4a", ""] {
+            assert_eq!(hls_mp4_codec_kind(codec), None, "{codec}");
+        }
+    }
     #[test]
     fn hls_video_rendition_selection_resolves_the_selected_angle() {
         let body = br#"#EXTM3U

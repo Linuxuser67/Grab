@@ -3439,38 +3439,6 @@ pub(super) async fn write_staged_file_atomic(
     result
 }
 
-async fn fetch_resource_with_stop_intent(
-    client: &reqwest::Client,
-    resource: Resource,
-    directory: &Path,
-    tx: &tokio::sync::mpsc::UnboundedSender<EngineMsg>,
-    downloaded: &Arc<AtomicU64>,
-    abort: &mut tokio::sync::oneshot::Receiver<crate::video::StopIntent>,
-) -> Result<bool, ManifestRunError> {
-    let fetch = fetch_resource(client, resource, directory, tx, downloaded.as_ref());
-    tokio::pin!(fetch);
-    let mut stop_pending = true;
-    loop {
-        tokio::select! {
-            biased;
-            stop = &mut *abort, if stop_pending => {
-                stop_pending = false;
-                match crate::video::stop_intent_or_pause(stop) {
-                    crate::video::StopIntent::Finish => {}
-                    crate::video::StopIntent::Pause | crate::video::StopIntent::Discard => {
-                        tx.send(progress_message(downloaded.load(Ordering::Relaxed))).ok();
-                        return Ok(false);
-                    }
-                }
-            }
-            result = &mut fetch => {
-                result?;
-                return Ok(true);
-            }
-        }
-    }
-}
-
 async fn fetch_hls_resources_incrementally(
     client: &reqwest::Client,
     plan: &HlsPlan,
@@ -3478,6 +3446,7 @@ async fn fetch_hls_resources_incrementally(
     tx: &tokio::sync::mpsc::UnboundedSender<EngineMsg>,
     downloaded: &Arc<AtomicU64>,
     abort: &mut tokio::sync::oneshot::Receiver<crate::video::StopIntent>,
+    connections: usize,
     first_segment_ready: tokio::sync::oneshot::Sender<()>,
     complete_ready: tokio::sync::oneshot::Sender<()>,
 ) -> Result<bool, ManifestRunError> {
@@ -3496,47 +3465,90 @@ async fn fetch_hls_resources_incrementally(
         ));
     }
     let batch_size = total_segments.div_ceil(MAX_PLAYLIST_SNAPSHOTS).max(1);
+    let resource_count = resources.len();
+    let mut completed = vec![false; resource_count];
+    let mut next_to_commit = 0usize;
     let mut completed_segments = 0usize;
     let mut first_segment_ready = Some(first_segment_ready);
 
-    for (index, resource) in resources.into_iter().enumerate() {
-        if !fetch_resource_with_stop(
-            client,
-            resource,
-            directory,
-            tx,
-            downloaded,
-            abort,
-        )
-        .await?
-        {
-            return Ok(false);
-        }
+    let result = async {
+        let jobs = futures_util::stream::iter(resources.into_iter().enumerate().map(
+            |(index, resource)| {
+                let client = client.clone();
+                let directory = directory.to_path_buf();
+                let tx = tx.clone();
+                let downloaded = Arc::clone(downloaded);
+                async move {
+                    fetch_resource(&client, resource, &directory, &tx, &downloaded)
+                        .await
+                        .map(|_| index)
+                }
+            },
+        ))
+        .buffer_unordered(connections.clamp(1, MAX_RESOURCE_CONNECTIONS));
+        tokio::pin!(jobs);
+        let mut stop_pending = true;
 
-        if plan.resources[index].kind != crate::manifest::HlsResourceKind::Segment {
-            continue;
-        }
-        completed_segments += 1;
-        if completed_segments == 1 || completed_segments % batch_size == 0 {
-            let bytes = plan
-                .local_playlist_prefix_bytes(
-                    completed_segments,
-                    crate::manifest::HlsPlaylistFinality::Growing,
-                )
-                .map_err(|error| ManifestRunError::Failed(error.to_string()))?;
-            write_staged_file_atomic(
-                directory,
-                "local.m3u8.next",
-                "local.m3u8",
-                &bytes,
-                StagedPublish::Replace,
-            )
-            .await
-            .map_err(ManifestRunError::Failed)?;
-            if let Some(sender) = first_segment_ready.take() {
-                let _ = sender.send(());
+        loop {
+            tokio::select! {
+                biased;
+                stop = &mut *abort, if stop_pending => {
+                    stop_pending = false;
+                    match crate::video::stop_intent_or_pause(stop) {
+                        crate::video::StopIntent::Finish => {}
+                        crate::video::StopIntent::Pause | crate::video::StopIntent::Discard => {
+                            break Ok(false);
+                        }
+                    }
+                }
+                result = jobs.next() => {
+                    let Some(result) = result else {
+                        break Ok(true);
+                    };
+                    let index = result?;
+                    completed[index] = true;
+                    while next_to_commit < resource_count && completed[next_to_commit] {
+                        if plan.resources[next_to_commit].kind == crate::manifest::HlsResourceKind::Segment {
+                            completed_segments += 1;
+                            if completed_segments == 1 || completed_segments % batch_size == 0 {
+                                let bytes = plan
+                                    .local_playlist_prefix_bytes(
+                                        completed_segments,
+                                        crate::manifest::HlsPlaylistFinality::Growing,
+                                    )
+                                    .map_err(|error| ManifestRunError::Failed(error.to_string()))?;
+                                write_staged_file_atomic(
+                                    directory,
+                                    "local.m3u8.next",
+                                    "local.m3u8",
+                                    &bytes,
+                                    StagedPublish::Replace,
+                                )
+                                .await
+                                .map_err(ManifestRunError::Failed)?;
+                                if let Some(sender) = first_segment_ready.take() {
+                                    let _ = sender.send(());
+                                }
+                            }
+                        }
+                        next_to_commit += 1;
+                    }
+                }
             }
         }
+    }
+    .await;
+
+    match result {
+        Ok(false) => {
+            tx.send(progress_message(downloaded.load(Ordering::Relaxed))).ok();
+            return Ok(false);
+        }
+        Err(error) => {
+            tx.send(progress_message(downloaded.load(Ordering::Relaxed))).ok();
+            return Err(error);
+        }
+        Ok(true) => {}
     }
 
     if completed_segments != total_segments {
@@ -3547,6 +3559,7 @@ async fn fetch_hls_resources_incrementally(
     if pending_manifest_stop_intent(abort).is_some_and(|intent| {
         matches!(intent, crate::video::StopIntent::Pause | crate::video::StopIntent::Discard)
     }) {
+        tx.send(progress_message(downloaded.load(Ordering::Relaxed))).ok();
         return Ok(false);
     }
 

@@ -5198,6 +5198,8 @@ async fn run_ffmpeg_with_offsets_timeout(
         command.arg("-itsoffset").arg(offset);
     }
     command.arg("-i").arg(video_input.path);
+    // HLS CEA-608/708 captions are carried in-band with video samples.
+    // Keep them inside the copied video stream; they are not a separate subtitle input.
     if let Some(audio_input) = audio_input {
         if is_hls_playlist_input(audio_input.path) {
             add_hls_staging_options(&mut command);
@@ -5362,6 +5364,53 @@ mod tests {
     }
 
     #[cfg(unix)]
+    fn fake_ffmpeg_recording_arguments(directory: &Path) -> PathBuf {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let path = directory.join("fake-ffmpeg-args");
+        std::fs::write(
+            &path,
+            "#!/bin/sh\nprintf '%s\\n' \"$@\" > \"$0.args\"\nexit 0\n",
+        )
+        .expect("write argument-recording fake FFmpeg executable");
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o700))
+            .expect("make argument-recording FFmpeg executable");
+        path
+    }
+
+    #[cfg(unix)]
+    async fn run_ffmpeg_recording_args(
+        ffmpeg: &Path,
+        output: &Path,
+        subtitles: SubtitleOutput<'_>,
+    ) -> Vec<String> {
+        // Finish waits for FFmpeg to exit, making the captured command deterministic.
+        let (sender, mut abort) = tokio::sync::oneshot::channel();
+        sender
+            .send(crate::video::StopIntent::Finish)
+            .expect("queue FFmpeg Finish intent");
+        run_ffmpeg_with_offsets(
+            ffmpeg,
+            FfmpegInput {
+                path: Path::new("video.m3u8"),
+                timestamp_offset: None,
+            },
+            None,
+            InputTimestampPolicy::Normalize,
+            subtitles,
+            output,
+            &mut abort,
+        )
+        .await
+        .expect("recording FFmpeg invocation should complete");
+        std::fs::read_to_string(ffmpeg.with_extension("args"))
+            .expect("read recorded FFmpeg arguments")
+            .lines()
+            .map(str::to_string)
+            .collect()
+    }
+
+    #[cfg(unix)]
     fn fake_ffmpeg_that_hangs(directory: &Path) -> PathBuf {
         use std::os::unix::fs::PermissionsExt as _;
 
@@ -5371,6 +5420,83 @@ mod tests {
         std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o700))
             .expect("make hanging fake FFmpeg executable");
         path
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn imsc1_hls_subtitles_are_stream_copied_or_preserved_in_mp4_sidecars() {
+        let directory = tempfile::tempdir().expect("create FFmpeg argument test directory");
+        let ffmpeg = fake_ffmpeg_recording_arguments(directory.path());
+        let output = directory.path().join("output.mp4");
+        let sidecar = directory.path().join("output.en.imsc1.mp4");
+
+        let embedded = run_ffmpeg_recording_args(
+            &ffmpeg,
+            &output,
+            SubtitleOutput {
+                input: Some(Path::new("subtitles.m3u8")),
+                embed: true,
+                sidecar: None,
+                is_imsc1: true,
+            },
+        )
+        .await;
+        assert!(
+            embedded.windows(2).any(|pair| pair == ["-map", "1:s:0"]),
+            "the selected subtitle input must be explicitly mapped: {embedded:?}"
+        );
+        assert!(
+            embedded.windows(2).any(|pair| pair == ["-c:s", "copy"]),
+            "IMSC1 must be stream-copied into MP4, not decoded to mov_text: {embedded:?}"
+        );
+        assert!(
+            !embedded.windows(2).any(|pair| pair == ["-c:s", "mov_text"]),
+            "IMSC1 must not enter the WebVTT conversion path"
+        );
+
+        let sidecar_args = run_ffmpeg_recording_args(
+            &ffmpeg,
+            &output,
+            SubtitleOutput {
+                input: Some(Path::new("subtitles.m3u8")),
+                embed: false,
+                sidecar: Some(&sidecar),
+                is_imsc1: true,
+            },
+        )
+        .await;
+        assert!(
+            sidecar_args.windows(2).any(|pair| pair == ["-c:s", "copy"]),
+            "IMSC1 sidecars must retain the source subtitle codec: {sidecar_args:?}"
+        );
+        assert!(
+            sidecar_args
+                .windows(4)
+                .any(|args| args == ["-movflags", "+faststart", "-f", "mp4"]),
+            "IMSC1 sidecars must be MP4 containers: {sidecar_args:?}"
+        );
+        assert!(
+            sidecar_args
+                .iter()
+                .any(|argument| argument == sidecar.to_string_lossy().as_ref()),
+            "the IMSC1 sidecar destination must be passed to FFmpeg"
+        );
+
+        let webvtt = run_ffmpeg_recording_args(
+            &ffmpeg,
+            &output,
+            SubtitleOutput {
+                input: Some(Path::new("subtitles.m3u8")),
+                embed: true,
+                sidecar: None,
+                is_imsc1: false,
+            },
+        )
+        .await;
+        assert!(
+            webvtt.windows(2).any(|pair| pair == ["-c:s", "mov_text"]),
+            "the existing WebVTT-to-MP4 conversion path must remain intact: {webvtt:?}"
+        );
     }
 
     #[cfg(unix)]

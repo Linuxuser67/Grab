@@ -5927,7 +5927,7 @@ segment-2.ts
                         .expect("read AES-128 resource request");
                     let request = String::from_utf8_lossy(&request[..count]);
                     let path = request.split_ascii_whitespace().nth(1).unwrap_or("/");
-                    if path == final_path {
+                    if path == final_path.as_str() {
                         requested.notify_one();
                         release.notified().await;
                     }

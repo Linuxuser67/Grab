@@ -120,6 +120,7 @@ fn hls_variant_supports_mp4(variant: &HlsVariant) -> bool {
 
     has_video && (variant.audio_group.is_none() || has_audio)
 }
+
 /// Select the closest representation to the configured video-quality preference.
 #[must_use]
 pub(crate) fn preferred_choice_index(choices: &[ManifestChoice], quality: &str) -> usize {
@@ -494,7 +495,9 @@ impl ManifestLookup {
         // fetching child playlists again can consume one-shot URLs before download.
         let output_container = match &self.manifest {
             NativeManifest::HlsMaster(master) => master
-                .variants.iter().zip(hls_variant_keys(&master.variants))
+                .variants
+                .iter()
+                .zip(hls_variant_keys(&master.variants))
                 .find_map(|(variant, key)| {
                     (key.as_deref() == Some(representation_key.as_str())).then_some(variant)
                 })
@@ -502,7 +505,8 @@ impl ManifestLookup {
                 .map(|_| ManifestContainer::Mp4),
             NativeManifest::HlsMedia(plan) => plan.output_container(),
             NativeManifest::Dash(dash) => dash
-                .video_representations.iter()
+                .video_representations
+                .iter()
                 .find(|representation| representation.matches_key(representation_key.as_str()))
                 .and_then(|representation| {
                     dash_output_container(representation.mime_type.as_deref())

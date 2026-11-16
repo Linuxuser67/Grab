@@ -576,9 +576,9 @@ impl HlsPlan {
         let Ok(playlist) = std::str::from_utf8(&bytes) else {
             return false;
         };
-        !playlist.lines().any(|line| {
-            line.starts_with("#EXT-X-BYTERANGE:") || line == "#EXT-X-GAP"
-        })
+        !playlist
+            .lines()
+            .any(|line| line.starts_with("#EXT-X-BYTERANGE:") || line == "#EXT-X-GAP")
     }
 
     /// Whether one leading `EXT-X-MAP` section followed by media segments can be
@@ -2823,8 +2823,8 @@ segment-2.m4s
 segment.m4s
 #EXT-X-ENDLIST
 "#;
-        let plan = plan_hls_media_playlist(BASE_URL, ranged)
-            .expect("ranged fMP4 playlist should plan");
+        let plan =
+            plan_hls_media_playlist(BASE_URL, ranged).expect("ranged fMP4 playlist should plan");
         assert!(!plan.is_incremental_clear_vod_candidate());
 
         let encrypted = br#"#EXTM3U
@@ -2850,8 +2850,8 @@ segment-1.m4s
 segment-2.m4s
 #EXT-X-ENDLIST
 "#;
-        let plan = plan_hls_media_playlist(BASE_URL, plain)
-            .expect("simple fMP4 playlist should plan");
+        let plan =
+            plan_hls_media_playlist(BASE_URL, plain).expect("simple fMP4 playlist should plan");
         assert!(!plan.is_incremental_clear_vod_candidate());
         assert!(plan.is_destination_assemblable_candidate());
     }

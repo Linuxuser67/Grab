@@ -4469,10 +4469,16 @@ async fn wait_for_manifest_mux(
         },
         None => child.wait().await,
     };
-    status.map_err(|error| {
-        let _ = child.start_kill();
-        ManifestRunError::Failed(format!("FFmpeg could not finish: {error}"))
-    })
+    match status {
+        Ok(status) => Ok(status),
+        Err(error) => {
+            let _ = child.kill().await;
+            let _ = child.wait().await;
+            Err(ManifestRunError::Failed(format!(
+                "FFmpeg could not finish: {error}"
+            )))
+        }
+    }
 }
 
 enum FfmpegOutput {
@@ -4510,6 +4516,11 @@ async fn run_ffmpeg_with_offsets_timeout(
         return Err(mpegts_embedded_subtitle_error());
     }
 
+    tracing::debug!(
+        output = %output_label.display(),
+        output_container = ?output_container,
+        "starting FFmpeg manifest mux"
+    );
     let mut command = tokio::process::Command::new(ffmpeg);
     if is_hls_playlist_input(video_input.path) {
         add_hls_staging_options(&mut command);

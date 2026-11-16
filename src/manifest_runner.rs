@@ -5259,7 +5259,7 @@ mod tests {
         );
     }
 
-    #[cfg(unix)]
+    #[cfg(target_os = "linux")]
     #[tokio::test]
     async fn ffmpeg_owned_part_output_uses_the_inherited_file_descriptor() {
         use std::os::unix::fs::PermissionsExt as _;

@@ -68,7 +68,7 @@ default. CODECS describes codec formats, not whether child segments use fMP4
 or MPEG-TS, so this is a conservative mux-compatibility decision rather than
 a claim that the master playlist identifies the segment container.
 The current sample-entry allowlist covers common AVC/HEVC/Dolby Vision/AV1/VP9
-and MJPEG video identifiers; AAC, AC-3/E-AC-3, ALAC, APAC and FLAC audio
+and MJPEG/MPEG-4 Visual video identifiers; AAC, AC-3/E-AC-3, ALAC, APAC and FLAC audio
 identifiers; and WVTT/IMSC1 subtitle identifiers. Unknown identifiers
 remain on the MKV fallback rather than being guessed as MP4-compatible.
 

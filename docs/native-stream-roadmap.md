@@ -62,13 +62,17 @@ the live video stream.
 HLS master previews do not fetch selected child playlists a second time just
 to choose an output suffix, because child URLs may be one-shot. Instead, Grab
 chooses MP4 only when the selected variant's CODECS declaration contains
-recognized MP4 sample-entry families and any referenced separate audio or subtitle group has a declared compatible codec. Missing or unknown codec metadata retains the MKV
+recognized MP4 sample-entry families and any referenced separate audio or
+subtitle group has a declared compatible codec. Missing or unknown codec
+metadata retains the MKV
 default. CODECS describes codec formats, not whether child segments use fMP4
 or MPEG-TS, so this is a conservative mux-compatibility decision rather than
 a claim that the master playlist identifies the segment container.
 The current sample-entry allowlist is limited to codec tags supported by the
 app's minimum FFmpeg MP4 muxer: AVC/HEVC (including `dvh1`), AV1 and VP9
-video; AAC, AC-3/E-AC-3, ALAC and FLAC audio; and IMSC1/TTML (`stpp`) subtitles. fMP4 WebVTT (`wvtt`) remains outside the MP4 allowlist because the minimum FFmpeg MP4 muxer does not register that sample entry.
+video; AAC, AC-3/E-AC-3, ALAC and FLAC audio; and IMSC1/TTML (`stpp`)
+subtitles. fMP4 WebVTT (`wvtt`) remains outside the MP4 allowlist because the
+minimum FFmpeg MP4 muxer does not register that sample entry.
 Less common or unsupported identifiers, including unknown sample types,
 remain on the MKV fallback rather than being guessed as MP4-compatible.
 

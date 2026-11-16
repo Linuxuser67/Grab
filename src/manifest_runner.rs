@@ -2601,7 +2601,7 @@ async fn run_incremental_hls_vod(
 
     let mut fetchers =
         tokio::task::JoinSet::<(usize, Result<bool, ManifestRunError>)>::new();
-    let mut workers = Vec::with_capacity(usize::from(audio.is_some()) + 1);
+    let mut workers = Vec::with_capacity(if audio.is_some() { 2 } else { 1 });
     workers.push(spawn_incremental_hls_track_fetch(
         &mut fetchers,
         ManifestIncrementalHlsTrackFetch {
@@ -2764,7 +2764,6 @@ async fn run_incremental_hls_vod(
 
     let mut ffmpeg_result = None;
     let mut ffmpeg_exited_before_complete_playlist = false;
-    let mut fetch_join_error = None;
     while fetch_results.iter().any(Option::is_none) || ffmpeg_result.is_none() {
         tokio::select! {
             biased;
@@ -2797,7 +2796,6 @@ async fn run_incremental_hls_vod(
                     }
                     Some(Err(error)) => {
                         let message = format!("Incremental HLS track fetch task failed: {error}");
-                        fetch_join_error = Some(message.clone());
                         for result in &mut fetch_results {
                             if result.is_none() {
                                 *result = Some(Err(ManifestRunError::Failed(message.clone())));
@@ -3219,6 +3217,22 @@ async fn finalize_manifest_download(
         }
         _ => None,
     };
+    if matches!(
+        mode,
+        ManifestFinalizationMode::PublishPreMuxedDestinationPart
+    ) && !destination_parts
+    {
+        // Incremental muxing writes the final media stream directly into the
+        // owned video part; there are no separate audio/video track parts.
+        crate::manifest_destination::verify_owned_part_async(
+            staging.to_path_buf(),
+            job.dest.clone(),
+            job.item_id,
+            TrackKind::Video,
+        )
+        .await
+        .map_err(ManifestRunError::Failed)?;
+    }
     if destination_parts {
         for (track, should_verify) in [
             (TrackKind::Video, true),

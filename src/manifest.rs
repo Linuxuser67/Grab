@@ -1372,6 +1372,13 @@ fn validate_hls_rendition_groups(
             if alternative.autoselect {
                 // AUTOSELECT renditions in one group need distinct language,
                 // associated-language, forced, characteristics, and caption-service identities.
+                let caption_service = alternative.instream_id.as_ref().map(|instream_id| {
+                    match instream_id {
+                        m3u8_rs::InstreamId::CC(channel) => format!("CC{channel}"),
+                        m3u8_rs::InstreamId::Service(service) => format!("SERVICE{service}"),
+                        m3u8_rs::InstreamId::Other(value) => format!("OTHER:{value}"),
+                    }
+                });
                 let signature = (
                     group_kind,
                     group,
@@ -1379,7 +1386,7 @@ fn validate_hls_rendition_groups(
                     alternative.assoc_language.clone(),
                     alternative.forced,
                     alternative.characteristics.clone(),
-                    alternative.instream_id.clone(),
+                    caption_service,
                 );
                 if !autoselect_signatures.insert(signature) {
                     return Err(group_error);

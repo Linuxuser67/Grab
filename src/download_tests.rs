@@ -1317,7 +1317,7 @@ fn content_disposition_table() {
         ),
         // RFC 5987 Latin-1 charset (not UTF-8).
         (
-            "attachment; filename*=ISO-8859-1''caf%E9.pdf",
+            "attachment; filename*=\"ISO-8859-1''caf%E9.pdf\"",
             Some("café.pdf"),
         ),
         // Semicolon inside quotes is not a separator.

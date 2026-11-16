@@ -376,7 +376,7 @@ enum Tracks {
 }
 
 impl Tracks {
-    fn uses_incremental_aes128_vod(&self) -> bool {
+    fn uses_incremental_hls_vod(&self) -> bool {
         matches!(
             self,
             Self::Hls {
@@ -385,6 +385,7 @@ impl Tracks {
                 subtitle: None,
                 ..
             } if video.is_incremental_aes128_mpegts_vod_candidate()
+                || video.is_incremental_clear_vod_candidate()
         )
     }
 
@@ -2145,8 +2146,8 @@ pub(crate) async fn run_manifest_download(
         ) => return Ok(ManifestOutcome::Aborted),
     };
     let mut _finish_stop_sender = None;
-    if !live_hls && !live_dash && !has_audio && tracks.uses_incremental_aes128_vod() {
-        let result = run_incremental_aes128_hls_vod(ManifestIncrementalHlsVod {
+    if !live_hls && !live_dash && !has_audio && tracks.uses_incremental_hls_vod() {
+        let result = run_incremental_hls_vod(ManifestIncrementalHlsVod {
             job: &job,
             gate,
             abort,
@@ -2158,7 +2159,7 @@ pub(crate) async fn run_manifest_download(
             tracks,
             ffmpeg,
             downloaded,
-            connections: job.connections,
+            connections: 1,
             client: &client,
         })
         .await;
@@ -2351,7 +2352,7 @@ fn send_manifest_stop_intent(
     }
 }
 
-struct ManifestCompleteAes128Remux<'a> {
+struct ManifestCompleteHlsRemux<'a> {
     ffmpeg: &'a Path,
     playlist: &'a Path,
     staging: &'a Path,
@@ -2362,12 +2363,12 @@ struct ManifestCompleteAes128Remux<'a> {
     abort: &'a mut tokio::sync::oneshot::Receiver<crate::video::StopIntent>,
 }
 
-async fn remux_complete_aes128_vod_part(
-    context: ManifestCompleteAes128Remux<'_>,
+async fn remux_complete_hls_vod_part(
+    context: ManifestCompleteHlsRemux<'_>,
 ) -> Result<ManifestMuxOutcome, ManifestRunError> {
     use tokio::io::AsyncSeekExt as _;
 
-    let ManifestCompleteAes128Remux {
+    let ManifestCompleteHlsRemux {
         ffmpeg,
         playlist,
         staging,
@@ -2386,16 +2387,16 @@ async fn remux_complete_aes128_vod_part(
     .await
     .map_err(ManifestRunError::Failed)?;
     output_file.set_len(0).await.map_err(|error| {
-        manifest_storage_error("Could not reset the incomplete AES-128 output part", error)
+        manifest_storage_error("Could not reset the incomplete HLS output part", error)
     })?;
     output_file
         .seek(std::io::SeekFrom::Start(0))
         .await
         .map_err(|error| {
-            manifest_storage_error("Could not rewind the AES-128 output part", error)
+            manifest_storage_error("Could not rewind the HLS output part", error)
         })?;
     output_file.sync_all().await.map_err(|error| {
-        manifest_storage_error("Could not persist the reset AES-128 output part", error)
+        manifest_storage_error("Could not persist the reset HLS output part", error)
     })?;
 
     run_ffmpeg_with_offsets_timeout(
@@ -2425,7 +2426,7 @@ async fn remux_complete_aes128_vod_part(
     .await
 }
 
-async fn run_incremental_aes128_hls_vod(
+async fn run_incremental_hls_vod(
     context: ManifestIncrementalHlsVod<'_>,
 ) -> Result<ManifestOutcome, ManifestRunError> {
     use tokio::io::AsyncSeekExt as _;
@@ -2446,7 +2447,7 @@ async fn run_incremental_aes128_hls_vod(
         client,
     } = context;
     tx.send(EngineMsg::Phase(
-        "Downloading and decrypting HLS VOD…".to_string(),
+        "Downloading HLS VOD…".to_string(),
     ))
     .ok();
     let Tracks::Hls {
@@ -2457,7 +2458,7 @@ async fn run_incremental_aes128_hls_vod(
     } = tracks
     else {
         return Err(ManifestRunError::Failed(
-            "Incremental AES-128 HLS VOD requires one media playlist".to_string(),
+            "Incremental HLS VOD requires one media playlist".to_string(),
         ));
     };
 
@@ -2716,14 +2717,14 @@ async fn run_incremental_aes128_hls_vod(
             if ffmpeg_exited_before_complete_playlist {
                 tracing::warn!(
                     item_id = job.item_id,
-                    "FFmpeg exited on a growing AES-128 VOD snapshot; remuxing the completed playlist"
+                    "FFmpeg exited on a growing HLS VOD snapshot; remuxing the completed playlist"
                 );
                 let remux_outcome = if abort_done {
                     // Finish was already consumed by the fetch/mux supervisor.
                     // Re-arm it for the completion-only remux.
                     let (finish_sender, mut finish_abort) = tokio::sync::oneshot::channel();
                     let _ = finish_sender.send(crate::video::StopIntent::Finish);
-                    remux_complete_aes128_vod_part(ManifestCompleteAes128Remux {
+                    remux_complete_hls_vod_part(ManifestCompleteHlsRemux {
                         ffmpeg: &ffmpeg,
                         playlist: &playlist_path,
                         staging,
@@ -2735,7 +2736,7 @@ async fn run_incremental_aes128_hls_vod(
                     })
                     .await?
                 } else {
-                    remux_complete_aes128_vod_part(ManifestCompleteAes128Remux {
+                    remux_complete_hls_vod_part(ManifestCompleteHlsRemux {
                         ffmpeg: &ffmpeg,
                         playlist: &playlist_path,
                         staging,
@@ -6424,7 +6425,7 @@ segment-2.ts
             .map_or_else(|| ffmpeg.clone(), |(wrapper, _)| wrapper.clone());
         let task_downloaded = Arc::clone(&downloaded);
         let download_task = tokio::spawn(async move {
-            run_incremental_aes128_hls_vod(ManifestIncrementalHlsVod {
+            run_incremental_hls_vod(ManifestIncrementalHlsVod {
                 job: &job,
                 gate,
                 abort,

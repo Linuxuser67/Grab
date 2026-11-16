@@ -2329,6 +2329,312 @@ struct ManifestIncrementalHlsVod<'a> {
     client: &'a reqwest::Client,
 }
 
+fn send_manifest_stop_intent(
+    sender: &mut Option<tokio::sync::oneshot::Sender<crate::video::StopIntent>>,
+    intent: crate::video::StopIntent,
+) {
+    if let Some(sender) = sender.take() {
+        let _ = sender.send(intent);
+    }
+}
+
+async fn run_incremental_aes128_hls_vod(
+    context: ManifestIncrementalHlsVod<'_>,
+) -> Result<ManifestOutcome, ManifestRunError> {
+    use tokio::io::AsyncSeekExt as _;
+
+    let ManifestIncrementalHlsVod {
+        job,
+        gate,
+        mut abort,
+        tx,
+        staging,
+        dest_dir,
+        video_dir,
+        audio_dir,
+        output_part,
+        tracks,
+        has_audio,
+        ffmpeg,
+        downloaded,
+        client,
+    } = context;
+    let Tracks::Hls {
+        video,
+        audio: None,
+        subtitle: None,
+        ..
+    } = tracks
+    else {
+        return Err(ManifestRunError::Failed(
+            "Incremental AES-128 HLS VOD requires one media playlist".to_string(),
+        ));
+    };
+
+    let part_path = crate::manifest_destination::part_path_async(
+        staging.to_path_buf(),
+        job.dest.clone(),
+        job.item_id,
+        TrackKind::Video,
+    )
+    .await
+    .map_err(ManifestRunError::Failed)?;
+    let mut output_file = crate::manifest_destination::open_owned_part_async(
+        staging.to_path_buf(),
+        job.dest.clone(),
+        job.item_id,
+        TrackKind::Video,
+    )
+    .await
+    .map_err(ManifestRunError::Failed)?;
+    output_file
+        .set_len(0)
+        .await
+        .map_err(|error| manifest_storage_error("Could not reset the owned HLS output part", error))?;
+    output_file
+        .seek(std::io::SeekFrom::Start(0))
+        .await
+        .map_err(|error| manifest_storage_error("Could not rewind the owned HLS output part", error))?;
+    output_file
+        .sync_all()
+        .await
+        .map_err(|error| manifest_storage_error("Could not persist the empty HLS output part", error))?;
+
+    let (fetch_abort_tx, fetch_abort_rx) = tokio::sync::oneshot::channel();
+    let (ffmpeg_abort_tx, ffmpeg_abort_rx) = tokio::sync::oneshot::channel();
+    let (first_segment_tx, mut first_segment_rx) = tokio::sync::oneshot::channel();
+    let (complete_tx, mut complete_rx) = tokio::sync::oneshot::channel();
+    let fetch_client = client.clone();
+    let fetch_plan = video.clone();
+    let fetch_directory = video_dir.to_path_buf();
+    let fetch_tx = tx.clone();
+    let fetch_downloaded = Arc::clone(&downloaded);
+    let mut fetch_abort = fetch_abort_rx;
+    let mut fetch_task = tokio::spawn(async move {
+        fetch_hls_resources_incrementally(
+            &fetch_client,
+            &fetch_plan,
+            &fetch_directory,
+            &fetch_tx,
+            &fetch_downloaded,
+            &mut fetch_abort,
+            first_segment_tx,
+            complete_tx,
+        )
+        .await
+    });
+    let mut fetch_result = None;
+    let mut fetch_abort_tx = Some(fetch_abort_tx);
+    let mut ffmpeg_abort_tx = Some(ffmpeg_abort_tx);
+    let mut abort_done = false;
+    let mut stop_intent = None;
+
+    // Do not start FFmpeg until the first complete segment and its key are
+    // durable and the first growing local playlist snapshot has been published.
+    loop {
+        tokio::select! {
+            biased;
+            stop = &mut abort, if !abort_done => {
+                abort_done = true;
+                let intent = crate::video::stop_intent_or_pause(stop);
+                stop_intent = Some(intent);
+                if intent != crate::video::StopIntent::Finish {
+                    send_manifest_stop_intent(&mut fetch_abort_tx, intent);
+                    send_manifest_stop_intent(&mut ffmpeg_abort_tx, intent);
+                }
+            }
+            ready = &mut first_segment_rx => {
+                if ready.is_ok() {
+                    break;
+                }
+                fetch_result = Some(fetch_task.await);
+                break;
+            }
+            result = &mut fetch_task, if fetch_result.is_none() => {
+                fetch_result = Some(result);
+                break;
+            }
+        }
+    }
+
+    if let Some(result) = fetch_result.as_ref() {
+        match result {
+            Ok(Ok(true)) => {}
+            Ok(Ok(false)) => {
+                return Ok(match stop_intent.unwrap_or(crate::video::StopIntent::Pause) {
+                    crate::video::StopIntent::Pause | crate::video::StopIntent::Finish => ManifestOutcome::Paused,
+                    crate::video::StopIntent::Discard => ManifestOutcome::Aborted,
+                });
+            }
+            Ok(Err(error)) => return Err(ManifestRunError::Failed(error.to_string())),
+            Err(error) => {
+                return Err(ManifestRunError::Failed(format!(
+                    "Incremental HLS resource task failed: {error}"
+                )));
+            }
+        }
+    }
+
+    let output_container = manifest_output_container(&job.dest)?;
+    let ffmpeg_path = ffmpeg.clone();
+    let playlist_path = video_dir.join("local.m3u8");
+    let output_label = part_path.clone();
+    let output_file = output_file.into_std().await;
+    let mut ffmpeg_abort = ffmpeg_abort_rx;
+    let mut ffmpeg_task = tokio::spawn(async move {
+        run_ffmpeg_with_offsets_timeout(
+            &ffmpeg_path,
+            FfmpegInput {
+                path: &playlist_path,
+                timestamp_offset: None,
+            },
+            None,
+            ManifestMuxOptions {
+                timestamp_policy: InputTimestampPolicy::Normalize,
+                timeout: None,
+            },
+            SubtitleOutput {
+                input: None,
+                embed: false,
+                sidecar: None,
+            },
+            FfmpegOutput::OwnedPart {
+                file: output_file,
+                container: output_container,
+                label: output_label,
+            },
+            &mut ffmpeg_abort,
+        )
+        .await
+    });
+
+    let mut ffmpeg_result = None;
+    let mut complete_ready = false;
+    let mut complete_signal_done = false;
+    let mut ffmpeg_exited_before_complete_playlist = false;
+    loop {
+        if fetch_result.is_some() && ffmpeg_result.is_some() {
+            break;
+        }
+        tokio::select! {
+            biased;
+            stop = &mut abort, if !abort_done => {
+                abort_done = true;
+                let intent = crate::video::stop_intent_or_pause(stop);
+                stop_intent = Some(intent);
+                if intent != crate::video::StopIntent::Finish {
+                    send_manifest_stop_intent(&mut fetch_abort_tx, intent);
+                    send_manifest_stop_intent(&mut ffmpeg_abort_tx, intent);
+                }
+            }
+            complete = &mut complete_rx, if !complete_signal_done => {
+                complete_signal_done = true;
+                complete_ready = complete.is_ok();
+            }
+            result = &mut fetch_task, if fetch_result.is_none() => {
+                fetch_result = Some(result);
+                if !matches!(fetch_result, Some(Ok(Ok(true)))) {
+                    send_manifest_stop_intent(
+                        &mut ffmpeg_abort_tx,
+                        crate::video::StopIntent::Pause,
+                    );
+                }
+            }
+            result = &mut ffmpeg_task, if ffmpeg_result.is_none() => {
+                ffmpeg_result = Some(result);
+                match &ffmpeg_result {
+                    Some(Ok(Ok(ManifestMuxOutcome::Finished))) if !complete_ready => {
+                        ffmpeg_exited_before_complete_playlist = true;
+                        send_manifest_stop_intent(
+                            &mut fetch_abort_tx,
+                            crate::video::StopIntent::Pause,
+                        );
+                    }
+                    Some(Ok(Err(_))) | Some(Err(_)) => {
+                        send_manifest_stop_intent(
+                            &mut fetch_abort_tx,
+                            crate::video::StopIntent::Pause,
+                        );
+                    }
+                    _ => {}
+                }
+            }
+        }
+    }
+
+    if !abort_done {
+        stop_intent = pending_manifest_stop_intent(&mut abort);
+    }
+    if let Some(intent @ (crate::video::StopIntent::Pause | crate::video::StopIntent::Discard)) = stop_intent {
+        return Ok(match intent {
+            crate::video::StopIntent::Pause => ManifestOutcome::Paused,
+            crate::video::StopIntent::Discard => ManifestOutcome::Aborted,
+            crate::video::StopIntent::Finish => unreachable!(),
+        });
+    }
+    if ffmpeg_exited_before_complete_playlist {
+        return Err(ManifestRunError::Failed(
+            "FFmpeg exited before the complete HLS VOD playlist was published".to_string(),
+        ));
+    }
+
+    let fetched = match fetch_result.expect("fetch task must finish before publication") {
+        Ok(Ok(fetched)) => fetched,
+        Ok(Err(error)) => return Err(error),
+        Err(error) => {
+            return Err(ManifestRunError::Failed(format!(
+                "Incremental HLS resource task failed: {error}"
+            )));
+        }
+    };
+    if !fetched {
+        return Ok(ManifestOutcome::Paused);
+    }
+    match ffmpeg_result.expect("FFmpeg task must finish before publication") {
+        Ok(Ok(ManifestMuxOutcome::Finished)) if complete_ready => {}
+        Ok(Ok(ManifestMuxOutcome::Paused)) => return Ok(ManifestOutcome::Paused),
+        Ok(Ok(ManifestMuxOutcome::Aborted)) => return Ok(ManifestOutcome::Aborted),
+        Ok(Ok(ManifestMuxOutcome::Finished)) => {
+            return Err(ManifestRunError::Failed(
+                "FFmpeg finished without receiving the complete HLS VOD playlist".to_string(),
+            ));
+        }
+        Ok(Err(error)) => return Err(error),
+        Err(error) => {
+            return Err(ManifestRunError::Failed(format!(
+                "FFmpeg HLS mux task failed: {error}"
+            )));
+        }
+    }
+
+    let (finalizer_abort_sender, finalizer_abort) = tokio::sync::oneshot::channel();
+    let result = finalize_manifest_download(ManifestFinalization {
+        job,
+        destination_parts: true,
+        output_already_muxed: true,
+        gate,
+        abort: finalizer_abort,
+        tx,
+        staging,
+        dest_dir,
+        video_dir,
+        audio_dir,
+        output_part,
+        tracks: Tracks::Hls {
+            video: Box::new(video),
+            audio: None,
+            subtitle: None,
+            subtitle_language: None,
+        },
+        has_audio,
+        ffmpeg,
+        downloaded: downloaded.as_ref(),
+    })
+    .await;
+    drop(finalizer_abort_sender);
+    result
+}
+
 /// Mux the staged tracks, validate the output, and publish it without clobbering.
 ///
 /// The staging data is retained on every failure before publication so a later

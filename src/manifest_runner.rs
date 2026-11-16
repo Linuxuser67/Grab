@@ -76,6 +76,7 @@ const HLS_STATIC_RESOURCE_CONNECTIONS: usize = 1;
 const FFMPEG_LOG_LINES: usize = 32;
 /// Bound native manifest muxing, including a user-requested Finish while FFmpeg is running.
 const MANIFEST_MUX_TIMEOUT: Duration = Duration::from_secs(3600);
+const INCREMENTAL_HLS_MUX_TIMEOUT: Duration = Duration::from_secs(7 * 24 * 60 * 60);
 /// Upper bound on the persisted dynamic DASH segment index.
 const MAX_DASH_LIVE_SEGMENTS: usize = crate::manifest_types::MAX_MANIFEST_SEGMENTS;
 /// Bound for a serialized dynamic DASH resume index.
@@ -2488,7 +2489,7 @@ async fn run_incremental_aes128_hls_vod(
             None,
             ManifestMuxOptions {
                 timestamp_policy: InputTimestampPolicy::Normalize,
-                timeout: None,
+                timeout: Some(INCREMENTAL_HLS_MUX_TIMEOUT),
             },
             SubtitleOutput {
                 input: None,

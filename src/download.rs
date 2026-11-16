@@ -1482,10 +1482,9 @@ impl DownloadManager {
         .map_err(|error| format!("Could not inspect download folder: {error:?}"))?
         .map_err(|error| format!("Could not inspect download folder: {error}"))?;
 
-        // Reuse format metadata already present in the Add-card preview. HLS
-        // master child playlists are intentionally not fetched here; their
-        // conservative Matroska default avoids a second, potentially one-shot
-        // manifest request before the queue row appears.
+        // Reuse the selected rendition's transient container hint from the
+        // Add-card preview. Unknown or incomplete format metadata retains
+        // the Matroska default; do not refetch potentially one-shot children.
         let container = source
             .output_container
             .unwrap_or(crate::media_types::ManifestContainer::Mkv);

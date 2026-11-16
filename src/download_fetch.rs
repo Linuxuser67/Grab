@@ -242,7 +242,6 @@ pub(crate) async fn run_download(mut ctx: FetchCtx, connections: usize, mode: St
                             Ok(None) => return,
                             Err(_) => {
                                 tracing::warn!(
-                                    url = %ctx.url,
                                     "segmented-download checkpoint acknowledgement timed out; using single-stream mode"
                                 );
                                 let mut single_tries = 3;

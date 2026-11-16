@@ -7120,6 +7120,406 @@ segment-2.ts
         );
     }
 
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn separate_audio_fmp4_vod_grows_one_owned_destination_part_while_fetching() {
+        use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+
+        let ffmpeg = match resolve_manifest_ffmpeg(&[PathBuf::from("/usr/bin")]) {
+            Ok(path) => path,
+            Err(error) if std::env::var_os("GRAB_REQUIRE_FFMPEG_MANIFEST").is_none() => {
+                tracing::debug!(%error, "skipping multi-rendition HLS integration test without FFmpeg");
+                return;
+            }
+            Err(error) => {
+                panic!("FFmpeg is required for the multi-rendition HLS integration test: {error}")
+            }
+        };
+
+        let fixture = tempfile::tempdir().expect("create multi-rendition fixture directory");
+        let video_source = fixture.path().join("video-source");
+        let audio_source = fixture.path().join("audio-source");
+        let served_video = fixture.path().join("served-video");
+        let served_audio = fixture.path().join("served-audio");
+        for directory in [&video_source, &audio_source, &served_video, &served_audio] {
+            std::fs::create_dir(directory).expect("create HLS fixture directory");
+        }
+        let video_playlist_path = video_source.join("playlist.m3u8");
+        let video_generated = tokio::process::Command::new(&ffmpeg)
+            .args([
+                "-hide_banner",
+                "-loglevel",
+                "error",
+                "-f",
+                "lavfi",
+                "-i",
+                "testsrc2=size=96x64:rate=12",
+                "-t",
+                "4",
+                "-an",
+                "-c:v",
+                "mpeg2video",
+                "-pix_fmt",
+                "yuv420p",
+                "-g",
+                "12",
+                "-sc_threshold",
+                "0",
+                "-f",
+                "hls",
+                "-hls_time",
+                "2",
+                "-hls_list_size",
+                "0",
+                "-hls_playlist_type",
+                "vod",
+                "-hls_segment_type",
+                "fmp4",
+                "-hls_fmp4_init_filename",
+                "init.mp4",
+                "-hls_segment_filename",
+            ])
+            .arg(video_source.join("segment-%03d.m4s"))
+            .arg(&video_playlist_path)
+            .output()
+            .await
+            .expect("generate fMP4 video rendition");
+        assert!(
+            video_generated.status.success(),
+            "FFmpeg video fixture generation failed: {}",
+            String::from_utf8_lossy(&video_generated.stderr)
+        );
+
+        let audio_playlist_path = audio_source.join("playlist.m3u8");
+        let audio_generated = tokio::process::Command::new(&ffmpeg)
+            .args([
+                "-hide_banner",
+                "-loglevel",
+                "error",
+                "-f",
+                "lavfi",
+                "-i",
+                "sine=frequency=1000:sample_rate=48000",
+                "-t",
+                "4",
+                "-vn",
+                "-c:a",
+                "aac",
+                "-b:a",
+                "96k",
+                "-f",
+                "hls",
+                "-hls_time",
+                "2",
+                "-hls_list_size",
+                "0",
+                "-hls_playlist_type",
+                "vod",
+                "-hls_segment_type",
+                "fmp4",
+                "-hls_fmp4_init_filename",
+                "init.mp4",
+                "-hls_segment_filename",
+            ])
+            .arg(audio_source.join("segment-%03d.m4s"))
+            .arg(&audio_playlist_path)
+            .output()
+            .await
+            .expect("generate fMP4 audio rendition");
+        assert!(
+            audio_generated.status.success(),
+            "FFmpeg audio fixture generation failed: {}",
+            String::from_utf8_lossy(&audio_generated.stderr)
+        );
+
+        let video_playlist = std::fs::read_to_string(&video_playlist_path)
+            .expect("read generated fMP4 video playlist");
+        let second_video_segment = video_playlist
+            .rfind("#EXTINF:")
+            .expect("video fixture has a second segment");
+        let mut discontinuous_video_playlist = video_playlist;
+        discontinuous_video_playlist.insert_str(
+            second_video_segment,
+            "#EXT-X-DISCONTINUITY\n",
+        );
+        std::fs::write(&video_playlist_path, &discontinuous_video_playlist)
+            .expect("add a video discontinuity before the final segment");
+
+        let mut video_plan = crate::manifest::plan_hls_media_playlist(
+            "https://cdn.example.test/video/playlist.m3u8",
+            discontinuous_video_playlist.as_bytes(),
+        )
+        .expect("plan discontinuous fMP4 video rendition");
+        let mut audio_plan = crate::manifest::plan_hls_media_playlist(
+            "https://cdn.example.test/audio/playlist.m3u8",
+            &std::fs::read(&audio_playlist_path).expect("read generated fMP4 audio playlist"),
+        )
+        .expect("plan fMP4 audio rendition");
+        assert!(
+            video_plan.is_incremental_clear_vod_candidate(),
+            "the video discontinuity must select playlist-aware muxing"
+        );
+        assert!(
+            audio_plan.is_destination_assemblable_candidate(),
+            "the simple audio rendition is still eligible for ordered resource fetching"
+        );
+
+        let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0))
+            .await
+            .expect("bind multi-rendition fixture server");
+        let address = listener
+            .local_addr()
+            .expect("multi-rendition fixture server address");
+        let final_video_filename = video_plan
+            .resources
+            .iter()
+            .rev()
+            .find(|resource| resource.kind == crate::manifest::HlsResourceKind::Segment)
+            .map(|resource| resource.filename.clone())
+            .expect("video fixture has a final media segment");
+        let final_video_path = format!("/video/{final_video_filename}");
+
+        for resource in &mut video_plan.resources {
+            let source_name = resource
+                .url
+                .path()
+                .rsplit('/')
+                .next()
+                .filter(|name| !name.is_empty())
+                .expect("video resource has a fixture filename")
+                .to_string();
+            std::fs::copy(
+                video_source.join(source_name),
+                served_video.join(&resource.filename),
+            )
+            .expect("copy video resource under its localized staging filename");
+            resource.url = Url::parse(&format!(
+                "http://{address}/video/{}",
+                resource.filename
+            ))
+            .expect("set local video resource URL");
+        }
+        for resource in &mut audio_plan.resources {
+            let source_name = resource
+                .url
+                .path()
+                .rsplit('/')
+                .next()
+                .filter(|name| !name.is_empty())
+                .expect("audio resource has a fixture filename")
+                .to_string();
+            std::fs::copy(
+                audio_source.join(source_name),
+                served_audio.join(&resource.filename),
+            )
+            .expect("copy audio resource under its localized staging filename");
+            resource.url = Url::parse(&format!(
+                "http://{address}/audio/{}",
+                resource.filename
+            ))
+            .expect("set local audio resource URL");
+        }
+        let request_count = video_plan.resources.len() + audio_plan.resources.len();
+        let release_final_video = Arc::new(tokio::sync::Notify::new());
+        let final_video_requested = Arc::new(tokio::sync::Notify::new());
+        let server_release = Arc::clone(&release_final_video);
+        let server_requested = Arc::clone(&final_video_requested);
+        let server_final_path = final_video_path.clone();
+        let server_video_root = served_video.clone();
+        let server_audio_root = served_audio.clone();
+        let server = tokio::spawn(async move {
+            let mut responses = Vec::with_capacity(request_count);
+            for _ in 0..request_count {
+                let (mut socket, _) = listener
+                    .accept()
+                    .await
+                    .expect("accept multi-rendition HLS resource request");
+                let video_root = server_video_root.clone();
+                let audio_root = server_audio_root.clone();
+                let release = Arc::clone(&server_release);
+                let requested = Arc::clone(&server_requested);
+                let final_path = server_final_path.clone();
+                responses.push(tokio::spawn(async move {
+                    let mut request = [0_u8; 1024];
+                    let count = socket
+                        .read(&mut request)
+                        .await
+                        .expect("read multi-rendition HLS request");
+                    let request = String::from_utf8_lossy(&request[..count]);
+                    let path = request.split_ascii_whitespace().nth(1).unwrap_or("/");
+                    if path == final_path.as_str() {
+                        requested.notify_one();
+                        release.notified().await;
+                    }
+                    let (root, name) = if let Some(name) = path.strip_prefix("/video/") {
+                        (video_root, name)
+                    } else if let Some(name) = path.strip_prefix("/audio/") {
+                        (audio_root, name)
+                    } else {
+                        panic!("unexpected multi-rendition resource path: {path}");
+                    };
+                    let payload = tokio::fs::read(root.join(name))
+                        .await
+                        .expect("read served multi-rendition fixture resource");
+                    let header = format!(
+                        "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                        payload.len()
+                    );
+                    socket
+                        .write_all(header.as_bytes())
+                        .await
+                        .expect("write multi-rendition response header");
+                    socket
+                        .write_all(&payload)
+                        .await
+                        .expect("write multi-rendition response body");
+                }));
+            }
+            for response in responses {
+                response.await.expect("join multi-rendition response task");
+            }
+        });
+
+        let client = reqwest::Client::builder()
+            .no_proxy()
+            .build()
+            .expect("build multi-rendition fixture client");
+        let staging = tempfile::tempdir().expect("create multi-rendition HLS staging directory");
+        let destination_dir =
+            tempfile::tempdir().expect("create multi-rendition destination directory");
+        let destination = destination_dir.path().join("separate-audio-vod.mp4");
+        let item_id = 92;
+        crate::manifest_destination::ensure_plan(
+            staging.path(),
+            &destination,
+            item_id,
+            true,
+            false,
+        )
+        .expect("persist multi-rendition destination ownership plan");
+        let part_path = crate::manifest_destination::part_path_async(
+            staging.path().to_path_buf(),
+            destination.clone(),
+            item_id,
+            TrackKind::Video,
+        )
+        .await
+        .expect("resolve combined destination partial");
+        let video_dir = staging.path().join("video");
+        let audio_dir = staging.path().join("audio");
+        tokio::fs::create_dir(&video_dir)
+            .await
+            .expect("create video staging directory");
+        tokio::fs::create_dir(&audio_dir)
+            .await
+            .expect("create audio staging directory");
+
+        let job = ManifestJob {
+            item_id,
+            source: crate::media_types::ManifestSource {
+                url: "https://cdn.example.test/master.m3u8".to_string(),
+                kind: ManifestKind::Hls,
+                representation_key: "hls-variant".into(),
+                output_container: Some(ManifestContainer::Mp4),
+                audio_key: Some("hls-audio".into()),
+                subtitle_key: None,
+                subtitle_language: None,
+            },
+            dest: destination.clone(),
+            proxy: None,
+            cookies_browser: "none".to_string(),
+            connections: 1,
+            embed_subs: false,
+        };
+        let gate = crate::attempt_gate::AttemptGate::new();
+        let downloaded = Arc::new(AtomicU64::new(0));
+        let (stop_sender, abort) = tokio::sync::oneshot::channel();
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+        let task_staging = staging.path().to_path_buf();
+        let task_dest_dir = destination_dir.path().to_path_buf();
+        let task_video_dir = video_dir;
+        let task_audio_dir = audio_dir;
+        let task_client = client;
+        let task_ffmpeg = ffmpeg.clone();
+        let task_downloaded = Arc::clone(&downloaded);
+        let download_task = tokio::spawn(async move {
+            run_incremental_hls_vod(ManifestIncrementalHlsVod {
+                job: &job,
+                gate,
+                abort,
+                tx: &tx,
+                staging: &task_staging,
+                dest_dir: &task_dest_dir,
+                video_dir: &task_video_dir,
+                audio_dir: &task_audio_dir,
+                tracks: Tracks::Hls {
+                    video: Box::new(video_plan),
+                    audio: Some(Box::new(audio_plan)),
+                    subtitle: None,
+                    subtitle_language: None,
+                    subtitle_is_fmp4: false,
+                },
+                ffmpeg: task_ffmpeg,
+                downloaded: task_downloaded,
+                connections: 1,
+                client: &task_client,
+            })
+            .await
+        });
+
+        tokio::time::timeout(Duration::from_secs(10), final_video_requested.notified())
+            .await
+            .expect("the final video segment request should start after the first video segment");
+        assert!(
+            !download_task.is_finished(),
+            "the combined download must remain active while the final video segment is blocked"
+        );
+        let initial_growth = tokio::time::timeout(Duration::from_secs(15), async {
+            loop {
+                let size = tokio::fs::metadata(&part_path)
+                    .await
+                    .expect("stat combined destination part")
+                    .len();
+                if size > 0 {
+                    break size;
+                }
+                tokio::time::sleep(Duration::from_millis(25)).await;
+            }
+        })
+        .await
+        .expect("FFmpeg should write the combined destination part before the final video segment is released");
+        assert!(initial_growth > 0);
+
+        release_final_video.notify_one();
+        let outcome = download_task
+            .await
+            .expect("join separate-audio HLS VOD runner")
+            .expect("separate-audio HLS VOD runner should finish");
+        assert!(
+            matches!(outcome, ManifestOutcome::Finished(size) if size > 0),
+            "expected publication of a non-empty combined stream, got {outcome:?}"
+        );
+        drop(stop_sender);
+        server.await.expect("multi-rendition fixture server task");
+
+        assert!(
+            tokio::fs::symlink_metadata(&part_path).await.is_err(),
+            "successful publication must move the owned combined part into place"
+        );
+        let verification = tokio::process::Command::new(&ffmpeg)
+            .args(["-hide_banner", "-loglevel", "error", "-i"])
+            .arg(&destination)
+            .args(["-map", "0:v:0", "-map", "0:a:0", "-f", "null", "-"])
+            .output()
+            .await
+            .expect("verify published audio/video HLS output");
+        assert!(
+            verification.status.success(),
+            "published output must contain readable video and audio: {}",
+            String::from_utf8_lossy(&verification.stderr)
+        );
+    }
+
     #[tokio::test]
     async fn static_hls_fmp4_fragments_grow_the_owned_destination_part_in_order() {
         use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};

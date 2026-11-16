@@ -42,23 +42,23 @@
   <screenshots>
     <screenshot type="default">
       <caption>Empty state with a New Download shortcut</caption>
-      <image>https://raw.githubusercontent.com/Linuxuser67/Grab/v4.5.9/data/screenshots/empty-state-dark.png</image>
+      <image>https://raw.githubusercontent.com/Linuxuser67/Grab/v6.5.0-beta.22/data/screenshots/empty-state-dark.png</image>
     </screenshot>
     <screenshot>
       <caption>Active downloads with per-block progress maps</caption>
-      <image>https://raw.githubusercontent.com/Linuxuser67/Grab/v4.5.9/data/screenshots/downloads-video.png</image>
+      <image>https://raw.githubusercontent.com/Linuxuser67/Grab/v6.5.0-beta.22/data/screenshots/downloads-video.png</image>
     </screenshot>
     <screenshot>
       <caption>New Download card with inline media format picker</caption>
-      <image>https://raw.githubusercontent.com/Linuxuser67/Grab/v4.5.9/data/screenshots/new-download-format.png</image>
+      <image>https://raw.githubusercontent.com/Linuxuser67/Grab/v6.5.0-beta.22/data/screenshots/new-download-format.png</image>
     </screenshot>
     <screenshot>
       <caption>Live stream recording alongside active downloads</caption>
-      <image>https://raw.githubusercontent.com/Linuxuser67/Grab/v4.5.9/data/screenshots/live-recording.png</image>
+      <image>https://raw.githubusercontent.com/Linuxuser67/Grab/v6.5.0-beta.22/data/screenshots/live-recording.png</image>
     </screenshot>
   </screenshots>
   <releases>
-    <release version="6.5.0~beta.22" date="2026-11-15">
+    <release version="6.5.0~beta.22" type="development" date="2026-11-15">
       <description>
         <ul>
           <li>Trash: serialize moves to the Trash with queue removals, so removing a row cannot race a running download or an Undo of the same destination.</li>
@@ -68,7 +68,7 @@
         </ul>
       </description>
     </release>
-    <release version="6.5.0~beta.21" date="2026-11-15">
+    <release version="6.5.0~beta.21" type="development" date="2026-11-15">
       <description>
         <ul>
           <li>Downloads: paused DASH and HLS VOD transfers keep their staged fragments and stay resumable.</li>
@@ -81,7 +81,7 @@
         </ul>
       </description>
     </release>
-    <release version="6.5.0~beta.20" date="2026-11-14">
+    <release version="6.5.0~beta.20" type="development" date="2026-11-14">
       <description>
         <ul>
           <li>Flatpak: allow the Secret Service so browser cookie import works with Brave, Chrome, and Chromium profiles.</li>
@@ -93,7 +93,7 @@
         </ul>
       </description>
     </release>
-    <release version="6.5.0~beta.19" date="2026-11-13">
+    <release version="6.5.0~beta.19" type="development" date="2026-11-13">
       <description>
         <ul>
           <li>Native HLS: ad markers are ignored and every listed segment is downloaded; DASH no longer rejects SCTE-35 signaling.</li>
@@ -105,7 +105,7 @@
         </ul>
       </description>
     </release>
-    <release version="6.5.0~beta.18" date="2026-11-11">
+    <release version="6.5.0~beta.18" type="development" date="2026-11-11">
       <description>
         <ul>
           <li>Manifest downloads can emit native MPEG-TS output, inferring the container from the playlist and selected tracks while preserving subtitles on automatic TS output.</li>
@@ -116,7 +116,7 @@
         </ul>
       </description>
     </release>
-    <release version="6.5.0~beta.17" date="2026-11-11">
+    <release version="6.5.0~beta.17" type="development" date="2026-11-11">
       <description>
         <ul>
           <li>Live HLS: refresh Content Steering pathways and verify against Apple profiles, with bounded pathway waits.</li>
@@ -129,7 +129,7 @@
         </ul>
       </description>
     </release>
-    <release version="6.5.0~beta.16" date="2026-11-10">
+    <release version="6.5.0~beta.16" type="development" date="2026-11-10">
       <description>
         <ul>
           <li>Run yt-dlp playlists as single collection jobs with aggregate row progress.</li>
@@ -140,7 +140,7 @@
         </ul>
       </description>
     </release>
-    <release version="6.5.0~beta.15" date="2026-11-09">
+    <release version="6.5.0~beta.15" type="development" date="2026-11-09">
       <description>
         <ul>
           <li>Collection rows use conditional action icons like normal download rows, with a collection-level remove-from-list action.</li>
@@ -148,14 +148,14 @@
         </ul>
       </description>
     </release>
-    <release version="6.5.0~beta.14" date="2026-11-08">
+    <release version="6.5.0~beta.14" type="development" date="2026-11-08">
       <description>
         <ul>
           <li>Group playlist downloads under expandable collection rows with shared metadata persisted across restarts.</li>
         </ul>
       </description>
     </release>
-    <release version="6.5.0~beta.13" date="2026-11-07">
+    <release version="6.5.0~beta.13" type="development" date="2026-11-07">
       <description>
         <ul>
           <li>Update dependencies to their latest stable releases.</li>
@@ -166,7 +166,7 @@
         </ul>
       </description>
     </release>
-    <release version="6.5.0~beta.12" date="2026-11-06">
+    <release version="6.5.0~beta.12" type="development" date="2026-11-06">
       <description>
         <ul>
           <li>Bump yt-dlp to 2.10.0 for metadata cache freshness and header parsing compatibility.</li>
@@ -174,7 +174,7 @@
         </ul>
       </description>
     </release>
-    <release version="6.5.0~beta.11" date="2026-11-04">
+    <release version="6.5.0~beta.11" type="development" date="2026-11-04">
       <description>
         <ul>
           <li>Create native manifest parts with private file permissions.</li>
@@ -182,7 +182,7 @@
         </ul>
       </description>
     </release>
-    <release version="6.5.0~beta.10" date="2026-11-04">
+    <release version="6.5.0~beta.10" type="development" date="2026-11-04">
       <description>
         <ul>
           <li>Cache playlist and media previews using browser cookies; authenticated video previews are cached in memory.</li>
@@ -192,7 +192,7 @@
         </ul>
       </description>
     </release>
-    <release version="6.5.0~beta.9" date="2026-11-03">
+    <release version="6.5.0~beta.9" type="development" date="2026-11-03">
       <description>
         <ul>
           <li>Show queue tab icons only in the narrow queue layout.</li>
@@ -200,7 +200,7 @@
         </ul>
       </description>
     </release>
-    <release version="6.5.0~beta.8" date="2026-11-03">
+    <release version="6.5.0~beta.8" type="development" date="2026-11-03">
       <description>
         <ul>
           <li>Use a GNOME-style adaptive view switcher for queue navigation.</li>
@@ -208,7 +208,7 @@
         </ul>
       </description>
     </release>
-    <release version="6.5.0~beta.7" date="2026-11-03">
+    <release version="6.5.0~beta.7" type="development" date="2026-11-03">
       <description>
         <ul>
           <li>Remove native manifest partials when deleting a download's local files, and move download filters into a compact adaptive header.</li>
@@ -216,7 +216,7 @@
         </ul>
       </description>
     </release>
-    <release version="6.5.0~beta.6" date="2026-11-03">
+    <release version="6.5.0~beta.6" type="development" date="2026-11-03">
       <description>
         <ul>
           <li>Use anonymous Unix files for manifest publication and preserve named file-derived output in the working tree.</li>
@@ -225,7 +225,7 @@
         </ul>
       </description>
     </release>
-    <release version="6.5.0~beta.5" date="2026-11-03">
+    <release version="6.5.0~beta.5" type="development" date="2026-11-03">
       <description>
         <ul>
           <li>Stream static HLS fragments directly to destination parts, including single-init fMP4 playlists with safe byte concatenation.</li>
@@ -235,7 +235,7 @@
         </ul>
       </description>
     </release>
-    <release version="6.5.0~beta.4" date="2026-11-02">
+    <release version="6.5.0~beta.4" type="development" date="2026-11-02">
       <description>
         <ul>
           <li>Reduce the staged footprint of native HLS/DASH downloads by writing track fragments as destination-visible parts instead of committing unrelated files to staging.</li>
@@ -245,7 +245,7 @@
         </ul>
       </description>
     </release>
-    <release version="6.5.0~beta.3" date="2026-11-01">
+    <release version="6.5.0~beta.3" type="development" date="2026-11-01">
       <description>
         <ul>
           <li>Improve native HLS/DASH downloads with stable track identities, plan-bound recovery, audio and subtitle selection, MP4/MKV output, and more reliable live-stream handling.</li>
@@ -255,14 +255,14 @@
         </ul>
       </description>
     </release>
-    <release version="6.5.0~beta.2" date="2026-11-01">
+    <release version="6.5.0~beta.2" type="development" date="2026-11-01">
       <description>
         <ul>
           <li>Show the shared file-selection picker for multi-file magnet links, allowing individual torrent files to be selected before downloads are queued.</li>
         </ul>
       </description>
     </release>
-    <release version="6.5.0~beta.1" date="2026-10-30">
+    <release version="6.5.0~beta.1" type="development" date="2026-10-30">
       <description>
         <ul>
           <li>Add native downloads for supported HLS and static DASH streams, including segment fetching, track assembly, and MP4 finalization.</li>

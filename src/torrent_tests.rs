@@ -319,7 +319,8 @@ fn output_folder_for_gates_hostile_names() {
 fn archive_path_and_directory_creation_refuse_a_symlinked_root() {
     use std::os::unix::fs::symlink;
 
-    let base = std::env::temp_dir().join(format!("grab-torrent-archive-link-{}", std::process::id()));
+    let base =
+        std::env::temp_dir().join(format!("grab-torrent-archive-link-{}", std::process::id()));
     let outside = base.join("outside");
     let root_link = base.join("archive-root");
     let external_torrent = outside.join("stale.torrent");

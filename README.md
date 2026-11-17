@@ -9,12 +9,21 @@ Download files, videos, music, image galleries, torrents, and live streams from 
 ## What you can do
 
 - **Download faster** — download large files efficiently and resume interrupted downloads.
-- **Save videos and music** — choose the quality and format available from supported websites.
-- **Download galleries** — save images and collections from supported sites.
+- **Save videos and music** — use [yt-dlp](https://github.com/yt-dlp/yt-dlp) to extract media from supported websites.
+- **Download galleries** — use [gallery-dl](https://codeberg.org/mikf/gallery-dl) to save images and collections from supported sites.
 - **Manage torrents** — add magnet links or torrent files, choose the files you need, and control seeding.
 - **Record live streams** — capture streams while they are still broadcasting.
 - **Send downloads from your browser** — use the companion extension with Firefox and Chromium-based browsers.
 - **Stay in your flow** — a clean, keyboard-friendly interface made for the GNOME desktop.
+
+## Supported websites
+
+Grab integrates two upstream extractors for broad website support:
+
+- **Video and audio:** [yt-dlp](https://github.com/yt-dlp/yt-dlp) — see its [supported sites list](https://github.com/yt-dlp/yt-dlp/blob/master/supportedsites.md).
+- **Image galleries and collections:** [gallery-dl](https://codeberg.org/mikf/gallery-dl) — see its [supported sites list](https://github.com/mikf/gallery-dl/blob/master/docs/supportedsites.md).
+
+These lists are maintained by the upstream projects and can change over time. A site appearing in a list does not guarantee that every URL or feature will work; website changes, authentication requirements, and access restrictions can affect availability.
 
 ## Screenshots
 

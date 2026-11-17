@@ -3937,6 +3937,16 @@ async fn fetch_hls_resources_incrementally(
         ));
     }
     let total_segments = plan.segment_count();
+    #[cfg(test)]
+    if plan.is_incremental_aes128_mpegts_vod_candidate() {
+        eprintln!(
+            "AES-128 fixture plan: segments={total_segments}, resources={:?}",
+            plan.resources
+                .iter()
+                .map(|resource| (resource.kind, resource.filename.as_str()))
+                .collect::<Vec<_>>()
+        );
+    }
     if total_segments == 0 {
         return Err(ManifestRunError::Failed(
             "The selected HLS VOD playlist contains no media segments".to_string(),
@@ -3988,6 +3998,14 @@ async fn fetch_hls_resources_incrementally(
                     };
                     let index = result?;
                     completed[index] = true;
+                    #[cfg(test)]
+                    if plan.is_incremental_aes128_mpegts_vod_candidate() {
+                        eprintln!(
+                            "AES-128 completed resource index={index} kind={:?} name={} next_to_commit={next_to_commit} completed_segments={completed_segments}",
+                            plan.resources[index].kind,
+                            plan.resources[index].filename
+                        );
+                    }
                     while next_to_commit < resource_count && completed[next_to_commit] {
                         if plan.resources[next_to_commit].kind == crate::manifest::HlsResourceKind::Segment {
                             completed_segments += 1;
@@ -6618,6 +6636,11 @@ segment-2.ts
         // sequence so the test always blocks the actual penultimate/final media.
         let penultimate_segment_path = segment_request_path(total_segments - 2);
         let final_segment_path = segment_request_path(total_segments - 1);
+        if verify_incremental_growth {
+            eprintln!(
+                "AES-128 gate paths: penultimate={penultimate_segment_path} final={final_segment_path}"
+            );
+        }
         for resource in &mut plan.resources {
             let name = resource
                 .url
@@ -6666,6 +6689,9 @@ segment-2.ts
                         .expect("read AES-128 resource request");
                     let request = String::from_utf8_lossy(&request[..count]);
                     let path = request.split_ascii_whitespace().nth(1).unwrap_or("/");
+                    if verify_incremental_growth {
+                        eprintln!("AES-128 fixture server received {path}");
+                    }
                     if verify_incremental_growth && path == penultimate_path.as_str() {
                         requested_second.notify_one();
                         release_second.notified().await;

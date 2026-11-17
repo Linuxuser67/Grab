@@ -1106,18 +1106,53 @@ pub(crate) fn discard_handoff_cookies_async(url: &str) {
 }
 
 fn take_handoff_cookie_path(url: &str) -> Option<PathBuf> {
-    handoff_key(url).and_then(|key| {
-        let mut store = lock_handoff_cookies();
-        store.order.retain(|candidate| candidate != &key);
-        let path = store.by_key.remove(&key).map(|entry| entry.path);
-        if let Some(host) = url::Url::parse(&key)
-            .ok()
-            .and_then(|parsed| parsed.host_str().map(str::to_ascii_lowercase))
-        {
-            prune_suppression(&mut store, &host);
-        }
-        path
-    })
+    take_handoff_cookie_path_matching(url, |_| true)
+}
+
+/// Remove a URL entry only while it still owns the expected staged file.
+fn take_handoff_cookie_path_if_path(url: &str, expected_path: &Path) -> Option<PathBuf> {
+    take_handoff_cookie_path_matching(url, |entry| entry.path.as_path() == expected_path)
+}
+
+/// Remove an exact-URL jar only when it predates this request.
+fn take_handoff_cookie_path_before(url: &str, request_instant: Instant) -> Option<PathBuf> {
+    take_handoff_cookie_path_matching(url, |entry| entry.request_instant < request_instant)
+}
+
+fn take_handoff_cookie_path_matching(
+    url: &str,
+    matches: impl FnOnce(&HandoffCookies) -> bool,
+) -> Option<PathBuf> {
+    let key = handoff_key(url)?;
+    let mut store = lock_handoff_cookies();
+    if !store.by_key.get(&key).is_some_and(matches) {
+        return None;
+    }
+    store.order.retain(|candidate| candidate != &key);
+    let path = store.by_key.remove(&key).map(|entry| entry.path);
+    if let Some(host) = url::Url::parse(&key)
+        .ok()
+        .and_then(|parsed| parsed.host_str().map(str::to_ascii_lowercase))
+    {
+        prune_suppression(&mut store, &host);
+    }
+    path
+}
+
+fn discard_handoff_cookies_if_path_async(url: &str, expected_path: &Path) {
+    if let Some(path) = take_handoff_cookie_path_if_path(url, expected_path) {
+        drop(crate::runtime::tokio_rt().spawn_blocking(move || {
+            let _ = std::fs::remove_file(path);
+        }));
+    }
+}
+
+fn discard_handoff_cookies_before_async(url: &str, request_instant: Instant) {
+    if let Some(path) = take_handoff_cookie_path_before(url, request_instant) {
+        drop(crate::runtime::tokio_rt().spawn_blocking(move || {
+            let _ = std::fs::remove_file(path);
+        }));
+    }
 }
 
 /// Remove all entries from the in-memory handoff store and return their files.
@@ -1487,6 +1522,8 @@ async fn handle_add(
     body: Bytes,
 ) -> Response {
     tracing::debug!("Extension handoff received");
+    // Capture request order before any asynchronous cookie staging.
+    let request_instant = Instant::now();
     if !is_json_content_type(&headers) {
         return StatusCode::UNSUPPORTED_MEDIA_TYPE.into_response();
     }
@@ -1577,22 +1614,31 @@ async fn handle_add(
     // An authenticated handoff with no usable cookies discards the stale
     // exact entry, and every cookieless handoff suppresses older same-host
     // jars so the fallback cannot resurrect an earlier browser session.
-    let (staged, accepted_cookie_count) = if authenticated {
+    let (staged_path, accepted_cookie_count) = if authenticated {
         match stage_handoff_cookies(&req.url, &req.cookies).await {
             Some((staged_file, accepted)) => {
-                store_handoff_cookies(&req.url, staged_file.into_path(), req.user_agent);
-                (true, accepted)
+                let path = staged_file.into_path();
+                if store_handoff_cookies_at(
+                    &req.url,
+                    path.clone(),
+                    req.user_agent,
+                    request_instant,
+                ) {
+                    (Some(path), accepted)
+                } else {
+                    (None, 0)
+                }
             }
             None => {
-                discard_handoff_cookies_async(&req.url);
-                (false, 0)
+                discard_handoff_cookies_before_async(&req.url, request_instant);
+                (None, 0)
             }
         }
     } else {
-        (false, 0)
+        (None, 0)
     };
-    let mut suppression = if !staged {
-        suppress_handoff_host(&req.url)
+    let mut suppression = if staged_path.is_none() {
+        suppress_handoff_host_at(&req.url, request_instant)
     } else {
         None
     };
@@ -1603,8 +1649,8 @@ async fn handle_add(
             }
         }
         Err(TrySendError::Full(_)) => {
-            if staged {
-                discard_handoff_cookies_async(&req.url);
+            if let Some(path) = staged_path.as_deref() {
+                discard_handoff_cookies_if_path_async(&req.url, path);
             }
             // Keep the nonce reserved. The extension creates a fresh nonce on
             // each 429 retry; releasing this one would let a captured rejected
@@ -1612,8 +1658,8 @@ async fn handle_add(
             return StatusCode::TOO_MANY_REQUESTS.into_response();
         }
         Err(TrySendError::Closed(_)) => {
-            if staged {
-                discard_handoff_cookies_async(&req.url);
+            if let Some(path) = staged_path.as_deref() {
+                discard_handoff_cookies_if_path_async(&req.url, path);
             }
             // Do not reopen a consumed nonce after an internal queue failure.
             return StatusCode::INTERNAL_SERVER_ERROR.into_response();
@@ -1634,8 +1680,8 @@ async fn handle_add(
                 if let Some(suppression) = suppression.as_mut() {
                     suppression.release();
                 }
-                if staged {
-                    discard_handoff_cookies_async(&req.url);
+                if let Some(path) = staged_path.as_deref() {
+                    discard_handoff_cookies_if_path_async(&req.url, path);
                 }
                 // The explicit release above prevents the Drop guard from
                 // decrementing a second time.
@@ -1651,8 +1697,8 @@ async fn handle_add(
                 suppression.release();
             }
             drop(suppression);
-            if staged {
-                discard_handoff_cookies_async(&req.url);
+            if let Some(path) = staged_path.as_deref() {
+                discard_handoff_cookies_if_path_async(&req.url, path);
             }
             let status = if outcome.is_err() {
                 StatusCode::REQUEST_TIMEOUT

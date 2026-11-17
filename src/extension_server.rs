@@ -1661,18 +1661,22 @@ async fn handle_add(
         authenticated,
         expires_at: wait.then(|| Instant::now() + st.confirm_wait),
     };
-    // Publish this request's start time before any asynchronous staging.
-    // A later request wins even if this handler reaches the cookie writer last.
-    let request_is_current = match register_handoff_request(&req.url, request_instant) {
-        Ok(current) => current,
-        Err(status) => return status.into_response(),
+    // Register cookie-bearing requests before their async file write so a
+    // newer cookieless handoff can retain its cutoff for older writes in flight.
+    let cookie_stage_registration = if authenticated && !req.cookies.is_empty() {
+        match register_cookie_stage(&req.url, request_instant) {
+            Ok(registration) => registration,
+            Err(status) => return status.into_response(),
+        }
+    } else {
+        None
     };
     // Stage before queuing: the GTK side may start a probe the moment the
     // handoff is received, and every probe leg looks the cookies up by URL.
     // An authenticated handoff with no usable cookies discards the stale
     // exact entry, and every cookieless handoff suppresses older same-host
     // jars so the fallback cannot resurrect an earlier browser session.
-    let (staged_path, accepted_cookie_count) = if authenticated && request_is_current {
+    let (staged_path, accepted_cookie_count) = if authenticated {
         match stage_handoff_cookies(&req.url, &req.cookies).await {
             Some((staged_file, accepted)) => {
                 let path = staged_file.into_path();
@@ -1691,7 +1695,8 @@ async fn handle_add(
     } else {
         (None, 0)
     };
-    let mut suppression = if staged_path.is_none() && request_is_current {
+    drop(cookie_stage_registration);
+    let mut suppression = if staged_path.is_none() {
         suppress_handoff_host_at(&req.url, request_instant)
     } else {
         None

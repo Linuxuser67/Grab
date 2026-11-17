@@ -697,6 +697,36 @@ fn recording_watcher_guard_aborts_on_drop() {
     });
 }
 
+#[cfg(unix)]
+#[test]
+fn live_staging_preflight_rejects_dangling_destination_symlink() {
+    use std::os::unix::fs::symlink;
+
+    let root = tempfile::tempdir().expect("temporary live staging root");
+    let staging = root.path().join("staging");
+    std::fs::create_dir(&staging).expect("create live staging directory");
+    let destination = root.path().join("video.mp4");
+    symlink(root.path().join("missing-target"), &destination)
+        .expect("create dangling destination symlink");
+
+    let result = prepare_live_staging(&staging, &destination, 77, "mp4");
+    assert!(
+        result.is_err(),
+        "a dangling final-destination symlink must prevent a live recording"
+    );
+    assert!(
+        std::fs::symlink_metadata(&destination)
+            .expect("inspect preserved destination symlink")
+            .file_type()
+            .is_symlink(),
+        "the user's dangling symlink must remain untouched"
+    );
+    assert!(
+        !root.path().join("video.77.mp4.part").exists(),
+        "the rejected attempt must release its staging claim"
+    );
+}
+
 /// Staging claim skips existing base files: if the user has Title.1.mp4,
 /// the claim must choose Title.1-1.mp4 and leave Title.1.mp4 byte-identical.
 /// Regression test for the live-staging collision data loss.

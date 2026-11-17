@@ -6593,7 +6593,7 @@ segment-2.ts
             "continuous-growth fixture must contain at least three segments"
         );
         let mut segment_index = 0usize;
-        let mut second_segment_path = None;
+        let mut penultimate_segment_path = None;
         let mut final_segment_path = None;
         for resource in &mut plan.resources {
             let name = resource
@@ -6608,8 +6608,8 @@ segment-2.ts
                 crate::manifest::HlsResourceKind::Key => {}
                 crate::manifest::HlsResourceKind::Segment => {
                     segment_index += 1;
-                    if segment_index == 2 {
-                        second_segment_path = Some(format!("/{name}"));
+                    if segment_index == total_segments - 1 {
+                        penultimate_segment_path = Some(format!("/{name}"));
                     }
                     if segment_index == total_segments {
                         final_segment_path = Some(format!("/{name}"));
@@ -6620,8 +6620,8 @@ segment-2.ts
             resource.url = Url::parse(&format!("http://{address}/{name}"))
                 .expect("set local AES-128 fixture resource URL");
         }
-        let second_segment_path =
-            second_segment_path.expect("encrypted HLS fixture must have a second media segment");
+        let penultimate_segment_path = penultimate_segment_path
+            .expect("encrypted HLS fixture must have a penultimate media segment");
         let final_segment_path =
             final_segment_path.expect("encrypted HLS fixture must have a final segment");
         let request_count = plan.resources.len();
@@ -6635,7 +6635,7 @@ segment-2.ts
         let server_requested_second = Arc::clone(&second_segment_requested);
         let server_release_final = Arc::clone(&release_final_segment);
         let server_requested_final = Arc::clone(&final_segment_requested);
-        let server_second_path = second_segment_path.clone();
+        let server_penultimate_path = penultimate_segment_path.clone();
         let server_final_path = final_segment_path.clone();
         let server = tokio::spawn(async move {
             let verify_incremental_growth = verify_incremental_growth_server;
@@ -6650,7 +6650,7 @@ segment-2.ts
                 let requested_second = Arc::clone(&server_requested_second);
                 let release_final = Arc::clone(&server_release_final);
                 let requested_final = Arc::clone(&server_requested_final);
-                let second_path = server_second_path.clone();
+                let penultimate_path = server_penultimate_path.clone();
                 let final_path = server_final_path.clone();
                 responses.push(tokio::spawn(async move {
                     let mut request = [0_u8; 1024];
@@ -6660,7 +6660,7 @@ segment-2.ts
                         .expect("read AES-128 resource request");
                     let request = String::from_utf8_lossy(&request[..count]);
                     let path = request.split_ascii_whitespace().nth(1).unwrap_or("/");
-                    if verify_incremental_growth && path == second_path.as_str() {
+                    if verify_incremental_growth && path == penultimate_path.as_str() {
                         requested_second.notify_one();
                         release_second.notified().await;
                     }
@@ -6805,7 +6805,7 @@ segment-2.ts
         if verify_incremental_growth {
             tokio::time::timeout(Duration::from_secs(10), second_segment_requested.notified())
                 .await
-                .expect("the second AES-128 media segment request should start");
+                .expect("the penultimate AES-128 media segment request should start after the prefix");
         } else {
             tokio::time::timeout(Duration::from_secs(10), final_segment_requested.notified())
                 .await

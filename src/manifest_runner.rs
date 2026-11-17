@@ -6805,7 +6805,9 @@ segment-2.ts
         if verify_incremental_growth {
             tokio::time::timeout(Duration::from_secs(10), second_segment_requested.notified())
                 .await
-                .expect("the penultimate AES-128 media segment request should start after the prefix");
+                .expect(
+                    "the penultimate AES-128 media segment request should start after the prefix",
+                );
         } else {
             tokio::time::timeout(Duration::from_secs(10), final_segment_requested.notified())
                 .await

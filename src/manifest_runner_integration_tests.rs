@@ -4631,7 +4631,7 @@ combined.mp4
 
             let mut body = expected_body;
             let mut content_range_start = range.offset;
-            let mut content_range_end = range.offset + range.length - 1;
+            let content_range_end = range.offset + range.length - 1;
             if index == 1 {
                 match response_case {
                     SingleFileFmp4RangeResponse::Valid => {}
@@ -4640,7 +4640,7 @@ combined.mp4
                     }
                     SingleFileFmp4RangeResponse::Oversized => body.push(b'!'),
                     SingleFileFmp4RangeResponse::Truncated => {
-                        body.pop();
+                        body.truncate(body.len() - 1);
                     }
                 }
             }

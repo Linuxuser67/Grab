@@ -62,7 +62,7 @@ impl ManifestPreviewCacheKey {
             }
             ManifestClientAuth::Anonymous => {
                 self.handoff_cookie_hash.is_none() && self.handoff_user_agent_hash.is_none()
-            },
+            }
         }
     }
 }
@@ -91,8 +91,8 @@ fn manifest_preview_cache_key(
         return None;
     }
 
-    let handoff_cookie_hash = handoff_identity
-        .and_then(|(path, _)| crate::extension_server::handoff_cookie_hash(path));
+    let handoff_cookie_hash =
+        handoff_identity.and_then(|(path, _)| crate::extension_server::handoff_cookie_hash(path));
     // Handoff cookies such as cf_clearance can be bound to the browser UA.
     // Scope the cache to the exact UA used with the staged jar, including the
     // default UA when the extension did not provide one.
@@ -388,8 +388,7 @@ pub(crate) async fn lookup(
 
     let request_url = raw_url.to_string();
     let (auth, lookup) = tokio::time::timeout(MANIFEST_LOOKUP_BUDGET, async move {
-        let (client, auth) =
-            client_for_preview(&request_url, proxy, handoff_identity).await?;
+        let (client, auth) = client_for_preview(&request_url, proxy, handoff_identity).await?;
         let lookup = lookup_preview_with_client(&client, &request_url)
             .await
             .map_err(|error| error.to_string())?;

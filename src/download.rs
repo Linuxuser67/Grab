@@ -3834,22 +3834,64 @@ impl DownloadManager {
             match tokio_rt()
                 .spawn_blocking(move || {
                     let mut reconciled = Vec::with_capacity(truncations.len());
+                    let mut reset_files = Vec::new();
                     let mut failures = Vec::new();
                     for (id, path, state) in truncations {
                         match truncate_to_prefix(&path, &state) {
-                            Ok(()) => reconciled.push(id),
+                            Ok(crate::download_fetch::PrefixTruncation::CompletedPrefix) => {
+                                let mut state = state;
+                                state.forget_beyond_prefix();
+                                reconciled.push((id, state));
+                            }
+                            Ok(crate::download_fetch::PrefixTruncation::ResetFromZero(file)) => {
+                                reconciled.push((id, SegmentState::new(state.total)));
+                                reset_files.push((path, file));
+                            }
                             Err(error) => failures.push((path, error)),
                         }
                     }
-                    (reconciled, failures)
+                    (reconciled, reset_files, failures)
                 })
                 .await
             {
-                Ok((reconciled, failures)) => {
-                    let mut states = self.segment_state.borrow_mut();
-                    for id in reconciled {
-                        if let Some(state) = states.get_mut(&id) {
-                            state.forget_beyond_prefix();
+                Ok((reconciled, reset_files, failures)) => {
+                    {
+                        let mut states = self.segment_state.borrow_mut();
+                        for (id, state) in reconciled {
+                            states.insert(id, state);
+                        }
+                    }
+                    if !reset_files.is_empty() {
+                        // Commit empty bitmaps before zeroing files. A crash after this point
+                        // can only cause a full re-fetch, never trust data that disappeared.
+                        self.persist_for_shutdown_async(true).await;
+                        match tokio_rt()
+                            .spawn_blocking(move || {
+                                let mut failures = Vec::new();
+                                for (path, file) in reset_files {
+                                    if let Err(error) =
+                                        crate::download_fetch::truncate_open_file_to_zero(file)
+                                    {
+                                        failures.push((path, error));
+                                    }
+                                }
+                                failures
+                            })
+                            .await
+                        {
+                            Ok(reset_failures) => {
+                                for (path, error) in reset_failures {
+                                    tracing::warn!(
+                                        path = %path.display(),
+                                        error = %error,
+                                        "shutdown: could not reset unsafe segmented destination"
+                                    );
+                                }
+                            }
+                            Err(error) => tracing::warn!(
+                                error = %error,
+                                "shutdown: segmented destination zero-reset worker failed"
+                            ),
                         }
                     }
                     for (path, error) in failures {

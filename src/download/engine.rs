@@ -4,7 +4,10 @@ use super::{
     DownloadManager, FinalNameReservations, ProbeJsonKey, RestoreState, ensure_contained_parent,
     format_gettext_template,
 };
-use crate::download_fetch::{FetchCtx, StartMode, run_download, truncate_to_prefix};
+use crate::download_fetch::{
+    FetchCtx, PrefixTruncation, StartMode, run_download, truncate_open_file_to_zero,
+    truncate_to_prefix,
+};
 use crate::download_net::{DownloadOptions, http_client_for};
 use crate::download_pieces::SegmentState;
 use crate::download_rate::{fmt_eta, format_amounts, parse_rate, publish_rate_limit};
@@ -1264,31 +1267,75 @@ impl DownloadManager {
                                 done = true;
                                 break;
                             };
-                            this.release_dest(&path);
                             if !this.is_current(id, generation) {
+                                this.release_dest(&path);
                                 done = true;
                                 break;
                             }
                             match truncation {
-                                Ok(Ok(())) => {}
-                                Ok(Err(error)) => tracing::warn!(
-                                    path = %path.display(),
-                                    error = %error,
-                                    "could not truncate segmented destination to its completed prefix"
-                                ),
-                                Err(error) => tracing::warn!(
-                                    path = %path.display(),
-                                    error = ?error,
-                                    "segmented destination truncation worker failed"
-                                ),
+                                Ok(Ok(PrefixTruncation::CompletedPrefix)) => {
+                                    this.release_dest(&path);
+                                    this.start_next();
+                                }
+                                Ok(Ok(PrefixTruncation::ResetFromZero(file))) => {
+                                    if let Some(state) = this.segment_state.borrow_mut().get_mut(&id) {
+                                        *state = SegmentState::new(state.total);
+                                    }
+                                    this.persist_queue();
+                                    drop(this);
+                                    let reset = gio::spawn_blocking(move || {
+                                        truncate_open_file_to_zero(file)
+                                    })
+                                    .await;
+                                    let Some(this) = weak.upgrade() else {
+                                        done = true;
+                                        break;
+                                    };
+                                    this.release_dest(&path);
+                                    if !this.is_current(id, generation) {
+                                        done = true;
+                                        break;
+                                    }
+                                    match reset {
+                                        Ok(Ok(())) => {}
+                                        Ok(Err(error)) => tracing::warn!(
+                                            path = %path.display(),
+                                            error = %error,
+                                            "could not reset unsafe segmented destination to zero"
+                                        ),
+                                        Err(error) => tracing::warn!(
+                                            path = %path.display(),
+                                            error = ?error,
+                                            "segmented destination zero-reset worker failed"
+                                        ),
+                                    }
+                                    this.start_next();
+                                }
+                                Ok(Err(error)) => {
+                                    this.release_dest(&path);
+                                    tracing::warn!(
+                                        path = %path.display(),
+                                        error = %error,
+                                        "could not truncate segmented destination to its completed prefix"
+                                    );
+                                    this.start_next();
+                                }
+                                Err(error) => {
+                                    this.release_dest(&path);
+                                    tracing::warn!(
+                                        path = %path.display(),
+                                        error = ?error,
+                                        "segmented destination truncation worker failed"
+                                    );
+                                    this.start_next();
+                                }
                             }
-                            this.start_next();
                         }
                     }
                     EngineMsg::FallbackSingle { ack } => {
-                        // Keep the bitmap persisted until the sparse/segmented file is
-                        // actually truncated. A crash during the worker must still restore
-                        // with the bitmap rather than append to a file with holes.
+                        // Keep the bitmap persisted until the prefix truncation is durable.
+                        // For a shorter-than-prefix file, clear and persist the bitmap first,
+                        // then reset the still-open descriptor to zero.
                         let segment_state = { this.segment_state.borrow().get(&id).cloned() };
                         if let Some(state) = segment_state {
                             let path = item.file_path();
@@ -1303,41 +1350,83 @@ impl DownloadManager {
                                 done = true;
                                 break;
                             };
-                            this.release_dest(&path);
                             if !this.is_current(id, generation) {
+                                this.release_dest(&path);
                                 done = true;
                                 break;
                             }
                             match truncation {
-                                Ok(Ok(())) => {
+                                Ok(Ok(PrefixTruncation::CompletedPrefix)) => {
+                                    this.release_dest(&path);
                                     this.segment_state.borrow_mut().remove(&id);
                                     this.persist_queue();
                                     this.start_next();
                                     drop(this);
                                     ack.send(()).await.ok();
                                 }
+                                Ok(Ok(PrefixTruncation::ResetFromZero(file))) => {
+                                    this.segment_state.borrow_mut().remove(&id);
+                                    this.persist_queue();
+                                    drop(this);
+                                    let reset = gio::spawn_blocking(move || {
+                                        truncate_open_file_to_zero(file)
+                                    })
+                                    .await;
+                                    let Some(this) = weak.upgrade() else {
+                                        done = true;
+                                        break;
+                                    };
+                                    this.release_dest(&path);
+                                    if !this.is_current(id, generation) {
+                                        done = true;
+                                        break;
+                                    }
+                                    match reset {
+                                        Ok(Ok(())) => {
+                                            this.start_next();
+                                            drop(this);
+                                            ack.send(()).await.ok();
+                                        }
+                                        Ok(Err(error)) => {
+                                            tracing::warn!(
+                                                path = %path.display(),
+                                                error = %error,
+                                                "could not reset unsafe segmented file before single-stream fallback"
+                                            );
+                                            // Leave ack unsent: the worker stops instead of
+                                            // writing to an unreset partial.
+                                            break;
+                                        }
+                                        Err(error) => {
+                                            tracing::warn!(
+                                                path = %path.display(),
+                                                error = ?error,
+                                                "segmented-file zero-reset worker failed before single-stream fallback"
+                                            );
+                                            break;
+                                        }
+                                    }
+                                }
                                 Ok(Err(error)) => {
+                                    this.release_dest(&path);
                                     tracing::warn!(
                                         path = %path.display(),
                                         error = %error,
                                         "could not truncate segmented file before single-stream fallback"
                                     );
-                                    // set_len may already have shortened the file before sync_all
-                                    // failed; keeping bits beyond the prefix could complete a
-                                    // short/sparse file on a later resume. Drop the bitmap.
                                     this.segment_state.borrow_mut().remove(&id);
                                     this.persist_queue();
-                                    // Leave ack unsent: the worker sees the closed channel and stops.
                                     break;
                                 }
-                                Err(_) => {
+                                Err(error) => {
+                                    this.release_dest(&path);
                                     tracing::warn!(
                                         path = %path.display(),
+                                        error = ?error,
                                         "segmented-file truncation worker failed before single-stream fallback"
                                     );
                                     this.segment_state.borrow_mut().remove(&id);
                                     this.persist_queue();
-                                    // Leave ack unsent: the worker sees the closed channel and stops.
                                     break;
                                 }
                             }

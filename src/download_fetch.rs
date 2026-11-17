@@ -406,14 +406,19 @@ async fn multi_loop(
             Err(AttemptFail::Throttled(_)) => {
                 let Some(expected) = claim.identity() else {
                     ctx.tx
-                        .send(EngineMsg::FailedDestination(DestinationProblem::Disappeared))
+                        .send(EngineMsg::FailedDestination(
+                            DestinationProblem::Disappeared,
+                        ))
                         .ok();
                     return false;
                 };
                 let (ack_tx, mut ack_rx) =
                     tokio::sync::mpsc::channel::<Result<(), DestinationProblem>>(1);
                 ctx.tx
-                    .send(EngineMsg::FallbackSingle { expected, ack: ack_tx })
+                    .send(EngineMsg::FallbackSingle {
+                        expected,
+                        ack: ack_tx,
+                    })
                     .ok();
                 // Wait for the UI thread to verify and truncate the claimed inode before single-stream resumes.
                 match wait_for_fallback_ack(&mut ack_rx, FALLBACK_ACK_TIMEOUT).await {
@@ -438,7 +443,9 @@ async fn multi_loop(
                 if *tries <= 0 {
                     let Some(expected) = claim.identity() else {
                         ctx.tx
-                            .send(EngineMsg::FailedDestination(DestinationProblem::Disappeared))
+                            .send(EngineMsg::FailedDestination(
+                                DestinationProblem::Disappeared,
+                            ))
                             .ok();
                         return false;
                     };
@@ -988,11 +995,9 @@ pub(crate) fn verify_destination_identity(
             ))
         }
         Ok(_) => Ok(()),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-            Err(PrefixTruncationError::Destination(
-                DestinationProblem::Disappeared,
-            ))
-        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Err(
+            PrefixTruncationError::Destination(DestinationProblem::Disappeared),
+        ),
         Err(error) => Err(PrefixTruncationError::Io(error)),
     }
 }
@@ -1071,9 +1076,7 @@ pub(crate) fn truncate_to_prefix(
 ) -> std::io::Result<PrefixTruncation> {
     truncate_to_prefix_inner(path, st, None).map_err(|error| match error {
         PrefixTruncationError::Io(error) => error,
-        PrefixTruncationError::Destination(problem) => {
-            std::io::Error::other(problem.message())
-        }
+        PrefixTruncationError::Destination(problem) => std::io::Error::other(problem.message()),
     })
 }
 

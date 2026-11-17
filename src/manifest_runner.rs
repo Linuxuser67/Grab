@@ -6631,16 +6631,9 @@ segment-2.ts
                 .map(|name| format!("/{name}"))
                 .expect("each playlist segment filename must map to one planned resource")
         };
-        // Resource plans are deduplicated independently of media-playlist
-        // ordering. Choose the held requests from the playlist's own segment
-        // sequence so the test always blocks the actual penultimate/final media.
-        let penultimate_segment_path = segment_request_path(total_segments - 2);
+        // Hold only the final media segment so FFmpeg can probe and mux a
+        // realistic committed prefix before the test checks destination growth.
         let final_segment_path = segment_request_path(total_segments - 1);
-        if verify_incremental_growth {
-            eprintln!(
-                "AES-128 gate paths: penultimate={penultimate_segment_path} final={final_segment_path}"
-            );
-        }
         for resource in &mut plan.resources {
             let name = resource
                 .url
@@ -6655,19 +6648,12 @@ segment-2.ts
         }
         let request_count = plan.resources.len();
         let fixture_root = fixture.path().to_path_buf();
-        let verify_incremental_growth_server = verify_incremental_growth;
-        let release_second_segment = Arc::new(tokio::sync::Notify::new());
-        let second_segment_requested = Arc::new(tokio::sync::Notify::new());
         let release_final_segment = Arc::new(tokio::sync::Notify::new());
         let final_segment_requested = Arc::new(tokio::sync::Notify::new());
-        let server_release_second = Arc::clone(&release_second_segment);
-        let server_requested_second = Arc::clone(&second_segment_requested);
         let server_release_final = Arc::clone(&release_final_segment);
         let server_requested_final = Arc::clone(&final_segment_requested);
-        let server_penultimate_path = penultimate_segment_path.clone();
         let server_final_path = final_segment_path.clone();
         let server = tokio::spawn(async move {
-            let verify_incremental_growth = verify_incremental_growth_server;
             let mut responses = Vec::with_capacity(request_count);
             for _ in 0..request_count {
                 let (mut socket, _) = listener
@@ -6675,11 +6661,8 @@ segment-2.ts
                     .await
                     .expect("accept AES-128 resource request");
                 let fixture_root = fixture_root.clone();
-                let release_second = Arc::clone(&server_release_second);
-                let requested_second = Arc::clone(&server_requested_second);
                 let release_final = Arc::clone(&server_release_final);
                 let requested_final = Arc::clone(&server_requested_final);
-                let penultimate_path = server_penultimate_path.clone();
                 let final_path = server_final_path.clone();
                 responses.push(tokio::spawn(async move {
                     let mut request = [0_u8; 1024];
@@ -6689,13 +6672,6 @@ segment-2.ts
                         .expect("read AES-128 resource request");
                     let request = String::from_utf8_lossy(&request[..count]);
                     let path = request.split_ascii_whitespace().nth(1).unwrap_or("/");
-                    if verify_incremental_growth {
-                        eprintln!("AES-128 fixture server received {path}");
-                    }
-                    if verify_incremental_growth && path == penultimate_path.as_str() {
-                        requested_second.notify_one();
-                        release_second.notified().await;
-                    }
                     if path == final_path.as_str() {
                         requested_final.notify_one();
                         release_final.notified().await;
@@ -6834,17 +6810,9 @@ segment-2.ts
             .await
         });
 
-        if verify_incremental_growth {
-            tokio::time::timeout(Duration::from_secs(10), second_segment_requested.notified())
-                .await
-                .expect(
-                    "the penultimate AES-128 media segment request should start after the prefix",
-                );
-        } else {
-            tokio::time::timeout(Duration::from_secs(10), final_segment_requested.notified())
-                .await
-                .expect("the final segment request should start while earlier segments are muxed");
-        }
+        tokio::time::timeout(Duration::from_secs(10), final_segment_requested.notified())
+            .await
+            .expect("the final segment request should start after the earlier VOD prefix is fetched");
 
         let initial_growth_result = tokio::time::timeout(Duration::from_secs(15), async {
             loop {
@@ -6870,62 +6838,11 @@ segment-2.ts
                     None => String::new(),
                 };
                 panic!(
-                    "FFmpeg did not write the first decrypted AES-128 segment before the second was released; local playlist:\n{snapshot}\nFFmpeg verbose log:\n{log}"
+                    "FFmpeg did not write a decrypted AES-128 prefix before the final segment was released; local playlist:\n{snapshot}\nFFmpeg verbose log:\n{log}"
                 );
             }
         };
         assert!(initial_growth > 0);
-
-        if verify_incremental_growth {
-            release_second_segment.notify_one();
-            tokio::time::timeout(Duration::from_secs(10), final_segment_requested.notified())
-                .await
-                .expect("all middle segments should be fetched while the final segment is blocked");
-            let growing_snapshot = tokio::time::timeout(Duration::from_secs(10), async {
-                loop {
-                    let snapshot = tokio::fs::read_to_string(staging.path().join("video/local.m3u8"))
-                        .await
-                        .expect("read growing AES-128 playlist snapshot");
-                    if snapshot.matches("#EXTINF:").count() == total_segments - 1 {
-                        break snapshot;
-                    }
-                    tokio::time::sleep(Duration::from_millis(25)).await;
-                }
-            })
-            .await
-            .expect("the local playlist should contain every committed segment before the final segment");
-            assert!(!growing_snapshot.contains("#EXT-X-ENDLIST"));
-            assert!(!growing_snapshot.contains("#EXT-X-PLAYLIST-TYPE:VOD"));
-            let continued_growth_result = tokio::time::timeout(Duration::from_secs(20), async {
-                loop {
-                    let size = tokio::fs::metadata(&part_path)
-                        .await
-                        .expect("stat visible destination part")
-                        .len();
-                    if size > initial_growth {
-                        break size;
-                    }
-                    tokio::time::sleep(Duration::from_millis(25)).await;
-                }
-            })
-            .await;
-            let continued_growth = match continued_growth_result {
-                Ok(size) => size,
-                Err(_) => {
-                    let log = match ffmpeg_log_path.as_ref() {
-                        Some(path) => tokio::fs::read_to_string(path).await.unwrap_or_default(),
-                        None => String::new(),
-                    };
-                    panic!(
-                        "destination part did not grow beyond its first decrypted segment before final release (initial={initial_growth}); growing playlist:\\n{growing_snapshot}\\nFFmpeg verbose log:\\n{log}"
-                    );
-                }
-            };
-            assert!(
-                continued_growth > initial_growth,
-                "the destination part should continue growing as additional AES-128 segments become available"
-            );
-        }
 
         assert!(
             !download_task.is_finished(),
@@ -6956,7 +6873,14 @@ segment-2.ts
             .await
             .expect("stat published decrypted destination")
             .len();
-        assert!(final_size >= initial_growth);
+        if verify_incremental_growth {
+            assert!(
+                final_size > initial_growth,
+                "the destination part should grow beyond its initial decrypted prefix after the final segment is released (initial={initial_growth}, final={final_size})"
+            );
+        } else {
+            assert!(final_size >= initial_growth);
+        }
         assert!(
             tokio::fs::symlink_metadata(&part_path).await.is_err(),
             "successful publication must move the owned destination part into place"

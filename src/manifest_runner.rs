@@ -6812,7 +6812,7 @@ segment-2.ts
                 .expect("the final segment request should start while earlier segments are muxed");
         }
 
-        let initial_growth = tokio::time::timeout(Duration::from_secs(15), async {
+        let initial_growth_result = tokio::time::timeout(Duration::from_secs(15), async {
             loop {
                 let size = tokio::fs::metadata(&part_path)
                     .await
@@ -6824,8 +6824,23 @@ segment-2.ts
                 tokio::time::sleep(Duration::from_millis(25)).await;
             }
         })
-        .await
-        .expect("FFmpeg should write decrypted bytes before the blocked segment is released");
+        .await;
+        let initial_growth = match initial_growth_result {
+            Ok(size) => size,
+            Err(_) => {
+                let snapshot =
+                    tokio::fs::read_to_string(staging.path().join("video/local.m3u8"))
+                        .await
+                        .unwrap_or_else(|error| format!("Could not read local playlist: {error}"));
+                let log = match ffmpeg_log_path.as_ref() {
+                    Some(path) => tokio::fs::read_to_string(path).await.unwrap_or_default(),
+                    None => String::new(),
+                };
+                panic!(
+                    "FFmpeg did not write the first decrypted AES-128 segment before the second was released; local playlist:\n{snapshot}\nFFmpeg verbose log:\n{log}"
+                );
+            }
+        };
         assert!(initial_growth > 0);
 
         if verify_incremental_growth {

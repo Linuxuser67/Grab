@@ -268,15 +268,15 @@ pub fn build_window(
     search_bar.set_widget_name("download-search-bar");
     search_bar.connect_entry(&search);
     search_bar.set_key_capture_widget(Some(&window));
-    // Restore the HIG spacing around the search surface.
-    search_bar.set_margin_top(12);
-    search_bar.set_margin_bottom(12);
-    search_bar.set_margin_start(12);
-    search_bar.set_margin_end(12);
-    // Keep the search control at the requested 350 px width and centered.
+    // Keep the actual search control 350 px wide; put the HIG spacing
+    // outside the clamp so margins do not reduce the control's width.
     let search_clamp = adw::Clamp::builder().maximum_size(350).build();
     search_clamp.set_widget_name("download-search-clamp");
     search_clamp.set_hexpand(true);
+    search_clamp.set_margin_top(12);
+    search_clamp.set_margin_bottom(12);
+    search_clamp.set_margin_start(12);
+    search_clamp.set_margin_end(12);
     search_clamp.set_child(Some(&search_bar));
 
     let menu = gio::Menu::new();

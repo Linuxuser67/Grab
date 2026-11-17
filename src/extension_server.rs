@@ -2398,7 +2398,12 @@ mod tests {
 
         let late_old_path =
             write_handoff_cookies(url, &[cookie("c", "old")]).expect("late old jar");
-        assert!(store_handoff_cookies_at(url, late_old_path.clone(), None, started));
+        assert!(store_handoff_cookies_at(
+            url,
+            late_old_path.clone(),
+            None,
+            started
+        ));
         assert!(late_old_path.exists(), "approved suppression hides but retains the old jar");
         drop(pending);
         assert!(
@@ -2423,7 +2428,12 @@ mod tests {
 
         let late_old_path =
             write_handoff_cookies(url, &[cookie("c", "old")]).expect("late old jar");
-        assert!(store_handoff_cookies_at(url, late_old_path.clone(), None, started));
+        assert!(store_handoff_cookies_at(
+            url,
+            late_old_path.clone(),
+            None,
+            started
+        ));
         drop(pending);
         assert_eq!(
             handoff_cookie_args(url).get(1).map(String::as_str),

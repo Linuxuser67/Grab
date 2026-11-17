@@ -1280,7 +1280,9 @@ impl DownloadManager {
                                     let _ = ack.send(false);
                                 }
                                 Ok(Ok(PrefixTruncation::ResetFromZero(file))) => {
-                                    if let Some(state) = this.segment_state.borrow_mut().get_mut(&id) {
+                                    if let Some(state) =
+                                        this.segment_state.borrow_mut().get_mut(&id)
+                                    {
                                         *state = SegmentState::new(state.total);
                                     }
                                     this.persist_queue();

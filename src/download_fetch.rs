@@ -361,7 +361,10 @@ async fn multi_loop(
                 *tries -= 1;
                 if *tries <= 0 {
                     let (ack_tx, ack_rx) = tokio::sync::oneshot::channel();
-                    if ctx.tx.send(EngineMsg::TruncatePrefix { ack: ack_tx }).is_ok()
+                    if ctx
+                        .tx
+                        .send(EngineMsg::TruncatePrefix { ack: ack_tx })
+                        .is_ok()
                         && matches!(
                             tokio::time::timeout(FALLBACK_ACK_TIMEOUT, ack_rx).await,
                             Ok(Ok(true))
@@ -405,8 +408,7 @@ async fn attempt_multi(
         Arc::new(Mutex::new(missing.into_iter().collect()));
     let failed = Arc::new(AtomicBool::new(false));
     let first_err: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None));
-    let destination_problem: Arc<Mutex<Option<DestinationProblem>>> =
-        Arc::new(Mutex::new(None));
+    let destination_problem: Arc<Mutex<Option<DestinationProblem>>> = Arc::new(Mutex::new(None));
     let throttled = Arc::new(AtomicBool::new(false));
     let changed = Arc::new(AtomicBool::new(false));
     // Bound in-flight BYTES, not pieces (big pieces would pin hundreds of MB on a slow disk).
@@ -495,10 +497,12 @@ async fn attempt_multi(
             while let Some((offset, bytes, idx)) = wrx.recv().await {
                 file.seek(std::io::SeekFrom::Start(offset))
                     .await
-                    .map_err(|error| AttemptFail::Retryable(format!("Cannot write file: {error}")))?;
-                file.write_all(&bytes)
-                    .await
-                    .map_err(|error| AttemptFail::Retryable(format!("Cannot write file: {error}")))?;
+                    .map_err(|error| {
+                        AttemptFail::Retryable(format!("Cannot write file: {error}"))
+                    })?;
+                file.write_all(&bytes).await.map_err(|error| {
+                    AttemptFail::Retryable(format!("Cannot write file: {error}"))
+                })?;
                 downloaded += bytes.len() as u64;
                 written += bytes.len() as u64;
                 unsynced_bytes = unsynced_bytes.saturating_add(bytes.len() as u64);
@@ -509,15 +513,17 @@ async fn attempt_multi(
                     last_rate_update = Instant::now();
                 }
                 if unsynced_bytes >= durable_batch_bytes {
-                    file.flush()
-                        .await
-                        .map_err(|error| AttemptFail::Retryable(format!("Cannot write file: {error}")))?;
-                    file.sync_data()
-                        .await
-                        .map_err(|error| AttemptFail::Retryable(format!("Cannot sync file: {error}")))?;
+                    file.flush().await.map_err(|error| {
+                        AttemptFail::Retryable(format!("Cannot write file: {error}"))
+                    })?;
+                    file.sync_data().await.map_err(|error| {
+                        AttemptFail::Retryable(format!("Cannot sync file: {error}"))
+                    })?;
                     // Publish a batch only while both the opened descriptor and
                     // the destination path still identify the claimed regular file.
-                    claim.verify_opened_file(&dest, &file, "downloaded file").await?;
+                    claim
+                        .verify_opened_file(&dest, &file, "downloaded file")
+                        .await?;
                     for idx in completed_indices.drain(..) {
                         st.mark(idx);
                         ctx.tx.send(EngineMsg::PieceDone(idx)).ok();
@@ -535,7 +541,9 @@ async fn attempt_multi(
             file.sync_all()
                 .await
                 .map_err(|error| AttemptFail::Retryable(format!("Cannot sync file: {error}")))?;
-            claim.verify_opened_file(&dest, &file, "downloaded file").await?;
+            claim
+                .verify_opened_file(&dest, &file, "downloaded file")
+                .await?;
             for idx in completed_indices {
                 st.mark(idx);
                 ctx.tx.send(EngineMsg::PieceDone(idx)).ok();
@@ -1611,8 +1619,8 @@ const PIECE_TRIES: u32 = 3;
 mod destination_ownership_tests {
     use super::{
         AttemptFail, DestinationClaim, DestinationProblem, FetchCtx, FileIdentity,
-        PrefixTruncation, attempt_once, ensure_sized, single_loop,
-        truncate_open_file_to_zero, truncate_to_prefix, wait_for_fallback_ack,
+        PrefixTruncation, attempt_once, ensure_sized, single_loop, truncate_open_file_to_zero,
+        truncate_to_prefix, wait_for_fallback_ack,
     };
     use crate::download_net::{DEFAULT_USER_AGENT, DownloadOptions};
     use crate::download_pieces::SegmentState;

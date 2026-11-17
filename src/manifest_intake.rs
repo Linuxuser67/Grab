@@ -4,7 +4,9 @@
 //! resources remain remote until the queue/fetch phase consumes the selected
 //! representation.
 
+use sha2::{Digest, Sha256};
 use std::collections::{HashMap, HashSet};
+use std::path::PathBuf;
 use std::sync::{LazyLock, Mutex};
 use std::time::{Duration, Instant, SystemTime};
 
@@ -38,6 +40,7 @@ const MANIFEST_PREVIEW_CACHE_CAPACITY: usize = 32;
 struct ManifestPreviewCacheKey {
     url: String,
     handoff_cookie_hash: Option<[u8; 32]>,
+    handoff_user_agent_hash: Option<[u8; 32]>,
     proxy: Option<String>,
 }
 
@@ -54,8 +57,12 @@ enum ManifestClientAuth {
 impl ManifestPreviewCacheKey {
     fn matches_auth(&self, auth: ManifestClientAuth) -> bool {
         match auth {
-            ManifestClientAuth::Handoff => self.handoff_cookie_hash.is_some(),
-            ManifestClientAuth::Anonymous => self.handoff_cookie_hash.is_none(),
+            ManifestClientAuth::Handoff => {
+                self.handoff_cookie_hash.is_some() && self.handoff_user_agent_hash.is_some()
+            }
+            ManifestClientAuth::Anonymous => {
+                self.handoff_cookie_hash.is_none() && self.handoff_user_agent_hash.is_none()
+            },
         }
     }
 }
@@ -76,6 +83,7 @@ fn has_query_parameters(url: &Url) -> bool {
 fn manifest_preview_cache_key(
     raw_url: &str,
     proxy: Option<&crate::net_types::ResolvedProxy>,
+    handoff_identity: Option<&(PathBuf, Option<String>)>,
 ) -> Option<ManifestPreviewCacheKey> {
     let mut url = Url::parse(raw_url).ok()?;
     url.set_fragment(None);
@@ -83,12 +91,22 @@ fn manifest_preview_cache_key(
         return None;
     }
 
-    let handoff_cookie_hash = crate::extension_server::live_handoff_identity(raw_url)
-        .and_then(|(path, _)| crate::extension_server::handoff_cookie_hash(&path));
+    let handoff_cookie_hash = handoff_identity
+        .and_then(|(path, _)| crate::extension_server::handoff_cookie_hash(path));
+    // Handoff cookies such as cf_clearance can be bound to the browser UA.
+    // Scope the cache to the exact UA used with the staged jar, including the
+    // default UA when the extension did not provide one.
+    let handoff_user_agent_hash = handoff_cookie_hash.map(|_| {
+        let user_agent = handoff_identity
+            .and_then(|(_, user_agent)| user_agent.as_deref())
+            .unwrap_or(crate::download_net::DEFAULT_USER_AGENT);
+        Sha256::digest(user_agent.as_bytes()).into()
+    });
 
     Some(ManifestPreviewCacheKey {
         url: url.to_string(),
         handoff_cookie_hash,
+        handoff_user_agent_hash,
         proxy: proxy.map(|resolved| resolved.cli_url.clone()),
     })
 }
@@ -353,7 +371,11 @@ pub(crate) async fn lookup(
     if !is_native_manifest_candidate(&requested_url, ManifestTransportPolicy::HttpsOnly) {
         return Ok(None);
     }
-    let cache_key = manifest_preview_cache_key(raw_url, proxy);
+    // Snapshot the staged cookie path and UA once. Cache identity and the
+    // request client must use the same handoff entry if another handoff arrives
+    // while the preview is being prepared.
+    let handoff_identity = crate::extension_server::live_handoff_identity(raw_url);
+    let cache_key = manifest_preview_cache_key(raw_url, proxy, handoff_identity.as_ref());
     if let Some(key) = cache_key.as_ref()
         && let Some(mut cached) = manifest_preview_cache_get(key)
     {
@@ -364,9 +386,11 @@ pub(crate) async fn lookup(
         return Ok(Some(cached));
     }
 
-    let (auth, lookup) = tokio::time::timeout(MANIFEST_LOOKUP_BUDGET, async {
-        let (client, auth) = client_for_preview(raw_url, proxy).await?;
-        let lookup = lookup_preview_with_client(&client, raw_url)
+    let request_url = raw_url.to_string();
+    let (auth, lookup) = tokio::time::timeout(MANIFEST_LOOKUP_BUDGET, async move {
+        let (client, auth) =
+            client_for_preview(&request_url, proxy, handoff_identity).await?;
+        let lookup = lookup_preview_with_client(&client, &request_url)
             .await
             .map_err(|error| error.to_string())?;
         Ok::<_, String>((auth, lookup))
@@ -456,9 +480,12 @@ async fn client_from_handoff_jar(
 async fn client_for_preview(
     raw_url: &str,
     proxy: Option<&crate::net_types::ResolvedProxy>,
+    handoff_identity: Option<(PathBuf, Option<String>)>,
 ) -> Result<(reqwest::Client, ManifestClientAuth), String> {
     validate_handoff_proxy(raw_url)?;
-    if let Some(client) = client_with_handoff_jar(raw_url, proxy).await? {
+    if let Some((path, user_agent)) = handoff_identity
+        && let Some(client) = client_from_handoff_jar(&path, user_agent.as_deref(), proxy).await?
+    {
         return Ok((client, ManifestClientAuth::Handoff));
     }
     crate::download_net::http_client_for(proxy)
@@ -2430,6 +2457,7 @@ segment.ts
             manifest_preview_cache_key(
                 "https://cache-preview.example.test/master.m3u8?X-Amz-Signature=secret",
                 None,
+                None,
             )
             .is_none(),
             "known signed source URLs must not be cached"
@@ -2437,6 +2465,7 @@ segment.ts
         assert!(
             manifest_preview_cache_key(
                 "https://cache-preview.example.test/master.m3u8?f=418899&srv=server&i=0.4&sp=500&p1=one&p2=two&asn=327934",
+                None,
                 None,
             )
             .is_some(),
@@ -2538,7 +2567,7 @@ segment.ts?f=418899&srv=server&i=0.4&sp=500&p1=one&p2=two&asn=327934
 
     #[tokio::test]
     async fn preview_client_is_anonymous_without_a_staged_handoff() {
-        let (_, auth) = client_for_preview("https://preview.example.test/master.m3u8", None)
+        let (_, auth) = client_for_preview("https://preview.example.test/master.m3u8", None, None)
             .await
             .expect("anonymous preview client");
         assert_eq!(
@@ -2568,11 +2597,55 @@ segment.ts?f=418899&srv=server&i=0.4&sp=500&p1=one&p2=two&asn=327934
     }
 
     #[test]
+    fn preview_cache_identity_includes_handoff_user_agent() {
+        let directory = tempfile::tempdir().expect("temporary cookie directory");
+        let jar = directory.path().join("handoff.jar");
+        std::fs::write(
+            &jar,
+            b"# Netscape HTTP Cookie File\\n.example.test\\tTRUE\\t/\\tFALSE\\t0\\tsid\\tv\\n",
+        )
+        .expect("write handoff jar");
+
+        let url = "https://cache-preview.example.test/master.m3u8";
+        let first_identity = (jar.clone(), Some("Grab-UA-One".to_string()));
+        let second_identity = (jar.clone(), Some("Grab-UA-Two".to_string()));
+        let first = manifest_preview_cache_key(url, None, Some(&first_identity))
+            .expect("first handoff cache key");
+        let second = manifest_preview_cache_key(url, None, Some(&second_identity))
+            .expect("second handoff cache key");
+
+        assert_eq!(
+            first.handoff_cookie_hash, second.handoff_cookie_hash,
+            "the staged cookie contents are identical"
+        );
+        assert_ne!(
+            first.handoff_user_agent_hash, second.handoff_user_agent_hash,
+            "a changed browser UA changes the authenticated preview identity"
+        );
+        assert_ne!(
+            first, second,
+            "previews fetched with different User-Agent headers must not share a cache entry"
+        );
+
+        let default_identity = (jar.clone(), None);
+        let explicit_default_identity = (
+            jar,
+            Some(crate::download_net::DEFAULT_USER_AGENT.to_string()),
+        );
+        assert_eq!(
+            manifest_preview_cache_key(url, None, Some(&default_identity)),
+            manifest_preview_cache_key(url, None, Some(&explicit_default_identity)),
+            "an omitted handoff UA and an explicit default UA produce the same request identity"
+        );
+    }
+
+    #[test]
     fn preview_cache_key_only_matches_the_source_that_served_it() {
         let url = "https://cache-preview.example.test/master.m3u8";
-        let anonymous = manifest_preview_cache_key(url, None).expect("anonymous key");
+        let anonymous = manifest_preview_cache_key(url, None, None).expect("anonymous key");
         let handoff = ManifestPreviewCacheKey {
             handoff_cookie_hash: Some([7_u8; 32]),
+            handoff_user_agent_hash: Some([8_u8; 32]),
             ..anonymous.clone()
         };
 

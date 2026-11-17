@@ -3381,6 +3381,56 @@ fn restored_unstarted_row_refuses_existing_dest() {
 }
 
 #[test]
+fn failed_prefix_recovery_does_not_reuse_unverified_destination() {
+    // A failed prefix truncation or zero-reset can leave segmented bytes in an
+    // inconsistent state. Once its bitmap is dropped, the file must not be
+    // adopted as a single-stream resume on a later retry.
+    let (_q, _l) = test_locks();
+    let _qf = test_queue_file("failed-prefix-reset-ownership");
+    let manager = DownloadManager::new(gio::ListStore::new::<DownloadItem>(), test_settings());
+    let dest =
+        std::env::temp_dir().join(format!("grab-failed-prefix-reset-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dest);
+    std::fs::create_dir_all(&dest).unwrap();
+    std::fs::write(dest.join("partial.bin"), b"unverified partial").unwrap();
+    let dest_s = dest.to_string_lossy().into_owned();
+    let mut stored = stored_row(
+        "https://example.com/partial.bin",
+        &dest_s,
+        "partial.bin",
+        DownloadStatus::Failed,
+    );
+    stored.started = Some(true);
+    let item = manager
+        .restore_existing(&stored)
+        .expect("restore started row");
+    assert!(
+        manager.started.borrow().contains(&item.id()),
+        "fixture must begin with the prior engine ownership marker"
+    );
+
+    manager.invalidate_started_destination(item.id());
+    item.set_status(DownloadStatus::Queued);
+    manager.start_next();
+
+    assert!(
+        wait_for_status(
+            &manager,
+            item.id(),
+            DownloadStatus::Failed,
+            Duration::from_secs(15)
+        ),
+        "retry must refuse the path rather than append to the unverified partial"
+    );
+    assert_eq!(item.detail(), crate::engine_msg::DEST_EXISTS);
+    assert_eq!(
+        std::fs::read(dest.join("partial.bin")).unwrap(),
+        b"unverified partial"
+    );
+    let _ = std::fs::remove_dir_all(&dest);
+}
+
+#[test]
 fn legacy_queue_row_without_started_resumes_partial() {
     // Queue files from before `started` existed carry None: the legacy
     // resume-anything-with-bytes behavior applies, so a pre-upgrade partial

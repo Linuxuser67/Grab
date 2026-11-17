@@ -3179,7 +3179,7 @@ segment-001.m4s
         audio: None,
         subtitle: None,
         subtitle_language: None,
-        subtitle_is_fmp4: false,
+        subtitle_format: SubtitleFormat::Text,
     };
     assert!(
         tracks.uses_destination_parts(),
@@ -3250,7 +3250,7 @@ segment-001.m4s
         audio: None,
         subtitle: None,
         subtitle_language: None,
-        subtitle_is_fmp4: false,
+        subtitle_format: SubtitleFormat::Text,
     };
 
     let staging = root.path().join("staging");
@@ -4671,7 +4671,7 @@ combined.mp4
         audio: None,
         subtitle: None,
         subtitle_language: None,
-        subtitle_is_fmp4: false,
+        subtitle_format: SubtitleFormat::Text,
     };
     let root = TempRoot::new("hls-single-file-fmp4-ranges");
     let staging = root.path().join("staging");

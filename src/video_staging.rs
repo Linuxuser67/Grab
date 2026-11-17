@@ -1313,11 +1313,13 @@ fn stem_has_subtitle_sidecar(names: &[String], stem: &str) -> bool {
             .and_then(|suffix| {
                 suffix
                     .strip_suffix(".srt")
-                    .or_else(|| suffix.strip_suffix(".fmp4.mp4"))
+                    .or_else(|| suffix.strip_suffix(&format!(".{FMP4_SUBTITLE_SIDECAR_EXTENSION}")))
             })
             .is_some_and(|lang| subtitle_content_languages().any(|l| l == lang))
     })
 }
+
+pub(crate) const FMP4_SUBTITLE_SIDECAR_EXTENSION: &str = FMP4_SUBTITLE_SIDECAR_EXTENSION;
 
 pub(crate) fn sidecar_path_for(output: &Path, lang: &str) -> PathBuf {
     sidecar_path_for_extension(output, lang, "srt")
@@ -2985,7 +2987,7 @@ mod tests {
     #[test]
     fn fmp4_subtitle_sidecars_keep_their_container_and_reserve_the_video_stem() {
         let destination = Path::new("/downloads/film.mp4");
-        let sidecar = sidecar_path_for_extension(destination, "en", "fmp4.mp4");
+        let sidecar = sidecar_path_for_extension(destination, "en", FMP4_SUBTITLE_SIDECAR_EXTENSION);
         assert_eq!(sidecar, PathBuf::from("/downloads/film.en.fmp4.mp4"));
         assert!(
             stem_reserved_in(&["film.en.fmp4.mp4".to_string()], "film"),

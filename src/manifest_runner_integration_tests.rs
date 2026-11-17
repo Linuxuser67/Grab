@@ -3273,6 +3273,7 @@ segment-001.m4s
 
     let task_staging = staging.clone();
     let task_video_dir = video_dir.clone();
+    let task_audio_dir = staging.join("audio");
     let task_destination = destination.clone();
     let task_tracks = tracks;
     let task = tokio::spawn(async move {
@@ -3288,7 +3289,7 @@ segment-001.m4s
             destination: &task_destination,
             item_id: 92,
             video_dir: &task_video_dir,
-            audio_dir: &task_staging.join("audio"),
+            audio_dir: &task_audio_dir,
             concurrency: 2,
             tx: &tx,
             downloaded: &downloaded,

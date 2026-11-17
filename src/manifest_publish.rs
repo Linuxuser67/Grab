@@ -37,10 +37,77 @@ impl Drop for DiscardOnDrop {
 struct RollbackJob {
     path: PathBuf,
     restore_to: Option<PathBuf>,
+    identity: DestinationIdentity,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct DestinationIdentity {
+    device: u64,
+    inode: u64,
+}
+
+fn identity_from_file(file: &std::fs::File) -> std::io::Result<DestinationIdentity> {
+    let metadata = file.metadata()?;
+    if !metadata.is_file() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "published destination is not a regular file",
+        ));
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt as _;
+        Ok(DestinationIdentity {
+            device: metadata.dev(),
+            inode: metadata.ino(),
+        })
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = metadata;
+        Err(std::io::Error::new(
+            std::io::ErrorKind::Unsupported,
+            "manifest publication rollback requires Unix file identities",
+        ))
+    }
+}
+
+fn identity_from_path(path: &Path) -> std::io::Result<DestinationIdentity> {
+    let mut options = std::fs::OpenOptions::new();
+    options.read(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt as _;
+        options.custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC);
+    }
+    let file = options.open(path)?;
+    identity_from_file(&file)
+}
+
+fn verify_destination_identity(path: &Path, expected: DestinationIdentity) -> std::io::Result<()> {
+    let actual = identity_from_path(path)?;
+    if actual != expected {
+        return Err(std::io::Error::other(
+            "published destination was replaced before rollback or commit",
+        ));
+    }
+    Ok(())
 }
 
 impl RollbackJob {
     fn run(self, gate: &crate::attempt_gate::AttemptGate) {
+        match verify_destination_identity(&self.path, self.identity) {
+            Ok(()) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return,
+            Err(error) => {
+                tracing::warn!(
+                    path = %self.path.display(),
+                    error = %error,
+                    "manifest rollback refused to touch a destination that is no longer owned"
+                );
+                return;
+            }
+        }
         let rollback = match self.restore_to.as_deref() {
             Some(source) => crate::file_names::rename_noreplace_same_device(&self.path, source),
             None => std::fs::remove_file(&self.path),
@@ -110,6 +177,7 @@ fn spawn_rollback(
 struct PendingDestination {
     path: PathBuf,
     gate: Arc<crate::attempt_gate::AttemptGate>,
+    identity: DestinationIdentity,
     /// A same-filesystem rename can be restored here if the directory sync fails.
     restore_to: Option<PathBuf>,
     armed: bool,
@@ -120,11 +188,13 @@ impl PendingDestination {
         path: &Path,
         gate: Arc<crate::attempt_gate::AttemptGate>,
         restore_to: Option<&Path>,
+        identity: DestinationIdentity,
     ) -> Self {
         Self {
             path: path.to_path_buf(),
             gate,
             restore_to: restore_to.map(Path::to_path_buf),
+            identity,
             armed: false,
         }
     }
@@ -145,6 +215,7 @@ impl PendingDestination {
         Some(RollbackJob {
             path: std::mem::take(&mut self.path),
             restore_to: self.restore_to.take(),
+            identity: self.identity,
         })
     }
 
@@ -321,14 +392,20 @@ async fn persist_prepared_copy(
     let destination_for_worker = destination.to_path_buf();
     let gate_for_worker = Arc::clone(gate);
     let mut pending = match tokio::task::spawn_blocking(move || {
-        let mut pending =
-            PendingDestination::new(&destination_for_worker, Arc::clone(&gate_for_worker), None);
+        let identity = identity_from_file(temporary.as_file())?;
+        let mut pending = PendingDestination::new(
+            &destination_for_worker,
+            Arc::clone(&gate_for_worker),
+            None,
+            identity,
+        );
         crate::file_names::persist_noclobber_with_fallback(
             temporary,
             &destination_for_worker,
             || gate_for_worker.is_active(),
         )?;
         pending.arm();
+        verify_destination_identity(&destination_for_worker, identity)?;
         Ok::<_, std::io::Error>(pending)
     })
     .await
@@ -341,6 +418,10 @@ async fn persist_prepared_copy(
         Err(error) => return Err(std::io::Error::other(error)),
     };
     if let Err(error) = sync_parent_directory(destination).await {
+        pending.rollback().await;
+        return Err(error);
+    }
+    if let Err(error) = verify_destination_identity(destination, pending.identity) {
         pending.rollback().await;
         return Err(error);
     }
@@ -362,11 +443,19 @@ async fn commit_renamed_destination(
     destination: &Path,
 ) -> std::io::Result<ManifestPublishOutcome> {
     pending.arm();
+    if let Err(error) = verify_destination_identity(destination, pending.identity) {
+        pending.rollback().await;
+        return Err(error);
+    }
     if let Err(error) = sync_parent_directory(destination).await {
         pending.rollback().await;
         return Err(error);
     }
     if let Err(error) = sync_parent_directory(source).await {
+        pending.rollback().await;
+        return Err(error);
+    }
+    if let Err(error) = verify_destination_identity(destination, pending.identity) {
         pending.rollback().await;
         return Err(error);
     }
@@ -390,9 +479,15 @@ pub(crate) async fn publish(
         return Ok(ManifestPublishOutcome::Aborted);
     }
 
+    let source_identity = identity_from_path(source)?;
     match crate::file_names::rename_noreplace_same_device(source, destination) {
         Ok(()) => {
-            let pending = PendingDestination::new(destination, Arc::clone(gate), Some(source));
+            let pending = PendingDestination::new(
+                destination,
+                Arc::clone(gate),
+                Some(source),
+                source_identity,
+            );
             return commit_renamed_destination(gate, pending, source, destination).await;
         }
         Err(error) if error.raw_os_error() == Some(libc::EXDEV) => {}
@@ -676,6 +771,65 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn rollback_preserves_a_replacement_at_the_published_path() {
+        let directory = tempfile::tempdir().expect("create publication root");
+        let destination = directory.path().join("final.mp4");
+        std::fs::write(&destination, b"original publication").expect("write original");
+        let gate = crate::attempt_gate::AttemptGate::new();
+        let identity = identity_from_path(&destination).expect("capture original inode");
+        let mut pending = PendingDestination::new(&destination, Arc::clone(&gate), None, identity);
+        pending.arm();
+
+        let replacement = directory.path().join("replacement.mp4");
+        std::fs::write(&replacement, b"user replacement").expect("write replacement");
+        std::fs::rename(&replacement, &destination).expect("replace published path");
+
+        drop(pending);
+        gate.wait_for_rollbacks().await;
+
+        assert_eq!(
+            std::fs::read(&destination).expect("read replacement"),
+            b"user replacement",
+            "rollback must not remove a replacement file"
+        );
+        assert!(
+            !gate.was_delivered(),
+            "an unowned replacement must not be classified as a delivered orphan"
+        );
+    }
+
+    #[tokio::test]
+    async fn rollback_does_not_move_a_replacement_back_to_the_staging_source() {
+        let directory = tempfile::tempdir().expect("create publication root");
+        let source = directory.path().join("source.part");
+        let destination = directory.path().join("final.mp4");
+        std::fs::write(&destination, b"original publication").expect("write original");
+        let gate = crate::attempt_gate::AttemptGate::new();
+        let identity = identity_from_path(&destination).expect("capture original inode");
+        let mut pending =
+            PendingDestination::new(&destination, Arc::clone(&gate), Some(&source), identity);
+        pending.arm();
+
+        let replacement = directory.path().join("replacement.mp4");
+        std::fs::write(&replacement, b"user replacement").expect("write replacement");
+        std::fs::rename(&replacement, &destination).expect("replace published path");
+
+        drop(pending);
+        gate.wait_for_rollbacks().await;
+
+        assert_eq!(
+            std::fs::read(&destination).expect("read replacement"),
+            b"user replacement",
+            "rollback must not move a replacement file"
+        );
+        assert!(
+            !source.exists(),
+            "a replacement must not be moved into the staging source path"
+        );
+        assert!(!gate.was_delivered());
+    }
+
+    #[tokio::test]
     async fn dropping_pending_destination_restores_renamed_source_before_finalization() {
         let directory = tempfile::tempdir().expect("create publication root");
         let source = directory.path().join("source.part");
@@ -684,7 +838,9 @@ mod tests {
         crate::file_names::rename_noreplace_same_device(&source, &destination)
             .expect("move staged output into pending destination");
         let gate = crate::attempt_gate::AttemptGate::new();
-        let mut pending = PendingDestination::new(&destination, Arc::clone(&gate), Some(&source));
+        let identity = identity_from_path(&destination).expect("capture published inode");
+        let mut pending =
+            PendingDestination::new(&destination, Arc::clone(&gate), Some(&source), identity);
         pending.arm();
 
         drop(pending);
@@ -704,7 +860,8 @@ mod tests {
         let destination = directory.path().join("final.mp4");
         std::fs::write(&destination, b"published orphan").expect("write destination");
         let gate = crate::attempt_gate::AttemptGate::new();
-        let mut pending = PendingDestination::new(&destination, Arc::clone(&gate), None);
+        let identity = identity_from_path(&destination).expect("capture published inode");
+        let mut pending = PendingDestination::new(&destination, Arc::clone(&gate), None, identity);
         pending.arm();
 
         drop(pending);
@@ -728,7 +885,9 @@ mod tests {
         std::fs::write(&source, b"existing source").expect("write source");
         std::fs::write(&destination, b"published orphan").expect("write destination");
         let gate = crate::attempt_gate::AttemptGate::new();
-        let mut pending = PendingDestination::new(&destination, Arc::clone(&gate), Some(&source));
+        let identity = identity_from_path(&destination).expect("capture published inode");
+        let mut pending =
+            PendingDestination::new(&destination, Arc::clone(&gate), Some(&source), identity);
         pending.arm();
 
         drop(pending);

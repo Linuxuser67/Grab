@@ -4610,7 +4610,10 @@ combined.mp4
                 .expect("timed out waiting for byte-range request")
                 .expect("accept byte-range request");
             let request = read_fixture_request_headers(&mut socket).await;
-            assert!(request.starts_with("GET /combined.mp4 "), "unexpected request: {request}");
+            assert!(
+                request.starts_with("GET /combined.mp4 "),
+                "unexpected request: {request}"
+            );
             let expected_range = format!(
                 "bytes={}-{}",
                 range.offset,

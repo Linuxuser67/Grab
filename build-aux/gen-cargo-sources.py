@@ -35,8 +35,15 @@ def render() -> tuple[str, int]:
     for pkg in lock["package"]:
         source = pkg.get("source", "")
         if not source:
-            # Path packages (the grab workspace crate) have no source and need no archive.
-            continue
+            # Only the root Grab workspace package is expected to be source-less.
+            # Any other source-less lock entry is a path dependency; silently
+            # skipping it would produce an incomplete offline vendor directory.
+            if pkg["name"] == "grab":
+                continue
+            sys.exit(
+                f"ERROR: path package {pkg['name']} {pkg['version']} has no registry source; "
+                "extend this generator before adding it to Cargo.lock"
+            )
         if not source.startswith("registry+"):
             # A git/path dependency cannot be vendored by this registry-only script.
             # Silent skipping would let --check pass while the offline build lacks the crate.

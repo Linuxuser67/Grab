@@ -6577,8 +6577,9 @@ segment-2.ts
         .expect("plan generated AES-128 HLS VOD");
         assert!(plan.is_incremental_aes128_mpegts_vod_candidate());
         assert!(
-            plan.segment_count() >= 2,
-            "fixture must contain multiple segments"
+            plan.segment_count() >= 8,
+            "the progressive AES-128 fixture needs enough segments for FFmpeg to probe and mux; found {}",
+            plan.segment_count()
         );
 
         let total_segments = plan.segment_count();
@@ -6832,7 +6833,14 @@ segment-2.ts
             .await
             .expect("stat published decrypted destination")
             .len();
-        assert!(final_size >= initial_growth);
+        if extension == "ts" && !force_early_exit {
+            assert!(
+                final_size > initial_growth,
+                "the destination output must grow after the withheld AES-128 segment is released (initial={initial_growth}, final={final_size})"
+            );
+        } else {
+            assert!(final_size >= initial_growth);
+        }
         assert!(
             tokio::fs::symlink_metadata(&part_path).await.is_err(),
             "successful publication must move the owned destination part into place"

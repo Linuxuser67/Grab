@@ -595,7 +595,7 @@ async fn attempt_once(
             }
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
                 if claim.is_claimed() {
-                    return Err(AttemptFail::Retryable(DESTINATION_DISAPPEARED.to_string()));
+                    return Err(AttemptFail::Destination(DestinationProblem::Disappeared));
                 }
                 0
             }
@@ -927,23 +927,18 @@ async fn open_nofollow(
 pub(crate) async fn open_partial(
     path: &std::path::Path,
     start: u64,
-) -> Result<tokio::fs::File, String> {
+) -> std::io::Result<tokio::fs::File> {
     let file = open_nofollow(
         |o| {
             o.append(true);
         },
         path,
     )
-    .await
-    .map_err(|e| format!("Cannot write file: {e}"))?;
+    .await?;
     // The stat happened before the request: a local append/truncate in that window would shift every byte.
-    let at = file
-        .metadata()
-        .await
-        .map_err(|e| format!("Cannot write file: {e}"))?
-        .len();
+    let at = file.metadata().await?.len();
     if at != start {
-        return Err(gettext("The partial file changed during resume"));
+        return Err(std::io::Error::other(gettext("The partial file changed during resume")));
     }
     Ok(file)
 }
@@ -980,6 +975,16 @@ impl DestinationProblem {
             Self::Disappeared => DESTINATION_DISAPPEARED.to_string(),
             Self::Replaced => DESTINATION_REPLACED.to_string(),
         }
+    }
+}
+
+fn destination_open_error(error: std::io::Error, claimed: bool) -> AttemptFail {
+    if claimed && error.kind() == std::io::ErrorKind::NotFound {
+        AttemptFail::Destination(DestinationProblem::Disappeared)
+    } else if claimed && error.raw_os_error() == Some(libc::ELOOP) {
+        AttemptFail::Destination(DestinationProblem::Replaced)
+    } else {
+        AttemptFail::Retryable(format!("Cannot write file: {error}"))
     }
 }
 
@@ -1078,10 +1083,8 @@ impl DestinationClaim {
         .map_err(|error| {
             if !was_claimed && error.kind() == std::io::ErrorKind::AlreadyExists {
                 AttemptFail::Destination(DestinationProblem::Exists)
-            } else if was_claimed && error.raw_os_error() == Some(libc::ELOOP) {
-                AttemptFail::Destination(DestinationProblem::Replaced)
             } else {
-                AttemptFail::Retryable(format!("Cannot write file: {error}"))
+                destination_open_error(error, was_claimed)
             }
         })?;
         let metadata = file
@@ -1120,7 +1123,7 @@ impl DestinationClaim {
         }
         let file = open_partial(path, start)
             .await
-            .map_err(AttemptFail::Retryable)?;
+            .map_err(|error| destination_open_error(error, true))?;
         self.verify_opened_file(path, &file, "partial download")
             .await?;
         Ok(file)
@@ -1750,7 +1753,7 @@ mod destination_ownership_tests {
             .await
             .expect_err("an unowned file must be rejected before networking");
         assert!(
-            matches!(&error, AttemptFail::Retryable(message) if message == crate::engine_msg::DEST_EXISTS),
+            matches!(error, AttemptFail::Destination(DestinationProblem::Exists)),
             "expected a retryable ownership failure, got {error:?}"
         );
         assert_eq!(
@@ -1825,7 +1828,10 @@ mod destination_ownership_tests {
         )
         .expect("write segmented destination");
 
-        truncate_to_prefix(&destination, &state).expect("truncate to completed prefix");
+        assert!(matches!(
+            truncate_to_prefix(&destination, &state).expect("truncate to completed prefix"),
+            PrefixTruncation::CompletedPrefix
+        ));
 
         let bytes = std::fs::read(&destination).expect("read truncated destination");
         assert_eq!(

@@ -1392,11 +1392,17 @@ video.m3u8
             .expect("bind manifest retry fixture");
         let port = listener.local_addr().expect("read fixture address").port();
         let server = tokio::spawn(async move {
-            let (mut socket, _) = listener.accept().await.expect("accept first manifest request");
+            let (mut socket, _) = listener
+                .accept()
+                .await
+                .expect("accept first manifest request");
             let mut request = Vec::new();
             let mut chunk = [0_u8; 1024];
             loop {
-                let count = socket.read(&mut chunk).await.expect("read manifest request");
+                let count = socket
+                    .read(&mut chunk)
+                    .await
+                    .expect("read manifest request");
                 if count == 0 {
                     break;
                 }

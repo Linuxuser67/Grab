@@ -836,6 +836,12 @@ fn fixture_client() -> reqwest::Client {
 }
 
 async fn read_fixture_request_path(socket: &mut tokio::net::TcpStream) -> String {
+    read_fixture_request_with_range(socket).await.0
+}
+
+async fn read_fixture_request_with_range(
+    socket: &mut tokio::net::TcpStream,
+) -> (String, Option<(u64, u64)>) {
     let mut request = Vec::with_capacity(512);
     while !request.windows(4).any(|window| window == b"\r\n\r\n") {
         let mut buffer = [0_u8; 1024];
@@ -851,7 +857,8 @@ async fn read_fixture_request_path(socket: &mut tokio::net::TcpStream) -> String
         );
     }
 
-    String::from_utf8_lossy(&request)
+    let request = String::from_utf8_lossy(&request);
+    let path = request
         .lines()
         .next()
         .and_then(|line| line.split_whitespace().nth(1))
@@ -859,7 +866,27 @@ async fn read_fixture_request_path(socket: &mut tokio::net::TcpStream) -> String
         .split('?')
         .next()
         .unwrap_or("/")
-        .to_string()
+        .to_string();
+    let range = request
+        .lines()
+        .find_map(|line| {
+            let (name, value) = line.split_once(':')?;
+            name.eq_ignore_ascii_case("range").then_some(value.trim())
+        })
+        .map(|value| {
+            let value = value
+                .strip_prefix("bytes=")
+                .expect("fixture Range header should use bytes");
+            let (start, end) = value
+                .split_once('-')
+                .expect("fixture Range header should have both bounds");
+            (
+                start.parse().expect("parse fixture Range start"),
+                end.parse().expect("parse fixture Range end"),
+            )
+        });
+
+    (path, range)
 }
 
 struct OrderedDashFixtureServer {
@@ -3335,6 +3362,236 @@ segment-001.m4s
             .await
             .expect("read completed fMP4 destination part"),
         expected
+    );
+}
+
+
+#[tokio::test]
+async fn byte_ranged_fmp4_video_and_audio_create_destination_parts_during_transfer() {
+    let root = TempRoot::new("hls-fmp4-byte-range-destination-parts");
+    let video_playlist = br#"#EXTM3U
+#EXT-X-VERSION:7
+#EXT-X-TARGETDURATION:2
+#EXT-X-MAP:URI="video.mp4",BYTERANGE="4@0"
+#EXTINF:1.0,
+#EXT-X-BYTERANGE:4@4
+video.mp4
+#EXTINF:1.0,
+#EXT-X-BYTERANGE:4@8
+video.mp4
+#EXT-X-ENDLIST
+"#;
+    let audio_playlist = br#"#EXTM3U
+#EXT-X-VERSION:7
+#EXT-X-TARGETDURATION:2
+#EXT-X-MAP:URI="audio.mp4",BYTERANGE="4@0"
+#EXTINF:1.0,
+#EXT-X-BYTERANGE:4@4
+audio.mp4
+#EXTINF:1.0,
+#EXT-X-BYTERANGE:4@8
+audio.mp4
+#EXT-X-ENDLIST
+"#;
+    let mut video_plan = crate::manifest::plan_hls_media_playlist(
+        "https://cdn.fixture.invalid/video.m3u8",
+        video_playlist,
+    )
+    .expect("plan byte-ranged fMP4 video track");
+    let mut audio_plan = crate::manifest::plan_hls_media_playlist(
+        "https://cdn.fixture.invalid/audio.m3u8",
+        audio_playlist,
+    )
+    .expect("plan byte-ranged fMP4 audio track");
+    assert!(video_plan.is_destination_assemblable_candidate());
+    assert!(audio_plan.is_destination_assemblable_candidate());
+    assert_eq!(video_plan.resources.len(), 3);
+    assert_eq!(audio_plan.resources.len(), 3);
+    assert!(
+        video_plan.resources.iter().all(|resource| resource.range.is_some()),
+        "video init and media resources should all retain their byte ranges"
+    );
+    assert!(
+        audio_plan.resources.iter().all(|resource| resource.range.is_some()),
+        "audio init and media resources should all retain their byte ranges"
+    );
+
+    let video_bytes = b"VINI0000V001";
+    let audio_bytes = b"AINI0000A001";
+    let files = HashMap::from([
+        ("/video.mp4".to_string(), video_bytes.to_vec()),
+        ("/audio.mp4".to_string(), audio_bytes.to_vec()),
+    ]);
+    let request_count = video_plan.resources.len() + audio_plan.resources.len();
+    let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0))
+        .await
+        .expect("bind byte-range fMP4 fixture server");
+    let address = listener
+        .local_addr()
+        .expect("read byte-range fMP4 fixture server address");
+    let (media_requested_tx, media_requested_rx) = tokio::sync::oneshot::channel();
+    let (release_media_tx, release_media_rx) = tokio::sync::oneshot::channel();
+    let server = tokio::spawn(async move {
+        let mut media_requested_tx = Some(media_requested_tx);
+        let mut release_media_rx = Some(release_media_rx);
+        for _ in 0..request_count {
+            let (mut socket, _) = listener
+                .accept()
+                .await
+                .expect("accept byte-range fMP4 request");
+            let (request_path, range) = read_fixture_request_with_range(&mut socket).await;
+            let body = files
+                .get(&request_path)
+                .expect("byte-range fMP4 request should name a fixture file");
+            let (start, end) = range.expect("fMP4 init and media requests must use HTTP Range");
+            let start_index = usize::try_from(start).expect("convert byte-range start");
+            let end_index = usize::try_from(end).expect("convert byte-range end");
+            let fragment = body
+                .get(start_index..=end_index)
+                .expect("requested byte range should fit in the fixture file");
+            let headers = format!(
+                "HTTP/1.1 206 Partial Content\\r\\nContent-Range: bytes {start}-{end}/{}\\r\\nContent-Length: {}\\r\\nConnection: close\\r\\n\\r\\n",
+                body.len(),
+                fragment.len()
+            );
+            socket
+                .write_all(headers.as_bytes())
+                .await
+                .expect("write byte-range response headers");
+            if request_path == "/video.mp4" && start == 4 {
+                media_requested_tx
+                    .take()
+                    .expect("first video media request notification exists")
+                    .send(())
+                    .expect("notify test about the in-flight video fragment");
+                release_media_rx
+                    .take()
+                    .expect("video media release receiver exists")
+                    .await
+                    .expect("test releases the in-flight video fragment");
+            }
+            socket
+                .write_all(fragment)
+                .await
+                .expect("write byte-range response body");
+        }
+    });
+
+    let base_url = Url::parse(&format!("http://{address}/"))
+        .expect("build loopback byte-range fMP4 URL");
+    for resource in &mut video_plan.resources {
+        resource.url = loopback_resource_url(&base_url, &resource.url);
+    }
+    for resource in &mut audio_plan.resources {
+        resource.url = loopback_resource_url(&base_url, &resource.url);
+    }
+    let tracks = Tracks::Hls {
+        video: Box::new(video_plan),
+        audio: Some(Box::new(audio_plan)),
+        subtitle: None,
+        subtitle_language: None,
+        subtitle_is_fmp4: false,
+    };
+    assert!(
+        tracks.uses_destination_parts(),
+        "separate byte-ranged fMP4 video and audio tracks should select destination-part assembly"
+    );
+
+    let staging = root.path().join("staging");
+    let video_dir = staging.join("video");
+    let audio_dir = staging.join("audio");
+    tokio::fs::create_dir_all(&video_dir)
+        .await
+        .expect("create fMP4 video staging directory");
+    tokio::fs::create_dir_all(&audio_dir)
+        .await
+        .expect("create fMP4 audio staging directory");
+    let destination_dir = root.path().join("destination");
+    tokio::fs::create_dir_all(&destination_dir)
+        .await
+        .expect("create fMP4 destination directory");
+    let destination = destination_dir.join("recording.mp4");
+    crate::manifest_destination::ensure_plan(&staging, &destination, 93, true, false)
+        .expect("persist separate video and audio destination parts");
+    let video_part = crate::manifest_destination::part_path(
+        &staging,
+        &destination,
+        93,
+        TrackKind::Video,
+    )
+    .expect("resolve fMP4 video destination part");
+    let audio_part = crate::manifest_destination::part_path(
+        &staging,
+        &destination,
+        93,
+        TrackKind::Audio,
+    )
+    .expect("resolve fMP4 audio destination part");
+
+    let task_staging = staging.clone();
+    let task_video_dir = video_dir.clone();
+    let task_audio_dir = audio_dir.clone();
+    let task_destination = destination.clone();
+    let task = tokio::spawn(async move {
+        let client = fixture_client();
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+        let downloaded = Arc::new(std::sync::atomic::AtomicU64::new(0));
+        let (_stop_tx, mut abort) = tokio::sync::oneshot::channel();
+        transfer_static_manifest_tracks(ManifestStaticTransfer {
+            client: &client,
+            tracks: &tracks,
+            destination_parts: tracks.uses_destination_parts(),
+            staging: &task_staging,
+            destination: &task_destination,
+            item_id: 93,
+            video_dir: &task_video_dir,
+            audio_dir: &task_audio_dir,
+            concurrency: 2,
+            tx: &tx,
+            downloaded: &downloaded,
+            abort: &mut abort,
+        })
+        .await
+    });
+
+    tokio::time::timeout(FIXTURE_TIMEOUT, media_requested_rx)
+        .await
+        .expect("the byte-ranged video media request should begin")
+        .expect("the byte-range fixture server should notify the in-flight video fragment");
+    let metadata = tokio::fs::symlink_metadata(&video_part)
+        .await
+        .expect("the video destination .part must exist while its media request is in flight");
+    assert!(metadata.is_file());
+    assert_eq!(metadata.len(), 4, "the byte-ranged init section must be committed");
+    assert_eq!(
+        tokio::fs::read(&video_part)
+            .await
+            .expect("read growing byte-ranged fMP4 video part"),
+        b"VINI"
+    );
+
+    release_media_tx
+        .send(())
+        .expect("release the in-flight byte-ranged video fragment");
+    assert!(
+        task.await
+            .expect("join byte-ranged fMP4 transfer")
+            .expect("transfer byte-ranged fMP4 destination parts"),
+        "byte-ranged fMP4 transfer should complete"
+    );
+    server.await.expect("join byte-range fMP4 fixture server");
+
+    assert_eq!(
+        tokio::fs::read(&video_part)
+            .await
+            .expect("read completed byte-ranged fMP4 video part"),
+        video_bytes
+    );
+    assert_eq!(
+        tokio::fs::read(&audio_part)
+            .await
+            .expect("read completed byte-ranged fMP4 audio part"),
+        audio_bytes
     );
 }
 

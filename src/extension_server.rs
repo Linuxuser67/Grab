@@ -745,9 +745,8 @@ pub(crate) fn handoff_cookie_hash(path: &Path) -> Option<[u8; 32]> {
     Some(Sha256::digest(&contents).into())
 }
 
-/// Store a cookie file for a URL. Called by the extension handoff once the
-/// handoff is accepted. Replaces any existing entry (deleting its file);
-/// past [`MAX_HANDOFF_ENTRIES`] the oldest entry is evicted with its file.
+/// Test helper that stores a cookie file with the current request time.
+#[cfg(test)]
 pub(crate) fn store_handoff_cookies(url: &str, path: PathBuf, user_agent: Option<String>) {
     let _ = store_handoff_cookies_at(url, path, user_agent, Instant::now());
 }
@@ -1007,6 +1006,7 @@ fn finish_suppression(host: &str, id: u64, at: Instant, approved: bool) {
     prune_suppression(&mut store, host);
 }
 
+#[cfg(test)]
 fn suppress_handoff_host(url: &str) -> Option<Suppression> {
     suppress_handoff_host_at(url, Instant::now())
 }
@@ -2301,7 +2301,7 @@ mod tests {
             "late older staging result must discard its own file"
         );
         assert_eq!(
-            live_handoff_identity(url, SystemTime::now()),
+            live_handoff_identity_at(url, SystemTime::now()),
             Some((newer_path.clone(), Some("New-UA".into())))
         );
         assert_eq!(
@@ -2404,7 +2404,10 @@ mod tests {
             None,
             started
         ));
-        assert!(late_old_path.exists(), "approved suppression hides but retains the old jar");
+        assert!(
+            late_old_path.exists(),
+            "approved suppression hides but retains the old jar"
+        );
         drop(pending);
         assert!(
             handoff_cookie_args(url).is_empty(),
@@ -2422,7 +2425,7 @@ mod tests {
         let pending = register_cookie_stage(url, started)
             .expect("register pending stage")
             .expect("URL host");
-        let suppression = suppress_handoff_host_at(url, started + Duration::from_secs(1))
+        let mut suppression = suppress_handoff_host_at(url, started + Duration::from_secs(1))
             .expect("newer cookieless request sees the older in-flight stage");
         suppression.release();
 

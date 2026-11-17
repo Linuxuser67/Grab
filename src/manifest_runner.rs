@@ -145,14 +145,15 @@ async fn ensure_incremental_hls_output_space(
 ) -> Result<(), ManifestRunError> {
     let metadata = tokio::fs::symlink_metadata(output_part)
         .await
-        .map_err(|error| manifest_storage_error("Could not inspect the incremental HLS output part", error))?;
+        .map_err(|error| {
+            manifest_storage_error("Could not inspect the incremental HLS output part", error)
+        })?;
     if metadata.file_type().is_symlink() || !metadata.is_file() {
         return Err(ManifestRunError::Failed(
             "The incremental HLS output part is not a regular file".to_string(),
         ));
     }
-    let required_bytes =
-        incremental_hls_remaining_output_bytes(staged_bytes, metadata.len());
+    let required_bytes = incremental_hls_remaining_output_bytes(staged_bytes, metadata.len());
     ensure_manifest_mux_space(destination_dir, required_bytes)
 }
 

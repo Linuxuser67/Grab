@@ -3156,6 +3156,189 @@ async fn hls_fmp4_fixture_downloads_and_finalizes_with_audio_and_video() {
 }
 
 #[tokio::test]
+async fn hls_fmp4_creates_destination_part_before_media_fragment_finishes() {
+    let root = TempRoot::new("hls-fmp4-visible-part");
+    let media_manifest_url = "https://cdn.fixture.invalid/media.m3u8";
+    let playlist = br#"#EXTM3U
+#EXT-X-VERSION:7
+#EXT-X-TARGETDURATION:2
+#EXT-X-MAP:URI="init.mp4"
+#EXTINF:1.0,
+segment-000.m4s
+#EXTINF:1.0,
+segment-001.m4s
+#EXT-X-ENDLIST
+"#;
+    let plan = crate::manifest::plan_hls_media_playlist(media_manifest_url, playlist)
+        .expect("plan single-init HLS fMP4 presentation");
+    assert!(plan.is_single_init_fmp4_presentation());
+    assert!(plan.is_destination_assemblable_candidate());
+
+    let tracks = Tracks::Hls {
+        video: Box::new(plan.clone()),
+        audio: None,
+        subtitle: None,
+        subtitle_language: None,
+        subtitle_is_fmp4: false,
+    };
+    assert!(
+        tracks.uses_destination_parts(),
+        "the production HLS route must choose destination-side assembly for one-init fMP4"
+    );
+
+    let init = b"fmp4-init-segment";
+    let first_media = b"first-fmp4-media-fragment";
+    let second_media = b"second-fmp4-media-fragment";
+    let files = HashMap::from([
+        ("/init.mp4".to_string(), init.to_vec()),
+        ("/segment-000.m4s".to_string(), first_media.to_vec()),
+        ("/segment-001.m4s".to_string(), second_media.to_vec()),
+    ]);
+    let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0))
+        .await
+        .expect("bind fMP4 fixture server");
+    let address = listener
+        .local_addr()
+        .expect("read fMP4 fixture server address");
+    let media_path = "/segment-000.m4s".to_string();
+    let (media_requested_tx, media_requested_rx) = tokio::sync::oneshot::channel();
+    let (release_media_tx, release_media_rx) = tokio::sync::oneshot::channel();
+    let request_count = files.len();
+    let server = tokio::spawn(async move {
+        let mut media_requested_tx = Some(media_requested_tx);
+        let mut release_media_rx = Some(release_media_rx);
+        for _ in 0..request_count {
+            let (mut socket, _) = listener.accept().await.expect("accept fMP4 request");
+            let request_path = read_fixture_request_path(&mut socket).await;
+            let body = files
+                .get(&request_path)
+                .expect("HLS fMP4 request must name a fixture resource");
+            let headers = format!(
+                "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                body.len()
+            );
+            socket
+                .write_all(headers.as_bytes())
+                .await
+                .expect("write fMP4 response headers");
+            if request_path == media_path {
+                media_requested_tx
+                    .take()
+                    .expect("first media request notification exists")
+                    .send(())
+                    .expect("notify test about the in-flight media fragment");
+                release_media_rx
+                    .take()
+                    .expect("media release receiver exists")
+                    .await
+                    .expect("test releases the fMP4 media fragment");
+            }
+            socket
+                .write_all(body)
+                .await
+                .expect("write fMP4 response body");
+        }
+    });
+
+    let mut plan = plan;
+    let base_url = Url::parse(&format!("http://{address}/")).expect("build loopback fMP4 URL");
+    for resource in &mut plan.resources {
+        resource.url = loopback_resource_url(&base_url, &resource.url);
+    }
+    let tracks = Tracks::Hls {
+        video: Box::new(plan),
+        audio: None,
+        subtitle: None,
+        subtitle_language: None,
+        subtitle_is_fmp4: false,
+    };
+
+    let staging = root.path().join("staging");
+    let video_dir = staging.join("video");
+    tokio::fs::create_dir_all(&video_dir)
+        .await
+        .expect("create fMP4 video staging directory");
+    let destination_dir = root.path().join("destination");
+    tokio::fs::create_dir_all(&destination_dir)
+        .await
+        .expect("create fMP4 destination directory");
+    let destination = destination_dir.join("recording.mp4");
+    crate::manifest_destination::ensure_plan(&staging, &destination, 92, false, false)
+        .expect("persist fMP4 destination ownership plan");
+    let part = crate::manifest_destination::part_path(&staging, &destination, 92, TrackKind::Video)
+        .expect("resolve fMP4 destination part");
+
+    let task_staging = staging.clone();
+    let task_video_dir = video_dir.clone();
+    let task_audio_dir = staging.join("audio");
+    let task_destination = destination.clone();
+    let task_tracks = tracks;
+    let task = tokio::spawn(async move {
+        let client = fixture_client();
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+        let downloaded = Arc::new(std::sync::atomic::AtomicU64::new(0));
+        let (_stop_tx, mut abort) = tokio::sync::oneshot::channel();
+        transfer_static_manifest_tracks(ManifestStaticTransfer {
+            client: &client,
+            tracks: &task_tracks,
+            destination_parts: task_tracks.uses_destination_parts(),
+            staging: &task_staging,
+            destination: &task_destination,
+            item_id: 92,
+            video_dir: &task_video_dir,
+            audio_dir: &task_audio_dir,
+            concurrency: 2,
+            tx: &tx,
+            downloaded: &downloaded,
+            abort: &mut abort,
+        })
+        .await
+    });
+
+    tokio::time::timeout(FIXTURE_TIMEOUT, media_requested_rx)
+        .await
+        .expect("the first fMP4 media fragment request should begin")
+        .expect("the fMP4 fixture server should notify the media request");
+    let metadata = tokio::fs::symlink_metadata(&part)
+        .await
+        .expect("the destination-side .part must exist before the media fragment completes");
+    assert!(metadata.is_file());
+    assert_eq!(
+        metadata.len(),
+        init.len() as u64,
+        "the completed initialization fragment must already be visible in the destination part"
+    );
+    assert_eq!(
+        tokio::fs::read(&part)
+            .await
+            .expect("read growing fMP4 destination part"),
+        init,
+        "the visible part should contain the committed initialization section while media is in flight"
+    );
+
+    release_media_tx
+        .send(())
+        .expect("release the first fMP4 media fragment");
+    assert!(
+        task.await
+            .expect("join production HLS fMP4 transfer")
+            .expect("transfer fMP4 HLS destination parts"),
+        "HLS fMP4 transfer should complete"
+    );
+    server.await.expect("join fMP4 fixture server");
+
+    let mut expected = init.to_vec();
+    expected.extend_from_slice(first_media);
+    expected.extend_from_slice(second_media);
+    assert_eq!(
+        tokio::fs::read(&part)
+            .await
+            .expect("read completed fMP4 destination part"),
+        expected
+    );
+}
+
+#[tokio::test]
 async fn hls_fmp4_invalid_resources_are_staged_for_ffmpeg_validation() {
     if !tools_available() {
         return;

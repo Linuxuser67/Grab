@@ -268,14 +268,13 @@ pub fn build_window(
     search_bar.set_widget_name("download-search-bar");
     search_bar.connect_entry(&search);
     search_bar.set_key_capture_widget(Some(&window));
-    // No top margin: the search bar hugs the header bar like GNOME's own
-    // inline search bars instead of floating in a gap below it.
+    // Restore the HIG spacing around the search surface.
+    search_bar.set_margin_top(12);
     search_bar.set_margin_bottom(12);
     search_bar.set_margin_start(12);
     search_bar.set_margin_end(12);
-    // Keep the standard search entry at a readable width on wide windows,
-    // while AdwClamp continues to fill the available width on narrow windows.
-    let search_clamp = adw::Clamp::builder().maximum_size(600).build();
+    // Keep the search control at the requested 350 px width and centered.
+    let search_clamp = adw::Clamp::builder().maximum_size(350).build();
     search_clamp.set_widget_name("download-search-clamp");
     search_clamp.set_hexpand(true);
     search_clamp.set_child(Some(&search_bar));

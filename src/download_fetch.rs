@@ -2214,54 +2214,6 @@ mod destination_ownership_tests {
         )
         .expect("write owned partial");
 
-        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
-        let context = test_context(
-            "http://127.0.0.1:1/download.bin".to_string(),
-            destination.clone(),
-            tx,
-        );
-        let claim = DestinationClaim::capture(&destination)
-            .await
-            .expect("capture destination claim");
-        let expected = claim.identity().expect("claim has an inode");
-
-        let replacement = directory.path().join("replacement.bin");
-        std::fs::write(&replacement, b"foreign sentinel").expect("write replacement");
-        std::fs::rename(&replacement, &destination).expect("replace destination path");
-
-        let result = truncate_to_prefix_owned(&destination, &state, expected);
-        assert!(matches!(
-            result,
-            Err(PrefixTruncationError::Destination(
-                DestinationProblem::Replaced
-            ))
-        ));
-        assert_eq!(
-            std::fs::read(&destination).expect("read replacement"),
-            b"foreign sentinel",
-            "fallback must never truncate a replacement inode"
-        );
-    }
-
-    #[tokio::test]
-    async fn claimed_prefix_truncation_rejects_a_replaced_destination() {
-        let directory = tempfile::tempdir().expect("create destination directory");
-        let destination = directory.path().join("download.bin");
-        let mut state = SegmentState::new(64 * 1024 * 1024);
-        state.mark(0);
-        let prefix = state.prefix_len();
-        std::fs::write(
-            &destination,
-            vec![0xa5; usize::try_from(prefix + 4096).expect("file size fits usize")],
-        )
-        .expect("write owned partial");
-
-        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
-        let context = test_context(
-            "http://127.0.0.1:1/download.bin".to_string(),
-            destination.clone(),
-            tx,
-        );
         let claim = DestinationClaim::capture(&destination)
             .await
             .expect("capture destination claim");

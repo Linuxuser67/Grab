@@ -314,6 +314,36 @@ fn output_folder_for_gates_hostile_names() {
     );
 }
 
+#[cfg(unix)]
+#[test]
+fn sweep_archives_refuses_a_symlinked_root() {
+    use std::os::unix::fs::symlink;
+
+    let base =
+        std::env::temp_dir().join(format!("grab-torrent-sweep-link-{}", std::process::id()));
+    let outside = base.join("outside");
+    let root_link = base.join("archive-root");
+    let stale_torrent = outside.join("stale.torrent");
+    let stale_metadata = outside.join("magnet-b94a8fe5ccb19ba61c4c0873d391e987982fbbd3.meta");
+    let _ = std::fs::remove_dir_all(&base);
+    std::fs::create_dir_all(&outside).expect("create external directory");
+    std::fs::write(&stale_torrent, b"keep").expect("write external torrent");
+    std::fs::write(&stale_metadata, b"keep").expect("write external metadata");
+    symlink(&outside, &root_link).expect("create archive-root symlink");
+
+    sweep_archives_in(&root_link, &std::collections::HashSet::new());
+
+    assert_eq!(
+        std::fs::read(&stale_torrent).expect("external torrent must survive"),
+        b"keep"
+    );
+    assert_eq!(
+        std::fs::read(&stale_metadata).expect("external metadata must survive"),
+        b"keep"
+    );
+    let _ = std::fs::remove_dir_all(&base);
+}
+
 #[test]
 fn sweep_archives_keeps_referenced_only() {
     use std::collections::HashSet;

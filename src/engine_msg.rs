@@ -63,7 +63,8 @@ pub(crate) enum EngineMsg {
     /// only when the bitmap was cleared and a shorter-than-prefix destination was
     /// reset to zero, allowing the caller to continue with single-stream.
     TruncatePrefix {
-        ack: tokio::sync::oneshot::Sender<bool>,
+        expected: crate::download_fetch::FileIdentity,
+        ack: tokio::sync::oneshot::Sender<Result<bool, crate::download_fetch::DestinationProblem>>,
     },
     /// Fresh multi probe succeeded; UI thread creates the resume bitmap and
     /// queues a persist, then acks. The engine waits (bounded) for the ack
@@ -75,7 +76,8 @@ pub(crate) enum EngineMsg {
     },
     /// Server throttling parallel connections: shrink to prefix, drop bitmap, ack to continue single-stream; handshake so pause/resume never sees bitmap without file.
     FallbackSingle {
-        ack: tokio::sync::mpsc::Sender<()>,
+        expected: crate::download_fetch::FileIdentity,
+        ack: tokio::sync::mpsc::Sender<Result<(), crate::download_fetch::DestinationProblem>>,
     },
     /// Server-advertised filename; adopted at Finished when current name qualifies.
     SuggestName(String),

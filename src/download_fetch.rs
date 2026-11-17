@@ -368,13 +368,13 @@ const FALLBACK_ACK_TIMEOUT: Duration = Duration::from_secs(30);
 /// A closed ack (the handler drops `ack` on failure or `break`) or a stall must stop the
 /// worker: continuing single-stream after the row was failed leaves a detached writer behind.
 async fn wait_for_fallback_ack(
-    ack: &mut tokio::sync::mpsc::Receiver<()>,
+    ack: &mut tokio::sync::mpsc::Receiver<Result<(), DestinationProblem>>,
     timeout: Duration,
-) -> bool {
-    matches!(
-        tokio::time::timeout(timeout, ack.recv()).await,
-        Ok(Some(()))
-    )
+) -> Option<Result<(), DestinationProblem>> {
+    match tokio::time::timeout(timeout, ack.recv()).await {
+        Ok(Some(result)) => Some(result),
+        Ok(None) | Err(_) => None,
+    }
 }
 
 /// Retry loop around segmented attempts (each retry refetches only still-missing pieces).
@@ -404,10 +404,31 @@ async fn multi_loop(
                 return false;
             }
             Err(AttemptFail::Throttled(_)) => {
-                let (ack_tx, mut ack_rx) = tokio::sync::mpsc::channel::<()>(1);
-                ctx.tx.send(EngineMsg::FallbackSingle { ack: ack_tx }).ok();
-                // Wait for the UI thread to truncate + drop the bitmap before single-stream resumes.
-                return wait_for_fallback_ack(&mut ack_rx, FALLBACK_ACK_TIMEOUT).await;
+                let Some(expected) = claim.identity() else {
+                    ctx.tx
+                        .send(EngineMsg::FailedDestination(
+                            DestinationProblem::Disappeared,
+                        ))
+                        .ok();
+                    return false;
+                };
+                let (ack_tx, mut ack_rx) =
+                    tokio::sync::mpsc::channel::<Result<(), DestinationProblem>>(1);
+                ctx.tx
+                    .send(EngineMsg::FallbackSingle {
+                        expected,
+                        ack: ack_tx,
+                    })
+                    .ok();
+                // Wait for the UI thread to verify and truncate the claimed inode before single-stream resumes.
+                match wait_for_fallback_ack(&mut ack_rx, FALLBACK_ACK_TIMEOUT).await {
+                    Some(Ok(())) => return true,
+                    Some(Err(problem)) => {
+                        ctx.tx.send(EngineMsg::FailedDestination(problem)).ok();
+                        return false;
+                    }
+                    None => return false,
+                }
             }
             Err(AttemptFail::Changed(message)) => {
                 report_changed_destination(ctx, claim, message).await;
@@ -420,19 +441,35 @@ async fn multi_loop(
             Err(AttemptFail::Retryable(e)) => {
                 *tries -= 1;
                 if *tries <= 0 {
+                    let Some(expected) = claim.identity() else {
+                        ctx.tx
+                            .send(EngineMsg::FailedDestination(
+                                DestinationProblem::Disappeared,
+                            ))
+                            .ok();
+                        return false;
+                    };
                     let (ack_tx, ack_rx) = tokio::sync::oneshot::channel();
                     if ctx
                         .tx
-                        .send(EngineMsg::TruncatePrefix { ack: ack_tx })
+                        .send(EngineMsg::TruncatePrefix {
+                            expected,
+                            ack: ack_tx,
+                        })
                         .is_ok()
-                        && matches!(
-                            tokio::time::timeout(FALLBACK_ACK_TIMEOUT, ack_rx).await,
-                            Ok(Ok(true))
-                        )
                     {
-                        // The bitmap was cleared and the stale partial was reset to zero.
-                        // Reuse the existing destination claim for a fresh single stream.
-                        return true;
+                        match tokio::time::timeout(FALLBACK_ACK_TIMEOUT, ack_rx).await {
+                            Ok(Ok(Ok(true))) => {
+                                // The bitmap was cleared and the claimed partial was reset to zero.
+                                // Reuse the existing destination claim for a fresh single stream.
+                                return true;
+                            }
+                            Ok(Ok(Err(problem))) => {
+                                ctx.tx.send(EngineMsg::FailedDestination(problem)).ok();
+                                return false;
+                            }
+                            _ => {}
+                        }
                     }
                     ctx.tx.send(EngineMsg::Failed(e)).ok();
                     return false;
@@ -926,23 +963,83 @@ pub(crate) enum PrefixTruncation {
     ResetFromZero(std::fs::File),
 }
 
-pub(crate) fn truncate_to_prefix(
+#[derive(Debug)]
+pub(crate) enum PrefixTruncationError {
+    Destination(DestinationProblem),
+    Io(std::io::Error),
+}
+
+impl std::fmt::Display for PrefixTruncationError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Destination(problem) => formatter.write_str(&problem.message()),
+            Self::Io(error) => write!(formatter, "{error}"),
+        }
+    }
+}
+
+/// Verify that the destination pathname still resolves to the inode claimed by
+/// the running transfer. The open descriptor may remain valid after replacement.
+pub(crate) fn verify_destination_identity(
+    path: &std::path::Path,
+    expected: FileIdentity,
+) -> Result<(), PrefixTruncationError> {
+    match std::fs::symlink_metadata(path) {
+        Ok(metadata)
+            if metadata.file_type().is_symlink()
+                || !metadata.is_file()
+                || file_identity(&metadata) != expected =>
+        {
+            Err(PrefixTruncationError::Destination(
+                DestinationProblem::Replaced,
+            ))
+        }
+        Ok(_) => Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Err(
+            PrefixTruncationError::Destination(DestinationProblem::Disappeared),
+        ),
+        Err(error) => Err(PrefixTruncationError::Io(error)),
+    }
+}
+
+fn truncate_to_prefix_inner(
     path: &std::path::Path,
     st: &SegmentState,
-) -> std::io::Result<PrefixTruncation> {
+    expected: Option<FileIdentity>,
+) -> Result<PrefixTruncation, PrefixTruncationError> {
     let prefix = st.prefix_len();
     let file = std_open_nofollow(
         |options| {
             options.write(true);
         },
         path,
-    )?;
-    let metadata = file.metadata()?;
+    )
+    .map_err(|error| match expected {
+        Some(_) if error.kind() == std::io::ErrorKind::NotFound => {
+            PrefixTruncationError::Destination(DestinationProblem::Disappeared)
+        }
+        Some(_) if error.raw_os_error() == Some(libc::ELOOP) => {
+            PrefixTruncationError::Destination(DestinationProblem::Replaced)
+        }
+        _ => PrefixTruncationError::Io(error),
+    })?;
+    let metadata = file.metadata().map_err(PrefixTruncationError::Io)?;
     if !metadata.is_file() {
-        return Err(std::io::Error::new(
-            std::io::ErrorKind::InvalidInput,
-            "segmented download destination is not a regular file",
-        ));
+        return Err(match expected {
+            Some(_) => PrefixTruncationError::Destination(DestinationProblem::Replaced),
+            None => PrefixTruncationError::Io(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "segmented download destination is not a regular file",
+            )),
+        });
+    }
+    if let Some(expected) = expected {
+        if file_identity(&metadata) != expected {
+            return Err(PrefixTruncationError::Destination(
+                DestinationProblem::Replaced,
+            ));
+        }
+        verify_destination_identity(path, expected)?;
     }
     if metadata.len() < prefix {
         // Return the still-open descriptor without modifying it. The caller
@@ -951,11 +1048,68 @@ pub(crate) fn truncate_to_prefix(
         return Ok(PrefixTruncation::ResetFromZero(file));
     }
     if metadata.len() > prefix {
-        file.set_len(prefix)?;
+        if let Err(error) = file.set_len(prefix) {
+            if let Some(expected) = expected {
+                verify_destination_identity(path, expected)?;
+            }
+            return Err(PrefixTruncationError::Io(error));
+        }
         // The caller clears the durable bitmap only after this sync succeeds.
-        file.sync_all()?;
+        if let Err(error) = file.sync_all() {
+            if let Some(expected) = expected {
+                verify_destination_identity(path, expected)?;
+            }
+            return Err(PrefixTruncationError::Io(error));
+        }
+    }
+    if let Some(expected) = expected {
+        verify_destination_identity(path, expected)?;
     }
     Ok(PrefixTruncation::CompletedPrefix)
+}
+
+/// Shutdown reconciliation has no live worker claim, so it can only use the
+/// persisted queue's path/bitmap pairing.
+pub(crate) fn truncate_to_prefix(
+    path: &std::path::Path,
+    st: &SegmentState,
+) -> std::io::Result<PrefixTruncation> {
+    truncate_to_prefix_inner(path, st, None).map_err(|error| match error {
+        PrefixTruncationError::Io(error) => error,
+        PrefixTruncationError::Destination(problem) => std::io::Error::other(problem.message()),
+    })
+}
+
+/// Live fallback may only truncate the inode captured by the current attempt.
+pub(crate) fn truncate_to_prefix_owned(
+    path: &std::path::Path,
+    st: &SegmentState,
+    expected: FileIdentity,
+) -> Result<PrefixTruncation, PrefixTruncationError> {
+    truncate_to_prefix_inner(path, st, Some(expected))
+}
+
+/// Reset an already-open claimed inode and verify that the pathname still names it.
+pub(crate) fn truncate_open_file_to_zero_owned(
+    file: std::fs::File,
+    path: &std::path::Path,
+    expected: FileIdentity,
+) -> Result<(), PrefixTruncationError> {
+    let metadata = file.metadata().map_err(PrefixTruncationError::Io)?;
+    if !metadata.is_file() || file_identity(&metadata) != expected {
+        return Err(PrefixTruncationError::Destination(
+            DestinationProblem::Replaced,
+        ));
+    }
+    if let Err(error) = file.set_len(0) {
+        verify_destination_identity(path, expected)?;
+        return Err(PrefixTruncationError::Io(error));
+    }
+    if let Err(error) = file.sync_all() {
+        verify_destination_identity(path, expected)?;
+        return Err(PrefixTruncationError::Io(error));
+    }
+    verify_destination_identity(path, expected)
 }
 
 /// Reset a previously validated no-follow descriptor after its resume bitmap was cleared.
@@ -1024,7 +1178,7 @@ pub(crate) async fn open_partial(
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-struct FileIdentity {
+pub(crate) struct FileIdentity {
     dev: u64,
     ino: u64,
 }
@@ -1085,6 +1239,10 @@ impl DestinationClaim {
 
     fn is_claimed(&self) -> bool {
         self.identity.is_some()
+    }
+
+    fn identity(&self) -> Option<FileIdentity> {
+        self.identity
     }
 
     #[cfg(test)]
@@ -1679,8 +1837,9 @@ const PIECE_TRIES: u32 = 3;
 mod destination_ownership_tests {
     use super::{
         AttemptFail, DestinationClaim, DestinationProblem, FetchCtx, FileIdentity,
-        PrefixTruncation, attempt_once, ensure_sized, reset_changed_destination, single_loop,
-        truncate_open_file_to_zero, truncate_to_prefix, wait_for_fallback_ack,
+        PrefixTruncation, PrefixTruncationError, attempt_once, ensure_sized,
+        reset_changed_destination, single_loop, truncate_open_file_to_zero, truncate_to_prefix,
+        truncate_to_prefix_owned, wait_for_fallback_ack,
     };
     use crate::download_net::{DEFAULT_USER_AGENT, DownloadOptions};
     use crate::download_pieces::SegmentState;
@@ -2013,21 +2172,71 @@ mod destination_ownership_tests {
 
     #[tokio::test]
     async fn fallback_ack_requires_an_explicit_success() {
-        let (tx, mut rx) = tokio::sync::mpsc::channel::<()>(1);
-        tx.send(()).await.expect("send fallback ack");
-        assert!(wait_for_fallback_ack(&mut rx, Duration::from_secs(1)).await);
+        let (tx, mut rx) = tokio::sync::mpsc::channel::<Result<(), DestinationProblem>>(1);
+        tx.send(Ok(())).await.expect("send fallback ack");
+        assert_eq!(
+            wait_for_fallback_ack(&mut rx, Duration::from_secs(1)).await,
+            Some(Ok(()))
+        );
 
-        let (tx, mut rx) = tokio::sync::mpsc::channel::<()>(1);
+        let (tx, mut rx) = tokio::sync::mpsc::channel::<Result<(), DestinationProblem>>(1);
+        tx.send(Err(DestinationProblem::Replaced))
+            .await
+            .expect("send destination error");
+        assert!(matches!(
+            wait_for_fallback_ack(&mut rx, Duration::from_secs(1)).await,
+            Some(Err(DestinationProblem::Replaced))
+        ));
+
+        let (tx, mut rx) = tokio::sync::mpsc::channel::<Result<(), DestinationProblem>>(1);
         drop(tx);
-        assert!(
-            !wait_for_fallback_ack(&mut rx, Duration::from_secs(1)).await,
+        assert_eq!(
+            wait_for_fallback_ack(&mut rx, Duration::from_secs(1)).await,
+            None,
             "a closed ack must stop the worker, not continue single-stream"
         );
 
-        let (_tx, mut rx) = tokio::sync::mpsc::channel::<()>(1);
-        assert!(
-            !wait_for_fallback_ack(&mut rx, Duration::from_millis(10)).await,
+        let (_tx, mut rx) = tokio::sync::mpsc::channel::<Result<(), DestinationProblem>>(1);
+        assert_eq!(
+            wait_for_fallback_ack(&mut rx, Duration::from_millis(10)).await,
+            None,
             "a stalled ack must not hang the worker"
+        );
+    }
+
+    #[tokio::test]
+    async fn claimed_prefix_truncation_rejects_a_replaced_destination() {
+        let directory = tempfile::tempdir().expect("create destination directory");
+        let destination = directory.path().join("download.bin");
+        let mut state = SegmentState::new(64 * 1024 * 1024);
+        state.mark(0);
+        let prefix = state.prefix_len();
+        std::fs::write(
+            &destination,
+            vec![0xa5; usize::try_from(prefix + 4096).expect("file size fits usize")],
+        )
+        .expect("write owned partial");
+
+        let claim = DestinationClaim::capture(&destination)
+            .await
+            .expect("capture destination claim");
+        let expected = claim.identity().expect("claim has an inode");
+
+        let replacement = directory.path().join("replacement.bin");
+        std::fs::write(&replacement, b"foreign sentinel").expect("write replacement");
+        std::fs::rename(&replacement, &destination).expect("replace destination path");
+
+        let result = truncate_to_prefix_owned(&destination, &state, expected);
+        assert!(matches!(
+            result,
+            Err(PrefixTruncationError::Destination(
+                DestinationProblem::Replaced
+            ))
+        ));
+        assert_eq!(
+            std::fs::read(&destination).expect("read replacement"),
+            b"foreign sentinel",
+            "fallback must never truncate a replacement inode"
         );
     }
 

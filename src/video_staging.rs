@@ -1007,11 +1007,11 @@ fn sweep_manifest_staging_directories(
     root: &Path,
     keep: &std::collections::HashSet<(String, u64)>,
 ) {
-    if !staging_root_is_real(&root) {
+    if !staging_root_is_real(root) {
         return;
     }
     let (Ok(canonical_root), Ok(entries)) =
-        (std::fs::canonicalize(&root), std::fs::read_dir(&root))
+        (std::fs::canonicalize(root), std::fs::read_dir(root))
     else {
         return;
     };
@@ -1032,7 +1032,7 @@ fn sweep_manifest_staging_directories(
             continue;
         }
         let dir = entry.path();
-        if !manifest_staging_is_owned(&dir, &root, item_id, key, None) {
+        if !manifest_staging_is_owned(&dir, root, item_id, key, None) {
             continue;
         }
         let Ok(canonical_dir) = std::fs::canonicalize(&dir) else {

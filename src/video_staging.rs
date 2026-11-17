@@ -589,6 +589,13 @@ pub(crate) fn ensure_manifest_staging_dir(
 ) -> Result<PathBuf, VideoError> {
     let dest_dir = std::fs::canonicalize(dest_dir).map_err(VideoError::staging)?;
     let destination_key = dest_key(&dest_dir);
+    let app_state_root = state_root();
+    let video_root = app_state_root.join("video");
+    if !staging_root_is_real(&app_state_root) || !staging_root_is_real(&video_root) {
+        return Err(VideoError::staging(
+            "application video state root is not a real directory",
+        ));
+    }
     let root = manifest_staging_root();
     ensure_private_dir(&root).map_err(VideoError::staging)?;
     let dir = root.join(manifest_staging_name(item_id, &destination_key));
@@ -923,65 +930,83 @@ pub fn sweep_dest_staging(dest_dir: &Path, keep: &std::collections::HashSet<u64>
 /// dest strings; keys are normalized here so a trailing slash cannot hide a
 /// live row. Also clears stale runtime scratch.
 pub fn sweep_state_staging(keep: &std::collections::HashSet<(String, u64)>) {
-    // Merge workspaces are app-owned state, not destination-side user files,
-    // so sweep them even when the originating queue row was removed before exit.
-    sweep_stale_dash_merge_directories(&dash_merge_temp_root());
-    let keep: std::collections::HashSet<(String, u64)> = keep
-        .iter()
-        .map(|(dest, id)| (dest_key(Path::new(dest)), *id))
-        .collect();
-    if let Ok(entries) = std::fs::read_dir(state_root().join("video")) {
-        for entry in entries.filter_map(|e| e.ok()) {
-            let Some(name) = entry.file_name().to_str().map(str::to_owned) else {
-                continue;
-            };
-            // An interrupted atomic write leaves this temp, never a truncated
-            // manifest. No writer runs during startup, so it is always debris.
-            if name.ends_with(".tmp") {
-                let _ = std::fs::remove_file(entry.path());
-                continue;
-            }
-            let Some(id) = state_manifest_id(&name) else {
-                continue;
-            };
-            let Some(manifest) = read_manifest_file(&entry.path()) else {
-                // Unreadable manifest: keep it while any queued row still
-                // claims the id, or a crash mid-write would drop resume state.
-                if !keep.iter().any(|(_, kid)| *kid == id) {
-                    let _ = std::fs::remove_file(entry.path());
-                }
-                continue;
-            };
-            let Some(dest) = manifest.dest_dir.as_deref() else {
-                // No destination recorded = no file it could prove ownership
-                // of. State manifests always record one; drop the stray unless
-                // a queued row still claims the id.
-                if !keep.iter().any(|(_, kid)| *kid == id) {
-                    let _ = std::fs::remove_file(entry.path());
-                }
-                continue;
-            };
-            if keep.contains(&(dest_key(dest), id)) {
-                continue;
-            }
-            // Act on the manifest we opened: its recorded destination may no
-            // longer hash to the path in its own filename (moved/symlink).
-            let Some(ownership) = manifest_ownership_of(&manifest) else {
-                continue;
-            };
-            remove_owned_files(dest, &ownership);
-            let _ = std::fs::remove_file(entry.path());
-            remove_manifest_files(dest, id);
-        }
+    sweep_state_staging_in(&state_root(), &runtime_root(), keep);
+}
+
+fn sweep_state_staging_in(
+    state_root: &Path,
+    runtime_root: &Path,
+    keep: &std::collections::HashSet<(String, u64)>,
+) {
+    // These roots are app-owned. Refuse symlinked leaves before read_dir or
+    // deletion: filename patterns in a redirected directory are not authority.
+    if !staging_root_is_real(state_root) {
+        return;
     }
-    sweep_manifest_staging_directories(&keep);
-    sweep_private_temps();
+    let video_root = state_root.join("video");
+    if staging_root_is_real(&video_root) {
+        // Merge workspaces are app-owned state, not destination-side user files,
+        // so sweep them even when the originating queue row was removed before exit.
+        sweep_stale_dash_merge_directories(&video_root.join("dash-merge"));
+        let keep: std::collections::HashSet<(String, u64)> = keep
+            .iter()
+            .map(|(dest, id)| (dest_key(Path::new(dest)), *id))
+            .collect();
+        if let Ok(entries) = std::fs::read_dir(&video_root) {
+            for entry in entries.filter_map(|e| e.ok()) {
+                let Some(name) = entry.file_name().to_str().map(str::to_owned) else {
+                    continue;
+                };
+                // An interrupted atomic write leaves this temp, never a truncated
+                // manifest. No writer runs during startup, so it is always debris.
+                if name.ends_with(".tmp") {
+                    let _ = std::fs::remove_file(entry.path());
+                    continue;
+                }
+                let Some(id) = state_manifest_id(&name) else {
+                    continue;
+                };
+                let Some(manifest) = read_manifest_file(&entry.path()) else {
+                    // Unreadable manifest: keep it while any queued row still
+                    // claims the id, or a crash mid-write would drop resume state.
+                    if !keep.iter().any(|(_, kid)| *kid == id) {
+                        let _ = std::fs::remove_file(entry.path());
+                    }
+                    continue;
+                };
+                let Some(dest) = manifest.dest_dir.as_deref() else {
+                    // No destination recorded = no file it could prove ownership
+                    // of. State manifests always record one; drop the stray unless
+                    // a queued row still claims the id.
+                    if !keep.iter().any(|(_, kid)| *kid == id) {
+                        let _ = std::fs::remove_file(entry.path());
+                    }
+                    continue;
+                };
+                if keep.contains(&(dest_key(dest), id)) {
+                    continue;
+                }
+                // Act on the manifest we opened: its recorded destination may no
+                // longer hash to the path in its own filename (moved/symlink).
+                let Some(ownership) = manifest_ownership_of(&manifest) else {
+                    continue;
+                };
+                remove_owned_files(dest, &ownership);
+                let _ = std::fs::remove_file(entry.path());
+                remove_manifest_files(dest, id);
+            }
+        }
+        sweep_manifest_staging_directories(&video_root.join("staging"), &keep);
+    }
+    sweep_private_temps(runtime_root);
 }
 
 /// Reclaim orphan native-manifest stage directories from the XDG state root.
 /// Only a real child directory with a valid owner marker is eligible.
-fn sweep_manifest_staging_directories(keep: &std::collections::HashSet<(String, u64)>) {
-    let root = manifest_staging_root();
+fn sweep_manifest_staging_directories(
+    root: &Path,
+    keep: &std::collections::HashSet<(String, u64)>,
+) {
     if !staging_root_is_real(&root) {
         return;
     }
@@ -1029,8 +1054,11 @@ fn state_manifest_id(name: &str) -> Option<u64> {
 }
 
 /// Startup: all scratch JSON is per-attempt and never reused across a process.
-fn sweep_private_temps() {
-    let Ok(entries) = std::fs::read_dir(runtime_root()) else {
+fn sweep_private_temps(root: &Path) {
+    if !staging_root_is_real(root) {
+        return;
+    }
+    let Ok(entries) = std::fs::read_dir(root) else {
         return;
     };
     for entry in entries.filter_map(|e| e.ok()) {
@@ -1536,7 +1564,20 @@ pub(crate) fn read_manifest(dest_dir: &Path, item_id: u64) -> Option<VideoManife
 
 /// Parse one manifest file. Corrupt or unreadable sidecars read as absent.
 fn read_manifest_file(path: &Path) -> Option<VideoManifest> {
-    let text = std::fs::read_to_string(path).ok()?;
+    let mut options = std::fs::OpenOptions::new();
+    options.read(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt as _;
+        options.custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK);
+    }
+    let mut file = options.open(path).ok()?;
+    if !file.metadata().ok()?.is_file() {
+        return None;
+    }
+    let mut text = String::new();
+    use std::io::Read as _;
+    file.read_to_string(&mut text).ok()?;
     serde_json::from_str(&text).ok()
 }
 
@@ -2766,6 +2807,78 @@ mod tests {
         let _ = std::fs::remove_file(&path);
         let _ = std::fs::remove_dir_all(&dest_a);
         let _ = std::fs::remove_dir_all(&dest_b);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn state_sweep_refuses_a_symlinked_video_root() {
+        let state = unique_dir("state-sweep-video-link-state");
+        let outside = unique_dir("state-sweep-video-link-outside");
+        let runtime = unique_dir("state-sweep-video-link-runtime");
+        std::fs::create_dir_all(&state).unwrap();
+        std::fs::create_dir_all(&outside).unwrap();
+        std::fs::create_dir_all(&runtime).unwrap();
+        let sentinel = outside.join("orphan.tmp");
+        std::fs::write(&sentinel, b"outside user data").unwrap();
+        std::os::unix::fs::symlink(&outside, state.join("video")).unwrap();
+
+        sweep_state_staging_in(&state, &runtime, &std::collections::HashSet::new());
+
+        assert_eq!(
+            std::fs::read(&sentinel).unwrap(),
+            b"outside user data",
+            "a symlinked app state parent must never redirect the orphan sweep"
+        );
+        let _ = std::fs::remove_file(state.join("video"));
+        let _ = std::fs::remove_dir_all(&state);
+        let _ = std::fs::remove_dir_all(&outside);
+        let _ = std::fs::remove_dir_all(&runtime);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn state_sweep_refuses_a_symlinked_runtime_root() {
+        let state = unique_dir("state-sweep-runtime-link-state");
+        let outside = unique_dir("state-sweep-runtime-link-outside");
+        let runtime_link = unique_dir("state-sweep-runtime-link");
+        std::fs::create_dir_all(&state).unwrap();
+        std::fs::create_dir_all(&outside).unwrap();
+        let sentinel = outside.join("info-8000099.json");
+        std::fs::write(&sentinel, b"user-owned").unwrap();
+        std::os::unix::fs::symlink(&outside, &runtime_link).unwrap();
+
+        sweep_state_staging_in(&state, &runtime_link, &std::collections::HashSet::new());
+
+        assert_eq!(
+            std::fs::read(&sentinel).unwrap(),
+            b"user-owned",
+            "a symlinked runtime root must not authorize temp cleanup"
+        );
+        let _ = std::fs::remove_file(&runtime_link);
+        let _ = std::fs::remove_dir_all(&state);
+        let _ = std::fs::remove_dir_all(&outside);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn read_manifest_file_refuses_a_symlink() {
+        let dir = unique_dir("read-manifest-link");
+        std::fs::create_dir_all(&dir).unwrap();
+        let target = dir.join("target.json");
+        let link = dir.join("8-0123456789abcdef.manifest.json");
+        std::fs::write(
+            &target,
+            serde_json::to_string(&test_manifest("owned.mp4", Some(dir.clone()))).unwrap(),
+        )
+        .unwrap();
+        std::os::unix::fs::symlink(&target, &link).unwrap();
+
+        assert!(
+            read_manifest_file(&link).is_none(),
+            "state manifest reads must not follow symlink entries"
+        );
+        let _ = std::fs::remove_file(link);
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     /// Startup reclaims state manifests whose `(destination, id)` is gone,

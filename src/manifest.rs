@@ -590,14 +590,13 @@ impl HlsPlan {
         }
 
         let mut resources = self.resources.iter();
-        if !resources.next().is_some_and(|resource| {
-            resource.kind == HlsResourceKind::InitMap && resource.range.is_none()
-        }) {
+        if !resources
+            .next()
+            .is_some_and(|resource| resource.kind == HlsResourceKind::InitMap)
+        {
             return false;
         }
-        if resources
-            .any(|resource| resource.kind != HlsResourceKind::Segment || resource.range.is_some())
-        {
+        if resources.any(|resource| resource.kind != HlsResourceKind::Segment) {
             return false;
         }
 
@@ -2732,17 +2731,30 @@ segment-2.m4s
             .expect("late fMP4 init section should still plan");
         assert!(!plan.is_destination_assemblable_candidate());
 
-        let ranged_map = br#"#EXTM3U
-#EXT-X-VERSION:6
+        let byte_ranged_fmp4 = br#"#EXTM3U
+#EXT-X-VERSION:7
 #EXT-X-TARGETDURATION:4
-#EXT-X-MAP:URI="init.mp4",BYTERANGE="720@0"
+#EXT-X-MAP:URI="combined.mp4",BYTERANGE="720@0"
 #EXTINF:4,
-segment-1.m4s
+#EXT-X-BYTERANGE:2048@720
+combined.mp4
+#EXTINF:4,
+#EXT-X-BYTERANGE:2048@2768
+combined.mp4
 #EXT-X-ENDLIST
 "#;
-        let plan = plan_hls_media_playlist(BASE_URL, ranged_map)
-            .expect("ranged fMP4 init section should still plan");
-        assert!(!plan.is_destination_assemblable_candidate());
+        let plan = plan_hls_media_playlist(BASE_URL, byte_ranged_fmp4)
+            .expect("byte-ranged fMP4 init and media sections should plan");
+        assert!(plan.is_destination_assemblable_candidate());
+        assert!(plan.is_single_init_fmp4_presentation());
+        assert_eq!(
+            plan.resources
+                .iter()
+                .filter(|resource| resource.range.is_some())
+                .count(),
+            3,
+            "the init section and both media fragments should retain their byte ranges"
+        );
 
         let encrypted_map = br#"#EXTM3U
 #EXT-X-VERSION:6

@@ -167,6 +167,10 @@ pub(crate) async fn run_download(mut ctx: FetchCtx, connections: usize, mode: St
         StartMode::Single => {
             let mut claim = match DestinationClaim::capture(&ctx.dest).await {
                 Ok(claim) => claim,
+                Err(AttemptFail::Destination(problem)) => {
+                    ctx.tx.send(EngineMsg::FailedDestination(problem)).ok();
+                    return;
+                }
                 Err(error) => {
                     ctx.tx.send(EngineMsg::Failed(error.into_message())).ok();
                     return;
@@ -235,10 +239,14 @@ pub(crate) async fn run_download(mut ctx: FetchCtx, connections: usize, mode: St
                 Ok(claim) if claim.is_claimed() => claim,
                 Ok(_) => {
                     ctx.tx
-                        .send(EngineMsg::Failed(gettext(
-                            "The partial download file is missing",
-                        )))
+                        .send(EngineMsg::FailedDestination(
+                            DestinationProblem::Disappeared,
+                        ))
                         .ok();
+                    return;
+                }
+                Err(AttemptFail::Destination(problem)) => {
+                    ctx.tx.send(EngineMsg::FailedDestination(problem)).ok();
                     return;
                 }
                 Err(error) => {
@@ -336,7 +344,7 @@ async fn single_loop(
                         return;
                     }
                     AttemptFail::Destination(problem) => {
-                        ctx.tx.send(EngineMsg::Failed(problem.message())).ok();
+                        ctx.tx.send(EngineMsg::FailedDestination(problem)).ok();
                         return;
                     }
                     AttemptFail::Retryable(e) | AttemptFail::Throttled(e) => e,
@@ -406,7 +414,7 @@ async fn multi_loop(
                 return false;
             }
             Err(AttemptFail::Destination(problem)) => {
-                ctx.tx.send(EngineMsg::Failed(problem.message())).ok();
+                ctx.tx.send(EngineMsg::FailedDestination(problem)).ok();
                 return false;
             }
             Err(AttemptFail::Retryable(e)) => {
@@ -1041,7 +1049,7 @@ pub(crate) enum DestinationProblem {
 }
 
 impl DestinationProblem {
-    fn message(self) -> String {
+    pub(crate) fn message(self) -> String {
         match self {
             Self::Exists => DEST_EXISTS.to_string(),
             Self::Disappeared => DESTINATION_DISAPPEARED.to_string(),

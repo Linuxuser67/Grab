@@ -1056,6 +1056,33 @@ impl DownloadManager {
                         done = true;
                         break;
                     }
+                    EngineMsg::FailedDestination(problem) => {
+                        if item.is_collection_owner() {
+                            this.finish_video_playlist_file_rows(id, DownloadStatus::Failed);
+                        }
+                        // The worker no longer owns this path. Clear every piece
+                        // of persisted resume identity before a later retry can
+                        // mistake a replacement file for our partial download.
+                        this.invalidate_started_destination(id);
+                        this.segment_state.borrow_mut().remove(&id);
+                        this.pending_names.borrow_mut().remove(&id);
+                        this.server_mtime.borrow_mut().remove(&id);
+                        item.set_etag(String::new());
+                        item.set_last_modified(String::new());
+                        this.persist_queue();
+                        if item.status() != DownloadStatus::Cancelled
+                            && item.status() != DownloadStatus::Paused
+                        {
+                            let error = problem.message();
+                            item.set_detail(error.clone());
+                            item.set_status(DownloadStatus::Failed);
+                            this.torrent_pieces.borrow_mut().remove(&id);
+                            this.notify_finished(&item, Err(error));
+                        }
+                        this.start_next();
+                        done = true;
+                        break;
+                    }
                     EngineMsg::Failed(e) => {
                         if item.is_collection_owner() {
                             this.finish_video_playlist_file_rows(id, DownloadStatus::Failed);

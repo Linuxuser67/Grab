@@ -90,8 +90,7 @@ fn verify_destination_identity(
 ) -> std::io::Result<()> {
     let actual = identity_from_path(path)?;
     if actual != expected {
-        return Err(std::io::Error::new(
-            std::io::ErrorKind::Other,
+        return Err(std::io::Error::other(
             "published destination was replaced before rollback or commit",
         ));
     }
@@ -476,11 +475,15 @@ pub(crate) async fn publish(
         return Ok(ManifestPublishOutcome::Aborted);
     }
 
+    let source_identity = identity_from_path(source)?;
     match crate::file_names::rename_noreplace_same_device(source, destination) {
         Ok(()) => {
-            let identity = identity_from_path(destination)?;
-            let pending =
-                PendingDestination::new(destination, Arc::clone(gate), Some(source), identity);
+            let pending = PendingDestination::new(
+                destination,
+                Arc::clone(gate),
+                Some(source),
+                source_identity,
+            );
             return commit_renamed_destination(gate, pending, source, destination).await;
         }
         Err(error) if error.raw_os_error() == Some(libc::EXDEV) => {}

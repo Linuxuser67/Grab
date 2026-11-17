@@ -6828,10 +6828,9 @@ segment-2.ts
         let initial_growth = match initial_growth_result {
             Ok(size) => size,
             Err(_) => {
-                let snapshot =
-                    tokio::fs::read_to_string(staging.path().join("video/local.m3u8"))
-                        .await
-                        .unwrap_or_else(|error| format!("Could not read local playlist: {error}"));
+                let snapshot = tokio::fs::read_to_string(staging.path().join("video/local.m3u8"))
+                    .await
+                    .unwrap_or_else(|error| format!("Could not read local playlist: {error}"));
                 let log = match ffmpeg_log_path.as_ref() {
                     Some(path) => tokio::fs::read_to_string(path).await.unwrap_or_default(),
                     None => String::new(),

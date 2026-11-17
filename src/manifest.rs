@@ -533,8 +533,8 @@ impl HlsPlan {
     /// Plain TS and one-init fMP4 playlists use the ordered byte-assembly path.
     /// This path is for presentations that need FFmpeg to interpret playlist
     /// boundaries, such as discontinuities or changing initialization maps.
-    /// Encrypted playlists, byte ranges, gaps, live reloads, and LL-HLS remain
-    /// on their existing specialized paths.
+    /// Encrypted playlists, unsupported byte-range layouts, gaps, live reloads,
+    /// and LL-HLS remain on their existing specialized paths.
     pub(crate) fn is_incremental_clear_vod_candidate(&self) -> bool {
         if self.is_live
             || !self.end_list
@@ -581,23 +581,36 @@ impl HlsPlan {
             .any(|line| line.starts_with("#EXT-X-BYTERANGE:") || line == "#EXT-X-GAP")
     }
 
-    /// Whether one leading `EXT-X-MAP` section followed by media segments can be
-    /// byte-concatenated. A later map, byte range, key, or discontinuity would
-    /// change the stream mid-track, so those keep the playlist-based path.
+    /// Whether one leading EXT-X-MAP followed by media segments can be
+    /// byte-concatenated. In addition to separate resources, support Apple's
+    /// single-file fMP4 profile where the init section and every segment are
+    /// explicit byte ranges of the same resource.
     pub(crate) fn is_single_init_fmp4_presentation(&self) -> bool {
         if self.local_playlist.segments.is_empty() {
             return false;
         }
 
         let mut resources = self.resources.iter();
-        if !resources.next().is_some_and(|resource| {
-            resource.kind == HlsResourceKind::InitMap && resource.range.is_none()
-        }) {
+        let Some(init) = resources.next() else {
+            return false;
+        };
+        if init.kind != HlsResourceKind::InitMap {
             return false;
         }
-        if resources
-            .any(|resource| resource.kind != HlsResourceKind::Segment || resource.range.is_some())
-        {
+        // Keep the accepted byte-range profile deliberately bounded:
+        // the initialization section starts the single media resource.
+        if init.range.is_some_and(|range| range.offset != 0) {
+            return false;
+        }
+        let ranged_single_file = init.range.is_some();
+        if resources.any(|resource| {
+            resource.kind != HlsResourceKind::Segment
+                || if ranged_single_file {
+                    resource.range.is_none() || resource.url != init.url
+                } else {
+                    resource.range.is_some()
+                }
+        }) {
             return false;
         }
 

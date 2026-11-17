@@ -4519,3 +4519,265 @@ program-after.ts
         );
     }
 }
+
+async fn read_fixture_request_headers(socket: &mut tokio::net::TcpStream) -> String {
+    let mut request = Vec::with_capacity(512);
+    while !request.windows(4).any(|window| window == b"\r\n\r\n") {
+        let mut buffer = [0_u8; 1024];
+        let length = socket
+            .read(&mut buffer)
+            .await
+            .expect("read fixture request headers");
+        assert_ne!(length, 0, "fixture request ended before its headers");
+        request.extend_from_slice(&buffer[..length]);
+        assert!(
+            request.len() <= 16 * 1024,
+            "fixture request headers exceeded the test limit"
+        );
+    }
+    String::from_utf8_lossy(&request).into_owned()
+}
+
+#[derive(Clone, Copy)]
+enum SingleFileFmp4RangeResponse {
+    Valid,
+    MismatchedContentRange,
+    Oversized,
+    Truncated,
+}
+
+async fn transfer_single_file_fmp4_ranges(
+    response_case: SingleFileFmp4RangeResponse,
+) -> Result<Vec<u8>, String> {
+    use tokio::io::AsyncWriteExt as _;
+
+    const INIT: &[u8] = b"fmp4-init-range";
+    const MEDIA: &[u8] = b"fmp4-media-range-content";
+    let total_length = (INIT.len() + MEDIA.len()) as u64;
+    let media_offset = INIT.len() as u64;
+    let manifest_url = "https://cdn.fixture.invalid/single-file.m3u8";
+    let playlist = format!(
+        r#"#EXTM3U
+#EXT-X-VERSION:7
+#EXT-X-TARGETDURATION:2
+#EXT-X-MAP:URI="combined.mp4",BYTERANGE="{}@0"
+#EXTINF:1.0,
+#EXT-X-BYTERANGE:{}@{}
+combined.mp4
+#EXT-X-ENDLIST
+"#,
+        INIT.len(),
+        MEDIA.len(),
+        media_offset
+    );
+    let mut plan = crate::manifest::plan_hls_media_playlist(manifest_url, playlist.as_bytes())
+        .expect("plan single-file byte-ranged fMP4 playlist");
+    assert_eq!(
+        plan.resources.len(),
+        2,
+        "fixture contains init and one media range"
+    );
+    assert!(plan.is_single_init_fmp4_presentation());
+    assert!(plan.is_destination_assemblable_candidate());
+    assert_eq!(plan.resources[0].url, plan.resources[1].url);
+    let init_range = plan.resources[0]
+        .range
+        .expect("init map must have a byte range");
+    let media_range = plan.resources[1]
+        .range
+        .expect("media segment must have a byte range");
+    assert_eq!(init_range.offset, 0);
+    assert_eq!(init_range.length, INIT.len() as u64);
+    assert_eq!(media_range.offset, media_offset);
+    assert_eq!(media_range.length, MEDIA.len() as u64);
+
+    let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0))
+        .await
+        .expect("bind single-file fMP4 fixture server");
+    let address = listener
+        .local_addr()
+        .expect("read single-file fMP4 fixture address");
+    let resource_url =
+        Url::parse(&format!("http://{address}/combined.mp4")).expect("build ranged fMP4 URL");
+    for resource in &mut plan.resources {
+        resource.url = resource_url.clone();
+    }
+
+    let server = tokio::spawn(async move {
+        for (index, (range, expected_body)) in
+            [(init_range, INIT.to_vec()), (media_range, MEDIA.to_vec())]
+                .into_iter()
+                .enumerate()
+        {
+            let (mut socket, _) = tokio::time::timeout(FIXTURE_TIMEOUT, listener.accept())
+                .await
+                .expect("timed out waiting for byte-range request")
+                .expect("accept byte-range request");
+            let request = read_fixture_request_headers(&mut socket).await;
+            assert!(
+                request.starts_with("GET /combined.mp4 "),
+                "unexpected request: {request}"
+            );
+            let expected_range =
+                format!("bytes={}-{}", range.offset, range.offset + range.length - 1);
+            let actual_range = request
+                .lines()
+                .find_map(|line| {
+                    let (name, value) = line.split_once(':')?;
+                    name.eq_ignore_ascii_case("range").then_some(value.trim())
+                })
+                .expect("single-file HLS request must include Range");
+            assert_eq!(actual_range, expected_range);
+
+            let mut body = expected_body;
+            let mut content_range_start = range.offset;
+            let content_range_end = range.offset + range.length - 1;
+            if index == 1 {
+                match response_case {
+                    SingleFileFmp4RangeResponse::Valid => {}
+                    SingleFileFmp4RangeResponse::MismatchedContentRange => {
+                        content_range_start += 1;
+                    }
+                    SingleFileFmp4RangeResponse::Oversized => body.push(b'!'),
+                    SingleFileFmp4RangeResponse::Truncated => {
+                        body.truncate(body.len() - 1);
+                    }
+                }
+            }
+            let content_length = body.len();
+            let headers = format!(
+                concat!(
+                    "HTTP/1.1 206 Partial Content\r\n",
+                    "Content-Range: bytes {}-{}/{}\r\n",
+                    "Content-Length: {}\r\n",
+                    "Connection: close\r\n",
+                    "\r\n"
+                ),
+                content_range_start, content_range_end, total_length, content_length
+            );
+            socket
+                .write_all(headers.as_bytes())
+                .await
+                .expect("write byte-range response headers");
+            socket
+                .write_all(&body)
+                .await
+                .expect("write byte-range response body");
+        }
+    });
+
+    let tracks = Tracks::Hls {
+        video: Box::new(plan),
+        audio: None,
+        subtitle: None,
+        subtitle_language: None,
+        subtitle_is_fmp4: false,
+    };
+    let root = TempRoot::new("hls-single-file-fmp4-ranges");
+    let staging = root.path().join("staging");
+    let video_dir = staging.join("video");
+    let audio_dir = staging.join("audio");
+    tokio::fs::create_dir_all(&video_dir)
+        .await
+        .expect("create ranged fMP4 video staging directory");
+    tokio::fs::create_dir_all(&audio_dir)
+        .await
+        .expect("create ranged fMP4 audio staging directory");
+    let destination_dir = root.path().join("destination");
+    tokio::fs::create_dir_all(&destination_dir)
+        .await
+        .expect("create ranged fMP4 destination directory");
+    let destination = destination_dir.join("recording.mp4");
+    let item_id = 109;
+    crate::manifest_destination::ensure_plan(&staging, &destination, item_id, false, false)
+        .expect("persist ranged fMP4 destination ownership plan");
+    let part =
+        crate::manifest_destination::part_path(&staging, &destination, item_id, TrackKind::Video)
+            .expect("resolve ranged fMP4 destination part");
+
+    let client = fixture_client();
+    let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+    let downloaded = Arc::new(std::sync::atomic::AtomicU64::new(0));
+    let (_stop_tx, mut abort) = tokio::sync::oneshot::channel();
+    let destination_parts = tracks.uses_destination_parts();
+    let transfer_result = transfer_static_manifest_tracks(ManifestStaticTransfer {
+        client: &client,
+        tracks: &tracks,
+        destination_parts,
+        staging: &staging,
+        destination: &destination,
+        item_id,
+        video_dir: &video_dir,
+        audio_dir: &audio_dir,
+        concurrency: 1,
+        tx: &tx,
+        downloaded: &downloaded,
+        abort: &mut abort,
+    })
+    .await;
+    server.await.expect("join single-file fMP4 fixture server");
+
+    match transfer_result {
+        Ok(true) => {
+            let bytes = tokio::fs::read(&part)
+                .await
+                .expect("read completed single-file fMP4 destination part");
+            assert_eq!(bytes, [INIT, MEDIA].concat());
+            Ok(bytes)
+        }
+        Ok(false) => Err("single-file fMP4 transfer was aborted".to_string()),
+        Err(error) => {
+            assert!(
+                tokio::fs::symlink_metadata(&part).await.is_err(),
+                "rejected ranged response must not leave a destination-owned partial file"
+            );
+            Err(error.to_string())
+        }
+    }
+}
+
+#[tokio::test]
+async fn hls_fmp4_single_file_byte_ranges_stream_into_destination_part() {
+    let bytes = transfer_single_file_fmp4_ranges(SingleFileFmp4RangeResponse::Valid)
+        .await
+        .expect("valid single-file byte ranges should transfer");
+    assert_eq!(
+        bytes,
+        [
+            b"fmp4-init-range".as_slice(),
+            b"fmp4-media-range-content".as_slice()
+        ]
+        .concat()
+    );
+}
+
+#[tokio::test]
+async fn hls_fmp4_single_file_rejects_mismatched_content_range() {
+    let error =
+        transfer_single_file_fmp4_ranges(SingleFileFmp4RangeResponse::MismatchedContentRange)
+            .await
+            .expect_err("mismatched Content-Range must be rejected");
+    assert!(error.contains("did not honor"), "unexpected error: {error}");
+}
+
+#[tokio::test]
+async fn hls_fmp4_single_file_rejects_oversized_range_body() {
+    let error = transfer_single_file_fmp4_ranges(SingleFileFmp4RangeResponse::Oversized)
+        .await
+        .expect_err("oversized byte-range body must be rejected");
+    assert!(
+        error.contains("more bytes than the requested"),
+        "unexpected error: {error}"
+    );
+}
+
+#[tokio::test]
+async fn hls_fmp4_single_file_rejects_truncated_range_body() {
+    let error = transfer_single_file_fmp4_ranges(SingleFileFmp4RangeResponse::Truncated)
+        .await
+        .expect_err("truncated byte-range body must be rejected");
+    assert!(
+        error.contains("incomplete HLS byte range"),
+        "unexpected error: {error}"
+    );
+}

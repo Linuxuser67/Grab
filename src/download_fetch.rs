@@ -664,9 +664,9 @@ async fn attempt_once(
                 // A complete-looking partial can come from an interrupted attempt.
                 // Sync it before accepting a 416 as proof of completion.
                 let file = claim.open_for_writing(&ctx.dest).await?;
-                file.sync_all()
-                    .await
-                    .map_err(|error| AttemptFail::Retryable(format!("Cannot sync file: {error}")))?;
+                file.sync_all().await.map_err(|error| {
+                    AttemptFail::Retryable(format!("Cannot sync file: {error}"))
+                })?;
                 claim.verify(&ctx.dest).await?;
                 return Ok(());
             }
@@ -680,9 +680,9 @@ async fn attempt_once(
             // pathname after an async/network wait: it may now name someone else's file.
             if claim.is_claimed() {
                 let file = claim.open_for_writing(&ctx.dest).await?;
-                file.set_len(0)
-                    .await
-                    .map_err(|error| AttemptFail::Retryable(format!("Cannot reset partial download: {error}")))?;
+                file.set_len(0).await.map_err(|error| {
+                    AttemptFail::Retryable(format!("Cannot reset partial download: {error}"))
+                })?;
             } else if tokio::fs::symlink_metadata(&ctx.dest).await.is_ok() {
                 return Err(AttemptFail::Destination(DestinationProblem::Exists));
             }
@@ -760,9 +760,9 @@ async fn attempt_once(
             let was_claimed = claim.is_claimed();
             let file = claim.open_for_writing(&ctx.dest).await?;
             if was_claimed {
-                file.set_len(0)
-                    .await
-                    .map_err(|error| AttemptFail::Retryable(format!("Cannot reset partial download: {error}")))?;
+                file.set_len(0).await.map_err(|error| {
+                    AttemptFail::Retryable(format!("Cannot reset partial download: {error}"))
+                })?;
             }
             file
         };
@@ -948,7 +948,9 @@ pub(crate) async fn open_partial(
     // The stat happened before the request: a local append/truncate in that window would shift every byte.
     let at = file.metadata().await?.len();
     if at != start {
-        return Err(std::io::Error::other(gettext("The partial file changed during resume")));
+        return Err(std::io::Error::other(gettext(
+            "The partial file changed during resume",
+        )));
     }
     Ok(file)
 }
@@ -1052,7 +1054,9 @@ impl DestinationClaim {
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
                 Err(AttemptFail::Destination(DestinationProblem::Disappeared))
             }
-            Err(error) => Err(AttemptFail::Retryable(format!("Cannot inspect file: {error}"))),
+            Err(error) => Err(AttemptFail::Retryable(format!(
+                "Cannot inspect file: {error}"
+            ))),
         }
     }
 
@@ -1062,10 +1066,9 @@ impl DestinationClaim {
         file: &tokio::fs::File,
         context: &str,
     ) -> Result<(), AttemptFail> {
-        let metadata = file
-            .metadata()
-            .await
-            .map_err(|error| AttemptFail::Retryable(format!("Could not inspect {context}: {error}")))?;
+        let metadata = file.metadata().await.map_err(|error| {
+            AttemptFail::Retryable(format!("Could not inspect {context}: {error}"))
+        })?;
         self.verify_metadata(&metadata)?;
         self.verify(path).await
     }
@@ -1097,10 +1100,9 @@ impl DestinationClaim {
                 destination_open_error(error, was_claimed)
             }
         })?;
-        let metadata = file
-            .metadata()
-            .await
-            .map_err(|error| AttemptFail::Retryable(format!("Cannot inspect downloaded file: {error}")))?;
+        let metadata = file.metadata().await.map_err(|error| {
+            AttemptFail::Retryable(format!("Cannot inspect downloaded file: {error}"))
+        })?;
         if !metadata.is_file() {
             return Err(AttemptFail::Destination(if was_claimed {
                 DestinationProblem::Replaced
@@ -1142,16 +1144,16 @@ impl DestinationClaim {
 
 /// Capture an existing regular destination before a resume request. A fresh
 /// download receives `None` and must create its first file with create_new.
-async fn destination_identity(
-    path: &std::path::Path,
-) -> Result<Option<FileIdentity>, AttemptFail> {
+async fn destination_identity(path: &std::path::Path) -> Result<Option<FileIdentity>, AttemptFail> {
     match tokio::fs::symlink_metadata(path).await {
         Ok(metadata) if metadata.file_type().is_symlink() || !metadata.is_file() => {
             Err(AttemptFail::Destination(DestinationProblem::Exists))
         }
         Ok(metadata) => Ok(Some(file_identity(&metadata))),
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
-        Err(error) => Err(AttemptFail::Retryable(format!("Cannot inspect file: {error}"))),
+        Err(error) => Err(AttemptFail::Retryable(format!(
+            "Cannot inspect file: {error}"
+        ))),
     }
 }
 
@@ -1608,8 +1610,9 @@ const PIECE_TRIES: u32 = 3;
 #[cfg(test)]
 mod destination_ownership_tests {
     use super::{
-        AttemptFail, DestinationClaim, FetchCtx, FileIdentity, attempt_once, ensure_sized,
-        single_loop, truncate_to_prefix, wait_for_fallback_ack,
+        AttemptFail, DestinationClaim, DestinationProblem, FetchCtx, FileIdentity,
+        PrefixTruncation, attempt_once, ensure_sized, single_loop,
+        truncate_open_file_to_zero, truncate_to_prefix, wait_for_fallback_ack,
     };
     use crate::download_net::{DEFAULT_USER_AGENT, DownloadOptions};
     use crate::download_pieces::SegmentState;
@@ -1867,10 +1870,11 @@ mod destination_ownership_tests {
         )
         .expect("write short destination");
 
-        let reset_file = match truncate_to_prefix(&destination, &state).expect("inspect short partial") {
-            PrefixTruncation::ResetFromZero(file) => file,
-            PrefixTruncation::CompletedPrefix => panic!("short file must request a zero reset"),
-        };
+        let reset_file =
+            match truncate_to_prefix(&destination, &state).expect("inspect short partial") {
+                PrefixTruncation::ResetFromZero(file) => file,
+                PrefixTruncation::CompletedPrefix => panic!("short file must request a zero reset"),
+            };
         assert_eq!(
             std::fs::metadata(&destination)
                 .expect("inspect before reset")

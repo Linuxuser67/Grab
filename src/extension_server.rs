@@ -2216,12 +2216,150 @@ mod tests {
     }
 
     #[test]
+    fn late_older_handoff_cannot_replace_a_newer_same_url_jar() {
+        let _g = exclusive();
+        clear_handoff_cookies();
+        let url = "https://ordered-handoff.example/video";
+        let started = Instant::now();
+        let older_path = write_handoff_cookies(url, &[cookie("c", "old")]).expect("older jar");
+        let newer_path = write_handoff_cookies(url, &[cookie("c", "new")]).expect("newer jar");
+
+        assert!(store_handoff_cookies_at(
+            url,
+            newer_path.clone(),
+            Some("New-UA".into()),
+            started + Duration::from_secs(1),
+        ));
+        assert!(!store_handoff_cookies_at(
+            url,
+            older_path.clone(),
+            Some("Old-UA".into()),
+            started,
+        ));
+
+        assert!(
+            !older_path.exists(),
+            "late older staging result must discard its own file"
+        );
+        assert_eq!(
+            live_handoff_identity(url, SystemTime::now()),
+            Some((newer_path.clone(), Some("New-UA".into())))
+        );
+        assert_eq!(
+            handoff_cookie_args(url).get(1).map(String::as_str),
+            Some(newer_path.to_string_lossy().as_ref())
+        );
+        clear_handoff_cookies();
+    }
+
+    #[test]
+    fn failed_older_handoff_cleanup_cannot_remove_a_newer_jar() {
+        let _g = exclusive();
+        clear_handoff_cookies();
+        let url = "https://cleanup-race.example/video";
+        let started = Instant::now();
+        let older_path = write_handoff_cookies(url, &[cookie("c", "old")]).expect("older jar");
+        let newer_path = write_handoff_cookies(url, &[cookie("c", "new")]).expect("newer jar");
+
+        assert!(store_handoff_cookies_at(
+            url,
+            older_path.clone(),
+            None,
+            started,
+        ));
+        assert!(store_handoff_cookies_at(
+            url,
+            newer_path.clone(),
+            None,
+            started + Duration::from_secs(1),
+        ));
+
+        discard_handoff_cookies_if_path_async(url, &older_path);
+        assert_eq!(
+            handoff_cookie_args(url).get(1).map(String::as_str),
+            Some(newer_path.to_string_lossy().as_ref()),
+            "cleanup for the replaced older path must not remove the current entry"
+        );
+        clear_handoff_cookies();
+    }
+
+    #[test]
+    fn same_host_fallback_uses_request_order_not_staging_completion_order() {
+        let _g = exclusive();
+        clear_handoff_cookies();
+        let started = Instant::now();
+        let older_url = "https://ordered-host.example/collection";
+        let newer_url = "https://ordered-host.example/newer-collection";
+        // The newer request finishes staging first.
+        let newer_path =
+            write_handoff_cookies(newer_url, &[cookie("c", "new")]).expect("newer jar");
+        let older_path =
+            write_handoff_cookies(older_url, &[cookie("c", "old")]).expect("older jar");
+        assert!(store_handoff_cookies_at(
+            newer_url,
+            newer_path.clone(),
+            None,
+            started + Duration::from_secs(2),
+        ));
+        assert!(store_handoff_cookies_at(
+            older_url,
+            older_path.clone(),
+            None,
+            started,
+        ));
+
+        let fallback_url = "https://ordered-host.example/playlist-item";
+        assert_eq!(
+            handoff_cookie_args(fallback_url).get(1).map(String::as_str),
+            Some(newer_path.to_string_lossy().as_ref()),
+            "the newest request must win regardless of async staging completion"
+        );
+        let _suppression =
+            suppress_handoff_host_at(fallback_url, started + Duration::from_secs(1))
+                .expect("older jar should be eligible for suppression");
+        assert_eq!(
+            handoff_cookie_args(fallback_url).get(1).map(String::as_str),
+            Some(newer_path.to_string_lossy().as_ref()),
+            "a cookieless request cutoff must hide the older jar but preserve a newer one"
+        );
+        clear_handoff_cookies();
+    }
+
+    #[test]
+    fn late_older_cookie_jar_cannot_cross_a_newer_cookieless_suppression() {
+        let _g = exclusive();
+        clear_handoff_cookies();
+        let url = "https://suppressed-race.example/video";
+        let started = Instant::now();
+        let newer_path =
+            write_handoff_cookies("https://suppressed-race.example/other", &[cookie("c", "new")])
+                .expect("newer jar");
+        assert!(store_handoff_cookies_at(
+            "https://suppressed-race.example/other",
+            newer_path.clone(),
+            None,
+            started + Duration::from_secs(1),
+        ));
+        let _suppression =
+            suppress_handoff_host_at(url, started + Duration::from_secs(1))
+                .expect("newer cookieless request suppresses older jars");
+        let late_old_path = write_handoff_cookies(url, &[cookie("c", "old")]).expect("late old jar");
+        assert!(!store_handoff_cookies_at(url, late_old_path.clone(), None, started));
+        assert!(!late_old_path.exists());
+        assert_eq!(
+            handoff_cookie_args(url).get(1).map(String::as_str),
+            Some(newer_path.to_string_lossy().as_ref())
+        );
+        clear_handoff_cookies();
+    }
+
+    #[test]
     fn handoff_jar_usable_only_while_fresh() {
         let entry = HandoffCookies {
             path: PathBuf::from("/tmp/jar"),
             user_agent: None,
             staged_at: SystemTime::now(),
-            staged_instant: Instant::now(),
+            request_instant: Instant::now(),
         };
         assert!(handoff_jar_usable_at(&entry, entry.staged_at));
         assert!(!handoff_jar_usable_at(

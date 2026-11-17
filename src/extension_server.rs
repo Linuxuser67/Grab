@@ -2384,36 +2384,51 @@ mod tests {
     }
 
     #[test]
-    fn late_older_cookie_jar_cannot_cross_a_newer_cookieless_suppression() {
+    fn approved_cookieless_handoff_hides_an_older_inflight_cookie_stage() {
         let _g = exclusive();
         clear_handoff_cookies();
         let url = "https://suppressed-race.example/video";
         let started = Instant::now();
-        let newer_path = write_handoff_cookies(
-            "https://suppressed-race.example/other",
-            &[cookie("c", "new")],
-        )
-        .expect("newer jar");
-        assert!(store_handoff_cookies_at(
-            "https://suppressed-race.example/other",
-            newer_path.clone(),
-            None,
-            started + Duration::from_secs(1),
-        ));
-        let _suppression = suppress_handoff_host_at(url, started + Duration::from_secs(1))
-            .expect("newer cookieless request suppresses older jars");
+        let pending = register_cookie_stage(url, started)
+            .expect("register pending stage")
+            .expect("URL host");
+        let suppression = suppress_handoff_host_at(url, started + Duration::from_secs(1))
+            .expect("newer cookieless request sees the older in-flight stage");
+        suppression.keep();
+
         let late_old_path =
             write_handoff_cookies(url, &[cookie("c", "old")]).expect("late old jar");
-        assert!(!store_handoff_cookies_at(
-            url,
-            late_old_path.clone(),
-            None,
-            started
-        ));
-        assert!(!late_old_path.exists());
+        assert!(store_handoff_cookies_at(url, late_old_path.clone(), None, started));
+        assert!(late_old_path.exists(), "approved suppression hides but retains the old jar");
+        drop(pending);
+        assert!(
+            handoff_cookie_args(url).is_empty(),
+            "the older jar remains hidden after its staging guard drops"
+        );
+        clear_handoff_cookies();
+    }
+
+    #[test]
+    fn declined_cookieless_handoff_restores_an_older_inflight_cookie_stage() {
+        let _g = exclusive();
+        clear_handoff_cookies();
+        let url = "https://declined-suppression.example/video";
+        let started = Instant::now();
+        let pending = register_cookie_stage(url, started)
+            .expect("register pending stage")
+            .expect("URL host");
+        let suppression = suppress_handoff_host_at(url, started + Duration::from_secs(1))
+            .expect("newer cookieless request sees the older in-flight stage");
+        suppression.release();
+
+        let late_old_path =
+            write_handoff_cookies(url, &[cookie("c", "old")]).expect("late old jar");
+        assert!(store_handoff_cookies_at(url, late_old_path.clone(), None, started));
+        drop(pending);
         assert_eq!(
             handoff_cookie_args(url).get(1).map(String::as_str),
-            Some(newer_path.to_string_lossy().as_ref())
+            Some(late_old_path.to_string_lossy().as_ref()),
+            "declining the newer handoff must restore the older jar"
         );
         clear_handoff_cookies();
     }

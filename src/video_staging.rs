@@ -2987,7 +2987,8 @@ mod tests {
     #[test]
     fn fmp4_subtitle_sidecars_keep_their_container_and_reserve_the_video_stem() {
         let destination = Path::new("/downloads/film.mp4");
-        let sidecar = sidecar_path_for_extension(destination, "en", FMP4_SUBTITLE_SIDECAR_EXTENSION);
+        let sidecar =
+            sidecar_path_for_extension(destination, "en", FMP4_SUBTITLE_SIDECAR_EXTENSION);
         assert_eq!(sidecar, PathBuf::from("/downloads/film.en.fmp4.mp4"));
         assert!(
             stem_reserved_in(&["film.en.fmp4.mp4".to_string()], "film"),

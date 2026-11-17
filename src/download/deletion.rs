@@ -408,7 +408,11 @@ impl DownloadManager {
                 .flat_map(|lang| {
                     [
                         crate::video_staging::sidecar_path_for(&path, lang),
-                        crate::video_staging::sidecar_path_for_extension(&path, lang, crate::video_staging::FMP4_SUBTITLE_SIDECAR_EXTENSION),
+                        crate::video_staging::sidecar_path_for_extension(
+                            &path,
+                            lang,
+                            crate::video_staging::FMP4_SUBTITLE_SIDECAR_EXTENSION,
+                        ),
                     ]
                 })
                 .collect()

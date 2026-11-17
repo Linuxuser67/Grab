@@ -34,6 +34,14 @@ fn can_apply_playlist_file_event(
 }
 
 impl DownloadManager {
+    /// Revoke this process's resume ownership when a reset did not complete.
+    ///
+    /// A later retry must refuse an existing destination rather than adopting
+    /// bytes whose state could not be made consistent with the on-disk file.
+    pub(super) fn invalidate_started_destination(&self, id: u64) {
+        self.started.borrow_mut().remove(&id);
+    }
+
     pub(super) fn start_next(self: &Rc<Self>) {
         // Startup restore runs asynchronously in production. Don't start a newly
         // queued URL before persisted active rows have been inserted, or we can
@@ -1086,7 +1094,7 @@ impl DownloadManager {
                             // The transfer could not prove that the path still names
                             // its captured inode. A later retry must treat any file at
                             // this path as foreign instead of resuming it.
-                            this.started.borrow_mut().remove(&id);
+                            this.invalidate_started_destination(id);
                         }
                         this.persist_queue();
                         if item.status() != DownloadStatus::Cancelled
@@ -1408,8 +1416,10 @@ impl DownloadManager {
                                                 error = %error,
                                                 "could not reset unsafe segmented file before single-stream fallback"
                                             );
+                                            this.invalidate_started_destination(id);
                                             // Leave ack unsent: the worker stops instead of
-                                            // writing to an unreset partial.
+                                            // writing to an unreset partial. The existing path
+                                            // must not be adopted by a later single-stream retry.
                                             break;
                                         }
                                         Err(error) => {
@@ -1418,6 +1428,7 @@ impl DownloadManager {
                                                 error = ?error,
                                                 "segmented-file zero-reset worker failed before single-stream fallback"
                                             );
+                                            this.invalidate_started_destination(id);
                                             break;
                                         }
                                     }

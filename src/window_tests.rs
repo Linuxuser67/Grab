@@ -653,8 +653,18 @@ fn status_views_use_gnome_adaptive_view_switcher() {
             .expect("search width clamp is an AdwClamp");
         assert_eq!(
             search_clamp.property::<i32>("maximum-size"),
-            600,
-            "the search bar uses the standard readable maximum width"
+            350,
+            "the search bar is constrained to the requested 350 px width"
+        );
+        assert_eq!(
+            [
+                search_bar.margin_top(),
+                search_bar.margin_bottom(),
+                search_bar.margin_start(),
+                search_bar.margin_end(),
+            ],
+            [12, 12, 12, 12],
+            "the search surface retains the standard HIG spacing on all sides"
         );
         assert_eq!(
             search_bar

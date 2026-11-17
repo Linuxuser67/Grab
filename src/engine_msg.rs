@@ -51,6 +51,8 @@ pub(crate) enum EngineMsg {
     /// One per-file event from an owning yt-dlp playlist.
     PlaylistFile(Box<PlaylistFileEvent>),
     Failed(String),
+    /// Destination ownership was lost or could not be established; discard resume metadata.
+    FailedDestination(crate::download_fetch::DestinationProblem),
     /// Native manifest rejected the presentation or resource protocol; the pump switches to yt-dlp.
     ManifestFallback(String),
     /// A transient native transfer failed; owner-marked staging remains resumable.

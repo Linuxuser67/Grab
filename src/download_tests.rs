@@ -3381,6 +3381,78 @@ fn restored_unstarted_row_refuses_existing_dest() {
 }
 
 #[test]
+fn destination_ownership_failure_clears_persisted_resume_state() {
+    let (_q, _l) = test_locks();
+    let _qf = test_queue_file("destination-ownership-failure");
+    let manager = DownloadManager::new(gio::ListStore::new::<DownloadItem>(), test_settings());
+    let dest = std::env::temp_dir().join(format!(
+        "grab-destination-ownership-{}",
+        std::process::id()
+    ));
+    let _ = std::fs::remove_dir_all(&dest);
+    std::fs::create_dir_all(&dest).unwrap();
+    std::fs::write(dest.join("partial.bin"), b"foreign replacement").unwrap();
+
+    let dest_s = dest.to_string_lossy().into_owned();
+    let mut stored = stored_row(
+        "https://example.com/partial.bin",
+        &dest_s,
+        "partial.bin",
+        DownloadStatus::Failed,
+    );
+    stored.started = Some(true);
+    let item = manager.restore_existing(&stored).expect("restore started row");
+    manager.segment_state.borrow_mut().insert(item.id(), SegmentState::new(128));
+    item.set_etag("stale-etag");
+    item.set_last_modified("stale-date");
+    item.set_status(DownloadStatus::Downloading);
+    manager.epoch.borrow_mut().insert(item.id(), 1);
+
+    let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+    manager.pump(item.clone(), item.id(), 1, rx);
+    tx.send(EngineMsg::FailedDestination(
+        crate::download_fetch::DestinationProblem::Replaced,
+    ))
+    .expect("send typed destination ownership failure");
+    drop(tx);
+
+    assert!(
+        wait_for_status(
+            &manager,
+            item.id(),
+            DownloadStatus::Failed,
+            Duration::from_secs(5)
+        ),
+        "the typed destination failure must fail the active row"
+    );
+    assert_eq!(
+        item.detail(),
+        "Destination file was replaced during download"
+    );
+    assert!(
+        !manager.started.borrow().contains(&item.id()),
+        "a replacement destination must no longer be trusted as Grab-owned"
+    );
+    assert!(
+        !manager.segment_state.borrow().contains_key(&item.id()),
+        "the completed-piece bitmap must be discarded with destination ownership"
+    );
+    assert!(item.etag().is_empty(), "the prior ETag must not survive");
+    assert!(
+        item.last_modified().is_empty(),
+        "the prior Last-Modified validator must not survive"
+    );
+    assert_eq!(
+        std::fs::read(dest.join("partial.bin")).unwrap(),
+        b"foreign replacement",
+        "failing the row must not change the replacement file"
+    );
+
+    drain_engine(&manager, item.id());
+    let _ = std::fs::remove_dir_all(&dest);
+}
+
+#[test]
 fn failed_prefix_recovery_does_not_reuse_unverified_destination() {
     // A failed prefix truncation or zero-reset can leave segmented bytes in an
     // inconsistent state. Once its bitmap is dropped, the file must not be

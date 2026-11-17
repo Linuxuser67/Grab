@@ -2375,6 +2375,7 @@ segment.ts
         let key = ManifestPreviewCacheKey {
             url: lookup.source_url.clone(),
             handoff_cookie_hash: None,
+            handoff_user_agent_hash: None,
             proxy: None,
         };
         manifest_preview_cache_insert(key.clone(), &lookup);
@@ -2425,6 +2426,7 @@ segment.ts
         let key = ManifestPreviewCacheKey {
             url: "https://cache-expiry.example.test/media.m3u8".to_string(),
             handoff_cookie_hash: None,
+            handoff_user_agent_hash: None,
             proxy: None,
         };
         MANIFEST_PREVIEW_CACHE.lock().expect("cache lock").insert(
@@ -2602,7 +2604,7 @@ segment.ts?f=418899&srv=server&i=0.4&sp=500&p1=one&p2=two&asn=327934
         let jar = directory.path().join("handoff.jar");
         std::fs::write(
             &jar,
-            b"# Netscape HTTP Cookie File\\n.example.test\\tTRUE\\t/\\tFALSE\\t0\\tsid\\tv\\n",
+            b"# Netscape HTTP Cookie File\n.example.test\tTRUE\t/\tFALSE\t0\tsid\tv\n",
         )
         .expect("write handoff jar");
 

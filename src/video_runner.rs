@@ -2726,8 +2726,24 @@ fn prepare_live_staging(
         let _ = std::fs::remove_file(old_part);
     }
 
-    // Refuse an existing destination before spending time recording.
-    if dest.exists() {
+    // Refuse every occupied destination path before spending time recording.
+    // Path::exists() follows symlinks and reports a dangling symlink as absent;
+    // inspect the directory entry itself and fail closed on metadata errors.
+    let destination_occupied = match staging_path_is_occupied(dest) {
+        Ok(occupied) => occupied,
+        Err(error) => {
+            let part = out
+                .parent()
+                .unwrap_or_else(|| Path::new(""))
+                .join(format!("{staging_name}.part"));
+            let _ = std::fs::remove_file(part);
+            let _ = std::fs::remove_file(out.with_extension(format!("{ext}.ytdl")));
+            return Err(VideoError::staging(format!(
+                "cannot inspect final destination: {error}"
+            )));
+        }
+    };
+    if destination_occupied {
         let part = out
             .parent()
             .unwrap_or_else(|| Path::new(""))

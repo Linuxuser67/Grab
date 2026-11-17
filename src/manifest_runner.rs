@@ -4965,16 +4965,33 @@ async fn fetch_hls_resource_to_writer(
 ) -> Result<bool, ManifestRunError> {
     let mut reservation = ResourceByteReservation::new(downloaded);
     let result = async {
-        if resource.range.is_some() || resource.key {
+        if resource.key {
             return Err(ManifestRunError::Unsupported(
-                "The selected HLS track contains a ranged or encrypted resource".to_string(),
+                "The selected HLS track contains an encrypted resource".to_string(),
             ));
+        }
+
+        let mut request = client.get(resource.url.clone());
+        if let Some(range) = resource.range {
+            let end = range
+                .offset
+                .checked_add(range.length)
+                .and_then(|value| value.checked_sub(1))
+                .ok_or_else(|| {
+                    ManifestRunError::Unsupported(
+                        "The HLS resource contains an invalid byte range".to_string(),
+                    )
+                })?;
+            request = request.header(
+                reqwest::header::RANGE,
+                format!("bytes={}-{end}", range.offset),
+            );
         }
 
         let response = tokio::select! {
             biased;
             _ = &mut *abort => return Ok(false),
-            response = tokio::time::timeout(RESOURCE_IDLE_TIMEOUT, client.get(resource.url.clone()).send()) => {
+            response = tokio::time::timeout(RESOURCE_IDLE_TIMEOUT, request.send()) => {
                 response
                     .map_err(|_| ManifestRunError::Retryable(
                         "Timed out while requesting an HLS fragment".to_string(),
@@ -4986,23 +5003,49 @@ async fn fetch_hls_resource_to_writer(
             }
         };
         let status = response.status();
-        if status == reqwest::StatusCode::PARTIAL_CONTENT {
+        if let Some(range) = resource.range {
+            if is_retryable_resource_status(status) {
+                return Err(ManifestRunError::Retryable(format!(
+                    "The stream server returned HTTP {} for an HLS byte-range fragment",
+                    status.as_u16()
+                )));
+            }
+            if status != reqwest::StatusCode::PARTIAL_CONTENT
+                || !content_range_matches(
+                    response
+                        .headers()
+                        .get(reqwest::header::CONTENT_RANGE)
+                        .and_then(|value| value.to_str().ok()),
+                    range,
+                )
+            {
+                return Err(ManifestRunError::Unsupported(
+                    "The stream server did not honor the requested byte range for an HLS fragment"
+                        .to_string(),
+                ));
+            }
+        } else if status == reqwest::StatusCode::PARTIAL_CONTENT {
             return Err(ManifestRunError::Failed(
                 "The stream server returned partial content for a complete HLS fragment".to_string(),
             ));
-        }
-        if !status.is_success() {
+        } else if !status.is_success() {
             return Err(match resource_status_error(status) {
                 ManifestRunError::Unsupported(message) => ManifestRunError::Failed(message),
                 other => other,
             });
         }
-        if response
-            .content_length()
-            .is_some_and(|length| length > MAX_RESOURCE_BYTES)
-        {
+
+        let content_length = response.content_length();
+        if content_length.is_some_and(|length| length > MAX_RESOURCE_BYTES) {
             return Err(ManifestRunError::Failed(
                 "An HLS fragment exceeds the 1 GiB limit".to_string(),
+            ));
+        }
+        if let Some(range) = resource.range
+            && byte_range_content_length_exceeds(range, content_length)
+        {
+            return Err(ManifestRunError::Unsupported(
+                "The stream server returned more bytes than the requested HLS range".to_string(),
             ));
         }
 
@@ -5032,6 +5075,15 @@ async fn fetch_hls_resource_to_writer(
                     error.without_url()
                 ))
             })?;
+            if resource
+                .range
+                .is_some_and(|range| byte_range_chunk_exceeds(range, size, chunk.len()))
+            {
+                return Err(ManifestRunError::Unsupported(
+                    "The stream server returned more bytes than the requested HLS range"
+                        .to_string(),
+                ));
+            }
             let chunk_len = u64::try_from(chunk.len()).map_err(|_| {
                 ManifestRunError::Failed("An HLS fragment exceeds the size limit".to_string())
             })?;
@@ -5095,6 +5147,14 @@ async fn fetch_hls_resource_to_writer(
                 .write_streamed_chunk(&response_prefix)
                 .await
                 .map_err(ManifestRunError::Failed)?;
+        }
+        if let Some(range) = resource.range
+            && size < range.length
+        {
+            return Err(ManifestRunError::Retryable(
+                "The stream server ended an HLS byte-range fragment before all requested bytes arrived"
+                    .to_string(),
+            ));
         }
         if size == 0 {
             return Err(ManifestRunError::Failed(

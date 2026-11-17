@@ -5355,13 +5355,13 @@ fn is_hls_playlist_input(input: &Path) -> bool {
 
 fn add_hls_staging_options(command: &mut tokio::process::Command) {
     // Every HLS child URI is rewritten to a generated, single-component
-    // .bin staging name. Permit only those names and probe their contents:
-    // HLS resources may contain MPEG-TS, fragmented MP4, or encryption keys.
+    // .bin staging name. Keep .bin as the only segment extension, but also
+    // allow .m3u8 so FFmpeg can reload a growing local playlist during muxing.
     command.args([
         "-protocol_whitelist",
         "file,crypto",
         "-allowed_extensions",
-        "bin",
+        "m3u8,bin",
         "-allowed_segment_extensions",
         "bin",
         "-extension_picky",
@@ -5837,6 +5837,31 @@ mod tests {
         .await
         .expect("fake FFmpeg must stop within the test deadline")
         .expect("fake FFmpeg process should be handled")
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn ffmpeg_hls_staging_allows_local_playlist_reload_and_limits_child_segments() {
+        let directory = tempfile::tempdir().expect("create FFmpeg argument test directory");
+        let ffmpeg = fake_ffmpeg_recording_arguments(directory.path());
+        let output = directory.path().join("output.mp4");
+        let args = run_ffmpeg_recording_args(&ffmpeg, &output, SubtitleOutput::default()).await;
+
+        assert!(
+            args.windows(2)
+                .any(|pair| pair == ["-allowed_extensions", "m3u8,bin"]),
+            "FFmpeg must be able to reopen the growing local m3u8 playlist: {args:?}"
+        );
+        assert!(
+            args.windows(2)
+                .any(|pair| pair == ["-allowed_segment_extensions", "bin"]),
+            "HLS child resources must remain restricted to generated .bin files: {args:?}"
+        );
+        assert!(
+            args.windows(2)
+                .any(|pair| pair == ["-protocol_whitelist", "file,crypto"]),
+            "the local HLS mux must not gain network protocol access: {args:?}"
+        );
     }
 
     #[cfg(unix)]

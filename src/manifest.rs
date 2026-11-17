@@ -694,6 +694,15 @@ impl HlsPlan {
         self.local_playlist.segments.len()
     }
 
+    /// Ordered media-segment URI for integration fixtures that gate a specific prefix.
+    #[cfg(test)]
+    pub(crate) fn segment_uri(&self, index: usize) -> Option<&str> {
+        self.local_playlist
+            .segments
+            .get(index)
+            .map(|segment| segment.uri.as_str())
+    }
+
     pub(crate) fn local_playlist_bytes(&self) -> Result<Vec<u8>, ManifestError> {
         let mut output = Vec::new();
         self.local_playlist

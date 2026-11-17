@@ -131,6 +131,23 @@ pub(crate) fn route_for_collection(
     route(ytdlp_won, gallery_items)
 }
 
+/// Whether a probe error should be surfaced to the user instead of falling
+/// through to the plain-download path. Auth/HTTP errors mean the URL needs login;
+/// "unsupported URL" and timeouts mean gallery-dl just can't handle it.
+pub fn should_surface(e: &GalleryError) -> bool {
+    match e {
+        GalleryError::Probe(msg) => {
+            msg.contains("AuthenticationError")
+                || msg.contains("AuthorizationError")
+                || msg.contains("AuthRequired")
+                || msg.contains("ChallengeError")
+                || msg.contains("HttpError")
+        }
+        // Install/runtime errors (spawn failures, timeouts) fall through.
+        _ => false,
+    }
+}
+
 /// Best-effort label for one gallery-picker entry. Prefer its own media title,
 /// then the filename; do not confuse inherited collection metadata with an
 /// individual entry's label.

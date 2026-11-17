@@ -409,6 +409,10 @@ struct HandoffStore {
     /// Request order, independent of cookie-file write completion order.
     /// Same-host fallback and eviction must prefer the newest request.
     order: VecDeque<String>,
+    /// Cookie-bearing requests still writing their staged jar, keyed by host.
+    /// Cookieless requests use this to preserve a suppression cutoff until
+    /// older in-flight writes have either stored or been discarded.
+    pending_cookie_stages: HashMap<String, Vec<(u64, Instant)>>,
     /// Hosts whose older staged jars must not be reused. A cookieless
     /// handoff leaves no exact entry, so the same-host fallback would
     /// otherwise select a jar from an earlier handoff.
@@ -492,7 +496,9 @@ const MAX_SUPPRESSED_HOSTS: usize = MAX_HANDOFF_ENTRIES * 4;
 /// browser jar, so stale values would override rotated cookies. Entries scoped
 /// to that jar's staged path age out on their own once it is dropped.
 const HANDOFF_FRESH: Duration = Duration::from_secs(30 * 60);
+const MAX_PENDING_COOKIE_STAGES: usize = QUEUE_DEPTH * 4;
 static COOKIE_FILE_COUNTER: AtomicU64 = AtomicU64::new(0);
+static COOKIE_STAGE_ID_COUNTER: AtomicU64 = AtomicU64::new(0);
 static SUPPRESSION_ID_COUNTER: AtomicU64 = AtomicU64::new(0);
 
 /// Canonical map key for a handoff URL: the `url::Url` serialization, so the
@@ -913,18 +919,71 @@ fn host_has_stale_handoff(store: &HandoffStore, host: &str, at: Instant) -> bool
 
 /// Remove a tombstone only when no request depends on it and deleting it cannot
 /// expose a jar older than the last approved cutoff.
+fn host_has_pending_cookie_stage_before(store: &HandoffStore, host: &str, at: Instant) -> bool {
+    store
+        .pending_cookie_stages
+        .get(host)
+        .is_some_and(|pending| pending.iter().any(|(_, request_at)| *request_at < at))
+}
+
 fn prune_suppression(store: &mut HandoffStore, host: &str) {
     let Some(suppressed) = store.suppressed_hosts.get(host).cloned() else {
         return;
     };
     let removable = suppressed.pending.is_empty()
-        && suppressed
-            .approved_at
-            .is_none_or(|at| !host_has_stale_handoff(store, host, at));
+        && suppressed.approved_at.is_none_or(|at| {
+            !host_has_stale_handoff(store, host, at)
+                && !host_has_pending_cookie_stage_before(store, host, at)
+        });
     if removable {
         store.suppressed_hosts.remove(host);
         store.suppressed_order.retain(|candidate| candidate != host);
     }
+}
+
+/// Reserve a bounded slot while a cookie-bearing handoff writes its jar.
+/// Cookieless handoffs can then preserve an approved cutoff until all older
+/// writes have observed it.
+struct CookieStageRegistration {
+    host: String,
+    id: u64,
+}
+
+impl Drop for CookieStageRegistration {
+    fn drop(&mut self) {
+        let mut store = lock_handoff_cookies();
+        if let Some(pending) = store.pending_cookie_stages.get_mut(&self.host) {
+            pending.retain(|(id, _)| *id != self.id);
+            if pending.is_empty() {
+                store.pending_cookie_stages.remove(&self.host);
+            }
+        }
+        prune_suppression(&mut store, &self.host);
+    }
+}
+
+fn register_cookie_stage(
+    url: &str,
+    request_instant: Instant,
+) -> Result<Option<CookieStageRegistration>, ()> {
+    let Some(host) = url::Url::parse(url)
+        .ok()
+        .and_then(|parsed| parsed.host_str().map(str::to_ascii_lowercase))
+    else {
+        return Ok(None);
+    };
+    let mut store = lock_handoff_cookies();
+    let pending_count: usize = store.pending_cookie_stages.values().map(Vec::len).sum();
+    if pending_count >= MAX_PENDING_COOKIE_STAGES {
+        return Err(());
+    }
+    let id = COOKIE_STAGE_ID_COUNTER.fetch_add(1, Ordering::Relaxed);
+    store
+        .pending_cookie_stages
+        .entry(host.clone())
+        .or_default()
+        .push((id, request_instant));
+    Ok(Some(CookieStageRegistration { host, id }))
 }
 
 fn finish_suppression(host: &str, id: u64, at: Instant, approved: bool) {
@@ -962,14 +1021,12 @@ fn suppress_handoff_host_at(url: &str, at: Instant) -> Option<Suppression> {
         .ok()
         .and_then(|parsed| parsed.host_str().map(str::to_ascii_lowercase))?;
     let mut store = lock_handoff_cookies();
-    // Without a staged jar there is nothing to suppress and no tombstone is needed.
-    let has_staged = store.by_key.keys().any(|key| {
-        url::Url::parse(key)
-            .ok()
-            .and_then(|parsed| parsed.host_str().map(str::to_ascii_lowercase))
-            .is_some_and(|key_host| key_host == host)
-    });
-    if !has_staged {
+    // A jar may still be in its asynchronous file write and not yet appear
+    // in by_key. Preserve the cutoff whenever an older jar exists or an older
+    // cookie-bearing request is still staging.
+    let has_stale_jar = host_has_stale_handoff(&store, &host, at);
+    let has_older_stage = host_has_pending_cookie_stage_before(&store, &host, at);
+    if !has_stale_jar && !has_older_stage {
         return None;
     }
     // Every current jar predates this cutoff. Decline later restores the prior

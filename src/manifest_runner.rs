@@ -5702,7 +5702,7 @@ async fn run_ffmpeg_with_offsets_timeout(
             ManifestContainer::Mp4 => "mov_text",
             // Matroska preserves text WebVTT codecs. fMP4 subtitle inputs
             // are routed to an MP4 sidecar by the embedding policy.
-            ManifestContainer::Mkv if !subtitles.format == SubtitleFormat::Fmp4 => "copy",
+            ManifestContainer::Mkv if subtitles.format != SubtitleFormat::Fmp4 => "copy",
             ManifestContainer::Mkv | ManifestContainer::Ts => {
                 return Err(mpegts_embedded_subtitle_error());
             }

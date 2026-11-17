@@ -4520,8 +4520,6 @@ program-after.ts
     }
 }
 
-
-
 async fn read_fixture_request_headers(socket: &mut tokio::net::TcpStream) -> String {
     let mut request = Vec::with_capacity(512);
     while !request.windows(4).any(|window| window == b"\r\n\r\n") {
@@ -4574,12 +4572,20 @@ combined.mp4
     );
     let mut plan = crate::manifest::plan_hls_media_playlist(manifest_url, playlist.as_bytes())
         .expect("plan single-file byte-ranged fMP4 playlist");
-    assert_eq!(plan.resources.len(), 2, "fixture contains init and one media range");
+    assert_eq!(
+        plan.resources.len(),
+        2,
+        "fixture contains init and one media range"
+    );
     assert!(plan.is_single_init_fmp4_presentation());
     assert!(plan.is_destination_assemblable_candidate());
     assert_eq!(plan.resources[0].url, plan.resources[1].url);
-    let init_range = plan.resources[0].range.expect("init map must have a byte range");
-    let media_range = plan.resources[1].range.expect("media segment must have a byte range");
+    let init_range = plan.resources[0]
+        .range
+        .expect("init map must have a byte range");
+    let media_range = plan.resources[1]
+        .range
+        .expect("media segment must have a byte range");
     assert_eq!(init_range.offset, 0);
     assert_eq!(init_range.length, INIT.len() as u64);
     assert_eq!(media_range.offset, media_offset);
@@ -4598,12 +4604,10 @@ combined.mp4
     }
 
     let server = tokio::spawn(async move {
-        for (index, (range, expected_body)) in [
-            (init_range, INIT.to_vec()),
-            (media_range, MEDIA.to_vec()),
-        ]
-        .into_iter()
-        .enumerate()
+        for (index, (range, expected_body)) in
+            [(init_range, INIT.to_vec()), (media_range, MEDIA.to_vec())]
+                .into_iter()
+                .enumerate()
         {
             let (mut socket, _) = tokio::time::timeout(FIXTURE_TIMEOUT, listener.accept())
                 .await
@@ -4614,11 +4618,8 @@ combined.mp4
                 request.starts_with("GET /combined.mp4 "),
                 "unexpected request: {request}"
             );
-            let expected_range = format!(
-                "bytes={}-{}",
-                range.offset,
-                range.offset + range.length - 1
-            );
+            let expected_range =
+                format!("bytes={}-{}", range.offset, range.offset + range.length - 1);
             let actual_range = request
                 .lines()
                 .find_map(|line| {
@@ -4636,7 +4637,6 @@ combined.mp4
                     SingleFileFmp4RangeResponse::Valid => {}
                     SingleFileFmp4RangeResponse::MismatchedContentRange => {
                         content_range_start += 1;
-                        content_range_end += 1;
                     }
                     SingleFileFmp4RangeResponse::Oversized => body.push(b'!'),
                     SingleFileFmp4RangeResponse::Truncated => {
@@ -4694,13 +4694,9 @@ combined.mp4
     let item_id = 109;
     crate::manifest_destination::ensure_plan(&staging, &destination, item_id, false, false)
         .expect("persist ranged fMP4 destination ownership plan");
-    let part = crate::manifest_destination::part_path(
-        &staging,
-        &destination,
-        item_id,
-        TrackKind::Video,
-    )
-    .expect("resolve ranged fMP4 destination part");
+    let part =
+        crate::manifest_destination::part_path(&staging, &destination, item_id, TrackKind::Video)
+            .expect("resolve ranged fMP4 destination part");
 
     let client = fixture_client();
     let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
@@ -4722,9 +4718,7 @@ combined.mp4
         abort: &mut abort,
     })
     .await;
-    server
-        .await
-        .expect("join single-file fMP4 fixture server");
+    server.await.expect("join single-file fMP4 fixture server");
 
     match transfer_result {
         Ok(true) => {
@@ -4752,17 +4746,20 @@ async fn hls_fmp4_single_file_byte_ranges_stream_into_destination_part() {
         .expect("valid single-file byte ranges should transfer");
     assert_eq!(
         bytes,
-        [b"fmp4-init-range".as_slice(), b"fmp4-media-range-content".as_slice()].concat()
+        [
+            b"fmp4-init-range".as_slice(),
+            b"fmp4-media-range-content".as_slice()
+        ]
+        .concat()
     );
 }
 
 #[tokio::test]
 async fn hls_fmp4_single_file_rejects_mismatched_content_range() {
-    let error = transfer_single_file_fmp4_ranges(
-        SingleFileFmp4RangeResponse::MismatchedContentRange,
-    )
-    .await
-    .expect_err("mismatched Content-Range must be rejected");
+    let error =
+        transfer_single_file_fmp4_ranges(SingleFileFmp4RangeResponse::MismatchedContentRange)
+            .await
+            .expect_err("mismatched Content-Range must be rejected");
     assert!(error.contains("did not honor"), "unexpected error: {error}");
 }
 
@@ -4782,5 +4779,8 @@ async fn hls_fmp4_single_file_rejects_truncated_range_body() {
     let error = transfer_single_file_fmp4_ranges(SingleFileFmp4RangeResponse::Truncated)
         .await
         .expect_err("truncated byte-range body must be rejected");
-    assert!(error.contains("incomplete HLS byte range"), "unexpected error: {error}");
+    assert!(
+        error.contains("incomplete HLS byte range"),
+        "unexpected error: {error}"
+    );
 }

@@ -403,11 +403,8 @@ pub(crate) const MAX_TORRENT_BYTES: u64 = 10_000_000;
 
 /// Read a `.torrent` file with a single bounded open (no separate size check: a concurrent replacement must not slip between).
 pub(crate) fn read_torrent_bytes(path: &std::path::Path) -> Option<Vec<u8>> {
-    crate::bounded_file::read_regular_file_bounded(
-        path,
-        usize::try_from(MAX_TORRENT_BYTES).ok()?,
-    )
-    .ok()
+    crate::bounded_file::read_regular_file_bounded(path, usize::try_from(MAX_TORRENT_BYTES).ok()?)
+        .ok()
 }
 
 /// Read and parse a `.torrent` file in one call, so UI paths can hand the

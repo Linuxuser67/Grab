@@ -88,13 +88,23 @@ pub fn url_is_direct_media(url: &str) -> bool {
 }
 
 /// Where the New Download card should land after both probes complete.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ProbeOutcome {
+    /// yt-dlp fallback when it found a playable video or playlist.
+    VideoYtDlp,
+    /// gallery-dl returned enough files to take precedence over yt-dlp.
+    Gallery,
+    /// Neither backend found a usable result.
+    None,
+}
+
 ///
 /// When yt-dlp also finds a playable video, gallery-dl must return more than
 /// one file to replace that result. With no yt-dlp result, one gallery file is
 /// still a valid direct-file collection.
 ///
-/// \`ytdlp_video\`: whether the yt-dlp probe found a playable video.
-/// \`gallery_items\`: gallery-dl \`-j\` items (\`None\` = probe failed/unsupported).
+/// `ytdlp_video`: whether the yt-dlp probe found a playable video.
+/// `gallery_items`: gallery-dl `-j` items (`None` = probe failed/unsupported).
 pub fn route(ytdlp_video: bool, gallery_items: Option<&[GalleryItem]>) -> ProbeOutcome {
     let Some(items) = gallery_items.filter(|items| !items.is_empty()) else {
         return if ytdlp_video {
@@ -1673,6 +1683,11 @@ done
             route_for_collection(false, 0, Some(&single_image)),
             ProbeOutcome::Gallery,
             "a single file remains a gallery result when yt-dlp found nothing"
+        );
+        assert_eq!(
+            route_for_collection(false, 3, Some(&single_image)),
+            ProbeOutcome::VideoYtDlp,
+            "a recognized yt-dlp playlist counts as an existing result"
         );
     }
 

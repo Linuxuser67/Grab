@@ -239,7 +239,9 @@ pub(crate) async fn run_download(mut ctx: FetchCtx, connections: usize, mode: St
                 Ok(claim) if claim.is_claimed() => claim,
                 Ok(_) => {
                     ctx.tx
-                        .send(EngineMsg::FailedDestination(DestinationProblem::Disappeared))
+                        .send(EngineMsg::FailedDestination(
+                            DestinationProblem::Disappeared,
+                        ))
                         .ok();
                     return;
                 }

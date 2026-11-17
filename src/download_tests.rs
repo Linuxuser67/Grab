@@ -3385,10 +3385,8 @@ fn destination_ownership_failure_clears_persisted_resume_state() {
     let (_q, _l) = test_locks();
     let _qf = test_queue_file("destination-ownership-failure");
     let manager = DownloadManager::new(gio::ListStore::new::<DownloadItem>(), test_settings());
-    let dest = std::env::temp_dir().join(format!(
-        "grab-destination-ownership-{}",
-        std::process::id()
-    ));
+    let dest =
+        std::env::temp_dir().join(format!("grab-destination-ownership-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dest);
     std::fs::create_dir_all(&dest).unwrap();
     std::fs::write(dest.join("partial.bin"), b"foreign replacement").unwrap();
@@ -3401,8 +3399,13 @@ fn destination_ownership_failure_clears_persisted_resume_state() {
         DownloadStatus::Failed,
     );
     stored.started = Some(true);
-    let item = manager.restore_existing(&stored).expect("restore started row");
-    manager.segment_state.borrow_mut().insert(item.id(), SegmentState::new(128));
+    let item = manager
+        .restore_existing(&stored)
+        .expect("restore started row");
+    manager
+        .segment_state
+        .borrow_mut()
+        .insert(item.id(), SegmentState::new(128));
     item.set_etag("stale-etag");
     item.set_last_modified("stale-date");
     item.set_status(DownloadStatus::Downloading);

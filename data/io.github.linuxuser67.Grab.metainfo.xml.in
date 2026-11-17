@@ -58,6 +58,39 @@
     </screenshot>
   </screenshots>
   <releases>
+    <release version="6.5.0~beta.25" type="development" date="2026-11-17">
+      <description>
+        <ul>
+          <li>Streaming: HLS downloads now support single-file fMP4 destination parts, FFmpeg reloads growing AES-128 playlists, and compatible master variants choose MP4 output.</li>
+          <li>Live capture: the finish button uses a media stop glyph instead of a save icon.</li>
+          <li>UI: restore the search-bar spacing and gallery row precedence.</li>
+          <li>Internals: integration coverage confirms the fMP4 destination part stays visible while the transfer runs.</li>
+        </ul>
+      </description>
+    </release>
+    <release version="6.5.0~beta.24" type="development" date="2026-11-16">
+      <description>
+        <ul>
+          <li>Streaming: AES-128 HLS VOD downloads recover after an early FFmpeg exit, complex clear VOD presentations keep their output in the destination part, and separate video/audio renditions show the destination partial while downloading.</li>
+          <li>UI: restore the 12px padding below the inline Add form.</li>
+          <li>Translations: regenerate the message template so recently added strings reach translators, mark beta releases as development releases, and point screenshots at the current tag.</li>
+          <li>Internals: fix the release workflows so built artifacts attach automatically to the published release.</li>
+        </ul>
+      </description>
+    </release>
+    <release version="6.5.0~beta.23" type="development" date="2026-11-16">
+      <description>
+        <ul>
+          <li>Streaming: encrypted HLS VOD presentations now stream straight into the destination part while segments arrive, and MP4/MKV output through that path is covered by integration tests.</li>
+          <li>Downloads: a single-stream resume can no longer splice in bytes from a changed object; a failed segmented-fallback truncation stops its worker instead of writing to a failed row; only durable completed pieces are persisted for resume.</li>
+          <li>Live capture: the finish button now uses a save icon, and live remux cleanup is shared across failure paths.</li>
+          <li>Manifests: preserve supported caption formats and valid in-band closed-caption groups in HLS.</li>
+          <li>Queue: keep saved data on transient read errors and quarantine failures, and reject parent traversal in persisted restore paths.</li>
+          <li>UI: restore the 12px gap below the header bar and avoid in-app failure toasts while Grab is inactive.</li>
+          <li>Internals: harden the release and offline-vendor guards, serialize Trash moves, and broaden queue-restore and process-supervision coverage.</li>
+        </ul>
+      </description>
+    </release>
     <release version="6.5.0~beta.22" type="development" date="2026-11-15">
       <description>
         <ul>

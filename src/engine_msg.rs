@@ -91,8 +91,12 @@ pub(crate) enum EngineMsg {
     LiveDetected,
     /// The capture has ended; subsequent pause/cancel controls now target finalization.
     LiveFinalizing,
-    /// Server object changed mid-download: drop bitmap so retry starts fresh.
-    FailedVersion(String),
+    /// Server object changed mid-download; the transfer reports whether its
+    /// captured destination inode was reset and remains reusable.
+    FailedVersion {
+        error: String,
+        destination_reusable: bool,
+    },
     /// Torrent per-piece haves (500ms tick); replaces bitfield, redraws off progress ticks.
     TorrentPieces(Vec<bool>),
     /// Free-form phase label (resolve/merge stages byte counters miss); next Progress tick renders over it.

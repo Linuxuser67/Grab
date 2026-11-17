@@ -257,6 +257,59 @@ pub(crate) async fn run_download(mut ctx: FetchCtx, connections: usize, mode: St
 /// Single-stream fallback with retries. The identity is set only after a
 /// fresh destination is exclusively created, or captured before resuming an
 /// existing partial file. A retry cannot adopt a path that appeared meanwhile.
+async fn report_changed_destination(ctx: &FetchCtx, claim: &mut DestinationClaim, message: String) {
+    match reset_changed_destination(ctx, claim).await {
+        Ok(()) => {
+            ctx.tx
+                .send(EngineMsg::FailedVersion {
+                    error: message,
+                    destination_reusable: true,
+                })
+                .ok();
+        }
+        Err(reset_error) => {
+            tracing::warn!(
+                error = %reset_error.into_message(),
+                destination = %ctx.dest.display(),
+                "could not safely reset the partial after the server object changed"
+            );
+            let error = format!(
+                "{message}. Grab could not safely reset the partial file; remove it manually before retrying."
+            );
+            ctx.tx
+                .send(EngineMsg::FailedVersion {
+                    error,
+                    destination_reusable: false,
+                })
+                .ok();
+        }
+    }
+}
+
+/// Reset only the inode captured by the current attempt. A pathname that has
+/// disappeared or been replaced is never opened, truncated, or removed.
+async fn reset_changed_destination(
+    ctx: &FetchCtx,
+    claim: &mut DestinationClaim,
+) -> Result<(), AttemptFail> {
+    if !claim.is_claimed() {
+        return Err(AttemptFail::Destination(DestinationProblem::Disappeared));
+    }
+    let file = claim.open_for_writing(&ctx.dest).await?;
+    file.set_len(0).await.map_err(|error| {
+        AttemptFail::Retryable(format!("Could not reset the changed partial: {error}"))
+    })?;
+    file.sync_all().await.map_err(|error| {
+        AttemptFail::Retryable(format!("Could not sync the reset partial: {error}"))
+    })?;
+    claim
+        .verify_opened_file(&ctx.dest, &file, "reset partial")
+        .await
+}
+
+/// Single-stream fallback with retries. The identity is set only after a
+/// fresh destination is exclusively created, or captured before resuming an
+/// existing partial file. A retry cannot adopt a path that appeared meanwhile.
 async fn single_loop(
     ctx: &FetchCtx,
     tries: &mut i32,
@@ -278,8 +331,8 @@ async fn single_loop(
             Err(failure) => {
                 let message = match failure {
                     // A changed object invalidates the partial and any bitmap describing it.
-                    AttemptFail::Changed(e) => {
-                        ctx.tx.send(EngineMsg::FailedVersion(e)).ok();
+                    AttemptFail::Changed(message) => {
+                        report_changed_destination(ctx, claim, message).await;
                         return;
                     }
                     AttemptFail::Destination(problem) => {
@@ -348,9 +401,8 @@ async fn multi_loop(
                 // Wait for the UI thread to truncate + drop the bitmap before single-stream resumes.
                 return wait_for_fallback_ack(&mut ack_rx, FALLBACK_ACK_TIMEOUT).await;
             }
-            Err(AttemptFail::Changed(e)) => {
-                // The existing partial is invalid: discard it and let a later retry start fresh.
-                ctx.tx.send(EngineMsg::FailedVersion(e)).ok();
+            Err(AttemptFail::Changed(message)) => {
+                report_changed_destination(ctx, claim, message).await;
                 return false;
             }
             Err(AttemptFail::Destination(problem)) => {
@@ -1619,8 +1671,8 @@ const PIECE_TRIES: u32 = 3;
 mod destination_ownership_tests {
     use super::{
         AttemptFail, DestinationClaim, DestinationProblem, FetchCtx, FileIdentity,
-        PrefixTruncation, attempt_once, ensure_sized, single_loop, truncate_open_file_to_zero,
-        truncate_to_prefix, wait_for_fallback_ack,
+        PrefixTruncation, attempt_once, ensure_sized, reset_changed_destination, single_loop,
+        truncate_open_file_to_zero, truncate_to_prefix, wait_for_fallback_ack,
     };
     use crate::download_net::{DEFAULT_USER_AGENT, DownloadOptions};
     use crate::download_pieces::SegmentState;
@@ -1835,6 +1887,59 @@ mod destination_ownership_tests {
                 .expect("read destination"),
             b"old-",
             "the changed response must not be spliced onto the owned partial"
+        );
+        reset_changed_destination(&context, &mut claim)
+            .await
+            .expect("reset only the claimed partial inode");
+        assert!(
+            tokio::fs::read(&destination)
+                .await
+                .expect("read reset destination")
+                .is_empty(),
+            "the changed partial must be empty before the UI clears its resume metadata"
+        );
+    }
+
+    #[tokio::test]
+    async fn changed_version_reset_never_truncates_a_replacement_inode() {
+        let directory = tempfile::tempdir().expect("create destination directory");
+        let destination = directory.path().join("download.bin");
+        tokio::fs::write(&destination, b"old partial")
+            .await
+            .expect("write owned partial");
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+        let context = test_context(
+            "http://127.0.0.1:1/download.bin".to_string(),
+            destination.clone(),
+            tx,
+        );
+        let mut claim = DestinationClaim::capture(&destination)
+            .await
+            .expect("capture owned partial");
+
+        let replacement = directory.path().join("replacement.bin");
+        tokio::fs::write(&replacement, b"foreign sentinel")
+            .await
+            .expect("write replacement file");
+        tokio::fs::rename(&replacement, &destination)
+            .await
+            .expect("replace destination path");
+
+        let error = reset_changed_destination(&context, &mut claim)
+            .await
+            .expect_err("replacement inode must not be reset");
+        assert!(
+            matches!(
+                error,
+                AttemptFail::Destination(DestinationProblem::Replaced)
+            ),
+            "expected a typed replacement failure, got {error:?}"
+        );
+        assert_eq!(
+            tokio::fs::read(&destination)
+                .await
+                .expect("read replacement"),
+            b"foreign sentinel"
         );
     }
 

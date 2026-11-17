@@ -1071,42 +1071,34 @@ impl DownloadManager {
                         done = true;
                         break;
                     }
-                    EngineMsg::FailedVersion(e) => {
-                        // The existing partial is no longer safe to resume: drop its bitmap and re-probe fresh.
-                        // Clear the validator too: a later retry must not attach an old validator to the new partial
-                        // or keep treating the invalid bytes as the old version.
-                        // Explicitly delete the partial file: its bytes are not trusted and must not survive
-                        // into a retry (previously this was only emergent via 416/hole handling).
-                        let invalid_path = item.file_path();
+                    EngineMsg::FailedVersion {
+                        error,
+                        destination_reusable,
+                    } => {
+                        // The transfer has already reset the captured inode through
+                        // its open descriptor. Never unlink this pathname here: it
+                        // may have been replaced after the HTTP response was read.
                         this.segment_state.borrow_mut().remove(&id);
                         this.pending_names.borrow_mut().remove(&id);
                         item.set_etag(String::new());
                         item.set_last_modified(String::new());
-                        this.persist_queue();
-                        this.reserve_dest(&invalid_path);
-                        let worker_path = invalid_path.clone();
-                        drop(this);
-                        let _ =
-                            gio::spawn_blocking(move || std::fs::remove_file(worker_path)).await;
-                        let Some(this) = weak.upgrade() else {
-                            done = true;
-                            break;
-                        };
-                        this.release_dest(&invalid_path);
-                        if !this.is_current(id, generation) {
-                            done = true;
-                            break;
+                        if !destination_reusable {
+                            // The transfer could not prove that the path still names
+                            // its captured inode. A later retry must treat any file at
+                            // this path as foreign instead of resuming it.
+                            this.started.borrow_mut().remove(&id);
                         }
-                        this.start_next();
+                        this.persist_queue();
                         if item.status() != DownloadStatus::Cancelled
                             && item.status() != DownloadStatus::Paused
                         {
                             // Set detail BEFORE status: the status notify
                             // pops the failure dialog, which reads detail.
-                            item.set_detail(e.clone());
+                            item.set_detail(error.clone());
                             item.set_status(DownloadStatus::Failed);
-                            this.notify_finished(&item, Err(e));
+                            this.notify_finished(&item, Err(error));
                         }
+                        this.start_next();
                         done = true;
                         break;
                     }

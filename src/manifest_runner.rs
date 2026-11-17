@@ -3312,7 +3312,7 @@ async fn finalize_manifest_download(
     let embed_subtitles =
         embed_manifest_subtitles(job.embed_subs, output_container, subtitle_format);
     let subtitle_sidecar = if subtitle_input.is_some() && !embed_subtitles {
-        Some(if subtitle_format {
+        Some(if subtitle_format == SubtitleFormat::Fmp4 {
             crate::video_staging::sidecar_path_for_extension(
                 &output_part,
                 subtitle_language,
@@ -3495,7 +3495,7 @@ async fn finalize_manifest_download(
     }
 
     if let Some(sidecar) = subtitle_sidecar.as_deref() {
-        if subtitle_format {
+        if subtitle_format == SubtitleFormat::Fmp4 {
             crate::video_staging::collect_sidecar_with_extension(
                 sidecar,
                 &job.dest,

@@ -1319,7 +1319,7 @@ fn stem_has_subtitle_sidecar(names: &[String], stem: &str) -> bool {
     })
 }
 
-pub(crate) const FMP4_SUBTITLE_SIDECAR_EXTENSION: &str = FMP4_SUBTITLE_SIDECAR_EXTENSION;
+pub(crate) const FMP4_SUBTITLE_SIDECAR_EXTENSION: &str = "fmp4.mp4";
 
 pub(crate) fn sidecar_path_for(output: &Path, lang: &str) -> PathBuf {
     sidecar_path_for_extension(output, lang, "srt")

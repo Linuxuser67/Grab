@@ -25,6 +25,8 @@ import subprocess
 import sys
 import tomllib
 
+from _version import version_key
+
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 CARGO_TOML = ROOT / "Cargo.toml"
 CARGO_LOCK = ROOT / "Cargo.lock"
@@ -74,29 +76,6 @@ def metainfo_release_versions() -> list[str]:
     if not versions:
         raise fail("metainfo has no <release> entries")
     return versions
-
-
-def _identifier(part: str) -> tuple[int, int | str]:
-    # Mirror check-bundle-contents.py: numeric identifiers sort before
-    # alphanumeric ones and never compare an int against a str.
-    return (0, int(part)) if part.isdigit() else (1, part)
-
-
-def version_key(version: str):
-    # AppStream ordering: '~' sorts before everything, so 5.6.7~beta.3 < 5.6.7.
-    # Normalize Cargo's '-' prerelease separator to AppStream's '~'.
-    version = (
-        version.replace("-beta.", "~beta.")
-        .replace("-alpha.", "~alpha.")
-        .replace("-rc.", "~rc.")
-    )
-    if "~" in version:
-        core, pre = version.split("~", 1)
-        core_tuple = tuple(_identifier(p) for p in core.split("."))
-        pre_parts = tuple(_identifier(p) for p in pre.split("."))
-        return (core_tuple, 0, pre_parts)
-    core_tuple = tuple(_identifier(p) for p in version.split("."))
-    return (core_tuple, 1, ())
 
 
 def flatpak_manifest_tag(manifest: pathlib.Path) -> str | None:

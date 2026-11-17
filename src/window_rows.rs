@@ -344,12 +344,11 @@ pub(crate) fn stop_copy(is_live: bool) -> StopCopy {
     }
 }
 
-/// Which glyph the row's stop button wears: a live capture's button finishes
-/// and saves the recording, so it must not carry the cancel glyph. Adwaita's
-/// `document-save-symbolic` is the standard save icon.
+/// Which glyph the row's stop button wears: a live capture finishes a
+/// recording, so it uses the media stop square rather than the cancel glyph.
 pub(crate) fn stop_icon(is_live: bool) -> &'static str {
     if is_live {
-        "document-save-symbolic"
+        "media-playback-stop-symbolic"
     } else {
         "process-stop-symbolic"
     }
@@ -551,8 +550,7 @@ fn refresh_row(
     w.stop_btn.set_tooltip_text(Some(&stop_tip));
     w.stop_btn
         .update_property(&[gtk4::accessible::Property::Label(&stop_a11y)]);
-    // The glyph follows the action: a live capture's button saves the
-    // recording, so it must not wear the cancel icon.
+    // A live capture finishes a recording: use the media stop glyph, not cancel.
     w.stop_btn.set_icon_name(stop_icon(live_capturing));
     // Deferring only helps while another row waits for the slot.
     w.queue_btn.set_visible(

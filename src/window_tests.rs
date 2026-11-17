@@ -37,18 +37,16 @@ fn stop_copy_distinguishes_a_live_capture_from_a_discard() {
 }
 
 #[test]
-fn stop_icon_saves_a_live_capture_and_cancels_an_ordinary_download() {
-    // The glyph must match the action: finishing a live capture keeps the
-    // recording, so the stop square would read as "discard".
+fn stop_icon_uses_the_media_stop_glyph_for_live_captures() {
     assert_eq!(
         stop_icon(true),
-        "document-save-symbolic",
-        "a live capture is saved, so the button shows the save icon"
+        "media-playback-stop-symbolic",
+        "a live capture finishes a recording, so it shows the media stop glyph"
     );
     assert_eq!(
         stop_icon(false),
         "process-stop-symbolic",
-        "an ordinary download is discarded, so the stop icon stays"
+        "an ordinary download is cancelled, so it keeps the stop/cancel glyph"
     );
 }
 

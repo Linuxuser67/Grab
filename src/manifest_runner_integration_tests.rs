@@ -3365,7 +3365,6 @@ segment-001.m4s
     );
 }
 
-
 #[tokio::test]
 async fn byte_ranged_fmp4_video_and_audio_create_destination_parts_during_transfer() {
     let root = TempRoot::new("hls-fmp4-byte-range-destination-parts");
@@ -3408,11 +3407,17 @@ audio.mp4
     assert_eq!(video_plan.resources.len(), 3);
     assert_eq!(audio_plan.resources.len(), 3);
     assert!(
-        video_plan.resources.iter().all(|resource| resource.range.is_some()),
+        video_plan
+            .resources
+            .iter()
+            .all(|resource| resource.range.is_some()),
         "video init and media resources should all retain their byte ranges"
     );
     assert!(
-        audio_plan.resources.iter().all(|resource| resource.range.is_some()),
+        audio_plan
+            .resources
+            .iter()
+            .all(|resource| resource.range.is_some()),
         "audio init and media resources should all retain their byte ranges"
     );
 
@@ -3477,8 +3482,8 @@ audio.mp4
         }
     });
 
-    let base_url = Url::parse(&format!("http://{address}/"))
-        .expect("build loopback byte-range fMP4 URL");
+    let base_url =
+        Url::parse(&format!("http://{address}/")).expect("build loopback byte-range fMP4 URL");
     for resource in &mut video_plan.resources {
         resource.url = loopback_resource_url(&base_url, &resource.url);
     }
@@ -3513,20 +3518,12 @@ audio.mp4
     let destination = destination_dir.join("recording.mp4");
     crate::manifest_destination::ensure_plan(&staging, &destination, 93, true, false)
         .expect("persist separate video and audio destination parts");
-    let video_part = crate::manifest_destination::part_path(
-        &staging,
-        &destination,
-        93,
-        TrackKind::Video,
-    )
-    .expect("resolve fMP4 video destination part");
-    let audio_part = crate::manifest_destination::part_path(
-        &staging,
-        &destination,
-        93,
-        TrackKind::Audio,
-    )
-    .expect("resolve fMP4 audio destination part");
+    let video_part =
+        crate::manifest_destination::part_path(&staging, &destination, 93, TrackKind::Video)
+            .expect("resolve fMP4 video destination part");
+    let audio_part =
+        crate::manifest_destination::part_path(&staging, &destination, 93, TrackKind::Audio)
+            .expect("resolve fMP4 audio destination part");
 
     let task_staging = staging.clone();
     let task_video_dir = video_dir.clone();
@@ -3562,7 +3559,11 @@ audio.mp4
         .await
         .expect("the video destination .part must exist while its media request is in flight");
     assert!(metadata.is_file());
-    assert_eq!(metadata.len(), 4, "the byte-ranged init section must be committed");
+    assert_eq!(
+        metadata.len(),
+        4,
+        "the byte-ranged init section must be committed"
+    );
     assert_eq!(
         tokio::fs::read(&video_part)
             .await

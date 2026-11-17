@@ -58,7 +58,20 @@
     </screenshot>
   </screenshots>
   <releases>
-    <release version="6.5.0~beta.23" date="2026-11-16">
+    <release version="6.5.0" date="2026-11-17">
+      <description>
+        <ul>
+          <li>Native HLS and DASH downloads now cover a wider range of supported on-demand and live streams, with audio and video track handling, expanded subtitle and caption support, and MP4, MKV or MPEG-TS output.</li>
+          <li>Compatible HLS VOD downloads can write to a visible destination-side .part file while media arrives, including fMP4, byte-ranged resources, separate audio and video renditions, and AES-128 encrypted streams.</li>
+          <li>Live-stream handling is more capable, with improved HLS live and low-latency playlist support, clearer continuity handling, and more reliable recording finalization.</li>
+          <li>Playlist and gallery downloads are organized into collection rows with per-item progress. Choose individual files from multi-item playlists, galleries and torrents before queueing them.</li>
+          <li>Browser-cookie handoff improves access to supported authenticated video sources, while cached video and playlist lookups reduce repeated extraction work.</li>
+          <li>The GNOME interface adds adaptive queue navigation, refined search and download controls, and clearer collection and per-file progress presentation.</li>
+          <li>Download reliability and file safety are improved across pause and resume, saved-queue restoration, cancellation, publication and cleanup. Destination ownership checks and symlink protections help preserve files that Grab does not own.</li>
+        </ul>
+      </description>
+    </release>
+    <release version="6.5.0~beta.23" type="development" date="2026-11-16">
       <description>
         <ul>
           <li>Streaming: encrypted HLS VOD presentations now stream straight into the destination part while segments arrive, and MP4/MKV output through that path is covered by integration tests.</li>

@@ -168,7 +168,7 @@ pub(crate) async fn run_download(mut ctx: FetchCtx, connections: usize, mode: St
             let mut claim = match DestinationClaim::capture(&ctx.dest).await {
                 Ok(claim) => claim,
                 Err(error) => {
-                    ctx.tx.send(EngineMsg::Failed(error)).ok();
+                    ctx.tx.send(EngineMsg::Failed(error.into_message())).ok();
                     return;
                 }
             };
@@ -242,7 +242,7 @@ pub(crate) async fn run_download(mut ctx: FetchCtx, connections: usize, mode: St
                     return;
                 }
                 Err(error) => {
-                    ctx.tx.send(EngineMsg::Failed(error)).ok();
+                    ctx.tx.send(EngineMsg::Failed(error.into_message())).ok();
                     return;
                 }
             };
@@ -282,13 +282,12 @@ async fn single_loop(
                         ctx.tx.send(EngineMsg::FailedVersion(e)).ok();
                         return;
                     }
+                    AttemptFail::Destination(problem) => {
+                        ctx.tx.send(EngineMsg::Failed(problem.message())).ok();
+                        return;
+                    }
                     AttemptFail::Retryable(e) | AttemptFail::Throttled(e) => e,
                 };
-                // A destination this transfer cannot prove it owns is terminal; retries must not adopt it.
-                if message == DEST_EXISTS {
-                    ctx.tx.send(EngineMsg::Failed(message)).ok();
-                    return;
-                }
                 *tries -= 1;
                 if *tries <= 0 {
                     ctx.tx.send(EngineMsg::Failed(message)).ok();
@@ -318,7 +317,7 @@ async fn wait_for_fallback_ack(
 }
 
 /// Retry loop around segmented attempts (each retry refetches only still-missing pieces).
-/// Returns true when the server throttled parallel connections (caller continues single-stream).
+/// Returns true when throttling or an unsafe short prefix requires a fresh single-stream transfer.
 /// The caller retains the identity so a single-stream fallback keeps the same ownership proof.
 async fn multi_loop(
     ctx: &FetchCtx,
@@ -354,22 +353,32 @@ async fn multi_loop(
                 ctx.tx.send(EngineMsg::FailedVersion(e)).ok();
                 return false;
             }
+            Err(AttemptFail::Destination(problem)) => {
+                ctx.tx.send(EngineMsg::Failed(problem.message())).ok();
+                return false;
+            }
             Err(AttemptFail::Retryable(e)) => {
-                // A foreign destination is terminal, not something to retry
-                // by reopening or modifying the path.
-                if e == DEST_EXISTS {
-                    ctx.tx.send(EngineMsg::Failed(e)).ok();
-                    return false;
-                }
-
                 *tries -= 1;
                 if *tries <= 0 {
-                    ctx.tx.send(EngineMsg::TruncatePrefix).ok();
+                    let (ack_tx, ack_rx) = tokio::sync::oneshot::channel();
+                    if ctx
+                        .tx
+                        .send(EngineMsg::TruncatePrefix { ack: ack_tx })
+                        .is_ok()
+                        && matches!(
+                            tokio::time::timeout(FALLBACK_ACK_TIMEOUT, ack_rx).await,
+                            Ok(Ok(true))
+                        )
+                    {
+                        // The bitmap was cleared and the stale partial was reset to zero.
+                        // Reuse the existing destination claim for a fresh single stream.
+                        return true;
+                    }
                     ctx.tx.send(EngineMsg::Failed(e)).ok();
                     return false;
                 }
-                // Jittered backoff on retryable failures (Throttled has its own
-                // UI-ack handshake, Changed/DEST_EXISTS are terminal).
+                // Jittered backoff on retryable failures (Throttled and a short-prefix
+                // reset have explicit UI acknowledgments; Changed/Destination are terminal).
                 failures += 1;
                 tokio::time::sleep(backoff_delay(failures)).await;
             }
@@ -399,6 +408,7 @@ async fn attempt_multi(
         Arc::new(Mutex::new(missing.into_iter().collect()));
     let failed = Arc::new(AtomicBool::new(false));
     let first_err: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None));
+    let destination_problem: Arc<Mutex<Option<DestinationProblem>>> = Arc::new(Mutex::new(None));
     let throttled = Arc::new(AtomicBool::new(false));
     let changed = Arc::new(AtomicBool::new(false));
     // Bound in-flight BYTES, not pieces (big pieces would pin hundreds of MB on a slow disk).
@@ -411,12 +421,13 @@ async fn attempt_multi(
         .clamp(1, 16);
     let mut workers = Vec::with_capacity(n_workers);
     for _ in 0..n_workers {
-        let (ctx, wtx, queue, failed, first_err, throttled, changed) = (
+        let (ctx, wtx, queue, failed, first_err, destination_problem, throttled, changed) = (
             ctx,
             wtx.clone(),
             Arc::clone(&queue),
             Arc::clone(&failed),
             Arc::clone(&first_err),
+            Arc::clone(&destination_problem),
             Arc::clone(&throttled),
             Arc::clone(&changed),
         );
@@ -445,6 +456,12 @@ async fn attempt_multi(
                         failed.store(true, Ordering::SeqCst);
                         break;
                     }
+                    Err(AttemptFail::Destination(problem)) => {
+                        *lock_recover(&destination_problem) = Some(problem);
+                        lock_recover(&first_err).get_or_insert(problem.message());
+                        failed.store(true, Ordering::SeqCst);
+                        break;
+                    }
                     Err(AttemptFail::Retryable(msg)) => {
                         lock_recover(&first_err).get_or_insert(msg);
                         failed.store(true, Ordering::SeqCst);
@@ -459,6 +476,7 @@ async fn attempt_multi(
         let mut wrx = wrx;
         let dest = ctx.dest.clone();
         let st = &mut *st;
+        let claim = &*claim;
         async move {
             let mut file = output_file;
             let mut downloaded = st.completed_bytes();
@@ -479,10 +497,12 @@ async fn attempt_multi(
             while let Some((offset, bytes, idx)) = wrx.recv().await {
                 file.seek(std::io::SeekFrom::Start(offset))
                     .await
-                    .map_err(|e| format!("Cannot write file: {e}"))?;
-                file.write_all(&bytes)
-                    .await
-                    .map_err(|e| format!("Cannot write file: {e}"))?;
+                    .map_err(|error| {
+                        AttemptFail::Retryable(format!("Cannot write file: {error}"))
+                    })?;
+                file.write_all(&bytes).await.map_err(|error| {
+                    AttemptFail::Retryable(format!("Cannot write file: {error}"))
+                })?;
                 downloaded += bytes.len() as u64;
                 written += bytes.len() as u64;
                 unsynced_bytes = unsynced_bytes.saturating_add(bytes.len() as u64);
@@ -493,26 +513,17 @@ async fn attempt_multi(
                     last_rate_update = Instant::now();
                 }
                 if unsynced_bytes >= durable_batch_bytes {
-                    file.flush()
-                        .await
-                        .map_err(|e| format!("Cannot write file: {e}"))?;
-                    file.sync_data()
-                        .await
-                        .map_err(|e| format!("Cannot sync file: {e}"))?;
-                    // Verify the path still references the file being written
-                    // before publishing any completion from this batch.
-                    let fd_metadata = file
-                        .metadata()
-                        .await
-                        .map_err(|e| format!("Cannot inspect downloaded file: {e}"))?;
-                    let path_metadata = tokio::fs::symlink_metadata(&dest)
-                        .await
-                        .map_err(|e| format!("Cannot verify download destination: {e}"))?;
-                    if path_metadata.file_type().is_symlink()
-                        || file_identity(&fd_metadata) != file_identity(&path_metadata)
-                    {
-                        return Err("Destination file was replaced during download".to_string());
-                    }
+                    file.flush().await.map_err(|error| {
+                        AttemptFail::Retryable(format!("Cannot write file: {error}"))
+                    })?;
+                    file.sync_data().await.map_err(|error| {
+                        AttemptFail::Retryable(format!("Cannot sync file: {error}"))
+                    })?;
+                    // Publish a batch only while both the opened descriptor and
+                    // the destination path still identify the claimed regular file.
+                    claim
+                        .verify_opened_file(&dest, &file, "downloaded file")
+                        .await?;
                     for idx in completed_indices.drain(..) {
                         st.mark(idx);
                         ctx.tx.send(EngineMsg::PieceDone(idx)).ok();
@@ -523,35 +534,29 @@ async fn attempt_multi(
             }
             file.flush()
                 .await
-                .map_err(|e| format!("Cannot write file: {e}"))?;
+                .map_err(|error| AttemptFail::Retryable(format!("Cannot write file: {error}")))?;
             // Finish with sync_all after the last batch, then publish any short
             // final batch. Interrupted data not covered by a completed batch
             // remains absent from the resume bitmap and will be fetched again.
             file.sync_all()
                 .await
-                .map_err(|e| format!("Cannot sync file: {e}"))?;
-            let fd_metadata = file
-                .metadata()
-                .await
-                .map_err(|e| format!("Cannot inspect downloaded file: {e}"))?;
-            let path_metadata = tokio::fs::symlink_metadata(&dest)
-                .await
-                .map_err(|e| format!("Cannot verify download destination: {e}"))?;
-            if path_metadata.file_type().is_symlink()
-                || file_identity(&fd_metadata) != file_identity(&path_metadata)
-            {
-                return Err("Destination file was replaced during download".to_string());
-            }
+                .map_err(|error| AttemptFail::Retryable(format!("Cannot sync file: {error}")))?;
+            claim
+                .verify_opened_file(&dest, &file, "downloaded file")
+                .await?;
             for idx in completed_indices {
                 st.mark(idx);
                 ctx.tx.send(EngineMsg::PieceDone(idx)).ok();
             }
             ctx.tx.send(progress_msg(downloaded, Some(total))).ok();
-            Ok::<u64, String>(written)
+            Ok::<u64, AttemptFail>(written)
         }
     };
     let (wres, _) = tokio::join!(writer, futures_util::future::join_all(workers));
-    let written = wres.map_err(AttemptFail::Retryable)?;
+    let written = wres?;
+    if let Some(problem) = lock_recover(&destination_problem).take() {
+        return Err(AttemptFail::Destination(problem));
+    }
     if changed.load(Ordering::SeqCst) {
         return Err(AttemptFail::Changed(take_first_err(&first_err)));
     }
@@ -596,7 +601,11 @@ async fn attempt_once(
     loop {
         let start = match tokio::fs::symlink_metadata(&ctx.dest).await {
             Ok(metadata) if metadata.file_type().is_symlink() || !metadata.is_file() => {
-                return Err(AttemptFail::Retryable(DEST_EXISTS.to_string()));
+                return Err(AttemptFail::Destination(if claim.is_claimed() {
+                    DestinationProblem::Replaced
+                } else {
+                    DestinationProblem::Exists
+                }));
             }
             Ok(metadata) => {
                 claim.verify_metadata(&metadata)?;
@@ -604,7 +613,7 @@ async fn attempt_once(
             }
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
                 if claim.is_claimed() {
-                    return Err(AttemptFail::Retryable(DESTINATION_DISAPPEARED.to_string()));
+                    return Err(AttemptFail::Destination(DestinationProblem::Disappeared));
                 }
                 0
             }
@@ -626,7 +635,9 @@ async fn attempt_once(
                 req = req.header("If-Range", v);
             }
         }
-        let resp = execute_with_timeout(&ctx.client, req, ctx.timeout).await?;
+        let resp = execute_with_timeout(&ctx.client, req, ctx.timeout)
+            .await
+            .map_err(AttemptFail::Retryable)?;
         let status = resp.status();
         if status == reqwest::StatusCode::RANGE_NOT_SATISFIABLE {
             let claimed = resp
@@ -661,9 +672,9 @@ async fn attempt_once(
                 // A complete-looking partial can come from an interrupted attempt.
                 // Sync it before accepting a 416 as proof of completion.
                 let file = claim.open_for_writing(&ctx.dest).await?;
-                file.sync_all()
-                    .await
-                    .map_err(|error| format!("Cannot sync file: {error}"))?;
+                file.sync_all().await.map_err(|error| {
+                    AttemptFail::Retryable(format!("Cannot sync file: {error}"))
+                })?;
                 claim.verify(&ctx.dest).await?;
                 return Ok(());
             }
@@ -677,11 +688,11 @@ async fn attempt_once(
             // pathname after an async/network wait: it may now name someone else's file.
             if claim.is_claimed() {
                 let file = claim.open_for_writing(&ctx.dest).await?;
-                file.set_len(0)
-                    .await
-                    .map_err(|error| format!("Cannot reset partial download: {error}"))?;
+                file.set_len(0).await.map_err(|error| {
+                    AttemptFail::Retryable(format!("Cannot reset partial download: {error}"))
+                })?;
             } else if tokio::fs::symlink_metadata(&ctx.dest).await.is_ok() {
-                return Err(AttemptFail::Retryable(DEST_EXISTS.to_string()));
+                return Err(AttemptFail::Destination(DestinationProblem::Exists));
             }
             restarted = true;
             continue;
@@ -757,9 +768,9 @@ async fn attempt_once(
             let was_claimed = claim.is_claimed();
             let file = claim.open_for_writing(&ctx.dest).await?;
             if was_claimed {
-                file.set_len(0)
-                    .await
-                    .map_err(|error| format!("Cannot reset partial download: {error}"))?;
+                file.set_len(0).await.map_err(|error| {
+                    AttemptFail::Retryable(format!("Cannot reset partial download: {error}"))
+                })?;
             }
             file
         };
@@ -809,7 +820,7 @@ async fn attempt_once(
             empty_streak = 0;
             file.write_all(&chunk)
                 .await
-                .map_err(|error| format!("Cannot write file: {error}"))?;
+                .map_err(|error| AttemptFail::Retryable(format!("Cannot write file: {error}")))?;
             downloaded += chunk.len() as u64;
             pace_chunk(&mut paced, pace_start, rate, chunk.len()).await;
             if last_sent.elapsed() >= Duration::from_millis(50) {
@@ -820,7 +831,7 @@ async fn attempt_once(
         }
         file.flush()
             .await
-            .map_err(|error| format!("Cannot write file: {error}"))?;
+            .map_err(|error| AttemptFail::Retryable(format!("Cannot write file: {error}")))?;
         // Single-stream attempts complete before the UI persists progress/bitmap;
         // make the bytes durable first so a crash cannot resurrect a lost tail.
         file.sync_all().await.map_err(|error| {
@@ -847,11 +858,18 @@ pub(crate) fn apply_torrent_limits(s: &crate::settings::AppSettings) {
 
 /// Shrink `path` to the longest completed piece prefix before single-stream resume.
 ///
-/// # Errors
-///
-/// Returns an error if the destination is not a regular file, is shorter than the
-/// recorded completed prefix, or cannot be truncated and synced.
-pub(crate) fn truncate_to_prefix(path: &std::path::Path, st: &SegmentState) -> std::io::Result<()> {
+/// If the bitmap overstates the bytes that survived on disk, reset the file to zero.
+/// Non-regular destinations and filesystem errors remain hard failures.
+#[derive(Debug)]
+pub(crate) enum PrefixTruncation {
+    CompletedPrefix,
+    ResetFromZero(std::fs::File),
+}
+
+pub(crate) fn truncate_to_prefix(
+    path: &std::path::Path,
+    st: &SegmentState,
+) -> std::io::Result<PrefixTruncation> {
     let prefix = st.prefix_len();
     let file = std_open_nofollow(
         |options| {
@@ -867,17 +885,32 @@ pub(crate) fn truncate_to_prefix(path: &std::path::Path, st: &SegmentState) -> s
         ));
     }
     if metadata.len() < prefix {
-        return Err(std::io::Error::new(
-            std::io::ErrorKind::InvalidData,
-            "segmented download is shorter than its completed resume prefix",
-        ));
+        // Return the still-open descriptor without modifying it. The caller
+        // must durably clear the bitmap before truncating, so a crash between
+        // those operations cannot resurrect a bitmap for bytes that were lost.
+        return Ok(PrefixTruncation::ResetFromZero(file));
     }
     if metadata.len() > prefix {
         file.set_len(prefix)?;
         // The caller clears the durable bitmap only after this sync succeeds.
         file.sync_all()?;
     }
-    Ok(())
+    Ok(PrefixTruncation::CompletedPrefix)
+}
+
+/// Reset a previously validated no-follow descriptor after its resume bitmap was cleared.
+///
+/// The caller owns the ordering: persist the empty bitmap before invoking this function.
+pub(crate) fn truncate_open_file_to_zero(file: std::fs::File) -> std::io::Result<()> {
+    let metadata = file.metadata()?;
+    if !metadata.is_file() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "segmented download destination is not a regular file",
+        ));
+    }
+    file.set_len(0)?;
+    file.sync_all()
 }
 
 /// Open for writing without truncating (truncating here would corrupt resumed pieces the bitmap claims as done).
@@ -912,23 +945,20 @@ async fn open_nofollow(
 pub(crate) async fn open_partial(
     path: &std::path::Path,
     start: u64,
-) -> Result<tokio::fs::File, String> {
+) -> std::io::Result<tokio::fs::File> {
     let file = open_nofollow(
         |o| {
             o.append(true);
         },
         path,
     )
-    .await
-    .map_err(|e| format!("Cannot write file: {e}"))?;
+    .await?;
     // The stat happened before the request: a local append/truncate in that window would shift every byte.
-    let at = file
-        .metadata()
-        .await
-        .map_err(|e| format!("Cannot write file: {e}"))?
-        .len();
+    let at = file.metadata().await?.len();
     if at != start {
-        return Err(gettext("The partial file changed during resume"));
+        return Err(std::io::Error::other(gettext(
+            "The partial file changed during resume",
+        )));
     }
     Ok(file)
 }
@@ -951,6 +981,33 @@ fn file_identity(metadata: &std::fs::Metadata) -> FileIdentity {
 const DESTINATION_REPLACED: &str = "Destination file was replaced during download";
 const DESTINATION_DISAPPEARED: &str = "Destination file disappeared during download";
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum DestinationProblem {
+    Exists,
+    Disappeared,
+    Replaced,
+}
+
+impl DestinationProblem {
+    fn message(self) -> String {
+        match self {
+            Self::Exists => DEST_EXISTS.to_string(),
+            Self::Disappeared => DESTINATION_DISAPPEARED.to_string(),
+            Self::Replaced => DESTINATION_REPLACED.to_string(),
+        }
+    }
+}
+
+fn destination_open_error(error: std::io::Error, claimed: bool) -> AttemptFail {
+    if claimed && error.kind() == std::io::ErrorKind::NotFound {
+        AttemptFail::Destination(DestinationProblem::Disappeared)
+    } else if claimed && error.raw_os_error() == Some(libc::ELOOP) {
+        AttemptFail::Destination(DestinationProblem::Replaced)
+    } else {
+        AttemptFail::Retryable(format!("Cannot write file: {error}"))
+    }
+}
+
 /// Proof that a transfer owns the destination inode. Fresh transfers begin
 /// unclaimed and may acquire ownership only through an exclusive create_new.
 /// This stateful claim is not `Copy`: an implicit copy could fork its ownership state.
@@ -960,7 +1017,7 @@ struct DestinationClaim {
 }
 
 impl DestinationClaim {
-    async fn capture(path: &std::path::Path) -> Result<Self, String> {
+    async fn capture(path: &std::path::Path) -> Result<Self, AttemptFail> {
         Ok(Self {
             identity: destination_identity(path).await?,
         })
@@ -977,23 +1034,37 @@ impl DestinationClaim {
         }
     }
 
-    fn verify_metadata(&self, metadata: &std::fs::Metadata) -> Result<(), String> {
+    fn verify_metadata(&self, metadata: &std::fs::Metadata) -> Result<(), AttemptFail> {
         if metadata.file_type().is_symlink() || !metadata.is_file() {
-            return Err(DEST_EXISTS.to_string());
+            return Err(AttemptFail::Destination(if self.is_claimed() {
+                DestinationProblem::Replaced
+            } else {
+                DestinationProblem::Exists
+            }));
         }
         match self.identity {
             Some(expected) if file_identity(metadata) == expected => Ok(()),
-            Some(_) => Err(DESTINATION_REPLACED.to_string()),
-            None => Err(DEST_EXISTS.to_string()),
+            Some(_) => Err(AttemptFail::Destination(DestinationProblem::Replaced)),
+            None => Err(AttemptFail::Destination(DestinationProblem::Exists)),
         }
     }
 
-    async fn verify(&self, path: &std::path::Path) -> Result<(), String> {
-        let expected = self.identity.ok_or_else(|| DEST_EXISTS.to_string())?;
-        match destination_identity(path).await? {
-            Some(actual) if actual == expected => Ok(()),
-            Some(_) => Err(DESTINATION_REPLACED.to_string()),
-            None => Err(DESTINATION_DISAPPEARED.to_string()),
+    async fn verify(&self, path: &std::path::Path) -> Result<(), AttemptFail> {
+        let expected = self
+            .identity
+            .ok_or(AttemptFail::Destination(DestinationProblem::Exists))?;
+        match tokio::fs::symlink_metadata(path).await {
+            Ok(metadata) if metadata.file_type().is_symlink() || !metadata.is_file() => {
+                Err(AttemptFail::Destination(DestinationProblem::Replaced))
+            }
+            Ok(metadata) if file_identity(&metadata) == expected => Ok(()),
+            Ok(_) => Err(AttemptFail::Destination(DestinationProblem::Replaced)),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                Err(AttemptFail::Destination(DestinationProblem::Disappeared))
+            }
+            Err(error) => Err(AttemptFail::Retryable(format!(
+                "Cannot inspect file: {error}"
+            ))),
         }
     }
 
@@ -1002,11 +1073,10 @@ impl DestinationClaim {
         path: &std::path::Path,
         file: &tokio::fs::File,
         context: &str,
-    ) -> Result<(), String> {
-        let metadata = file
-            .metadata()
-            .await
-            .map_err(|error| format!("Could not inspect {context}: {error}"))?;
+    ) -> Result<(), AttemptFail> {
+        let metadata = file.metadata().await.map_err(|error| {
+            AttemptFail::Retryable(format!("Could not inspect {context}: {error}"))
+        })?;
         self.verify_metadata(&metadata)?;
         self.verify(path).await
     }
@@ -1016,7 +1086,7 @@ impl DestinationClaim {
     async fn open_for_writing(
         &mut self,
         path: &std::path::Path,
-    ) -> Result<tokio::fs::File, String> {
+    ) -> Result<tokio::fs::File, AttemptFail> {
         let was_claimed = self.is_claimed();
         if was_claimed {
             self.verify(path).await?;
@@ -1033,26 +1103,25 @@ impl DestinationClaim {
         .await
         .map_err(|error| {
             if !was_claimed && error.kind() == std::io::ErrorKind::AlreadyExists {
-                DEST_EXISTS.to_string()
+                AttemptFail::Destination(DestinationProblem::Exists)
             } else {
-                format!("Cannot write file: {error}")
+                destination_open_error(error, was_claimed)
             }
         })?;
-        let metadata = file
-            .metadata()
-            .await
-            .map_err(|error| format!("Cannot inspect downloaded file: {error}"))?;
+        let metadata = file.metadata().await.map_err(|error| {
+            AttemptFail::Retryable(format!("Cannot inspect downloaded file: {error}"))
+        })?;
         if !metadata.is_file() {
-            return Err(if was_claimed {
-                DESTINATION_REPLACED.to_string()
+            return Err(AttemptFail::Destination(if was_claimed {
+                DestinationProblem::Replaced
             } else {
-                DEST_EXISTS.to_string()
-            });
+                DestinationProblem::Exists
+            }));
         }
         let actual = file_identity(&metadata);
         match self.identity {
             Some(expected) if expected != actual => {
-                return Err(DESTINATION_REPLACED.to_string());
+                return Err(AttemptFail::Destination(DestinationProblem::Replaced));
             }
             None => self.identity = Some(actual),
             _ => {}
@@ -1068,11 +1137,13 @@ impl DestinationClaim {
         &self,
         path: &std::path::Path,
         start: u64,
-    ) -> Result<tokio::fs::File, String> {
+    ) -> Result<tokio::fs::File, AttemptFail> {
         if !self.is_claimed() {
-            return Err(DEST_EXISTS.to_string());
+            return Err(AttemptFail::Destination(DestinationProblem::Exists));
         }
-        let file = open_partial(path, start).await?;
+        let file = open_partial(path, start)
+            .await
+            .map_err(|error| destination_open_error(error, true))?;
         self.verify_opened_file(path, &file, "partial download")
             .await?;
         Ok(file)
@@ -1081,14 +1152,16 @@ impl DestinationClaim {
 
 /// Capture an existing regular destination before a resume request. A fresh
 /// download receives `None` and must create its first file with create_new.
-async fn destination_identity(path: &std::path::Path) -> Result<Option<FileIdentity>, String> {
+async fn destination_identity(path: &std::path::Path) -> Result<Option<FileIdentity>, AttemptFail> {
     match tokio::fs::symlink_metadata(path).await {
         Ok(metadata) if metadata.file_type().is_symlink() || !metadata.is_file() => {
-            Err(DEST_EXISTS.to_string())
+            Err(AttemptFail::Destination(DestinationProblem::Exists))
         }
         Ok(metadata) => Ok(Some(file_identity(&metadata))),
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
-        Err(error) => Err(format!("Cannot inspect file: {error}")),
+        Err(error) => Err(AttemptFail::Retryable(format!(
+            "Cannot inspect file: {error}"
+        ))),
     }
 }
 
@@ -1097,10 +1170,7 @@ async fn ensure_sized(
     total: u64,
     claim: &mut DestinationClaim,
 ) -> Result<tokio::fs::File, AttemptFail> {
-    let file = claim
-        .open_for_writing(dest)
-        .await
-        .map_err(AttemptFail::Retryable)?;
+    let file = claim.open_for_writing(dest).await?;
     let metadata = file
         .metadata()
         .await
@@ -1327,17 +1397,21 @@ pub(crate) fn accepts_content_range(
     )
 }
 
-/// Why an attempt failed. `Changed` means the existing partial is no longer safe to resume.
+/// Why an attempt failed. Destination ownership failures never enter the retry budget.
 #[derive(Debug)]
 pub(crate) enum AttemptFail {
     Retryable(String),
     Throttled(String),
     Changed(String),
+    Destination(DestinationProblem),
 }
 
-impl From<String> for AttemptFail {
-    fn from(message: String) -> Self {
-        Self::Retryable(message)
+impl AttemptFail {
+    fn into_message(self) -> String {
+        match self {
+            Self::Retryable(message) | Self::Throttled(message) | Self::Changed(message) => message,
+            Self::Destination(problem) => problem.message(),
+        }
     }
 }
 
@@ -1544,8 +1618,9 @@ const PIECE_TRIES: u32 = 3;
 #[cfg(test)]
 mod destination_ownership_tests {
     use super::{
-        AttemptFail, DestinationClaim, FetchCtx, FileIdentity, attempt_once, ensure_sized,
-        single_loop, truncate_to_prefix, wait_for_fallback_ack,
+        AttemptFail, DestinationClaim, DestinationProblem, FetchCtx, FileIdentity,
+        PrefixTruncation, attempt_once, ensure_sized, single_loop, truncate_open_file_to_zero,
+        truncate_to_prefix, wait_for_fallback_ack,
     };
     use crate::download_net::{DEFAULT_USER_AGENT, DownloadOptions};
     use crate::download_pieces::SegmentState;
@@ -1670,8 +1745,11 @@ mod destination_ownership_tests {
         let mut claim = DestinationClaim::from_identity(expected);
         let result = ensure_sized(&destination, 1024, &mut claim).await;
         assert!(
-            result.is_err(),
-            "a replacement inode must not be adopted or resized"
+            matches!(
+                result,
+                Err(AttemptFail::Destination(DestinationProblem::Replaced))
+            ),
+            "a replacement inode must be a terminal destination failure"
         );
         assert_eq!(
             tokio::fs::read(&destination)
@@ -1699,8 +1777,8 @@ mod destination_ownership_tests {
             .await
             .expect_err("an unowned file must be rejected before networking");
         assert!(
-            matches!(&error, AttemptFail::Retryable(message) if message == crate::engine_msg::DEST_EXISTS),
-            "expected a retryable ownership failure, got {error:?}"
+            matches!(error, AttemptFail::Destination(DestinationProblem::Exists)),
+            "expected a terminal typed ownership failure, got {error:?}"
         );
         assert_eq!(
             tokio::fs::read(&destination)
@@ -1774,7 +1852,10 @@ mod destination_ownership_tests {
         )
         .expect("write segmented destination");
 
-        truncate_to_prefix(&destination, &state).expect("truncate to completed prefix");
+        assert!(matches!(
+            truncate_to_prefix(&destination, &state).expect("truncate to completed prefix"),
+            PrefixTruncation::CompletedPrefix
+        ));
 
         let bytes = std::fs::read(&destination).expect("read truncated destination");
         assert_eq!(
@@ -1785,7 +1866,7 @@ mod destination_ownership_tests {
     }
 
     #[test]
-    fn truncation_refuses_a_file_shorter_than_the_completed_prefix() {
+    fn truncation_identifies_a_file_shorter_than_the_completed_prefix() {
         let directory = tempfile::tempdir().expect("create destination directory");
         let destination = directory.path().join("download.bin");
         let mut state = SegmentState::new(64 * 1024 * 1024);
@@ -1797,12 +1878,23 @@ mod destination_ownership_tests {
         )
         .expect("write short destination");
 
-        assert!(truncate_to_prefix(&destination, &state).is_err());
+        let reset_file =
+            match truncate_to_prefix(&destination, &state).expect("inspect short partial") {
+                PrefixTruncation::ResetFromZero(file) => file,
+                PrefixTruncation::CompletedPrefix => panic!("short file must request a zero reset"),
+            };
         assert_eq!(
             std::fs::metadata(&destination)
-                .expect("inspect unchanged destination")
+                .expect("inspect before reset")
                 .len(),
             prefix - 1
+        );
+        truncate_open_file_to_zero(reset_file).expect("reset unsafe partial");
+        assert_eq!(
+            std::fs::metadata(&destination)
+                .expect("inspect reset destination")
+                .len(),
+            0
         );
     }
 

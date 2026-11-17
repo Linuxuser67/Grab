@@ -57,8 +57,12 @@ pub(crate) enum EngineMsg {
     ManifestRetryable(String),
     /// A multi worker finished one piece; the UI thread records it for resume.
     PieceDone(u64),
-    /// Multi failed terminally: shrink to completed prefix (bitmap stays valid for retry).
-    TruncatePrefix,
+    /// Retry the segmented attempt's completed prefix. The acknowledgment is true
+    /// only when the bitmap was cleared and a shorter-than-prefix destination was
+    /// reset to zero, allowing the caller to continue with single-stream.
+    TruncatePrefix {
+        ack: tokio::sync::oneshot::Sender<bool>,
+    },
     /// Fresh multi probe succeeded; UI thread creates the resume bitmap and
     /// queues a persist, then acks. The engine waits (bounded) for the ack
     /// before preallocating the full-size file, so a crash can never leave a

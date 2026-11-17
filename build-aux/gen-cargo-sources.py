@@ -19,6 +19,12 @@ import tomllib
 
 OUT = "build-aux/cargo-sources.json"
 CRATES_IO = "https://static.crates.io/crates"
+CRATES_IO_SOURCE = "registry+https://github.com/rust-lang/crates.io-index"
+
+
+def is_supported_registry_source(source: str) -> bool:
+    """Only crates.io packages can be mapped to the URLs emitted by this generator."""
+    return source == CRATES_IO_SOURCE
 
 
 def render() -> tuple[str, int]:
@@ -44,12 +50,12 @@ def render() -> tuple[str, int]:
                 f"ERROR: path package {pkg['name']} {pkg['version']} has no registry source; "
                 "extend this generator before adding it to Cargo.lock"
             )
-        if not source.startswith("registry+"):
-            # A git/path dependency cannot be vendored by this registry-only script.
-            # Silent skipping would let --check pass while the offline build lacks the crate.
+        if not is_supported_registry_source(source):
+            # This generator constructs crates.io archive URLs, so accepting a
+            # different registry would produce a vendor manifest for the wrong source.
             sys.exit(
-                f"ERROR: non-registry package {pkg['name']} has source {source}; "
-                "extend this generator before adding it to Cargo.lock"
+                f"ERROR: unsupported package source {source} for {pkg['name']} {pkg['version']}; "
+                "only crates.io registry packages are supported"
             )
         name, version = pkg["name"], pkg["version"]
         key = f"checksum {name} {version} ({source})"

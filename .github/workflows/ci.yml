@@ -179,6 +179,7 @@ jobs:
       # Run the release metadata gate on every PR, not only after a tag is published.
       - name: Check release metadata consistency
         run: ./build-aux/check-release-consistency.py
+      - run: python3 build-aux/test-gen-cargo-sources.py
       - run: ./build-aux/gen-cargo-sources.py --check
   # Read-only secret and supply-chain scanning: gitleaks over the full
   # history plus cargo-audit against the RustSec advisory DB. No system

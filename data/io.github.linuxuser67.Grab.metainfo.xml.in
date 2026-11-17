@@ -58,6 +58,19 @@
     </screenshot>
   </screenshots>
   <releases>
+    <release version="6.5.0~beta.23" date="2026-11-16">
+      <description>
+        <ul>
+          <li>Streaming: encrypted HLS VOD presentations now stream straight into the destination part while segments arrive, and MP4/MKV output through that path is covered by integration tests.</li>
+          <li>Downloads: a single-stream resume can no longer splice in bytes from a changed object; a failed segmented-fallback truncation stops its worker instead of writing to a failed row; only durable completed pieces are persisted for resume.</li>
+          <li>Live capture: the finish button now uses a save icon, and live remux cleanup is shared across failure paths.</li>
+          <li>Manifests: preserve supported caption formats and valid in-band closed-caption groups in HLS.</li>
+          <li>Queue: keep saved data on transient read errors and quarantine failures, and reject parent traversal in persisted restore paths.</li>
+          <li>UI: restore the 12px gap below the header bar and avoid in-app failure toasts while Grab is inactive.</li>
+          <li>Internals: harden the release and offline-vendor guards, serialize Trash moves, and broaden queue-restore and process-supervision coverage.</li>
+        </ul>
+      </description>
+    </release>
     <release version="6.5.0~beta.22" type="development" date="2026-11-15">
       <description>
         <ul>

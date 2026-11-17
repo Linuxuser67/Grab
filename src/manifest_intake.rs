@@ -19,14 +19,13 @@ use crate::manifest::{HlsMasterPlan, HlsPlan, MAX_MANIFEST_BYTES};
 
 use crate::manifest_plan::{hls_audio_rendition_key, hls_subtitle_rendition_key, hls_variant_key};
 
-/// Download-time manifest requests retain their normal network tolerance.
+/// Each download-time manifest request is attempted once; retries are user-controlled.
 const MANIFEST_REQUEST_TIMEOUT: Duration = Duration::from_secs(20);
 /// Native preview yields to yt-dlp quickly when its transport is unsuitable.
 const MANIFEST_PREVIEW_REQUEST_TIMEOUT: Duration = Duration::from_secs(4);
 /// Native preview is bounded as a whole so it yields to yt-dlp quickly instead
 /// of stalling the Add card.
 const MANIFEST_LOOKUP_BUDGET: Duration = Duration::from_secs(10);
-const MAX_MANIFEST_ATTEMPTS: u32 = 3;
 const MAX_PREVIEW_MANIFEST_ATTEMPTS: u32 = 2;
 const MANIFEST_RETRY_BASE_DELAY: Duration = Duration::from_millis(250);
 
@@ -581,7 +580,7 @@ impl ManifestFetchOptions {
         Self {
             transport_policy,
             request_timeout: MANIFEST_REQUEST_TIMEOUT,
-            max_attempts: MAX_MANIFEST_ATTEMPTS,
+            max_attempts: 1,
             mode: ManifestFetchMode::Download,
             max_bytes: MAX_MANIFEST_BYTES,
         }
@@ -1359,7 +1358,7 @@ video.m3u8
     }
 
     #[test]
-    fn manifest_download_retries_only_transient_http_statuses() {
+    fn manifest_download_classifies_only_transient_http_statuses_as_retryable() {
         for status in [
             reqwest::StatusCode::REQUEST_TIMEOUT,
             reqwest::StatusCode::TOO_MANY_REQUESTS,
@@ -1382,6 +1381,60 @@ video.m3u8
                 ManifestIntakeError::Unsupported(_)
             ));
         }
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn download_manifest_request_does_not_retry_a_transient_status() {
+        use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+
+        let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0))
+            .await
+            .expect("bind manifest retry fixture");
+        let port = listener.local_addr().expect("read fixture address").port();
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = listener
+                .accept()
+                .await
+                .expect("accept first manifest request");
+            let mut request = Vec::new();
+            let mut chunk = [0_u8; 1024];
+            loop {
+                let count = socket
+                    .read(&mut chunk)
+                    .await
+                    .expect("read manifest request");
+                if count == 0 {
+                    break;
+                }
+                request.extend_from_slice(&chunk[..count]);
+                if request.windows(4).any(|window| window == b"\r\n\r\n") {
+                    break;
+                }
+            }
+            socket
+                .write_all(
+                    b"HTTP/1.1 503 Service Unavailable\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+                )
+                .await
+                .expect("send transient status");
+            tokio::time::timeout(Duration::from_millis(700), listener.accept())
+                .await
+                .is_ok()
+        });
+
+        let url = Url::parse(&format!("http://127.0.0.1:{port}/master.m3u8"))
+            .expect("fixture manifest URL");
+        let result = fetch_manifest_with_options(
+            &reqwest::Client::new(),
+            url,
+            ManifestFetchOptions::download(ManifestTransportPolicy::HttpFixture),
+        )
+        .await;
+        assert!(matches!(result, Err(ManifestIntakeError::Retryable(_))));
+        assert!(
+            !server.await.expect("manifest fixture task"),
+            "a download-time transient status must return after one request"
+        );
     }
 
     #[test]

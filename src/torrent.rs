@@ -633,6 +633,20 @@ pub fn sweep_archives(referenced: &std::collections::HashSet<String>) {
 
 /// Testable core: keep only `.torrent` archives and magnet metadata referenced by queue URLs.
 pub fn sweep_archives_in(dir: &std::path::Path, referenced: &std::collections::HashSet<String>) {
+    // The archive root is application state, not a user-selected directory.
+    // Refuse a pre-planted symlink before read_dir/remove_file can sweep a
+    // different directory through the archive path.
+    let Ok(metadata) = std::fs::symlink_metadata(dir) else {
+        return;
+    };
+    if metadata.file_type().is_symlink() || !metadata.is_dir() {
+        tracing::warn!(
+            path = %dir.display(),
+            "torrent archive sweep refused a non-directory or symlinked root"
+        );
+        return;
+    }
+
     let referenced_magnets: std::collections::HashSet<String> = referenced
         .iter()
         .filter(|url| is_magnet(url))

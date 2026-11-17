@@ -6593,18 +6593,14 @@ segment-2.ts
             "continuous-growth fixture must contain at least three segments"
         );
         let segment_request_path = |segment_index: usize| {
-            let segment_uri = plan
+            let segment_filename = plan
                 .segment_uri(segment_index)
                 .expect("AES-128 playlist segment index must be valid");
-            let segment_url = plan
-                .playlist_url
-                .join(segment_uri)
-                .expect("resolve AES-128 segment URI in playlist order");
             plan.resources
                 .iter()
                 .find(|resource| {
                     resource.kind == crate::manifest::HlsResourceKind::Segment
-                        && resource.url == segment_url
+                        && resource.filename == segment_filename
                 })
                 .and_then(|resource| {
                     resource
@@ -6615,7 +6611,7 @@ segment-2.ts
                         .filter(|name| !name.is_empty())
                 })
                 .map(|name| format!("/{name}"))
-                .expect("each playlist segment must map to one planned resource")
+                .expect("each playlist segment filename must map to one planned resource")
         };
         // Resource plans are deduplicated independently of media-playlist
         // ordering. Choose the held requests from the playlist's own segment

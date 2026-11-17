@@ -84,10 +84,7 @@ fn identity_from_path(path: &Path) -> std::io::Result<DestinationIdentity> {
     identity_from_file(&file)
 }
 
-fn verify_destination_identity(
-    path: &Path,
-    expected: DestinationIdentity,
-) -> std::io::Result<()> {
+fn verify_destination_identity(path: &Path, expected: DestinationIdentity) -> std::io::Result<()> {
     let actual = identity_from_path(path)?;
     if actual != expected {
         return Err(std::io::Error::other(
@@ -773,8 +770,7 @@ mod tests {
         std::fs::write(&destination, b"original publication").expect("write original");
         let gate = crate::attempt_gate::AttemptGate::new();
         let identity = identity_from_path(&destination).expect("capture original inode");
-        let mut pending =
-            PendingDestination::new(&destination, Arc::clone(&gate), None, identity);
+        let mut pending = PendingDestination::new(&destination, Arc::clone(&gate), None, identity);
         pending.arm();
 
         let replacement = directory.path().join("replacement.mp4");

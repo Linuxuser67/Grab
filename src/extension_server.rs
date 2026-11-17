@@ -1666,6 +1666,16 @@ async fn handle_add(
         authenticated,
         expires_at: wait.then(|| Instant::now() + st.confirm_wait),
     };
+    // Track cookie-bearing requests before the async file write so a newer
+    // cookieless handoff can suppress an older jar that has not been stored yet.
+    let cookie_stage_registration = if authenticated && !req.cookies.is_empty() {
+        match register_cookie_stage(&req.url, request_instant) {
+            Ok(registration) => registration,
+            Err(()) => return StatusCode::TOO_MANY_REQUESTS.into_response(),
+        }
+    } else {
+        None
+    };
     // Stage before queuing: the GTK side may start a probe the moment the
     // handoff is received, and every probe leg looks the cookies up by URL.
     // An authenticated handoff with no usable cookies discards the stale
@@ -1690,6 +1700,9 @@ async fn handle_add(
     } else {
         (None, 0)
     };
+    // At this point the write has stored or rejected its jar. The guard's drop
+    // also lets an approved suppression be reclaimed once no older write remains.
+    drop(cookie_stage_registration);
     let mut suppression = if staged_path.is_none() {
         suppress_handoff_host_at(&req.url, request_instant)
     } else {

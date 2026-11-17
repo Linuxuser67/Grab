@@ -5,8 +5,8 @@ use super::{
     format_gettext_template,
 };
 use crate::download_fetch::{
-    FetchCtx, PrefixTruncation, StartMode, run_download, truncate_open_file_to_zero,
-    truncate_to_prefix,
+    FetchCtx, PrefixTruncation, PrefixTruncationError, StartMode, run_download,
+    truncate_open_file_to_zero_owned, truncate_to_prefix_owned,
 };
 use crate::download_net::{DownloadOptions, http_client_for};
 use crate::download_pieces::SegmentState;
@@ -1270,7 +1270,7 @@ impl DownloadManager {
                             phase_owned = true;
                         }
                     }
-                    EngineMsg::TruncatePrefix { ack } => {
+                    EngineMsg::TruncatePrefix { expected, ack } => {
                         // Commit the matching bitmap first: Undo/retry during the worker must never see a
                         // prefix-truncated file paired with bits beyond the first gap.
                         let state = {
@@ -1287,7 +1287,7 @@ impl DownloadManager {
                             let worker_path = path.clone();
                             drop(this);
                             let truncation = gio::spawn_blocking(move || {
-                                truncate_to_prefix(&worker_path, &state)
+                                truncate_to_prefix_owned(&worker_path, &state, expected)
                             })
                             .await;
                             let Some(this) = weak.upgrade() else {
@@ -1304,7 +1304,7 @@ impl DownloadManager {
                                     this.release_dest(&path);
                                     this.start_next();
                                     drop(this);
-                                    let _ = ack.send(false);
+                                    let _ = ack.send(Ok(false));
                                 }
                                 Ok(Ok(PrefixTruncation::ResetFromZero(file))) => {
                                     if let Some(state) =
@@ -1313,9 +1313,14 @@ impl DownloadManager {
                                         *state = SegmentState::new(state.total);
                                     }
                                     this.persist_queue();
+                                    let reset_path = path.clone();
                                     drop(this);
                                     let reset = gio::spawn_blocking(move || {
-                                        truncate_open_file_to_zero(file)
+                                        truncate_open_file_to_zero_owned(
+                                            file,
+                                            &reset_path,
+                                            expected,
+                                        )
                                     })
                                     .await;
                                     let Some(this) = weak.upgrade() else {
@@ -1331,9 +1336,13 @@ impl DownloadManager {
                                         Ok(Ok(())) => {
                                             this.start_next();
                                             drop(this);
-                                            let _ = ack.send(true);
+                                            let _ = ack.send(Ok(true));
                                         }
-                                        Ok(Err(error)) => {
+                                        Ok(Err(PrefixTruncationError::Destination(problem))) => {
+                                            drop(this);
+                                            let _ = ack.send(Err(problem));
+                                        }
+                                        Ok(Err(PrefixTruncationError::Io(error))) => {
                                             tracing::warn!(
                                                 path = %path.display(),
                                                 error = %error,
@@ -1341,7 +1350,7 @@ impl DownloadManager {
                                             );
                                             this.start_next();
                                             drop(this);
-                                            let _ = ack.send(false);
+                                            let _ = ack.send(Ok(false));
                                         }
                                         Err(error) => {
                                             tracing::warn!(
@@ -1351,11 +1360,16 @@ impl DownloadManager {
                                             );
                                             this.start_next();
                                             drop(this);
-                                            let _ = ack.send(false);
+                                            let _ = ack.send(Ok(false));
                                         }
                                     }
                                 }
-                                Ok(Err(error)) => {
+                                Ok(Err(PrefixTruncationError::Destination(problem))) => {
+                                    this.release_dest(&path);
+                                    drop(this);
+                                    let _ = ack.send(Err(problem));
+                                }
+                                Ok(Err(PrefixTruncationError::Io(error))) => {
                                     this.release_dest(&path);
                                     tracing::warn!(
                                         path = %path.display(),
@@ -1364,7 +1378,7 @@ impl DownloadManager {
                                     );
                                     this.start_next();
                                     drop(this);
-                                    let _ = ack.send(false);
+                                    let _ = ack.send(Ok(false));
                                 }
                                 Err(error) => {
                                     this.release_dest(&path);
@@ -1375,14 +1389,14 @@ impl DownloadManager {
                                     );
                                     this.start_next();
                                     drop(this);
-                                    let _ = ack.send(false);
+                                    let _ = ack.send(Ok(false));
                                 }
                             }
                         } else {
-                            let _ = ack.send(false);
+                            let _ = ack.send(Ok(false));
                         }
                     }
-                    EngineMsg::FallbackSingle { ack } => {
+                    EngineMsg::FallbackSingle { expected, ack } => {
                         // Keep the bitmap persisted until the prefix truncation is durable.
                         // For a shorter-than-prefix file, clear and persist the bitmap first,
                         // then reset the still-open descriptor to zero.
@@ -1393,7 +1407,7 @@ impl DownloadManager {
                             let worker_path = path.clone();
                             drop(this);
                             let truncation = gio::spawn_blocking(move || {
-                                truncate_to_prefix(&worker_path, &state)
+                                truncate_to_prefix_owned(&worker_path, &state, expected)
                             })
                             .await;
                             let Some(this) = weak.upgrade() else {
@@ -1412,14 +1426,19 @@ impl DownloadManager {
                                     this.persist_queue();
                                     this.start_next();
                                     drop(this);
-                                    ack.send(()).await.ok();
+                                    ack.send(Ok(())).await.ok();
                                 }
                                 Ok(Ok(PrefixTruncation::ResetFromZero(file))) => {
                                     this.segment_state.borrow_mut().remove(&id);
                                     this.persist_queue();
+                                    let reset_path = path.clone();
                                     drop(this);
                                     let reset = gio::spawn_blocking(move || {
-                                        truncate_open_file_to_zero(file)
+                                        truncate_open_file_to_zero_owned(
+                                            file,
+                                            &reset_path,
+                                            expected,
+                                        )
                                     })
                                     .await;
                                     let Some(this) = weak.upgrade() else {
@@ -1435,9 +1454,13 @@ impl DownloadManager {
                                         Ok(Ok(())) => {
                                             this.start_next();
                                             drop(this);
-                                            ack.send(()).await.ok();
+                                            ack.send(Ok(())).await.ok();
                                         }
-                                        Ok(Err(error)) => {
+                                        Ok(Err(PrefixTruncationError::Destination(problem))) => {
+                                            drop(this);
+                                            ack.send(Err(problem)).await.ok();
+                                        }
+                                        Ok(Err(PrefixTruncationError::Io(error))) => {
                                             tracing::warn!(
                                                 path = %path.display(),
                                                 error = %error,
@@ -1460,7 +1483,12 @@ impl DownloadManager {
                                         }
                                     }
                                 }
-                                Ok(Err(error)) => {
+                                Ok(Err(PrefixTruncationError::Destination(problem))) => {
+                                    this.release_dest(&path);
+                                    drop(this);
+                                    ack.send(Err(problem)).await.ok();
+                                }
+                                Ok(Err(PrefixTruncationError::Io(error))) => {
                                     this.release_dest(&path);
                                     tracing::warn!(
                                         path = %path.display(),
@@ -1489,7 +1517,7 @@ impl DownloadManager {
                             this.segment_state.borrow_mut().remove(&id);
                             this.persist_queue();
                             drop(this);
-                            ack.send(()).await.ok();
+                            ack.send(Ok(())).await.ok();
                         }
                     }
                     EngineMsg::SuggestName(name) => {

@@ -4653,10 +4653,7 @@ combined.mp4
                     "Connection: close\r\n",
                     "\r\n"
                 ),
-                content_range_start,
-                content_range_end,
-                total_length,
-                content_length
+                content_range_start, content_range_end, total_length, content_length
             );
             socket
                 .write_all(headers.as_bytes())

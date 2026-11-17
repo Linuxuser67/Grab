@@ -3400,7 +3400,9 @@ fn failed_prefix_reset_does_not_reuse_unverified_destination() {
         DownloadStatus::Failed,
     );
     stored.started = Some(true);
-    let item = manager.restore_existing(&stored).expect("restore started row");
+    let item = manager
+        .restore_existing(&stored)
+        .expect("restore started row");
     assert!(
         manager.started.borrow().contains(&item.id()),
         "fixture must begin with the prior engine ownership marker"

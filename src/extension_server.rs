@@ -1618,12 +1618,8 @@ async fn handle_add(
         match stage_handoff_cookies(&req.url, &req.cookies).await {
             Some((staged_file, accepted)) => {
                 let path = staged_file.into_path();
-                if store_handoff_cookies_at(
-                    &req.url,
-                    path.clone(),
-                    req.user_agent,
-                    request_instant,
-                ) {
+                if store_handoff_cookies_at(&req.url, path.clone(), req.user_agent, request_instant)
+                {
                     (Some(path), accepted)
                 } else {
                     (None, 0)
@@ -2314,9 +2310,8 @@ mod tests {
             Some(newer_path.to_string_lossy().as_ref()),
             "the newest request must win regardless of async staging completion"
         );
-        let _suppression =
-            suppress_handoff_host_at(fallback_url, started + Duration::from_secs(1))
-                .expect("older jar should be eligible for suppression");
+        let _suppression = suppress_handoff_host_at(fallback_url, started + Duration::from_secs(1))
+            .expect("older jar should be eligible for suppression");
         assert_eq!(
             handoff_cookie_args(fallback_url).get(1).map(String::as_str),
             Some(newer_path.to_string_lossy().as_ref()),
@@ -2331,20 +2326,27 @@ mod tests {
         clear_handoff_cookies();
         let url = "https://suppressed-race.example/video";
         let started = Instant::now();
-        let newer_path =
-            write_handoff_cookies("https://suppressed-race.example/other", &[cookie("c", "new")])
-                .expect("newer jar");
+        let newer_path = write_handoff_cookies(
+            "https://suppressed-race.example/other",
+            &[cookie("c", "new")],
+        )
+        .expect("newer jar");
         assert!(store_handoff_cookies_at(
             "https://suppressed-race.example/other",
             newer_path.clone(),
             None,
             started + Duration::from_secs(1),
         ));
-        let _suppression =
-            suppress_handoff_host_at(url, started + Duration::from_secs(1))
-                .expect("newer cookieless request suppresses older jars");
-        let late_old_path = write_handoff_cookies(url, &[cookie("c", "old")]).expect("late old jar");
-        assert!(!store_handoff_cookies_at(url, late_old_path.clone(), None, started));
+        let _suppression = suppress_handoff_host_at(url, started + Duration::from_secs(1))
+            .expect("newer cookieless request suppresses older jars");
+        let late_old_path =
+            write_handoff_cookies(url, &[cookie("c", "old")]).expect("late old jar");
+        assert!(!store_handoff_cookies_at(
+            url,
+            late_old_path.clone(),
+            None,
+            started
+        ));
         assert!(!late_old_path.exists());
         assert_eq!(
             handoff_cookie_args(url).get(1).map(String::as_str),

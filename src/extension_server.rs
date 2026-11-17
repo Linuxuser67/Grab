@@ -751,7 +751,12 @@ pub(crate) fn handoff_cookie_hash(path: &Path) -> Option<[u8; 32]> {
 /// handoff is accepted. Replaces any existing entry (deleting its file);
 /// past [`MAX_HANDOFF_ENTRIES`] the oldest entry is evicted with its file.
 pub(crate) fn store_handoff_cookies(url: &str, path: PathBuf, user_agent: Option<String>) {
-    let _ = store_handoff_cookies_at(url, path, user_agent, Instant::now());
+    let request_instant = Instant::now();
+    if register_handoff_request(url, request_instant).is_ok_and(|current| current) {
+        let _ = store_handoff_cookies_at(url, path, user_agent, request_instant);
+    } else {
+        let _ = std::fs::remove_file(path);
+    }
 }
 
 /// Store a jar using the request's start time, not the time its async staging
@@ -1002,16 +1007,15 @@ fn suppress_handoff_host(url: &str) -> Option<Suppression> {
 }
 
 fn suppress_handoff_host_at(url: &str, at: Instant) -> Option<Suppression> {
+    // Request order is recorded even when no jar exists yet, so older writes
+    // that finish later are rejected by store_handoff_cookies_at.
+    if !register_handoff_request(url, at).ok()? {
+        return None;
+    }
     let host = url::Url::parse(url)
         .ok()
         .and_then(|parsed| parsed.host_str().map(str::to_ascii_lowercase))?;
     let mut store = lock_handoff_cookies();
-    // Request order is recorded even when no jar exists yet, so older writes
-    // that finish later are rejected by store_handoff_cookies_at.
-    let is_current = register_handoff_request(url, at).ok()?;
-    if !is_current {
-        return None;
-    }
     let has_stale_jar = host_has_stale_handoff(&store, &host, at);
     if !has_stale_jar {
         return None;
@@ -1654,22 +1658,18 @@ async fn handle_add(
         authenticated,
         expires_at: wait.then(|| Instant::now() + st.confirm_wait),
     };
-    // Track cookie-bearing requests before the async file write so a newer
-    // cookieless handoff can suppress an older jar that has not been stored yet.
-    let cookie_stage_registration = if authenticated && !req.cookies.is_empty() {
-        match register_cookie_stage(&req.url, request_instant) {
-            Ok(registration) => registration,
-            Err(()) => return StatusCode::TOO_MANY_REQUESTS.into_response(),
-        }
-    } else {
-        None
+    // Publish this request's start time before any asynchronous staging.
+    // A later request wins even if this handler reaches the cookie writer last.
+    let request_is_current = match register_handoff_request(&req.url, request_instant) {
+        Ok(current) => current,
+        Err(status) => return status.into_response(),
     };
     // Stage before queuing: the GTK side may start a probe the moment the
     // handoff is received, and every probe leg looks the cookies up by URL.
     // An authenticated handoff with no usable cookies discards the stale
     // exact entry, and every cookieless handoff suppresses older same-host
     // jars so the fallback cannot resurrect an earlier browser session.
-    let (staged_path, accepted_cookie_count) = if authenticated {
+    let (staged_path, accepted_cookie_count) = if authenticated && request_is_current {
         match stage_handoff_cookies(&req.url, &req.cookies).await {
             Some((staged_file, accepted)) => {
                 let path = staged_file.into_path();
@@ -1688,10 +1688,7 @@ async fn handle_add(
     } else {
         (None, 0)
     };
-    // At this point the write has stored or rejected its jar. The guard's drop
-    // also lets an approved suppression be reclaimed once no older write remains.
-    drop(cookie_stage_registration);
-    let mut suppression = if staged_path.is_none() {
+    let mut suppression = if staged_path.is_none() && request_is_current {
         suppress_handoff_host_at(&req.url, request_instant)
     } else {
         None

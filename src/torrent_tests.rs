@@ -316,6 +316,54 @@ fn output_folder_for_gates_hostile_names() {
 
 #[cfg(unix)]
 #[test]
+fn archive_path_and_directory_creation_refuse_a_symlinked_root() {
+    use std::os::unix::fs::symlink;
+
+    let base = std::env::temp_dir().join(format!("grab-torrent-archive-link-{}", std::process::id()));
+    let outside = base.join("outside");
+    let root_link = base.join("archive-root");
+    let external_torrent = outside.join("stale.torrent");
+    let _ = std::fs::remove_dir_all(&base);
+    std::fs::create_dir_all(&outside).expect("create external directory");
+    std::fs::write(&external_torrent, b"must survive").expect("write external torrent");
+    symlink(&outside, &root_link).expect("create archive-root symlink");
+
+    let pseudo_url = format!("torrent:{}", root_link.join("stale.torrent").display());
+    assert_eq!(archive_path_for_url_in(&root_link, &pseudo_url), None);
+    assert!(
+        ensure_archive_dir(&root_link).is_err(),
+        "archive writes must reject a symlinked root"
+    );
+    assert_eq!(
+        std::fs::read(&external_torrent).expect("external torrent must survive"),
+        b"must survive"
+    );
+    let _ = std::fs::remove_dir_all(&base);
+}
+
+#[cfg(unix)]
+#[test]
+fn read_torrent_bytes_refuses_symlinked_files() {
+    use std::os::unix::fs::symlink;
+
+    let dir = std::env::temp_dir().join(format!("grab-torrent-read-link-{}", std::process::id()));
+    let target = dir.join("target.torrent");
+    let link = dir.join("archive.torrent");
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).expect("create directory");
+    std::fs::write(&target, b"torrent metadata").expect("write target");
+    symlink(&target, &link).expect("create torrent symlink");
+
+    assert_eq!(read_torrent_bytes(&link), None);
+    assert_eq!(
+        std::fs::read(&target).expect("symlink target must survive"),
+        b"torrent metadata"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[cfg(unix)]
+#[test]
 fn sweep_archives_refuses_a_symlinked_root() {
     use std::os::unix::fs::symlink;
 

@@ -1243,7 +1243,7 @@ impl DownloadManager {
                             phase_owned = true;
                         }
                     }
-                    EngineMsg::TruncatePrefix => {
+                    EngineMsg::TruncatePrefix { ack } => {
                         // Commit the matching bitmap first: Undo/retry during the worker must never see a
                         // prefix-truncated file paired with bits beyond the first gap.
                         let state = {
@@ -1276,6 +1276,8 @@ impl DownloadManager {
                                 Ok(Ok(PrefixTruncation::CompletedPrefix)) => {
                                     this.release_dest(&path);
                                     this.start_next();
+                                    drop(this);
+                                    let _ = ack.send(false);
                                 }
                                 Ok(Ok(PrefixTruncation::ResetFromZero(file))) => {
                                     if let Some(state) = this.segment_state.borrow_mut().get_mut(&id) {
@@ -1297,19 +1299,32 @@ impl DownloadManager {
                                         break;
                                     }
                                     match reset {
-                                        Ok(Ok(())) => {}
-                                        Ok(Err(error)) => tracing::warn!(
-                                            path = %path.display(),
-                                            error = %error,
-                                            "could not reset unsafe segmented destination to zero"
-                                        ),
-                                        Err(error) => tracing::warn!(
-                                            path = %path.display(),
-                                            error = ?error,
-                                            "segmented destination zero-reset worker failed"
-                                        ),
+                                        Ok(Ok(())) => {
+                                            this.start_next();
+                                            drop(this);
+                                            let _ = ack.send(true);
+                                        }
+                                        Ok(Err(error)) => {
+                                            tracing::warn!(
+                                                path = %path.display(),
+                                                error = %error,
+                                                "could not reset unsafe segmented destination to zero"
+                                            );
+                                            this.start_next();
+                                            drop(this);
+                                            let _ = ack.send(false);
+                                        }
+                                        Err(error) => {
+                                            tracing::warn!(
+                                                path = %path.display(),
+                                                error = ?error,
+                                                "segmented destination zero-reset worker failed"
+                                            );
+                                            this.start_next();
+                                            drop(this);
+                                            let _ = ack.send(false);
+                                        }
                                     }
-                                    this.start_next();
                                 }
                                 Ok(Err(error)) => {
                                     this.release_dest(&path);
@@ -1319,6 +1334,8 @@ impl DownloadManager {
                                         "could not truncate segmented destination to its completed prefix"
                                     );
                                     this.start_next();
+                                    drop(this);
+                                    let _ = ack.send(false);
                                 }
                                 Err(error) => {
                                     this.release_dest(&path);
@@ -1328,8 +1345,12 @@ impl DownloadManager {
                                         "segmented destination truncation worker failed"
                                     );
                                     this.start_next();
+                                    drop(this);
+                                    let _ = ack.send(false);
                                 }
                             }
+                        } else {
+                            let _ = ack.send(false);
                         }
                     }
                     EngineMsg::FallbackSingle { ack } => {

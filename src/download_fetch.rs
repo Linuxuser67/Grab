@@ -360,7 +360,17 @@ async fn multi_loop(
             Err(AttemptFail::Retryable(e)) => {
                 *tries -= 1;
                 if *tries <= 0 {
-                    ctx.tx.send(EngineMsg::TruncatePrefix).ok();
+                    let (ack_tx, ack_rx) = tokio::sync::oneshot::channel();
+                    if ctx.tx.send(EngineMsg::TruncatePrefix { ack: ack_tx }).is_ok()
+                        && matches!(
+                            tokio::time::timeout(FALLBACK_ACK_TIMEOUT, ack_rx).await,
+                            Ok(Ok(true))
+                        )
+                    {
+                        // The bitmap was cleared and the stale partial was reset to zero.
+                        // Reuse the existing destination claim for a fresh single stream.
+                        return true;
+                    }
                     ctx.tx.send(EngineMsg::Failed(e)).ok();
                     return false;
                 }

@@ -1625,6 +1625,16 @@ async fn handle_add(
         return status.into_response();
     }
     let authenticated = token_authenticated && !legacy_authenticated;
+    // Register as soon as the authenticated request is validated. Later
+    // cookieless handoffs must see this older request before its async write.
+    let cookie_stage_registration = if authenticated && !req.cookies.is_empty() {
+        match register_cookie_stage(&req.url, request_instant) {
+            Ok(registration) => registration,
+            Err(status) => return status.into_response(),
+        }
+    } else {
+        None
+    };
     if legacy_authenticated {
         tracing::debug!("legacy paired extension handoff requires confirmation and drops cookies");
     }
@@ -1660,16 +1670,6 @@ async fn handle_add(
         decision,
         authenticated,
         expires_at: wait.then(|| Instant::now() + st.confirm_wait),
-    };
-    // Register cookie-bearing requests before their async file write so a
-    // newer cookieless handoff can retain its cutoff for older writes in flight.
-    let cookie_stage_registration = if authenticated && !req.cookies.is_empty() {
-        match register_cookie_stage(&req.url, request_instant) {
-            Ok(registration) => registration,
-            Err(status) => return status.into_response(),
-        }
-    } else {
-        None
     };
     // Stage before queuing: the GTK side may start a probe the moment the
     // handoff is received, and every probe leg looks the cookies up by URL.

@@ -34,7 +34,7 @@ fn can_apply_playlist_file_event(
 }
 
 impl DownloadManager {
-    /// Revoke this process's resume ownership when a reset did not complete.
+    /// Revoke this process's resume ownership when prefix recovery did not complete.
     ///
     /// A later retry must refuse an existing destination rather than adopting
     /// bytes whose state could not be made consistent with the on-disk file.
@@ -1441,6 +1441,7 @@ impl DownloadManager {
                                         "could not truncate segmented file before single-stream fallback"
                                     );
                                     this.segment_state.borrow_mut().remove(&id);
+                                    this.invalidate_started_destination(id);
                                     this.persist_queue();
                                     break;
                                 }
@@ -1452,6 +1453,7 @@ impl DownloadManager {
                                         "segmented-file truncation worker failed before single-stream fallback"
                                     );
                                     this.segment_state.borrow_mut().remove(&id);
+                                    this.invalidate_started_destination(id);
                                     this.persist_queue();
                                     break;
                                 }

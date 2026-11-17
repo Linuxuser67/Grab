@@ -3381,9 +3381,10 @@ fn restored_unstarted_row_refuses_existing_dest() {
 }
 
 #[test]
-fn failed_prefix_reset_does_not_reuse_unverified_destination() {
-    // A failed zero-reset clears the segment bitmap, but the existing file
-    // must no longer be accepted as a single-stream resume on a later retry.
+fn failed_prefix_recovery_does_not_reuse_unverified_destination() {
+    // A failed prefix truncation or zero-reset can leave segmented bytes in an
+    // inconsistent state. Once its bitmap is dropped, the file must not be
+    // adopted as a single-stream resume on a later retry.
     let (_q, _l) = test_locks();
     let _qf = test_queue_file("failed-prefix-reset-ownership");
     let manager = DownloadManager::new(gio::ListStore::new::<DownloadItem>(), test_settings());

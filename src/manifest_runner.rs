@@ -6812,7 +6812,9 @@ segment-2.ts
 
         tokio::time::timeout(Duration::from_secs(10), final_segment_requested.notified())
             .await
-            .expect("the final segment request should start after the earlier VOD prefix is fetched");
+            .expect(
+                "the final segment request should start after the earlier VOD prefix is fetched",
+            );
 
         let initial_growth_result = tokio::time::timeout(Duration::from_secs(15), async {
             loop {

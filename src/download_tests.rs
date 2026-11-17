@@ -3387,10 +3387,8 @@ fn failed_prefix_reset_does_not_reuse_unverified_destination() {
     let (_q, _l) = test_locks();
     let _qf = test_queue_file("failed-prefix-reset-ownership");
     let manager = DownloadManager::new(gio::ListStore::new::<DownloadItem>(), test_settings());
-    let dest = std::env::temp_dir().join(format!(
-        "grab-failed-prefix-reset-{}",
-        std::process::id()
-    ));
+    let dest =
+        std::env::temp_dir().join(format!("grab-failed-prefix-reset-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dest);
     std::fs::create_dir_all(&dest).unwrap();
     std::fs::write(dest.join("partial.bin"), b"unverified partial").unwrap();

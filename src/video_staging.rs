@@ -1010,8 +1010,7 @@ fn sweep_manifest_staging_directories(
     if !staging_root_is_real(root) {
         return;
     }
-    let (Ok(canonical_root), Ok(entries)) =
-        (std::fs::canonicalize(root), std::fs::read_dir(root))
+    let (Ok(canonical_root), Ok(entries)) = (std::fs::canonicalize(root), std::fs::read_dir(root))
     else {
         return;
     };

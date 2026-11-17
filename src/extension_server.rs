@@ -406,8 +406,8 @@ pub(crate) struct Cookie {
 #[derive(Default)]
 struct HandoffStore {
     by_key: HashMap<String, HandoffCookies>,
-    /// Insertion order, so a full store evicts the oldest handoff instead of
-    /// an arbitrary one (which could belong to a download still running).
+    /// Request order, independent of cookie-file write completion order.
+    /// Same-host fallback and eviction must prefer the newest request.
     order: VecDeque<String>,
     /// Hosts whose older staged jars must not be reused. A cookieless
     /// handoff leaves no exact entry, so the same-host fallback would
@@ -425,9 +425,9 @@ struct HandoffCookies {
     path: PathBuf,
     user_agent: Option<String>,
     staged_at: SystemTime,
-    /// Monotonic staging marker for tombstone ordering; wall-clock steps must
-    /// not make an old jar look newer than a later cookieless handoff.
-    staged_instant: Instant,
+    /// Monotonic request-order marker captured before async staging, so a
+    /// slow old request cannot overtake a newer handoff.
+    request_instant: Instant,
 }
 
 #[derive(Clone)]
@@ -448,23 +448,21 @@ struct SuppressedHost {
 static HANDOFF_COOKIES: LazyLock<Mutex<HandoffStore>> =
     LazyLock::new(|| Mutex::new(HandoffStore::default()));
 
-/// Recover a poisoned handoff store while restoring its bounded FIFO invariant.
+/// Recover a poisoned handoff store while restoring its request-order index
+/// and bounded suppression FIFO invariant.
 fn lock_handoff_cookies() -> MutexGuard<'static, HandoffStore> {
     match HANDOFF_COOKIES.lock() {
         Ok(store) => store,
         Err(poisoned) => {
             tracing::error!("handoff cookie store mutex poisoned; repairing its FIFO index");
             let mut store = poisoned.into_inner();
-            let keys: HashSet<String> = store.by_key.keys().cloned().collect();
-            let mut seen = HashSet::new();
-            store
-                .order
-                .retain(|key| keys.contains(key) && seen.insert(key.clone()));
-            for key in keys {
-                if seen.insert(key.clone()) {
-                    store.order.push_back(key);
-                }
-            }
+            let mut ordered: Vec<(Instant, String)> = store
+                .by_key
+                .iter()
+                .map(|(key, entry)| (entry.request_instant, key.clone()))
+                .collect();
+            ordered.sort_by_key(|(request_instant, _)| *request_instant);
+            store.order = ordered.into_iter().map(|(_, key)| key).collect();
             let hosts: HashSet<String> = store.suppressed_hosts.keys().cloned().collect();
             let mut seen_hosts = HashSet::new();
             store
@@ -746,11 +744,39 @@ pub(crate) fn handoff_cookie_hash(path: &Path) -> Option<[u8; 32]> {
 /// handoff is accepted. Replaces any existing entry (deleting its file);
 /// past [`MAX_HANDOFF_ENTRIES`] the oldest entry is evicted with its file.
 pub(crate) fn store_handoff_cookies(url: &str, path: PathBuf, user_agent: Option<String>) {
+    let _ = store_handoff_cookies_at(url, path, user_agent, Instant::now());
+}
+
+/// Store a jar using the request's start time, not the time its async staging
+/// write completed. Older requests cannot replace newer jars or outrank them
+/// in same-host fallback ordering.
+fn store_handoff_cookies_at(
+    url: &str,
+    path: PathBuf,
+    user_agent: Option<String>,
+    request_instant: Instant,
+) -> bool {
     let Some(key) = handoff_key(url) else {
         let _ = std::fs::remove_file(path);
-        return;
+        return false;
     };
+    let host = url::Url::parse(url)
+        .ok()
+        .and_then(|parsed| parsed.host_str().map(str::to_ascii_lowercase));
     let mut store = lock_handoff_cookies();
+    let superseded_for_url = store
+        .by_key
+        .get(&key)
+        .is_some_and(|current| current.request_instant > request_instant);
+    let superseded_for_host = host
+        .as_ref()
+        .and_then(|host| store.suppressed_hosts.get(host))
+        .is_some_and(|suppressed| suppressed.at > request_instant);
+    if superseded_for_url || superseded_for_host {
+        drop(store);
+        let _ = std::fs::remove_file(path);
+        return false;
+    }
     // Sanitize the UA: it goes into a header and an argv; trim whitespace,
     // drop it if empty, cap length (browsers send < 512 chars).
     let user_agent = user_agent
@@ -761,13 +787,23 @@ pub(crate) fn store_handoff_cookies(url: &str, path: PathBuf, user_agent: Option
         path,
         user_agent,
         staged_at: SystemTime::now(),
-        staged_instant: Instant::now(),
+        request_instant,
     };
     if let Some(old) = store.by_key.insert(key.clone(), entry) {
         let _ = std::fs::remove_file(old.path);
-        store.order.retain(|k| k != &key);
     }
-    store.order.push_back(key);
+    store.order.retain(|candidate| candidate != &key);
+    let insert_at = store
+        .order
+        .iter()
+        .position(|candidate| {
+            store
+                .by_key
+                .get(candidate)
+                .is_some_and(|entry| entry.request_instant > request_instant)
+        })
+        .unwrap_or(store.order.len());
+    store.order.insert(insert_at, key);
     while store.by_key.len() > MAX_HANDOFF_ENTRIES {
         let Some(oldest) = store.order.pop_front() else {
             break;
@@ -780,6 +816,7 @@ pub(crate) fn store_handoff_cookies(url: &str, path: PathBuf, user_agent: Option
     for host in hosts {
         prune_suppression(&mut store, &host);
     }
+    true
 }
 
 /// `--cookies` argv for a URL's staged handoff cookies, if any. Peeks: the
@@ -798,7 +835,7 @@ fn handoff_entry(url: &str) -> Option<HandoffCookies> {
         store
             .suppressed_hosts
             .get(&host)
-            .is_none_or(|suppressed| entry.staged_instant >= suppressed.at)
+            .is_none_or(|suppressed| entry.request_instant >= suppressed.at)
     };
     store
         .by_key
@@ -806,9 +843,9 @@ fn handoff_entry(url: &str) -> Option<HandoffCookies> {
         .filter(|entry| current(entry))
         .cloned()
         .or_else(|| {
-            // Newest-first through insertion order: deterministic, and the
-            // most recent handoff on the host is the best guess for the parent
-            // collection (a HashMap walk would be arbitrary).
+            // Newest-first through request order: deterministic even when
+            // cookie staging completes out of order. The newest handoff on
+            // the host is the best guess for the parent collection.
             store.order.iter().rev().find_map(|k| {
                 let khost = url::Url::parse(k).ok()?.host_str()?.to_ascii_lowercase();
                 if khost == host {
@@ -866,7 +903,7 @@ impl Drop for Suppression {
 /// Suppress older staged jars for a URL's host until the request is approved.
 fn host_has_stale_handoff(store: &HandoffStore, host: &str, at: Instant) -> bool {
     store.by_key.iter().any(|(key, entry)| {
-        entry.staged_instant < at
+        entry.request_instant < at
             && url::Url::parse(key)
                 .ok()
                 .and_then(|parsed| parsed.host_str().map(str::to_ascii_lowercase))
@@ -917,6 +954,10 @@ fn finish_suppression(host: &str, id: u64, at: Instant, approved: bool) {
 }
 
 fn suppress_handoff_host(url: &str) -> Option<Suppression> {
+    suppress_handoff_host_at(url, Instant::now())
+}
+
+fn suppress_handoff_host_at(url: &str, at: Instant) -> Option<Suppression> {
     let host = url::Url::parse(url)
         .ok()
         .and_then(|parsed| parsed.host_str().map(str::to_ascii_lowercase))?;
@@ -934,7 +975,6 @@ fn suppress_handoff_host(url: &str) -> Option<Suppression> {
     // Every current jar predates this cutoff. Decline later restores the prior
     // approved cutoff, while overlapping requests retain independent references.
     let id = SUPPRESSION_ID_COUNTER.fetch_add(1, Ordering::Relaxed);
-    let at = Instant::now();
     store
         .suppressed_hosts
         .entry(host.clone())

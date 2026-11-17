@@ -317,7 +317,7 @@ async fn wait_for_fallback_ack(
 }
 
 /// Retry loop around segmented attempts (each retry refetches only still-missing pieces).
-/// Returns true when the server throttled parallel connections (caller continues single-stream).
+/// Returns true when throttling or an unsafe short prefix requires a fresh single-stream transfer.
 /// The caller retains the identity so a single-stream fallback keeps the same ownership proof.
 async fn multi_loop(
     ctx: &FetchCtx,
@@ -374,8 +374,8 @@ async fn multi_loop(
                     ctx.tx.send(EngineMsg::Failed(e)).ok();
                     return false;
                 }
-                // Jittered backoff on retryable failures (Throttled has its own
-                // UI-ack handshake, Changed/DEST_EXISTS are terminal).
+                // Jittered backoff on retryable failures (Throttled and a short-prefix
+                // reset have explicit UI acknowledgments; Changed/Destination are terminal).
                 failures += 1;
                 tokio::time::sleep(backoff_delay(failures)).await;
             }
@@ -1734,8 +1734,11 @@ mod destination_ownership_tests {
         let mut claim = DestinationClaim::from_identity(expected);
         let result = ensure_sized(&destination, 1024, &mut claim).await;
         assert!(
-            result.is_err(),
-            "a replacement inode must not be adopted or resized"
+            matches!(
+                result,
+                Err(AttemptFail::Destination(DestinationProblem::Replaced))
+            ),
+            "a replacement inode must be a terminal destination failure"
         );
         assert_eq!(
             tokio::fs::read(&destination)
@@ -1764,7 +1767,7 @@ mod destination_ownership_tests {
             .expect_err("an unowned file must be rejected before networking");
         assert!(
             matches!(error, AttemptFail::Destination(DestinationProblem::Exists)),
-            "expected a retryable ownership failure, got {error:?}"
+            "expected a terminal typed ownership failure, got {error:?}"
         );
         assert_eq!(
             tokio::fs::read(&destination)

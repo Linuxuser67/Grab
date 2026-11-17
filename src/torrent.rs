@@ -273,15 +273,45 @@ fn torrents_dir() -> PathBuf {
     glib::user_data_dir().join("grab").join("torrents")
 }
 
+/// Whether the archive root is a real directory. All archive reads, writes
+/// and cleanup refuse a symlink here: queue data must never redirect archive
+/// operations into an unrelated directory.
+fn archive_dir_is_real(dir: &Path) -> bool {
+    std::fs::symlink_metadata(dir)
+        .is_ok_and(|metadata| !metadata.file_type().is_symlink() && metadata.is_dir())
+}
+
+/// Create the archive directory, then reject a pre-existing symlink or
+/// non-directory leaf before any archive file is opened beneath it.
+fn ensure_archive_dir(dir: &Path) -> io::Result<()> {
+    std::fs::create_dir_all(dir)?;
+    if archive_dir_is_real(dir) {
+        Ok(())
+    } else {
+        Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "torrent archive root is not a real directory",
+        ))
+    }
+}
+
 /// Absolute archive path for a `torrent:{abs-path}` pseudo-URL (constrained to our archive dir, so rows can only resolve/delete Grab-archived files).
 pub fn archive_path_for_url(url: &str) -> Option<PathBuf> {
+    archive_path_for_url_in(&torrents_dir(), url)
+}
+
+/// Testable core of archive-path validation.
+fn archive_path_for_url_in(dir: &Path, url: &str) -> Option<PathBuf> {
+    if !archive_dir_is_real(dir) {
+        return None;
+    }
     let path = url.trim_start().get("torrent:".len()..)?;
     let path = PathBuf::from(path);
     // Existence is part of validity: intake rejects doodled pseudo-URLs fast.
     (path.is_absolute()
         // `starts_with` is lexical: `<dir>/../x.torrent` would pass it.
         && !path.components().any(|c| matches!(c, std::path::Component::ParentDir))
-        && path.starts_with(torrents_dir())
+        && path.starts_with(dir)
         && path.extension().is_some_and(|e| e == "torrent")
         && path.exists())
     .then_some(path)
@@ -309,7 +339,7 @@ pub fn archive_torrent_file(file_name: &str, bytes: &[u8]) -> Result<String, Tor
     })?;
     let stem = safe_stem(file_name).unwrap_or("torrent");
     let dir = torrents_dir();
-    std::fs::create_dir_all(&dir).map_err(|source| TorrentError::Store {
+    ensure_archive_dir(&dir).map_err(|source| TorrentError::Store {
         message: gettext("Cannot store torrent file"),
         source,
     })?;
@@ -373,14 +403,11 @@ pub(crate) const MAX_TORRENT_BYTES: u64 = 10_000_000;
 
 /// Read a `.torrent` file with a single bounded open (no separate size check: a concurrent replacement must not slip between).
 pub(crate) fn read_torrent_bytes(path: &std::path::Path) -> Option<Vec<u8>> {
-    use std::io::Read as _;
-    let mut buf = Vec::new();
-    std::fs::File::open(path)
-        .ok()?
-        .take(MAX_TORRENT_BYTES + 1)
-        .read_to_end(&mut buf)
-        .ok()?;
-    (buf.len() as u64 <= MAX_TORRENT_BYTES).then_some(buf)
+    crate::bounded_file::read_regular_file_bounded(
+        path,
+        usize::try_from(MAX_TORRENT_BYTES).ok()?,
+    )
+    .ok()
 }
 
 /// Read and parse a `.torrent` file in one call, so UI paths can hand the
@@ -425,7 +452,7 @@ fn persist_magnet_metadata(info_hash: &str, bytes: &[u8]) -> Result<(), TorrentE
     }
 
     let dir = torrents_dir();
-    std::fs::create_dir_all(&dir).map_err(|source| TorrentError::MetadataStorage {
+    ensure_archive_dir(&dir).map_err(|source| TorrentError::MetadataStorage {
         message: gettext("Cannot store magnet metadata"),
         source,
     })?;
@@ -461,6 +488,9 @@ fn persist_magnet_metadata(info_hash: &str, bytes: &[u8]) -> Result<(), TorrentE
 
 /// Read cached metainfo for a magnet, verifying that its info-hash matches the cache key.
 fn read_magnet_metadata_in(dir: &Path, magnet: &str) -> Option<Vec<u8>> {
+    if !archive_dir_is_real(dir) {
+        return None;
+    }
     let info_hash = parse_magnet(magnet).ok()?.as_id20()?.as_string();
     let bytes = read_torrent_bytes(&magnet_metadata_path_in(dir, &info_hash)?)?;
     let metadata = librqbit::torrent_from_bytes(&bytes).ok()?;
@@ -636,10 +666,7 @@ pub fn sweep_archives_in(dir: &std::path::Path, referenced: &std::collections::H
     // The archive root is application state, not a user-selected directory.
     // Refuse a pre-planted symlink before read_dir/remove_file can sweep a
     // different directory through the archive path.
-    let Ok(metadata) = std::fs::symlink_metadata(dir) else {
-        return;
-    };
-    if metadata.file_type().is_symlink() || !metadata.is_dir() {
+    if !archive_dir_is_real(dir) {
         tracing::warn!(
             path = %dir.display(),
             "torrent archive sweep refused a non-directory or symlinked root"

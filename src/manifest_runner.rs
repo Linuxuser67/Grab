@@ -6592,9 +6592,34 @@ segment-2.ts
             !verify_incremental_growth || total_segments >= 3,
             "continuous-growth fixture must contain at least three segments"
         );
-        let mut segment_index = 0usize;
-        let mut penultimate_segment_path = None;
-        let mut final_segment_path = None;
+        let segment_request_path = |segment_index: usize| {
+            let segment_uri = &plan.local_playlist.segments[segment_index].uri;
+            let segment_url = plan
+                .playlist_url
+                .join(segment_uri)
+                .expect("resolve AES-128 segment URI in playlist order");
+            plan.resources
+                .iter()
+                .find(|resource| {
+                    resource.kind == crate::manifest::HlsResourceKind::Segment
+                        && resource.url == segment_url
+                })
+                .and_then(|resource| {
+                    resource
+                        .url
+                        .path()
+                        .rsplit('/')
+                        .next()
+                        .filter(|name| !name.is_empty())
+                })
+                .map(|name| format!("/{name}"))
+                .expect("each playlist segment must map to one planned resource")
+        };
+        // Resource plans are deduplicated independently of media-playlist
+        // ordering. Choose the held requests from the playlist's own segment
+        // sequence so the test always blocks the actual penultimate/final media.
+        let penultimate_segment_path = segment_request_path(total_segments - 2);
+        let final_segment_path = segment_request_path(total_segments - 1);
         for resource in &mut plan.resources {
             let name = resource
                 .url
@@ -6604,26 +6629,9 @@ segment-2.ts
                 .filter(|name| !name.is_empty())
                 .expect("planned AES-128 resource must have a filename")
                 .to_string();
-            match resource.kind {
-                crate::manifest::HlsResourceKind::Key => {}
-                crate::manifest::HlsResourceKind::Segment => {
-                    segment_index += 1;
-                    if segment_index == total_segments - 1 {
-                        penultimate_segment_path = Some(format!("/{name}"));
-                    }
-                    if segment_index == total_segments {
-                        final_segment_path = Some(format!("/{name}"));
-                    }
-                }
-                _ => panic!("unexpected resource in AES-128 MPEG-TS fixture"),
-            }
             resource.url = Url::parse(&format!("http://{address}/{name}"))
                 .expect("set local AES-128 fixture resource URL");
         }
-        let penultimate_segment_path = penultimate_segment_path
-            .expect("encrypted HLS fixture must have a penultimate media segment");
-        let final_segment_path =
-            final_segment_path.expect("encrypted HLS fixture must have a final segment");
         let request_count = plan.resources.len();
         let fixture_root = fixture.path().to_path_buf();
         let verify_incremental_growth_server = verify_incremental_growth;

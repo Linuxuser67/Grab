@@ -105,7 +105,6 @@ impl RollbackJob {
                     error = %error,
                     "manifest rollback refused to touch a destination that is no longer owned"
                 );
-                gate.mark_delivered();
                 return;
             }
         }
@@ -422,6 +421,10 @@ async fn persist_prepared_copy(
         pending.rollback().await;
         return Err(error);
     }
+    if let Err(error) = verify_destination_identity(destination, pending.identity) {
+        pending.rollback().await;
+        return Err(error);
+    }
     if !gate.try_commit() {
         pending.rollback().await;
         return Ok(ManifestPublishOutcome::Aborted);
@@ -449,6 +452,10 @@ async fn commit_renamed_destination(
         return Err(error);
     }
     if let Err(error) = sync_parent_directory(source).await {
+        pending.rollback().await;
+        return Err(error);
+    }
+    if let Err(error) = verify_destination_identity(destination, pending.identity) {
         pending.rollback().await;
         return Err(error);
     }
@@ -786,8 +793,8 @@ mod tests {
             "rollback must not remove a replacement file"
         );
         assert!(
-            gate.was_delivered(),
-            "a lost ownership claim must prevent later discard cleanup"
+            !gate.was_delivered(),
+            "an unowned replacement must not be classified as a delivered orphan"
         );
     }
 
@@ -819,7 +826,7 @@ mod tests {
             !source.exists(),
             "a replacement must not be moved into the staging source path"
         );
-        assert!(gate.was_delivered());
+        assert!(!gate.was_delivered());
     }
 
     #[tokio::test]

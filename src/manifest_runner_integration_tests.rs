@@ -3420,6 +3420,24 @@ audio.mp4
             .all(|resource| resource.range.is_some()),
         "audio init and media resources should all retain their byte ranges"
     );
+    assert_eq!(
+        video_plan
+            .resources
+            .iter()
+            .map(|resource| resource.range.map(|range| range.offset))
+            .collect::<Vec<_>>(),
+        [Some(0), Some(4), Some(8)],
+        "the video playlist should preserve the init and media byte offsets"
+    );
+    assert_eq!(
+        audio_plan
+            .resources
+            .iter()
+            .map(|resource| resource.range.map(|range| range.offset))
+            .collect::<Vec<_>>(),
+        [Some(0), Some(4), Some(8)],
+        "the audio playlist should preserve the init and media byte offsets"
+    );
 
     let video_bytes = b"VINI0000V001";
     let audio_bytes = b"AINI0000A001";
@@ -3463,15 +3481,15 @@ audio.mp4
                 .write_all(headers.as_bytes())
                 .await
                 .expect("write byte-range response headers");
-            if request_path == "/video.mp4" && start == 4 {
-                media_requested_tx
-                    .take()
-                    .expect("first video media request notification exists")
+            if request_path == "/video.mp4"
+                && start > 0
+                && let (Some(sender), Some(release)) =
+                    (media_requested_tx.take(), release_media_rx.take())
+            {
+                sender
                     .send(())
                     .expect("notify test about the in-flight video fragment");
-                release_media_rx
-                    .take()
-                    .expect("video media release receiver exists")
+                release
                     .await
                     .expect("test releases the in-flight video fragment");
             }
@@ -3529,7 +3547,7 @@ audio.mp4
     let task_video_dir = video_dir.clone();
     let task_audio_dir = audio_dir.clone();
     let task_destination = destination.clone();
-    let task = tokio::spawn(async move {
+    let mut task = tokio::spawn(async move {
         let client = fixture_client();
         let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
         let downloaded = Arc::new(std::sync::atomic::AtomicU64::new(0));
@@ -3551,10 +3569,18 @@ audio.mp4
         .await
     });
 
-    tokio::time::timeout(FIXTURE_TIMEOUT, media_requested_rx)
-        .await
-        .expect("the byte-ranged video media request should begin")
-        .expect("the byte-range fixture server should notify the in-flight video fragment");
+    let media_request = tokio::time::timeout(FIXTURE_TIMEOUT, &mut media_requested_rx);
+    tokio::pin!(media_request);
+    tokio::select! {
+        result = &mut task => panic!(
+            "the byte-ranged transfer finished before a video media request was held open: {result:?}"
+        ),
+        result = &mut media_request => {
+            result
+                .expect("the byte-ranged video media request should begin")
+                .expect("the byte-range fixture server should notify the in-flight video fragment");
+        }
+    }
     let metadata = tokio::fs::symlink_metadata(&video_part)
         .await
         .expect("the video destination .part must exist while its media request is in flight");

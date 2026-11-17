@@ -123,6 +123,40 @@ fn ensure_manifest_mux_spaces(
     ensure_manifest_mux_space(destination_dir, staged_bytes)
 }
 
+/// Estimate the remaining incremental HLS output from bytes fetched so far.
+///
+/// Stream-copy muxing adds container overhead. Reserve 10% above staged
+/// resource bytes, then subtract bytes already written to the destination part.
+fn incremental_hls_remaining_output_bytes(staged_bytes: u64, output_bytes: u64) -> u64 {
+    let estimated_output_bytes = staged_bytes.saturating_add(staged_bytes.div_ceil(10));
+    estimated_output_bytes.saturating_sub(output_bytes)
+}
+
+/// Check destination free space as incremental HLS resources become available.
+///
+/// This is called after each resource completes. The first media resource is
+/// checked before its growing playlist is published to FFmpeg, so FFmpeg does
+/// not start without an output-space estimate. Later checks account for output
+/// bytes already written to the visible destination part.
+async fn ensure_incremental_hls_output_space(
+    destination_dir: &Path,
+    output_part: &Path,
+    staged_bytes: u64,
+) -> Result<(), ManifestRunError> {
+    let metadata = tokio::fs::symlink_metadata(output_part)
+        .await
+        .map_err(|error| {
+            manifest_storage_error("Could not inspect the incremental HLS output part", error)
+        })?;
+    if metadata.file_type().is_symlink() || !metadata.is_file() {
+        return Err(ManifestRunError::Failed(
+            "The incremental HLS output part is not a regular file".to_string(),
+        ));
+    }
+    let required_bytes = incremental_hls_remaining_output_bytes(staged_bytes, metadata.len());
+    ensure_manifest_mux_space(destination_dir, required_bytes)
+}
+
 fn manifest_storage_error(context: &str, error: std::io::Error) -> ManifestRunError {
     let storage_exhausted = rustix::io::Errno::from_io_error(&error).is_some_and(|errno| {
         errno == rustix::io::Errno::NOSPC || errno == rustix::io::Errno::DQUOT
@@ -2397,6 +2431,8 @@ struct ManifestIncrementalHlsTrackFetch {
     client: reqwest::Client,
     plan: Arc<HlsPlan>,
     directory: PathBuf,
+    destination_dir: PathBuf,
+    output_part: PathBuf,
     tx: tokio::sync::mpsc::UnboundedSender<EngineMsg>,
     downloaded: Arc<AtomicU64>,
     connections: usize,
@@ -2418,6 +2454,8 @@ fn spawn_incremental_hls_track_fetch(
         client,
         plan,
         directory,
+        destination_dir,
+        output_part,
         tx,
         downloaded,
         connections,
@@ -2431,6 +2469,8 @@ fn spawn_incremental_hls_track_fetch(
             client: &client,
             plan: &plan,
             directory: &directory,
+            destination_dir: &destination_dir,
+            output_part: &output_part,
             tx: &tx,
             downloaded: downloaded.as_ref(),
             abort: &mut abort,
@@ -2622,6 +2662,8 @@ async fn run_incremental_hls_vod(
             client: client.clone(),
             plan: Arc::clone(&video),
             directory: video_dir.to_path_buf(),
+            destination_dir: dest_dir.to_path_buf(),
+            output_part: part_path.clone(),
             tx: tx.clone(),
             downloaded: Arc::clone(&downloaded),
             connections,
@@ -2635,6 +2677,8 @@ async fn run_incremental_hls_vod(
                 client: client.clone(),
                 plan: Arc::clone(audio_plan),
                 directory: audio_dir.to_path_buf(),
+                destination_dir: dest_dir.to_path_buf(),
+                output_part: part_path.clone(),
                 tx: tx.clone(),
                 downloaded: Arc::clone(&downloaded),
                 // Keep each rendition sequential. The video and audio tracks
@@ -3917,6 +3961,8 @@ struct IncrementalHlsFetch<'fetch> {
     client: &'fetch reqwest::Client,
     plan: &'fetch HlsPlan,
     directory: &'fetch Path,
+    destination_dir: &'fetch Path,
+    output_part: &'fetch Path,
     tx: &'fetch tokio::sync::mpsc::UnboundedSender<EngineMsg>,
     downloaded: &'fetch AtomicU64,
     abort: &'fetch mut tokio::sync::oneshot::Receiver<crate::video::StopIntent>,
@@ -3932,6 +3978,8 @@ async fn fetch_hls_resources_incrementally(
         client,
         plan,
         directory,
+        destination_dir,
+        output_part,
         tx,
         downloaded,
         abort,
@@ -4001,6 +4049,12 @@ async fn fetch_hls_resources_incrementally(
                         break Ok(true);
                     };
                     let index = result?;
+                    ensure_incremental_hls_output_space(
+                        destination_dir,
+                        output_part,
+                        downloaded.load(Ordering::Relaxed),
+                    )
+                    .await?;
                     completed[index] = true;
                     while next_to_commit < resource_count && completed[next_to_commit] {
                         if plan.resources[next_to_commit].kind == crate::manifest::HlsResourceKind::Segment {
@@ -6510,6 +6564,10 @@ segment-2.ts
         let fetch_client = client.clone();
         let fetch_plan = plan.clone();
         let fetch_directory = directory.path().to_path_buf();
+        let fetch_output_part = directory.path().join("output.part");
+        tokio::fs::write(&fetch_output_part, [])
+            .await
+            .expect("create growing output part");
         let fetch_tx = tx.clone();
         let fetch_downloaded = Arc::clone(&downloaded);
         let fetch_task = tokio::spawn(async move {
@@ -6517,6 +6575,8 @@ segment-2.ts
                 client: &fetch_client,
                 plan: &fetch_plan,
                 directory: &fetch_directory,
+                destination_dir: &fetch_directory,
+                output_part: &fetch_output_part,
                 tx: &fetch_tx,
                 downloaded: fetch_downloaded.as_ref(),
                 abort: &mut abort,
@@ -8010,6 +8070,17 @@ segment-2.m4s
             error,
             ManifestRunError::Failed(message) if message.contains("Not enough free disk space")
         ));
+    }
+
+    #[test]
+    fn incremental_hls_space_estimate_tracks_staged_bytes_and_growing_output() {
+        assert_eq!(incremental_hls_remaining_output_bytes(1_000, 0), 1_100);
+        assert_eq!(incremental_hls_remaining_output_bytes(1_000, 600), 500);
+        assert_eq!(incremental_hls_remaining_output_bytes(1_000, 1_100), 0);
+        assert_eq!(
+            incremental_hls_remaining_output_bytes(u64::MAX, 0),
+            u64::MAX
+        );
     }
 
     #[test]

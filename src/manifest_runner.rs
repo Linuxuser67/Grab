@@ -5350,13 +5350,13 @@ fn is_hls_playlist_input(input: &Path) -> bool {
 
 fn add_hls_staging_options(command: &mut tokio::process::Command) {
     // Every HLS child URI is rewritten to a generated, single-component
-    // .bin staging name. Permit only those names and probe their contents:
-    // HLS resources may contain MPEG-TS, fragmented MP4, or encryption keys.
+    // .bin staging name. Permit .m3u8 for FFmpeg to reopen the growing local
+    // playlist, but keep actual segment/resource extensions restricted to .bin.
     command.args([
         "-protocol_whitelist",
         "file,crypto",
         "-allowed_extensions",
-        "bin",
+        "m3u8,bin",
         "-allowed_segment_extensions",
         "bin",
         "-extension_picky",
@@ -5832,6 +5832,31 @@ mod tests {
         .await
         .expect("fake FFmpeg must stop within the test deadline")
         .expect("fake FFmpeg process should be handled")
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn ffmpeg_hls_staging_allows_local_playlist_reload_and_limits_child_segments() {
+        let directory = tempfile::tempdir().expect("create FFmpeg argument test directory");
+        let ffmpeg = fake_ffmpeg_recording_arguments(directory.path());
+        let output = directory.path().join("output.mp4");
+        let args = run_ffmpeg_recording_args(&ffmpeg, &output, SubtitleOutput::default()).await;
+
+        assert!(
+            args.windows(2)
+                .any(|pair| pair == ["-allowed_extensions", "m3u8,bin"]),
+            "FFmpeg must be allowed to reopen the growing local playlist: {args:?}"
+        );
+        assert!(
+            args.windows(2)
+                .any(|pair| pair == ["-allowed_segment_extensions", "bin"]),
+            "HLS child resources must remain restricted to generated .bin files: {args:?}"
+        );
+        assert!(
+            args.windows(2)
+                .any(|pair| pair == ["-protocol_whitelist", "file,crypto"]),
+            "the HLS local mux must not gain network protocol access: {args:?}"
+        );
     }
 
     #[cfg(unix)]
@@ -6557,8 +6582,39 @@ segment-2.ts
         );
 
         let total_segments = plan.segment_count();
-        let mut segment_index = 0usize;
-        let mut final_segment_path = None;
+        let segment_paths = plan
+            .resources
+            .iter()
+            .filter(|resource| resource.kind == crate::manifest::HlsResourceKind::Segment)
+            .map(|resource| {
+                format!(
+                    "/{}",
+                    resource
+                        .url
+                        .path()
+                        .rsplit('/')
+                        .next()
+                        .filter(|name| !name.is_empty())
+                        .expect("planned AES-128 segment must have a filename")
+                )
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            segment_paths.len(),
+            total_segments,
+            "the AES-128 resource plan must contain one resource for each playlist segment"
+        );
+        let final_segment_path = segment_paths
+            .last()
+            .cloned()
+            .expect("encrypted HLS fixture must have a final segment");
+        let first_segment_path = segment_paths
+            .first()
+            .expect("encrypted HLS fixture must have a first segment");
+        assert_ne!(
+            final_segment_path, *first_segment_path,
+            "the final-segment gate must not hold back the first segment"
+        );
         for resource in &mut plan.resources {
             let name = resource
                 .url
@@ -6568,21 +6624,9 @@ segment-2.ts
                 .filter(|name| !name.is_empty())
                 .expect("planned AES-128 resource must have a filename")
                 .to_string();
-            match resource.kind {
-                crate::manifest::HlsResourceKind::Key => {}
-                crate::manifest::HlsResourceKind::Segment => {
-                    segment_index += 1;
-                    if segment_index == total_segments {
-                        final_segment_path = Some(format!("/{name}"));
-                    }
-                }
-                _ => panic!("unexpected resource in AES-128 MPEG-TS fixture"),
-            }
             resource.url = Url::parse(&format!("http://{address}/{name}"))
                 .expect("set local AES-128 fixture resource URL");
         }
-        let final_segment_path =
-            final_segment_path.expect("encrypted HLS fixture must have a final segment");
         let request_count = plan.resources.len();
         let fixture_root = fixture.path().to_path_buf();
         let release_final_segment = Arc::new(tokio::sync::Notify::new());
@@ -6729,6 +6773,16 @@ segment-2.ts
         tokio::time::timeout(Duration::from_secs(10), final_segment_requested.notified())
             .await
             .expect("the final segment request should start while earlier segments are muxed");
+        let growing_prefix = tokio::fs::read_to_string(staging.path().join("video/local.m3u8"))
+            .await
+            .expect("read the growing AES-128 playlist while the final segment is blocked");
+        assert_eq!(
+            growing_prefix.matches("#EXTINF:").count(),
+            total_segments - 1,
+            "every non-final AES-128 segment must be in the local playlist before final release; prefix:\n{growing_prefix}"
+        );
+        assert!(!growing_prefix.contains("#EXT-X-ENDLIST"));
+        assert!(!growing_prefix.contains("#EXT-X-PLAYLIST-TYPE:VOD"));
         assert!(
             !download_task.is_finished(),
             "the final segment must remain in flight while FFmpeg consumes the growing prefix"

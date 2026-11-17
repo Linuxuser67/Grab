@@ -6593,7 +6593,9 @@ segment-2.ts
             "continuous-growth fixture must contain at least three segments"
         );
         let segment_request_path = |segment_index: usize| {
-            let segment_uri = &plan.local_playlist.segments[segment_index].uri;
+            let segment_uri = plan
+                .segment_uri(segment_index)
+                .expect("AES-128 playlist segment index must be valid");
             let segment_url = plan
                 .playlist_url
                 .join(segment_uri)

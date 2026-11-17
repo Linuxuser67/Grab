@@ -4646,7 +4646,17 @@ combined.mp4
             }
             let content_length = body.len();
             let headers = format!(
-                "HTTP/1.1 206 Partial Content\r\nContent-Range: bytes {content_range_start}-{content_range_end}/{total_length}\r\nContent-Length: {content_length}\r\nConnection: close\r\n\r\n"
+                concat!(
+                    "HTTP/1.1 206 Partial Content\r\n",
+                    "Content-Range: bytes {}-{}/{}\r\n",
+                    "Content-Length: {}\r\n",
+                    "Connection: close\r\n",
+                    "\r\n"
+                ),
+                content_range_start,
+                content_range_end,
+                total_length,
+                content_length
             );
             socket
                 .write_all(headers.as_bytes())

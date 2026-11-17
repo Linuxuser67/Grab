@@ -3197,7 +3197,9 @@ segment-001.m4s
     let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0))
         .await
         .expect("bind fMP4 fixture server");
-    let address = listener.local_addr().expect("read fMP4 fixture server address");
+    let address = listener
+        .local_addr()
+        .expect("read fMP4 fixture server address");
     let media_path = "/segment-000.m4s".to_string();
     let (media_requested_tx, media_requested_rx) = tokio::sync::oneshot::channel();
     let (release_media_tx, release_media_rx) = tokio::sync::oneshot::channel();
@@ -3263,13 +3265,8 @@ segment-001.m4s
     let destination = destination_dir.join("recording.mp4");
     crate::manifest_destination::ensure_plan(&staging, &destination, 92, false, false)
         .expect("persist fMP4 destination ownership plan");
-    let part = crate::manifest_destination::part_path(
-        &staging,
-        &destination,
-        92,
-        TrackKind::Video,
-    )
-    .expect("resolve fMP4 destination part");
+    let part = crate::manifest_destination::part_path(&staging, &destination, 92, TrackKind::Video)
+        .expect("resolve fMP4 destination part");
 
     let task_staging = staging.clone();
     let task_video_dir = video_dir.clone();
@@ -3312,7 +3309,9 @@ segment-001.m4s
         "the completed initialization fragment must already be visible in the destination part"
     );
     assert_eq!(
-        tokio::fs::read(&part).await.expect("read growing fMP4 destination part"),
+        tokio::fs::read(&part)
+            .await
+            .expect("read growing fMP4 destination part"),
         init,
         "the visible part should contain the committed initialization section while media is in flight"
     );
@@ -3332,7 +3331,9 @@ segment-001.m4s
     expected.extend_from_slice(first_media);
     expected.extend_from_slice(second_media);
     assert_eq!(
-        tokio::fs::read(&part).await.expect("read completed fMP4 destination part"),
+        tokio::fs::read(&part)
+            .await
+            .expect("read completed fMP4 destination part"),
         expected
     );
 }

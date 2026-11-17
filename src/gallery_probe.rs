@@ -88,69 +88,37 @@ pub fn url_is_direct_media(url: &str) -> bool {
 }
 
 /// Where the New Download card should land after both probes complete.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ProbeOutcome {
-    /// yt-dlp fallback when gallery-dl did not return any files.
-    VideoYtDlp,
-    /// gallery-dl returned one or more files, regardless of media type.
-    Gallery,
-    /// Neither probe found anything usable.
-    None,
-}
-
-/// Routing decision from both probe results.
 ///
-/// `ytdlp_video`: whether the yt-dlp probe found a playable video.
-/// `gallery_items`: gallery-dl `-j` items (`None` = probe failed/unsupported).
+/// When yt-dlp also finds a playable video, gallery-dl must return more than
+/// one file to replace that result. With no yt-dlp result, one gallery file is
+/// still a valid direct-file collection.
+///
+/// \`ytdlp_video\`: whether the yt-dlp probe found a playable video.
+/// \`gallery_items\`: gallery-dl \`-j\` items (\`None\` = probe failed/unsupported).
 pub fn route(ytdlp_video: bool, gallery_items: Option<&[GalleryItem]>) -> ProbeOutcome {
-    // Any non-empty successful gallery-dl listing owns the lookup, even if
-    // yt-dlp also found a playable video or recognized a playlist.
-    if gallery_items.is_some_and(|items| !items.is_empty()) {
-        return ProbeOutcome::Gallery;
-    }
+    let Some(items) = gallery_items.filter(|items| !items.is_empty()) else {
+        return if ytdlp_video {
+            ProbeOutcome::VideoYtDlp
+        } else {
+            ProbeOutcome::None
+        };
+    };
 
-    if ytdlp_video {
+    if ytdlp_video && items.len() == 1 {
         ProbeOutcome::VideoYtDlp
     } else {
-        ProbeOutcome::None
+        ProbeOutcome::Gallery
     }
 }
 
-/// Prefer every successful non-empty gallery-dl listing over yt-dlp. Keep
-/// yt-dlp's playlist path only as a fallback when gallery-dl returns no files.
+/// Apply the same multi-file threshold to yt-dlp's playlist-count fallback.
 pub(crate) fn route_for_collection(
     ytdlp_video: bool,
     ytdlp_playlist_entries: usize,
     gallery_items: Option<&[GalleryItem]>,
 ) -> ProbeOutcome {
-    if gallery_items.is_some_and(|items| !items.is_empty()) {
-        return route(ytdlp_video, gallery_items);
-    }
-
-    // A recognized yt-dlp playlist remains available when gallery-dl did
-    // not return files, even if its metadata count is the only video signal.
-    if ytdlp_playlist_entries > 0 {
-        return ProbeOutcome::VideoYtDlp;
-    }
-
-    route(ytdlp_video, gallery_items)
-}
-
-/// Whether a probe error should be surfaced to the user instead of falling
-/// through to the plain-download path. Auth/HTTP errors mean the URL needs
-/// login; "unsupported URL" and timeouts mean gallery-dl just can't handle it.
-pub fn should_surface(e: &GalleryError) -> bool {
-    match e {
-        GalleryError::Probe(msg) => {
-            msg.contains("AuthenticationError")
-                || msg.contains("AuthorizationError")
-                || msg.contains("AuthRequired")
-                || msg.contains("ChallengeError")
-                || msg.contains("HttpError")
-        }
-        // Install/runtime errors (spawn failures, timeouts) fall through.
-        _ => false,
-    }
+    let ytdlp_won = ytdlp_video || ytdlp_playlist_entries > 0;
+    route(ytdlp_won, gallery_items)
 }
 
 /// Best-effort label for one gallery-picker entry. Prefer its own media title,
@@ -1679,24 +1647,33 @@ done
     }
 
     #[test]
-    fn gallery_dl_success_overrides_ytdlp_playlists_and_single_videos() {
-        let videos = [item("mp4"), item("webm")];
+    fn gallery_dl_replaces_ytdlp_only_when_it_finds_multiple_files() {
+        let multiple_videos = [item("mp4"), item("webm")];
         let single_video = [item("mp4")];
         let images = [item("jpg"), item("png")];
-        let unknown = [item("zip"), item("opus")];
+        let single_image = [item("jpg")];
 
-        for items in [&videos[..], &single_video[..], &images[..], &unknown[..]] {
-            assert_eq!(
-                route_for_collection(true, 4, Some(items)),
-                ProbeOutcome::Gallery,
-                "a non-empty gallery-dl result must win for items: {items:?}",
-            );
-            assert_eq!(
-                route_for_collection(false, 0, Some(items)),
-                ProbeOutcome::Gallery,
-                "gallery-dl must also win when yt-dlp found nothing",
-            );
-        }
+        assert_eq!(
+            route_for_collection(true, 4, Some(&multiple_videos)),
+            ProbeOutcome::Gallery
+        );
+        assert_eq!(
+            route_for_collection(true, 4, Some(&single_video)),
+            ProbeOutcome::VideoYtDlp
+        );
+        assert_eq!(
+            route_for_collection(true, 0, Some(&images)),
+            ProbeOutcome::Gallery
+        );
+        assert_eq!(
+            route_for_collection(true, 4, Some(&single_image)),
+            ProbeOutcome::VideoYtDlp
+        );
+        assert_eq!(
+            route_for_collection(false, 0, Some(&single_image)),
+            ProbeOutcome::Gallery,
+            "a single file remains a gallery result when yt-dlp found nothing"
+        );
     }
 
     #[test]
@@ -1715,13 +1692,15 @@ done
     }
 
     #[test]
-    fn route_always_prefers_nonempty_gallery_dl_results() {
+    fn route_uses_gallery_count_only_when_ytdlp_has_no_video() {
         let video = vec![item("mp4")];
+        let multiple = vec![item("jpg"), item("png")];
         let unknown = vec![item("xyz")];
 
-        assert_eq!(route(true, Some(&video)), ProbeOutcome::Gallery);
+        assert_eq!(route(true, Some(&video)), ProbeOutcome::VideoYtDlp);
+        assert_eq!(route(true, Some(&unknown)), ProbeOutcome::VideoYtDlp);
+        assert_eq!(route(true, Some(&multiple)), ProbeOutcome::Gallery);
         assert_eq!(route(false, Some(&video)), ProbeOutcome::Gallery);
-        assert_eq!(route(true, Some(&unknown)), ProbeOutcome::Gallery);
         assert_eq!(route(true, None), ProbeOutcome::VideoYtDlp);
         assert_eq!(route(false, None), ProbeOutcome::None);
         assert_eq!(route(false, Some(&[])), ProbeOutcome::None);

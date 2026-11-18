@@ -878,7 +878,6 @@ pub(super) async fn run_live_dash_tracks(
         audio_plan,
     } = selection;
     let client = transfer.client;
-    let connections = transfer.connections;
     let tx = transfer.tx;
     let downloaded = transfer.downloaded;
     let (mut video, video_bytes) = load_dash_live_track_for_destination(

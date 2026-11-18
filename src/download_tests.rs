@@ -10371,7 +10371,10 @@ fn single_entry_playlist_staged_import_keeps_collection_owner() {
         .enqueue_video_playlist_staged(crate::download::VideoPlaylistEnqueue {
             page_url: "https://example.com/playlist",
             title: "One-entry playlist".to_string(),
-            dest_dir: destination.to_str().expect("UTF-8 temporary path").to_string(),
+            dest_dir: destination
+                .to_str()
+                .expect("UTF-8 temporary path")
+                .to_string(),
             files: vec![crate::media_types::VideoPlaylistFile {
                 id: "only-entry".to_string(),
                 title: "Only entry".to_string(),
@@ -10612,7 +10615,10 @@ fn playlist_staged_import_requeues_a_failed_owner_with_new_entries() {
         .enqueue_video_playlist_staged(crate::download::VideoPlaylistEnqueue {
             page_url: "https://example.com/failed-playlist",
             title: "Failed playlist".to_string(),
-            dest_dir: destination.to_str().expect("UTF-8 playlist folder").to_string(),
+            dest_dir: destination
+                .to_str()
+                .expect("UTF-8 playlist folder")
+                .to_string(),
             files: vec![entry("failed")],
             quality: "best".to_string(),
             audio_only: false,
@@ -10633,7 +10639,10 @@ fn playlist_staged_import_requeues_a_failed_owner_with_new_entries() {
         .enqueue_video_playlist_staged(crate::download::VideoPlaylistEnqueue {
             page_url: "https://example.com/failed-playlist",
             title: "Failed playlist".to_string(),
-            dest_dir: destination.to_str().expect("UTF-8 playlist folder").to_string(),
+            dest_dir: destination
+                .to_str()
+                .expect("UTF-8 playlist folder")
+                .to_string(),
             files: vec![entry("new")],
             quality: "best".to_string(),
             audio_only: false,

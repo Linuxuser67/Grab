@@ -1255,8 +1255,7 @@ pub(super) async fn run_live_dash_tracks(
                     video.committed_bytes,
                 )
                 .await?;
-                match apply_dash_live_snapshot(transfer, plan, track, abort, video_bytes).await?
-                {
+                match apply_dash_live_snapshot(transfer, plan, track, abort, video_bytes).await? {
                     DashLiveUpdateOutcome::Committed => {
                         ensure_manifest_mux_spaces(
                             staging_dir,

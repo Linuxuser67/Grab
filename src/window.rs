@@ -935,6 +935,9 @@ pub fn build_window(
     }
 
     let banner = adw::Banner::new(&gettext("Some downloads failed"));
+    banner.set_widget_name("download-failure-banner");
+    // Keep the persistent failure notice visually separated from the content below.
+    banner.set_margin_bottom(12);
     banner.set_button_label(Some(&gettext("Retry Failed")));
     {
         let m = Rc::clone(&manager);

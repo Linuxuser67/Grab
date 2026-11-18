@@ -3756,6 +3756,7 @@ fn build_submit_handler(context: SubmitContext) -> SubmitHandler {
                 return;
             }
             let url = url_entry.text().trim().to_string();
+            let referer = source_referer_for(&step2, &url);
             if crate::torrent::is_magnet(&url) {
                 let Some(lookup_guard) = TorrentPickerGuard::acquire(&magnet_lookup_state) else {
                     show_video_error(
@@ -3886,10 +3887,11 @@ fn build_submit_handler(context: SubmitContext) -> SubmitHandler {
                         scheduled_at.get(),
                         move |directory| async move {
                             enqueue_manager
-                                .enqueue_manifest_async_batched(
+                                .enqueue_manifest_async_batched_with_referer(
                                     source,
                                     directory.as_deref(),
                                     Some(&filename),
+                                    referer.as_deref(),
                                 )
                                 .await
                         },
@@ -4029,7 +4031,9 @@ fn build_submit_handler(context: SubmitContext) -> SubmitHandler {
                 scheduled_at.get(),
                 move |d| async move {
                     enqueue_manager
-                        .enqueue_async_batched(&enqueue_url, d.as_deref(), None)
+                        .enqueue_async_batched_with_referer(
+                            &enqueue_url, d.as_deref(), None, referer.as_deref(),
+                        )
                         .await
                 },
                 // Form-validation pattern: the error state lives on the entry
@@ -4787,6 +4791,7 @@ fn make_gallery_picker_opener(
             ),
             None => return,
         };
+        let referer = source_referer_for(&step2, &url);
         // A previous enumeration is superseded: abort it (kills
         // gallery-dl) instead of letting it probe on.
         abort_enumeration(&step2);
@@ -4857,6 +4862,7 @@ fn make_gallery_picker_opener(
                         cookies_file: auth.cookies_path.as_deref(),
                         cookies_browser: auth.cookies_browser.as_deref(),
                         user_agent: auth.user_agent.as_deref(),
+                        referer: referer.as_deref(),
                         filter,
                         proxy: proxy3.as_ref(),
                     };
@@ -4909,6 +4915,7 @@ fn make_gallery_picker_opener(
                         scheduled3.get(),
                         title.clone(),
                         url.clone(),
+                        referer.clone(),
                         filter,
                         crate::gallery_grid::GalleryGrid::new(),
                     ) {

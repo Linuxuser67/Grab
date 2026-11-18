@@ -112,7 +112,9 @@ impl DownloadManager {
                     // New single-file gallery jobs intentionally point at
                     // the parent destination. Older jobs keep their dedicated
                     // title-named subfolder, including historical one-file jobs.
-                    if !job.is_direct_single_file(destination) {
+                    let direct_single_file = job.is_direct_single_file(destination)
+                        && job.single_file_name.as_deref() == Some(item.filename.as_str());
+                    if !direct_single_file {
                         // An invalid or older payload must not retain a flat
                         // filename override when its destination is rebuilt
                         // as a multi-file collection directory.

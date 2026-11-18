@@ -558,9 +558,9 @@ mod tests {
             file_rows: Vec::new(),
         };
         let mut payload = serde_json::to_value(job).expect("serialize gallery job");
-        let payload = payload.as_object_mut().expect("gallery object");
-        payload.remove("file_rows");
-        payload.remove("single_file_name");
+        let payload_object = payload.as_object_mut().expect("gallery object");
+        payload_object.remove("file_rows");
+        payload_object.remove("single_file_name");
         let restored: GalleryJob =
             serde_json::from_value(payload).expect("old gallery job remains readable");
         assert!(restored.file_rows.is_empty());

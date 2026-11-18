@@ -1604,6 +1604,18 @@ impl DownloadManager {
         Ok((self.insert(item), guard))
     }
 
+    #[cfg(test)]
+    pub(crate) fn enqueue_video_staged(
+        self: &Rc<Self>,
+        page_url: &str,
+        dir: &str,
+        filename: Option<&str>,
+        choices: crate::media_types::VideoChoices,
+        existing: &[String],
+    ) -> Result<DownloadItem, String> {
+        self.enqueue_video_staged_with_referer(page_url, dir, filename, choices, existing, None)
+    }
+
     fn enqueue_video_staged_with_referer(
         self: &Rc<Self>,
         page_url: &str,

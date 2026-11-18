@@ -2097,7 +2097,8 @@ fn native_manifest_accepts_mp4_mkv_and_ts_but_rejects_other_containers() {
         .enqueue_manifest_staged(source.clone(), &directory, Some("Clip.mp4"), &[], None)
         .expect("MP4 native manifest row");
     assert_eq!(mp4.filename(), "Clip.mp4");
-    let unsupported = manager.enqueue_manifest_staged(source, &directory, Some("Stream.webm"), &[], None);
+    let unsupported =
+        manager.enqueue_manifest_staged(source, &directory, Some("Stream.webm"), &[], None);
     assert!(unsupported.is_err());
     assert_eq!(manager.store().n_items(), 3);
 
@@ -6271,7 +6272,7 @@ fn stamp_request_never_stamps_cookies() {
         "Grab-test/1.0",
         "https://example.com/v",
         None,
-)
+    )
     .build()
     .unwrap();
     assert_eq!(built.headers()["user-agent"], "Grab-test/1.0");
@@ -6599,7 +6600,7 @@ fn stamp_request_sends_origin_only_referer() {
         "",
         "http://127.0.0.1:8080/a/b?token=<redacted>",
         None,
-)
+    )
     .build()
     .unwrap();
     assert_eq!(
@@ -6613,7 +6614,7 @@ fn stamp_request_sends_origin_only_referer() {
         "",
         "https://example.com/v",
         None,
-)
+    )
     .build()
     .unwrap();
     assert_eq!(

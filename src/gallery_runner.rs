@@ -9,7 +9,7 @@ use std::path::Path;
 use tokio::io::{AsyncReadExt, BufReader};
 use tokio::process::Command;
 
-use crate::gallery_argv::{GalleryJob, download_argv_with_proxy};
+use crate::gallery_argv::{GalleryDownloadOptions, GalleryJob, download_argv_with_proxy};
 use crate::gallery_progress::{GalleryProgress, ProgressLine, parse_progress_line};
 use crate::gallery_tools::GalleryError;
 use crate::video_spawn::ProcessGroupGuard;
@@ -150,11 +150,13 @@ pub async fn run_gallery_download_with_proxy(
         &job.dest_dir,
         cookies_file,
         user_agent,
-        job.filter,
-        job.speed_limit,
-        job.range.as_deref(),
-        proxy,
-        &event_nonce,
+        GalleryDownloadOptions {
+            filter: job.filter,
+            speed_limit: job.speed_limit,
+            range: job.range.as_deref(),
+            proxy,
+            event_nonce: &event_nonce,
+        },
     );
     if let Some(referer) = job.referer.as_deref() {
         let separator = argv

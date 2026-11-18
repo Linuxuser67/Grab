@@ -289,7 +289,13 @@ mod tests {
             .expect("bind local fixture");
         let address = listener.local_addr().expect("fixture address");
         let server = tokio::spawn(async move {
-            let (mut stream, _) = listener.accept().await.expect("accept probe");
+            let (mut stream, _) = tokio::time::timeout(
+                std::time::Duration::from_secs(1),
+                listener.accept(),
+            )
+            .await
+            .expect("probe connection timeout")
+            .expect("accept probe");
             let mut request = Vec::new();
             let mut chunk = [0_u8; 1024];
             loop {
@@ -319,7 +325,7 @@ mod tests {
 
             stream
                 .write_all(
-                    b"HTTP/1.1 206 Partial Content\r\nContent-Type: application/octet-stream\r\nContent-Range: bytes 0-0/2000000\r\nContent-Length: 2000000\r\nConnection: close\r\n\r\nx",
+                    b"HTTP/1.1 206 Partial Content\r\nContent-Type: application/octet-stream\r\nContent-Range: bytes 0-0/2000000\r\nContent-Length: 2000000\r\nConnection: close\r\n\r\n",
                 )
                 .await
                 .expect("write response headers");

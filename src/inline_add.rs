@@ -1513,25 +1513,38 @@ fn submit_gallery_all(
     lookup_add: &Rc<RefCell<Option<gtk4::Button>>>,
     scheduled_at: Option<i64>,
 ) {
-    let (page_url, title, filter, file_count) = match step.gallery_card.borrow().as_ref() {
-        Some(card) => {
-            let filter = *card.filter.borrow();
-            (
-                card.url().to_string(),
-                step.gallery_info.title().to_string(),
-                filter,
-                card.total(filter),
-            )
-        }
-        None => {
-            show_video_error(
-                step,
-                &gettext("The gallery preview is no longer available."),
-            );
-            set_lookup_add(lookup_add, true);
-            return;
-        }
-    };
+    let (page_url, title, filter, known_file_count, preview_file_names) =
+        match step.gallery_card.borrow().as_ref() {
+            Some(card) => {
+                let filter = *card.filter.borrow();
+                let preview = card
+                    .filtered_items()
+                    .into_iter()
+                    .map(|item| item.filename.clone())
+                    .collect::<Vec<_>>();
+                // The initial probe is limited to the first five items. For
+                // an unfiltered result with fewer than five, that is the full
+                // listing; a filtered result needs its own count query.
+                let preview_count = (filter == crate::gallery_argv::GalleryFilter::All
+                    && card.items.len() < 5)
+                    .then_some(card.items.len() as u32);
+                (
+                    card.url().to_string(),
+                    step.gallery_info.title().to_string(),
+                    filter,
+                    card.total(filter).or(preview_count),
+                    preview,
+                )
+            }
+            None => {
+                show_video_error(
+                    step,
+                    &gettext("The gallery preview is no longer available."),
+                );
+                set_lookup_add(lookup_add, true);
+                return;
+            }
+        };
     let submitted_url = step.url_entry.text().trim().to_string();
     if !inherit_public_resolution_for_card(step, &submitted_url, &page_url) {
         show_video_error(
@@ -1543,18 +1556,9 @@ fn submit_gallery_all(
     }
 
     let settings = manager.settings();
-    let job = crate::gallery_argv::GalleryJob {
-        item_id: 0,
-        page_url,
-        title,
-        file_count,
-        dest_dir: std::path::PathBuf::from("."),
-        filter,
-        cookies_browser: settings.cookies_browser().to_string(),
-        speed_limit: crate::gallery_runner::gallery_speed_limit(settings),
-        range: None,
-        file_rows: Vec::new(),
-    };
+    let browser = settings.cookies_browser().to_string();
+    let speed_limit = crate::gallery_runner::gallery_speed_limit(settings);
+    let count_host_lease_guard = step.public_host_leases.borrow().lease_guard();
     let enqueue_manager = Rc::clone(manager);
     let error_step = Rc::clone(step);
     let error_lookup_add = Rc::clone(lookup_add);
@@ -1563,8 +1567,60 @@ fn submit_gallery_all(
         close_card,
         scheduled_at,
         move |d| async move {
-            let mut job = job;
-            job.dest_dir = std::path::PathBuf::from(d.unwrap_or_else(|| ".".to_string()));
+            let file_count = match known_file_count {
+                Some(count) => Some(count),
+                None => {
+                    let url_for_count = page_url.clone();
+                    let browser_for_count = browser.clone();
+                    crate::runtime::tokio_rt()
+                        .spawn(count_host_lease_guard.hold(async move {
+                            let count_settings = crate::settings::AppSettings::new();
+                            let proxy = crate::download::DownloadOptions::from_settings(
+                                &count_settings,
+                            )
+                            .proxy_config()
+                            .ok()?;
+                            let auth = crate::inline_gallery::resolve_gallery_auth(
+                                &url_for_count,
+                                &browser_for_count,
+                            );
+                            let tool = crate::gallery_argv::resolve_tool().ok()?;
+                            crate::gallery_probe::count_gallery_files_with_proxy(
+                                &tool,
+                                &url_for_count,
+                                auth.cookies_path.as_deref(),
+                                auth.cookies_browser.as_deref(),
+                                auth.user_agent.as_deref(),
+                                filter,
+                                proxy.as_ref(),
+                            )
+                            .await
+                        }))
+                        .await
+                        .ok()
+                        .flatten()
+                }
+            };
+            if file_count == Some(0) {
+                return Err(gettext("No files found in this gallery"));
+            }
+            let single_file_name = (file_count == Some(1))
+                .then(|| preview_file_names.as_slice())
+                .and_then(|names| (names.len() == 1).then(|| names[0].clone()))
+                .filter(|name| crate::file_names::sane_filename(name));
+            let job = crate::gallery_argv::GalleryJob {
+                item_id: 0,
+                page_url,
+                title,
+                file_count,
+                single_file_name,
+                dest_dir: std::path::PathBuf::from(d.unwrap_or_else(|| ".".to_string())),
+                filter,
+                cookies_browser: browser,
+                speed_limit,
+                range: None,
+                file_rows: Vec::new(),
+            };
             enqueue_manager.enqueue_gallery_async_batched(&job).await
         },
         move |e| {
@@ -1756,9 +1812,19 @@ fn playlist_host_limit_notice(skipped: usize) -> String {
     )
 }
 
-/// Apply the selected entries to one playlist owner. This async helper performs
-/// filesystem inspection on a blocking worker; its queue mutations still run
-/// on the caller's GLib context.
+/// A freshly selected single playlist entry is a normal video download.
+/// Re-imports into an existing collection stay with their owner even when the
+/// current selection contains only one new entry.
+fn queue_playlist_selection_as_single_download(
+    accepted_files: usize,
+    existing_destination: Option<&str>,
+) -> bool {
+    accepted_files == 1 && existing_destination.is_none()
+}
+
+/// Apply the selected entries to one playlist owner, or enqueue a normal video
+/// row for a new single-entry selection. Filesystem inspection runs on a
+/// blocking worker; all queue mutations remain on the caller's GLib context.
 async fn import_playlist_selection(
     request: PlaylistImportRequest,
 ) -> Result<Option<PlaylistImportOutcome>, String> {
@@ -1776,18 +1842,10 @@ async fn import_playlist_selection(
         audio_only,
     } = request;
 
-    let dir = prepare_playlist_destination(existing_destination, base_dir, title).await?;
-
-    // The card may have been closed while the blocking directory inspection
-    // ran. Its lease scope is set to None on close; do not let this stale
-    // picker enqueue or reacquire policy entries.
     if !guarded_child_hosts.borrow().is_current(owner_generation) {
         return Ok(None);
     }
 
-    // Keep the import atomic: the one owner and all its passive children enter
-    // the queue together, then the scheduler sees one playlist job.
-    let _batch = manager.batch_guard();
     let mut failed: Option<String> = None;
     let mut skipped_by_host_limit = 0usize;
     let mut accepted_indices = Vec::with_capacity(chosen.len());
@@ -1850,7 +1908,54 @@ async fn import_playlist_selection(
         });
     }
 
-    if !playlist_files.is_empty() {
+    if queue_playlist_selection_as_single_download(
+        playlist_files.len(),
+        existing_destination.as_deref(),
+    ) {
+        let Some(file) = playlist_files.pop() else {
+            return Err(gettext("Select at least one playlist entry"));
+        };
+        let listing_dir = base_dir.clone();
+        let existing = gio::spawn_blocking(move || {
+            crate::video_staging::try_dir_file_names(std::path::Path::new(&listing_dir))
+        })
+        .await
+        .map_err(|error| format!("Could not inspect download folder: {error:?}"))?
+        .map_err(|error| format!("Could not inspect download folder: {error}"))?;
+
+        // The picker may close while the destination is being inspected.
+        if !guarded_child_hosts.borrow().is_current(owner_generation) {
+            return Ok(None);
+        }
+
+        let settings = manager.settings();
+        let filename = default_name_for(settings, &file.title, audio_only);
+        let choices = crate::media_types::VideoChoices {
+            quality: settings.video_quality(),
+            audio_only,
+            video_format_id: None,
+            is_live: false,
+            // Keep the extractor ID when this entry's page URL is the
+            // collection URL; otherwise the distinct page URL is sufficient.
+            playlist_item_id: (file.page_url == page_url).then(|| file.id.clone()),
+        };
+        let _batch = manager.batch_guard();
+        let item = manager.enqueue_video_staged(
+            &file.page_url,
+            &base_dir,
+            Some(&filename),
+            choices,
+            &existing,
+        )?;
+        apply_scheduled_at(&item, scheduled_at);
+    } else if !playlist_files.is_empty() {
+        let dir = prepare_playlist_destination(existing_destination, base_dir, title).await?;
+        if !guarded_child_hosts.borrow().is_current(owner_generation) {
+            return Ok(None);
+        }
+
+        // Multi-entry collections enter as one owner and its passive children.
+        let _batch = manager.batch_guard();
         let owner = manager.enqueue_video_playlist_staged(
             &page_url,
             &group_title,
@@ -4957,6 +5062,14 @@ fn refresh_gallery_info(v: &VideoStep, title: &str, count_label: &str) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn only_new_single_entry_playlists_skip_the_collection_folder() {
+        assert!(queue_playlist_selection_as_single_download(1, None));
+        assert!(!queue_playlist_selection_as_single_download(0, None));
+        assert!(!queue_playlist_selection_as_single_download(2, None));
+        assert!(!queue_playlist_selection_as_single_download(1, Some("/tmp/existing-playlist")));
+    }
 
     fn gallery_item(extension: &str) -> crate::gallery_probe::GalleryItem {
         crate::gallery_probe::GalleryItem {

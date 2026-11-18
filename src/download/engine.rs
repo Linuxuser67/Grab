@@ -2273,6 +2273,7 @@ impl DownloadManager {
                                     DownloadStatus::Downloading,
                                     0.0,
                                     &gettext("Downloading"),
+                                    true,
                                 );
                             }
                             Some(crate::gallery_progress::ProgressLine::Completed(path)) => {
@@ -2282,6 +2283,7 @@ impl DownloadManager {
                                     DownloadStatus::Done,
                                     1.0,
                                     &gettext("Finished"),
+                                    true,
                                 );
                             }
                             Some(crate::gallery_progress::ProgressLine::Skipped(path)) => {
@@ -2291,6 +2293,7 @@ impl DownloadManager {
                                     DownloadStatus::Done,
                                     1.0,
                                     &gettext("Already exists"),
+                                    false,
                                 );
                             }
                             _ => {}
@@ -2310,6 +2313,7 @@ impl DownloadManager {
                                     .current_file_percent
                                     .map(|percent| format!("{percent}%"))
                                     .unwrap_or_else(|| gettext("Downloading")),
+                                true,
                             );
                         }
 

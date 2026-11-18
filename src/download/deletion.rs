@@ -79,6 +79,7 @@ pub(crate) struct UndoOperationGuard {
 enum DeleteOperation {
     Gallery {
         target: Option<std::path::PathBuf>,
+        files: Vec<std::path::PathBuf>,
         filename: String,
     },
     Torrent {
@@ -109,11 +110,35 @@ fn trash_path(path: &std::path::Path, display_name: &str) -> Result<(), String> 
 /// trash moves, all of which must stay off the GTK main thread.
 fn execute_delete_operation(operation: DeleteOperation) -> Result<(), String> {
     match operation {
-        DeleteOperation::Gallery { target, filename } => {
+        DeleteOperation::Gallery {
+            target,
+            files,
+            filename,
+        } => {
             if let Some(path) = target
-                && path.is_dir()
+                && std::fs::symlink_metadata(&path).is_ok_and(|metadata| metadata.is_dir())
             {
                 trash_path(&path, &filename)?;
+            } else {
+                // Direct-output galleries own only files they actually created.
+                // Never trash a skipped pre-existing file or the shared parent.
+                for path in files {
+                    match std::fs::symlink_metadata(&path) {
+                        Ok(metadata)
+                            if metadata.is_file() || metadata.file_type().is_symlink() =>
+                        {
+                            trash_path(&path, &filename)?;
+                        }
+                        Ok(_) => {}
+                        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                        Err(error) => {
+                            return Err(format!(
+                                "Could not inspect gallery output {}: {error}",
+                                path.display()
+                            ));
+                        }
+                    }
+                }
             }
         }
         DeleteOperation::Torrent {
@@ -361,9 +386,9 @@ impl DownloadManager {
         let dest_dir = item.dest_dir();
         let parent = std::path::Path::new(&dest_dir);
         let filename = item.filename();
-        // All three must hold: a distinct subfolder, directly inside the
-        // row's dest_dir, named exactly the row's filename. This rules out
-        // legacy rows (job points at the parent itself), `..` escapes, and
+        // All three must hold: a distinct collection directory, directly
+        // inside the row's dest_dir, named exactly the row's filename. This
+        // rules out flat single-file jobs, legacy rows, `..` escapes, and
         // records that drifted to a different folder.
         if job.dest_dir.as_path() == parent {
             return None;
@@ -377,19 +402,55 @@ impl DownloadManager {
         Some(job.dest_dir.clone())
     }
 
+    /// Exact direct-output files that this single-file gallery created.
+    /// Paths must be immediate children of the configured destination; the
+    /// shared destination itself is never a Trash target.
+    pub(super) fn gallery_direct_trash_targets(
+        destination: &std::path::Path,
+        job: &crate::gallery_argv::GalleryJob,
+    ) -> Vec<std::path::PathBuf> {
+        if !job.is_direct_single_file(destination) {
+            return Vec::new();
+        }
+        let mut seen = std::collections::HashSet::new();
+        job.file_rows
+            .iter()
+            .filter(|state| state.owned)
+            .filter_map(|state| {
+                let path = std::path::PathBuf::from(&state.path);
+                (path.parent() == Some(destination) && path.file_name().is_some())
+                    .then_some(path)
+            })
+            .filter(|path| seen.insert(path.clone()))
+            .collect()
+    }
+
     /// Prepare immutable inputs for deletion while the model is on GTK.
     /// Directory checks and torrent archive parsing are deferred to the worker.
     fn prepare_delete_operation(&self, id: u64, item: &DownloadItem) -> DeleteOperation {
         let filename = item.filename().to_string();
         if item.is_gallery() {
-            let target = self
+            let (target, files) = self
                 .gallery_jobs
                 .borrow()
                 .get(&id)
-                .and_then(|job| Self::gallery_trash_target(item, job));
-            // Legacy gallery rows without an ownership proof still remove
-            // only their queue row; they never trash the shared parent.
-            return DeleteOperation::Gallery { target, filename };
+                .map(|job| {
+                    (
+                        Self::gallery_trash_target(item, job),
+                        Self::gallery_direct_trash_targets(
+                            std::path::Path::new(&item.dest_dir()),
+                            job,
+                        ),
+                    )
+                })
+                .unwrap_or_default();
+            // Multi-file rows own a dedicated directory. A direct single-file
+            // row owns only its recorded files; legacy rows own neither.
+            return DeleteOperation::Gallery {
+                target,
+                files,
+                filename,
+            };
         }
 
         let url = item.url().to_string();
@@ -479,5 +540,90 @@ impl DownloadManager {
         completion_rx.await.map_err(|_| {
             format!("Could not move {filename} to Trash: completion was interrupted")
         })?
+    }
+}
+
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::gallery_argv::{GalleryFileState, GalleryFilter, GalleryJob};
+    use crate::download_store::DownloadStatus;
+
+    fn direct_job(destination: &std::path::Path) -> GalleryJob {
+        GalleryJob {
+            item_id: 1,
+            page_url: "https://example.test/gallery".to_string(),
+            title: "Gallery".to_string(),
+            file_count: Some(1),
+            single_file_name: Some("created.mp4".to_string()),
+            dest_dir: destination.to_path_buf(),
+            filter: GalleryFilter::All,
+            cookies_browser: "none".to_string(),
+            speed_limit: None,
+            range: None,
+            file_rows: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn direct_gallery_trash_includes_only_owned_immediate_files() {
+        let destination = std::path::Path::new("/tmp/grab-downloads");
+        let mut job = direct_job(destination);
+        job.file_rows = vec![
+            GalleryFileState {
+                path: destination.join("created.mp4").to_string_lossy().into_owned(),
+                status: DownloadStatus::Done,
+                progress: 1.0,
+                owned: true,
+            },
+            GalleryFileState {
+                path: destination.join("existing.mp4").to_string_lossy().into_owned(),
+                status: DownloadStatus::Done,
+                progress: 1.0,
+                owned: false,
+            },
+            GalleryFileState {
+                path: destination
+                    .join("nested")
+                    .join("created.mp4")
+                    .to_string_lossy()
+                    .into_owned(),
+                status: DownloadStatus::Done,
+                progress: 1.0,
+                owned: true,
+            },
+            GalleryFileState {
+                path: std::path::Path::new("/tmp/other/foreign.mp4")
+                    .to_string_lossy()
+                    .into_owned(),
+                status: DownloadStatus::Done,
+                progress: 1.0,
+                owned: true,
+            },
+        ];
+
+        assert_eq!(
+            DownloadManager::gallery_direct_trash_targets(destination, &job),
+            vec![destination.join("created.mp4")]
+        );
+    }
+
+    #[test]
+    fn direct_gallery_trash_never_targets_the_parent_or_multi_file_jobs() {
+        let destination = std::path::Path::new("/tmp/grab-downloads");
+        let mut job = direct_job(destination);
+        job.file_rows.push(GalleryFileState {
+            path: destination.join("created.mp4").to_string_lossy().into_owned(),
+            status: DownloadStatus::Done,
+            progress: 1.0,
+            owned: true,
+        });
+
+        assert!(!DownloadManager::gallery_direct_trash_targets(destination, &job)
+            .contains(&destination.to_path_buf()));
+
+        job.file_count = Some(2);
+        assert!(DownloadManager::gallery_direct_trash_targets(destination, &job).is_empty());
     }
 }

@@ -1496,10 +1496,10 @@ impl DownloadManager {
         Ok((item, guard))
     }
 
-    /// Enqueue a gallery download (image gallery via gallery-dl).
-    /// Creates a DownloadItem with gallery flags set; the actual download
-    /// is driven by the gallery runner (phase 12).
     /// Enqueue a gallery after listing its destination off GTK.
+    /// A verified one-file result writes its original filename directly into
+    /// the selected destination; multi-file and unknown-count results retain
+    /// an owned collection directory.
     #[cfg(test)]
     pub async fn enqueue_gallery_async(
         self: &Rc<Self>,
@@ -1543,20 +1543,41 @@ impl DownloadManager {
             counter += 1;
             unique_title = format!("{title}-{counter}");
         }
-        let item = DownloadItem::new(self.alloc_id_for_in(&existing), &url, &unique_title, &dir);
+        let direct_filename = (job.file_count == Some(1))
+            .then_some(job.single_file_name.as_deref())
+            .flatten()
+            .filter(|name| sane_filename(name))
+            .map(|name| self.finalize_filename(name))
+            .filter(|name| sane_filename(name));
+        let direct_filename = direct_filename.map(|name| {
+            dedupe_filename(&name, |candidate| {
+                let path = std::path::Path::new(&dir).join(candidate);
+                existing.iter().any(|entry| entry == candidate)
+                    || self.items().any(|row| row.file_path() == path)
+                    || self.dest_reserved(&path)
+            })
+        });
+        let direct_output = job.file_count == Some(1) && direct_filename.is_some();
+        let row_filename = direct_filename.as_deref().unwrap_or(&unique_title);
+        let item = DownloadItem::new(self.alloc_id_for_in(&existing), &url, row_filename, &dir);
         item.set_is_gallery(true);
         item.set_group(
             crate::download_store::DownloadGroup::try_new(item.id(), &job.title).or_else(|| {
-                crate::download_store::DownloadGroup::try_new(item.id(), &unique_title)
+                crate::download_store::DownloadGroup::try_new(item.id(), row_filename)
             }),
         );
         item.set_gallery_file_count(job.file_count.unwrap_or(0));
         item.set_gallery_files_done(0);
         item.set_gallery_url(url.clone());
         item.set_detail(gettext("Gallery"));
-        let gallery_dir = std::path::Path::new(&dir).join(&unique_title);
+        let gallery_dir = if direct_output {
+            std::path::PathBuf::from(&dir)
+        } else {
+            std::path::Path::new(&dir).join(&unique_title)
+        };
         let mut stored_job = job.clone();
         stored_job.dest_dir = gallery_dir;
+        stored_job.single_file_name = direct_filename;
         stored_job.item_id = item.id();
         self.gallery_jobs.borrow_mut().insert(item.id(), stored_job);
         Ok((self.insert(item), guard))
@@ -2447,12 +2468,19 @@ impl DownloadManager {
         status: DownloadStatus,
         progress: f64,
         detail: &str,
+        owned: bool,
     ) {
-        let Some(output_dir) = self
+        let destination = std::path::PathBuf::from(owner.dest_dir());
+        let Some((output_dir, direct_output)) = self
             .gallery_jobs
             .borrow()
             .get(&owner.id())
-            .map(|job| job.dest_dir.clone())
+            .map(|job| {
+                (
+                    job.dest_dir.clone(),
+                    job.is_direct_single_file(&destination),
+                )
+            })
         else {
             return;
         };
@@ -2474,7 +2502,33 @@ impl DownloadManager {
             );
             return;
         };
-        let filename = relative.to_string_lossy().into_owned();
+        let filename = if direct_output {
+            let mut components = relative.components();
+            let Some(std::path::Component::Normal(name)) = components.next() else {
+                return;
+            };
+            if components.next().is_some() {
+                tracing::warn!(
+                    path = %path,
+                    output_dir = %output_dir.display(),
+                    "single-file gallery emitted a nested output path"
+                );
+                return;
+            }
+            let Some(name) = name.to_str().filter(|name| sane_filename(name)) else {
+                tracing::warn!(
+                    path = %path,
+                    "single-file gallery emitted an invalid output filename"
+                );
+                return;
+            };
+            name.to_string()
+        } else {
+            relative.to_string_lossy().into_owned()
+        };
+        if direct_output {
+            owner.set_filename(filename.clone());
+        }
         let Some(group) = owner.group() else {
             tracing::warn!(
                 gallery_id = owner.id(),
@@ -2511,6 +2565,7 @@ impl DownloadManager {
                     path: path.to_string(),
                     status,
                     progress,
+                    owned,
                 });
                 index
             });
@@ -2525,6 +2580,7 @@ impl DownloadManager {
             };
             state.status = status;
             state.progress = progress;
+            state.owned |= owned;
             index
         };
         if existing_state_index.is_none()
@@ -2581,7 +2637,14 @@ impl DownloadManager {
                 state.status,
             );
             let detail = collection_child_status_detail(CollectionProjectionKind::Gallery, status);
-            self.upsert_gallery_file_row(owner, &state.path, status, state.progress, &detail);
+            self.upsert_gallery_file_row(
+                owner,
+                &state.path,
+                status,
+                state.progress,
+                &detail,
+                state.owned,
+            );
         }
         if !file_rows.is_empty() {
             self.changed();
@@ -3181,9 +3244,11 @@ impl DownloadManager {
         if name.is_empty() || !sane_filename(&name) {
             return Err(gettext("That isn't a valid file name"));
         }
+        let dest_dir = item.dest_dir();
+        let old_path = item.file_path();
+        let new_path = std::path::Path::new(&dest_dir).join(&name);
         if item.status() == DownloadStatus::Done {
-            let new_path = std::path::PathBuf::from(item.dest_dir().to_string()).join(&name);
-            match rename_noreplace(&item.file_path(), &new_path) {
+            match rename_noreplace(&old_path, &new_path) {
                 Ok(()) => {}
                 // Deleted behind our back: the label update below still applies.
                 Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
@@ -3194,16 +3259,52 @@ impl DownloadManager {
                 }
             }
         }
-        let dest_dir = item.dest_dir();
         let renamed_dir = std::path::Path::new(&dest_dir).join(&name);
-        item.set_filename(name);
-        // Gallery rows: the stored job's dest_dir is the on-disk subfolder.
-        // Keep it in sync with the rename so Delete's ownership check and a
-        // later retry target the renamed folder, not the stale name.
-        if item.is_gallery()
-            && let Some(job) = self.gallery_jobs.borrow_mut().get_mut(&id)
-        {
-            job.dest_dir = renamed_dir;
+        let direct_gallery = item.is_gallery()
+            && self
+                .gallery_jobs
+                .borrow()
+                .get(&id)
+                .is_some_and(|job| {
+                    job.is_direct_single_file(std::path::Path::new(&dest_dir))
+                });
+        let old_path_text = old_path.to_string_lossy().into_owned();
+        let new_path_text = new_path.to_string_lossy().into_owned();
+        item.set_filename(name.clone());
+        if item.is_gallery() {
+            if direct_gallery {
+                // A direct-output gallery owns the exact file paths recorded
+                // by gallery-dl, not a title-named directory. Keep persisted
+                // state and the transient child row aligned with the rename.
+                if let Some(job) = self.gallery_jobs.borrow_mut().get_mut(&id) {
+                    job.single_file_name = Some(name.clone());
+                    for file in &mut job.file_rows {
+                        if file.path == old_path_text {
+                            file.path = new_path_text.clone();
+                        }
+                    }
+                }
+                let row = {
+                    let mut indexes = self.gallery_file_row_index.borrow_mut();
+                    indexes.get_mut(&id).and_then(|index| {
+                        if let Some(state_index) = index.state_indices.remove(&old_path_text) {
+                            index.state_indices.insert(new_path_text.clone(), state_index);
+                        }
+                        index.rows.remove(&old_path_text)
+                    })
+                };
+                if let Some(row) = row {
+                    row.set_gallery_file_path(new_path_text.clone());
+                    row.set_filename(name.clone());
+                    row.set_dest_dir(dest_dir.clone());
+                    if let Some(index) = self.gallery_file_row_index.borrow_mut().get_mut(&id) {
+                        index.rows.insert(new_path_text.clone(), row);
+                    }
+                }
+            } else if let Some(job) = self.gallery_jobs.borrow_mut().get_mut(&id) {
+                // Multi-file galleries keep their dedicated directory.
+                job.dest_dir = renamed_dir;
+            }
         }
         self.persist_queue();
         self.changed();

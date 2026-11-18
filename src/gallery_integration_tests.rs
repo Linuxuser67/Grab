@@ -168,6 +168,7 @@ async fn gallery_integration_probe_count_download() {
         page_url: url.clone(),
         title: "test-gallery".to_string(),
         file_count: Some(4),
+        single_file_name: None,
         dest_dir: dest.clone(),
         filter: crate::gallery_argv::GalleryFilter::All,
         cookies_browser: "none".to_string(),
@@ -260,6 +261,7 @@ async fn gallery_integration_filtered_download() {
         page_url: url.clone(),
         title: "test-gallery-filter".to_string(),
         file_count: Some(3),
+        single_file_name: None,
         dest_dir: dest.clone(),
         filter: crate::gallery_argv::GalleryFilter::ImagesOnly,
         cookies_browser: "none".to_string(),
@@ -353,6 +355,7 @@ async fn gallery_integration_range_indexes_filtered_files() {
         page_url: url.clone(),
         title: "test-gallery-range".to_string(),
         file_count: Some(1),
+        single_file_name: Some("selected.jpg".to_string()),
         dest_dir: dest.clone(),
         filter,
         cookies_browser: "none".to_string(),
@@ -377,8 +380,8 @@ async fn gallery_integration_range_indexes_filtered_files() {
         "range 1 selects exactly one file"
     );
     assert!(
-        dest.join("img1.jpg").is_file(),
-        "--range must index the filtered list, not the raw one"
+        dest.join("selected.jpg").is_file(),
+        "a one-file selection uses its original filename in the destination folder"
     );
 
     std::fs::remove_dir_all(&dest).ok();

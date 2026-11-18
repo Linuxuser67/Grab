@@ -107,9 +107,19 @@ impl DownloadManager {
                     // uniquifying -2 suffix. A payload matching that shape is
                     // trustworthy; anything else (legacy rows, drifted
                     // records) is rebuilt from the validated filename.
-                    let folder = std::path::Path::new(&item.dest_dir).join(&item.filename);
-                    if job.dest_dir != folder {
-                        job.dest_dir = folder;
+                    let destination = std::path::Path::new(&item.dest_dir);
+                    let folder = destination.join(&item.filename);
+                    // New single-file gallery jobs intentionally point at
+                    // the parent destination. Older jobs keep their dedicated
+                    // title-named subfolder, including historical one-file jobs.
+                    if !job.is_direct_single_file(destination) {
+                        // An invalid or older payload must not retain a flat
+                        // filename override when its destination is rebuilt
+                        // as a multi-file collection directory.
+                        job.single_file_name = None;
+                        if job.dest_dir != folder {
+                            job.dest_dir = folder;
+                        }
                     }
                     Some(job)
                 }
@@ -134,6 +144,7 @@ impl DownloadManager {
                         page_url: page_url.clone(),
                         title: item.filename.clone(),
                         file_count: None,
+                        single_file_name: None,
                         dest_dir: std::path::PathBuf::from(&item.dest_dir),
                         filter: crate::gallery_argv::GalleryFilter::All,
                         cookies_browser: "none".to_string(),

@@ -326,6 +326,16 @@ pub struct GalleryFileState {
     pub status: crate::download_store::DownloadStatus,
     #[serde(default)]
     pub progress: f64,
+    /// True only when gallery-dl created or resumed this file; skipped files
+    /// already present in the destination are never owned by this queue row.
+    #[serde(default)]
+    pub owned: bool,
+}
+
+/// Encode a literal filename for gallery-dl's Python-style format string.
+/// Braces are the format delimiters; percent signs are ordinary filename data.
+pub(crate) fn literal_filename_format(filename: &str) -> String {
+    filename.replace('{', "{{").replace('}', "}}")
 }
 
 /// Inputs for one gallery-dl process and its expandable collection UI.
@@ -339,6 +349,11 @@ pub struct GalleryJob {
     pub title: String,
     /// File count from the probe (`-g` line count), if available.
     pub file_count: Option<u32>,
+    /// Original filename for a known one-file result. When present, the
+    /// runner uses this exact leaf name and can safely write into the parent
+    /// destination without reserving a title-named directory.
+    #[serde(default)]
+    pub single_file_name: Option<String>,
     pub dest_dir: PathBuf,
     pub filter: GalleryFilter,
     /// Browser spec for cookies (e.g. "chrome", "firefox", "none").
@@ -358,6 +373,19 @@ pub struct GalleryJob {
     pub file_rows: Vec<GalleryFileState>,
 }
 
+impl GalleryJob {
+    /// Whether this job writes its one selected file directly into the
+    /// queue row's destination, rather than into a collection subfolder.
+    #[must_use]
+    pub(crate) fn is_direct_single_file(&self, destination: &Path) -> bool {
+        self.file_count == Some(1)
+            && self.dest_dir.as_path() == destination
+            && self.single_file_name
+                .as_deref()
+                .is_some_and(crate::file_names::sane_filename)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -365,6 +393,45 @@ mod tests {
 
     fn tool() -> PathBuf {
         PathBuf::from("/tmp/gallery-dl")
+    }
+
+    fn gallery_job(file_count: Option<u32>, dest_dir: PathBuf) -> GalleryJob {
+        GalleryJob {
+            item_id: 1,
+            page_url: "https://example.test/gallery".to_string(),
+            title: "Gallery".to_string(),
+            file_count,
+            single_file_name: None,
+            dest_dir,
+            filter: GalleryFilter::All,
+            cookies_browser: "none".to_string(),
+            speed_limit: None,
+            range: None,
+            file_rows: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn literal_gallery_filename_escapes_format_braces_only() {
+        assert_eq!(literal_filename_format("100% {sample}.jpg"), "100% {{sample}}.jpg");
+        assert_eq!(literal_filename_format("plain.jpg"), "plain.jpg");
+    }
+
+    #[test]
+    fn only_a_known_single_file_uses_the_parent_destination() {
+        let destination = Path::new("/tmp/downloads");
+        let mut single = gallery_job(Some(1), destination.to_path_buf());
+        assert!(!single.is_direct_single_file(destination));
+        single.single_file_name = Some("image.jpg".to_string());
+        assert!(single.is_direct_single_file(destination));
+        assert!(!gallery_job(Some(2), destination.to_path_buf()).is_direct_single_file(destination));
+        assert!(!gallery_job(None, destination.to_path_buf()).is_direct_single_file(destination));
+        let mut nested = gallery_job(Some(1), destination.join("Gallery"));
+        nested.single_file_name = Some("image.jpg".to_string());
+        assert!(!nested.is_direct_single_file(destination));
+        let mut unsafe_name = gallery_job(Some(1), destination.to_path_buf());
+        unsafe_name.single_file_name = Some("../outside.jpg".to_string());
+        assert!(!unsafe_name.is_direct_single_file(destination));
     }
 
     #[test]
@@ -452,12 +519,31 @@ mod tests {
     }
 
     #[test]
+    fn older_gallery_file_rows_default_to_unowned() {
+        let state = GalleryFileState {
+            path: "/tmp/downloads/existing.jpg".to_string(),
+            status: crate::download_store::DownloadStatus::Done,
+            progress: 1.0,
+            owned: true,
+        };
+        let mut payload = serde_json::to_value(state).expect("serialize gallery file state");
+        payload
+            .as_object_mut()
+            .expect("gallery file state object")
+            .remove("owned");
+        let restored: GalleryFileState =
+            serde_json::from_value(payload).expect("legacy file state remains readable");
+        assert!(!restored.owned);
+    }
+
+    #[test]
     fn older_gallery_job_payloads_default_to_no_file_rows() {
         let job = GalleryJob {
             item_id: 41,
             page_url: "https://example.com/gallery".to_string(),
             title: "Gallery".to_string(),
             file_count: Some(2),
+            single_file_name: None,
             dest_dir: PathBuf::from("/tmp/gallery"),
             filter: GalleryFilter::All,
             cookies_browser: "none".to_string(),
@@ -466,13 +552,13 @@ mod tests {
             file_rows: Vec::new(),
         };
         let mut payload = serde_json::to_value(job).expect("serialize gallery job");
-        payload
-            .as_object_mut()
-            .expect("gallery object")
-            .remove("file_rows");
+        let payload = payload.as_object_mut().expect("gallery object");
+        payload.remove("file_rows");
+        payload.remove("single_file_name");
         let restored: GalleryJob =
             serde_json::from_value(payload).expect("old gallery job remains readable");
         assert!(restored.file_rows.is_empty());
+        assert_eq!(restored.single_file_name, None);
     }
 
     #[test]

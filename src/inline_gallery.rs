@@ -306,6 +306,7 @@ pub(crate) async fn dual_probe(ctx: DualProbeCtx<'_>) -> DualProbeOutcome {
 pub(crate) struct GalleryPickerStream {
     grid: GalleryGrid,
     page_url: String,
+    items: Rc<RefCell<Vec<crate::gallery_probe::GalleryItem>>>,
     error_caption: gtk4::Label,
     add_btn: gtk4::Button,
     select_all_btn: gtk4::Button,
@@ -327,6 +328,7 @@ impl GalleryPickerStream {
             })
             .collect::<Vec<_>>();
         self.grid.append(&titles);
+        self.items.borrow_mut().extend_from_slice(items);
     }
 
     /// Stream finished: enable the action bar.
@@ -375,6 +377,7 @@ pub(crate) fn push_gallery_picker_page(
         return None;
     }
     let page_url = url.clone();
+    let items = Rc::new(RefCell::new(Vec::new()));
 
     let list_box = gtk4::Box::builder()
         .orientation(gtk4::Orientation::Vertical)
@@ -421,6 +424,7 @@ pub(crate) fn push_gallery_picker_page(
 
     {
         let grid = grid.clone();
+        let items = Rc::clone(&items);
         let error_caption = error_caption.clone();
         let add_btn_click = add_btn.clone();
         let add_btn_guard = add_btn.clone();
@@ -447,6 +451,15 @@ pub(crate) fn push_gallery_picker_page(
                     return;
                 }
             };
+            let single_file_name = if selected.len() == 1 {
+                selected
+                    .first()
+                    .and_then(|index| items.borrow().get(*index))
+                    .map(|item| item.filename.clone())
+                    .filter(|name| crate::file_names::sane_filename(name))
+            } else {
+                None
+            };
             // Disable while the enqueue runs: a second click would enqueue duplicates.
             add_btn_guard.set_sensitive(false);
             let settings = manager.settings();
@@ -455,6 +468,7 @@ pub(crate) fn push_gallery_picker_page(
                 page_url: url.clone(),
                 title: title.clone(),
                 file_count: Some(selected.len() as u32),
+                single_file_name,
                 dest_dir: std::path::PathBuf::from("."),
                 filter,
                 cookies_browser: settings.cookies_browser().to_string(),
@@ -492,6 +506,7 @@ pub(crate) fn push_gallery_picker_page(
     Some(GalleryPickerStream {
         grid,
         page_url,
+        items,
         error_caption,
         add_btn,
         select_all_btn,

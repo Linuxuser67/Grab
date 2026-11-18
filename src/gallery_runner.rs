@@ -144,7 +144,7 @@ pub async fn run_gallery_download_with_proxy(
     let event_nonce = crate::event_nonce::new_event_nonce().map_err(|error| {
         GalleryError::runtime(format!("couldn't generate gallery event nonce: {error}"))
     })?;
-    let argv = download_argv_with_proxy(
+    let mut argv = download_argv_with_proxy(
         tool,
         &job.page_url,
         &job.dest_dir,
@@ -156,6 +156,23 @@ pub async fn run_gallery_download_with_proxy(
         proxy,
         &event_nonce,
     );
+    if let Some(filename) = job.single_file_name.as_deref() {
+        // This is only set for a confirmed one-file gallery. Escape braces
+        // because gallery-dl formats filenames with Python's str.format;
+        // percent signs remain literal filename characters.
+        let filename_template = crate::gallery_argv::literal_filename_format(filename);
+        let Some(format_index) = argv.iter().position(|argument| argument == "-f") else {
+            return Err(GalleryError::runtime(
+                "gallery-dl filename option is missing",
+            ));
+        };
+        let Some(value) = argv.get_mut(format_index + 1) else {
+            return Err(GalleryError::runtime(
+                "gallery-dl filename option has no value",
+            ));
+        };
+        *value = filename_template;
+    }
     let guarded_proxy = if untrusted_handoff {
         crate::video_spawn::validate_guarded_proxy_args(&argv).map_err(GalleryError::probe)?;
         Some(crate::subprocess_proxy::ensure_started().map_err(GalleryError::probe)?)
@@ -426,6 +443,7 @@ mod tests {
             page_url: "https://example.com/gallery".to_string(),
             title: "Gallery".to_string(),
             file_count: Some(2),
+            single_file_name: None,
             dest_dir: dir.clone(),
             filter: GalleryFilter::All,
             cookies_browser: "none".to_string(),
@@ -516,6 +534,7 @@ mod tests {
             page_url: "https://example.com/x".to_string(),
             title: "x".to_string(),
             file_count: None,
+            single_file_name: None,
             dest_dir: dir.clone(),
             filter: GalleryFilter::All,
             cookies_browser: "none".to_string(),
@@ -591,6 +610,7 @@ mod tests {
             page_url: "https://example.com/gallery".to_string(),
             title: "Test Gallery".to_string(),
             file_count: Some(10),
+            single_file_name: None,
             dest_dir: PathBuf::from("/tmp/dest"),
             filter: GalleryFilter::ImagesOnly,
             cookies_browser: "none".to_string(),

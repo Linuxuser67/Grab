@@ -1445,7 +1445,18 @@ fn request_referer(target: &str, source: Option<&str>) -> Option<String> {
     let Some(source) = source else {
         return origin_referer(target);
     };
+    let source = source.trim();
+    if source.len() > 2048 {
+        return None;
+    }
     let source_url = url::Url::parse(source).ok()?;
+    if !matches!(source_url.scheme(), "http" | "https")
+        || source_url.host_str().is_none()
+        || !source_url.username().is_empty()
+        || source_url.password().is_some()
+    {
+        return None;
+    }
     let target_url = url::Url::parse(target).ok()?;
     if source_url.scheme() == "https" && target_url.scheme() == "http" {
         return None;
@@ -1456,6 +1467,65 @@ fn request_referer(target: &str, source: Option<&str>) -> Option<String> {
         Some(source_url.to_string())
     } else {
         origin_referer(source)
+    }
+}
+
+#[cfg(test)]
+mod request_referer_tests {
+    use super::request_referer;
+
+    #[test]
+    fn same_origin_keeps_page_url_without_fragment() {
+        assert_eq!(
+            request_referer(
+                "https://example.test/download/file",
+                Some("https://example.test/watch?id=42#player"),
+            ),
+            Some("https://example.test/watch?id=42".to_string())
+        );
+    }
+
+    #[test]
+    fn cross_origin_sends_source_origin_only() {
+        assert_eq!(
+            request_referer(
+                "https://cdn.example.test/file",
+                Some("https://www.example.test/watch?id=private"),
+            ),
+            Some("https://www.example.test/".to_string())
+        );
+    }
+
+    #[test]
+    fn downgrade_and_invalid_source_suppress_referer() {
+        assert_eq!(
+            request_referer(
+                "http://cdn.example.test/file",
+                Some("https://www.example.test/watch"),
+            ),
+            None
+        );
+        assert_eq!(
+            request_referer(
+                "https://cdn.example.test/file",
+                Some("javascript:alert(1)"),
+            ),
+            None
+        );
+        assert_eq!(
+            request_referer(
+                "https://cdn.example.test/file",
+                Some("https://user:pass@example.test/watch"),
+            ),
+            None
+        );
+        assert_eq!(
+            request_referer(
+                "https://cdn.example.test/file",
+                Some(&"x".repeat(2049)),
+            ),
+            None
+        );
     }
 }
 

@@ -9765,6 +9765,7 @@ fn test_gallery_job(dest_dir: std::path::PathBuf) -> crate::gallery_argv::Galler
         page_url: "https://example.com/gallery".to_string(),
         title: "title".to_string(),
         file_count: None,
+        single_file_name: None,
         dest_dir,
         filter: crate::gallery_argv::GalleryFilter::All,
         cookies_browser: "none".to_string(),

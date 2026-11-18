@@ -58,6 +58,15 @@
     </screenshot>
   </screenshots>
   <releases>
+    <release version="6.5.2" date="2026-11-18">
+      <description>
+        <ul>
+          <li>Carry the originating browser page context through supported media lookups and downloads, improving compatibility with embedded and access-controlled sources.</li>
+          <li>Prevent source-page paths and query parameters from leaking to unrelated destinations across HTTP redirects.</li>
+          <li>Reuse video, gallery and native HLS/DASH previews only when the source page and request context match, reducing repeated lookups without mixing results from different pages.</li>
+        </ul>
+      </description>
+    </release>
     <release version="6.5.1" date="2026-11-18">
       <description>
         <ul>

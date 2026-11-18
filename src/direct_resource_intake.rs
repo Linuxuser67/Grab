@@ -148,9 +148,13 @@ fn is_direct_resource_metadata(
     if matches!(
         mime.as_str(),
         "application/vnd.apple.mpegurl"
+            | "application/mpegurl"
             | "application/x-mpegurl"
             | "audio/mpegurl"
             | "audio/x-mpegurl"
+            | "video/mpegurl"
+            | "video/vnd.mpegurl"
+            | "video/x-mpegurl"
             | "application/dash+xml"
     ) {
         return false;
@@ -261,8 +265,13 @@ mod tests {
     fn never_classifies_hls_or_dash_manifest_mime_types_as_files() {
         for mime in [
             "application/vnd.apple.mpegurl",
+            "application/mpegurl",
             "application/x-mpegurl",
             "audio/mpegurl",
+            "audio/x-mpegurl",
+            "video/mpegurl",
+            "video/vnd.mpegurl",
+            "video/x-mpegurl",
             "application/dash+xml",
         ] {
             assert!(

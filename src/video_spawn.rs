@@ -347,34 +347,41 @@ pub async fn fetch_video_infos_with_referer(
             let cache_cookies_browser = cookies_browser.clone();
             let cache_proxy = fetch_proxy.clone();
             let cache_identity_args = identity_args.clone();
-            let (cache_key, playlist_base_key) = match tokio::task::spawn_blocking(move || {
-                let video = crate::video_cache::cache_key(
-                    &cache_url,
-                    &cache_binary,
-                    &cache_version,
-                    &cache_cookies_browser,
-                    cache_proxy.as_ref(),
-                    &cache_identity_args,
-                );
-                let playlist = crate::video_cache::playlist_cache_key(
-                    &cache_url,
-                    &cache_binary,
-                    &cache_version,
-                    &cache_cookies_browser,
-                    cache_proxy.as_ref(),
-                    &cache_identity_args,
-                );
-                (video, playlist)
-            })
-            .await
-            {
-                Ok(keys) => keys,
-                Err(error) => {
-                    tracing::warn!(
-                        error = %error,
-                        "yt-dlp cache identity task failed; probing without cache"
+            // The source page changes the HTTP request identity. Do not
+            // reuse extraction or playlist metadata produced under another
+            // Referer, even if URL, cookies, proxy, and tool version match.
+            let (cache_key, playlist_base_key) = if referer.is_some() {
+                (None, None)
+            } else {
+                match tokio::task::spawn_blocking(move || {
+                    let video = crate::video_cache::cache_key(
+                        &cache_url,
+                        &cache_binary,
+                        &cache_version,
+                        &cache_cookies_browser,
+                        cache_proxy.as_ref(),
+                        &cache_identity_args,
                     );
-                    (None, None)
+                    let playlist = crate::video_cache::playlist_cache_key(
+                        &cache_url,
+                        &cache_binary,
+                        &cache_version,
+                        &cache_cookies_browser,
+                        cache_proxy.as_ref(),
+                        &cache_identity_args,
+                    );
+                    (video, playlist)
+                })
+                .await
+                {
+                    Ok(keys) => keys,
+                    Err(error) => {
+                        tracing::warn!(
+                            error = %error,
+                            "yt-dlp cache identity task failed; probing without cache"
+                        );
+                        (None, None)
+                    }
                 }
             };
             // Playlist metadata uses a separate namespace and the crate's

@@ -1363,6 +1363,14 @@ fn inherit_public_resolution_for_card(step: &VideoStep, parent_url: &str, child_
 }
 
 /// Whether the combo's current pick is the Audio only row.
+fn source_referer_for(step: &VideoStep, submitted_url: &str) -> Option<String> {
+    step.source_referer
+        .borrow()
+        .as_ref()
+        .filter(|(bound_url, _)| bound_url == submitted_url)
+        .map(|(_, referer)| referer.clone())
+}
+
 fn selected_audio_only(step: &VideoStep) -> bool {
     let selected = step.format.selected() as usize;
     step.options
@@ -3289,12 +3297,7 @@ fn build_video_lookup_kicker(context: VideoLookupContext) -> VideoLookupKick {
                 // outer card flow is polled by GLib, so run this entire backend
                 // lookup as a Tokio task and keep GTK updates on this context.
                 let lookup_url = url.clone();
-                let source_referer = step_b
-                    .source_referer
-                    .borrow()
-                    .as_ref()
-                    .filter(|(bound_url, _)| bound_url == &lookup_url)
-                    .map(|(_, referer)| referer.clone());
+                let source_referer = source_referer_for(&step_b, &lookup_url);
                 // Keep the browser-handoff DNS policy alive until the detached
                 // Tokio lookup has actually stopped, even when card close
                 // aborts the outer GLib future.
@@ -3305,7 +3308,7 @@ fn build_video_lookup_kicker(context: VideoLookupContext) -> VideoLookupKick {
                         browser,
                         newest_first,
                         proxy,
-                        source_referer,
+                        source_referer.clone(),
                     )));
                 let _abort_lookup_on_drop = AbortTaskOnDrop(lookup_task.abort_handle());
                 let outcome = match lookup_task.await {

@@ -591,8 +591,8 @@ async fn lookup_media_inner(
             native_proxy.as_ref(),
             native_referer.as_deref(),
         )
-            .await
-            .and_then(|manifest| {
+        .await
+        .and_then(|manifest| {
                 manifest.ok_or_else(|| {
                     gettext("The URL did not resolve to a supported HLS or DASH manifest")
                 })
@@ -4706,7 +4706,8 @@ pub fn build_add_card(manager: Rc<DownloadManager>) -> AddCard {
                             if let Ok(normalized) = crate::download::normalize_url(&pasted) {
                                 // Paste once: skip a link this auto-paste already inserted.
                                 let fingerprint = paste_fingerprint(&normalized);
-                                if last_auto_paste.borrow().as_deref() == Some(fingerprint.as_str()) {
+                                if last_auto_paste.borrow().as_deref() == Some(fingerprint.as_str())
+                                {
                                     return;
                                 }
                                 url_entry.set_text(&normalized);
@@ -4715,7 +4716,8 @@ pub fn build_add_card(manager: Rc<DownloadManager>) -> AddCard {
                                 // Persist so a restart doesn't re-paste the stale link.
                                 // The manager Rc isn't available in this async block;
                                 // settings are global via the default AppSettings.
-                                crate::settings::AppSettings::new().set_last_auto_paste(&fingerprint);
+                                crate::settings::AppSettings::new()
+                                    .set_last_auto_paste(&fingerprint);
                             }
                         });
                     }
@@ -4723,7 +4725,6 @@ pub fn build_add_card(manager: Rc<DownloadManager>) -> AddCard {
                 // Keyboard-first: focus lands in the URL field so typing starts a
                 // download with no tab stops.
                 url_entry.grab_focus();
-
             },
         )
     };

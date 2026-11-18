@@ -1575,11 +1575,10 @@ fn submit_gallery_all(
                     crate::runtime::tokio_rt()
                         .spawn(count_host_lease_guard.hold(async move {
                             let count_settings = crate::settings::AppSettings::new();
-                            let proxy = crate::download::DownloadOptions::from_settings(
-                                &count_settings,
-                            )
-                            .proxy_config()
-                            .ok()?;
+                            let proxy =
+                                crate::download::DownloadOptions::from_settings(&count_settings)
+                                    .proxy_config()
+                                    .ok()?;
                             let auth = crate::inline_gallery::resolve_gallery_auth(
                                 &url_for_count,
                                 &browser_for_count,
@@ -5068,7 +5067,10 @@ mod tests {
         assert!(queue_playlist_selection_as_single_download(1, None));
         assert!(!queue_playlist_selection_as_single_download(0, None));
         assert!(!queue_playlist_selection_as_single_download(2, None));
-        assert!(!queue_playlist_selection_as_single_download(1, Some("/tmp/existing-playlist")));
+        assert!(!queue_playlist_selection_as_single_download(
+            1,
+            Some("/tmp/existing-playlist")
+        ));
     }
 
     fn gallery_item(extension: &str) -> crate::gallery_probe::GalleryItem {

@@ -1775,7 +1775,7 @@ impl DownloadManager {
 
         let id = self.alloc_id();
         let title = if title.trim().is_empty() {
-            filename
+            filename.to_string()
         } else {
             title
         };
@@ -1801,7 +1801,7 @@ impl DownloadManager {
                 }),
         );
         item.set_is_collection_owner(true);
-        item.set_group(crate::download_store::DownloadGroup::try_new(id, title));
+        item.set_group(crate::download_store::DownloadGroup::try_new(id, &title));
         item.set_gallery_url(url.clone());
         item.set_gallery_file_count(saturating_u32(state.files.len()));
         item.set_gallery_files_done(0);

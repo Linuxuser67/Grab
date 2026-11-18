@@ -40,6 +40,7 @@ struct ManifestPreviewCacheKey {
     url: String,
     handoff_cookie_hash: Option<[u8; 32]>,
     handoff_user_agent_hash: Option<[u8; 32]>,
+    referer_hash: Option<[u8; 32]>,
     proxy: Option<String>,
 }
 
@@ -74,21 +75,30 @@ fn has_query_parameters(url: &Url) -> bool {
     url.query().is_some_and(|query| !query.is_empty())
 }
 
-/// Build a preview cache key from the URL, the staged jar (if any) and the
-/// proxy.
-///
-/// Extension handoff jars are keyed by cookie contents, so a re-handoff of the
-/// same credentials reuses the preview despite a new staged path.
+/// Build a preview cache key from the URL, the staged jar (if any), the
+/// source page, and the proxy. Referer identity is hashed so cache keys never
+/// retain a source URL's path or query.
+#[cfg(test)]
 fn manifest_preview_cache_key(
     raw_url: &str,
     proxy: Option<&crate::net_types::ResolvedProxy>,
     handoff_identity: Option<&(PathBuf, Option<String>)>,
+) -> Option<ManifestPreviewCacheKey> {
+    manifest_preview_cache_key_with_referer(raw_url, proxy, handoff_identity, None)
+}
+
+fn manifest_preview_cache_key_with_referer(
+    raw_url: &str,
+    proxy: Option<&crate::net_types::ResolvedProxy>,
+    handoff_identity: Option<&(PathBuf, Option<String>)>,
+    referer: Option<&str>,
 ) -> Option<ManifestPreviewCacheKey> {
     let mut url = Url::parse(raw_url).ok()?;
     url.set_fragment(None);
     if crate::video_cache::has_known_rotating_auth_query(&url) {
         return None;
     }
+    let referer_hash = crate::referrer::cache_identity(referer)?;
 
     let handoff_cookie_hash =
         handoff_identity.and_then(|(path, _)| crate::extension_server::handoff_cookie_hash(path));
@@ -106,6 +116,7 @@ fn manifest_preview_cache_key(
         url: url.to_string(),
         handoff_cookie_hash,
         handoff_user_agent_hash,
+        referer_hash,
         proxy: proxy.map(|resolved| resolved.cli_url.clone()),
     })
 }
@@ -375,13 +386,14 @@ pub(crate) async fn lookup(
     // request client must use the same handoff entry if another handoff arrives
     // while the preview is being prepared.
     let handoff_identity = crate::extension_server::live_handoff_identity(raw_url);
-    // A preview can depend on the initiating page's Referer header.
-    // Never reuse an entry produced under a different request context.
-    let cache_key = if referer.is_none() {
-        manifest_preview_cache_key(raw_url, proxy, handoff_identity.as_ref())
-    } else {
-        None
-    };
+    // The source page can affect an access-controlled manifest response.
+    // Its hash is part of the key, allowing reuse only for the same context.
+    let cache_key = manifest_preview_cache_key_with_referer(
+        raw_url,
+        proxy,
+        handoff_identity.as_ref(),
+        referer,
+    );
     if let Some(key) = cache_key.as_ref()
         && let Some(mut cached) = manifest_preview_cache_get(key)
     {
@@ -2447,6 +2459,7 @@ segment.ts
             url: lookup.source_url.clone(),
             handoff_cookie_hash: None,
             handoff_user_agent_hash: None,
+            referer_hash: None,
             proxy: None,
         };
         manifest_preview_cache_insert(key.clone(), &lookup);
@@ -2616,6 +2629,28 @@ segment.ts?f=418899&srv=server&i=0.4&sp=500&p1=one&p2=two&asn=327934
             !is_cacheable_static_manifest(&media_lookup),
             "a query-bearing segment URL must prevent caching the media playlist"
         );
+    }
+
+    #[test]
+    fn preview_cache_identity_includes_the_source_page() {
+        let url = "https://cache-preview.example.test/master.m3u8";
+        let source = "https://origin.example.test/watch?id=one#player";
+        let same_source = "https://origin.example.test/watch?id=one#other";
+        let different_source = "https://origin.example.test/watch?id=two";
+
+        let anonymous =
+            manifest_preview_cache_key_with_referer(url, None, None, None).expect("anonymous key");
+        let first = manifest_preview_cache_key_with_referer(url, None, None, Some(source))
+            .expect("source-page key");
+        let same = manifest_preview_cache_key_with_referer(url, None, None, Some(same_source))
+            .expect("equivalent source-page key");
+        let different =
+            manifest_preview_cache_key_with_referer(url, None, None, Some(different_source))
+                .expect("different source-page key");
+
+        assert_ne!(anonymous, first, "anonymous and Referer-bound previews differ");
+        assert_eq!(first, same, "URL fragments do not affect Referer identity");
+        assert_ne!(first, different, "different source pages must not share a preview");
     }
 
     #[test]

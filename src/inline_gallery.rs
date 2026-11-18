@@ -377,7 +377,7 @@ pub(crate) fn push_gallery_picker_page(
         return None;
     }
     let page_url = url.clone();
-    let items = Rc::new(RefCell::new(Vec::new()));
+    let items = Rc::new(RefCell::new(Vec::<crate::gallery_probe::GalleryItem>::new()));
 
     let list_box = gtk4::Box::builder()
         .orientation(gtk4::Orientation::Vertical)

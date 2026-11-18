@@ -602,13 +602,9 @@ async fn lookup_media_inner(
         // Unknown HTTP resources can still be direct files when their paths
         // have no extension. Probe response headers while the established
         // extractors run; never read the response body during classification.
-        let direct_future = crate::direct_resource_intake::probe(
-            url.clone(),
-            proxy.clone(),
-            referer.clone(),
-        );
-        let extractor_future =
-            lookup_extractors_inner(url, browser, newest_first, proxy, referer);
+        let direct_future =
+            crate::direct_resource_intake::probe(url.clone(), proxy.clone(), referer.clone());
+        let extractor_future = lookup_extractors_inner(url, browser, newest_first, proxy, referer);
         tokio::pin!(direct_future);
         tokio::pin!(extractor_future);
 

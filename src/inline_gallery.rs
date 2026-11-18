@@ -284,11 +284,12 @@ pub(crate) async fn dual_probe(ctx: DualProbeCtx<'_>) -> DualProbeOutcome {
     let gallery_fut = async {
         let gallery_started = Instant::now();
         let auth = resolve_gallery_auth(&url, &ctx.browser);
-        let cache_key = if ctx.referer.is_none() {
-            gallery_preview_cache_key_with_referer(&url, &auth, ctx.proxy.as_ref(), ctx.referer.as_deref())
-        } else {
-            None
-        };
+        let cache_key = gallery_preview_cache_key_with_referer(
+            &url,
+            &auth,
+            ctx.proxy.as_ref(),
+            ctx.referer.as_deref(),
+        );
         let cached = cache_key.as_ref().and_then(gallery_preview_cache_get);
         let r = if let Some(items) = cached {
             tracing::debug!(url_host = %host, "gallery-dl preview cache hit");

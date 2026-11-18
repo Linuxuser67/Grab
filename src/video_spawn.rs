@@ -117,12 +117,32 @@ pub(crate) async fn fetch_raw_dump_json(
     flat_playlist: bool,
     identity_args: Option<&[String]>,
 ) -> Result<serde_json::Value, VideoError> {
+    fetch_raw_dump_json_with_referer(
+        youtube_bin, url, cookies_browser, timeout, fetch_proxy, flat_playlist,
+        identity_args, None,
+    ).await
+}
+
+async fn fetch_raw_dump_json_with_referer(
+    youtube_bin: &Path,
+    url: &str,
+    cookies_browser: &str,
+    timeout: Duration,
+    fetch_proxy: Option<&crate::net_types::ResolvedProxy>,
+    flat_playlist: bool,
+    identity_args: Option<&[String]>,
+    referer: Option<&str>,
+) -> Result<serde_json::Value, VideoError> {
     let mut args = vec!["--ignore-config".to_string(), "--no-progress".to_string()];
     if flat_playlist {
         args.push("--flat-playlist".to_string());
     }
     args.push("--dump-single-json".to_string());
     args.extend(proxy_cli_args(fetch_proxy));
+    if let Some(referer) = referer {
+        args.push("--referer".to_string());
+        args.push(referer.to_string());
+    }
     // Extension handoff (Cloudflare bypass): staged by the handoff receiver,
     // peeked here. The entry outlives the probe — the subtitle probe and the
     // media download spawn yt-dlp separately and need it too; the finished
@@ -273,6 +293,21 @@ pub async fn fetch_video_infos(
     fetch_proxy: Option<crate::net_types::ResolvedProxy>,
     cancel: Option<tokio::sync::oneshot::Receiver<()>>,
 ) -> Result<(ProbeResult, Option<serde_json::Value>), VideoError> {
+    fetch_video_infos_with_referer(
+        youtube_bin, url, cookies_browser, newest_first, fetch_proxy, None, cancel,
+    )
+    .await
+}
+
+pub async fn fetch_video_infos_with_referer(
+    youtube_bin: PathBuf,
+    url: String,
+    cookies_browser: String,
+    newest_first: bool,
+    fetch_proxy: Option<crate::net_types::ResolvedProxy>,
+    referer: Option<String>,
+    cancel: Option<tokio::sync::oneshot::Receiver<()>>,
+) -> Result<(ProbeResult, Option<serde_json::Value>), VideoError> {
     let handle = crate::runtime::tokio_rt().spawn(async move {
         let total_started = std::time::Instant::now();
         let mut version_ms = 0u64;
@@ -372,7 +407,7 @@ pub async fn fetch_video_infos(
             let phase_started = std::time::Instant::now();
             let fetch_result = tokio::time::timeout(
                 Duration::from_secs(FETCH_TIMEOUT_SECS),
-                fetch_raw_dump_json(
+                fetch_raw_dump_json_with_referer(
                     &youtube_bin,
                     &url,
                     &cookies_browser,
@@ -380,6 +415,7 @@ pub async fn fetch_video_infos(
                     fetch_proxy.as_ref(),
                     true,
                     Some(&identity_args),
+                    referer.as_deref(),
                 ),
             )
             .await;

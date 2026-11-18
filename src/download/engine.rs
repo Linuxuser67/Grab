@@ -1829,6 +1829,10 @@ impl DownloadManager {
             live_from_start: self.settings.live_from_start(),
             newest_codecs: self.settings.video_codec_newest(),
             cookies_browser: self.settings.cookies_browser(),
+            referer: {
+                let value = item.referer();
+                (!value.is_empty()).then_some(value)
+            },
             // Audio-only rows never subtitle or remux (no video leg exists): resolve to `None` here rather than gating at every use.
             subtitles: if audio_only {
                 None
@@ -1940,6 +1944,10 @@ impl DownloadManager {
             live_from_start: false,
             newest_codecs: self.settings.video_codec_newest(),
             cookies_browser: self.settings.cookies_browser(),
+            referer: {
+                let value = item.referer();
+                (!value.is_empty()).then_some(value)
+            },
             subtitles: if audio_only {
                 None
             } else {

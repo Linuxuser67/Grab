@@ -583,10 +583,12 @@ fn attach_native_fallback_reason(
     }
 }
 
-/// Start native HLS/DASH intake alongside tool resolution and yt-dlp/gallery-dl.
+/// Resolve native HLS/DASH manifests or opaque direct resources alongside
+/// the established yt-dlp/gallery-dl lookup.
 ///
-/// URLs outside the native candidate set retain the extractor-only path without
-/// paying for native intake or arbitration.
+/// Known video pages and manifests avoid the direct-resource probe. Unknown
+/// plain-fallback candidates use a bounded header request concurrently with
+/// extractor discovery.
 async fn lookup_media_inner(
     url: String,
     browser: String,

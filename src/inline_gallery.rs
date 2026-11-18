@@ -669,9 +669,8 @@ mod tests {
 
         let base = gallery_preview_cache_key_with_referer(url, &auth, None, None)
             .expect("without a Referer");
-        let first =
-            gallery_preview_cache_key_with_referer(url, &auth, None, Some(source))
-                .expect("with a Referer");
+        let first = gallery_preview_cache_key_with_referer(url, &auth, None, Some(source))
+            .expect("with a Referer");
         let same = gallery_preview_cache_key_with_referer(url, &auth, None, Some(same_source))
             .expect("equivalent Referer");
         let different =
@@ -679,8 +678,14 @@ mod tests {
                 .expect("different Referer");
 
         assert_ne!(base, first, "a source page changes the extractor request");
-        assert_eq!(first, same, "fragments are not part of the Referer identity");
-        assert_ne!(first, different, "different source pages must not share a preview");
+        assert_eq!(
+            first, same,
+            "fragments are not part of the Referer identity"
+        );
+        assert_ne!(
+            first, different,
+            "different source pages must not share a preview"
+        );
     }
 
     #[test]

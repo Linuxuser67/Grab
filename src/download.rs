@@ -450,6 +450,17 @@ fn ensure_contained_parent(
     Ok(parent_contained_in_dest(parent, dest_dir))
 }
 
+/// All user-selected and source-specific inputs for one playlist owner.
+pub(crate) struct VideoPlaylistEnqueue {
+    pub page_url: String,
+    pub title: String,
+    pub dest_dir: String,
+    pub files: Vec<crate::media_types::VideoPlaylistFile>,
+    pub quality: String,
+    pub audio_only: bool,
+    pub referer: Option<String>,
+}
+
 pub struct DownloadManager {
     // Borrow discipline: never hold RefCells across `set_*` notifies or `changed()`; GTK re-enters and panics. Keep borrows scoped.
     store: gio::ListStore,
@@ -545,12 +556,11 @@ pub struct DownloadManager {
     /// Queue persist channel: `watch` keeps only the latest value, so rapid
     /// state changes coalesce to a single write. The tokio task (below) is the
     /// sole writer, which makes writes ordered by construction.
-    /// Tests write synchronously and never use the channel.
-    #[cfg_attr(test, allow(dead_code))]
+    /// Coalesced queue-persistence channel, owned by the production writer.
+    #[cfg(not(test))]
     persist_tx: RefCell<Option<tokio::sync::watch::Sender<Option<StoredQueue>>>>,
-    /// Handle for the queue persist task; awaited on shutdown after the final
-    /// state is sent. Tests never spawn it.
-    #[cfg_attr(test, allow(dead_code))]
+    /// Production writer task, awaited during orderly shutdown.
+    #[cfg(not(test))]
     persist_task: RefCell<Option<tokio::task::JoinHandle<()>>>,
 }
 
@@ -841,9 +851,6 @@ impl DownloadManager {
             }));
             (Some(tx), Some(task))
         };
-        #[cfg(test)]
-        let (persist_tx, persist_task) = (None, None);
-
         let (restore_ready, _) = tokio::sync::watch::channel(false);
         let this = Rc::new(Self {
             store,
@@ -894,7 +901,9 @@ impl DownloadManager {
             restore_dirty: Cell::new(false),
             restore_task: RefCell::new(None),
             restore_ready,
+            #[cfg(not(test))]
             persist_tx: RefCell::new(persist_tx),
+            #[cfg(not(test))]
             persist_task: RefCell::new(persist_task),
         });
         // Publish the Weak for `wake_queue()`'s `Send` closure (see `MANAGER_WEAK`).
@@ -1258,18 +1267,6 @@ impl DownloadManager {
         Ok((item, guard))
     }
 
-    #[allow(dead_code)]
-    pub(crate) async fn enqueue_async(
-        self: &Rc<Self>,
-        url: &str,
-        dest_dir: Option<&str>,
-        filename: Option<&str>,
-    ) -> Result<DownloadItem, String> {
-        let (item, guard) = self.enqueue_async_batched(url, dest_dir, filename).await?;
-        drop(guard);
-        Ok(item)
-    }
-
     /// Synchronous intake for tests; production paths list the destination off
     /// GTK and call [`Self::enqueue_async_batched`].
     #[cfg(test)]
@@ -1455,7 +1452,7 @@ impl DownloadManager {
         Ok(item)
     }
 
-    #[allow(dead_code)]
+    #[cfg(test)]
     pub(crate) async fn enqueue_video_async_batched(
         self: &Rc<Self>,
         page_url: &str,
@@ -1507,18 +1504,6 @@ impl DownloadManager {
             .filter(|stem| !stem.is_empty())
             .unwrap_or(&fallback_stem);
         format!("{stem}.{}", container.extension())
-    }
-
-    /// Queue a native HLS/DASH selection after listing its destination off GTK.
-    #[allow(dead_code)]
-    pub(crate) async fn enqueue_manifest_async_batched(
-        self: &Rc<Self>,
-        source: crate::media_types::ManifestSource,
-        dest_dir: Option<&str>,
-        filename: Option<&str>,
-    ) -> Result<(DownloadItem, BatchGuard), String> {
-        self.enqueue_manifest_async_batched_with_referer(source, dest_dir, filename, None)
-            .await
     }
 
     pub(crate) async fn enqueue_manifest_async_batched_with_referer(
@@ -1619,12 +1604,7 @@ impl DownloadManager {
         Ok((self.insert(item), guard))
     }
 
-    /// [`DownloadManager::enqueue_video`] with a precomputed directory listing,
-    /// for bulk imports that would otherwise readdir once per row. The snapshot
-    /// stays correct as rows land: the per-row dedupe also consults the live
-    /// store and the stem reservation map. An on-disk file never renames the
-    /// intake (see [`DownloadManager::enqueue`]).
-    #[allow(dead_code)]
+    #[cfg(test)]
     pub(crate) fn enqueue_video_staged(
         self: &Rc<Self>,
         page_url: &str,
@@ -1745,40 +1725,25 @@ impl DownloadManager {
         .then_some(state.dest_dir)
     }
 
-    /// Enqueue selected yt-dlp playlist entries as one schedulable owner.
+    /// Enqueue a selected yt-dlp playlist as one schedulable owner.
     /// Re-imports for the same URL extend that owner instead of creating a
     /// second process; a running owner is restarted with the enlarged selection.
-    #[allow(dead_code)]
     pub(crate) fn enqueue_video_playlist_staged(
         self: &Rc<Self>,
-        page_url: &str,
-        title: &str,
-        dest_dir: &str,
-        files: Vec<crate::media_types::VideoPlaylistFile>,
-        quality: String,
-        audio_only: bool,
+        request: VideoPlaylistEnqueue,
     ) -> Result<DownloadItem, String> {
-        self.enqueue_video_playlist_staged_with_referer(
-            page_url, title, dest_dir, files, quality, audio_only, None,
-        )
-    }
-
-    #[expect(
-        clippy::too_many_arguments,
-        reason = "the source referrer is per playlist owner and the other arguments form the existing selection contract"
-    )]
-    pub(crate) fn enqueue_video_playlist_staged_with_referer(
-        self: &Rc<Self>,
-        page_url: &str,
-        title: &str,
-        dest_dir: &str,
-        files: Vec<crate::media_types::VideoPlaylistFile>,
-        quality: String,
-        audio_only: bool,
-        referer: Option<&str>,
-    ) -> Result<DownloadItem, String> {
-        let url = normalize_url(page_url)?;
-        let output_dir = std::path::Path::new(dest_dir);
+        let VideoPlaylistEnqueue {
+            page_url,
+            title,
+            dest_dir,
+            files,
+            quality,
+            audio_only,
+            referer,
+        } = request;
+        let referer = referer.as_deref();
+        let url = normalize_url(&page_url)?;
+        let output_dir = std::path::Path::new(&dest_dir);
         // The picker validates the directory on GIO's blocking pool. Keep this
         // GTK-thread commit path limited to path-shape checks.
         if !output_dir.is_absolute() || output_dir.file_name().is_none() {
@@ -1812,7 +1777,7 @@ impl DownloadManager {
 
         if let Some(owner) = self.video_playlist_owner_for_url(&url) {
             let owner =
-                self.extend_video_playlist_staged(&owner, dest_dir, files, &quality, audio_only)?;
+                self.extend_video_playlist_staged(&owner, &dest_dir, files, &quality, audio_only)?;
             if let Some(referer) = referer {
                 owner.set_referer(referer);
                 self.persist_queue();
@@ -1822,7 +1787,7 @@ impl DownloadManager {
 
         let id = self.alloc_id();
         let title = if title.trim().is_empty() {
-            filename
+            filename.to_string()
         } else {
             title
         };
@@ -1848,7 +1813,7 @@ impl DownloadManager {
                 }),
         );
         item.set_is_collection_owner(true);
-        item.set_group(crate::download_store::DownloadGroup::try_new(id, title));
+        item.set_group(crate::download_store::DownloadGroup::try_new(id, &title));
         item.set_gallery_url(url.clone());
         item.set_gallery_file_count(saturating_u32(state.files.len()));
         item.set_gallery_files_done(0);

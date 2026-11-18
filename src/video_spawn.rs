@@ -107,7 +107,7 @@ fn ytdlp_failure_is_retryable(detail: &str) -> bool {
     .any(|needle| lower.contains(needle))
 }
 
-/// Fetch one page's raw `--dump-single-json`, then parse leniently. `flat_playlist` lists collection stubs; false runs full extraction.
+/// Fetch page metadata without a source referrer.
 pub(crate) async fn fetch_raw_dump_json(
     youtube_bin: &Path,
     url: &str,
@@ -120,30 +120,41 @@ pub(crate) async fn fetch_raw_dump_json(
     fetch_raw_dump_json_with_referer(
         youtube_bin,
         url,
+        RawDumpOptions {
+            cookies_browser,
+            timeout,
+            fetch_proxy,
+            flat_playlist,
+            identity_args,
+            referer: None,
+        },
+    )
+    .await
+}
+
+/// Options applied to one yt-dlp metadata subprocess.
+struct RawDumpOptions<'a> {
+    cookies_browser: &'a str,
+    timeout: Duration,
+    fetch_proxy: Option<&'a crate::net_types::ResolvedProxy>,
+    flat_playlist: bool,
+    identity_args: Option<&'a [String]>,
+    referer: Option<&'a str>,
+}
+
+async fn fetch_raw_dump_json_with_referer(
+    youtube_bin: &Path,
+    url: &str,
+    options: RawDumpOptions<'_>,
+) -> Result<serde_json::Value, VideoError> {
+    let RawDumpOptions {
         cookies_browser,
         timeout,
         fetch_proxy,
         flat_playlist,
         identity_args,
-        None,
-    )
-    .await
-}
-
-#[expect(
-    clippy::too_many_arguments,
-    reason = "this helper mirrors the existing yt-dlp probe inputs and adds the optional source referrer"
-)]
-async fn fetch_raw_dump_json_with_referer(
-    youtube_bin: &Path,
-    url: &str,
-    cookies_browser: &str,
-    timeout: Duration,
-    fetch_proxy: Option<&crate::net_types::ResolvedProxy>,
-    flat_playlist: bool,
-    identity_args: Option<&[String]>,
-    referer: Option<&str>,
-) -> Result<serde_json::Value, VideoError> {
+        referer,
+    } = options;
     let mut args = vec!["--ignore-config".to_string(), "--no-progress".to_string()];
     if flat_playlist {
         args.push("--flat-playlist".to_string());
@@ -296,7 +307,7 @@ impl Drop for AbortOnDrop {
 /// Returns the parsed result plus the raw `--dump-single-json` for single videos
 /// (used for `--load-info-json` at download time to skip re-extraction).
 /// Playlists return `None` (their entries are re-probed individually).
-#[allow(dead_code)]
+#[cfg(test)]
 pub async fn fetch_video_infos(
     youtube_bin: PathBuf,
     url: String,
@@ -435,12 +446,14 @@ pub async fn fetch_video_infos_with_referer(
                 fetch_raw_dump_json_with_referer(
                     &youtube_bin,
                     &url,
-                    &cookies_browser,
-                    Duration::from_secs(300),
-                    fetch_proxy.as_ref(),
-                    true,
-                    Some(&identity_args),
-                    referer.as_deref(),
+                    RawDumpOptions {
+                        cookies_browser: &cookies_browser,
+                        timeout: Duration::from_secs(300),
+                        fetch_proxy: fetch_proxy.as_ref(),
+                        flat_playlist: true,
+                        identity_args: Some(&identity_args),
+                        referer: referer.as_deref(),
+                    },
                 ),
             )
             .await;

@@ -21,6 +21,23 @@ use std::rc::Rc;
 use std::sync::{LazyLock, Mutex};
 use std::time::{Duration, Instant};
 
+/// UI lifetime and destination state shared by a gallery picker page.
+pub(crate) struct GalleryPickerContext<'a> {
+    pub nav: &'a adw::NavigationView,
+    pub manager: Rc<DownloadManager>,
+    pub dest_dir: Rc<RefCell<String>>,
+    pub close_card: Rc<dyn Fn()>,
+    pub scheduled_at: Option<i64>,
+}
+
+/// Metadata that defines the gallery being enumerated and selected.
+pub(crate) struct GalleryPickerSource {
+    pub title: String,
+    pub url: String,
+    pub referer: Option<String>,
+    pub filter: crate::gallery_argv::GalleryFilter,
+}
+
 /// Outcome of the dual-backend probe. The caller (inline_add.rs) checks
 /// staleness, routes the real results with `gallery_probe::route_for_collection`, and owns
 /// all UI; this only orchestrates the two probes.
@@ -361,22 +378,24 @@ impl GalleryPickerStream {
 /// The grid arrives empty and fills from a streamed enumeration (see
 /// `GalleryPickerStream`); `None` means another picker page already owns
 /// the screen, so the caller should drop its enumeration.
-#[expect(
-    clippy::too_many_arguments,
-    reason = "the picker page builder threads live GUI state from the enumeration caller"
-)]
 pub(crate) fn push_gallery_picker_page(
-    nav: &adw::NavigationView,
-    manager: Rc<DownloadManager>,
-    dest_dir: Rc<RefCell<String>>,
-    close_card: Rc<dyn Fn()>,
-    scheduled_at: Option<i64>,
-    title: String,
-    url: String,
-    referer: Option<String>,
-    filter: crate::gallery_argv::GalleryFilter,
+    context: GalleryPickerContext<'_>,
+    source: GalleryPickerSource,
     grid: GalleryGrid,
 ) -> Option<GalleryPickerStream> {
+    let GalleryPickerContext {
+        nav,
+        manager,
+        dest_dir,
+        close_card,
+        scheduled_at,
+    } = context;
+    let GalleryPickerSource {
+        title,
+        url,
+        referer,
+        filter,
+    } = source;
     // Only the form opens a picker: another picker (playlist, torrent) may
     // already own the card.
     if !crate::window_rows::form_is_visible(nav) {

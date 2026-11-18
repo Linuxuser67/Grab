@@ -8991,6 +8991,7 @@ fn gallery_job_fixture() -> crate::gallery_argv::GalleryJob {
         page_url: "https://example.com/gallery".to_string(),
         title: "Test Gallery".to_string(),
         file_count: Some(5),
+        single_file_name: None,
         dest_dir: std::path::PathBuf::from("/tmp/dl"),
         filter: crate::gallery_argv::GalleryFilter::All,
         cookies_browser: "none".to_string(),

@@ -504,6 +504,7 @@ fn dispatch_handoff(
             let add_card_c = add_card.clone();
             let settings_c = settings.clone();
             let approved_c = approved.clone();
+            let referer_c = referer.clone();
             let decision_c = decision.clone();
             glib::spawn_future_local(async move {
                 let routed = route_open_uri(
@@ -512,7 +513,7 @@ fn dispatch_handoff(
                     add_card_c,
                     settings_c,
                     approved_c,
-                    referer.clone(),
+                    referer_c,
                     None,
                 )
                 .await;

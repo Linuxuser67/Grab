@@ -4864,6 +4864,7 @@ fn make_gallery_picker_opener(
             let (items_tx, mut items_rx) = tokio::sync::mpsc::channel(
                 crate::gallery_probe::GALLERY_ENUMERATION_CHANNEL_CAPACITY,
             );
+            let enumeration_referer = referer.clone();
             let handle =
                 crate::runtime::tokio_rt().spawn(enumeration_lease_guard.hold(async move {
                     // Unified auth: handoff jar first, browser export as
@@ -4875,7 +4876,7 @@ fn make_gallery_picker_opener(
                         cookies_file: auth.cookies_path.as_deref(),
                         cookies_browser: auth.cookies_browser.as_deref(),
                         user_agent: auth.user_agent.as_deref(),
-                        referer: referer.as_deref(),
+                        referer: enumeration_referer.as_deref(),
                         filter,
                         proxy: proxy3.as_ref(),
                     };

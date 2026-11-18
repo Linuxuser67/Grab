@@ -581,6 +581,8 @@ pub(crate) struct RemovedSnapshot {
     pub started: bool,
     /// Preserve the untrusted-handoff policy reference when Undo restores a row.
     pub public_only: bool,
+    /// Preserve the source page when Undo restores a row.
+    pub referer: String,
     /// Keep a restored child in its original multi-item group.
     pub group: Option<crate::download_store::DownloadGroup>,
     /// Restore a removed gallery collection as one gallery-dl process.
@@ -603,6 +605,7 @@ impl RemovedSnapshot {
             video_source: manager.video_source(id),
             started: manager.has_started(id),
             public_only: item.public_only(),
+            referer: item.referer(),
             group: item.group(),
             gallery_job: manager.gallery_job(id),
         }
@@ -1230,6 +1233,16 @@ impl DownloadManager {
         dest_dir: Option<&str>,
         filename: Option<&str>,
     ) -> Result<(DownloadItem, BatchGuard), String> {
+        self.enqueue_async_batched_with_referer(url, dest_dir, filename, None).await
+    }
+
+    pub(crate) async fn enqueue_async_batched_with_referer(
+        self: &Rc<Self>,
+        url: &str,
+        dest_dir: Option<&str>,
+        filename: Option<&str>,
+        referer: Option<&str>,
+    ) -> Result<(DownloadItem, BatchGuard), String> {
         let dir = self.resolve_dir(dest_dir);
         let listing_dir = dir.clone();
         let existing = gio::spawn_blocking(move || {
@@ -1239,7 +1252,9 @@ impl DownloadManager {
         .map_err(|error| format!("Could not inspect download folder: {error:?}"))?
         .map_err(|error| format!("Could not inspect download folder: {error}"))?;
         let guard = self.batch_guard();
-        let item = self.enqueue_with_listing(url, Some(&dir), filename, &existing)?;
+        let item = self.enqueue_with_listing_and_referer(
+            url, Some(&dir), filename, &existing, referer,
+        )?;
         Ok((item, guard))
     }
 
@@ -1275,6 +1290,17 @@ impl DownloadManager {
         filename: Option<&str>,
         existing: &[String],
     ) -> Result<DownloadItem, String> {
+        self.enqueue_with_listing_and_referer(url, dest_dir, filename, existing, None)
+    }
+
+    fn enqueue_with_listing_and_referer(
+        self: &Rc<Self>,
+        url: &str,
+        dest_dir: Option<&str>,
+        filename: Option<&str>,
+        existing: &[String],
+        referer: Option<&str>,
+    ) -> Result<DownloadItem, String> {
         let url = normalize_url(url)?;
         let dir = self.resolve_dir(dest_dir);
         let name = filename
@@ -1300,6 +1326,7 @@ impl DownloadManager {
                 })
         });
         let item = DownloadItem::new(self.alloc_id_for_in(existing), &url, &name, &dir);
+        item.set_referer(referer.unwrap_or_default());
         if crate::torrent::is_magnet(&url) {
             // Magnets carry no archive to recompute the output folder from later, so record their subfolder now.
             item.set_output_dir(
@@ -2119,6 +2146,7 @@ impl DownloadManager {
             &filename,
             dest_dir,
         );
+        item.set_referer(stored.referer.clone().unwrap_or_default());
         item.set_public_only(public_only);
         item.set_group(stored.group.clone());
         // Resumed rows requeue; only settled rows keep their status.
@@ -2223,6 +2251,7 @@ impl DownloadManager {
         let id = self.claim_id_in(stored.id, existing);
         job.item_id = id;
         let item = DownloadItem::new(id, &url, &title, &stored.dest_dir);
+        item.set_referer(stored.referer.clone().unwrap_or_default());
         item.set_public_only(public_only);
         item.set_is_gallery(true);
         item.set_group(
@@ -2341,6 +2370,7 @@ impl DownloadManager {
             dest_dir: dir,
             filename: name,
             progress,
+            referer,
             video_source,
             group,
             ..
@@ -2358,6 +2388,7 @@ impl DownloadManager {
             return;
         }
         let item = DownloadItem::new(self.claim_id_in(stored_id, existing), &url, &name, &dir);
+        item.set_referer(referer.unwrap_or_default());
         item.set_group(group);
         item.set_progress(progress.clamp(0.0, 1.0));
         item.set_status(DownloadStatus::Done);

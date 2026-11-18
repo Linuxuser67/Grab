@@ -31,6 +31,9 @@ mod imp {
         pub id: Cell<u64>,
         #[property(get, set)]
         pub url: RefCell<String>,
+        /// Optional browser-provided page used for HTTP Referer headers.
+        #[property(get, set)]
+        pub referer: RefCell<String>,
         #[property(get, set)]
         pub filename: RefCell<String>,
         #[property(get, set)]

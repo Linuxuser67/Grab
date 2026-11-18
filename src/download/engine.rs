@@ -2038,6 +2038,10 @@ impl DownloadManager {
         let job = crate::manifest_runner::ManifestJob {
             item_id: id,
             source,
+            referer: {
+                let value = item.referer();
+                (!value.is_empty()).then_some(value)
+            },
             dest: item.file_path(),
             proxy,
             cookies_browser: opts.cookies_browser.clone(),

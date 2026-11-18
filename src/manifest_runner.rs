@@ -250,6 +250,7 @@ fn mux_failure_error(log: &str) -> ManifestRunError {
 pub(crate) struct ManifestJob {
     pub(crate) item_id: u64,
     pub(crate) source: ManifestSource,
+    pub(crate) referer: Option<String>,
     pub(crate) dest: PathBuf,
     pub(crate) proxy: Option<crate::net_types::ResolvedProxy>,
     pub(crate) cookies_browser: String,
@@ -932,6 +933,7 @@ async fn resolve_manifest_tracks(
             &job.source.url,
             &job.cookies_browser,
             job.proxy.as_ref(),
+            job.referer.as_deref(),
         )
         .await
         {

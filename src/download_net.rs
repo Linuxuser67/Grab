@@ -304,9 +304,45 @@ fn apply_proxies(
 /// Build one client per download attempt. Connection pooling stays shared within
 /// its requests and range workers, but DNS policy does not leak to other rows.
 pub(crate) fn http_client_for(proxy: Option<&ResolvedProxy>) -> Result<reqwest::Client, String> {
-    apply_proxies(client_builder(), proxy)
+    http_client_for_with_referer(proxy, None)
+}
+
+/// Build a guarded client with an optional browser-provided Referer header.
+pub(crate) fn http_client_for_with_referer(
+    proxy: Option<&ResolvedProxy>,
+    referer: Option<&str>,
+) -> Result<reqwest::Client, String> {
+    apply_proxies(client_builder_with_referer(referer), proxy)
         .build()
         .map_err(|error| error.to_string())
+}
+
+fn client_builder_with_referer(referer: Option<&str>) -> reqwest::ClientBuilder {
+    let Some(value) = normalized_referer(referer)
+        .and_then(|value| reqwest::header::HeaderValue::from_str(&value).ok())
+    else {
+        return client_builder();
+    };
+    let mut headers = reqwest::header::HeaderMap::new();
+    headers.insert(reqwest::header::REFERER, value);
+    client_builder().default_headers(headers)
+}
+
+fn normalized_referer(raw: Option<&str>) -> Option<String> {
+    let raw = raw?.trim();
+    if raw.is_empty() || raw.len() > 2048 {
+        return None;
+    }
+    let mut parsed = url::Url::parse(raw).ok()?;
+    if !matches!(parsed.scheme(), "http" | "https")
+        || parsed.host_str().is_none()
+        || !parsed.username().is_empty()
+        || parsed.password().is_some()
+    {
+        return None;
+    }
+    parsed.set_fragment(None);
+    Some(parsed.to_string())
 }
 
 /// Read-only view of a cookie jar for reqwest's cookie provider: staged
@@ -321,7 +357,15 @@ pub(crate) fn http_client_with_jar(
     proxy: Option<&ResolvedProxy>,
     jar: std::sync::Arc<reqwest::cookie::Jar>,
 ) -> Result<reqwest::Client, String> {
-    apply_proxies(client_builder().cookie_provider(jar), proxy)
+    http_client_with_jar_and_referer(proxy, jar, None)
+}
+
+pub(crate) fn http_client_with_jar_and_referer(
+    proxy: Option<&ResolvedProxy>,
+    jar: std::sync::Arc<reqwest::cookie::Jar>,
+    referer: Option<&str>,
+) -> Result<reqwest::Client, String> {
+    apply_proxies(client_builder_with_referer(referer).cookie_provider(jar), proxy)
         .build()
         .map_err(|error| error.to_string())
 }
@@ -332,8 +376,19 @@ pub(crate) fn http_client_with_jar_and_user_agent(
     jar: std::sync::Arc<reqwest::cookie::Jar>,
     user_agent: &str,
 ) -> Result<reqwest::Client, String> {
+    http_client_with_jar_and_user_agent_and_referer(proxy, jar, user_agent, None)
+}
+
+pub(crate) fn http_client_with_jar_and_user_agent_and_referer(
+    proxy: Option<&ResolvedProxy>,
+    jar: std::sync::Arc<reqwest::cookie::Jar>,
+    user_agent: &str,
+    referer: Option<&str>,
+) -> Result<reqwest::Client, String> {
     apply_proxies(
-        client_builder().cookie_provider(jar).user_agent(user_agent),
+        client_builder_with_referer(referer)
+            .cookie_provider(jar)
+            .user_agent(user_agent),
         proxy,
     )
     .build()

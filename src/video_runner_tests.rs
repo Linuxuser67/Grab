@@ -778,6 +778,7 @@ fn staging_claim_skips_existing_base_file() {
     let job = VideoJob {
         item_id: 1,
         page_url: "https://example.com/v".into(),
+        referer: None,
         playlist_item_id: None,
         quality: "1080p".into(),
         audio_only: false,

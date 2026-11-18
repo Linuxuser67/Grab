@@ -369,6 +369,10 @@ impl DownloadManager {
         let ctx = FetchCtx {
             client,
             url: url.clone(),
+            referer: {
+                let value = item.referer();
+                (!value.is_empty()).then_some(value)
+            },
             dest,
             opts,
             if_range: {

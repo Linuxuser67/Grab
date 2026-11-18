@@ -676,13 +676,13 @@ async fn ensure_destination_unclaimed(destination: &Path) -> Result<(), VideoErr
 
 /// Shared executable and lifecycle state for one resolved yt-dlp attempt.
 pub(crate) struct YtdlpAttemptContext<'a> {
-    youtube_bin: &'a Path,
-    ffmpeg_bin: &'a Path,
-    staging: &'a Path,
-    gate: &'a Arc<AttemptGate>,
-    timeout: Duration,
-    tx: tokio::sync::mpsc::UnboundedSender<crate::engine_msg::EngineMsg>,
-    playlist_index: Option<usize>,
+    pub(crate) youtube_bin: &'a Path,
+    pub(crate) ffmpeg_bin: &'a Path,
+    pub(crate) staging: &'a Path,
+    pub(crate) gate: &'a Arc<AttemptGate>,
+    pub(crate) timeout: Duration,
+    pub(crate) tx: tokio::sync::mpsc::UnboundedSender<crate::engine_msg::EngineMsg>,
+    pub(crate) playlist_index: Option<usize>,
 }
 
 async fn run_video_download_inner(

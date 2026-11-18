@@ -341,6 +341,11 @@ fn normalized_referer(raw: Option<&str>) -> Option<String> {
     {
         return None;
     }
+    // Native manifest clients reuse this value for child requests and
+    // redirects, so expose only the source origin. The direct HTTP engine
+    // applies the full same-origin / origin-only cross-origin policy per request.
+    parsed.set_path("/");
+    parsed.set_query(None);
     parsed.set_fragment(None);
     Some(parsed.to_string())
 }

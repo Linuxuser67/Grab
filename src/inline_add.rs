@@ -3387,10 +3387,11 @@ fn build_video_lookup_kicker(context: VideoLookupContext) -> VideoLookupKick {
                                         scheduled_at_b.get(),
                                         move |directory| async move {
                                             enqueue_manager
-                                                .enqueue_manifest_async_batched(
+                                                .enqueue_manifest_async_batched_with_referer(
                                                     source,
                                                     directory.as_deref(),
                                                     Some(&filename),
+                                                    source_referer.as_deref(),
                                                 )
                                                 .await
                                         },
@@ -3564,6 +3565,7 @@ fn build_video_lookup_kicker(context: VideoLookupContext) -> VideoLookupKick {
                                 &dest_b,
                                 &close_b,
                                 &url,
+                                source_referer.clone(),
                                 scheduled_at_b.get(),
                             )
                             .await

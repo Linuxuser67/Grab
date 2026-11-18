@@ -496,7 +496,10 @@ async fn client_for_preview(
 ) -> Result<(reqwest::Client, ManifestClientAuth), String> {
     validate_handoff_proxy(raw_url)?;
     if let Some((path, user_agent)) = handoff_identity
-        && let Some(client) = client_from_handoff_jar(&path, user_agent.as_deref(), proxy).await?
+        && let Some(client) = client_from_handoff_jar(
+            &path, user_agent.as_deref(), proxy, referer,
+        )
+        .await?
     {
         return Ok((client, ManifestClientAuth::Handoff));
     }

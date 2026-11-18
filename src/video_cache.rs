@@ -381,8 +381,8 @@ fn identity_key(
     // Cookie- or Referer-bound video previews stay in memory: their results
     // can contain signed media URLs, and the persistent cache is keyed by video
     // id rather than the full extraction identity.
-    let video_needs_memory_cache = matches!(scope, CacheScope::Video)
-        && (has_cookie_file || referer_hash.is_some());
+    let video_needs_memory_cache =
+        matches!(scope, CacheScope::Video) && (has_cookie_file || referer_hash.is_some());
     let schema = if video_needs_memory_cache {
         AUTHENTICATED_VIDEO_NAMESPACE
     } else {

@@ -1501,14 +1501,12 @@ fn submit_probe(
     scheduled_at: Option<i64>,
     queue_all: bool,
 ) {
-    let VideoSubmitContext {
-        manager,
-        dest,
-        close_card,
-        step,
-        lookup_add,
-        nav,
-    } = context;
+    let manager = context.manager;
+    let dest = context.dest;
+    let close_card = context.close_card;
+    let step = context.step;
+    let lookup_add = context.lookup_add;
+    let nav = context.nav;
     match probe {
         crate::video::ProbeResult::Single(v) => {
             submit_probed_single(

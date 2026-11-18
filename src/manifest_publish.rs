@@ -94,6 +94,29 @@ fn verify_destination_identity(path: &Path, expected: DestinationIdentity) -> st
     Ok(())
 }
 
+/// Capture a path identity without occupying an async runtime worker.
+///
+/// Path inspection can block on network and FUSE filesystems, so callers in
+/// async publication paths must use this wrapper rather than
+/// `identity_from_path` directly.
+async fn identity_from_path_blocking(path: &Path) -> std::io::Result<DestinationIdentity> {
+    let path = path.to_path_buf();
+    tokio::task::spawn_blocking(move || identity_from_path(&path))
+        .await
+        .map_err(std::io::Error::other)?
+}
+
+/// Verify a published path on Tokio's blocking pool.
+async fn verify_destination_identity_blocking(
+    path: &Path,
+    expected: DestinationIdentity,
+) -> std::io::Result<()> {
+    let path = path.to_path_buf();
+    tokio::task::spawn_blocking(move || verify_destination_identity(&path, expected))
+        .await
+        .map_err(std::io::Error::other)?
+}
+
 impl RollbackJob {
     fn run(self, gate: &crate::attempt_gate::AttemptGate) {
         match verify_destination_identity(&self.path, self.identity) {
@@ -421,7 +444,7 @@ async fn persist_prepared_copy(
         pending.rollback().await;
         return Err(error);
     }
-    if let Err(error) = verify_destination_identity(destination, pending.identity) {
+    if let Err(error) = verify_destination_identity_blocking(destination, pending.identity).await {
         pending.rollback().await;
         return Err(error);
     }
@@ -443,7 +466,7 @@ async fn commit_renamed_destination(
     destination: &Path,
 ) -> std::io::Result<ManifestPublishOutcome> {
     pending.arm();
-    if let Err(error) = verify_destination_identity(destination, pending.identity) {
+    if let Err(error) = verify_destination_identity_blocking(destination, pending.identity).await {
         pending.rollback().await;
         return Err(error);
     }
@@ -455,7 +478,7 @@ async fn commit_renamed_destination(
         pending.rollback().await;
         return Err(error);
     }
-    if let Err(error) = verify_destination_identity(destination, pending.identity) {
+    if let Err(error) = verify_destination_identity_blocking(destination, pending.identity).await {
         pending.rollback().await;
         return Err(error);
     }
@@ -479,7 +502,7 @@ pub(crate) async fn publish(
         return Ok(ManifestPublishOutcome::Aborted);
     }
 
-    let source_identity = identity_from_path(source)?;
+    let source_identity = identity_from_path_blocking(source).await?;
     match crate::file_names::rename_noreplace_same_device(source, destination) {
         Ok(()) => {
             let pending = PendingDestination::new(
@@ -776,7 +799,9 @@ mod tests {
         let destination = directory.path().join("final.mp4");
         std::fs::write(&destination, b"original publication").expect("write original");
         let gate = crate::attempt_gate::AttemptGate::new();
-        let identity = identity_from_path(&destination).expect("capture original inode");
+        let identity = identity_from_path_blocking(&destination)
+            .await
+            .expect("capture original inode");
         let mut pending = PendingDestination::new(&destination, Arc::clone(&gate), None, identity);
         pending.arm();
 
@@ -805,7 +830,9 @@ mod tests {
         let destination = directory.path().join("final.mp4");
         std::fs::write(&destination, b"original publication").expect("write original");
         let gate = crate::attempt_gate::AttemptGate::new();
-        let identity = identity_from_path(&destination).expect("capture original inode");
+        let identity = identity_from_path_blocking(&destination)
+            .await
+            .expect("capture original inode");
         let mut pending =
             PendingDestination::new(&destination, Arc::clone(&gate), Some(&source), identity);
         pending.arm();
@@ -838,7 +865,9 @@ mod tests {
         crate::file_names::rename_noreplace_same_device(&source, &destination)
             .expect("move staged output into pending destination");
         let gate = crate::attempt_gate::AttemptGate::new();
-        let identity = identity_from_path(&destination).expect("capture published inode");
+        let identity = identity_from_path_blocking(&destination)
+            .await
+            .expect("capture published inode");
         let mut pending =
             PendingDestination::new(&destination, Arc::clone(&gate), Some(&source), identity);
         pending.arm();
@@ -860,7 +889,9 @@ mod tests {
         let destination = directory.path().join("final.mp4");
         std::fs::write(&destination, b"published orphan").expect("write destination");
         let gate = crate::attempt_gate::AttemptGate::new();
-        let identity = identity_from_path(&destination).expect("capture published inode");
+        let identity = identity_from_path_blocking(&destination)
+            .await
+            .expect("capture published inode");
         let mut pending = PendingDestination::new(&destination, Arc::clone(&gate), None, identity);
         pending.arm();
 
@@ -885,7 +916,9 @@ mod tests {
         std::fs::write(&source, b"existing source").expect("write source");
         std::fs::write(&destination, b"published orphan").expect("write destination");
         let gate = crate::attempt_gate::AttemptGate::new();
-        let identity = identity_from_path(&destination).expect("capture published inode");
+        let identity = identity_from_path_blocking(&destination)
+            .await
+            .expect("capture published inode");
         let mut pending =
             PendingDestination::new(&destination, Arc::clone(&gate), Some(&source), identity);
         pending.arm();

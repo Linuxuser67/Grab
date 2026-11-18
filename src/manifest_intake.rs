@@ -375,7 +375,13 @@ pub(crate) async fn lookup(
     // request client must use the same handoff entry if another handoff arrives
     // while the preview is being prepared.
     let handoff_identity = crate::extension_server::live_handoff_identity(raw_url);
-    let cache_key = manifest_preview_cache_key(raw_url, proxy, handoff_identity.as_ref());
+    // A preview can depend on the initiating page's Referer header.
+    // Never reuse an entry produced under a different request context.
+    let cache_key = if referer.is_none() {
+        manifest_preview_cache_key(raw_url, proxy, handoff_identity.as_ref())
+    } else {
+        None
+    };
     if let Some(key) = cache_key.as_ref()
         && let Some(mut cached) = manifest_preview_cache_get(key)
     {

@@ -459,6 +459,7 @@ mod tests {
         let job = GalleryJob {
             item_id: 41,
             page_url: "https://example.com/gallery".to_string(),
+            referer: None,
             title: "Gallery".to_string(),
             file_count: Some(2),
             dest_dir: PathBuf::from("/tmp/gallery"),

@@ -522,6 +522,7 @@ fn subtitle_probe_rejects_oversized_json_output() {
     let job = VideoJob {
         item_id: 1,
         page_url: "https://example.com/v".into(),
+        referer: None,
         playlist_item_id: None,
         quality: "1080p".into(),
         audio_only: false,

@@ -584,11 +584,12 @@ async fn lookup_media_inner(
     let native_started = std::time::Instant::now();
     let native_url = url.clone();
     let native_proxy = proxy.clone();
+    let native_referer = referer.clone();
     let native_future = async move {
         let result = crate::manifest_intake::lookup(
             &native_url,
             native_proxy.as_ref(),
-            referer.as_deref(),
+            native_referer.as_deref(),
         )
             .await
             .and_then(|manifest| {
@@ -4791,7 +4792,8 @@ fn make_gallery_picker_opener(
             ),
             None => return,
         };
-        let referer = source_referer_for(&step2, &url);
+        let submitted_url = step2.url_entry.text().trim().to_string();
+        let referer = source_referer_for(&step2, &submitted_url);
         // A previous enumeration is superseded: abort it (kills
         // gallery-dl) instead of letting it probe on.
         abort_enumeration(&step2);

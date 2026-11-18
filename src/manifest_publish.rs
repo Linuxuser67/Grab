@@ -447,9 +447,7 @@ async fn persist_prepared_copy(
         pending.rollback().await;
         return Err(error);
     }
-    if let Err(error) =
-        verify_destination_identity_blocking(destination, pending.identity).await
-    {
+    if let Err(error) = verify_destination_identity_blocking(destination, pending.identity).await {
         pending.rollback().await;
         return Err(error);
     }
@@ -471,9 +469,7 @@ async fn commit_renamed_destination(
     destination: &Path,
 ) -> std::io::Result<ManifestPublishOutcome> {
     pending.arm();
-    if let Err(error) =
-        verify_destination_identity_blocking(destination, pending.identity).await
-    {
+    if let Err(error) = verify_destination_identity_blocking(destination, pending.identity).await {
         pending.rollback().await;
         return Err(error);
     }
@@ -485,9 +481,7 @@ async fn commit_renamed_destination(
         pending.rollback().await;
         return Err(error);
     }
-    if let Err(error) =
-        verify_destination_identity_blocking(destination, pending.identity).await
-    {
+    if let Err(error) = verify_destination_identity_blocking(destination, pending.identity).await {
         pending.rollback().await;
         return Err(error);
     }
@@ -875,8 +869,8 @@ mod tests {
             .expect("move staged output into pending destination");
         let gate = crate::attempt_gate::AttemptGate::new();
         let identity = identity_from_path_blocking(&destination)
-                .await
-                .expect("capture published inode");
+            .await
+            .expect("capture published inode");
         let mut pending =
             PendingDestination::new(&destination, Arc::clone(&gate), Some(&source), identity);
         pending.arm();
@@ -899,8 +893,8 @@ mod tests {
         std::fs::write(&destination, b"published orphan").expect("write destination");
         let gate = crate::attempt_gate::AttemptGate::new();
         let identity = identity_from_path_blocking(&destination)
-                .await
-                .expect("capture published inode");
+            .await
+            .expect("capture published inode");
         let mut pending = PendingDestination::new(&destination, Arc::clone(&gate), None, identity);
         pending.arm();
 
@@ -926,8 +920,8 @@ mod tests {
         std::fs::write(&destination, b"published orphan").expect("write destination");
         let gate = crate::attempt_gate::AttemptGate::new();
         let identity = identity_from_path_blocking(&destination)
-                .await
-                .expect("capture published inode");
+            .await
+            .expect("capture published inode");
         let mut pending =
             PendingDestination::new(&destination, Arc::clone(&gate), Some(&source), identity);
         pending.arm();

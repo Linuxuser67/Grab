@@ -284,12 +284,14 @@ pub(crate) fn cache_key_with_referer(
 ) -> Option<String> {
     identity_key(
         raw_url,
-        youtube_bin,
-        yt_version,
-        cookies_browser,
-        proxy,
-        identity_args,
-        referer,
+        CacheIdentityContext {
+            youtube_bin,
+            yt_version,
+            cookies_browser,
+            proxy,
+            identity_args,
+            referer,
+        },
         CacheScope::Video,
     )
 }
@@ -337,26 +339,40 @@ pub(crate) fn playlist_cache_key_with_referer(
 ) -> Option<String> {
     identity_key(
         raw_url,
+        CacheIdentityContext {
+            youtube_bin,
+            yt_version,
+            cookies_browser,
+            proxy,
+            identity_args,
+            referer,
+        },
+        CacheScope::Playlist,
+    )
+}
+
+struct CacheIdentityContext<'a> {
+    youtube_bin: &'a Path,
+    yt_version: &'a str,
+    cookies_browser: &'a str,
+    proxy: Option<&'a crate::net_types::ResolvedProxy>,
+    identity_args: &'a [String],
+    referer: Option<&'a str>,
+}
+
+fn identity_key(
+    raw_url: &str,
+    context: CacheIdentityContext<'_>,
+    scope: CacheScope,
+) -> Option<String> {
+    let CacheIdentityContext {
         youtube_bin,
         yt_version,
         cookies_browser,
         proxy,
         identity_args,
         referer,
-        CacheScope::Playlist,
-    )
-}
-
-fn identity_key(
-    raw_url: &str,
-    youtube_bin: &Path,
-    yt_version: &str,
-    cookies_browser: &str,
-    proxy: Option<&crate::net_types::ResolvedProxy>,
-    identity_args: &[String],
-    referer: Option<&str>,
-    scope: CacheScope,
-) -> Option<String> {
+    } = context;
     let mut url = url::Url::parse(raw_url).ok()?;
     url.set_fragment(None);
     if has_known_rotating_auth_query(&url) {

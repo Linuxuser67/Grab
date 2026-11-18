@@ -124,9 +124,7 @@ fn execute_delete_operation(operation: DeleteOperation) -> Result<(), String> {
                 // Never trash a skipped pre-existing file or the shared parent.
                 for path in files {
                     match std::fs::symlink_metadata(&path) {
-                        Ok(metadata)
-                            if metadata.is_file() || metadata.file_type().is_symlink() =>
-                        {
+                        Ok(metadata) if metadata.is_file() || metadata.file_type().is_symlink() => {
                             trash_path(&path, &filename)?;
                         }
                         Ok(_) => {}
@@ -418,8 +416,7 @@ impl DownloadManager {
             .filter(|state| state.owned)
             .filter_map(|state| {
                 let path = std::path::PathBuf::from(&state.path);
-                (path.parent() == Some(destination) && path.file_name().is_some())
-                    .then_some(path)
+                (path.parent() == Some(destination) && path.file_name().is_some()).then_some(path)
             })
             .filter(|path| seen.insert(path.clone()))
             .collect()
@@ -543,12 +540,11 @@ impl DownloadManager {
     }
 }
 
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::gallery_argv::{GalleryFileState, GalleryFilter, GalleryJob};
     use crate::download_store::DownloadStatus;
+    use crate::gallery_argv::{GalleryFileState, GalleryFilter, GalleryJob};
 
     fn direct_job(destination: &std::path::Path) -> GalleryJob {
         GalleryJob {
@@ -572,13 +568,19 @@ mod tests {
         let mut job = direct_job(destination);
         job.file_rows = vec![
             GalleryFileState {
-                path: destination.join("created.mp4").to_string_lossy().into_owned(),
+                path: destination
+                    .join("created.mp4")
+                    .to_string_lossy()
+                    .into_owned(),
                 status: DownloadStatus::Done,
                 progress: 1.0,
                 owned: true,
             },
             GalleryFileState {
-                path: destination.join("existing.mp4").to_string_lossy().into_owned(),
+                path: destination
+                    .join("existing.mp4")
+                    .to_string_lossy()
+                    .into_owned(),
                 status: DownloadStatus::Done,
                 progress: 1.0,
                 owned: false,
@@ -614,14 +616,19 @@ mod tests {
         let destination = std::path::Path::new("/tmp/grab-downloads");
         let mut job = direct_job(destination);
         job.file_rows.push(GalleryFileState {
-            path: destination.join("created.mp4").to_string_lossy().into_owned(),
+            path: destination
+                .join("created.mp4")
+                .to_string_lossy()
+                .into_owned(),
             status: DownloadStatus::Done,
             progress: 1.0,
             owned: true,
         });
 
-        assert!(!DownloadManager::gallery_direct_trash_targets(destination, &job)
-            .contains(&destination.to_path_buf()));
+        assert!(
+            !DownloadManager::gallery_direct_trash_targets(destination, &job)
+                .contains(&destination.to_path_buf())
+        );
 
         job.file_count = Some(2);
         assert!(DownloadManager::gallery_direct_trash_targets(destination, &job).is_empty());

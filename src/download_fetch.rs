@@ -1505,7 +1505,7 @@ mod request_referer_tests {
         async fn read_headers(stream: &mut tokio::net::TcpStream) -> String {
             let mut request = Vec::new();
             let mut buffer = [0_u8; 1024];
-            while !request.windows(4).any(|window| window == b"\\r\\n\\r\\n") {
+            while !request.windows(4).any(|window| window == b"\r\n\r\n") {
                 let read = tokio::time::timeout(
                     std::time::Duration::from_secs(3),
                     stream.read(&mut buffer),
@@ -1538,7 +1538,7 @@ mod request_referer_tests {
             stream
                 .write_all(
                     format!(
-                        "HTTP/1.1 302 Found\\r\\nLocation: http://{redirected_address}/resource\\r\\nContent-Length: 0\\r\\nConnection: close\\r\\n\\r\\n"
+                        "HTTP/1.1 302 Found\r\nLocation: http://{redirected_address}/resource\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
                     )
                     .as_bytes(),
                 )
@@ -1557,7 +1557,7 @@ mod request_referer_tests {
             let request = read_headers(&mut stream).await;
             stream
                 .write_all(
-                    b"HTTP/1.1 200 OK\\r\\nContent-Length: 0\\r\\nConnection: close\\r\\n\\r\\n",
+                    b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
                 )
                 .await
                 .expect("write final response");

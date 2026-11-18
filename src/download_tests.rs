@@ -9023,7 +9023,7 @@ fn gallery_file_row_lifecycle_updates_persisted_state_through_the_owner_index() 
     manager.store.append(&owner);
 
     let path = output_dir.join("one.jpg").to_string_lossy().into_owned();
-    manager.upsert_gallery_file_row(&owner, &path, DownloadStatus::Paused, 0.37, "Paused");
+    manager.upsert_gallery_file_row(&owner, &path, DownloadStatus::Paused, 0.37, "Paused", true);
     manager.prepare_gallery_file_rows_for_attempt(id);
 
     let child = manager
@@ -9039,7 +9039,7 @@ fn gallery_file_row_lifecycle_updates_persisted_state_through_the_owner_index() 
         assert_eq!(state.progress, 0.0);
     }
 
-    manager.upsert_gallery_file_row(&owner, &path, DownloadStatus::Downloading, 0.55, "55%");
+    manager.upsert_gallery_file_row(&owner, &path, DownloadStatus::Downloading, 0.55, "55%", true);
     manager.finish_gallery_file_rows(id, DownloadStatus::Failed);
 
     assert_eq!(child.status(), DownloadStatus::Failed);
@@ -9083,8 +9083,9 @@ fn gallery_file_rows_are_persisted_with_owner_and_rehydrated() {
         DownloadStatus::Downloading,
         0.42,
         "42%",
+        true,
     );
-    manager.upsert_gallery_file_row(&owner, &second_path, DownloadStatus::Done, 1.0, "Finished");
+    manager.upsert_gallery_file_row(&owner, &second_path, DownloadStatus::Done, 1.0, "Finished", true);
     // A malicious or stale output event must not create a child outside the
     // gallery's dedicated output folder.
     manager.upsert_gallery_file_row(
@@ -9093,6 +9094,7 @@ fn gallery_file_rows_are_persisted_with_owner_and_rehydrated() {
         DownloadStatus::Done,
         1.0,
         "Finished",
+        true,
     );
 
     let children = manager

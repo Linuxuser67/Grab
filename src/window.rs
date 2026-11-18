@@ -313,8 +313,7 @@ pub fn build_window(
     // mirrors Escape / successful-add / toggle closes too), so the button
     // itself is the dismissal affordance — no separate close button needed.
     let add_btn = gtk4::ToggleButton::builder()
-        .icon_name("list-add-symbolic")
-        .css_classes(["suggested-action"])
+        .icon_name("tab-new-symbolic")
         .tooltip_text(gettext("New Download (Ctrl+N)"))
         .build();
     add_btn.set_widget_name("add-download-button");

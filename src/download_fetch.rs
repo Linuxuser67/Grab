@@ -1556,9 +1556,7 @@ mod request_referer_tests {
             .expect("accept redirected request");
             let request = read_headers(&mut stream).await;
             stream
-                .write_all(
-                    b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
-                )
+                .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
                 .await
                 .expect("write final response");
             request
@@ -1567,19 +1565,12 @@ mod request_referer_tests {
         let client = crate::download_net::http_client_for(None).expect("build guarded client");
         let target = format!("http://{first_address}/media");
         let source = format!("http://{first_address}/watch?token=private");
-        let request = super::stamp_request(
-            client.get(&target),
-            "Grab-Test-UA",
-            &target,
-            Some(&source),
-        );
-        let response = super::execute_with_timeout(
-            &client,
-            request,
-            std::time::Duration::from_secs(3),
-        )
-        .await
-        .expect("follow safe redirect");
+        let request =
+            super::stamp_request(client.get(&target), "Grab-Test-UA", &target, Some(&source));
+        let response =
+            super::execute_with_timeout(&client, request, std::time::Duration::from_secs(3))
+                .await
+                .expect("follow safe redirect");
         assert!(response.status().is_success());
 
         let initial_request = first_server.await.expect("initial server task");

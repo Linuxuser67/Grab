@@ -2640,9 +2640,10 @@ segment.ts?f=418899&srv=server&i=0.4&sp=500&p1=one&p2=two&asn=327934
 
     #[tokio::test]
     async fn preview_client_is_anonymous_without_a_staged_handoff() {
-        let (_, auth) = client_for_preview("https://preview.example.test/master.m3u8", None, None, None)
-            .await
-            .expect("anonymous preview client");
+        let (_, auth) =
+            client_for_preview("https://preview.example.test/master.m3u8", None, None, None)
+                .await
+                .expect("anonymous preview client");
         assert_eq!(
             auth,
             ManifestClientAuth::Anonymous,

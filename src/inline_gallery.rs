@@ -147,7 +147,7 @@ pub(crate) fn resolve_gallery_auth(url: &str, browser: &str) -> GalleryAuth {
 const GALLERY_PREVIEW_CACHE_TTL: Duration = Duration::from_secs(5 * 60);
 const GALLERY_PREVIEW_CACHE_CAPACITY: usize = 32;
 
-#[derive(Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 struct GalleryPreviewCacheKey {
     url: String,
     cookies_browser: Option<String>,

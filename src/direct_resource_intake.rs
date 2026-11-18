@@ -5,7 +5,7 @@
 
 use std::time::Duration;
 
-use reqwest::header::{HeaderMap, CONTENT_DISPOSITION, CONTENT_TYPE, RANGE};
+use reqwest::header::{CONTENT_DISPOSITION, CONTENT_TYPE, HeaderMap, RANGE};
 
 const DIRECT_RESOURCE_PROBE_BUDGET: Duration = Duration::from_secs(3);
 const DIRECT_RESOURCE_REQUEST_TIMEOUT: Duration = Duration::from_secs(3);
@@ -109,7 +109,14 @@ async fn inspect_response_headers(
         .and_then(|value| value.to_str().ok())
         .map_or_else(
             || "content-disposition".to_string(),
-            |value| value.split(';').next().unwrap_or_default().trim().to_ascii_lowercase(),
+            |value| {
+                value
+                    .split(';')
+                    .next()
+                    .unwrap_or_default()
+                    .trim()
+                    .to_ascii_lowercase()
+            },
         );
 
     // Dropping the response here closes the unused body stream; no media bytes
@@ -200,8 +207,10 @@ fn has_download_disposition(value: &str) -> bool {
                 .trim()
                 .split_once('=')
                 .is_some_and(|(name, filename)| {
-                    matches!(name.trim().to_ascii_lowercase().as_str(), "filename" | "filename*")
-                        && !filename.trim().trim_matches('"').is_empty()
+                    matches!(
+                        name.trim().to_ascii_lowercase().as_str(),
+                        "filename" | "filename*"
+                    ) && !filename.trim().trim_matches('"').is_empty()
                 })
         })
 }
@@ -295,7 +304,9 @@ mod tests {
             }
             let request = String::from_utf8_lossy(&request);
             assert!(
-                request.lines().any(|line| line.eq_ignore_ascii_case("range: bytes=0-0")),
+                request
+                    .lines()
+                    .any(|line| line.eq_ignore_ascii_case("range: bytes=0-0")),
                 "the preflight must request only the first byte: {request}"
             );
 

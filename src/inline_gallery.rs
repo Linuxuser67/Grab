@@ -307,7 +307,12 @@ pub(crate) async fn dual_probe(ctx: DualProbeCtx<'_>) -> DualProbeOutcome {
             // Errors may be transient and Retry must actually retry. Re-hash
             // after the probe: a replaced or removed jar must not store its
             // result under the old credentials' key.
-            let unchanged = gallery_preview_cache_key(&url, &auth, ctx.proxy.as_ref()) == cache_key;
+            let unchanged = gallery_preview_cache_key_with_referer(
+                &url,
+                &auth,
+                ctx.proxy.as_ref(),
+                ctx.referer.as_deref(),
+            ) == cache_key;
             if let Ok(Some(items)) = &r
                 && let Some(key) = cache_key
                 && unchanged

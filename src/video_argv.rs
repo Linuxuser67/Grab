@@ -561,6 +561,10 @@ pub(crate) fn live_capture_argv_with_mode(
         args.push("--live-from-start".to_string());
     }
     args.extend(proxy_cli_args(job.proxy.as_ref()));
+    if let Some(referer) = job.referer.as_deref() {
+        args.push("--referer".to_string());
+        args.push(referer.to_string());
+    }
     // Fresh handoff jar (or the configured browser) plus the shared identity
     // tail, which ends with `-- <url>`.
     args.extend(crate::extension_server::ytdlp_spawn_identity(

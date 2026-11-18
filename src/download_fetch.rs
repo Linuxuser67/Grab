@@ -1455,10 +1455,11 @@ fn origin_referer(url: &str) -> Option<String> {
 /// Referer); single choke point for all requests. No Cookie: cookie-bearing
 /// downloads use a client with the jar as provider (see `http_client_with_jar`),
 /// which re-applies in-scope cookies on every hop.
-/// Browser-like referrer policy for an outbound request. Same-origin requests
-/// retain the source page URL (without fragments); cross-origin requests send
-/// only its origin; HTTPS-to-HTTP requests omit it. With no browser source,
-/// keep Grab's established origin-only self-referer behavior.
+/// Produce a redirect-safe Referer. The HTTP client may follow redirects
+/// without giving Grab a chance to rewrite request headers at each hop, so a
+/// full source-page URL must never be attached to the initial request.
+/// Origin-only values preserve hotlink compatibility without leaking paths or
+/// query parameters to a later redirect destination.
 fn request_referer(target: &str, source: Option<&str>) -> Option<String> {
     let Some(source) = source else {
         return origin_referer(target);
@@ -1479,13 +1480,7 @@ fn request_referer(target: &str, source: Option<&str>) -> Option<String> {
     if source_url.scheme() == "https" && target_url.scheme() == "http" {
         return None;
     }
-    let mut source_url = source_url;
-    source_url.set_fragment(None);
-    if source_url.origin() == target_url.origin() {
-        Some(source_url.to_string())
-    } else {
-        origin_referer(source)
-    }
+    origin_referer(source_url.as_str())
 }
 
 #[cfg(test)]
@@ -1493,14 +1488,115 @@ mod request_referer_tests {
     use super::request_referer;
 
     #[test]
-    fn same_origin_keeps_page_url_without_fragment() {
+    fn same_origin_uses_only_the_source_origin() {
         assert_eq!(
             request_referer(
                 "https://example.test/download/file",
                 Some("https://example.test/watch?id=42#player"),
             ),
-            Some("https://example.test/watch?id=42".to_string())
+            Some("https://example.test/".to_string())
         );
+    }
+
+    #[tokio::test]
+    async fn redirect_does_not_forward_source_page_path_or_query() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        async fn read_headers(stream: &mut tokio::net::TcpStream) -> String {
+            let mut request = Vec::new();
+            let mut buffer = [0_u8; 1024];
+            while !request.windows(4).any(|window| window == b"\\r\\n\\r\\n") {
+                let read = tokio::time::timeout(
+                    std::time::Duration::from_secs(3),
+                    stream.read(&mut buffer),
+                )
+                .await
+                .expect("request headers arrive")
+                .expect("read request headers");
+                if read == 0 {
+                    break;
+                }
+                request.extend_from_slice(&buffer[..read]);
+            }
+            String::from_utf8(request).expect("HTTP request is UTF-8")
+        }
+
+        let first_listener = tokio::net::TcpListener::bind(("127.0.0.1", 0))
+            .await
+            .expect("bind initial origin");
+        let first_address = first_listener.local_addr().expect("initial origin address");
+        let redirected_listener = tokio::net::TcpListener::bind(("127.0.0.1", 0))
+            .await
+            .expect("bind redirected origin");
+        let redirected_address = redirected_listener
+            .local_addr()
+            .expect("redirected origin address");
+
+        let first_server = tokio::spawn(async move {
+            let (mut stream, _) = first_listener.accept().await.expect("initial request");
+            let request = read_headers(&mut stream).await;
+            stream
+                .write_all(
+                    format!(
+                        "HTTP/1.1 302 Found\\r\\nLocation: http://{redirected_address}/resource\\r\\nContent-Length: 0\\r\\nConnection: close\\r\\n\\r\\n"
+                    )
+                    .as_bytes(),
+                )
+                .await
+                .expect("write redirect response");
+            request
+        });
+        let redirected_server = tokio::spawn(async move {
+            let (mut stream, _) = tokio::time::timeout(
+                std::time::Duration::from_secs(3),
+                redirected_listener.accept(),
+            )
+            .await
+            .expect("redirected request arrives")
+            .expect("accept redirected request");
+            let request = read_headers(&mut stream).await;
+            stream
+                .write_all(
+                    b"HTTP/1.1 200 OK\\r\\nContent-Length: 0\\r\\nConnection: close\\r\\n\\r\\n",
+                )
+                .await
+                .expect("write final response");
+            request
+        });
+
+        let client = crate::download_net::http_client_for(None).expect("build guarded client");
+        let target = format!("http://{first_address}/media");
+        let source = format!("http://{first_address}/watch?token=private");
+        let request = super::stamp_request(
+            client.get(&target),
+            "Grab-Test-UA",
+            &target,
+            Some(&source),
+        );
+        let response = super::execute_with_timeout(
+            &client,
+            request,
+            std::time::Duration::from_secs(3),
+        )
+        .await
+        .expect("follow safe redirect");
+        assert!(response.status().is_success());
+
+        let initial_request = first_server.await.expect("initial server task");
+        let redirected_request = redirected_server.await.expect("redirect server task");
+        for request in [&initial_request, &redirected_request] {
+            let referer = request
+                .lines()
+                .find(|line| line.to_ascii_lowercase().starts_with("referer:"))
+                .expect("request has a Referer header");
+            assert_eq!(
+                referer.split_once(':').expect("header separator").1.trim(),
+                format!("http://{first_address}/"),
+                "only the source origin may survive an automatic redirect"
+            );
+            assert!(!request.contains("token=private"));
+            assert!(!request.contains("/watch"));
+        }
     }
 
     #[test]

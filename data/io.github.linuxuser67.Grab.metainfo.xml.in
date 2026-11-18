@@ -58,6 +58,18 @@
     </screenshot>
   </screenshots>
   <releases>
+    <release version="6.5.1" date="2026-11-18">
+      <description>
+        <ul>
+          <li>Preserve newer browser-cookie handoffs when concurrent requests finish out of order.</li>
+          <li>Harden destination publication identity checks and keep blocking filesystem verification off the asynchronous runtime.</li>
+          <li>Refuse symlinked torrent archive roots during archive inspection and updates.</li>
+          <li>Prevent automatic retries after native download failures.</li>
+          <li>Document supported yt-dlp and gallery-dl website coverage more clearly.</li>
+          <li>Refine the header's New Download icon.</li>
+        </ul>
+      </description>
+    </release>
     <release version="6.5.0" date="2026-11-17">
       <description>
         <ul>

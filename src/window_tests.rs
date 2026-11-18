@@ -493,6 +493,16 @@ fn status_views_use_gnome_adaptive_view_switcher() {
             Some("Grab"),
             "the window title must be the application name without a subtitle"
         );
+        let failure_banner = find_widget_by_name(window.upcast_ref(), "download-failure-banner")
+            .expect("the persistent failure notice exists")
+            .downcast::<libadwaita::Banner>()
+            .expect("the failure notice uses AdwBanner");
+        assert_eq!(
+            failure_banner.margin_bottom(),
+            12,
+            "the failure banner keeps 12 px of HIG spacing before the queue content"
+        );
+
         let header = find_widget_by_name(window.upcast_ref(), "main-header")
             .expect("main header exists")
             .downcast::<libadwaita::HeaderBar>()

@@ -674,6 +674,17 @@ async fn ensure_destination_unclaimed(destination: &Path) -> Result<(), VideoErr
     }
 }
 
+/// Shared executable and lifecycle state for one resolved yt-dlp attempt.
+struct YtdlpAttemptContext<'a> {
+    youtube_bin: &'a Path,
+    ffmpeg_bin: &'a Path,
+    staging: &'a Path,
+    gate: &'a Arc<AttemptGate>,
+    timeout: Duration,
+    tx: tokio::sync::mpsc::UnboundedSender<crate::engine_msg::EngineMsg>,
+    playlist_index: Option<usize>,
+}
+
 async fn run_video_download_inner(
     mut job: VideoJob,
     gate: &std::sync::Arc<AttemptGate>,
@@ -830,6 +841,16 @@ async fn run_video_download_inner(
         return Err(VideoError::fetch("empty response"));
     };
 
+    let attempt = YtdlpAttemptContext {
+        youtube_bin: &youtube_bin,
+        ffmpeg_bin: &ffmpeg_bin,
+        staging: &staging,
+        gate,
+        timeout,
+        tx: tx.clone(),
+        playlist_index,
+    };
+
     // Dialog-less rows skip the picker, so refresh live-ness from resolve metadata: without this a live row takes the HLS VOD path and never reaches capture. Flipping the job field keeps every downstream use consistent.
     if !job.is_live && yt_dlp_reports_currently_live(video.is_live, &video.live_status) {
         job.is_live = true;
@@ -893,32 +914,20 @@ async fn run_video_download_inner(
                 .filter(|u| !u.is_empty())
                 .unwrap_or(&job.page_url);
             return run_live_ytdlp(
-                &youtube_bin,
-                &ffmpeg_bin,
-                &staging,
+                &attempt,
                 &job,
-                gate,
                 canonical,
                 &hls.format_id,
                 abort,
-                timeout,
-                tx,
-                playlist_index,
             )
             .await
             .map(|opt| opt.map_or(VideoOutcome::Aborted, VideoOutcome::Finished));
         }
         let hls_outcome = run_hls_ytdlp(
-            &youtube_bin,
-            &ffmpeg_bin,
-            &staging,
+            &attempt,
             &job,
-            gate,
             &hls.format_id,
             &mut abort,
-            timeout,
-            tx.clone(),
-            playlist_index,
         )
         .await
         .map(|opt| opt.map_or(VideoOutcome::Aborted, VideoOutcome::Finished));
@@ -928,16 +937,10 @@ async fn run_video_download_inner(
             Err(ref e) if is_subtitles_fetch_failure(e) => {
                 match subtitle_degrade(&mut job, &mut abort, e, phase).await {
                     Ok(()) => run_hls_ytdlp(
-                        &youtube_bin,
-                        &ffmpeg_bin,
-                        &staging,
+                        &attempt,
                         &job,
-                        gate,
                         &hls.format_id,
                         &mut abort,
-                        timeout,
-                        tx,
-                        playlist_index,
                     )
                     .await
                     .map(|opt| opt.map_or(VideoOutcome::Aborted, VideoOutcome::Finished)),
@@ -1040,18 +1043,12 @@ async fn run_video_download_inner(
     let combined_total = query.total;
     // NOTE: Grab's speed limit applies to VOD legs via `--limit-rate`. Live capture runs unthrottled: capping an endless stream would fall behind the edge.
     let outcome = run_unified_ytdlp(
-        &youtube_bin,
-        &ffmpeg_bin,
-        &staging,
+        &attempt,
         &job,
-        gate,
         &spec,
         video_sel.as_ref().map(|s| s.ext.as_str()),
         combined_total,
         &mut abort,
-        timeout,
-        tx.clone(),
-        playlist_index,
     )
     .await
     .map(|opt| opt.map_or(VideoOutcome::Aborted, VideoOutcome::Finished));
@@ -1066,18 +1063,12 @@ async fn run_video_download_inner(
         Err(ref e) if is_subtitles_fetch_failure(e) => {
             match subtitle_degrade(&mut job, &mut abort, e, phase).await {
                 Ok(()) => run_unified_ytdlp(
-                    &youtube_bin,
-                    &ffmpeg_bin,
-                    &staging,
+                    &attempt,
                     &job,
-                    gate,
                     &spec,
                     video_sel.as_ref().map(|s| s.ext.as_str()),
                     combined_total,
                     &mut abort,
-                    timeout,
-                    tx,
-                    playlist_index,
                 )
                 .await
                 .map(|opt| opt.map_or(VideoOutcome::Aborted, VideoOutcome::Finished)),
@@ -1444,25 +1435,22 @@ fn should_merge_dash_partials(abort_intent: Option<StopIntent>) -> bool {
     matches!(abort_intent, Some(StopIntent::Finish))
 }
 
-#[expect(
-    clippy::too_many_arguments,
-    reason = "one attempt pipeline: splitting it would scatter cancellation and merge state"
-)]
 pub(crate) async fn run_unified_ytdlp(
-    youtube_bin: &Path,
-    ffmpeg_bin: &Path,
-    staging: &Path,
+    context: &YtdlpAttemptContext<'_>,
     job: &VideoJob,
-    gate: &std::sync::Arc<AttemptGate>,
     spec: &str,
     video_ext: Option<&str>,
     total: Option<u64>,
     abort: &mut oneshot::Receiver<StopIntent>,
-    timeout: Duration,
-    tx: tokio::sync::mpsc::UnboundedSender<crate::engine_msg::EngineMsg>,
-    playlist_index: Option<usize>,
 ) -> Result<Option<u64>, VideoError> {
     use crate::engine_msg::EngineMsg;
+    let youtube_bin = context.youtube_bin;
+    let ffmpeg_bin = context.ffmpeg_bin;
+    let staging = context.staging;
+    let gate = context.gate;
+    let timeout = context.timeout;
+    let tx = context.tx.clone();
+    let playlist_index = context.playlist_index;
     // Split rows merge; adopted singles download one file, nothing to merge.
     let merging = video_ext.is_some();
     let merge_ext = video_ext.map(merge_output_ext).unwrap_or_default();
@@ -2816,24 +2804,21 @@ fn live_capture_abort_result<E>(result: Result<crate::video::StopIntent, E>) -> 
     }
 }
 
-#[expect(
-    clippy::too_many_arguments,
-    reason = "mirrors run_unified_ytdlp so both attempts keep the same cancellation contract"
-)]
 pub(crate) async fn run_live_ytdlp(
-    youtube_bin: &Path,
-    ffmpeg_bin: &Path,
-    staging: &Path,
+    context: &YtdlpAttemptContext<'_>,
     job: &VideoJob,
-    gate: &std::sync::Arc<AttemptGate>,
     page_url: &str,
     hls_format_id: &str,
     mut abort: oneshot::Receiver<StopIntent>,
-    timeout: Duration,
-    tx: tokio::sync::mpsc::UnboundedSender<crate::engine_msg::EngineMsg>,
-    playlist_index: Option<usize>,
 ) -> Result<Option<u64>, VideoError> {
     use crate::engine_msg::EngineMsg;
+    let youtube_bin = context.youtube_bin;
+    let ffmpeg_bin = context.ffmpeg_bin;
+    let staging = context.staging;
+    let gate = context.gate;
+    let timeout = context.timeout;
+    let tx = context.tx.clone();
+    let playlist_index = context.playlist_index;
     // Fresh capture: a crashed run's live file must never be resumed into (append-only stream) nor adopted as an empty fresh capture.
     let ext = if job.audio_only { "m4a" } else { "mp4" };
     // Capture inside the row's staging dir: the `.part` shell stays hidden while
@@ -3367,23 +3352,20 @@ pub(crate) async fn run_live_ytdlp(
         .map(|metadata| metadata.len()))
 }
 
-#[expect(
-    clippy::too_many_arguments,
-    reason = "mirrors the other attempt runners so the HLS path keeps the same contract"
-)]
 pub(crate) async fn run_hls_ytdlp(
-    youtube_bin: &Path,
-    ffmpeg_bin: &Path,
-    staging: &Path,
+    context: &YtdlpAttemptContext<'_>,
     job: &VideoJob,
-    gate: &std::sync::Arc<AttemptGate>,
     hls_format_id: &str,
     abort: &mut oneshot::Receiver<StopIntent>,
-    timeout: Duration,
-    tx: tokio::sync::mpsc::UnboundedSender<crate::engine_msg::EngineMsg>,
-    playlist_index: Option<usize>,
 ) -> Result<Option<u64>, VideoError> {
     use crate::engine_msg::EngineMsg;
+    let youtube_bin = context.youtube_bin;
+    let ffmpeg_bin = context.ffmpeg_bin;
+    let staging = context.staging;
+    let gate = context.gate;
+    let timeout = context.timeout;
+    let tx = context.tx.clone();
+    let playlist_index = context.playlist_index;
     tokio::fs::create_dir_all(staging)
         .await
         .map_err(VideoError::staging)?;

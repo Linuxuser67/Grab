@@ -407,20 +407,17 @@ async fn verify_live_hls_resource_files<'a>(
     Ok(())
 }
 
-#[expect(
-    clippy::too_many_arguments,
-    reason = "one rendition update shares its client, cancellation, progress and aggregate byte-budget context"
-)]
 pub(super) async fn apply_live_hls_snapshot(
-    client: &reqwest::Client,
+    transfer: &LiveManifestTransfer<'_>,
     plan: &HlsPlan,
     track: &mut LiveHlsTrack,
-    connections: usize,
-    tx: &tokio::sync::mpsc::UnboundedSender<EngineMsg>,
-    downloaded: &Arc<AtomicU64>,
     abort: &mut tokio::sync::oneshot::Receiver<crate::video::StopIntent>,
     other_rendition_bytes: u64,
 ) -> Result<LiveHlsSnapshotOutcome, ManifestRunError> {
+    let client = transfer.client;
+    let connections = transfer.connections;
+    let tx = transfer.tx;
+    let downloaded = transfer.downloaded;
     if plan.is_live == plan.end_list {
         if track.accumulator.segment_count() > 0 {
             return Ok(LiveHlsSnapshotOutcome::ContinuityLost);
@@ -869,21 +866,15 @@ pub(super) async fn complete_saved_live_hls_destination_parts(
     Ok(None)
 }
 
-#[expect(
-    clippy::too_many_arguments,
-    reason = "one rendition poll carries the same guarded-network and cancellation context into its update"
-)]
 async fn poll_live_hls_track(
-    client: &reqwest::Client,
+    transfer: &LiveManifestTransfer<'_>,
     source_url: &str,
     track: &mut LiveHlsTrack,
-    connections: usize,
-    tx: &tokio::sync::mpsc::UnboundedSender<EngineMsg>,
-    downloaded: &Arc<AtomicU64>,
     abort: &mut tokio::sync::oneshot::Receiver<crate::video::StopIntent>,
     guarded_child_hosts: &mut crate::download_net::PublicResolutionSet,
     other_rendition_bytes: u64,
 ) -> Result<LiveHlsSnapshotOutcome, ManifestRunError> {
+    let client = transfer.client;
     let result = tokio::select! {
         biased;
         stop = &mut *abort => {
@@ -950,17 +941,7 @@ async fn poll_live_hls_track(
             ManifestRunError::Unsupported(error.to_string()),
         );
     }
-    apply_live_hls_snapshot(
-        client,
-        &plan,
-        track,
-        connections,
-        tx,
-        downloaded,
-        abort,
-        other_rendition_bytes,
-    )
-    .await
+    apply_live_hls_snapshot(transfer, &plan, track, abort, other_rendition_bytes).await
 }
 
 #[derive(Clone, Copy)]
@@ -1049,6 +1030,12 @@ pub(super) async fn run_live_hls_tracks(
         guarded_child_hosts,
         abort,
     } = context;
+    let transfer = LiveManifestTransfer {
+        client,
+        connections,
+        tx,
+        downloaded,
+    };
     let mut video = load_live_hls_track(video_plan, video_dir).await?;
     let mut audio = match audio_plan {
         Some(plan) => Some(load_live_hls_track(plan, audio_dir).await?),
@@ -1139,12 +1126,9 @@ pub(super) async fn run_live_hls_tracks(
     }
 
     match apply_live_hls_snapshot(
-        client,
+        &transfer,
         video_plan,
         &mut video,
-        connections,
-        tx,
-        downloaded,
         abort,
         audio_resource_bytes,
     )
@@ -1177,12 +1161,9 @@ pub(super) async fn run_live_hls_tracks(
     }
     if let (Some(plan), Some(track)) = (audio_plan, audio.as_mut()) {
         let audio_outcome = apply_live_hls_snapshot(
-            client,
+            &transfer,
             plan,
             track,
-            connections,
-            tx,
-            downloaded,
             abort,
             video.accumulator.resource_bytes(),
         )
@@ -1270,12 +1251,9 @@ pub(super) async fn run_live_hls_tracks(
                 .is_some_and(|deadline| deadline <= Instant::now())
         {
             match poll_live_hls_track(
-                client,
+                &transfer,
                 source_url,
                 &mut video,
-                connections,
-                tx,
-                downloaded,
                 abort,
                 guarded_child_hosts,
                 audio
@@ -1320,12 +1298,9 @@ pub(super) async fn run_live_hls_tracks(
                 .is_some_and(|deadline| deadline <= Instant::now())
         {
             match poll_live_hls_track(
-                client,
+                &transfer,
                 source_url,
                 audio,
-                connections,
-                tx,
-                downloaded,
                 abort,
                 guarded_child_hosts,
                 video.accumulator.resource_bytes(),
@@ -1430,17 +1405,13 @@ mod destination_part_tests {
         let downloaded = Arc::new(AtomicU64::new(0));
         let (_stop_tx, mut abort) = tokio::sync::oneshot::channel();
 
-        let result = apply_live_hls_snapshot(
-            &client,
-            &plan,
-            &mut track,
-            1,
-            &tx,
-            &downloaded,
-            &mut abort,
-            0,
-        )
-        .await;
+        let transfer = LiveManifestTransfer {
+            client: &client,
+            connections: 1,
+            tx: &tx,
+            downloaded: &downloaded,
+        };
+        let result = apply_live_hls_snapshot(&transfer, &plan, &mut track, &mut abort, 0).await;
 
         assert!(
             matches!(result, Err(ManifestRunError::Unsupported(_))),

@@ -83,6 +83,31 @@ const MAX_DASH_LIVE_SEGMENTS: usize = crate::manifest_types::MAX_MANIFEST_SEGMEN
 /// Bound for a serialized dynamic DASH resume index.
 const MAX_DASH_LIVE_STATE_BYTES: usize = 16 * 1024 * 1024;
 
+/// Immutable network and progress state shared by live manifest rendition updates.
+struct LiveManifestTransfer<'a> {
+    client: &'a reqwest::Client,
+    connections: usize,
+    tx: &'a tokio::sync::mpsc::UnboundedSender<EngineMsg>,
+    downloaded: &'a Arc<AtomicU64>,
+}
+
+/// Destination paths and row identity for one live DASH capture.
+struct DashLiveStorage<'a> {
+    destination_dir: &'a Path,
+    destination: &'a Path,
+    item_id: u64,
+    video_dir: &'a Path,
+    audio_dir: &'a Path,
+}
+
+/// Selected live DASH representations for one capture.
+struct DashLiveSelection<'a> {
+    representation_key: &'a str,
+    audio_key: Option<&'a str>,
+    video_plan: Option<&'a DashRepresentationPlan>,
+    audio_plan: Option<&'a DashRepresentationPlan>,
+}
+
 /// Require room for a second copy of the staged media while FFmpeg muxes it.
 fn check_manifest_mux_space(
     available_bytes: u64,
@@ -2082,21 +2107,28 @@ async fn prepare_live_dash_finalization(
         abort,
     } = context;
 
-    let capture = run_live_dash_tracks(
+    let transfer = LiveManifestTransfer {
         client,
-        source_url,
-        dest_dir,
-        destination,
-        item_id,
-        representation_key,
-        audio_key,
-        video_plan,
-        audio_plan,
-        video_dir,
-        audio_dir,
-        concurrency,
+        connections: concurrency,
         tx,
         downloaded,
+    };
+    let capture = run_live_dash_tracks(
+        &transfer,
+        source_url,
+        DashLiveStorage {
+            destination_dir: dest_dir,
+            destination,
+            item_id,
+            video_dir,
+            audio_dir,
+        },
+        DashLiveSelection {
+            representation_key,
+            audio_key,
+            video_plan,
+            audio_plan,
+        },
         guarded_child_hosts,
         abort,
     )

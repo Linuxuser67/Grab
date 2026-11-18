@@ -1419,12 +1419,14 @@ async fn live_hls_snapshots_append_only_new_media_sequences_and_resume() {
     let (_stop_tx, mut abort) = tokio::sync::oneshot::channel();
     assert_eq!(
         apply_live_hls_snapshot(
-            &client,
+            &LiveManifestTransfer {
+                client: &client,
+                connections: 2,
+                tx: &tx,
+                downloaded: &downloaded,
+            },
             &initial,
             &mut track,
-            2,
-            &tx,
-            &downloaded,
             &mut abort,
             0,
         )
@@ -1462,12 +1464,14 @@ async fn live_hls_snapshots_append_only_new_media_sequences_and_resume() {
         .expect("restore live HLS accumulator from staging");
     assert_eq!(
         apply_live_hls_snapshot(
-            &client,
+            &LiveManifestTransfer {
+                client: &client,
+                connections: 2,
+                tx: &tx,
+                downloaded: &downloaded,
+            },
             &next,
             &mut restored,
-            2,
-            &tx,
-            &downloaded,
             &mut abort,
             0,
         )
@@ -1588,12 +1592,14 @@ async fn llhls_live_capture_reuses_parts_when_complete_parent_segments_arrive() 
 
     assert_eq!(
         apply_live_hls_snapshot(
-            &client,
+            &LiveManifestTransfer {
+                client: &client,
+                connections: 2,
+                tx: &tx,
+                downloaded: &downloaded,
+            },
             &initial,
             &mut track,
-            2,
-            &tx,
-            &downloaded,
             &mut abort,
             0,
         )
@@ -1612,12 +1618,14 @@ async fn llhls_live_capture_reuses_parts_when_complete_parent_segments_arrive() 
 
     assert_eq!(
         apply_live_hls_snapshot(
-            &client,
+            &LiveManifestTransfer {
+                client: &client,
+                connections: 2,
+                tx: &tx,
+                downloaded: &downloaded,
+            },
             &next,
             &mut track,
-            2,
-            &tx,
-            &downloaded,
             &mut abort,
             0,
         )
@@ -1699,12 +1707,14 @@ async fn llhls_mapless_parts_are_staged_without_packet_sniffing() {
 
     assert_eq!(
         apply_live_hls_snapshot(
-            &client,
+            &LiveManifestTransfer {
+                client: &client,
+                connections: 1,
+                tx: &tx,
+                downloaded: &downloaded,
+            },
             &plan,
             &mut track,
-            1,
-            &tx,
-            &downloaded,
             &mut abort,
             0,
         )
@@ -1765,12 +1775,14 @@ async fn llhls_mapless_non_transport_stream_part_is_staged_for_ffmpeg() {
 
     assert_eq!(
         apply_live_hls_snapshot(
-            &client,
+            &LiveManifestTransfer {
+                client: &client,
+                connections: 1,
+                tx: &tx,
+                downloaded: &downloaded,
+            },
             &plan,
             &mut track,
-            1,
-            &tx,
-            &downloaded,
             &mut abort,
             0,
         )
@@ -1907,12 +1919,14 @@ async fn live_hls_accumulated_playlist_finalizes_to_a_playable_mp4() {
     let (_stop_tx, mut abort) = tokio::sync::oneshot::channel();
     assert_eq!(
         apply_live_hls_snapshot(
-            &client,
+            &LiveManifestTransfer {
+                client: &client,
+                connections: 4,
+                tx: &tx,
+                downloaded: &downloaded,
+            },
             &initial_plan,
             &mut track,
-            4,
-            &tx,
-            &downloaded,
             &mut abort,
             0,
         )
@@ -1922,12 +1936,14 @@ async fn live_hls_accumulated_playlist_finalizes_to_a_playable_mp4() {
     );
     assert_eq!(
         apply_live_hls_snapshot(
-            &client,
+            &LiveManifestTransfer {
+                client: &client,
+                connections: 4,
+                tx: &tx,
+                downloaded: &downloaded,
+            },
             &final_plan,
             &mut track,
-            4,
-            &tx,
-            &downloaded,
             &mut abort,
             0,
         )
@@ -2000,12 +2016,14 @@ async fn live_hls_sequence_gap_preserves_already_committed_media() {
     let downloaded = Arc::new(AtomicU64::new(0));
     let (_stop_tx, mut abort) = tokio::sync::oneshot::channel();
     let outcome = apply_live_hls_snapshot(
-        &client,
+        &LiveManifestTransfer {
+            client: &client,
+            connections: 1,
+            tx: &tx,
+            downloaded: &downloaded,
+        },
         &gap,
         &mut track,
-        1,
-        &tx,
-        &downloaded,
         &mut abort,
         0,
     )
@@ -2066,12 +2084,14 @@ async fn live_hls_pause_keeps_the_last_committed_window() {
     let (_first_stop_tx, mut first_abort) = tokio::sync::oneshot::channel();
     assert_eq!(
         apply_live_hls_snapshot(
-            &client,
+            &LiveManifestTransfer {
+                client: &client,
+                connections: 1,
+                tx: &tx,
+                downloaded: &downloaded,
+            },
             &first,
             &mut track,
-            1,
-            &tx,
-            &downloaded,
             &mut first_abort,
             0,
         )
@@ -2087,12 +2107,14 @@ async fn live_hls_pause_keeps_the_last_committed_window() {
         .expect("queue pause before the next window");
     assert_eq!(
         apply_live_hls_snapshot(
-            &client,
+            &LiveManifestTransfer {
+                client: &client,
+                connections: 1,
+                tx: &tx,
+                downloaded: &downloaded,
+            },
             &next,
             &mut track,
-            1,
-            &tx,
-            &downloaded,
             &mut stop_abort,
             0,
         )
@@ -2255,12 +2277,14 @@ async fn live_hls_pause_does_not_commit_an_interrupted_window() {
         .send(crate::video::StopIntent::Pause)
         .expect("queue pause");
     let stopped = apply_live_hls_snapshot(
-        &client,
+        &LiveManifestTransfer {
+            client: &client,
+            connections: 1,
+            tx: &tx,
+            downloaded: &downloaded,
+        },
         &plan,
         &mut track,
-        1,
-        &tx,
-        &downloaded,
         &mut abort,
         0,
     )
@@ -2409,12 +2433,14 @@ async fn dynamic_dash_snapshot_resumes_overlapping_window_and_repairs_missing_se
 
     assert_eq!(
         apply_dash_live_snapshot(
-            &client,
+            &LiveManifestTransfer {
+                client: &client,
+                connections: 3,
+                tx: &tx,
+                downloaded: &downloaded,
+            },
             &initial,
             &mut track,
-            3,
-            &tx,
-            &downloaded,
             &mut abort,
             0,
         )
@@ -2449,12 +2475,14 @@ async fn dynamic_dash_snapshot_resumes_overlapping_window_and_repairs_missing_se
 
     assert_eq!(
         apply_dash_live_snapshot(
-            &client,
+            &LiveManifestTransfer {
+                client: &client,
+                connections: 3,
+                tx: &tx,
+                downloaded: &downloaded,
+            },
             &next,
             &mut restored,
-            3,
-            &tx,
-            &downloaded,
             &mut abort,
             0,
         )
@@ -2636,12 +2664,14 @@ async fn low_latency_dash_fetches_initialization_then_oldest_segments_with_one_r
 
     let apply = tokio::spawn(async move {
         let outcome = apply_dash_live_snapshot(
-            &client,
+            &LiveManifestTransfer {
+                client: &client,
+                connections: 8,
+                tx: &tx,
+                downloaded: &downloaded,
+            },
             &plan,
             &mut track,
-            8,
-            &tx,
-            &downloaded,
             &mut abort,
             0,
         )
@@ -2775,12 +2805,14 @@ async fn low_latency_dash_does_not_commit_interrupted_tail_and_refetches_on_resu
     let (_initial_stop_tx, mut initial_abort) = tokio::sync::oneshot::channel();
     assert_eq!(
         apply_dash_live_snapshot(
-            &client,
+            &LiveManifestTransfer {
+                client: &client,
+                connections: 8,
+                tx: &tx,
+                downloaded: &downloaded,
+            },
             &initial,
             &mut track,
-            8,
-            &tx,
-            &downloaded,
             &mut initial_abort,
             0,
         )
@@ -2816,12 +2848,14 @@ async fn low_latency_dash_does_not_commit_interrupted_tail_and_refetches_on_resu
     let attempt = tokio::spawn(async move {
         let mut abort = stop_rx;
         let outcome = apply_dash_live_snapshot(
-            &attempt_client,
+            &LiveManifestTransfer {
+                client: &attempt_client,
+                connections: 8,
+                tx: &attempt_tx,
+                downloaded: &attempt_downloaded,
+            },
             &refreshed,
             &mut track,
-            8,
-            &attempt_tx,
-            &attempt_downloaded,
             &mut abort,
             0,
         )
@@ -2903,12 +2937,14 @@ async fn low_latency_dash_does_not_commit_interrupted_tail_and_refetches_on_resu
     let (_resume_stop_tx, mut resume_abort) = tokio::sync::oneshot::channel();
     assert_eq!(
         apply_dash_live_snapshot(
-            &client,
+            &LiveManifestTransfer {
+                client: &client,
+                connections: 8,
+                tx: &tx,
+                downloaded: &downloaded,
+            },
             &resume_plan,
             &mut track,
-            8,
-            &tx,
-            &downloaded,
             &mut resume_abort,
             0,
         )
@@ -3924,20 +3960,26 @@ async fn dynamic_dash_fmp4_fixture_runs_live_capture_and_finalizes_playable_mp4(
 
     let mut guarded_child_hosts = crate::download_net::PublicResolutionSet::default();
     let capture = run_live_dash_tracks(
-        &client,
+        &LiveManifestTransfer {
+            client: &client,
+            connections: 3,
+            tx: &tx,
+            downloaded: &downloaded,
+        },
         source_url,
-        root.path(),
-        &destination,
-        item_id,
-        &video_key,
-        Some(&audio_key),
-        Some(&video_plan),
-        Some(&audio_plan),
-        &video_dir,
-        &audio_dir,
-        3,
-        &tx,
-        &downloaded,
+        DashLiveStorage {
+            destination_dir: root.path(),
+            destination: &destination,
+            item_id,
+            video_dir: &video_dir,
+            audio_dir: &audio_dir,
+        },
+        DashLiveSelection {
+            representation_key: &video_key,
+            audio_key: Some(&audio_key),
+            video_plan: Some(&video_plan),
+            audio_plan: Some(&audio_plan),
+        },
         &mut guarded_child_hosts,
         &mut abort,
     )
@@ -4057,20 +4099,26 @@ async fn dynamic_dash_live_runner_pauses_and_retains_committed_window() {
 
     let mut guarded_child_hosts = crate::download_net::PublicResolutionSet::default();
     let capture = run_live_dash_tracks(
-        &client,
+        &LiveManifestTransfer {
+            client: &client,
+            connections: 3,
+            tx: &tx,
+            downloaded: &downloaded,
+        },
         "https://origin.example.test/live.mpd",
-        root.path(),
-        &destination,
-        item_id,
-        &representation_key,
-        None,
-        Some(&video_plan),
-        None,
-        &video_dir,
-        &audio_dir,
-        3,
-        &tx,
-        &downloaded,
+        DashLiveStorage {
+            destination_dir: root.path(),
+            destination: &destination,
+            item_id,
+            video_dir: &video_dir,
+            audio_dir: &audio_dir,
+        },
+        DashLiveSelection {
+            representation_key: &representation_key,
+            audio_key: None,
+            video_plan: Some(&video_plan),
+            audio_plan: None,
+        },
         &mut guarded_child_hosts,
         &mut abort,
     )
@@ -4112,20 +4160,26 @@ async fn dynamic_dash_live_runner_pauses_and_retains_committed_window() {
         .send(crate::video::StopIntent::Finish)
         .expect("queue finish after restoring the paused capture");
     let finished = run_live_dash_tracks(
-        &client,
+        &LiveManifestTransfer {
+            client: &client,
+            connections: 3,
+            tx: &tx,
+            downloaded: &downloaded,
+        },
         "https://origin.example.test/live.mpd",
-        root.path(),
-        &destination,
-        item_id,
-        &representation_key,
-        None,
-        Some(&video_plan),
-        None,
-        &video_dir,
-        &audio_dir,
-        3,
-        &tx,
-        &downloaded,
+        DashLiveStorage {
+            destination_dir: root.path(),
+            destination: &destination,
+            item_id,
+            video_dir: &video_dir,
+            audio_dir: &audio_dir,
+        },
+        DashLiveSelection {
+            representation_key: &representation_key,
+            audio_key: None,
+            video_plan: Some(&video_plan),
+            audio_plan: None,
+        },
         &mut guarded_child_hosts,
         &mut finish_abort,
     )
@@ -4199,12 +4253,14 @@ async fn live_hls_snapshot_appends_fetched_mpegts_fragments_to_visible_destinati
 
     assert_eq!(
         apply_live_hls_snapshot(
-            &client,
+            &LiveManifestTransfer {
+                client: &client,
+                connections: 2,
+                tx: &tx,
+                downloaded: &downloaded,
+            },
             &initial_plan,
             &mut track,
-            2,
-            &tx,
-            &downloaded,
             &mut abort,
             0,
         )

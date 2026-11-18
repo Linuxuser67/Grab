@@ -250,7 +250,7 @@ pub async fn probe_gallery(
     cookies_file: Option<&Path>,
     user_agent: Option<&str>,
 ) -> Result<Option<Vec<GalleryItem>>, GalleryError> {
-    probe_gallery_with_proxy(tool, url, cookies_file, None, user_agent, None).await
+    probe_gallery_with_proxy(tool, url, cookies_file, None, user_agent, None, None).await
 }
 
 pub async fn probe_gallery_with_proxy(
@@ -260,6 +260,7 @@ pub async fn probe_gallery_with_proxy(
     cookies_browser: Option<&str>,
     user_agent: Option<&str>,
     proxy: Option<&crate::net_types::ResolvedProxy>,
+    referer: Option<&str>,
 ) -> Result<Option<Vec<GalleryItem>>, GalleryError> {
     let mut cmd = tokio::process::Command::new(tool);
     crate::video_spawn::prepend_user_lib_to_path(&mut cmd);
@@ -281,6 +282,9 @@ pub async fn probe_gallery_with_proxy(
     ));
     if let Some(ua) = user_agent {
         cmd.arg("--user-agent").arg(ua);
+    }
+    if let Some(referer) = referer {
+        cmd.arg("-o").arg(format!("extractor.*.referer={referer}"));
     }
     // Instagram throttling for extraction requests (probe doesn't download).
     for arg in crate::gallery_argv::instagram_throttle_args(url, false) {
@@ -488,6 +492,7 @@ pub(crate) struct GalleryEnumerationOptions<'a> {
     pub(crate) cookies_file: Option<&'a Path>,
     pub(crate) cookies_browser: Option<&'a str>,
     pub(crate) user_agent: Option<&'a str>,
+    pub(crate) referer: Option<&'a str>,
     pub(crate) filter: crate::gallery_argv::GalleryFilter,
     pub(crate) proxy: Option<&'a crate::net_types::ResolvedProxy>,
 }
@@ -513,6 +518,9 @@ fn enumerate_command(
     ));
     if let Some(ua) = options.user_agent {
         cmd.arg("--user-agent").arg(ua);
+    }
+    if let Some(referer) = options.referer {
+        cmd.arg("-o").arg(format!("extractor.*.referer={referer}"));
     }
     // Mirror the download's filter so --range indices match.
     let mut filter_argv = Vec::new();
@@ -588,6 +596,7 @@ pub(crate) async fn enumerate_gallery_files_streamed(
             cookies_file,
             cookies_browser: None,
             user_agent,
+            referer: None,
             filter,
             proxy: None,
         },

@@ -581,6 +581,8 @@ pub(crate) struct RemovedSnapshot {
     pub started: bool,
     /// Preserve the untrusted-handoff policy reference when Undo restores a row.
     pub public_only: bool,
+    /// Preserve the source page when Undo restores a row.
+    pub referer: String,
     /// Keep a restored child in its original multi-item group.
     pub group: Option<crate::download_store::DownloadGroup>,
     /// Restore a removed gallery collection as one gallery-dl process.
@@ -603,6 +605,7 @@ impl RemovedSnapshot {
             video_source: manager.video_source(id),
             started: manager.has_started(id),
             public_only: item.public_only(),
+            referer: item.referer(),
             group: item.group(),
             gallery_job: manager.gallery_job(id),
         }
@@ -1230,6 +1233,17 @@ impl DownloadManager {
         dest_dir: Option<&str>,
         filename: Option<&str>,
     ) -> Result<(DownloadItem, BatchGuard), String> {
+        self.enqueue_async_batched_with_referer(url, dest_dir, filename, None)
+            .await
+    }
+
+    pub(crate) async fn enqueue_async_batched_with_referer(
+        self: &Rc<Self>,
+        url: &str,
+        dest_dir: Option<&str>,
+        filename: Option<&str>,
+        referer: Option<&str>,
+    ) -> Result<(DownloadItem, BatchGuard), String> {
         let dir = self.resolve_dir(dest_dir);
         let listing_dir = dir.clone();
         let existing = gio::spawn_blocking(move || {
@@ -1239,10 +1253,12 @@ impl DownloadManager {
         .map_err(|error| format!("Could not inspect download folder: {error:?}"))?
         .map_err(|error| format!("Could not inspect download folder: {error}"))?;
         let guard = self.batch_guard();
-        let item = self.enqueue_with_listing(url, Some(&dir), filename, &existing)?;
+        let item =
+            self.enqueue_with_listing_and_referer(url, Some(&dir), filename, &existing, referer)?;
         Ok((item, guard))
     }
 
+    #[allow(dead_code)]
     pub(crate) async fn enqueue_async(
         self: &Rc<Self>,
         url: &str,
@@ -1275,6 +1291,17 @@ impl DownloadManager {
         filename: Option<&str>,
         existing: &[String],
     ) -> Result<DownloadItem, String> {
+        self.enqueue_with_listing_and_referer(url, dest_dir, filename, existing, None)
+    }
+
+    fn enqueue_with_listing_and_referer(
+        self: &Rc<Self>,
+        url: &str,
+        dest_dir: Option<&str>,
+        filename: Option<&str>,
+        existing: &[String],
+        referer: Option<&str>,
+    ) -> Result<DownloadItem, String> {
         let url = normalize_url(url)?;
         let dir = self.resolve_dir(dest_dir);
         let name = filename
@@ -1300,6 +1327,7 @@ impl DownloadManager {
                 })
         });
         let item = DownloadItem::new(self.alloc_id_for_in(existing), &url, &name, &dir);
+        item.set_referer(referer.unwrap_or_default());
         if crate::torrent::is_magnet(&url) {
             // Magnets carry no archive to recompute the output folder from later, so record their subfolder now.
             item.set_output_dir(
@@ -1427,12 +1455,25 @@ impl DownloadManager {
         Ok(item)
     }
 
+    #[allow(dead_code)]
     pub(crate) async fn enqueue_video_async_batched(
         self: &Rc<Self>,
         page_url: &str,
         dest_dir: Option<&str>,
         filename: Option<&str>,
         choices: crate::media_types::VideoChoices,
+    ) -> Result<(DownloadItem, BatchGuard), String> {
+        self.enqueue_video_async_batched_with_referer(page_url, dest_dir, filename, choices, None)
+            .await
+    }
+
+    pub(crate) async fn enqueue_video_async_batched_with_referer(
+        self: &Rc<Self>,
+        page_url: &str,
+        dest_dir: Option<&str>,
+        filename: Option<&str>,
+        choices: crate::media_types::VideoChoices,
+        referer: Option<&str>,
     ) -> Result<(DownloadItem, BatchGuard), String> {
         let dir = self.resolve_dir(dest_dir);
         let listing_dir = dir.clone();
@@ -1443,7 +1484,9 @@ impl DownloadManager {
         .map_err(|error| format!("Could not inspect download folder: {error:?}"))?
         .map_err(|error| format!("Could not inspect download folder: {error}"))?;
         let guard = self.batch_guard();
-        let item = self.enqueue_video_staged(page_url, &dir, filename, choices, &existing)?;
+        let item = self.enqueue_video_staged_with_referer(
+            page_url, &dir, filename, choices, &existing, referer,
+        )?;
         Ok((item, guard))
     }
 
@@ -1467,11 +1510,23 @@ impl DownloadManager {
     }
 
     /// Queue a native HLS/DASH selection after listing its destination off GTK.
+    #[allow(dead_code)]
     pub(crate) async fn enqueue_manifest_async_batched(
         self: &Rc<Self>,
         source: crate::media_types::ManifestSource,
         dest_dir: Option<&str>,
         filename: Option<&str>,
+    ) -> Result<(DownloadItem, BatchGuard), String> {
+        self.enqueue_manifest_async_batched_with_referer(source, dest_dir, filename, None)
+            .await
+    }
+
+    pub(crate) async fn enqueue_manifest_async_batched_with_referer(
+        self: &Rc<Self>,
+        source: crate::media_types::ManifestSource,
+        dest_dir: Option<&str>,
+        filename: Option<&str>,
+        referer: Option<&str>,
     ) -> Result<(DownloadItem, BatchGuard), String> {
         let dir = self.resolve_dir(dest_dir);
         let listing_dir = dir.clone();
@@ -1492,7 +1547,8 @@ impl DownloadManager {
             Self::manifest_filename_for_container(filename, &source.url, container);
 
         let guard = self.batch_guard();
-        let item = self.enqueue_manifest_staged(source, &dir, Some(&requested_name), &existing)?;
+        let item =
+            self.enqueue_manifest_staged(source, &dir, Some(&requested_name), &existing, referer)?;
         Ok((item, guard))
     }
 
@@ -1544,6 +1600,7 @@ impl DownloadManager {
             unique_title = format!("{title}-{counter}");
         }
         let item = DownloadItem::new(self.alloc_id_for_in(&existing), &url, &unique_title, &dir);
+        item.set_referer(job.referer.clone().unwrap_or_default());
         item.set_is_gallery(true);
         item.set_group(
             crate::download_store::DownloadGroup::try_new(item.id(), &job.title).or_else(|| {
@@ -1567,6 +1624,7 @@ impl DownloadManager {
     /// stays correct as rows land: the per-row dedupe also consults the live
     /// store and the stem reservation map. An on-disk file never renames the
     /// intake (see [`DownloadManager::enqueue`]).
+    #[allow(dead_code)]
     pub(crate) fn enqueue_video_staged(
         self: &Rc<Self>,
         page_url: &str,
@@ -1574,6 +1632,18 @@ impl DownloadManager {
         filename: Option<&str>,
         choices: crate::media_types::VideoChoices,
         existing: &[String],
+    ) -> Result<DownloadItem, String> {
+        self.enqueue_video_staged_with_referer(page_url, dir, filename, choices, existing, None)
+    }
+
+    fn enqueue_video_staged_with_referer(
+        self: &Rc<Self>,
+        page_url: &str,
+        dir: &str,
+        filename: Option<&str>,
+        choices: crate::media_types::VideoChoices,
+        existing: &[String],
+        referer: Option<&str>,
     ) -> Result<DownloadItem, String> {
         let url = normalize_url(page_url)?;
         // Treat (page URL, playlist entry id) as an identity: playlist children
@@ -1616,6 +1686,7 @@ impl DownloadManager {
                     })
         });
         let item = DownloadItem::new(self.alloc_id_for_in(existing), &url, &name, dir);
+        item.set_referer(referer.unwrap_or_default());
         item.set_detail(pending_resolve_detail(choices.audio_only));
         self.video_sources.borrow_mut().insert(
             item.id(),
@@ -1677,6 +1748,7 @@ impl DownloadManager {
     /// Enqueue selected yt-dlp playlist entries as one schedulable owner.
     /// Re-imports for the same URL extend that owner instead of creating a
     /// second process; a running owner is restarted with the enlarged selection.
+    #[allow(dead_code)]
     pub(crate) fn enqueue_video_playlist_staged(
         self: &Rc<Self>,
         page_url: &str,
@@ -1685,6 +1757,25 @@ impl DownloadManager {
         files: Vec<crate::media_types::VideoPlaylistFile>,
         quality: String,
         audio_only: bool,
+    ) -> Result<DownloadItem, String> {
+        self.enqueue_video_playlist_staged_with_referer(
+            page_url, title, dest_dir, files, quality, audio_only, None,
+        )
+    }
+
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "the source referrer is per playlist owner and the other arguments form the existing selection contract"
+    )]
+    pub(crate) fn enqueue_video_playlist_staged_with_referer(
+        self: &Rc<Self>,
+        page_url: &str,
+        title: &str,
+        dest_dir: &str,
+        files: Vec<crate::media_types::VideoPlaylistFile>,
+        quality: String,
+        audio_only: bool,
+        referer: Option<&str>,
     ) -> Result<DownloadItem, String> {
         let url = normalize_url(page_url)?;
         let output_dir = std::path::Path::new(dest_dir);
@@ -1720,8 +1811,13 @@ impl DownloadManager {
         }
 
         if let Some(owner) = self.video_playlist_owner_for_url(&url) {
-            return self
-                .extend_video_playlist_staged(&owner, dest_dir, files, &quality, audio_only);
+            let owner =
+                self.extend_video_playlist_staged(&owner, dest_dir, files, &quality, audio_only)?;
+            if let Some(referer) = referer {
+                owner.set_referer(referer);
+                self.persist_queue();
+            }
+            return Ok(owner);
         }
 
         let id = self.alloc_id();
@@ -1736,6 +1832,7 @@ impl DownloadManager {
             files,
         };
         let item = DownloadItem::new(id, &url, filename, &parent_dir.to_string_lossy());
+        item.set_referer(referer.unwrap_or_default());
         item.set_public_only(
             url::Url::parse(&url)
                 .ok()
@@ -1877,6 +1974,7 @@ impl DownloadManager {
         dir: &str,
         filename: Option<&str>,
         existing: &[String],
+        referer: Option<&str>,
     ) -> Result<DownloadItem, String> {
         if !crate::manifest_intake::valid_source(&source) {
             return Err(gettext("The selected stream representation is invalid"));
@@ -1917,6 +2015,7 @@ impl DownloadManager {
                 })
         });
         let item = DownloadItem::new(self.alloc_id_for_in(existing), &url, &name, dir);
+        item.set_referer(referer.unwrap_or_default());
         item.set_detail(pending_resolve_detail(false));
         self.video_sources.borrow_mut().insert(
             item.id(),
@@ -2119,6 +2218,7 @@ impl DownloadManager {
             &filename,
             dest_dir,
         );
+        item.set_referer(stored.referer.clone().unwrap_or_default());
         item.set_public_only(public_only);
         item.set_group(stored.group.clone());
         // Resumed rows requeue; only settled rows keep their status.
@@ -2223,6 +2323,7 @@ impl DownloadManager {
         let id = self.claim_id_in(stored.id, existing);
         job.item_id = id;
         let item = DownloadItem::new(id, &url, &title, &stored.dest_dir);
+        item.set_referer(stored.referer.clone().unwrap_or_default());
         item.set_public_only(public_only);
         item.set_is_gallery(true);
         item.set_group(
@@ -2341,6 +2442,7 @@ impl DownloadManager {
             dest_dir: dir,
             filename: name,
             progress,
+            referer,
             video_source,
             group,
             ..
@@ -2358,6 +2460,7 @@ impl DownloadManager {
             return;
         }
         let item = DownloadItem::new(self.claim_id_in(stored_id, existing), &url, &name, &dir);
+        item.set_referer(referer.unwrap_or_default());
         item.set_group(group);
         item.set_progress(progress.clamp(0.0, 1.0));
         item.set_status(DownloadStatus::Done);
@@ -3360,6 +3463,7 @@ impl DownloadManager {
         });
         item.set_output_dir(snap.output_dir);
         item.set_public_only(snap.public_only);
+        item.set_referer(snap.referer);
         let mut gallery_file_rows = None;
         let mut playlist_file_rows = None;
         if let Some(mut job) = snap.gallery_job {

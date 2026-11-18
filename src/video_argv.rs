@@ -31,6 +31,8 @@ pub(crate) async fn write_manifest(
 pub struct VideoJob {
     pub item_id: u64,
     pub page_url: String,
+    /// Browser-provided source page for yt-dlp's Referer header.
+    pub referer: Option<String>,
     /// Playlist entry id this row was picked from, if any (selected on re-resolve).
     pub playlist_item_id: Option<String>,
     pub quality: String,
@@ -181,6 +183,10 @@ fn push_vod_tail_args(args: &mut Vec<String>, job: &VideoJob, subtitle_language:
         args.extend(subtitle_cli_args(lang));
     }
     args.extend(proxy_cli_args(job.proxy.as_ref()));
+    if let Some(referer) = job.referer.as_deref() {
+        args.push("--referer".to_string());
+        args.push(referer.to_string());
+    }
     // Fresh handoff jar (or the configured browser) plus the shared identity
     // tail, which ends with `-- <url>`.
     args.extend(crate::extension_server::ytdlp_spawn_identity(
@@ -555,6 +561,10 @@ pub(crate) fn live_capture_argv_with_mode(
         args.push("--live-from-start".to_string());
     }
     args.extend(proxy_cli_args(job.proxy.as_ref()));
+    if let Some(referer) = job.referer.as_deref() {
+        args.push("--referer".to_string());
+        args.push(referer.to_string());
+    }
     // Fresh handoff jar (or the configured browser) plus the shared identity
     // tail, which ends with `-- <url>`.
     args.extend(crate::extension_server::ytdlp_spawn_identity(
@@ -1089,6 +1099,7 @@ mod attempt_subtitle_language_tests {
 
     fn video_job() -> VideoJob {
         VideoJob {
+            referer: None,
             item_id: 7,
             page_url: "https://example.test/video".to_string(),
             playlist_item_id: None,
@@ -1153,6 +1164,7 @@ mod live_capture_start_tests {
 
     fn live_job() -> VideoJob {
         VideoJob {
+            referer: None,
             item_id: 7,
             page_url: "https://example.test/live".to_string(),
             playlist_item_id: None,

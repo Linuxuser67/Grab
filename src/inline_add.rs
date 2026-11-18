@@ -77,6 +77,7 @@ struct PlaylistPickerOwner {
     close_card: Rc<dyn Fn()>,
     public_host_leases: PublicHostLeases,
     generation: u64,
+    referer: Option<String>,
 }
 
 /// Tokio detaches a task when its JoinHandle is dropped. Own the abort handle
@@ -164,6 +165,9 @@ fn paste_fingerprint(url: &str) -> String {
         .collect()
 }
 
+/// A queued URL keeps the optional browser source page that belongs to it.
+type PendingUrl = (String, Option<String>);
+
 /// Starts the next queued link once the finished lookup's marker is cleared.
 /// The start is deferred to an idle callback so it never re-enters the task
 /// that is still unwinding, and it is skipped while a ready preview or picker
@@ -171,8 +175,8 @@ fn paste_fingerprint(url: &str) -> String {
 struct DrainPending {
     probe: Rc<RefCell<ProbeState>>,
     manifest: Rc<RefCell<Option<crate::manifest_intake::ManifestLookup>>>,
-    pending: Rc<RefCell<VecDeque<String>>>,
-    start: Rc<dyn Fn(String)>,
+    pending: Rc<RefCell<VecDeque<PendingUrl>>>,
+    start: Rc<dyn Fn(PendingUrl)>,
 }
 
 impl Drop for DrainPending {
@@ -429,10 +433,11 @@ async fn lookup_media(
     browser: String,
     newest_first: bool,
     proxy: Option<crate::net_types::ResolvedProxy>,
+    referer: Option<String>,
 ) -> Result<MediaLookupOutcome, MediaLookupFailure> {
     let started = std::time::Instant::now();
     let host = crate::video_probe::page_host(&url);
-    let result = lookup_media_inner(url, browser, newest_first, proxy).await;
+    let result = lookup_media_inner(url, browser, newest_first, proxy, referer).await;
     tracing::info!(
         url_host = %host,
         total_ms = started.elapsed().as_millis() as u64,
@@ -569,29 +574,35 @@ async fn lookup_media_inner(
     browser: String,
     newest_first: bool,
     proxy: Option<crate::net_types::ResolvedProxy>,
+    referer: Option<String>,
 ) -> Result<MediaLookupOutcome, MediaLookupFailure> {
     if !crate::manifest_intake::supports(&url) {
-        return lookup_extractors_inner(url, browser, newest_first, proxy).await;
+        return lookup_extractors_inner(url, browser, newest_first, proxy, referer).await;
     }
 
     let host = crate::video_probe::page_host(&url);
     let native_started = std::time::Instant::now();
     let native_url = url.clone();
     let native_proxy = proxy.clone();
+    let native_referer = referer.clone();
     let native_future = async move {
-        let result = crate::manifest_intake::lookup(&native_url, native_proxy.as_ref())
-            .await
-            .and_then(|manifest| {
-                manifest.ok_or_else(|| {
-                    gettext("The URL did not resolve to a supported HLS or DASH manifest")
-                })
-            });
+        let result = crate::manifest_intake::lookup(
+            &native_url,
+            native_proxy.as_ref(),
+            native_referer.as_deref(),
+        )
+        .await
+        .and_then(|manifest| {
+            manifest.ok_or_else(|| {
+                gettext("The URL did not resolve to a supported HLS or DASH manifest")
+            })
+        });
         (result, native_started.elapsed().as_millis() as u64)
     };
 
     // Tool lookup is part of this future, so it starts as soon as native intake
     // first yields. It is not awaited as a prerequisite to the native request.
-    let extractor_future = lookup_extractors_inner(url, browser, newest_first, proxy);
+    let extractor_future = lookup_extractors_inner(url, browser, newest_first, proxy, referer);
     match prefer_native_manifest(native_future, extractor_future).await {
         NativePriorityOutcome::Native {
             manifest,
@@ -632,6 +643,7 @@ async fn lookup_extractors_inner(
     browser: String,
     newest_first: bool,
     proxy: Option<crate::net_types::ResolvedProxy>,
+    referer: Option<String>,
 ) -> Result<MediaLookupOutcome, MediaLookupFailure> {
     let needs_gallery_tool = needs_gallery_probe(&url);
     let tool_started = std::time::Instant::now();
@@ -692,12 +704,14 @@ async fn lookup_extractors_inner(
 
     let (ytdlp_result, gallery_error) = if let Some(tool) = gallery_tool {
         let probe_url = url.clone();
+        let probe_referer = referer.clone();
         let probe_browser = browser.clone();
         let probe_proxy = proxy.clone();
         let probe_youtube_bin = youtube_bin.clone();
         let probe_handle = crate::runtime::tokio_rt().spawn(async move {
             crate::inline_gallery::dual_probe(crate::inline_gallery::DualProbeCtx {
                 url: &probe_url,
+                referer: probe_referer,
                 browser: probe_browser,
                 newest_first,
                 proxy: probe_proxy,
@@ -736,12 +750,13 @@ async fn lookup_extractors_inner(
         }
     } else {
         (
-            crate::video::fetch_video_infos(
+            crate::video::fetch_video_infos_with_referer(
                 youtube_bin,
                 url.clone(),
                 browser,
                 newest_first,
                 proxy,
+                referer,
                 None,
             )
             .await,
@@ -773,6 +788,8 @@ pub(crate) struct VideoStep {
     /// The URL entry itself: its secondary icon is the lookup state machine
     /// (tick → spinner → none), shared with the helpers below.
     pub(crate) url_entry: gtk4::Entry,
+    /// Browser source page bound to the exact URL currently in the entry.
+    pub(crate) source_referer: Rc<RefCell<Option<(String, String)>>>,
     /// Public-only hosts retained while this untrusted handoff card is open.
     public_host_leases: PublicHostLeases,
     /// Spinner paintable for the entry's secondary icon slot: GTK4 entries
@@ -1349,6 +1366,14 @@ fn inherit_public_resolution_for_card(step: &VideoStep, parent_url: &str, child_
 }
 
 /// Whether the combo's current pick is the Audio only row.
+fn source_referer_for(step: &VideoStep, submitted_url: &str) -> Option<String> {
+    step.source_referer
+        .borrow()
+        .as_ref()
+        .filter(|(bound_url, _)| bound_url == submitted_url)
+        .map(|(_, referer)| referer.clone())
+}
+
 fn selected_audio_only(step: &VideoStep) -> bool {
     let selected = step.format.selected() as usize;
     step.options
@@ -1408,6 +1433,7 @@ fn submit_probed_single(
         None => manager.settings().video_quality(),
     };
     let page_url = v.page_url.clone();
+    let referer = source_referer_for(step, &submitted_url);
     let is_live = v.is_live;
     let enqueue_manager = Rc::clone(manager);
     let error_step = Rc::clone(step);
@@ -1418,7 +1444,7 @@ fn submit_probed_single(
         scheduled_at,
         move |d| async move {
             enqueue_manager
-                .enqueue_video_async_batched(
+                .enqueue_video_async_batched_with_referer(
                     &page_url,
                     d.as_deref(),
                     name.as_deref(),
@@ -1429,6 +1455,7 @@ fn submit_probed_single(
                         is_live,
                         playlist_item_id: None,
                     },
+                    referer.as_deref(),
                 )
                 .await
         },
@@ -1494,6 +1521,7 @@ fn submit_probe(
                     close_card: close_card.clone(),
                     public_host_leases: Rc::clone(&step.public_host_leases),
                     generation: step.public_host_leases.borrow().generation,
+                    referer: source_referer_for(step, &submitted_url),
                 },
                 pl,
                 scheduled_at,
@@ -1542,10 +1570,12 @@ fn submit_gallery_all(
         return;
     }
 
+    let referer = source_referer_for(step, &submitted_url);
     let settings = manager.settings();
     let job = crate::gallery_argv::GalleryJob {
         item_id: 0,
         page_url,
+        referer,
         title,
         file_count,
         dest_dir: std::path::PathBuf::from("."),
@@ -1658,12 +1688,13 @@ async fn queue_plain(
     dest: &Rc<RefCell<String>>,
     close_card: &Rc<dyn Fn()>,
     url: &str,
+    referer: Option<String>,
     scheduled_at: Option<i64>,
 ) -> Result<(), String> {
     let destination = Some(dest.borrow().clone());
     // Batch guard defers start_next until the Scheduled status is set.
     let (item, guard) = manager
-        .enqueue_async_batched(url, destination.as_deref(), None)
+        .enqueue_async_batched_with_referer(url, destination.as_deref(), None, referer.as_deref())
         .await?;
     apply_scheduled_at(&item, scheduled_at);
     close_card();
@@ -1679,6 +1710,7 @@ struct PlaylistImportRequest {
     title: String,
     group_title: String,
     page_url: String,
+    referer: Option<String>,
     existing_destination: Option<String>,
     chosen: Vec<(usize, crate::media_types::PlaylistItem)>,
     scheduled_at: Option<i64>,
@@ -1770,6 +1802,7 @@ async fn import_playlist_selection(
         title,
         group_title,
         page_url,
+        referer,
         existing_destination,
         chosen,
         scheduled_at,
@@ -1851,13 +1884,14 @@ async fn import_playlist_selection(
     }
 
     if !playlist_files.is_empty() {
-        let owner = manager.enqueue_video_playlist_staged(
+        let owner = manager.enqueue_video_playlist_staged_with_referer(
             &page_url,
             &group_title,
             &dir,
             playlist_files,
             manager.settings().video_quality(),
             audio_only,
+            referer.as_deref(),
         )?;
         apply_scheduled_at(&owner, scheduled_at);
     }
@@ -1970,6 +2004,7 @@ fn push_playlist_items_page(
     let picker_page_on_error = picker_page.clone();
     let guarded_child_hosts = Rc::clone(&owner.public_host_leases);
     let owner_generation = owner.generation;
+    let referer = owner.referer.clone();
     let close_card = Rc::clone(&owner.close_card);
     let grid_for_import = grid.clone();
     let add_btn_click = add_btn.clone();
@@ -2007,6 +2042,7 @@ fn push_playlist_items_page(
             title: playlist.title.to_string(),
             group_title: playlist.title.to_string(),
             page_url: page_url.to_string(),
+            referer: referer.clone(),
             existing_destination: manager.video_playlist_destination_for_url(&page_url),
             chosen,
             scheduled_at,
@@ -2398,7 +2434,7 @@ pub struct AddCard {
     widget: gtk4::Widget,
     nav: adw::NavigationView,
     public_host_leases: PublicHostLeases,
-    open: Rc<dyn Fn(Option<String>)>,
+    open: Rc<dyn Fn(Option<String>, Option<String>)>,
     toggle: Rc<dyn Fn()>,
     open_torrent_picker: TorrentPickerOpener,
     state: Rc<OpenState>,
@@ -2419,9 +2455,17 @@ impl AddCard {
     /// Reveal the card, pre-filling `initial_url` when given (drops and
     /// Open With). An already-open card only gains focus — no reset;
     /// collapse always resets, so a reopened card starts fresh.
+    #[allow(dead_code)]
     pub fn open(&self, initial_url: Option<String>) {
         self.public_host_leases.borrow_mut().activate();
-        (self.open)(initial_url)
+        (self.open)(initial_url, None)
+    }
+
+    /// Reveal a browser URL together with the page that initiated it.
+    /// The source is retained only for that exact submitted URL.
+    pub fn open_with_referer(&self, initial_url: Option<String>, referer: Option<String>) {
+        self.public_host_leases.borrow_mut().activate();
+        (self.open)(initial_url, referer)
     }
 
     /// Shared toggle for every New Download affordance (header `+`,
@@ -2717,6 +2761,7 @@ fn build_video_preview(
     video_revealer.set_child(Some(&video_group));
     let step = Rc::new(VideoStep {
         url_entry: url_entry.clone(),
+        source_referer: Rc::new(RefCell::new(None)),
         public_host_leases,
         spinner_paintable,
         looking_up: Cell::new(false),
@@ -3076,7 +3121,7 @@ struct VideoLookupContext {
     dest_dir: Rc<RefCell<String>>,
     close_card: Rc<dyn Fn()>,
     scheduled_at: Rc<Cell<Option<i64>>>,
-    pending_url: Rc<RefCell<VecDeque<String>>>,
+    pending_url: Rc<RefCell<VecDeque<PendingUrl>>>,
     nav: adw::NavigationView,
     lookup_add: Rc<RefCell<Option<gtk4::Button>>>,
 }
@@ -3158,8 +3203,11 @@ fn build_video_lookup_kicker(context: VideoLookupContext) -> VideoLookupKick {
                     pending: Rc::clone(&pending_b),
                     start: {
                         let url_entry = url_b.clone();
-                        Rc::new(move |next: String| {
+                        let source_referer = Rc::clone(&step_b.source_referer);
+                        Rc::new(move |(next, referer): PendingUrl| {
                             url_entry.set_text(&next);
+                            *source_referer.borrow_mut() =
+                                referer.map(|referer| (next.clone(), referer));
                             // Submit one idle later: the changed handler settles
                             // on a 0 ms timeout, and submitting in this turn reads
                             // the previous URL's state while the deferred edit
@@ -3265,6 +3313,7 @@ fn build_video_lookup_kicker(context: VideoLookupContext) -> VideoLookupKick {
                 // outer card flow is polled by GLib, so run this entire backend
                 // lookup as a Tokio task and keep GTK updates on this context.
                 let lookup_url = url.clone();
+                let source_referer = source_referer_for(&step_b, &lookup_url);
                 // Keep the browser-handoff DNS policy alive until the detached
                 // Tokio lookup has actually stopped, even when card close
                 // aborts the outer GLib future.
@@ -3275,6 +3324,7 @@ fn build_video_lookup_kicker(context: VideoLookupContext) -> VideoLookupKick {
                         browser,
                         newest_first,
                         proxy,
+                        source_referer.clone(),
                     )));
                 let _abort_lookup_on_drop = AbortTaskOnDrop(lookup_task.abort_handle());
                 let outcome = match lookup_task.await {
@@ -3340,10 +3390,11 @@ fn build_video_lookup_kicker(context: VideoLookupContext) -> VideoLookupKick {
                                         scheduled_at_b.get(),
                                         move |directory| async move {
                                             enqueue_manager
-                                                .enqueue_manifest_async_batched(
+                                                .enqueue_manifest_async_batched_with_referer(
                                                     source,
                                                     directory.as_deref(),
                                                     Some(&filename),
+                                                    source_referer.as_deref(),
                                                 )
                                                 .await
                                         },
@@ -3418,6 +3469,7 @@ fn build_video_lookup_kicker(context: VideoLookupContext) -> VideoLookupKick {
                                 &dest_b,
                                 &close_b,
                                 &direct,
+                                source_referer.clone(),
                                 scheduled_at_b.get(),
                             )
                             .await
@@ -3447,6 +3499,7 @@ fn build_video_lookup_kicker(context: VideoLookupContext) -> VideoLookupKick {
                                 &dest_b,
                                 &close_b,
                                 &url,
+                                source_referer.clone(),
                                 scheduled_at_b.get(),
                             )
                             .await
@@ -3487,7 +3540,9 @@ fn build_video_lookup_kicker(context: VideoLookupContext) -> VideoLookupKick {
                         }
                         // Cache the raw info JSON for --load-info-json at download time.
                         // Single videos only; playlists re-probe per entry.
-                        if let Some(json) = raw_json {
+                        if source_referer.is_none()
+                            && let Some(json) = raw_json
+                        {
                             // The probe canonically retargets some pages
                             // (youtu.be/… → …/watch?v=…) and enqueue stores the
                             // probed page URL, which the download keys the cache on.
@@ -3513,6 +3568,7 @@ fn build_video_lookup_kicker(context: VideoLookupContext) -> VideoLookupKick {
                                 &dest_b,
                                 &close_b,
                                 &url,
+                                source_referer.clone(),
                                 scheduled_at_b.get(),
                             )
                             .await
@@ -3617,6 +3673,7 @@ fn build_video_lookup_kicker(context: VideoLookupContext) -> VideoLookupKick {
                                                 .public_host_leases
                                                 .borrow()
                                                 .generation,
+                                            referer: source_referer.clone(),
                                         },
                                         pl,
                                         scheduled_at_b.get(),
@@ -3705,6 +3762,7 @@ fn build_submit_handler(context: SubmitContext) -> SubmitHandler {
                 return;
             }
             let url = url_entry.text().trim().to_string();
+            let referer = source_referer_for(&step2, &url);
             if crate::torrent::is_magnet(&url) {
                 let Some(lookup_guard) = TorrentPickerGuard::acquire(&magnet_lookup_state) else {
                     show_video_error(
@@ -3835,10 +3893,11 @@ fn build_submit_handler(context: SubmitContext) -> SubmitHandler {
                         scheduled_at.get(),
                         move |directory| async move {
                             enqueue_manager
-                                .enqueue_manifest_async_batched(
+                                .enqueue_manifest_async_batched_with_referer(
                                     source,
                                     directory.as_deref(),
                                     Some(&filename),
+                                    referer.as_deref(),
                                 )
                                 .await
                         },
@@ -3952,6 +4011,7 @@ fn build_submit_handler(context: SubmitContext) -> SubmitHandler {
                                     close_card: close_card.clone(),
                                     public_host_leases: Rc::clone(&step2.public_host_leases),
                                     generation: step2.public_host_leases.borrow().generation,
+                                    referer: source_referer_for(&step2, &url),
                                 },
                                 pl,
                                 scheduled_at.get(),
@@ -3977,7 +4037,12 @@ fn build_submit_handler(context: SubmitContext) -> SubmitHandler {
                 scheduled_at.get(),
                 move |d| async move {
                     enqueue_manager
-                        .enqueue_async_batched(&enqueue_url, d.as_deref(), None)
+                        .enqueue_async_batched_with_referer(
+                            &enqueue_url,
+                            d.as_deref(),
+                            None,
+                            referer.as_deref(),
+                        )
                         .await
                 },
                 // Form-validation pattern: the error state lives on the entry
@@ -4117,6 +4182,14 @@ fn wire_url_entry(
             let fresh = fresh_video || fresh_manifest;
             // A matching native manifest or extractor preview remains visible;
             // any settled URL change invalidates both forms of preview.
+            if step2
+                .source_referer
+                .borrow()
+                .as_ref()
+                .is_some_and(|(bound_url, _)| bound_url != &text)
+            {
+                step2.source_referer.borrow_mut().take();
+            }
             if !fresh {
                 hide_video_step(&step2);
                 step2.action_revealer.set_reveal_child(false);
@@ -4402,7 +4475,7 @@ pub fn build_add_card(manager: Rc<DownloadManager>) -> AddCard {
     let probe = Rc::new(RefCell::new(ProbeState::default()));
     // Queued URL from context menu/share while a probe is in flight: the
     // open() handler stores it here, and the probe completion auto-starts it.
-    let pending_url: Rc<RefCell<VecDeque<String>>> = Rc::new(RefCell::new(VecDeque::new()));
+    let pending_url: Rc<RefCell<VecDeque<PendingUrl>>> = Rc::new(RefCell::new(VecDeque::new()));
     // The form's Add button, desensitized while a lookup is in flight (a
     // dead button says so upfront). Every terminal state re-enables it.
     let lookup_add: Rc<RefCell<Option<gtk4::Button>>> = Rc::new(RefCell::new(None));
@@ -4563,6 +4636,7 @@ pub fn build_add_card(manager: Rc<DownloadManager>) -> AddCard {
         let open_state = Rc::clone(&open_state);
         let public_host_leases = Rc::clone(&public_host_leases);
         let url_entry = url_entry.clone();
+        let source_referer = Rc::clone(&step.source_referer);
         let probe = Rc::clone(&probe);
         let pending_url = Rc::clone(&pending_url);
         // The last URL the clipboard auto-paste inserted: a stale clipboard
@@ -4574,75 +4648,86 @@ pub fn build_add_card(manager: Rc<DownloadManager>) -> AddCard {
             let saved = manager.settings().last_auto_paste();
             if saved.is_empty() { None } else { Some(saved) }
         }));
-        Rc::new(move |initial_url: Option<String>| {
-            public_host_leases.borrow_mut().activate();
-            let already = open_state.is_open();
-            reveal();
-            // Dropped/opened URLs land here pre-filled: setting the text syncs the form, and the
-            // lookup itself starts on Add/Enter like any other entry.
-            // If a probe is already in flight, queue the URL: it auto-starts
-            // when the current probe finishes (see the completion handler).
-            // Also queue if the entry holds an unprobed URL: replacing it
-            // would lose the first link.
-            if let Some(raw) = initial_url {
-                if let Ok(normalized) = crate::download::normalize_url(raw.trim()) {
-                    let st = probe.borrow();
-                    let busy = st.inflight.is_some();
-                    let has_unprobed = !busy
-                        && st.info.is_none()
-                        && !url_entry.text().trim().is_empty()
-                        && url_entry.text().trim() != normalized;
-                    drop(st);
-                    if busy || has_unprobed {
-                        // FIFO: rapid sends must not overwrite each other.
-                        let mut queue = pending_url.borrow_mut();
-                        if !queue.contains(&normalized) {
-                            queue.push_back(normalized);
+        Rc::new(
+            move |initial_url: Option<String>, initial_referer: Option<String>| {
+                public_host_leases.borrow_mut().activate();
+                let already = open_state.is_open();
+                reveal();
+                // Dropped/opened URLs land here pre-filled: setting the text syncs the form, and the
+                // lookup itself starts on Add/Enter like any other entry.
+                // If a probe is already in flight, queue the URL: it auto-starts
+                // when the current probe finishes (see the completion handler).
+                // Also queue if the entry holds an unprobed URL: replacing it
+                // would lose the first link.
+                if let Some(raw) = initial_url {
+                    if let Ok(normalized) = crate::download::normalize_url(raw.trim()) {
+                        let st = probe.borrow();
+                        let busy = st.inflight.is_some();
+                        let has_unprobed = !busy
+                            && st.info.is_none()
+                            && !url_entry.text().trim().is_empty()
+                            && url_entry.text().trim() != normalized;
+                        drop(st);
+                        if busy || has_unprobed {
+                            // FIFO: rapid sends must not overwrite each other.
+                            let queued = (normalized.clone(), initial_referer.clone());
+                            let mut queue = pending_url.borrow_mut();
+                            if !queue.contains(&queued) {
+                                queue.push_back(queued);
+                            }
+                            return;
                         }
-                        return;
+                        url_entry.set_text(&normalized);
+                        *source_referer.borrow_mut() = initial_referer
+                            .filter(|referer| !referer.is_empty())
+                            .map(|referer| (normalized, referer));
                     }
-                    url_entry.set_text(&normalized);
-                }
-            } else if !already && url_entry.text().trim().is_empty() {
-                let next = { pending_url.borrow_mut().pop_front() };
-                if let Some(next) = next {
-                    // A manifest preview may have held this FIFO entry until
-                    // the user dismissed it. Resume the oldest queued URL first.
-                    url_entry.set_text(&next);
-                } else {
-                    // Single clipboard read per fresh open; no watch, no polling.
-                    let url_entry = url_entry.clone();
-                    let last_auto_paste = Rc::clone(&last_auto_paste);
-                    glib::spawn_future_local(async move {
-                        let clipboard = gtk4::gdk::Display::default().map(|d| d.clipboard());
-                        let Some(clipboard) = clipboard else { return };
-                        let Ok(Some(text)) = clipboard.read_text_future().await else {
-                            return;
-                        };
-                        if !url_entry.text().trim().is_empty() {
-                            return;
-                        }
-                        let pasted = text.trim().to_string();
-                        if let Ok(normalized) = crate::download::normalize_url(&pasted) {
-                            // Paste once: skip a link this auto-paste already inserted.
-                            let fingerprint = paste_fingerprint(&normalized);
-                            if last_auto_paste.borrow().as_deref() == Some(fingerprint.as_str()) {
+                } else if !already && url_entry.text().trim().is_empty() {
+                    let next = { pending_url.borrow_mut().pop_front() };
+                    if let Some((next, referer)) = next {
+                        // A manifest preview may have held this FIFO entry until
+                        // the user dismissed it. Resume the oldest queued URL first.
+                        url_entry.set_text(&next);
+                        *source_referer.borrow_mut() = referer.map(|referer| (next, referer));
+                    } else {
+                        // Single clipboard read per fresh open; no watch, no polling.
+                        let url_entry = url_entry.clone();
+                        let source_referer = Rc::clone(&source_referer);
+                        let last_auto_paste = Rc::clone(&last_auto_paste);
+                        glib::spawn_future_local(async move {
+                            let clipboard = gtk4::gdk::Display::default().map(|d| d.clipboard());
+                            let Some(clipboard) = clipboard else { return };
+                            let Ok(Some(text)) = clipboard.read_text_future().await else {
+                                return;
+                            };
+                            if !url_entry.text().trim().is_empty() {
                                 return;
                             }
-                            url_entry.set_text(&normalized);
-                            *last_auto_paste.borrow_mut() = Some(fingerprint.clone());
-                            // Persist so a restart doesn't re-paste the stale link.
-                            // The manager Rc isn't available in this async block;
-                            // settings are global via the default AppSettings.
-                            crate::settings::AppSettings::new().set_last_auto_paste(&fingerprint);
-                        }
-                    });
+                            let pasted = text.trim().to_string();
+                            if let Ok(normalized) = crate::download::normalize_url(&pasted) {
+                                // Paste once: skip a link this auto-paste already inserted.
+                                let fingerprint = paste_fingerprint(&normalized);
+                                if last_auto_paste.borrow().as_deref() == Some(fingerprint.as_str())
+                                {
+                                    return;
+                                }
+                                url_entry.set_text(&normalized);
+                                source_referer.borrow_mut().take();
+                                *last_auto_paste.borrow_mut() = Some(fingerprint.clone());
+                                // Persist so a restart doesn't re-paste the stale link.
+                                // The manager Rc isn't available in this async block;
+                                // settings are global via the default AppSettings.
+                                crate::settings::AppSettings::new()
+                                    .set_last_auto_paste(&fingerprint);
+                            }
+                        });
+                    }
                 }
-            }
-            // Keyboard-first: focus lands in the URL field so typing starts a
-            // download with no tab stops.
-            url_entry.grab_focus();
-        })
+                // Keyboard-first: focus lands in the URL field so typing starts a
+                // download with no tab stops.
+                url_entry.grab_focus();
+            },
+        )
     };
     let toggle = {
         let open = Rc::clone(&open);
@@ -4652,7 +4737,7 @@ pub fn build_add_card(manager: Rc<DownloadManager>) -> AddCard {
             if open_state.is_open() {
                 close_card();
             } else {
-                open(None);
+                open(None, None);
             }
         })
     };
@@ -4719,6 +4804,8 @@ fn make_gallery_picker_opener(
             ),
             None => return,
         };
+        let submitted_url = step2.url_entry.text().trim().to_string();
+        let referer = source_referer_for(&step2, &submitted_url);
         // A previous enumeration is superseded: abort it (kills
         // gallery-dl) instead of letting it probe on.
         abort_enumeration(&step2);
@@ -4778,6 +4865,7 @@ fn make_gallery_picker_opener(
             let (items_tx, mut items_rx) = tokio::sync::mpsc::channel(
                 crate::gallery_probe::GALLERY_ENUMERATION_CHANNEL_CAPACITY,
             );
+            let enumeration_referer = referer.clone();
             let handle =
                 crate::runtime::tokio_rt().spawn(enumeration_lease_guard.hold(async move {
                     // Unified auth: handoff jar first, browser export as
@@ -4789,6 +4877,7 @@ fn make_gallery_picker_opener(
                         cookies_file: auth.cookies_path.as_deref(),
                         cookies_browser: auth.cookies_browser.as_deref(),
                         user_agent: auth.user_agent.as_deref(),
+                        referer: enumeration_referer.as_deref(),
                         filter,
                         proxy: proxy3.as_ref(),
                     };
@@ -4841,6 +4930,7 @@ fn make_gallery_picker_opener(
                         scheduled3.get(),
                         title.clone(),
                         url.clone(),
+                        referer.clone(),
                         filter,
                         crate::gallery_grid::GalleryGrid::new(),
                     ) {
@@ -5029,6 +5119,7 @@ mod tests {
                     scope
                 },
                 generation: 1,
+                referer: None,
             },
             crate::media_types::PlaylistInfo {
                 title: "Playlist".into(),

@@ -462,6 +462,7 @@ fn subtitle_probe_drain_times_out_when_pipe_stays_open() {
     let job = VideoJob {
         item_id: 1,
         page_url: "https://example.com/v".into(),
+        referer: None,
         playlist_item_id: None,
         quality: "1080p".into(),
         audio_only: false,
@@ -521,6 +522,7 @@ fn subtitle_probe_rejects_oversized_json_output() {
     let job = VideoJob {
         item_id: 1,
         page_url: "https://example.com/v".into(),
+        referer: None,
         playlist_item_id: None,
         quality: "1080p".into(),
         audio_only: false,
@@ -776,6 +778,7 @@ fn staging_claim_skips_existing_base_file() {
     let job = VideoJob {
         item_id: 1,
         page_url: "https://example.com/v".into(),
+        referer: None,
         playlist_item_id: None,
         quality: "1080p".into(),
         audio_only: false,

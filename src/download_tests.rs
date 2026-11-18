@@ -215,6 +215,7 @@ fn wait_for_preparation(manager: &DownloadManager, id: u64, timeout: Duration) -
 /// Minimal persisted row for `restore_existing` fixtures (no id => pre-v3 allocate path).
 fn stored_row(url: &str, dest_dir: &str, filename: &str, status: DownloadStatus) -> StoredItem {
     StoredItem {
+        referer: None,
         id: None,
         url: url.to_string(),
         dest_dir: dest_dir.to_string(),
@@ -1119,6 +1120,7 @@ fn overcap_queue_keeps_active_first() {
     let settings = test_settings();
     let mut items = vec![
         StoredItem {
+            referer: None,
             id: None,
             url: "https://example.com/active.iso".to_string(),
             dest_dir: "/tmp/dl".to_string(),
@@ -1138,6 +1140,7 @@ fn overcap_queue_keeps_active_first() {
             group: None,
         },
         StoredItem {
+            referer: None,
             id: None,
             url: "https://example.com/paused.iso".to_string(),
             dest_dir: "/tmp/dl".to_string(),
@@ -1159,6 +1162,7 @@ fn overcap_queue_keeps_active_first() {
     ];
     for i in 0..1000 {
         items.push(StoredItem {
+            referer: None,
             id: None,
             url: format!("https://example.com/f{i}.iso"),
             dest_dir: "/tmp/dl".to_string(),
@@ -1817,6 +1821,7 @@ fn a_fresh_row_never_lands_on_a_dest_side_leftover_staging_dir() {
     // Row A pins the allocator at 9001; row B has no persisted id, so restore allocates.
     let items = vec![
         StoredItem {
+            referer: None,
             id: Some(9_000),
             url: "https://example.com/a.bin".to_string(),
             dest_dir: dest_s.clone(),
@@ -1836,6 +1841,7 @@ fn a_fresh_row_never_lands_on_a_dest_side_leftover_staging_dir() {
             group: None,
         },
         StoredItem {
+            referer: None,
             id: None,
             url: "https://example.com/b.bin".to_string(),
             dest_dir: dest_s.clone(),
@@ -1957,7 +1963,7 @@ fn native_manifest_source_survives_queue_restore() {
         let manager = DownloadManager::new(gio::ListStore::new::<DownloadItem>(), test_settings());
         let guard = manager.batch_guard();
         let item = manager
-            .enqueue_manifest_staged(source.clone(), &dest_string, Some("Stream.mkv"), &[])
+            .enqueue_manifest_staged(source.clone(), &dest_string, Some("Stream.mkv"), &[], None)
             .expect("native manifest enqueue");
         item.set_status(DownloadStatus::Paused);
         let id = item.id();
@@ -2021,10 +2027,10 @@ fn native_manifest_queue_deduplicates_repeated_requested_filenames() {
     };
 
     let first = manager
-        .enqueue_manifest_staged(source.clone(), &directory, Some("Stream.mp4"), &[])
+        .enqueue_manifest_staged(source.clone(), &directory, Some("Stream.mp4"), &[], None)
         .expect("first native manifest queue row");
     let second = manager
-        .enqueue_manifest_staged(source, &directory, Some("Stream.mp4"), &[])
+        .enqueue_manifest_staged(source, &directory, Some("Stream.mp4"), &[], None)
         .expect("second native manifest queue row");
 
     assert_ne!(first.filename(), second.filename());
@@ -2054,7 +2060,7 @@ fn native_manifest_without_a_supplied_name_uses_a_title_from_the_manifest_url() 
     };
 
     let item = manager
-        .enqueue_manifest_staged(source, &directory, None, &[])
+        .enqueue_manifest_staged(source, &directory, None, &[], None)
         .expect("enqueue manifest with a derived filename");
 
     assert_eq!(item.filename(), "my video.mkv");
@@ -2080,18 +2086,19 @@ fn native_manifest_accepts_mp4_mkv_and_ts_but_rejects_other_containers() {
     };
 
     let mkv = manager
-        .enqueue_manifest_staged(source.clone(), &directory, Some("Stream.mkv"), &[])
+        .enqueue_manifest_staged(source.clone(), &directory, Some("Stream.mkv"), &[], None)
         .expect("MKV native manifest row");
     assert_eq!(mkv.filename(), "Stream.mkv");
     let ts = manager
-        .enqueue_manifest_staged(source.clone(), &directory, Some("Transport.ts"), &[])
+        .enqueue_manifest_staged(source.clone(), &directory, Some("Transport.ts"), &[], None)
         .expect("MPEG-TS native manifest row");
     assert_eq!(ts.filename(), "Transport.ts");
     let mp4 = manager
-        .enqueue_manifest_staged(source.clone(), &directory, Some("Clip.mp4"), &[])
+        .enqueue_manifest_staged(source.clone(), &directory, Some("Clip.mp4"), &[], None)
         .expect("MP4 native manifest row");
     assert_eq!(mp4.filename(), "Clip.mp4");
-    let unsupported = manager.enqueue_manifest_staged(source, &directory, Some("Stream.webm"), &[]);
+    let unsupported =
+        manager.enqueue_manifest_staged(source, &directory, Some("Stream.webm"), &[], None);
     assert!(unsupported.is_err());
     assert_eq!(manager.store().n_items(), 3);
 
@@ -2167,6 +2174,7 @@ fn invalid_native_manifest_source_is_skipped_on_restore() {
     let (_queue_lock, _main_loop_lock) = test_locks();
     let queue_file = test_queue_file("manifest-invalid-restore");
     let item = StoredItem {
+        referer: None,
         id: None,
         url: "https://cdn.example.test/master.m3u8".to_string(),
         dest_dir: "/tmp".to_string(),
@@ -2220,6 +2228,7 @@ fn mismatched_video_source_dropped_on_restore() {
     let queue = StoredQueue {
         version: QUEUE_VERSION,
         items: vec![StoredItem {
+            referer: None,
             id: None,
             url: "https://example.com/f.iso".into(),
             dest_dir: "/tmp/dl".into(),
@@ -2275,6 +2284,7 @@ fn done_video_keeps_page_source_on_restore() {
     let queue = StoredQueue {
         version: QUEUE_VERSION,
         items: vec![StoredItem {
+            referer: None,
             id: None,
             url: "https://vimeo.com/123456".into(),
             dest_dir: "/tmp/dl".into(),
@@ -2356,6 +2366,7 @@ fn unremove_restores_video_source() {
     drain_engine(&manager, id);
     assert_eq!(item.status(), DownloadStatus::Failed);
     let snap = RemovedSnapshot {
+        referer: String::new(),
         url: item.url().to_string(),
         dest_dir: item.dest_dir().to_string(),
         filename: item.filename().to_string(),
@@ -3571,6 +3582,7 @@ fn unremove_restores_started_for_single_connection_partial() {
     manager.started.borrow_mut().insert(id);
     // Snapshot exactly like the remove-button handler, then remove.
     let snap = RemovedSnapshot {
+        referer: String::new(),
         url: item.url().to_string(),
         dest_dir: item.dest_dir().to_string(),
         filename: item.filename().to_string(),
@@ -3804,6 +3816,7 @@ fn queue_roundtrip_and_mapping() {
         version: QUEUE_VERSION,
         items: vec![
             StoredItem {
+                referer: None,
                 id: None,
                 url: "https://example.com/a.iso".to_string(),
                 dest_dir: "/tmp/dl".to_string(),
@@ -3823,6 +3836,7 @@ fn queue_roundtrip_and_mapping() {
                 group: None,
             },
             StoredItem {
+                referer: None,
                 id: None,
                 url: "https://example.com/b.iso".to_string(),
                 dest_dir: "/tmp/dl".to_string(),
@@ -3996,6 +4010,7 @@ fn batch_restore_hundred_done() {
     let settings = test_settings();
     let items: Vec<StoredItem> = (0..100)
         .map(|i| StoredItem {
+            referer: None,
             id: None,
             url: format!("https://example.com/f{i}.iso"),
             dest_dir: "/tmp/dl".to_string(),
@@ -4313,6 +4328,7 @@ fn restore_preserves_intent() {
     ]
     .into_iter()
     .map(|(f, status)| StoredItem {
+        referer: None,
         id: None,
         url: format!("https://example.com/{f}"),
         dest_dir: "/tmp/dl".to_string(),
@@ -4823,6 +4839,7 @@ fn piece_rejects_changed_file_version() {
     } = spawn_fixture("verc", "v.bin", 300_000, "0", &[], 43);
     let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
     let ctx = FetchCtx {
+        referer: None,
         client: http_client().expect("http client").clone(),
         url: format!("http://127.0.0.1:{port}/v.bin"),
         dest: dl.join("v.bin"),
@@ -5059,6 +5076,7 @@ fn killed_segmented_resume_starts_over() {
         serde_json::to_string(&StoredQueue {
             version: QUEUE_VERSION,
             items: vec![StoredItem {
+                referer: None,
                 id: None,
                 url: format!("http://127.0.0.1:{port}/big.bin"),
                 dest_dir: dl.to_string_lossy().into_owned(),
@@ -6253,6 +6271,7 @@ fn stamp_request_never_stamps_cookies() {
             .get("https://example.com/v"),
         "Grab-test/1.0",
         "https://example.com/v",
+        None,
     )
     .build()
     .unwrap();
@@ -6455,6 +6474,7 @@ fn direct_mode_ignores_proxy_env() {
     let _env = EnvGuard;
     let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
     let ctx = FetchCtx {
+        referer: None,
         client: http_client().expect("http client").clone(),
         url: format!("http://127.0.0.1:{port}/v.bin"),
         dest: dl.join("v.bin"),
@@ -6484,6 +6504,7 @@ fn proxy_argv_precedes_end_of_options() {
         .expect("valid")
         .expect("proxied");
     let job = crate::video::VideoJob {
+        referer: None,
         item_id: 1,
         page_url: "https://x.com/u/status/1".into(),
         playlist_item_id: None,
@@ -6541,6 +6562,7 @@ fn single_connection_skips_probe() {
     } = spawn_fixture("noprobe", "v.bin", 20_000, "0", &[], 45);
     let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
     let ctx = FetchCtx {
+        referer: None,
         client: http_client().expect("http client").clone(),
         url: format!("http://127.0.0.1:{port}/v.bin"),
         dest: dl.join("v.bin"),
@@ -6577,6 +6599,7 @@ fn stamp_request_sends_origin_only_referer() {
             .get("http://127.0.0.1:8080/a/b?token=<redacted>"),
         "",
         "http://127.0.0.1:8080/a/b?token=<redacted>",
+        None,
     )
     .build()
     .unwrap();
@@ -6590,6 +6613,7 @@ fn stamp_request_sends_origin_only_referer() {
             .get("https://example.com/v"),
         "",
         "https://example.com/v",
+        None,
     )
     .build()
     .unwrap();
@@ -7693,6 +7717,7 @@ fn released_reservation_wakes_parked_unremoved_row() {
     let reserved = dest.join("Clip.mp4");
     manager.reserve_dest(&reserved);
     let snap = RemovedSnapshot {
+        referer: String::new(),
         url: "https://vimeo.com/123456".to_string(),
         dest_dir: dest_s,
         filename: "Clip.mp4".to_string(),
@@ -7775,6 +7800,7 @@ fn an_unremove_of_a_settled_row_stays_settled_while_reserved() {
     let reserved = dest.join("Clip.mp4");
     manager.reserve_dest(&reserved);
     let snap = RemovedSnapshot {
+        referer: String::new(),
         url: "https://vimeo.com/123456".to_string(),
         dest_dir: dest_s,
         filename: "Clip.mp4".to_string(),
@@ -8638,6 +8664,7 @@ fn piece_sends_if_range_when_validator_set() {
     let if_range = std::sync::Arc::new(std::sync::OnceLock::new());
     let _ = if_range.set("\"test-etag-123\"".to_string());
     let ctx = FetchCtx {
+        referer: None,
         client: http_client().expect("http client").clone(),
         url: format!("http://127.0.0.1:{port}/v.bin"),
         dest: dl.join("v.bin"),
@@ -8690,6 +8717,7 @@ fn piece_rejects_200_after_if_range_mismatch() {
     // Our validator differs from the server's ETag.
     let _ = if_range.set("\"client-etag\"".to_string());
     let ctx = FetchCtx {
+        referer: None,
         client: http_client().expect("http client").clone(),
         url: format!("http://127.0.0.1:{port}/v.bin"),
         dest: dl.join("v.bin"),
@@ -8748,6 +8776,7 @@ fn piece_rejects_206_with_mismatched_validator() {
     // Our validator differs from the server's ETag ("server-etag-v2").
     let _ = if_range.set("\"client-etag-v1\"".to_string());
     let ctx = FetchCtx {
+        referer: None,
         client: http_client().expect("http client").clone(),
         url: format!("http://127.0.0.1:{port}/v.bin"),
         dest: dl.join("v.bin"),
@@ -8793,6 +8822,7 @@ fn probe_validator_sent_before_workers() {
     );
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
     let ctx = FetchCtx {
+        referer: None,
         client: http_client().expect("http client").clone(),
         url: format!("http://127.0.0.1:{port}/v.bin"),
         dest: dl.join("v.bin"),
@@ -8987,6 +9017,7 @@ mod proptest_cd {
 
 fn gallery_job_fixture() -> crate::gallery_argv::GalleryJob {
     crate::gallery_argv::GalleryJob {
+        referer: None,
         item_id: 0,
         page_url: "https://example.com/gallery".to_string(),
         title: "Test Gallery".to_string(),
@@ -9162,6 +9193,7 @@ fn gallery_file_rows_are_persisted_with_owner_and_rehydrated() {
 
 fn gallery_stored_item(status: DownloadStatus, job: Option<serde_json::Value>) -> StoredItem {
     StoredItem {
+        referer: None,
         id: None,
         url: "https://example.com/gallery".to_string(),
         dest_dir: "/tmp/dl".to_string(),
@@ -9760,6 +9792,7 @@ fn test_gallery_item(id: u64, dest_dir: &std::path::Path, filename: &str) -> Dow
 
 fn test_gallery_job(dest_dir: std::path::PathBuf) -> crate::gallery_argv::GalleryJob {
     crate::gallery_argv::GalleryJob {
+        referer: None,
         item_id: 0,
         page_url: "https://example.com/gallery".to_string(),
         title: "title".to_string(),
@@ -10711,6 +10744,7 @@ fn unremove_many_reports_partial_failures_with_one_refresh() {
     ]
     .into_iter()
     .map(|(filename, dest_dir)| RemovedSnapshot {
+        referer: String::new(),
         url: format!("https://example.test/{filename}"),
         dest_dir,
         filename: filename.to_string(),
@@ -10753,6 +10787,7 @@ fn unremove_many_restores_collection_members_with_one_queue_refresh() {
     let snapshots = ["one.mp4", "two.mp4"]
         .into_iter()
         .map(|filename| RemovedSnapshot {
+            referer: String::new(),
             url: format!("https://example.test/{filename}"),
             dest_dir: directory.path().to_string_lossy().into_owned(),
             filename: filename.to_string(),

@@ -1276,9 +1276,31 @@ pub(crate) fn purge_handoff_cookies() {
     });
 }
 
+/// Accept only a bounded HTTP(S) source URL. Invalid optional metadata is
+/// ignored rather than turning an otherwise valid browser handoff into an error.
+fn validated_referer(raw: Option<String>) -> Option<String> {
+    let raw = raw?;
+    if raw.len() > 2048 {
+        return None;
+    }
+    let mut parsed = url::Url::parse(raw.trim()).ok()?;
+    if !matches!(parsed.scheme(), "http" | "https")
+        || parsed.host_str().is_none()
+        || !parsed.username().is_empty()
+        || parsed.password().is_some()
+    {
+        return None;
+    }
+    parsed.set_fragment(None);
+    Some(parsed.to_string())
+}
+
 #[derive(Deserialize)]
 struct AddRequest {
     url: String,
+    /// Browser-provided source page; authenticated as part of the JSON body.
+    #[serde(default)]
+    referer: Option<String>,
     /// Millisecond timestamp and unique nonce are included in the signed JSON body.
     /// Optional only for legacy unauthenticated URL-only requests; authenticated
     /// requests missing either field are rejected.
@@ -1325,6 +1347,8 @@ pub(crate) fn handoff_outcome_response(outcome: &HandoffOutcome) -> (axum::http:
 
 pub(crate) struct Handoff {
     pub url: String,
+    /// Optional browser-provided source page; never inferred from the target URL.
+    pub referer: Option<String>,
     /// Set for `/add?confirm=1`: the GTK side answers with the outcome.
     /// Dropping it unanswered counts as declined.
     pub decision: Option<oneshot::Sender<HandoffOutcome>>,
@@ -1667,6 +1691,7 @@ async fn handle_add(
     };
     let handoff = Handoff {
         url: req.url.clone(),
+        referer: validated_referer(req.referer),
         decision,
         authenticated,
         expires_at: wait.then(|| Instant::now() + st.confirm_wait),

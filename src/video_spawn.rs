@@ -117,12 +117,43 @@ pub(crate) async fn fetch_raw_dump_json(
     flat_playlist: bool,
     identity_args: Option<&[String]>,
 ) -> Result<serde_json::Value, VideoError> {
+    fetch_raw_dump_json_with_referer(
+        youtube_bin,
+        url,
+        cookies_browser,
+        timeout,
+        fetch_proxy,
+        flat_playlist,
+        identity_args,
+        None,
+    )
+    .await
+}
+
+#[expect(
+    clippy::too_many_arguments,
+    reason = "this helper mirrors the existing yt-dlp probe inputs and adds the optional source referrer"
+)]
+async fn fetch_raw_dump_json_with_referer(
+    youtube_bin: &Path,
+    url: &str,
+    cookies_browser: &str,
+    timeout: Duration,
+    fetch_proxy: Option<&crate::net_types::ResolvedProxy>,
+    flat_playlist: bool,
+    identity_args: Option<&[String]>,
+    referer: Option<&str>,
+) -> Result<serde_json::Value, VideoError> {
     let mut args = vec!["--ignore-config".to_string(), "--no-progress".to_string()];
     if flat_playlist {
         args.push("--flat-playlist".to_string());
     }
     args.push("--dump-single-json".to_string());
     args.extend(proxy_cli_args(fetch_proxy));
+    if let Some(referer) = referer {
+        args.push("--referer".to_string());
+        args.push(referer.to_string());
+    }
     // Extension handoff (Cloudflare bypass): staged by the handoff receiver,
     // peeked here. The entry outlives the probe — the subtitle probe and the
     // media download spawn yt-dlp separately and need it too; the finished
@@ -265,12 +296,34 @@ impl Drop for AbortOnDrop {
 /// Returns the parsed result plus the raw `--dump-single-json` for single videos
 /// (used for `--load-info-json` at download time to skip re-extraction).
 /// Playlists return `None` (their entries are re-probed individually).
+#[allow(dead_code)]
 pub async fn fetch_video_infos(
     youtube_bin: PathBuf,
     url: String,
     cookies_browser: String,
     newest_first: bool,
     fetch_proxy: Option<crate::net_types::ResolvedProxy>,
+    cancel: Option<tokio::sync::oneshot::Receiver<()>>,
+) -> Result<(ProbeResult, Option<serde_json::Value>), VideoError> {
+    fetch_video_infos_with_referer(
+        youtube_bin,
+        url,
+        cookies_browser,
+        newest_first,
+        fetch_proxy,
+        None,
+        cancel,
+    )
+    .await
+}
+
+pub async fn fetch_video_infos_with_referer(
+    youtube_bin: PathBuf,
+    url: String,
+    cookies_browser: String,
+    newest_first: bool,
+    fetch_proxy: Option<crate::net_types::ResolvedProxy>,
+    referer: Option<String>,
     cancel: Option<tokio::sync::oneshot::Receiver<()>>,
 ) -> Result<(ProbeResult, Option<serde_json::Value>), VideoError> {
     let handle = crate::runtime::tokio_rt().spawn(async move {
@@ -298,34 +351,41 @@ pub async fn fetch_video_infos(
             let cache_cookies_browser = cookies_browser.clone();
             let cache_proxy = fetch_proxy.clone();
             let cache_identity_args = identity_args.clone();
-            let (cache_key, playlist_base_key) = match tokio::task::spawn_blocking(move || {
-                let video = crate::video_cache::cache_key(
-                    &cache_url,
-                    &cache_binary,
-                    &cache_version,
-                    &cache_cookies_browser,
-                    cache_proxy.as_ref(),
-                    &cache_identity_args,
-                );
-                let playlist = crate::video_cache::playlist_cache_key(
-                    &cache_url,
-                    &cache_binary,
-                    &cache_version,
-                    &cache_cookies_browser,
-                    cache_proxy.as_ref(),
-                    &cache_identity_args,
-                );
-                (video, playlist)
-            })
-            .await
-            {
-                Ok(keys) => keys,
-                Err(error) => {
-                    tracing::warn!(
-                        error = %error,
-                        "yt-dlp cache identity task failed; probing without cache"
+            // The source page changes the HTTP request identity. Do not
+            // reuse extraction or playlist metadata produced under another
+            // Referer, even if URL, cookies, proxy, and tool version match.
+            let (cache_key, playlist_base_key) = if referer.is_some() {
+                (None, None)
+            } else {
+                match tokio::task::spawn_blocking(move || {
+                    let video = crate::video_cache::cache_key(
+                        &cache_url,
+                        &cache_binary,
+                        &cache_version,
+                        &cache_cookies_browser,
+                        cache_proxy.as_ref(),
+                        &cache_identity_args,
                     );
-                    (None, None)
+                    let playlist = crate::video_cache::playlist_cache_key(
+                        &cache_url,
+                        &cache_binary,
+                        &cache_version,
+                        &cache_cookies_browser,
+                        cache_proxy.as_ref(),
+                        &cache_identity_args,
+                    );
+                    (video, playlist)
+                })
+                .await
+                {
+                    Ok(keys) => keys,
+                    Err(error) => {
+                        tracing::warn!(
+                            error = %error,
+                            "yt-dlp cache identity task failed; probing without cache"
+                        );
+                        (None, None)
+                    }
                 }
             };
             // Playlist metadata uses a separate namespace and the crate's
@@ -372,7 +432,7 @@ pub async fn fetch_video_infos(
             let phase_started = std::time::Instant::now();
             let fetch_result = tokio::time::timeout(
                 Duration::from_secs(FETCH_TIMEOUT_SECS),
-                fetch_raw_dump_json(
+                fetch_raw_dump_json_with_referer(
                     &youtube_bin,
                     &url,
                     &cookies_browser,
@@ -380,6 +440,7 @@ pub async fn fetch_video_infos(
                     fetch_proxy.as_ref(),
                     true,
                     Some(&identity_args),
+                    referer.as_deref(),
                 ),
             )
             .await;

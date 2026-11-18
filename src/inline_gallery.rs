@@ -42,6 +42,7 @@ pub(crate) enum DualProbeOutcome {
 /// Inputs for [`dual_probe`].
 pub(crate) struct DualProbeCtx<'a> {
     pub url: &'a str,
+    pub referer: Option<String>,
     pub browser: String,
     pub newest_first: bool,
     pub proxy: Option<crate::net_types::ResolvedProxy>,
@@ -239,12 +240,13 @@ pub(crate) async fn dual_probe(ctx: DualProbeCtx<'_>) -> DualProbeOutcome {
     let host = crate::video_probe::page_host(&url);
     // yt-dlp starts immediately: it uses the handoff jar or
     // --cookies-from-browser, not the exported file below.
-    let ytdlp_fut = crate::video::fetch_video_infos(
+    let ytdlp_fut = crate::video::fetch_video_infos_with_referer(
         ctx.youtube_bin,
         url.clone(),
         ctx.browser.clone(),
         ctx.newest_first,
         ctx.proxy.clone(),
+        ctx.referer.clone(),
         None,
     );
     // Resolve a handoff jar or browser selector without spawning an export
@@ -252,7 +254,11 @@ pub(crate) async fn dual_probe(ctx: DualProbeCtx<'_>) -> DualProbeOutcome {
     let gallery_fut = async {
         let gallery_started = Instant::now();
         let auth = resolve_gallery_auth(&url, &ctx.browser);
-        let cache_key = gallery_preview_cache_key(&url, &auth, ctx.proxy.as_ref());
+        let cache_key = if ctx.referer.is_none() {
+            gallery_preview_cache_key(&url, &auth, ctx.proxy.as_ref())
+        } else {
+            None
+        };
         let cached = cache_key.as_ref().and_then(gallery_preview_cache_get);
         let r = if let Some(items) = cached {
             tracing::debug!(url_host = %host, "gallery-dl preview cache hit");
@@ -265,6 +271,7 @@ pub(crate) async fn dual_probe(ctx: DualProbeCtx<'_>) -> DualProbeOutcome {
                 auth.cookies_browser.as_deref(),
                 auth.user_agent.as_deref(),
                 ctx.proxy.as_ref(),
+                ctx.referer.as_deref(),
             )
             .await;
             // Errors may be transient and Retry must actually retry. Re-hash
@@ -366,6 +373,7 @@ pub(crate) fn push_gallery_picker_page(
     scheduled_at: Option<i64>,
     title: String,
     url: String,
+    referer: Option<String>,
     filter: crate::gallery_argv::GalleryFilter,
     grid: GalleryGrid,
 ) -> Option<GalleryPickerStream> {
@@ -453,6 +461,7 @@ pub(crate) fn push_gallery_picker_page(
             let base_job = crate::gallery_argv::GalleryJob {
                 item_id: 0, // enqueue_gallery assigns the real row ID.
                 page_url: url.clone(),
+                referer: referer.clone(),
                 title: title.clone(),
                 file_count: Some(selected.len() as u32),
                 dest_dir: std::path::PathBuf::from("."),

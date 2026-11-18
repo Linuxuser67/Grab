@@ -89,6 +89,9 @@ pub(crate) struct StoredItem {
     #[serde(default)]
     pub(crate) id: Option<u64>,
     pub(crate) url: String,
+    /// Optional browser-provided source page; absent on legacy queue entries.
+    #[serde(default)]
+    pub(crate) referer: Option<String>,
     pub(crate) dest_dir: String,
     pub(crate) filename: String,
     pub(crate) status: DownloadStatus,

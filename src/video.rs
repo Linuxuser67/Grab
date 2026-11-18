@@ -59,7 +59,11 @@ mod stop_intent_tests {
 }
 /// Facade: spawn plumbing + fetch resolve live in
 /// [`video_spawn`](crate::video_spawn) now.
+/// Backwards-compatible facade for callers without a browser source page.
+#[allow(unused_imports)]
 pub use crate::video_spawn::fetch_video_infos;
+/// Referrer-aware yt-dlp metadata lookup.
+pub use crate::video_spawn::fetch_video_infos_with_referer;
 #[cfg(test)]
 pub use crate::video_staging::clean_staging;
 pub use crate::video_staging::clean_staging_files;

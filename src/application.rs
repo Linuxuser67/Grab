@@ -299,11 +299,15 @@ enum Routed {
 async fn enqueue_direct_handoff(
     manager: &Rc<DownloadManager>,
     uri: &url::Url,
+    referer: Option<&str>,
 ) -> Result<(), String> {
     manager
-        .enqueue_async(uri.as_str(), None, None)
+        .enqueue_async_batched_with_referer(uri.as_str(), None, None, referer)
         .await
-        .map(|_| ())
+        .map(|(item, guard)| {
+            drop(guard);
+            drop(item);
+        })
 }
 
 async fn route_open_uri(
@@ -312,6 +316,7 @@ async fn route_open_uri(
     add_card: crate::inline_add::AddCard,
     settings: AppSettings,
     uri: url::Url,
+    referer: Option<String>,
     public_host_lease: Option<std::sync::Arc<crate::download_net::PublicResolutionLease>>,
 ) -> Routed {
     // Remote .torrent files: fetch the bytes and run the
@@ -334,7 +339,10 @@ async fn route_open_uri(
                     return Routed::Failed;
                 }
             };
-        let client = match crate::download_net::http_client_for(proxy.as_ref()) {
+        let client = match crate::download_net::http_client_for_with_referer(
+            proxy.as_ref(),
+            referer.as_deref(),
+        ) {
             Ok(c) => c,
             Err(e) => {
                 toasts.add_toast(crate::ui_util::plain_toast(&e));
@@ -351,13 +359,13 @@ async fn route_open_uri(
     // like a pasted URL. Plain enqueue would save a raw page — or a manifest
     // — as a file.
     if handoff_goes_to_card(&uri) {
-        add_card.open(Some(uri.as_str().to_string()));
+        add_card.open_with_referer(Some(uri.as_str().to_string()), referer);
         if let Some(lease) = public_host_lease {
             add_card.retain_public_resolution_lease(lease);
         }
         return Routed::OpenedCard;
     }
-    match enqueue_direct_handoff(&manager, &uri).await {
+    match enqueue_direct_handoff(&manager, &uri, referer.as_deref()).await {
         Ok(()) => Routed::Queued,
         Err(e) => {
             toasts.add_toast(crate::ui_util::plain_toast(&e));
@@ -393,6 +401,7 @@ fn dispatch_handoff(
     extension_authenticated: Option<bool>,
     decision: Option<tokio::sync::oneshot::Sender<crate::extension_server::HandoffOutcome>>,
     expires_at: Option<std::time::Instant>,
+    referer: Option<String>,
 ) {
     let (manager, toasts, add_card, settings) = (
         s.manager.clone(),
@@ -436,8 +445,16 @@ fn dispatch_handoff(
         // The lease is transferred to an open card or held until enqueue has
         // acquired the queue-row reference.
         glib::spawn_future_local(async move {
-            let routed =
-                route_open_uri(manager, toasts, add_card, settings, uri, public_host_lease).await;
+            let routed = route_open_uri(
+                manager,
+                toasts,
+                add_card,
+                settings,
+                uri,
+                referer,
+                public_host_lease,
+            )
+            .await;
             answer_handoff(decision, routed.into());
         });
         return;
@@ -487,10 +504,11 @@ fn dispatch_handoff(
             let add_card_c = add_card.clone();
             let settings_c = settings.clone();
             let approved_c = approved.clone();
+            let referer_c = referer.clone();
             let decision_c = decision.clone();
             glib::spawn_future_local(async move {
                 let routed = route_open_uri(
-                    manager_c, toasts_c, add_card_c, settings_c, approved_c, None,
+                    manager_c, toasts_c, add_card_c, settings_c, approved_c, referer_c, None,
                 )
                 .await;
                 answer_handoff(decision_c.borrow_mut().take(), routed.into());
@@ -554,7 +572,7 @@ fn handle_open_files(s: Rc<State>, files: Vec<gio::File>) {
             if let Ok(uri) = uri_text.parse::<url::Url>()
                 && matches!(uri.scheme(), "http" | "https" | "magnet")
             {
-                dispatch_handoff(&s, uri, via_grab, None, None, None);
+                dispatch_handoff(&s, uri, via_grab, None, None, None, None);
                 continue;
             }
             if let Some(path) = f.path() {
@@ -823,6 +841,7 @@ pub fn setup(app: &adw::Application) {
                         Some(authenticated),
                         decision,
                         expires_at,
+                        handoff.referer,
                     );
                 }
             });
@@ -1311,7 +1330,7 @@ mod tests {
                 "a public direct-file handoff skips confirmation when auto-add is enabled"
             );
             gtk4::glib::MainContext::default()
-                .block_on(enqueue_direct_handoff(&manager, &uri))
+                .block_on(enqueue_direct_handoff(&manager, &uri, None))
                 .expect("direct handoff should enqueue");
             assert_eq!(manager.store().n_items(), 1);
             let item = manager
@@ -1359,7 +1378,7 @@ mod tests {
             // This is the confirmation dialog's acceptance route: once the
             // user approves, it invokes the same direct enqueue path as auto-add.
             gtk4::glib::MainContext::default()
-                .block_on(enqueue_direct_handoff(&manager, &uri))
+                .block_on(enqueue_direct_handoff(&manager, &uri, None))
                 .expect("a confirmed direct handoff should enqueue");
             assert_eq!(manager.store().n_items(), 1);
             assert!(

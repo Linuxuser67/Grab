@@ -915,11 +915,11 @@ async fn run_video_download_inner(
                 .unwrap_or(&job.page_url);
             return run_live_ytdlp(&attempt, &job, canonical, &hls.format_id, abort)
                 .await
-            .map(|opt| opt.map_or(VideoOutcome::Aborted, VideoOutcome::Finished));
+                .map(|opt| opt.map_or(VideoOutcome::Aborted, VideoOutcome::Finished));
         }
         let hls_outcome = run_hls_ytdlp(&attempt, &job, &hls.format_id, &mut abort)
             .await
-        .map(|opt| opt.map_or(VideoOutcome::Aborted, VideoOutcome::Finished));
+            .map(|opt| opt.map_or(VideoOutcome::Aborted, VideoOutcome::Finished));
         // Same subtitle-throttle degradation as the unified tail below: the
         // HLS VOD leg carries the same subtitle argv and the same failure.
         let res = match hls_outcome {
@@ -927,7 +927,7 @@ async fn run_video_download_inner(
                 match subtitle_degrade(&mut job, &mut abort, e, phase).await {
                     Ok(()) => run_hls_ytdlp(&attempt, &job, &hls.format_id, &mut abort)
                         .await
-                    .map(|opt| opt.map_or(VideoOutcome::Aborted, VideoOutcome::Finished)),
+                        .map(|opt| opt.map_or(VideoOutcome::Aborted, VideoOutcome::Finished)),
                     Err(()) => Ok(VideoOutcome::Aborted),
                 }
             }

@@ -3205,7 +3205,8 @@ fn build_video_lookup_kicker(context: VideoLookupContext) -> VideoLookupKick {
                         let source_referer = Rc::clone(&step_b.source_referer);
                         Rc::new(move |(next, referer): PendingUrl| {
                             url_entry.set_text(&next);
-                            *source_referer.borrow_mut() = referer.map(|referer| (next.clone(), referer));
+                            *source_referer.borrow_mut() =
+                                referer.map(|referer| (next.clone(), referer));
                             // Submit one idle later: the changed handler settles
                             // on a 0 ms timeout, and submitting in this turn reads
                             // the previous URL's state while the deferred edit
@@ -4036,7 +4037,10 @@ fn build_submit_handler(context: SubmitContext) -> SubmitHandler {
                 move |d| async move {
                     enqueue_manager
                         .enqueue_async_batched_with_referer(
-                            &enqueue_url, d.as_deref(), None, referer.as_deref(),
+                            &enqueue_url,
+                            d.as_deref(),
+                            None,
+                            referer.as_deref(),
                         )
                         .await
                 },
@@ -4643,82 +4647,85 @@ pub fn build_add_card(manager: Rc<DownloadManager>) -> AddCard {
             let saved = manager.settings().last_auto_paste();
             if saved.is_empty() { None } else { Some(saved) }
         }));
-        Rc::new(move |initial_url: Option<String>, initial_referer: Option<String>| {
-            public_host_leases.borrow_mut().activate();
-            let already = open_state.is_open();
-            reveal();
-            // Dropped/opened URLs land here pre-filled: setting the text syncs the form, and the
-            // lookup itself starts on Add/Enter like any other entry.
-            // If a probe is already in flight, queue the URL: it auto-starts
-            // when the current probe finishes (see the completion handler).
-            // Also queue if the entry holds an unprobed URL: replacing it
-            // would lose the first link.
-            if let Some(raw) = initial_url {
-                if let Ok(normalized) = crate::download::normalize_url(raw.trim()) {
-                    let st = probe.borrow();
-                    let busy = st.inflight.is_some();
-                    let has_unprobed = !busy
-                        && st.info.is_none()
-                        && !url_entry.text().trim().is_empty()
-                        && url_entry.text().trim() != normalized;
-                    drop(st);
-                    if busy || has_unprobed {
-                        // FIFO: rapid sends must not overwrite each other.
-                        let queued = (normalized.clone(), initial_referer.clone());
-                        let mut queue = pending_url.borrow_mut();
-                        if !queue.contains(&queued) {
-                            queue.push_back(queued);
+        Rc::new(
+            move |initial_url: Option<String>, initial_referer: Option<String>| {
+                public_host_leases.borrow_mut().activate();
+                let already = open_state.is_open();
+                reveal();
+                // Dropped/opened URLs land here pre-filled: setting the text syncs the form, and the
+                // lookup itself starts on Add/Enter like any other entry.
+                // If a probe is already in flight, queue the URL: it auto-starts
+                // when the current probe finishes (see the completion handler).
+                // Also queue if the entry holds an unprobed URL: replacing it
+                // would lose the first link.
+                if let Some(raw) = initial_url {
+                    if let Ok(normalized) = crate::download::normalize_url(raw.trim()) {
+                        let st = probe.borrow();
+                        let busy = st.inflight.is_some();
+                        let has_unprobed = !busy
+                            && st.info.is_none()
+                            && !url_entry.text().trim().is_empty()
+                            && url_entry.text().trim() != normalized;
+                        drop(st);
+                        if busy || has_unprobed {
+                            // FIFO: rapid sends must not overwrite each other.
+                            let queued = (normalized.clone(), initial_referer.clone());
+                            let mut queue = pending_url.borrow_mut();
+                            if !queue.contains(&queued) {
+                                queue.push_back(queued);
+                            }
+                            return;
                         }
-                        return;
+                        url_entry.set_text(&normalized);
+                        *source_referer.borrow_mut() = initial_referer
+                            .filter(|referer| !referer.is_empty())
+                            .map(|referer| (normalized, referer));
                     }
-                    url_entry.set_text(&normalized);
-                    *source_referer.borrow_mut() = initial_referer
-                        .filter(|referer| !referer.is_empty())
-                        .map(|referer| (normalized, referer));
-                }
-            } else if !already && url_entry.text().trim().is_empty() {
-                let next = { pending_url.borrow_mut().pop_front() };
-                if let Some((next, referer)) = next {
-                    // A manifest preview may have held this FIFO entry until
-                    // the user dismissed it. Resume the oldest queued URL first.
-                    url_entry.set_text(&next);
-                    *source_referer.borrow_mut() = referer.map(|referer| (next, referer));
-                } else {
-                    // Single clipboard read per fresh open; no watch, no polling.
-                    let url_entry = url_entry.clone();
-                    let source_referer = Rc::clone(&source_referer);
-                    let last_auto_paste = Rc::clone(&last_auto_paste);
-                    glib::spawn_future_local(async move {
-                        let clipboard = gtk4::gdk::Display::default().map(|d| d.clipboard());
-                        let Some(clipboard) = clipboard else { return };
-                        let Ok(Some(text)) = clipboard.read_text_future().await else {
-                            return;
-                        };
-                        if !url_entry.text().trim().is_empty() {
-                            return;
-                        }
-                        let pasted = text.trim().to_string();
-                        if let Ok(normalized) = crate::download::normalize_url(&pasted) {
-                            // Paste once: skip a link this auto-paste already inserted.
-                            let fingerprint = paste_fingerprint(&normalized);
-                            if last_auto_paste.borrow().as_deref() == Some(fingerprint.as_str()) {
+                } else if !already && url_entry.text().trim().is_empty() {
+                    let next = { pending_url.borrow_mut().pop_front() };
+                    if let Some((next, referer)) = next {
+                        // A manifest preview may have held this FIFO entry until
+                        // the user dismissed it. Resume the oldest queued URL first.
+                        url_entry.set_text(&next);
+                        *source_referer.borrow_mut() = referer.map(|referer| (next, referer));
+                    } else {
+                        // Single clipboard read per fresh open; no watch, no polling.
+                        let url_entry = url_entry.clone();
+                        let source_referer = Rc::clone(&source_referer);
+                        let last_auto_paste = Rc::clone(&last_auto_paste);
+                        glib::spawn_future_local(async move {
+                            let clipboard = gtk4::gdk::Display::default().map(|d| d.clipboard());
+                            let Some(clipboard) = clipboard else { return };
+                            let Ok(Some(text)) = clipboard.read_text_future().await else {
+                                return;
+                            };
+                            if !url_entry.text().trim().is_empty() {
                                 return;
                             }
-                            url_entry.set_text(&normalized);
-                            source_referer.borrow_mut().take();
-                            *last_auto_paste.borrow_mut() = Some(fingerprint.clone());
-                            // Persist so a restart doesn't re-paste the stale link.
-                            // The manager Rc isn't available in this async block;
-                            // settings are global via the default AppSettings.
-                            crate::settings::AppSettings::new().set_last_auto_paste(&fingerprint);
-                        }
-                    });
+                            let pasted = text.trim().to_string();
+                            if let Ok(normalized) = crate::download::normalize_url(&pasted) {
+                                // Paste once: skip a link this auto-paste already inserted.
+                                let fingerprint = paste_fingerprint(&normalized);
+                                if last_auto_paste.borrow().as_deref() == Some(fingerprint.as_str()) {
+                                    return;
+                                }
+                                url_entry.set_text(&normalized);
+                                source_referer.borrow_mut().take();
+                                *last_auto_paste.borrow_mut() = Some(fingerprint.clone());
+                                // Persist so a restart doesn't re-paste the stale link.
+                                // The manager Rc isn't available in this async block;
+                                // settings are global via the default AppSettings.
+                                crate::settings::AppSettings::new().set_last_auto_paste(&fingerprint);
+                            }
+                        });
+                    }
                 }
-            }
-            // Keyboard-first: focus lands in the URL field so typing starts a
-            // download with no tab stops.
-            url_entry.grab_focus();
-        })
+                // Keyboard-first: focus lands in the URL field so typing starts a
+                // download with no tab stops.
+                url_entry.grab_focus();
+
+            },
+        )
     };
     let toggle = {
         let open = Rc::clone(&open);

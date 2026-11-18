@@ -360,10 +360,7 @@ mod browser_referer_tests {
             normalized_referer(Some("https://example.test/watch?id=private#player")),
             Some("https://example.test/".to_string())
         );
-        assert_eq!(
-            normalized_referer(Some("file:///etc/passwd")),
-            None
-        );
+        assert_eq!(normalized_referer(Some("file:///etc/passwd")), None);
         assert_eq!(
             normalized_referer(Some("https://user:pass@example.test/watch")),
             None
@@ -392,9 +389,12 @@ pub(crate) fn http_client_with_jar_and_referer(
     jar: std::sync::Arc<reqwest::cookie::Jar>,
     referer: Option<&str>,
 ) -> Result<reqwest::Client, String> {
-    apply_proxies(client_builder_with_referer(referer).cookie_provider(jar), proxy)
-        .build()
-        .map_err(|error| error.to_string())
+    apply_proxies(
+        client_builder_with_referer(referer).cookie_provider(jar),
+        proxy,
+    )
+    .build()
+    .map_err(|error| error.to_string())
 }
 
 /// Build an attempt-scoped client with browser-bound cookies and the matching user agent.

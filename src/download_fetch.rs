@@ -187,7 +187,15 @@ pub(crate) async fn run_download(mut ctx: FetchCtx, connections: usize, mode: St
                 single_loop(&ctx, &mut tries, None, &mut claim).await;
                 return;
             }
-            match probe_ranges(&ctx.client, &ctx.url, &ctx.user_agent, ctx.referer.as_deref(), timeout).await {
+            match probe_ranges(
+                &ctx.client,
+                &ctx.url,
+                &ctx.user_agent,
+                ctx.referer.as_deref(),
+                timeout,
+            )
+            .await
+            {
                 Ok((total, validator)) => {
                     // The probe captured the session validator before any worker started.
                     // Persist it for cross-session resume, and use it for If-Range.
@@ -724,7 +732,12 @@ async fn attempt_once(
             }
         };
 
-        let mut req = stamp_request(ctx.client.get(&ctx.url), &ctx.user_agent, &ctx.url, ctx.referer.as_deref());
+        let mut req = stamp_request(
+            ctx.client.get(&ctx.url),
+            &ctx.user_agent,
+            &ctx.url,
+            ctx.referer.as_deref(),
+        );
         if start > 0 {
             req = req.header("Range", format!("bytes={start}-"));
             // If-Range: the server returns 206 only if the object still
@@ -758,7 +771,12 @@ async fn attempt_once(
                 && !has_holes(&ctx.dest).await;
             if !already_complete && claimed.is_none() && start > 0 && !restarted {
                 // Bare 416 with no usable Content-Range: confirm the length before resetting.
-                let hreq = stamp_request(ctx.client.head(&ctx.url), &ctx.user_agent, &ctx.url, ctx.referer.as_deref());
+                let hreq = stamp_request(
+                    ctx.client.head(&ctx.url),
+                    &ctx.user_agent,
+                    &ctx.url,
+                    ctx.referer.as_deref(),
+                );
                 if let Ok(hresp) = execute_with_timeout(&ctx.client, hreq, ctx.timeout).await {
                     already_complete = hresp.status().is_success()
                         && hresp.content_length() == Some(start)
@@ -1506,10 +1524,7 @@ mod request_referer_tests {
             None
         );
         assert_eq!(
-            request_referer(
-                "https://cdn.example.test/file",
-                Some("javascript:alert(1)"),
-            ),
+            request_referer("https://cdn.example.test/file", Some("javascript:alert(1)"),),
             None
         );
         assert_eq!(
@@ -1520,10 +1535,7 @@ mod request_referer_tests {
             None
         );
         assert_eq!(
-            request_referer(
-                "https://cdn.example.test/file",
-                Some(&"x".repeat(2049)),
-            ),
+            request_referer("https://cdn.example.test/file", Some(&"x".repeat(2049)),),
             None
         );
     }

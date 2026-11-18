@@ -19,7 +19,7 @@ use yt_dlp::model::Video;
 const VIDEO_CACHE_TTL: Duration = Duration::from_secs(15 * 60);
 const CLEAN_INTERVAL: Duration = Duration::from_secs(5 * 60);
 
-/// Authenticated previews stay in memory: the Redb layer keys rows by video id,
+/// Authenticated and Referer-bound previews stay in memory: the Redb layer keys rows by video id,
 /// so two identities for one video would overwrite each other, and these entries
 /// carry signed media URLs. A staged handoff jar outlives this window.
 const AUTHENTICATED_PREVIEW_TTL: Duration = VIDEO_CACHE_TTL;
@@ -250,8 +250,7 @@ async fn clean_expired_if_due(cache: &VideoCache) {
     }
 }
 
-/// Cache identity includes all inputs that can affect extractor output. Hash
-/// credentials and proxy URLs instead of writing them into the Redb keys.
+#[cfg(test)]
 pub(crate) fn cache_key(
     raw_url: &str,
     youtube_bin: &Path,
@@ -260,13 +259,39 @@ pub(crate) fn cache_key(
     proxy: Option<&crate::net_types::ResolvedProxy>,
     identity_args: &[String],
 ) -> Option<String> {
-    identity_key(
+    cache_key_with_referer(
         raw_url,
         youtube_bin,
         yt_version,
         cookies_browser,
         proxy,
         identity_args,
+        None,
+    )
+}
+
+/// Cache identity includes all inputs that can affect extractor output.
+/// Hash credentials, proxies, and source-page URLs instead of writing them
+/// into the Redb keys.
+pub(crate) fn cache_key_with_referer(
+    raw_url: &str,
+    youtube_bin: &Path,
+    yt_version: &str,
+    cookies_browser: &str,
+    proxy: Option<&crate::net_types::ResolvedProxy>,
+    identity_args: &[String],
+    referer: Option<&str>,
+) -> Option<String> {
+    identity_key(
+        raw_url,
+        CacheIdentityContext {
+            youtube_bin,
+            yt_version,
+            cookies_browser,
+            proxy,
+            identity_args,
+            referer,
+        },
         CacheScope::Video,
     )
 }
@@ -280,8 +305,10 @@ enum CacheScope {
     Playlist,
 }
 
-/// Playlist keys are scoped by the profile spec or the staged jar contents.
-/// Equivalent handoffs share a key while cookie rotation changes it.
+/// Playlist keys are scoped by the profile spec, staged jar contents, and
+/// source page. Equivalent handoffs and Referer spellings share a key while
+/// cookie or source-page changes produce a distinct identity.
+#[cfg(test)]
 pub(crate) fn playlist_cache_key(
     raw_url: &str,
     youtube_bin: &Path,
@@ -290,32 +317,69 @@ pub(crate) fn playlist_cache_key(
     proxy: Option<&crate::net_types::ResolvedProxy>,
     identity_args: &[String],
 ) -> Option<String> {
-    identity_key(
+    playlist_cache_key_with_referer(
         raw_url,
         youtube_bin,
         yt_version,
         cookies_browser,
         proxy,
         identity_args,
-        CacheScope::Playlist,
+        None,
     )
 }
 
-fn identity_key(
+pub(crate) fn playlist_cache_key_with_referer(
     raw_url: &str,
     youtube_bin: &Path,
     yt_version: &str,
     cookies_browser: &str,
     proxy: Option<&crate::net_types::ResolvedProxy>,
     identity_args: &[String],
+    referer: Option<&str>,
+) -> Option<String> {
+    identity_key(
+        raw_url,
+        CacheIdentityContext {
+            youtube_bin,
+            yt_version,
+            cookies_browser,
+            proxy,
+            identity_args,
+            referer,
+        },
+        CacheScope::Playlist,
+    )
+}
+
+struct CacheIdentityContext<'a> {
+    youtube_bin: &'a Path,
+    yt_version: &'a str,
+    cookies_browser: &'a str,
+    proxy: Option<&'a crate::net_types::ResolvedProxy>,
+    identity_args: &'a [String],
+    referer: Option<&'a str>,
+}
+
+fn identity_key(
+    raw_url: &str,
+    context: CacheIdentityContext<'_>,
     scope: CacheScope,
 ) -> Option<String> {
+    let CacheIdentityContext {
+        youtube_bin,
+        yt_version,
+        cookies_browser,
+        proxy,
+        identity_args,
+        referer,
+    } = context;
     let mut url = url::Url::parse(raw_url).ok()?;
     url.set_fragment(None);
     if has_known_rotating_auth_query(&url) {
         return None;
     }
     canonicalize_youtube_url(&mut url);
+    let referer_hash = crate::referrer::cache_identity(referer).ok()?;
 
     let browser_profile_is_active =
         crate::video_tools::cookies_browser_spec(cookies_browser).is_some();
@@ -330,9 +394,12 @@ fn identity_key(
     if matches!(scope, CacheScope::Video) && browser_profile_is_active && !has_cookie_file {
         return None;
     }
-    // Authenticated video previews get their own namespace so they never reach
-    // the persistent cache, which keys rows by video id.
-    let schema = if matches!(scope, CacheScope::Video) && has_cookie_file {
+    // Cookie- or Referer-bound video previews stay in memory: their results
+    // can contain signed media URLs, and the persistent cache is keyed by video
+    // id rather than the full extraction identity.
+    let video_needs_memory_cache =
+        matches!(scope, CacheScope::Video) && (has_cookie_file || referer_hash.is_some());
+    let schema = if video_needs_memory_cache {
         AUTHENTICATED_VIDEO_NAMESPACE
     } else {
         "grab-ytdlp-video-v1"
@@ -341,6 +408,9 @@ fn identity_key(
     let mut hasher = Sha256::new();
     hash_field(&mut hasher, b"schema", schema.as_bytes());
     hash_field(&mut hasher, b"url", url.as_str().as_bytes());
+    if let Some(referer_hash) = referer_hash.as_ref() {
+        hash_field(&mut hasher, b"source-referer", referer_hash);
+    }
     hash_field(&mut hasher, b"yt-dlp-version", yt_version.as_bytes());
     hash_field(
         &mut hasher,
@@ -679,6 +749,93 @@ mod tests {
         assert_ne!(
             cache_key(url, &binary, "2026.10.23", "none", Some(&proxy), &args),
             Some(base)
+        );
+    }
+
+    #[test]
+    fn referer_bound_video_and_playlist_keys_are_separate_and_video_stays_in_memory() {
+        let directory = tempfile::tempdir().expect("temporary directory");
+        let binary = fake_binary(directory.path());
+        let url = "https://example.test/watch?v=1";
+        let args = vec!["--".to_string(), url.to_string()];
+        let source = "https://origin.example.test/watch?id=one#player";
+        let same_source = "https://origin.example.test/watch?id=one#other";
+        let different_source = "https://origin.example.test/watch?id=two";
+
+        let video_key = super::cache_key_with_referer(
+            url,
+            &binary,
+            "2026.10.23",
+            "none",
+            None,
+            &args,
+            Some(source),
+        )
+        .expect("Referer-bound video lookup should be cacheable");
+        assert!(
+            video_key.starts_with(AUTHENTICATED_VIDEO_NAMESPACE),
+            "Referer-bound metadata can contain signed media URLs and must stay in memory"
+        );
+        assert_eq!(
+            Some(video_key.clone()),
+            super::cache_key_with_referer(
+                url,
+                &binary,
+                "2026.10.23",
+                "none",
+                None,
+                &args,
+                Some(same_source),
+            ),
+            "the fragment does not affect the source request identity"
+        );
+        assert_ne!(
+            Some(video_key),
+            super::cache_key_with_referer(
+                url,
+                &binary,
+                "2026.10.23",
+                "none",
+                None,
+                &args,
+                Some(different_source),
+            ),
+            "different source-page queries must not share metadata"
+        );
+
+        let playlist_key = super::playlist_cache_key_with_referer(
+            url,
+            &binary,
+            "2026.10.23",
+            "none",
+            None,
+            &args,
+            Some(source),
+        )
+        .expect("Referer-bound playlist lookup should be cacheable");
+        assert_eq!(
+            Some(playlist_key.clone()),
+            super::playlist_cache_key_with_referer(
+                url,
+                &binary,
+                "2026.10.23",
+                "none",
+                None,
+                &args,
+                Some(same_source),
+            )
+        );
+        assert_ne!(
+            Some(playlist_key),
+            super::playlist_cache_key_with_referer(
+                url,
+                &binary,
+                "2026.10.23",
+                "none",
+                None,
+                &args,
+                Some(different_source),
+            )
         );
     }
 

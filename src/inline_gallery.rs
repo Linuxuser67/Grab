@@ -153,6 +153,7 @@ struct GalleryPreviewCacheKey {
     cookies_browser: Option<String>,
     handoff_cookie_hash: Option<[u8; 32]>,
     user_agent: Option<String>,
+    referer_hash: Option<[u8; 32]>,
     proxy: Option<String>,
 }
 
@@ -165,18 +166,29 @@ static GALLERY_PREVIEW_CACHE: LazyLock<GalleryPreviewCache> =
 
 /// Cache identity for one gallery-dl preview. Cookie jars are keyed by content
 /// so a re-handoff of the same credentials reuses the result despite a new
-/// staged path; a browser profile is keyed by the setting, like the manifest
-/// preview cache.
+/// staged path; source Referers are hashed so their path and query are not
+/// retained in the cache key.
+#[cfg(test)]
 fn gallery_preview_cache_key(
     raw_url: &str,
     auth: &GalleryAuth,
     proxy: Option<&crate::net_types::ResolvedProxy>,
+) -> Option<GalleryPreviewCacheKey> {
+    gallery_preview_cache_key_with_referer(raw_url, auth, proxy, None)
+}
+
+fn gallery_preview_cache_key_with_referer(
+    raw_url: &str,
+    auth: &GalleryAuth,
+    proxy: Option<&crate::net_types::ResolvedProxy>,
+    referer: Option<&str>,
 ) -> Option<GalleryPreviewCacheKey> {
     let mut url = url::Url::parse(raw_url).ok()?;
     url.set_fragment(None);
     if crate::video_cache::has_known_rotating_auth_query(&url) {
         return None;
     }
+    let referer_hash = crate::referrer::cache_identity(referer)?;
     let handoff_cookie_hash = match auth.cookies_path.as_deref() {
         Some(path) => Some(crate::extension_server::handoff_cookie_hash(path)?),
         None => None,
@@ -186,6 +198,7 @@ fn gallery_preview_cache_key(
         cookies_browser: auth.cookies_browser.clone(),
         handoff_cookie_hash,
         user_agent: auth.user_agent.clone(),
+        referer_hash,
         proxy: proxy.map(|resolved| resolved.cli_url.clone()),
     })
 }
@@ -272,7 +285,7 @@ pub(crate) async fn dual_probe(ctx: DualProbeCtx<'_>) -> DualProbeOutcome {
         let gallery_started = Instant::now();
         let auth = resolve_gallery_auth(&url, &ctx.browser);
         let cache_key = if ctx.referer.is_none() {
-            gallery_preview_cache_key(&url, &auth, ctx.proxy.as_ref())
+            gallery_preview_cache_key_with_referer(&url, &auth, ctx.proxy.as_ref(), ctx.referer.as_deref())
         } else {
             None
         };
@@ -638,6 +651,30 @@ mod tests {
             gallery_preview_cache_key(url, &anonymous, Some(&proxy)) != Some(base),
             "a proxy can change what the extractor returns"
         );
+    }
+
+    #[test]
+    fn gallery_preview_cache_identity_includes_the_source_page() {
+        let url = "https://gallery-cache.example.test/collection";
+        let auth = cache_auth(None, None, None);
+        let source = "https://origin.example.test/watch?id=one#player";
+        let same_source = "https://origin.example.test/watch?id=one#other";
+        let different_source = "https://origin.example.test/watch?id=two";
+
+        let base = gallery_preview_cache_key_with_referer(url, &auth, None, None)
+            .expect("without a Referer");
+        let first =
+            gallery_preview_cache_key_with_referer(url, &auth, None, Some(source))
+                .expect("with a Referer");
+        let same = gallery_preview_cache_key_with_referer(url, &auth, None, Some(same_source))
+            .expect("equivalent Referer");
+        let different =
+            gallery_preview_cache_key_with_referer(url, &auth, None, Some(different_source))
+                .expect("different Referer");
+
+        assert_ne!(base, first, "a source page changes the extractor request");
+        assert_eq!(first, same, "fragments are not part of the Referer identity");
+        assert_ne!(first, different, "different source pages must not share a preview");
     }
 
     #[test]

@@ -515,6 +515,20 @@ async fn client_for_preview(
         .map_err(|_| gettext("The configured proxy could not be used for this manifest"))
 }
 
+/// Create a bounded preview client for a direct-resource preflight. It shares
+/// the manifest preview handoff-cookie, browser-UA, Referer, proxy, and
+/// guarded-redirect policy without exporting browser-profile cookies.
+pub(crate) async fn client_for_direct_resource_probe(
+    raw_url: &str,
+    proxy: Option<&crate::net_types::ResolvedProxy>,
+    referer: Option<&str>,
+) -> Result<reqwest::Client, String> {
+    let handoff_identity = crate::extension_server::live_handoff_identity(raw_url);
+    client_for_preview(raw_url, proxy, handoff_identity, referer)
+        .await
+        .map(|(client, _)| client)
+}
+
 /// Client carrying the configured browser's exported cookies, when they export
 /// successfully. Exporting is slow (keyring plus a full yt-dlp extraction), so
 /// only downloads pay for it; previews stay anonymous or use a handoff jar.

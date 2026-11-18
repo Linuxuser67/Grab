@@ -118,9 +118,16 @@ pub(crate) async fn fetch_raw_dump_json(
     identity_args: Option<&[String]>,
 ) -> Result<serde_json::Value, VideoError> {
     fetch_raw_dump_json_with_referer(
-        youtube_bin, url, cookies_browser, timeout, fetch_proxy, flat_playlist,
-        identity_args, None,
-    ).await
+        youtube_bin,
+        url,
+        cookies_browser,
+        timeout,
+        fetch_proxy,
+        flat_playlist,
+        identity_args,
+        None,
+    )
+    .await
 }
 
 async fn fetch_raw_dump_json_with_referer(
@@ -294,7 +301,13 @@ pub async fn fetch_video_infos(
     cancel: Option<tokio::sync::oneshot::Receiver<()>>,
 ) -> Result<(ProbeResult, Option<serde_json::Value>), VideoError> {
     fetch_video_infos_with_referer(
-        youtube_bin, url, cookies_browser, newest_first, fetch_proxy, None, cancel,
+        youtube_bin,
+        url,
+        cookies_browser,
+        newest_first,
+        fetch_proxy,
+        None,
+        cancel,
     )
     .await
 }

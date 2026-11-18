@@ -362,28 +362,29 @@ pub async fn fetch_video_infos_with_referer(
             let cache_cookies_browser = cookies_browser.clone();
             let cache_proxy = fetch_proxy.clone();
             let cache_identity_args = identity_args.clone();
-            // The source page changes the HTTP request identity. Do not
-            // reuse extraction or playlist metadata produced under another
-            // Referer, even if URL, cookies, proxy, and tool version match.
-            let (cache_key, playlist_base_key) = if referer.is_some() {
-                (None, None)
-            } else {
+            let cache_referer = referer.clone();
+            // The source page changes the HTTP request identity. Include its
+            // canonical hash in both keys instead of disabling cache reuse for
+            // every Referer-bearing lookup.
+            let (cache_key, playlist_base_key) =
                 match tokio::task::spawn_blocking(move || {
-                    let video = crate::video_cache::cache_key(
+                    let video = crate::video_cache::cache_key_with_referer(
                         &cache_url,
                         &cache_binary,
                         &cache_version,
                         &cache_cookies_browser,
                         cache_proxy.as_ref(),
                         &cache_identity_args,
+                        cache_referer.as_deref(),
                     );
-                    let playlist = crate::video_cache::playlist_cache_key(
+                    let playlist = crate::video_cache::playlist_cache_key_with_referer(
                         &cache_url,
                         &cache_binary,
                         &cache_version,
                         &cache_cookies_browser,
                         cache_proxy.as_ref(),
                         &cache_identity_args,
+                        cache_referer.as_deref(),
                     );
                     (video, playlist)
                 })
@@ -397,8 +398,7 @@ pub async fn fetch_video_infos_with_referer(
                         );
                         (None, None)
                     }
-                }
-            };
+                };
             // Playlist metadata uses a separate namespace and the crate's
             // dedicated playlist cache. It may be cached for a browser profile
             // or a staged handoff jar: it holds no signed media URLs. The

@@ -1419,12 +1419,14 @@ async fn live_hls_snapshots_append_only_new_media_sequences_and_resume() {
     let (_stop_tx, mut abort) = tokio::sync::oneshot::channel();
     assert_eq!(
         apply_live_hls_snapshot(
-            &client,
+            &LiveManifestTransfer {
+                client: &client,
+                connections: 2,
+                tx: &tx,
+                downloaded: &downloaded,
+            },
             &initial,
             &mut track,
-            2,
-            &tx,
-            &downloaded,
             &mut abort,
             0,
         )
@@ -1462,12 +1464,14 @@ async fn live_hls_snapshots_append_only_new_media_sequences_and_resume() {
         .expect("restore live HLS accumulator from staging");
     assert_eq!(
         apply_live_hls_snapshot(
-            &client,
+            &LiveManifestTransfer {
+                client: &client,
+                connections: 2,
+                tx: &tx,
+                downloaded: &downloaded,
+            },
             &next,
             &mut restored,
-            2,
-            &tx,
-            &downloaded,
             &mut abort,
             0,
         )
@@ -1588,12 +1592,14 @@ async fn llhls_live_capture_reuses_parts_when_complete_parent_segments_arrive() 
 
     assert_eq!(
         apply_live_hls_snapshot(
-            &client,
+            &LiveManifestTransfer {
+                client: &client,
+                connections: 2,
+                tx: &tx,
+                downloaded: &downloaded,
+            },
             &initial,
             &mut track,
-            2,
-            &tx,
-            &downloaded,
             &mut abort,
             0,
         )
@@ -1612,12 +1618,14 @@ async fn llhls_live_capture_reuses_parts_when_complete_parent_segments_arrive() 
 
     assert_eq!(
         apply_live_hls_snapshot(
-            &client,
+            &LiveManifestTransfer {
+                client: &client,
+                connections: 2,
+                tx: &tx,
+                downloaded: &downloaded,
+            },
             &next,
             &mut track,
-            2,
-            &tx,
-            &downloaded,
             &mut abort,
             0,
         )
@@ -1699,12 +1707,14 @@ async fn llhls_mapless_parts_are_staged_without_packet_sniffing() {
 
     assert_eq!(
         apply_live_hls_snapshot(
-            &client,
+            &LiveManifestTransfer {
+                client: &client,
+                connections: 1,
+                tx: &tx,
+                downloaded: &downloaded,
+            },
             &plan,
             &mut track,
-            1,
-            &tx,
-            &downloaded,
             &mut abort,
             0,
         )
@@ -1765,12 +1775,14 @@ async fn llhls_mapless_non_transport_stream_part_is_staged_for_ffmpeg() {
 
     assert_eq!(
         apply_live_hls_snapshot(
-            &client,
+            &LiveManifestTransfer {
+                client: &client,
+                connections: 1,
+                tx: &tx,
+                downloaded: &downloaded,
+            },
             &plan,
             &mut track,
-            1,
-            &tx,
-            &downloaded,
             &mut abort,
             0,
         )
@@ -1907,12 +1919,14 @@ async fn live_hls_accumulated_playlist_finalizes_to_a_playable_mp4() {
     let (_stop_tx, mut abort) = tokio::sync::oneshot::channel();
     assert_eq!(
         apply_live_hls_snapshot(
-            &client,
+            &LiveManifestTransfer {
+                client: &client,
+                connections: 4,
+                tx: &tx,
+                downloaded: &downloaded,
+            },
             &initial_plan,
             &mut track,
-            4,
-            &tx,
-            &downloaded,
             &mut abort,
             0,
         )
@@ -1922,12 +1936,14 @@ async fn live_hls_accumulated_playlist_finalizes_to_a_playable_mp4() {
     );
     assert_eq!(
         apply_live_hls_snapshot(
-            &client,
+            &LiveManifestTransfer {
+                client: &client,
+                connections: 4,
+                tx: &tx,
+                downloaded: &downloaded,
+            },
             &final_plan,
             &mut track,
-            4,
-            &tx,
-            &downloaded,
             &mut abort,
             0,
         )
@@ -2000,15 +2016,17 @@ async fn live_hls_sequence_gap_preserves_already_committed_media() {
     let downloaded = Arc::new(AtomicU64::new(0));
     let (_stop_tx, mut abort) = tokio::sync::oneshot::channel();
     let outcome = apply_live_hls_snapshot(
-        &client,
-        &gap,
-        &mut track,
-        1,
-        &tx,
-        &downloaded,
-        &mut abort,
-        0,
-    )
+            &LiveManifestTransfer {
+                client: &client,
+                connections: 1,
+                tx: &tx,
+                downloaded: &downloaded,
+            },
+            &gap,
+            &mut track,
+            &mut abort,
+            0,
+        )
     .await
     .expect("continuity loss is a partial capture, not extractor fallback");
 
@@ -2066,12 +2084,14 @@ async fn live_hls_pause_keeps_the_last_committed_window() {
     let (_first_stop_tx, mut first_abort) = tokio::sync::oneshot::channel();
     assert_eq!(
         apply_live_hls_snapshot(
-            &client,
+            &LiveManifestTransfer {
+                client: &client,
+                connections: 1,
+                tx: &tx,
+                downloaded: &downloaded,
+            },
             &first,
             &mut track,
-            1,
-            &tx,
-            &downloaded,
             &mut first_abort,
             0,
         )
@@ -2087,12 +2107,14 @@ async fn live_hls_pause_keeps_the_last_committed_window() {
         .expect("queue pause before the next window");
     assert_eq!(
         apply_live_hls_snapshot(
-            &client,
+            &LiveManifestTransfer {
+                client: &client,
+                connections: 1,
+                tx: &tx,
+                downloaded: &downloaded,
+            },
             &next,
             &mut track,
-            1,
-            &tx,
-            &downloaded,
             &mut stop_abort,
             0,
         )
@@ -2255,15 +2277,17 @@ async fn live_hls_pause_does_not_commit_an_interrupted_window() {
         .send(crate::video::StopIntent::Pause)
         .expect("queue pause");
     let stopped = apply_live_hls_snapshot(
-        &client,
-        &plan,
-        &mut track,
-        1,
-        &tx,
-        &downloaded,
-        &mut abort,
-        0,
-    )
+            &LiveManifestTransfer {
+                client: &client,
+                connections: 1,
+                tx: &tx,
+                downloaded: &downloaded,
+            },
+            &plan,
+            &mut track,
+            &mut abort,
+            0,
+        )
     .await
     .expect("a stop before fetching is not a manifest error");
 
@@ -4199,12 +4223,14 @@ async fn live_hls_snapshot_appends_fetched_mpegts_fragments_to_visible_destinati
 
     assert_eq!(
         apply_live_hls_snapshot(
-            &client,
+            &LiveManifestTransfer {
+                client: &client,
+                connections: 2,
+                tx: &tx,
+                downloaded: &downloaded,
+            },
             &initial_plan,
             &mut track,
-            2,
-            &tx,
-            &downloaded,
             &mut abort,
             0,
         )

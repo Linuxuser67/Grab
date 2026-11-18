@@ -2016,17 +2016,17 @@ async fn live_hls_sequence_gap_preserves_already_committed_media() {
     let downloaded = Arc::new(AtomicU64::new(0));
     let (_stop_tx, mut abort) = tokio::sync::oneshot::channel();
     let outcome = apply_live_hls_snapshot(
-            &LiveManifestTransfer {
-                client: &client,
-                connections: 1,
-                tx: &tx,
-                downloaded: &downloaded,
-            },
-            &gap,
-            &mut track,
-            &mut abort,
-            0,
-        )
+        &LiveManifestTransfer {
+            client: &client,
+            connections: 1,
+            tx: &tx,
+            downloaded: &downloaded,
+        },
+        &gap,
+        &mut track,
+        &mut abort,
+        0,
+    )
     .await
     .expect("continuity loss is a partial capture, not extractor fallback");
 
@@ -2277,17 +2277,17 @@ async fn live_hls_pause_does_not_commit_an_interrupted_window() {
         .send(crate::video::StopIntent::Pause)
         .expect("queue pause");
     let stopped = apply_live_hls_snapshot(
-            &LiveManifestTransfer {
-                client: &client,
-                connections: 1,
-                tx: &tx,
-                downloaded: &downloaded,
-            },
-            &plan,
-            &mut track,
-            &mut abort,
-            0,
-        )
+        &LiveManifestTransfer {
+            client: &client,
+            connections: 1,
+            tx: &tx,
+            downloaded: &downloaded,
+        },
+        &plan,
+        &mut track,
+        &mut abort,
+        0,
+    )
     .await
     .expect("a stop before fetching is not a manifest error");
 

@@ -1573,9 +1573,8 @@ fn submit_gallery_all(
                     let url_for_count = page_url.clone();
                     let browser_for_count = browser.clone();
                     let count_settings = crate::settings::AppSettings::new();
-                    let proxy =
-                        crate::download::DownloadOptions::from_settings(&count_settings)
-                            .proxy_config();
+                    let proxy = crate::download::DownloadOptions::from_settings(&count_settings)
+                        .proxy_config();
                     crate::runtime::tokio_rt()
                         .spawn(count_host_lease_guard.hold(async move {
                             let proxy = match proxy {

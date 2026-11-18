@@ -87,6 +87,8 @@ pub(crate) struct FetchCtx {
     /// Browser UA from the extension handoff (cf_clearance is UA-bound).
     /// Falls back to DEFAULT_USER_AGENT when no handoff.
     pub(crate) user_agent: String,
+    /// Browser-provided source page; absent for manually pasted links.
+    pub(crate) referer: Option<String>,
     pub(crate) timeout: Duration,
     pub(crate) tx: tokio::sync::mpsc::UnboundedSender<EngineMsg>,
     /// Session validator for If-Range: ETag preferred, Last-Modified fallback.
@@ -185,7 +187,7 @@ pub(crate) async fn run_download(mut ctx: FetchCtx, connections: usize, mode: St
                 single_loop(&ctx, &mut tries, None, &mut claim).await;
                 return;
             }
-            match probe_ranges(&ctx.client, &ctx.url, &ctx.user_agent, timeout).await {
+            match probe_ranges(&ctx.client, &ctx.url, &ctx.user_agent, ctx.referer.as_deref(), timeout).await {
                 Ok((total, validator)) => {
                     // The probe captured the session validator before any worker started.
                     // Persist it for cross-session resume, and use it for If-Range.
@@ -722,7 +724,7 @@ async fn attempt_once(
             }
         };
 
-        let mut req = stamp_request(ctx.client.get(&ctx.url), &ctx.user_agent, &ctx.url);
+        let mut req = stamp_request(ctx.client.get(&ctx.url), &ctx.user_agent, &ctx.url, ctx.referer.as_deref());
         if start > 0 {
             req = req.header("Range", format!("bytes={start}-"));
             // If-Range: the server returns 206 only if the object still
@@ -756,7 +758,7 @@ async fn attempt_once(
                 && !has_holes(&ctx.dest).await;
             if !already_complete && claimed.is_none() && start > 0 && !restarted {
                 // Bare 416 with no usable Content-Range: confirm the length before resetting.
-                let hreq = stamp_request(ctx.client.head(&ctx.url), &ctx.user_agent, &ctx.url);
+                let hreq = stamp_request(ctx.client.head(&ctx.url), &ctx.user_agent, &ctx.url, ctx.referer.as_deref());
                 if let Ok(hresp) = execute_with_timeout(&ctx.client, hreq, ctx.timeout).await {
                     already_complete = hresp.status().is_success()
                         && hresp.content_length() == Some(start)
@@ -1435,15 +1437,38 @@ fn origin_referer(url: &str) -> Option<String> {
 /// Referer); single choke point for all requests. No Cookie: cookie-bearing
 /// downloads use a client with the jar as provider (see `http_client_with_jar`),
 /// which re-applies in-scope cookies on every hop.
+/// Browser-like referrer policy for an outbound request. Same-origin requests
+/// retain the source page URL (without fragments); cross-origin requests send
+/// only its origin; HTTPS-to-HTTP requests omit it. With no browser source,
+/// keep Grab's established origin-only self-referer behavior.
+fn request_referer(target: &str, source: Option<&str>) -> Option<String> {
+    let Some(source) = source else {
+        return origin_referer(target);
+    };
+    let source_url = url::Url::parse(source).ok()?;
+    let target_url = url::Url::parse(target).ok()?;
+    if source_url.scheme() == "https" && target_url.scheme() == "http" {
+        return None;
+    }
+    let mut source_url = source_url;
+    source_url.set_fragment(None);
+    if source_url.origin() == target_url.origin() {
+        Some(source_url.to_string())
+    } else {
+        origin_referer(source)
+    }
+}
+
 pub(crate) fn stamp_request(
     mut req: reqwest::RequestBuilder,
     user_agent: &str,
     url: &str,
+    source_referer: Option<&str>,
 ) -> reqwest::RequestBuilder {
     if !user_agent.trim().is_empty() {
         req = req.header("User-Agent", user_agent.trim());
     }
-    if let Some(referer) = origin_referer(url) {
+    if let Some(referer) = request_referer(url, source_referer) {
         req = req.header("Referer", referer);
     }
     req
@@ -1519,12 +1544,14 @@ async fn probe_ranges(
     client: &reqwest::Client,
     url: &str,
     user_agent: &str,
+    referer: Option<&str>,
     timeout: Duration,
 ) -> Result<(u64, crate::engine_msg::ValidatorInfo), String> {
     let req = stamp_request(
         client.get(url).header("Range", "bytes=0-0"),
         user_agent,
         url,
+        referer,
     );
     let resp = execute_with_timeout(client, req, timeout).await?;
     if resp.status() != reqwest::StatusCode::PARTIAL_CONTENT {
@@ -1653,7 +1680,7 @@ pub(crate) async fn fetch_piece(
         if let Some(v) = ctx.if_range.get() {
             builder = builder.header("If-Range", v);
         }
-        let req = stamp_request(builder, &ctx.user_agent, &ctx.url);
+        let req = stamp_request(builder, &ctx.user_agent, &ctx.url, ctx.referer.as_deref());
         let resp = match execute_with_timeout(&ctx.client, req, timeout).await {
             Ok(r) => r,
             Err(e) => {
@@ -1861,6 +1888,7 @@ mod destination_ownership_tests {
             opts: DownloadOptions::default(),
             cookies: None,
             user_agent: DEFAULT_USER_AGENT.to_string(),
+            referer: None,
             timeout: Duration::from_secs(3),
             tx,
             if_range: std::sync::Arc::new(std::sync::OnceLock::new()),

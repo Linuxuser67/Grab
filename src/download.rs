@@ -3391,6 +3391,7 @@ impl DownloadManager {
         });
         item.set_output_dir(snap.output_dir);
         item.set_public_only(snap.public_only);
+        item.set_referer(snap.referer);
         let mut gallery_file_rows = None;
         let mut playlist_file_rows = None;
         if let Some(mut job) = snap.gallery_job {

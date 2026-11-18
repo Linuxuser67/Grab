@@ -393,6 +393,10 @@ impl DownloadManager {
             // If a handoff jar is accepted at attempt start, run_download also
             // applies its matching UA. Otherwise use the default with live-browser cookies.
             user_agent: crate::download_net::DEFAULT_USER_AGENT.to_string(),
+            referer: {
+                let value = item.referer();
+                (!value.is_empty()).then_some(value)
+            },
             timeout,
             tx,
         };

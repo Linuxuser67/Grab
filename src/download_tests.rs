@@ -2060,7 +2060,7 @@ fn native_manifest_without_a_supplied_name_uses_a_title_from_the_manifest_url() 
     };
 
     let item = manager
-        .enqueue_manifest_staged(source, &directory, None, &[])
+        .enqueue_manifest_staged(source, &directory, None, &[], None)
         .expect("enqueue manifest with a derived filename");
 
     assert_eq!(item.filename(), "my video.mkv");

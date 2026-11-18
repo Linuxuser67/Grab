@@ -130,6 +130,10 @@ pub(crate) async fn fetch_raw_dump_json(
     .await
 }
 
+#[expect(
+    clippy::too_many_arguments,
+    reason = "this helper mirrors the existing yt-dlp probe inputs and adds the optional source referrer"
+)]
 async fn fetch_raw_dump_json_with_referer(
     youtube_bin: &Path,
     url: &str,

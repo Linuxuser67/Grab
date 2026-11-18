@@ -398,14 +398,6 @@ pub(crate) fn http_client_with_jar_and_referer(
 }
 
 /// Build an attempt-scoped client with browser-bound cookies and the matching user agent.
-pub(crate) fn http_client_with_jar_and_user_agent(
-    proxy: Option<&ResolvedProxy>,
-    jar: std::sync::Arc<reqwest::cookie::Jar>,
-    user_agent: &str,
-) -> Result<reqwest::Client, String> {
-    http_client_with_jar_and_user_agent_and_referer(proxy, jar, user_agent, None)
-}
-
 pub(crate) fn http_client_with_jar_and_user_agent_and_referer(
     proxy: Option<&ResolvedProxy>,
     jar: std::sync::Arc<reqwest::cookie::Jar>,

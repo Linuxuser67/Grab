@@ -1763,6 +1763,10 @@ impl DownloadManager {
         )
     }
 
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "the source referrer is per playlist owner and the other arguments form the existing selection contract"
+    )]
     pub(crate) fn enqueue_video_playlist_staged_with_referer(
         self: &Rc<Self>,
         page_url: &str,

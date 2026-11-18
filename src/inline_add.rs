@@ -1430,6 +1430,7 @@ fn submit_probed_single(
         None => manager.settings().video_quality(),
     };
     let page_url = v.page_url.clone();
+    let referer = source_referer_for(step, &submitted_url);
     let is_live = v.is_live;
     let enqueue_manager = Rc::clone(manager);
     let error_step = Rc::clone(step);
@@ -1440,7 +1441,7 @@ fn submit_probed_single(
         scheduled_at,
         move |d| async move {
             enqueue_manager
-                .enqueue_video_async_batched(
+                .enqueue_video_async_batched_with_referer(
                     &page_url,
                     d.as_deref(),
                     name.as_deref(),
@@ -1451,6 +1452,7 @@ fn submit_probed_single(
                         is_live,
                         playlist_item_id: None,
                     },
+                    referer.as_deref(),
                 )
                 .await
         },
@@ -1564,10 +1566,12 @@ fn submit_gallery_all(
         return;
     }
 
+    let referer = source_referer_for(step, &submitted_url);
     let settings = manager.settings();
     let job = crate::gallery_argv::GalleryJob {
         item_id: 0,
         page_url,
+        referer,
         title,
         file_count,
         dest_dir: std::path::PathBuf::from("."),
@@ -1680,12 +1684,13 @@ async fn queue_plain(
     dest: &Rc<RefCell<String>>,
     close_card: &Rc<dyn Fn()>,
     url: &str,
+    referer: Option<String>,
     scheduled_at: Option<i64>,
 ) -> Result<(), String> {
     let destination = Some(dest.borrow().clone());
     // Batch guard defers start_next until the Scheduled status is set.
     let (item, guard) = manager
-        .enqueue_async_batched(url, destination.as_deref(), None)
+        .enqueue_async_batched_with_referer(url, destination.as_deref(), None, referer.as_deref())
         .await?;
     apply_scheduled_at(&item, scheduled_at);
     close_card();
@@ -3452,6 +3457,7 @@ fn build_video_lookup_kicker(context: VideoLookupContext) -> VideoLookupKick {
                                 &dest_b,
                                 &close_b,
                                 &direct,
+                                source_referer.clone(),
                                 scheduled_at_b.get(),
                             )
                             .await
@@ -3481,6 +3487,7 @@ fn build_video_lookup_kicker(context: VideoLookupContext) -> VideoLookupKick {
                                 &dest_b,
                                 &close_b,
                                 &url,
+                                source_referer.clone(),
                                 scheduled_at_b.get(),
                             )
                             .await

@@ -675,7 +675,7 @@ async fn ensure_destination_unclaimed(destination: &Path) -> Result<(), VideoErr
 }
 
 /// Shared executable and lifecycle state for one resolved yt-dlp attempt.
-struct YtdlpAttemptContext<'a> {
+pub(crate) struct YtdlpAttemptContext<'a> {
     youtube_bin: &'a Path,
     ffmpeg_bin: &'a Path,
     staging: &'a Path,

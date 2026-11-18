@@ -35,9 +35,9 @@ use crate::video_progress::{
 use crate::video_quality::selector_for_quality;
 use crate::video_quality::{default_quality_index, default_video_filename, quality_for_height};
 use crate::video_runner::{
-    RecordingWatcherGuard, await_child, live_capture_argv_with_ffmpeg, pick_subtitle_lang,
-    remux_live_capture, resolve_subtitle_lang, run_hls_ytdlp, run_live_ytdlp, run_unified_ytdlp,
-    spawn_recording_watcher,
+    RecordingWatcherGuard, YtdlpAttemptContext, await_child, live_capture_argv_with_ffmpeg,
+    pick_subtitle_lang, remux_live_capture, resolve_subtitle_lang, run_hls_ytdlp, run_live_ytdlp,
+    run_unified_ytdlp, spawn_recording_watcher,
 };
 use crate::video_spawn::{
     ProcessGroupGuard, fetch_raw_dump_json, fetch_video_page, reap_child, ytdlp_command,
@@ -4167,17 +4167,19 @@ fn live_capture_adopts_part_and_remuxes() {
     let (_abort_tx, abort_rx) = tokio::sync::oneshot::channel::<crate::video::StopIntent>();
     // Natural end with a `.part` shell: adopted, remuxed, delivered.
     let res = crate::runtime::tokio_rt().block_on(run_live_ytdlp(
-        &fake_yt,
-        &fake_ff,
-        &staging,
+        &YtdlpAttemptContext {
+            youtube_bin: &fake_yt,
+            ffmpeg_bin: &fake_ff,
+            staging: &staging,
+            gate: &AttemptGate::new(),
+            timeout: std::time::Duration::from_secs(30),
+            tx,
+            playlist_index: None,
+        },
         &job,
-        &AttemptGate::new(),
         "https://youtu.be/grabtest",
         "h1080",
         abort_rx,
-        std::time::Duration::from_secs(30),
-        tx,
-        None,
     ));
     assert!(matches!(res, Ok(Some(_))), "got {res:?}");
     assert_eq!(std::fs::read(&job.dest).unwrap(), b"tsbytes");
@@ -4231,17 +4233,19 @@ fn live_capture_empty_fails_with_detail() {
     let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
     let (_abort_tx, abort_rx) = tokio::sync::oneshot::channel::<crate::video::StopIntent>();
     let res = crate::runtime::tokio_rt().block_on(run_live_ytdlp(
-        &fake_yt,
-        &fake_ff,
-        &staging,
+        &YtdlpAttemptContext {
+            youtube_bin: &fake_yt,
+            ffmpeg_bin: &fake_ff,
+            staging: &staging,
+            gate: &AttemptGate::new(),
+            timeout: std::time::Duration::from_secs(30),
+            tx,
+            playlist_index: None,
+        },
         &job,
-        &AttemptGate::new(),
         "https://youtu.be/grabtest",
         "h1080",
         abort_rx,
-        std::time::Duration::from_secs(30),
-        tx,
-        None,
     ));
     match res {
         Err(e) => assert!(e.to_string().contains("404"), "yt-dlp line surfaces: {e}"),
@@ -4265,17 +4269,19 @@ fn live_capture_crash_fails_instead_of_adopting() {
     let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
     let (_abort_tx, abort_rx) = tokio::sync::oneshot::channel::<crate::video::StopIntent>();
     let res = crate::runtime::tokio_rt().block_on(run_live_ytdlp(
-        &fake_yt,
-        &fake_ff,
-        &staging,
+        &YtdlpAttemptContext {
+            youtube_bin: &fake_yt,
+            ffmpeg_bin: &fake_ff,
+            staging: &staging,
+            gate: &AttemptGate::new(),
+            timeout: std::time::Duration::from_secs(30),
+            tx,
+            playlist_index: None,
+        },
         &job,
-        &AttemptGate::new(),
         "https://youtu.be/grabtest",
         "h1080",
         abort_rx,
-        std::time::Duration::from_secs(30),
-        tx,
-        None,
     ));
     match res {
         Err(e) => assert!(
@@ -4337,17 +4343,19 @@ fn live_capture_stale_staging_never_adopts() {
     let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
     let (_abort_tx, abort_rx) = tokio::sync::oneshot::channel::<crate::video::StopIntent>();
     let res = crate::runtime::tokio_rt().block_on(run_live_ytdlp(
-        &fake_yt,
-        &fake_ff,
-        &staging,
+        &YtdlpAttemptContext {
+            youtube_bin: &fake_yt,
+            ffmpeg_bin: &fake_ff,
+            staging: &staging,
+            gate: &AttemptGate::new(),
+            timeout: std::time::Duration::from_secs(30),
+            tx,
+            playlist_index: None,
+        },
         &job,
-        &AttemptGate::new(),
         "https://youtu.be/grabtest",
         "h1080",
         abort_rx,
-        std::time::Duration::from_secs(30),
-        tx,
-        None,
     ));
     assert!(res.is_err(), "barren run must fail, got {res:?}");
     assert!(!job.dest.exists(), "stale bytes must not deliver");
@@ -4369,17 +4377,19 @@ fn live_capture_refuses_existing_dest() {
     let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
     let (_abort_tx, abort_rx) = tokio::sync::oneshot::channel::<crate::video::StopIntent>();
     let res = crate::runtime::tokio_rt().block_on(run_live_ytdlp(
-        &fake_yt,
-        &fake_ff,
-        &staging,
+        &YtdlpAttemptContext {
+            youtube_bin: &fake_yt,
+            ffmpeg_bin: &fake_ff,
+            staging: &staging,
+            gate: &AttemptGate::new(),
+            timeout: std::time::Duration::from_secs(30),
+            tx,
+            playlist_index: None,
+        },
         &job,
-        &AttemptGate::new(),
         "https://youtu.be/grabtest",
         "h1080",
         abort_rx,
-        std::time::Duration::from_secs(30),
-        tx,
-        None,
     ));
     match res {
         Err(e) => assert_eq!(e.to_string(), crate::engine_msg::DEST_EXISTS, "{e}"),
@@ -4424,17 +4434,19 @@ fn live_capture_refusal_reclaims_stale_scratch() {
     let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
     let (_abort_tx, abort_rx) = tokio::sync::oneshot::channel::<crate::video::StopIntent>();
     let res = crate::runtime::tokio_rt().block_on(run_live_ytdlp(
-        &fake_yt,
-        &fake_ff,
-        &staging,
+        &YtdlpAttemptContext {
+            youtube_bin: &fake_yt,
+            ffmpeg_bin: &fake_ff,
+            staging: &staging,
+            gate: &AttemptGate::new(),
+            timeout: std::time::Duration::from_secs(30),
+            tx,
+            playlist_index: None,
+        },
         &job,
-        &AttemptGate::new(),
         "https://youtu.be/grabtest",
         "h1080",
         abort_rx,
-        std::time::Duration::from_secs(30),
-        tx,
-        None,
     ));
     match res {
         Err(e) => assert_eq!(e.to_string(), crate::engine_msg::DEST_EXISTS, "{e}"),
@@ -4492,17 +4504,19 @@ fn live_capture_abort_adopts_partial() {
             let _ = abort_tx.send(crate::video::StopIntent::Finish);
         });
         run_live_ytdlp(
-            &fake_yt,
-            &fake_ff,
-            &staging,
+            &YtdlpAttemptContext {
+                youtube_bin: &fake_yt,
+                ffmpeg_bin: &fake_ff,
+                staging: &staging,
+                gate: &AttemptGate::new(),
+                timeout: std::time::Duration::from_secs(30),
+                tx,
+                playlist_index: None,
+            },
             &job,
-            &AttemptGate::new(),
             "https://youtu.be/grabtest",
             "h1080",
             abort_rx,
-            std::time::Duration::from_secs(30),
-            tx,
-            None,
         )
         .await
     });
@@ -4598,17 +4612,19 @@ fn live_capture_remux_failure_sweeps_state_but_keeps_recording() {
     let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
     let (_abort_tx, abort_rx) = tokio::sync::oneshot::channel::<crate::video::StopIntent>();
     let res = crate::runtime::tokio_rt().block_on(run_live_ytdlp(
-        &fake_yt,
-        &fake_ff,
-        &staging,
+        &YtdlpAttemptContext {
+            youtube_bin: &fake_yt,
+            ffmpeg_bin: &fake_ff,
+            staging: &staging,
+            gate: &AttemptGate::new(),
+            timeout: std::time::Duration::from_secs(30),
+            tx,
+            playlist_index: None,
+        },
         &job,
-        &AttemptGate::new(),
         "https://youtu.be/grabtest",
         "h1080",
         abort_rx,
-        std::time::Duration::from_secs(30),
-        tx,
-        None,
     ));
     assert!(res.is_err(), "failed remux must fail the row, got {res:?}");
     assert!(
@@ -4683,17 +4699,19 @@ fn live_capture_barren_start_sweeps_state_file() {
     let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
     let (_abort_tx, abort_rx) = tokio::sync::oneshot::channel::<crate::video::StopIntent>();
     let res = crate::runtime::tokio_rt().block_on(run_live_ytdlp(
-        &fake_yt,
-        &fake_ff,
-        &staging,
+        &YtdlpAttemptContext {
+            youtube_bin: &fake_yt,
+            ffmpeg_bin: &fake_ff,
+            staging: &staging,
+            gate: &AttemptGate::new(),
+            timeout: std::time::Duration::from_secs(30),
+            tx,
+            playlist_index: None,
+        },
         &job,
-        &AttemptGate::new(),
         "https://youtu.be/grabtest",
         "h1080",
         abort_rx,
-        std::time::Duration::from_secs(30),
-        tx,
-        None,
     ));
     assert!(res.is_err(), "barren run must fail, got {res:?}");
     assert!(
@@ -4738,17 +4756,19 @@ fn a_discard_signal_reaps_the_whole_recorder_group_and_delivers_nothing() {
                 let _ = stop_tx.send(StopIntent::Discard);
             });
             run_live_ytdlp(
-                &fake_yt,
-                &fake_ff,
-                &staging,
+                &YtdlpAttemptContext {
+                    youtube_bin: &fake_yt,
+                    ffmpeg_bin: &fake_ff,
+                    staging: &staging,
+                    gate: &AttemptGate::new(),
+                    timeout: std::time::Duration::from_secs(600),
+                    tx,
+                    playlist_index: None,
+                },
                 &job,
-                &AttemptGate::new(),
                 "https://youtu.be/grabtest",
                 "h1080",
                 stop_rx,
-                std::time::Duration::from_secs(600),
-                tx,
-                None,
             )
             .await
         }
@@ -4893,17 +4913,19 @@ fn a_discard_that_lands_mid_remux_still_delivers_nothing() {
                 }
             });
             run_live_ytdlp(
-                &fake_yt,
-                &fake_ff,
-                &staging,
+                &YtdlpAttemptContext {
+                    youtube_bin: &fake_yt,
+                    ffmpeg_bin: &fake_ff,
+                    staging: &staging,
+                    gate: &gate,
+                    timeout: std::time::Duration::from_secs(60),
+                    tx,
+                    playlist_index: None,
+                },
                 &job,
-                &gate,
                 "https://youtu.be/grabtest",
                 "h1080",
                 stop_rx,
-                std::time::Duration::from_secs(60),
-                tx,
-                None,
             )
             .await
         }
@@ -5309,17 +5331,19 @@ fn a_sweep_never_removes_another_attempts_remux() {
     let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
     let (_a, abort_rx) = tokio::sync::oneshot::channel::<crate::video::StopIntent>();
     let res = crate::runtime::tokio_rt().block_on(run_live_ytdlp(
-        &fake_yt,
-        &fake_ff,
-        &staging,
+        &YtdlpAttemptContext {
+            youtube_bin: &fake_yt,
+            ffmpeg_bin: &fake_ff,
+            staging: &staging,
+            gate: &AttemptGate::new(),
+            timeout: std::time::Duration::from_secs(30),
+            tx,
+            playlist_index: None,
+        },
         &job,
-        &AttemptGate::new(),
         "https://youtu.be/grabtest",
         "h1080",
         abort_rx,
-        std::time::Duration::from_secs(30),
-        tx,
-        None,
     ));
     assert!(res.is_err(), "a barren attempt must fail the row");
     assert_eq!(
@@ -5386,17 +5410,19 @@ fn live_capture_retry_never_inherits_stale_state() {
     let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
     let (_abort_tx, abort_rx) = tokio::sync::oneshot::channel::<crate::video::StopIntent>();
     let res = crate::runtime::tokio_rt().block_on(run_live_ytdlp(
-        &fake_yt,
-        &fake_ff,
-        &staging,
+        &YtdlpAttemptContext {
+            youtube_bin: &fake_yt,
+            ffmpeg_bin: &fake_ff,
+            staging: &staging,
+            gate: &AttemptGate::new(),
+            timeout: std::time::Duration::from_secs(30),
+            tx,
+            playlist_index: None,
+        },
         &job,
-        &AttemptGate::new(),
         "https://youtu.be/grabtest",
         "h1080",
         abort_rx,
-        std::time::Duration::from_secs(30),
-        tx,
-        None,
     ));
     assert!(
         matches!(res, Ok(Some(_))),
@@ -5583,17 +5609,19 @@ fn aborting_a_live_capture_kills_the_recorder() {
             let (_abort_tx, abort_rx) = tokio::sync::oneshot::channel::<crate::video::StopIntent>();
             // A long stall timeout so the capture cannot finish on its own.
             let _ = run_live_ytdlp(
-                &fake_yt,
-                &fake_ff,
-                &staging_for_task,
+                &YtdlpAttemptContext {
+                    youtube_bin: &fake_yt,
+                    ffmpeg_bin: &fake_ff,
+                    staging: &staging_for_task,
+                    gate: &AttemptGate::new(),
+                    timeout: std::time::Duration::from_secs(600),
+                    tx,
+                    playlist_index: None,
+                },
                 &job,
-                &AttemptGate::new(),
                 "https://youtu.be/grabtest",
                 "h1080",
                 abort_rx,
-                std::time::Duration::from_secs(600),
-                tx,
-                None,
             )
             .await;
         }
@@ -5784,16 +5812,18 @@ fn hls_map_survives_estimate_wobble() {
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
     let (_abort_tx, mut abort_rx) = tokio::sync::oneshot::channel::<crate::video::StopIntent>();
     let res = crate::runtime::tokio_rt().block_on(run_hls_ytdlp(
-        &fake,
-        std::path::Path::new("/usr/bin/ffmpeg"),
-        &staging,
+        &YtdlpAttemptContext {
+            youtube_bin: &fake,
+            ffmpeg_bin: std::path::Path::new("/usr/bin/ffmpeg"),
+            staging: &staging,
+            gate: &AttemptGate::new(),
+            timeout: std::time::Duration::from_secs(30),
+            tx,
+            playlist_index: None,
+        },
         &job,
-        &AttemptGate::new(),
         "h1080",
         &mut abort_rx,
-        std::time::Duration::from_secs(30),
-        tx,
-        None,
     ));
     assert!(matches!(res, Ok(Some(_))), "got {res:?}");
     let mut last = (0u64, None);
@@ -5874,16 +5904,18 @@ fn hls_map_rebuilds_on_upward_wobble() {
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
     let (_abort_tx, mut abort_rx) = tokio::sync::oneshot::channel::<crate::video::StopIntent>();
     let res = crate::runtime::tokio_rt().block_on(run_hls_ytdlp(
-        &fake,
-        std::path::Path::new("/usr/bin/ffmpeg"),
-        &staging,
+        &YtdlpAttemptContext {
+            youtube_bin: &fake,
+            ffmpeg_bin: std::path::Path::new("/usr/bin/ffmpeg"),
+            staging: &staging,
+            gate: &AttemptGate::new(),
+            timeout: std::time::Duration::from_secs(30),
+            tx,
+            playlist_index: None,
+        },
         &job,
-        &AttemptGate::new(),
         "h1080",
         &mut abort_rx,
-        std::time::Duration::from_secs(30),
-        tx,
-        None,
     ));
     assert!(matches!(res, Ok(Some(_))), "got {res:?}");
     let mut last = (0u64, None);
@@ -5963,16 +5995,18 @@ fn hls_map_adopts_estimate_collapse() {
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
     let (_abort_tx, mut abort_rx) = tokio::sync::oneshot::channel::<crate::video::StopIntent>();
     let res = crate::runtime::tokio_rt().block_on(run_hls_ytdlp(
-        &fake,
-        std::path::Path::new("/usr/bin/ffmpeg"),
-        &staging,
+        &YtdlpAttemptContext {
+            youtube_bin: &fake,
+            ffmpeg_bin: std::path::Path::new("/usr/bin/ffmpeg"),
+            staging: &staging,
+            gate: &AttemptGate::new(),
+            timeout: std::time::Duration::from_secs(30),
+            tx,
+            playlist_index: None,
+        },
         &job,
-        &AttemptGate::new(),
         "h1080",
         &mut abort_rx,
-        std::time::Duration::from_secs(30),
-        tx,
-        None,
     ));
     assert!(matches!(res, Ok(Some(_))), "got {res:?}");
     let mut last = (0u64, None);
@@ -6059,16 +6093,18 @@ fn hls_progress_moves_through_second_leg() {
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
     let (_abort_tx, mut abort_rx) = tokio::sync::oneshot::channel::<crate::video::StopIntent>();
     let res = crate::runtime::tokio_rt().block_on(run_hls_ytdlp(
-        &fake,
-        std::path::Path::new("/usr/bin/ffmpeg"),
-        &staging,
+        &YtdlpAttemptContext {
+            youtube_bin: &fake,
+            ffmpeg_bin: std::path::Path::new("/usr/bin/ffmpeg"),
+            staging: &staging,
+            gate: &AttemptGate::new(),
+            timeout: std::time::Duration::from_secs(30),
+            tx,
+            playlist_index: None,
+        },
         &job,
-        &AttemptGate::new(),
         "h1080",
         &mut abort_rx,
-        std::time::Duration::from_secs(30),
-        tx,
-        None,
     ));
     assert!(matches!(res, Ok(Some(_))), "got {res:?}");
     let mut seen = Vec::new();
@@ -6172,16 +6208,18 @@ fn hls_progress_moves_through_similar_sized_legs() {
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
     let (_abort_tx, mut abort_rx) = tokio::sync::oneshot::channel::<crate::video::StopIntent>();
     let res = crate::runtime::tokio_rt().block_on(run_hls_ytdlp(
-        &fake,
-        std::path::Path::new("/usr/bin/ffmpeg"),
-        &staging,
+        &YtdlpAttemptContext {
+            youtube_bin: &fake,
+            ffmpeg_bin: std::path::Path::new("/usr/bin/ffmpeg"),
+            staging: &staging,
+            gate: &AttemptGate::new(),
+            timeout: std::time::Duration::from_secs(30),
+            tx,
+            playlist_index: None,
+        },
         &job,
-        &AttemptGate::new(),
         "h1080",
         &mut abort_rx,
-        std::time::Duration::from_secs(30),
-        tx,
-        None,
     ));
     assert!(matches!(res, Ok(Some(_))), "got {res:?}");
     let mut seen = Vec::new();
@@ -6292,16 +6330,18 @@ fn hls_stall_watchdog_kills_silent_download() {
     let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
     let (_abort_tx, mut abort_rx) = tokio::sync::oneshot::channel::<crate::video::StopIntent>();
     let res = crate::runtime::tokio_rt().block_on(run_hls_ytdlp(
-        &fake,
-        std::path::Path::new("/usr/bin/ffmpeg"),
-        &staging,
+        &YtdlpAttemptContext {
+            youtube_bin: &fake,
+            ffmpeg_bin: std::path::Path::new("/usr/bin/ffmpeg"),
+            staging: &staging,
+            gate: &AttemptGate::new(),
+            timeout: std::time::Duration::from_secs(2),
+            tx,
+            playlist_index: None,
+        },
         &job,
-        &AttemptGate::new(),
         "h1080",
         &mut abort_rx,
-        std::time::Duration::from_secs(2),
-        tx,
-        None,
     ));
     let err = res.expect_err("silent yt-dlp should stall out");
     assert!(
@@ -6325,16 +6365,18 @@ fn hls_stall_watchdog_spares_progressing_download() {
     let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
     let (_abort_tx, mut abort_rx) = tokio::sync::oneshot::channel::<crate::video::StopIntent>();
     let res = crate::runtime::tokio_rt().block_on(run_hls_ytdlp(
-        &fake,
-        std::path::Path::new("/usr/bin/ffmpeg"),
-        &staging,
+        &YtdlpAttemptContext {
+            youtube_bin: &fake,
+            ffmpeg_bin: std::path::Path::new("/usr/bin/ffmpeg"),
+            staging: &staging,
+            gate: &AttemptGate::new(),
+            timeout: std::time::Duration::from_secs(2),
+            tx,
+            playlist_index: None,
+        },
         &job,
-        &AttemptGate::new(),
         "h1080",
         &mut abort_rx,
-        std::time::Duration::from_secs(2),
-        tx,
-        None,
     ));
     assert!(matches!(res, Ok(Some(_))), "got {res:?}");
     let _ = std::fs::remove_dir_all(&dir);
@@ -6356,16 +6398,18 @@ fn hls_stall_watchdog_spares_silent_merge() {
     let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
     let (_abort_tx, mut abort_rx) = tokio::sync::oneshot::channel::<crate::video::StopIntent>();
     let res = crate::runtime::tokio_rt().block_on(run_hls_ytdlp(
-        &fake,
-        std::path::Path::new("/usr/bin/ffmpeg"),
-        &staging,
+        &YtdlpAttemptContext {
+            youtube_bin: &fake,
+            ffmpeg_bin: std::path::Path::new("/usr/bin/ffmpeg"),
+            staging: &staging,
+            gate: &AttemptGate::new(),
+            timeout: std::time::Duration::from_secs(2),
+            tx,
+            playlist_index: None,
+        },
         &job,
-        &AttemptGate::new(),
         "h1080",
         &mut abort_rx,
-        std::time::Duration::from_secs(2),
-        tx,
-        None,
     ));
     assert!(matches!(res, Ok(Some(_))), "got {res:?}");
     let _ = std::fs::remove_dir_all(&dir);
@@ -6469,16 +6513,18 @@ fn vod_hls_pins_planner_variant_id() {
     let (_abort_tx, mut abort_rx) = tokio::sync::oneshot::channel::<crate::video::StopIntent>();
     let gate = AttemptGate::new();
     let res = crate::runtime::tokio_rt().block_on(run_hls_ytdlp(
-        &fake,
-        std::path::Path::new("/usr/bin/ffmpeg"),
-        &staging,
+        &YtdlpAttemptContext {
+            youtube_bin: &fake,
+            ffmpeg_bin: std::path::Path::new("/usr/bin/ffmpeg"),
+            staging: &staging,
+            gate: &gate,
+            timeout: std::time::Duration::from_secs(30),
+            tx,
+            playlist_index: None,
+        },
         &job,
-        &gate,
         "h1080",
         &mut abort_rx,
-        std::time::Duration::from_secs(30),
-        tx,
-        None,
     ));
     assert!(matches!(res, Ok(Some(_))), "got {res:?}");
     assert_eq!(std::fs::read(&job.dest).unwrap(), b"hlsbytes");
@@ -6538,16 +6584,18 @@ fn vod_hls_refuses_existing_dest() {
     let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
     let (_abort_tx, mut abort_rx) = tokio::sync::oneshot::channel::<crate::video::StopIntent>();
     let res = crate::runtime::tokio_rt().block_on(run_hls_ytdlp(
-        &fake,
-        std::path::Path::new("/usr/bin/ffmpeg"),
-        &staging,
+        &YtdlpAttemptContext {
+            youtube_bin: &fake,
+            ffmpeg_bin: std::path::Path::new("/usr/bin/ffmpeg"),
+            staging: &staging,
+            gate: &AttemptGate::new(),
+            timeout: std::time::Duration::from_secs(30),
+            tx,
+            playlist_index: None,
+        },
         &job,
-        &AttemptGate::new(),
         "h1080",
         &mut abort_rx,
-        std::time::Duration::from_secs(30),
-        tx,
-        None,
     ));
     match res {
         Err(e) => assert_eq!(e.to_string(), crate::engine_msg::DEST_EXISTS, "{e}"),
@@ -9205,16 +9253,18 @@ fn hls_collects_sidecar_beside_finished_file() {
     let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
     let (_abort_tx, mut abort_rx) = tokio::sync::oneshot::channel::<crate::video::StopIntent>();
     let res = crate::runtime::tokio_rt().block_on(run_hls_ytdlp(
-        &fake,
-        std::path::Path::new("/usr/bin/ffmpeg"),
-        &staging,
+        &YtdlpAttemptContext {
+            youtube_bin: &fake,
+            ffmpeg_bin: std::path::Path::new("/usr/bin/ffmpeg"),
+            staging: &staging,
+            gate: &AttemptGate::new(),
+            timeout: std::time::Duration::from_secs(30),
+            tx,
+            playlist_index: None,
+        },
         &job,
-        &AttemptGate::new(),
         "h1080",
         &mut abort_rx,
-        std::time::Duration::from_secs(30),
-        tx,
-        None,
     ));
     assert!(matches!(res, Ok(Some(_))), "got {res:?}");
     assert_eq!(std::fs::read(&job.dest).unwrap(), b"hlsbytes");
@@ -9242,16 +9292,18 @@ fn hls_embed_skips_sidecar_collection() {
     let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
     let (_abort_tx, mut abort_rx) = tokio::sync::oneshot::channel::<crate::video::StopIntent>();
     let res = crate::runtime::tokio_rt().block_on(run_hls_ytdlp(
-        &fake,
-        std::path::Path::new("/usr/bin/ffmpeg"),
-        &staging,
+        &YtdlpAttemptContext {
+            youtube_bin: &fake,
+            ffmpeg_bin: std::path::Path::new("/usr/bin/ffmpeg"),
+            staging: &staging,
+            gate: &AttemptGate::new(),
+            timeout: std::time::Duration::from_secs(30),
+            tx,
+            playlist_index: None,
+        },
         &job,
-        &AttemptGate::new(),
         "h1080",
         &mut abort_rx,
-        std::time::Duration::from_secs(30),
-        tx,
-        None,
     ));
     assert!(matches!(res, Ok(Some(_))), "got {res:?}");
     assert_eq!(std::fs::read(&job.dest).unwrap(), b"hlsbytes");
@@ -9315,16 +9367,18 @@ exit 0
     let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
     let (_abort_tx, mut abort_rx) = tokio::sync::oneshot::channel::<crate::video::StopIntent>();
     let res = crate::runtime::tokio_rt().block_on(run_hls_ytdlp(
-        &bin,
-        std::path::Path::new("/usr/bin/ffmpeg"),
-        &staging,
+        &YtdlpAttemptContext {
+            youtube_bin: &bin,
+            ffmpeg_bin: std::path::Path::new("/usr/bin/ffmpeg"),
+            staging: &staging,
+            gate: &AttemptGate::new(),
+            timeout: std::time::Duration::from_secs(30),
+            tx,
+            playlist_index: None,
+        },
         &job,
-        &AttemptGate::new(),
         "h1080",
         &mut abort_rx,
-        std::time::Duration::from_secs(30),
-        tx,
-        None,
     ));
     assert!(
         matches!(res, Ok(Some(_))),
@@ -9442,17 +9496,19 @@ fn live_part_shell_announces_recording_and_is_swept() {
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
     let (_abort_tx, abort_rx) = tokio::sync::oneshot::channel::<crate::video::StopIntent>();
     let res = crate::runtime::tokio_rt().block_on(run_live_ytdlp(
-        &fake_yt,
-        &fake_ff,
-        &staging,
+        &YtdlpAttemptContext {
+            youtube_bin: &fake_yt,
+            ffmpeg_bin: &fake_ff,
+            staging: &staging,
+            gate: &AttemptGate::new(),
+            timeout: std::time::Duration::from_secs(30),
+            tx,
+            playlist_index: None,
+        },
         &job,
-        &AttemptGate::new(),
         "https://youtu.be/grabtest",
         "h1080",
         abort_rx,
-        std::time::Duration::from_secs(30),
-        tx,
-        None,
     ));
     assert!(matches!(res, Ok(Some(_))), "got {res:?}");
     assert_eq!(std::fs::read(&job.dest).unwrap(), b"tsbytes");
@@ -9583,18 +9639,20 @@ fn unified_runner_downloads_claims_and_collects() {
     let (_abort_tx, mut abort_rx) = tokio::sync::oneshot::channel::<crate::video::StopIntent>();
     let gate = AttemptGate::new();
     let res = crate::runtime::tokio_rt().block_on(run_unified_ytdlp(
-        &fake,
-        std::path::Path::new("/usr/bin/ffmpeg"),
-        &staging,
+        &YtdlpAttemptContext {
+            youtube_bin: &fake,
+            ffmpeg_bin: std::path::Path::new("/usr/bin/ffmpeg"),
+            staging: &staging,
+            gate: &gate,
+            timeout: std::time::Duration::from_secs(30),
+            tx,
+            playlist_index: None,
+        },
         &job,
-        &gate,
         "v123+a456/bv*+ba/b",
         Some("mp4"),
         Some(7),
         &mut abort_rx,
-        std::time::Duration::from_secs(30),
-        tx,
-        None,
     ));
     assert!(matches!(res, Ok(Some(7))), "got {res:?}");
     assert_eq!(std::fs::read(&job.dest).unwrap(), b"unified");
@@ -9660,18 +9718,20 @@ fn a_unified_leg_finishing_over_a_live_recording_leaves_it_alone() {
     let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
     let (_abort_tx, mut abort_rx) = tokio::sync::oneshot::channel();
     let res = crate::runtime::tokio_rt().block_on(run_unified_ytdlp(
-        &fake,
-        std::path::Path::new("/usr/bin/ffmpeg"),
-        &staging,
+        &YtdlpAttemptContext {
+            youtube_bin: &fake,
+            ffmpeg_bin: std::path::Path::new("/usr/bin/ffmpeg"),
+            staging: &staging,
+            gate: &AttemptGate::new(),
+            timeout: std::time::Duration::from_secs(30),
+            tx,
+            playlist_index: None,
+        },
         &job,
-        &AttemptGate::new(),
         "v123+a456/bv*+ba/b",
         Some("mp4"),
         Some(7),
         &mut abort_rx,
-        std::time::Duration::from_secs(30),
-        tx,
-        None,
     ));
     assert!(
         matches!(res, Ok(Some(7))),
@@ -9702,18 +9762,20 @@ fn unified_runner_surfaces_failure_tail() {
     let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
     let (_abort_tx, mut abort_rx) = tokio::sync::oneshot::channel::<crate::video::StopIntent>();
     let res = crate::runtime::tokio_rt().block_on(run_unified_ytdlp(
-        &fake,
-        std::path::Path::new("/usr/bin/ffmpeg"),
-        &staging,
+        &YtdlpAttemptContext {
+            youtube_bin: &fake,
+            ffmpeg_bin: std::path::Path::new("/usr/bin/ffmpeg"),
+            staging: &staging,
+            gate: &AttemptGate::new(),
+            timeout: std::time::Duration::from_secs(30),
+            tx,
+            playlist_index: None,
+        },
         &job,
-        &AttemptGate::new(),
         "v123+a456/bv*+ba/b",
         Some("mp4"),
         None,
         &mut abort_rx,
-        std::time::Duration::from_secs(30),
-        tx,
-        None,
     ));
     match res {
         Err(e) => assert!(e.to_string().contains("403"), "tail surfaces: {e}"),
@@ -9745,18 +9807,20 @@ fn unified_runner_abort_stays_quiet() {
     let (abort_tx, mut abort_rx) = tokio::sync::oneshot::channel::<crate::video::StopIntent>();
     let handle = std::thread::spawn(move || {
         crate::runtime::tokio_rt().block_on(run_unified_ytdlp(
-            &bin,
-            std::path::Path::new("/usr/bin/ffmpeg"),
-            &staging,
+            &YtdlpAttemptContext {
+                youtube_bin: &bin,
+                ffmpeg_bin: std::path::Path::new("/usr/bin/ffmpeg"),
+                staging: &staging,
+                gate: &AttemptGate::new(),
+                timeout: std::time::Duration::from_secs(30),
+                tx,
+                playlist_index: None,
+            },
             &job,
-            &AttemptGate::new(),
             "v123+a456/bv*+ba/b",
             Some("mp4"),
             None,
             &mut abort_rx,
-            std::time::Duration::from_secs(30),
-            tx,
-            None,
         ))
     });
     std::thread::sleep(std::time::Duration::from_millis(500));
@@ -9782,18 +9846,20 @@ fn unified_runner_refuses_existing_dest() {
     let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
     let (_abort_tx, mut abort_rx) = tokio::sync::oneshot::channel::<crate::video::StopIntent>();
     let res = crate::runtime::tokio_rt().block_on(run_unified_ytdlp(
-        &fake,
-        std::path::Path::new("/usr/bin/ffmpeg"),
-        &staging,
+        &YtdlpAttemptContext {
+            youtube_bin: &fake,
+            ffmpeg_bin: std::path::Path::new("/usr/bin/ffmpeg"),
+            staging: &staging,
+            gate: &AttemptGate::new(),
+            timeout: std::time::Duration::from_secs(30),
+            tx,
+            playlist_index: None,
+        },
         &job,
-        &AttemptGate::new(),
         "v123+a456/bv*+ba/b",
         Some("mp4"),
         None,
         &mut abort_rx,
-        std::time::Duration::from_secs(30),
-        tx,
-        None,
     ));
     match res {
         Err(e) => assert_eq!(e.to_string(), crate::engine_msg::DEST_EXISTS, "{e}"),
@@ -9840,18 +9906,20 @@ exit 0
     let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
     let (_abort_tx, mut abort_rx) = tokio::sync::oneshot::channel::<crate::video::StopIntent>();
     let res = crate::runtime::tokio_rt().block_on(run_unified_ytdlp(
-        &bin,
-        std::path::Path::new("/usr/bin/ffmpeg"),
-        &staging,
+        &YtdlpAttemptContext {
+            youtube_bin: &bin,
+            ffmpeg_bin: std::path::Path::new("/usr/bin/ffmpeg"),
+            staging: &staging,
+            gate: &AttemptGate::new(),
+            timeout: std::time::Duration::from_secs(30),
+            tx,
+            playlist_index: None,
+        },
         &job,
-        &AttemptGate::new(),
         "v123+a456/bv*+ba/b",
         Some("mp4"),
         None,
         &mut abort_rx,
-        std::time::Duration::from_secs(30),
-        tx,
-        None,
     ));
     match res {
         Err(e) => assert!(e.to_string().contains("empty stream"), "got {e}"),
@@ -10080,18 +10148,20 @@ fn unified_runner_sums_two_leg_progress() {
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
     let (_abort_tx, mut abort_rx) = tokio::sync::oneshot::channel::<crate::video::StopIntent>();
     let res = crate::runtime::tokio_rt().block_on(run_unified_ytdlp(
-        &fake,
-        std::path::Path::new("/usr/bin/ffmpeg"),
-        &staging,
+        &YtdlpAttemptContext {
+            youtube_bin: &fake,
+            ffmpeg_bin: std::path::Path::new("/usr/bin/ffmpeg"),
+            staging: &staging,
+            gate: &AttemptGate::new(),
+            timeout: std::time::Duration::from_secs(30),
+            tx,
+            playlist_index: None,
+        },
         &job,
-        &AttemptGate::new(),
         "v1+a2/bv*+a2/bv*+ba/b",
         Some("mp4"),
         Some(150),
         &mut abort_rx,
-        std::time::Duration::from_secs(30),
-        tx,
-        None,
     ));
     assert!(matches!(res, Ok(Some(_))), "got {res:?}");
     let mut max_seen = 0u64;
@@ -10303,17 +10373,19 @@ fn a_discard_before_the_commit_delivers_nothing() {
     let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
     let (_stop_tx, stop_rx) = tokio::sync::oneshot::channel();
     let res = crate::runtime::tokio_rt().block_on(run_live_ytdlp(
-        &fake_yt,
-        &fake_ff,
-        &staging,
+        &YtdlpAttemptContext {
+            youtube_bin: &fake_yt,
+            ffmpeg_bin: &fake_ff,
+            staging: &staging,
+            gate: &gate,
+            timeout: std::time::Duration::from_secs(30),
+            tx,
+            playlist_index: None,
+        },
         &job,
-        &gate,
         "https://youtu.be/grabtest",
         "h1080",
         stop_rx,
-        std::time::Duration::from_secs(30),
-        tx,
-        None,
     ));
     assert!(
         matches!(res, Ok(None)),
@@ -10345,17 +10417,19 @@ fn a_commit_before_the_discard_delivers_and_is_recorded() {
     let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
     let (_stop_tx, stop_rx) = tokio::sync::oneshot::channel();
     let res = crate::runtime::tokio_rt().block_on(run_live_ytdlp(
-        &fake_yt,
-        &fake_ff,
-        &staging,
+        &YtdlpAttemptContext {
+            youtube_bin: &fake_yt,
+            ffmpeg_bin: &fake_ff,
+            staging: &staging,
+            gate: &gate,
+            timeout: std::time::Duration::from_secs(30),
+            tx,
+            playlist_index: None,
+        },
         &job,
-        &gate,
         "https://youtu.be/grabtest",
         "h1080",
         stop_rx,
-        std::time::Duration::from_secs(30),
-        tx,
-        None,
     ));
     assert!(
         matches!(res, Ok(Some(_))),
@@ -10383,18 +10457,20 @@ fn a_unified_leg_honours_a_discard_before_its_commit() {
     let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
     let (_stop_tx, mut stop_rx) = tokio::sync::oneshot::channel();
     let res = crate::runtime::tokio_rt().block_on(run_unified_ytdlp(
-        &fake,
-        std::path::Path::new("/usr/bin/ffmpeg"),
-        &staging,
+        &YtdlpAttemptContext {
+            youtube_bin: &fake,
+            ffmpeg_bin: std::path::Path::new("/usr/bin/ffmpeg"),
+            staging: &staging,
+            gate: &gate,
+            timeout: std::time::Duration::from_secs(30),
+            tx,
+            playlist_index: None,
+        },
         &job,
-        &gate,
         "v123+a456/bv*+ba/b",
         Some("mp4"),
         Some(7),
         &mut stop_rx,
-        std::time::Duration::from_secs(30),
-        tx,
-        None,
     ));
     assert!(
         matches!(res, Ok(None)),
@@ -10421,16 +10497,18 @@ fn an_hls_leg_honours_a_discard_before_its_commit() {
     let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
     let (_stop_tx, mut stop_rx) = tokio::sync::oneshot::channel();
     let res = crate::runtime::tokio_rt().block_on(run_hls_ytdlp(
-        &fake,
-        std::path::Path::new("/usr/bin/ffmpeg"),
-        &staging,
+        &YtdlpAttemptContext {
+            youtube_bin: &fake,
+            ffmpeg_bin: std::path::Path::new("/usr/bin/ffmpeg"),
+            staging: &staging,
+            gate: &gate,
+            timeout: std::time::Duration::from_secs(30),
+            tx,
+            playlist_index: None,
+        },
         &job,
-        &gate,
         "h1080",
         &mut stop_rx,
-        std::time::Duration::from_secs(30),
-        tx,
-        None,
     ));
     assert!(
         matches!(res, Ok(None)),
@@ -10486,17 +10564,19 @@ sleep 30 & wait
         let worker_gate = std::sync::Arc::clone(&gate);
         let worker = tokio::spawn(async move {
             run_live_ytdlp(
-                &worker_yt,
-                &worker_ff,
-                &worker_staging,
+                &YtdlpAttemptContext {
+                    youtube_bin: &worker_yt,
+                    ffmpeg_bin: &worker_ff,
+                    staging: &worker_staging,
+                    gate: &worker_gate,
+                    timeout: std::time::Duration::from_secs(30),
+                    tx,
+                    playlist_index: None,
+                },
                 &worker_job,
-                &worker_gate,
                 "https://youtu.be/grabtest",
                 "h1080",
                 stop_rx,
-                std::time::Duration::from_secs(30),
-                tx,
-                None,
             )
             .await
         });

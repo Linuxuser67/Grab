@@ -2481,6 +2481,12 @@ impl AddCard {
 
     /// Reveal a browser URL together with the page that initiated it.
     /// The source is retained only for that exact submitted URL.
+    #[cfg(test)]
+    pub fn open(&self, initial_url: Option<String>) {
+        self.public_host_leases.borrow_mut().activate();
+        (self.open)(initial_url, None)
+    }
+
     pub fn open_with_referer(&self, initial_url: Option<String>, referer: Option<String>) {
         self.public_host_leases.borrow_mut().activate();
         (self.open)(initial_url, referer)

@@ -289,13 +289,11 @@ mod tests {
             .expect("bind local fixture");
         let address = listener.local_addr().expect("fixture address");
         let server = tokio::spawn(async move {
-            let (mut stream, _) = tokio::time::timeout(
-                std::time::Duration::from_secs(1),
-                listener.accept(),
-            )
-            .await
-            .expect("probe connection timeout")
-            .expect("accept probe");
+            let (mut stream, _) =
+                tokio::time::timeout(std::time::Duration::from_secs(1), listener.accept())
+                    .await
+                    .expect("probe connection timeout")
+                    .expect("accept probe");
             let mut request = Vec::new();
             let mut chunk = [0_u8; 1024];
             loop {

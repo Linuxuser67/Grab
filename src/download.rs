@@ -1562,9 +1562,8 @@ impl DownloadManager {
         let item = DownloadItem::new(self.alloc_id_for_in(&existing), &url, row_filename, &dir);
         item.set_is_gallery(true);
         item.set_group(
-            crate::download_store::DownloadGroup::try_new(item.id(), &job.title).or_else(|| {
-                crate::download_store::DownloadGroup::try_new(item.id(), row_filename)
-            }),
+            crate::download_store::DownloadGroup::try_new(item.id(), &job.title)
+                .or_else(|| crate::download_store::DownloadGroup::try_new(item.id(), row_filename)),
         );
         item.set_gallery_file_count(job.file_count.unwrap_or(0));
         item.set_gallery_files_done(0);
@@ -2471,11 +2470,8 @@ impl DownloadManager {
         owned: bool,
     ) {
         let destination = std::path::PathBuf::from(owner.dest_dir());
-        let Some((output_dir, direct_output)) = self
-            .gallery_jobs
-            .borrow()
-            .get(&owner.id())
-            .map(|job| {
+        let Some((output_dir, direct_output)) =
+            self.gallery_jobs.borrow().get(&owner.id()).map(|job| {
                 (
                     job.dest_dir.clone(),
                     job.is_direct_single_file(&destination),
@@ -3265,9 +3261,7 @@ impl DownloadManager {
                 .gallery_jobs
                 .borrow()
                 .get(&id)
-                .is_some_and(|job| {
-                    job.is_direct_single_file(std::path::Path::new(&dest_dir))
-                });
+                .is_some_and(|job| job.is_direct_single_file(std::path::Path::new(&dest_dir)));
         let old_path_text = old_path.to_string_lossy().into_owned();
         let new_path_text = new_path.to_string_lossy().into_owned();
         item.set_filename(name.clone());
@@ -3288,7 +3282,9 @@ impl DownloadManager {
                     let mut indexes = self.gallery_file_row_index.borrow_mut();
                     indexes.get_mut(&id).and_then(|index| {
                         if let Some(state_index) = index.state_indices.remove(&old_path_text) {
-                            index.state_indices.insert(new_path_text.clone(), state_index);
+                            index
+                                .state_indices
+                                .insert(new_path_text.clone(), state_index);
                         }
                         index.rows.remove(&old_path_text)
                     })

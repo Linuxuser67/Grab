@@ -3970,7 +3970,7 @@ async fn dynamic_dash_fmp4_fixture_runs_live_capture_and_finalizes_playable_mp4(
         DashLiveStorage {
             destination_dir: root.path(),
             destination: &destination,
-            item_id: item_id,
+            item_id,
             video_dir: &video_dir,
             audio_dir: &audio_dir,
         },
@@ -4109,7 +4109,7 @@ async fn dynamic_dash_live_runner_pauses_and_retains_committed_window() {
         DashLiveStorage {
             destination_dir: root.path(),
             destination: &destination,
-            item_id: item_id,
+            item_id,
             video_dir: &video_dir,
             audio_dir: &audio_dir,
         },
@@ -4170,7 +4170,7 @@ async fn dynamic_dash_live_runner_pauses_and_retains_committed_window() {
         DashLiveStorage {
             destination_dir: root.path(),
             destination: &destination,
-            item_id: item_id,
+            item_id,
             video_dir: &video_dir,
             audio_dir: &audio_dir,
         },

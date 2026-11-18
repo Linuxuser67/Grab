@@ -155,6 +155,22 @@ enum TorrentPickerSource {
     Magnet { url: String },
 }
 
+/// UI lifetime and destination state shared by a torrent picker page.
+struct TorrentPickerContext<'a> {
+    nav: &'a adw::NavigationView,
+    manager: Rc<DownloadManager>,
+    dest_dir: Rc<RefCell<String>>,
+    close_card: Rc<dyn Fn()>,
+    scheduled_at: Rc<Cell<Option<i64>>>,
+}
+
+/// Resolved torrent payload shown by the picker.
+struct TorrentPickerSelection {
+    file_name: String,
+    source: TorrentPickerSource,
+    entries: Vec<crate::torrent::TorrentFileEntry>,
+}
+
 /// Lowercase hex SHA-256 of a pasted link: what the "paste once" check stores
 /// instead of the link (dconf is plain text and often synced or backed up).
 fn paste_fingerprint(url: &str) -> String {
@@ -1466,24 +1482,33 @@ fn submit_probed_single(
     );
 }
 
+/// Shared UI state for submitting the result of a fresh video-page probe.
+struct VideoSubmitContext<'a> {
+    manager: &'a Rc<DownloadManager>,
+    dest: &'a Rc<RefCell<String>>,
+    close_card: &'a Rc<dyn Fn()>,
+    step: &'a Rc<VideoStep>,
+    lookup_add: &'a Rc<RefCell<Option<gtk4::Button>>>,
+    nav: &'a adw::NavigationView,
+}
+
 /// Dispatch a fresh preview to its submit path: singles keep their chosen
 /// format, while collections queue their resolved entries. The caller's
 /// freshness gate stays.
-#[expect(
-    clippy::too_many_arguments,
-    reason = "the preview and submit paths share this GUI wiring; a context struct only renames it"
-)]
 fn submit_probe(
-    manager: &Rc<DownloadManager>,
-    dest: &Rc<RefCell<String>>,
-    close_card: &Rc<dyn Fn()>,
-    step: &Rc<VideoStep>,
-    lookup_add: &Rc<RefCell<Option<gtk4::Button>>>,
-    nav: &adw::NavigationView,
+    context: &VideoSubmitContext<'_>,
     probe: crate::video::ProbeResult,
     scheduled_at: Option<i64>,
     queue_all: bool,
 ) {
+    let VideoSubmitContext {
+        manager,
+        dest,
+        close_card,
+        step,
+        lookup_add,
+        nav,
+    } = context;
     match probe {
         crate::video::ProbeResult::Single(v) => {
             submit_probed_single(
@@ -1884,14 +1909,16 @@ async fn import_playlist_selection(
     }
 
     if !playlist_files.is_empty() {
-        let owner = manager.enqueue_video_playlist_staged_with_referer(
-            &page_url,
-            &group_title,
-            &dir,
-            playlist_files,
-            manager.settings().video_quality(),
-            audio_only,
-            referer.as_deref(),
+        let owner = manager.enqueue_video_playlist_staged(
+            crate::download::VideoPlaylistEnqueue {
+                page_url,
+                title: group_title,
+                dest_dir: dir,
+                files: playlist_files,
+                quality: manager.settings().video_quality(),
+                audio_only,
+                referer,
+            },
         )?;
         apply_scheduled_at(&owner, scheduled_at);
     }
@@ -2100,20 +2127,22 @@ fn push_playlist_items_page(
 }
 
 /// Torrent intake presents a selection page when the user explicitly requests one.
-#[expect(
-    clippy::too_many_arguments,
-    reason = "single call site; bundling these into a struct would only move the arguments"
-)]
 fn push_torrent_picker_page(
-    nav: &adw::NavigationView,
-    manager: Rc<DownloadManager>,
-    dest_dir: Rc<RefCell<String>>,
-    close_card: Rc<dyn Fn()>,
-    file_name: String,
-    source: TorrentPickerSource,
-    entries: Vec<crate::torrent::TorrentFileEntry>,
-    scheduled_at: Rc<Cell<Option<i64>>>,
+    context: TorrentPickerContext<'_>,
+    selection: TorrentPickerSelection,
 ) {
+    let TorrentPickerContext {
+        nav,
+        manager,
+        dest_dir,
+        close_card,
+        scheduled_at,
+    } = context;
+    let TorrentPickerSelection {
+        file_name,
+        source,
+        entries,
+    } = selection;
     if !crate::window_rows::form_is_visible(nav) {
         return;
     }
@@ -2330,14 +2359,18 @@ fn wire_torrent_picker(
                 return;
             }
             push_torrent_picker_page(
-                &nav,
-                m,
-                dd,
-                close_card,
-                name,
-                TorrentPickerSource::File { bytes },
-                entries,
-                scheduled_at,
+                TorrentPickerContext {
+                    nav: &nav,
+                    manager: m,
+                    dest_dir: dd,
+                    close_card,
+                    scheduled_at,
+                },
+                TorrentPickerSelection {
+                    file_name: name,
+                    source: TorrentPickerSource::File { bytes },
+                    entries,
+                },
             );
         });
     });
@@ -2450,15 +2483,6 @@ impl AddCard {
     /// can react to a picker page becoming visible.
     pub fn navigation(&self) -> &adw::NavigationView {
         &self.nav
-    }
-
-    /// Reveal the card, pre-filling `initial_url` when given (drops and
-    /// Open With). An already-open card only gains focus — no reset;
-    /// collapse always resets, so a reopened card starts fresh.
-    #[allow(dead_code)]
-    pub fn open(&self, initial_url: Option<String>) {
-        self.public_host_leases.borrow_mut().activate();
-        (self.open)(initial_url, None)
     }
 
     /// Reveal a browser URL together with the page that initiated it.
@@ -3816,14 +3840,18 @@ fn build_submit_handler(context: SubmitContext) -> SubmitHandler {
                             match magnet_resolution_action(source, entries.len()) {
                                 MagnetResolutionAction::OpenPicker => {
                                     push_torrent_picker_page(
-                                        &lookup_nav,
-                                        lookup_manager,
-                                        lookup_dest,
-                                        lookup_close,
-                                        name,
-                                        TorrentPickerSource::Magnet { url: magnet },
-                                        entries,
-                                        lookup_scheduled,
+                                        TorrentPickerContext {
+                                            nav: &lookup_nav,
+                                            manager: lookup_manager,
+                                            dest_dir: lookup_dest,
+                                            close_card: lookup_close,
+                                            scheduled_at: lookup_scheduled,
+                                        },
+                                        TorrentPickerSelection {
+                                            file_name: name,
+                                            source: TorrentPickerSource::Magnet { url: magnet },
+                                            entries,
+                                        },
                                     );
                                 }
                                 MagnetResolutionAction::QueueAll => {
@@ -3934,17 +3962,22 @@ fn build_submit_handler(context: SubmitContext) -> SubmitHandler {
                     }
                 };
                 match ready {
-                    Some(probe) => submit_probe(
-                        &m,
-                        &dd,
-                        &close_card,
-                        &step2,
-                        &lookup_add_submit,
-                        &nav2,
-                        probe,
-                        scheduled_at.get(),
-                        matches!(source, SubmitSource::Button),
-                    ),
+                    Some(probe) => {
+                        let context = VideoSubmitContext {
+                            manager: &m,
+                            dest: &dd,
+                            close_card: &close_card,
+                            step: &step2,
+                            lookup_add: &lookup_add_submit,
+                            nav: &nav2,
+                        };
+                        submit_probe(
+                            &context,
+                            probe,
+                            scheduled_at.get(),
+                            matches!(source, SubmitSource::Button),
+                        );
+                    }
                     None => {
                         // A tap while the lookup is still running: don't stack
                         // a twin resolve, say so instead.
@@ -4754,14 +4787,18 @@ pub fn build_add_card(manager: Rc<DownloadManager>) -> AddCard {
                   entries: Vec<crate::torrent::TorrentFileEntry>| {
                 reveal();
                 push_torrent_picker_page(
-                    &nav,
-                    manager.clone(),
-                    dest_dir.clone(),
-                    close_card.clone(),
-                    file_name,
-                    TorrentPickerSource::File { bytes },
-                    entries,
-                    Rc::clone(&scheduled_at),
+                    TorrentPickerContext {
+                        nav: &nav,
+                        manager: manager.clone(),
+                        dest_dir: dest_dir.clone(),
+                        close_card: close_card.clone(),
+                        scheduled_at: Rc::clone(&scheduled_at),
+                    },
+                    TorrentPickerSelection {
+                        file_name,
+                        source: TorrentPickerSource::File { bytes },
+                        entries,
+                    },
                 );
             },
         )
@@ -4923,15 +4960,19 @@ fn make_gallery_picker_opener(
                     }
                     restore_btn();
                     page = match crate::inline_gallery::push_gallery_picker_page(
-                        &nav3,
-                        manager3.clone(),
-                        dest3.clone(),
-                        close3.clone(),
-                        scheduled3.get(),
-                        title.clone(),
-                        url.clone(),
-                        referer.clone(),
-                        filter,
+                        crate::inline_gallery::GalleryPickerContext {
+                            nav: &nav3,
+                            manager: manager3.clone(),
+                            dest_dir: dest3.clone(),
+                            close_card: close3.clone(),
+                            scheduled_at: scheduled3.get(),
+                        },
+                        crate::inline_gallery::GalleryPickerSource {
+                            title: title.clone(),
+                            url: url.clone(),
+                            referer: referer.clone(),
+                            filter,
+                        },
                         crate::gallery_grid::GalleryGrid::new(),
                     ) {
                         Some(page) => Some(page),
@@ -5148,23 +5189,27 @@ mod tests {
             .build();
         torrent_nav.push(&torrent_form);
         push_torrent_picker_page(
-            &torrent_nav,
-            Rc::clone(&manager),
-            Rc::clone(&destination),
-            Rc::clone(&close_card),
-            "archive.torrent".into(),
-            TorrentPickerSource::File { bytes: vec![0] },
-            vec![
-                crate::torrent::TorrentFileEntry {
-                    raw_path: "folder/file.txt".into(),
-                    display_path: "folder/file.txt".into(),
-                },
-                crate::torrent::TorrentFileEntry {
-                    raw_path: "folder/second.txt".into(),
-                    display_path: "folder/second.txt".into(),
-                },
-            ],
-            Rc::new(Cell::new(None)),
+            TorrentPickerContext {
+                nav: &torrent_nav,
+                manager: Rc::clone(&manager),
+                dest_dir: Rc::clone(&destination),
+                close_card: Rc::clone(&close_card),
+                scheduled_at: Rc::new(Cell::new(None)),
+            },
+            TorrentPickerSelection {
+                file_name: "archive.torrent".into(),
+                source: TorrentPickerSource::File { bytes: vec![0] },
+                entries: vec![
+                    crate::torrent::TorrentFileEntry {
+                        raw_path: "folder/file.txt".into(),
+                        display_path: "folder/file.txt".into(),
+                    },
+                    crate::torrent::TorrentFileEntry {
+                        raw_path: "folder/second.txt".into(),
+                        display_path: "folder/second.txt".into(),
+                    },
+                ],
+            },
         );
         assert_eq!(torrent_nav.visible_page_tag().as_deref(), Some("torrent"));
         assert_eq!(store.n_items(), 0, "torrent must wait for Add");
@@ -5177,19 +5222,23 @@ mod tests {
             .build();
         single_magnet_nav.push(&single_magnet_form);
         push_torrent_picker_page(
-            &single_magnet_nav,
-            Rc::clone(&manager),
-            Rc::clone(&destination),
-            Rc::clone(&close_card),
-            "Single-file magnet".into(),
-            TorrentPickerSource::Magnet {
-                url: "magnet:?xt=urn:btih:0123456789012345678901234567890123456789".into(),
+            TorrentPickerContext {
+                nav: &single_magnet_nav,
+                manager: Rc::clone(&manager),
+                dest_dir: Rc::clone(&destination),
+                close_card: Rc::clone(&close_card),
+                scheduled_at: Rc::new(Cell::new(None)),
             },
-            vec![crate::torrent::TorrentFileEntry {
-                raw_path: "movie.mkv".into(),
-                display_path: "movie.mkv".into(),
-            }],
-            Rc::new(Cell::new(None)),
+            TorrentPickerSelection {
+                file_name: "Single-file magnet".into(),
+                source: TorrentPickerSource::Magnet {
+                    url: "magnet:?xt=urn:btih:0123456789012345678901234567890123456789".into(),
+                },
+                entries: vec![crate::torrent::TorrentFileEntry {
+                    raw_path: "movie.mkv".into(),
+                    display_path: "movie.mkv".into(),
+                }],
+            },
         );
         assert_eq!(
             single_magnet_nav.visible_page_tag().as_deref(),
@@ -5206,25 +5255,29 @@ mod tests {
             .build();
         magnet_nav.push(&magnet_form);
         push_torrent_picker_page(
-            &magnet_nav,
-            Rc::clone(&manager),
-            Rc::clone(&destination),
-            Rc::clone(&close_card),
-            "Magnet archive".into(),
-            TorrentPickerSource::Magnet {
-                url: "magnet:?xt=urn:btih:0123456789012345678901234567890123456789".into(),
+            TorrentPickerContext {
+                nav: &magnet_nav,
+                manager: Rc::clone(&manager),
+                dest_dir: Rc::clone(&destination),
+                close_card: Rc::clone(&close_card),
+                scheduled_at: Rc::new(Cell::new(None)),
             },
-            vec![
-                crate::torrent::TorrentFileEntry {
-                    raw_path: "folder/file.txt".into(),
-                    display_path: "folder/file.txt".into(),
+            TorrentPickerSelection {
+                file_name: "Magnet archive".into(),
+                source: TorrentPickerSource::Magnet {
+                    url: "magnet:?xt=urn:btih:0123456789012345678901234567890123456789".into(),
                 },
-                crate::torrent::TorrentFileEntry {
-                    raw_path: "folder/second.txt".into(),
-                    display_path: "folder/second.txt".into(),
-                },
-            ],
-            Rc::new(Cell::new(None)),
+                entries: vec![
+                    crate::torrent::TorrentFileEntry {
+                        raw_path: "folder/file.txt".into(),
+                        display_path: "folder/file.txt".into(),
+                    },
+                    crate::torrent::TorrentFileEntry {
+                        raw_path: "folder/second.txt".into(),
+                        display_path: "folder/second.txt".into(),
+                    },
+                ],
+            },
         );
         assert_eq!(magnet_nav.visible_page_tag().as_deref(), Some("torrent"));
         assert_eq!(store.n_items(), 0, "magnet must wait for Add");

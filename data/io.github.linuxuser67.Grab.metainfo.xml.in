@@ -58,6 +58,14 @@
     </screenshot>
   </screenshots>
   <releases>
+    <release version="6.5.3" date="2026-11-18">
+      <description>
+        <ul>
+          <li>Detect direct files behind opaque CDN URLs using a bounded HTTP response-header preflight, then download them through Grab's native HTTP engine.</li>
+          <li>Use the existing proxy, browser handoff cookies, User-Agent and source-page context during detection without buffering the resource body.</li>
+        </ul>
+      </description>
+    </release>
     <release version="6.5.2" date="2026-11-18">
       <description>
         <ul>

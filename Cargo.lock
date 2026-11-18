@@ -1447,7 +1447,7 @@ dependencies = [
 
 [[package]]
 name = "grab"
-version = "6.5.2"
+version = "6.5.3"
 dependencies = [
  "axum",
  "base64",

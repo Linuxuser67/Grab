@@ -593,10 +593,10 @@ async fn lookup_media_inner(
         )
         .await
         .and_then(|manifest| {
-                manifest.ok_or_else(|| {
-                    gettext("The URL did not resolve to a supported HLS or DASH manifest")
-                })
-            });
+            manifest.ok_or_else(|| {
+                gettext("The URL did not resolve to a supported HLS or DASH manifest")
+            })
+        });
         (result, native_started.elapsed().as_millis() as u64)
     };
 

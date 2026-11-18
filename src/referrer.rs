@@ -8,7 +8,7 @@ pub(crate) fn cache_identity(raw: Option<&str>) -> Result<Option<[u8; 32]>, ()> 
     let Some(raw) = raw else {
         return Ok(None);
     };
-    let mut source = url::Url::parse(raw).ok()?;
+    let mut source = url::Url::parse(raw).map_err(|_| ())?;
     if !matches!(source.scheme(), "http" | "https")
         || source.host_str().is_none()
         || !source.username().is_empty()

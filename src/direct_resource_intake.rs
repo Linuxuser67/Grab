@@ -306,6 +306,13 @@ mod tests {
             assert!(
                 request
                     .lines()
+                    .next()
+                    .is_some_and(|line| line.starts_with("GET /opaque/resource ")),
+                "the preflight must use GET for the opaque URL: {request}"
+            );
+            assert!(
+                request
+                    .lines()
                     .any(|line| line.eq_ignore_ascii_case("range: bytes=0-0")),
                 "the preflight must request only the first byte: {request}"
             );
@@ -319,6 +326,7 @@ mod tests {
         });
 
         let client = reqwest::Client::builder()
+            .no_proxy()
             .redirect(reqwest::redirect::Policy::none())
             .build()
             .expect("build fixture client");

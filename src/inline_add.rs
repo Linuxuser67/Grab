@@ -750,12 +750,13 @@ async fn lookup_extractors_inner(
         }
     } else {
         (
-            crate::video::fetch_video_infos(
+            crate::video::fetch_video_infos_with_referer(
                 youtube_bin,
                 url.clone(),
                 browser,
                 newest_first,
                 proxy,
+                referer,
                 None,
             )
             .await,

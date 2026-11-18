@@ -350,6 +350,28 @@ fn normalized_referer(raw: Option<&str>) -> Option<String> {
     Some(parsed.to_string())
 }
 
+#[cfg(test)]
+mod browser_referer_tests {
+    use super::normalized_referer;
+
+    #[test]
+    fn native_client_referer_is_reduced_to_source_origin() {
+        assert_eq!(
+            normalized_referer(Some("https://example.test/watch?id=private#player")),
+            Some("https://example.test/".to_string())
+        );
+        assert_eq!(
+            normalized_referer(Some("file:///etc/passwd")),
+            None
+        );
+        assert_eq!(
+            normalized_referer(Some("https://user:pass@example.test/watch")),
+            None
+        );
+        assert_eq!(normalized_referer(None), None);
+    }
+}
+
 /// Read-only view of a cookie jar for reqwest's cookie provider: staged
 /// Client applying staged cookies via a provider: reqwest re-applies
 /// in-scope cookies on every redirect hop, while a manually-stamped `Cookie`

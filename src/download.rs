@@ -1730,8 +1730,8 @@ impl DownloadManager {
             referer,
         } = request;
         let referer = referer.as_deref();
-        let url = normalize_url(page_url)?;
-        let output_dir = std::path::Path::new(dest_dir);
+        let url = normalize_url(&page_url)?;
+        let output_dir = std::path::Path::new(&dest_dir);
         // The picker validates the directory on GIO's blocking pool. Keep this
         // GTK-thread commit path limited to path-shape checks.
         if !output_dir.is_absolute() || output_dir.file_name().is_none() {
@@ -1765,7 +1765,7 @@ impl DownloadManager {
 
         if let Some(owner) = self.video_playlist_owner_for_url(&url) {
             let owner =
-                self.extend_video_playlist_staged(&owner, dest_dir, files, &quality, audio_only)?;
+                self.extend_video_playlist_staged(&owner, &dest_dir, files, &quality, audio_only)?;
             if let Some(referer) = referer {
                 owner.set_referer(referer);
                 self.persist_queue();

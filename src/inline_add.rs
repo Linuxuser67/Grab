@@ -385,6 +385,7 @@ struct VideoLookupResult {
 
 enum MediaLookupOutcome {
     Manifest(Box<crate::manifest_intake::ManifestLookup>),
+    DirectFile,
     Gallery(Vec<crate::gallery_probe::GalleryItem>),
     Video(Box<VideoLookupResult>),
 }
@@ -459,12 +460,13 @@ async fn lookup_media(
         total_ms = started.elapsed().as_millis() as u64,
         result = match &result {
             Ok(MediaLookupOutcome::Manifest(_)) => "manifest",
+            Ok(MediaLookupOutcome::DirectFile) => "direct_file",
             Ok(MediaLookupOutcome::Gallery(_)) => "gallery",
             Ok(MediaLookupOutcome::Video(_)) => "video",
             Err(_) => "error",
         },
         lookup_winner = match &result {
-            Ok(MediaLookupOutcome::Manifest(_)) => "native",
+            Ok(MediaLookupOutcome::Manifest(_) | MediaLookupOutcome::DirectFile) => "native",
             Ok(_) => "extractors",
             Err(_) => "none",
         },
@@ -593,7 +595,51 @@ async fn lookup_media_inner(
     referer: Option<String>,
 ) -> Result<MediaLookupOutcome, MediaLookupFailure> {
     if !crate::manifest_intake::supports(&url) {
-        return lookup_extractors_inner(url, browser, newest_first, proxy, referer).await;
+        if !plain_fallback_allowed(&url) {
+            return lookup_extractors_inner(url, browser, newest_first, proxy, referer).await;
+        }
+
+        // Unknown HTTP resources can still be direct files when their paths
+        // have no extension. Probe response headers while the established
+        // extractors run; never read the response body during classification.
+        let direct_future = crate::direct_resource_intake::probe(
+            url.clone(),
+            proxy.clone(),
+            referer.clone(),
+        );
+        let extractor_future =
+            lookup_extractors_inner(url, browser, newest_first, proxy, referer);
+        tokio::pin!(direct_future);
+        tokio::pin!(extractor_future);
+
+        return tokio::select! {
+            direct_file = &mut direct_future => {
+                if direct_file {
+                    Ok(MediaLookupOutcome::DirectFile)
+                } else {
+                    extractor_future.await
+                }
+            }
+            extractor_result = &mut extractor_future => {
+                match extractor_result {
+                    Ok(MediaLookupOutcome::Video(video)) if video.ytdlp_result.is_err() => {
+                        if direct_future.await {
+                            Ok(MediaLookupOutcome::DirectFile)
+                        } else {
+                            Ok(MediaLookupOutcome::Video(video))
+                        }
+                    }
+                    Err(error) => {
+                        if direct_future.await {
+                            Ok(MediaLookupOutcome::DirectFile)
+                        } else {
+                            Err(error)
+                        }
+                    }
+                    other => other,
+                }
+            }
+        };
     }
 
     let host = crate::video_probe::page_host(&url);
@@ -3387,6 +3433,27 @@ fn build_video_lookup_kicker(context: VideoLookupContext) -> VideoLookupKick {
                 }
                 let (ytdlp_result, gallery_error, probe_json_key, native_fallback_reason) =
                     match outcome {
+                        MediaLookupOutcome::DirectFile => {
+                            if let Err(error) = queue_plain(
+                                &manager_b,
+                                &dest_b,
+                                &close_b,
+                                &url,
+                                source_referer.clone(),
+                                scheduled_at_b.get(),
+                            )
+                            .await
+                            {
+                                tracing::warn!(
+                                    host = %crate::video_probe::page_host(&url),
+                                    error = %error,
+                                    "direct resource enqueue failed"
+                                );
+                                show_video_error(&step_b, &error);
+                                set_lookup_add(&lookup_add_b, true);
+                            }
+                            return;
+                        }
                         MediaLookupOutcome::Manifest(manifest) => {
                             let manifest = *manifest;
                             let preferred_quality = settings_b.video_quality();

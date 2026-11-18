@@ -634,20 +634,17 @@ fn dash_live_segment_indices(
     indices
 }
 
-#[expect(
-    clippy::too_many_arguments,
-    reason = "one rendition update shares its client, cancellation, progress and aggregate byte-budget context"
-)]
 pub(super) async fn apply_dash_live_snapshot(
-    client: &reqwest::Client,
+    transfer: &LiveManifestTransfer<'_>,
     plan: &DashRepresentationPlan,
     track: &mut DashLiveTrack,
-    connections: usize,
-    tx: &tokio::sync::mpsc::UnboundedSender<EngineMsg>,
-    downloaded: &Arc<AtomicU64>,
     abort: &mut tokio::sync::oneshot::Receiver<crate::video::StopIntent>,
     other_rendition_bytes: u64,
 ) -> Result<DashLiveUpdateOutcome, ManifestRunError> {
+    let client = transfer.client;
+    let connections = transfer.connections;
+    let tx = transfer.tx;
+    let downloaded = transfer.downloaded;
     if plan.representation.live_key != track.state.representation_key.as_str() {
         return Ok(DashLiveUpdateOutcome::ContinuityLost);
     }
@@ -859,28 +856,31 @@ pub(super) async fn apply_dash_live_snapshot(
     Ok(DashLiveUpdateOutcome::Committed)
 }
 
-#[expect(
-    clippy::too_many_arguments,
-    reason = "the live poll loop owns the shared DASH manifest selection, rendition states, progress and cancellation"
-)]
 pub(super) async fn run_live_dash_tracks(
-    client: &reqwest::Client,
+    transfer: &LiveManifestTransfer<'_>,
     source_url: &str,
-    destination_dir: &Path,
-    destination: &Path,
-    item_id: u64,
-    representation_key: &str,
-    audio_key: Option<&str>,
-    video_plan: Option<&DashRepresentationPlan>,
-    audio_plan: Option<&DashRepresentationPlan>,
-    video_dir: &Path,
-    audio_dir: &Path,
-    connections: usize,
-    tx: &tokio::sync::mpsc::UnboundedSender<EngineMsg>,
-    downloaded: &Arc<AtomicU64>,
+    storage: DashLiveStorage<'_>,
+    selection: DashLiveSelection<'_>,
     guarded_child_hosts: &mut crate::download_net::PublicResolutionSet,
     abort: &mut tokio::sync::oneshot::Receiver<crate::video::StopIntent>,
 ) -> Result<DashLiveCapture, ManifestRunError> {
+    let DashLiveStorage {
+        destination_dir,
+        destination,
+        item_id,
+        video_dir,
+        audio_dir,
+    } = storage;
+    let DashLiveSelection {
+        representation_key,
+        audio_key,
+        video_plan,
+        audio_plan,
+    } = selection;
+    let client = transfer.client;
+    let connections = transfer.connections;
+    let tx = transfer.tx;
+    let downloaded = transfer.downloaded;
     let (mut video, video_bytes) = load_dash_live_track_for_destination(
         representation_key,
         video_dir,
@@ -1036,16 +1036,7 @@ pub(super) async fn run_live_dash_tracks(
     };
     let mut next_refresh_at = dash_next_refresh_deadline(&current_video_plan.presentation)?;
 
-    match apply_dash_live_snapshot(
-        client,
-        &current_video_plan,
-        &mut video,
-        connections,
-        tx,
-        downloaded,
-        abort,
-        audio_bytes,
-    )
+    match apply_dash_live_snapshot(transfer, &current_video_plan, &mut video, abort, audio_bytes)
     .await?
     {
         DashLiveUpdateOutcome::Committed => {
@@ -1082,16 +1073,7 @@ pub(super) async fn run_live_dash_tracks(
             video.committed_bytes,
         )
         .await?;
-        match apply_dash_live_snapshot(
-            client,
-            plan,
-            &mut audio.0,
-            connections,
-            tx,
-            downloaded,
-            abort,
-            updated_video_bytes,
-        )
+        match apply_dash_live_snapshot(transfer, plan, &mut audio.0, abort, updated_video_bytes)
         .await?
         {
             DashLiveUpdateOutcome::Committed => {
@@ -1226,16 +1208,7 @@ pub(super) async fn run_live_dash_tracks(
             None => 0,
         };
 
-        match apply_dash_live_snapshot(
-            client,
-            &current_video_plan,
-            &mut video,
-            connections,
-            tx,
-            downloaded,
-            abort,
-            current_audio_bytes,
-        )
+        match apply_dash_live_snapshot(transfer, &current_video_plan, &mut video, abort, current_audio_bytes)
         .await?
         {
             DashLiveUpdateOutcome::Committed => {
@@ -1270,16 +1243,7 @@ pub(super) async fn run_live_dash_tracks(
                     video.committed_bytes,
                 )
                 .await?;
-                match apply_dash_live_snapshot(
-                    client,
-                    plan,
-                    track,
-                    connections,
-                    tx,
-                    downloaded,
-                    abort,
-                    video_bytes,
-                )
+                match apply_dash_live_snapshot(transfer, plan, track, abort, video_bytes)
                 .await?
                 {
                     DashLiveUpdateOutcome::Committed => {
@@ -1328,16 +1292,7 @@ pub(super) async fn run_live_dash_tracks(
                     video.committed_bytes,
                 )
                 .await?;
-                match apply_dash_live_snapshot(
-                    client,
-                    plan,
-                    &mut track,
-                    connections,
-                    tx,
-                    downloaded,
-                    abort,
-                    video_bytes,
-                )
+                match apply_dash_live_snapshot(transfer, plan, &mut track, abort, video_bytes)
                 .await?
                 {
                     DashLiveUpdateOutcome::Committed => {

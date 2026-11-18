@@ -107,6 +107,31 @@ fn ytdlp_failure_is_retryable(detail: &str) -> bool {
     .any(|needle| lower.contains(needle))
 }
 
+/// Fetch page metadata without a source referrer.
+pub(crate) async fn fetch_raw_dump_json(
+    youtube_bin: &Path,
+    url: &str,
+    cookies_browser: &str,
+    timeout: Duration,
+    fetch_proxy: Option<&crate::net_types::ResolvedProxy>,
+    flat_playlist: bool,
+    identity_args: Option<&[String]>,
+) -> Result<serde_json::Value, VideoError> {
+    fetch_raw_dump_json_with_referer(
+        youtube_bin,
+        url,
+        RawDumpOptions {
+            cookies_browser,
+            timeout,
+            fetch_proxy,
+            flat_playlist,
+            identity_args,
+            referer: None,
+        },
+    )
+    .await
+}
+
 /// Options applied to one yt-dlp metadata subprocess.
 struct RawDumpOptions<'a> {
     cookies_browser: &'a str,

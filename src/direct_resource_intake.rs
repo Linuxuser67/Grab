@@ -18,6 +18,17 @@ pub(crate) async fn probe(
     referer: Option<String>,
 ) -> bool {
     let host = crate::video_probe::page_host(&raw_url);
+    let Ok(parsed_url) = url::Url::parse(&raw_url) else {
+        return false;
+    };
+    if !matches!(parsed_url.scheme(), "http" | "https")
+        || parsed_url.host_str().is_none()
+        || !parsed_url.username().is_empty()
+        || parsed_url.password().is_some()
+    {
+        return false;
+    }
+
     let result = tokio::time::timeout(DIRECT_RESOURCE_PROBE_BUDGET, async {
         let client = crate::manifest_intake::client_for_direct_resource_probe(
             &raw_url,
@@ -257,6 +268,56 @@ mod tests {
                 "{mime} must not become a file even with Content-Disposition"
             );
         }
+    }
+
+    #[tokio::test]
+    async fn opaque_probe_sends_a_single_byte_range_and_does_not_read_the_body() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        use tokio::net::TcpListener;
+
+        let listener = TcpListener::bind(("127.0.0.1", 0))
+            .await
+            .expect("bind local fixture");
+        let address = listener.local_addr().expect("fixture address");
+        let server = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.expect("accept probe");
+            let mut request = Vec::new();
+            let mut chunk = [0_u8; 1024];
+            loop {
+                let count = stream.read(&mut chunk).await.expect("read request");
+                if count == 0 {
+                    break;
+                }
+                request.extend_from_slice(&chunk[..count]);
+                if request.windows(4).any(|window| window == b"\\r\\n\\r\\n") {
+                    break;
+                }
+            }
+            let request = String::from_utf8_lossy(&request);
+            assert!(
+                request.lines().any(|line| line.eq_ignore_ascii_case("range: bytes=0-0")),
+                "the preflight must request only the first byte: {request}"
+            );
+
+            stream
+                .write_all(
+                    b"HTTP/1.1 206 Partial Content\\r\\nContent-Type: application/octet-stream\\r\\nContent-Range: bytes 0-0/2000000\\r\\nContent-Length: 2000000\\r\\nConnection: close\\r\\n\\r\\nx",
+                )
+                .await
+                .expect("write response headers");
+        });
+
+        let client = reqwest::Client::builder()
+            .redirect(reqwest::redirect::Policy::none())
+            .build()
+            .expect("build fixture client");
+        let url = format!("http://{address}/opaque/resource");
+        let result = super::inspect_response_headers(&client, &url)
+            .await
+            .expect("inspect response headers");
+
+        assert_eq!(result.as_deref(), Some("application/octet-stream"));
+        server.await.expect("fixture server task");
     }
 
     #[test]

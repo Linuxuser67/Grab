@@ -2511,6 +2511,7 @@ segment.ts
             url: "https://cache-expiry.example.test/media.m3u8".to_string(),
             handoff_cookie_hash: None,
             handoff_user_agent_hash: None,
+            referer_hash: None,
             proxy: None,
         };
         MANIFEST_PREVIEW_CACHE.lock().expect("cache lock").insert(

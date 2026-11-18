@@ -4517,7 +4517,7 @@ fn live_capture_abort_adopts_partial() {
             "https://youtu.be/grabtest",
             "h1080",
             abort_rx,
-    )
+        )
         .await
     });
     assert!(
@@ -4769,7 +4769,7 @@ fn a_discard_signal_reaps_the_whole_recorder_group_and_delivers_nothing() {
                 "https://youtu.be/grabtest",
                 "h1080",
                 stop_rx,
-    )
+            )
             .await
         }
     });
@@ -4926,7 +4926,7 @@ fn a_discard_that_lands_mid_remux_still_delivers_nothing() {
                 "https://youtu.be/grabtest",
                 "h1080",
                 stop_rx,
-    )
+            )
             .await
         }
     });
@@ -5622,7 +5622,7 @@ fn aborting_a_live_capture_kills_the_recorder() {
                 "https://youtu.be/grabtest",
                 "h1080",
                 abort_rx,
-    )
+            )
             .await;
         }
     });
@@ -9821,7 +9821,7 @@ fn unified_runner_abort_stays_quiet() {
             Some("mp4"),
             None,
             &mut abort_rx,
-    ))
+        ))
     });
     std::thread::sleep(std::time::Duration::from_millis(500));
     drop(abort_tx);
@@ -10577,7 +10577,7 @@ sleep 30 & wait
                 "https://youtu.be/grabtest",
                 "h1080",
                 stop_rx,
-    )
+            )
             .await
         });
 

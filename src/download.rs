@@ -1258,6 +1258,7 @@ impl DownloadManager {
         Ok((item, guard))
     }
 
+#[allow(dead_code)]
     pub(crate) async fn enqueue_async(
         self: &Rc<Self>,
         url: &str,
@@ -1454,6 +1455,7 @@ impl DownloadManager {
         Ok(item)
     }
 
+#[allow(dead_code)]
     pub(crate) async fn enqueue_video_async_batched(
         self: &Rc<Self>,
         page_url: &str,
@@ -1508,6 +1510,7 @@ impl DownloadManager {
     }
 
     /// Queue a native HLS/DASH selection after listing its destination off GTK.
+#[allow(dead_code)]
     pub(crate) async fn enqueue_manifest_async_batched(
         self: &Rc<Self>,
         source: crate::media_types::ManifestSource,
@@ -1621,6 +1624,7 @@ impl DownloadManager {
     /// stays correct as rows land: the per-row dedupe also consults the live
     /// store and the stem reservation map. An on-disk file never renames the
     /// intake (see [`DownloadManager::enqueue`]).
+#[allow(dead_code)]
     pub(crate) fn enqueue_video_staged(
         self: &Rc<Self>,
         page_url: &str,
@@ -1744,6 +1748,7 @@ impl DownloadManager {
     /// Enqueue selected yt-dlp playlist entries as one schedulable owner.
     /// Re-imports for the same URL extend that owner instead of creating a
     /// second process; a running owner is restarted with the enlarged selection.
+#[allow(dead_code)]
     pub(crate) fn enqueue_video_playlist_staged(
         self: &Rc<Self>,
         page_url: &str,

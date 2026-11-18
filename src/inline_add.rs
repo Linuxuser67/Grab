@@ -164,6 +164,9 @@ fn paste_fingerprint(url: &str) -> String {
         .collect()
 }
 
+/// A queued URL keeps the optional browser source page that belongs to it.
+type PendingUrl = (String, Option<String>);
+
 /// Starts the next queued link once the finished lookup's marker is cleared.
 /// The start is deferred to an idle callback so it never re-enters the task
 /// that is still unwinding, and it is skipped while a ready preview or picker
@@ -171,8 +174,8 @@ fn paste_fingerprint(url: &str) -> String {
 struct DrainPending {
     probe: Rc<RefCell<ProbeState>>,
     manifest: Rc<RefCell<Option<crate::manifest_intake::ManifestLookup>>>,
-    pending: Rc<RefCell<VecDeque<String>>>,
-    start: Rc<dyn Fn(String)>,
+    pending: Rc<RefCell<VecDeque<PendingUrl>>>,
+    start: Rc<dyn Fn(PendingUrl)>,
 }
 
 impl Drop for DrainPending {
@@ -773,6 +776,8 @@ pub(crate) struct VideoStep {
     /// The URL entry itself: its secondary icon is the lookup state machine
     /// (tick → spinner → none), shared with the helpers below.
     pub(crate) url_entry: gtk4::Entry,
+    /// Browser source page bound to the exact URL currently in the entry.
+    pub(crate) source_referer: Rc<RefCell<Option<(String, String)>>>,
     /// Public-only hosts retained while this untrusted handoff card is open.
     public_host_leases: PublicHostLeases,
     /// Spinner paintable for the entry's secondary icon slot: GTK4 entries
@@ -2398,7 +2403,7 @@ pub struct AddCard {
     widget: gtk4::Widget,
     nav: adw::NavigationView,
     public_host_leases: PublicHostLeases,
-    open: Rc<dyn Fn(Option<String>)>,
+    open: Rc<dyn Fn(Option<String>, Option<String>)>,
     toggle: Rc<dyn Fn()>,
     open_torrent_picker: TorrentPickerOpener,
     state: Rc<OpenState>,
@@ -2421,7 +2426,14 @@ impl AddCard {
     /// collapse always resets, so a reopened card starts fresh.
     pub fn open(&self, initial_url: Option<String>) {
         self.public_host_leases.borrow_mut().activate();
-        (self.open)(initial_url)
+        (self.open)(initial_url, None)
+    }
+
+    /// Reveal a browser URL together with the page that initiated it.
+    /// The source is retained only for that exact submitted URL.
+    pub fn open_with_referer(&self, initial_url: Option<String>, referer: Option<String>) {
+        self.public_host_leases.borrow_mut().activate();
+        (self.open)(initial_url, referer)
     }
 
     /// Shared toggle for every New Download affordance (header `+`,
@@ -2717,6 +2729,7 @@ fn build_video_preview(
     video_revealer.set_child(Some(&video_group));
     let step = Rc::new(VideoStep {
         url_entry: url_entry.clone(),
+        source_referer: Rc::new(RefCell::new(None)),
         public_host_leases,
         spinner_paintable,
         looking_up: Cell::new(false),
@@ -3076,7 +3089,7 @@ struct VideoLookupContext {
     dest_dir: Rc<RefCell<String>>,
     close_card: Rc<dyn Fn()>,
     scheduled_at: Rc<Cell<Option<i64>>>,
-    pending_url: Rc<RefCell<VecDeque<String>>>,
+    pending_url: Rc<RefCell<VecDeque<PendingUrl>>>,
     nav: adw::NavigationView,
     lookup_add: Rc<RefCell<Option<gtk4::Button>>>,
 }
@@ -3158,8 +3171,10 @@ fn build_video_lookup_kicker(context: VideoLookupContext) -> VideoLookupKick {
                     pending: Rc::clone(&pending_b),
                     start: {
                         let url_entry = url_b.clone();
-                        Rc::new(move |next: String| {
+                        let source_referer = Rc::clone(&step_b.source_referer);
+                        Rc::new(move |(next, referer): PendingUrl| {
                             url_entry.set_text(&next);
+                            *source_referer.borrow_mut() = referer.map(|referer| (next.clone(), referer));
                             // Submit one idle later: the changed handler settles
                             // on a 0 ms timeout, and submitting in this turn reads
                             // the previous URL's state while the deferred edit
@@ -3265,6 +3280,12 @@ fn build_video_lookup_kicker(context: VideoLookupContext) -> VideoLookupKick {
                 // outer card flow is polled by GLib, so run this entire backend
                 // lookup as a Tokio task and keep GTK updates on this context.
                 let lookup_url = url.clone();
+                let source_referer = step_b
+                    .source_referer
+                    .borrow()
+                    .as_ref()
+                    .filter(|(bound_url, _)| bound_url == &lookup_url)
+                    .map(|(_, referer)| referer.clone());
                 // Keep the browser-handoff DNS policy alive until the detached
                 // Tokio lookup has actually stopped, even when card close
                 // aborts the outer GLib future.
@@ -3275,6 +3296,7 @@ fn build_video_lookup_kicker(context: VideoLookupContext) -> VideoLookupKick {
                         browser,
                         newest_first,
                         proxy,
+                        source_referer,
                     )));
                 let _abort_lookup_on_drop = AbortTaskOnDrop(lookup_task.abort_handle());
                 let outcome = match lookup_task.await {
@@ -4117,6 +4139,14 @@ fn wire_url_entry(
             let fresh = fresh_video || fresh_manifest;
             // A matching native manifest or extractor preview remains visible;
             // any settled URL change invalidates both forms of preview.
+            if step2
+                .source_referer
+                .borrow()
+                .as_ref()
+                .is_some_and(|(bound_url, _)| bound_url != &text)
+            {
+                step2.source_referer.borrow_mut().take();
+            }
             if !fresh {
                 hide_video_step(&step2);
                 step2.action_revealer.set_reveal_child(false);
@@ -4402,7 +4432,7 @@ pub fn build_add_card(manager: Rc<DownloadManager>) -> AddCard {
     let probe = Rc::new(RefCell::new(ProbeState::default()));
     // Queued URL from context menu/share while a probe is in flight: the
     // open() handler stores it here, and the probe completion auto-starts it.
-    let pending_url: Rc<RefCell<VecDeque<String>>> = Rc::new(RefCell::new(VecDeque::new()));
+    let pending_url: Rc<RefCell<VecDeque<PendingUrl>>> = Rc::new(RefCell::new(VecDeque::new()));
     // The form's Add button, desensitized while a lookup is in flight (a
     // dead button says so upfront). Every terminal state re-enables it.
     let lookup_add: Rc<RefCell<Option<gtk4::Button>>> = Rc::new(RefCell::new(None));
@@ -4563,6 +4593,7 @@ pub fn build_add_card(manager: Rc<DownloadManager>) -> AddCard {
         let open_state = Rc::clone(&open_state);
         let public_host_leases = Rc::clone(&public_host_leases);
         let url_entry = url_entry.clone();
+        let source_referer = Rc::clone(&step.source_referer);
         let probe = Rc::clone(&probe);
         let pending_url = Rc::clone(&pending_url);
         // The last URL the clipboard auto-paste inserted: a stale clipboard
@@ -4574,7 +4605,7 @@ pub fn build_add_card(manager: Rc<DownloadManager>) -> AddCard {
             let saved = manager.settings().last_auto_paste();
             if saved.is_empty() { None } else { Some(saved) }
         }));
-        Rc::new(move |initial_url: Option<String>| {
+        Rc::new(move |initial_url: Option<String>, initial_referer: Option<String>| {
             public_host_leases.borrow_mut().activate();
             let already = open_state.is_open();
             reveal();
@@ -4595,23 +4626,29 @@ pub fn build_add_card(manager: Rc<DownloadManager>) -> AddCard {
                     drop(st);
                     if busy || has_unprobed {
                         // FIFO: rapid sends must not overwrite each other.
+                        let queued = (normalized.clone(), initial_referer.clone());
                         let mut queue = pending_url.borrow_mut();
-                        if !queue.contains(&normalized) {
-                            queue.push_back(normalized);
+                        if !queue.contains(&queued) {
+                            queue.push_back(queued);
                         }
                         return;
                     }
                     url_entry.set_text(&normalized);
+                    *source_referer.borrow_mut() = initial_referer
+                        .filter(|referer| !referer.is_empty())
+                        .map(|referer| (normalized, referer));
                 }
             } else if !already && url_entry.text().trim().is_empty() {
                 let next = { pending_url.borrow_mut().pop_front() };
-                if let Some(next) = next {
+                if let Some((next, referer)) = next {
                     // A manifest preview may have held this FIFO entry until
                     // the user dismissed it. Resume the oldest queued URL first.
                     url_entry.set_text(&next);
+                    *source_referer.borrow_mut() = referer.map(|referer| (next, referer));
                 } else {
                     // Single clipboard read per fresh open; no watch, no polling.
                     let url_entry = url_entry.clone();
+                    let source_referer = Rc::clone(&source_referer);
                     let last_auto_paste = Rc::clone(&last_auto_paste);
                     glib::spawn_future_local(async move {
                         let clipboard = gtk4::gdk::Display::default().map(|d| d.clipboard());
@@ -4630,6 +4667,7 @@ pub fn build_add_card(manager: Rc<DownloadManager>) -> AddCard {
                                 return;
                             }
                             url_entry.set_text(&normalized);
+                            source_referer.borrow_mut().take();
                             *last_auto_paste.borrow_mut() = Some(fingerprint.clone());
                             // Persist so a restart doesn't re-paste the stale link.
                             // The manager Rc isn't available in this async block;
@@ -4652,7 +4690,7 @@ pub fn build_add_card(manager: Rc<DownloadManager>) -> AddCard {
             if open_state.is_open() {
                 close_card();
             } else {
-                open(None);
+                open(None, None);
             }
         })
     };

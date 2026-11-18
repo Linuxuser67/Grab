@@ -10,6 +10,7 @@ mod download;
 mod download_fetch;
 mod download_intake;
 mod download_net;
+mod direct_resource_intake;
 mod download_pieces;
 mod download_rate;
 mod download_row;

@@ -77,6 +77,7 @@ struct PlaylistPickerOwner {
     close_card: Rc<dyn Fn()>,
     public_host_leases: PublicHostLeases,
     generation: u64,
+    referer: Option<String>,
 }
 
 /// Tokio detaches a task when its JoinHandle is dropped. Own the abort handle
@@ -1518,6 +1519,7 @@ fn submit_probe(
                     close_card: close_card.clone(),
                     public_host_leases: Rc::clone(&step.public_host_leases),
                     generation: step.public_host_leases.borrow().generation,
+                    referer: source_referer_for(step, &submitted_url),
                 },
                 pl,
                 scheduled_at,
@@ -1706,6 +1708,7 @@ struct PlaylistImportRequest {
     title: String,
     group_title: String,
     page_url: String,
+    referer: Option<String>,
     existing_destination: Option<String>,
     chosen: Vec<(usize, crate::media_types::PlaylistItem)>,
     scheduled_at: Option<i64>,
@@ -1797,6 +1800,7 @@ async fn import_playlist_selection(
         title,
         group_title,
         page_url,
+        referer,
         existing_destination,
         chosen,
         scheduled_at,
@@ -1878,13 +1882,14 @@ async fn import_playlist_selection(
     }
 
     if !playlist_files.is_empty() {
-        let owner = manager.enqueue_video_playlist_staged(
+        let owner = manager.enqueue_video_playlist_staged_with_referer(
             &page_url,
             &group_title,
             &dir,
             playlist_files,
             manager.settings().video_quality(),
             audio_only,
+            referer.as_deref(),
         )?;
         apply_scheduled_at(&owner, scheduled_at);
     }
@@ -1997,6 +2002,7 @@ fn push_playlist_items_page(
     let picker_page_on_error = picker_page.clone();
     let guarded_child_hosts = Rc::clone(&owner.public_host_leases);
     let owner_generation = owner.generation;
+    let referer = owner.referer.clone();
     let close_card = Rc::clone(&owner.close_card);
     let grid_for_import = grid.clone();
     let add_btn_click = add_btn.clone();
@@ -2034,6 +2040,7 @@ fn push_playlist_items_page(
             title: playlist.title.to_string(),
             group_title: playlist.title.to_string(),
             page_url: page_url.to_string(),
+            referer: referer.clone(),
             existing_destination: manager.video_playlist_destination_for_url(&page_url),
             chosen,
             scheduled_at,
@@ -3660,6 +3667,7 @@ fn build_video_lookup_kicker(context: VideoLookupContext) -> VideoLookupKick {
                                                 .public_host_leases
                                                 .borrow()
                                                 .generation,
+                                            referer: source_referer.clone(),
                                         },
                                         pl,
                                         scheduled_at_b.get(),
@@ -3995,6 +4003,7 @@ fn build_submit_handler(context: SubmitContext) -> SubmitHandler {
                                     close_card: close_card.clone(),
                                     public_host_leases: Rc::clone(&step2.public_host_leases),
                                     generation: step2.public_host_leases.borrow().generation,
+                                    referer: source_referer_for(&step2, &url),
                                 },
                                 pl,
                                 scheduled_at.get(),
@@ -5088,6 +5097,7 @@ mod tests {
                     scope
                 },
                 generation: 1,
+                referer: None,
             },
             crate::media_types::PlaylistInfo {
                 title: "Playlist".into(),

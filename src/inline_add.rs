@@ -1572,28 +1572,37 @@ fn submit_gallery_all(
                 None => {
                     let url_for_count = page_url.clone();
                     let browser_for_count = browser.clone();
+                    let count_settings = crate::settings::AppSettings::new();
+                    let proxy =
+                        crate::download::DownloadOptions::from_settings(&count_settings)
+                            .proxy_config();
                     crate::runtime::tokio_rt()
                         .spawn(count_host_lease_guard.hold(async move {
-                            let count_settings = crate::settings::AppSettings::new();
-                            let proxy =
-                                crate::download::DownloadOptions::from_settings(&count_settings)
-                                    .proxy_config()
-                                    .ok()?;
+                            let proxy = match proxy {
+                                Ok(proxy) => proxy,
+                                Err(error) => {
+                                    tracing::warn!(error = %error, "gallery count proxy invalid");
+                                    return None;
+                                }
+                            };
                             let auth = crate::inline_gallery::resolve_gallery_auth(
                                 &url_for_count,
                                 &browser_for_count,
                             );
-                            let tool = crate::gallery_argv::resolve_tool().ok()?;
-                            crate::gallery_probe::count_gallery_files_with_proxy(
-                                &tool,
-                                &url_for_count,
-                                auth.cookies_path.as_deref(),
-                                auth.cookies_browser.as_deref(),
-                                auth.user_agent.as_deref(),
-                                filter,
-                                proxy.as_ref(),
-                            )
-                            .await
+                            if let Ok(tool) = crate::gallery_argv::resolve_tool() {
+                                crate::gallery_probe::count_gallery_files_with_proxy(
+                                    &tool,
+                                    &url_for_count,
+                                    auth.cookies_path.as_deref(),
+                                    auth.cookies_browser.as_deref(),
+                                    auth.user_agent.as_deref(),
+                                    filter,
+                                    proxy.as_ref(),
+                                )
+                                .await
+                            } else {
+                                None
+                            }
                         }))
                         .await
                         .ok()

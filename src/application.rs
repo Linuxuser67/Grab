@@ -445,8 +445,16 @@ fn dispatch_handoff(
         // The lease is transferred to an open card or held until enqueue has
         // acquired the queue-row reference.
         glib::spawn_future_local(async move {
-            let routed =
-                route_open_uri(manager, toasts, add_card, settings, uri, referer, public_host_lease).await;
+            let routed = route_open_uri(
+                manager,
+                toasts,
+                add_card,
+                settings,
+                uri,
+                referer,
+                public_host_lease,
+            )
+            .await;
             answer_handoff(decision, routed.into());
         });
         return;
@@ -499,7 +507,13 @@ fn dispatch_handoff(
             let decision_c = decision.clone();
             glib::spawn_future_local(async move {
                 let routed = route_open_uri(
-                    manager_c, toasts_c, add_card_c, settings_c, approved_c, referer.clone(), None,
+                    manager_c,
+                    toasts_c,
+                    add_card_c,
+                    settings_c,
+                    approved_c,
+                    referer.clone(),
+                    None,
                 )
                 .await;
                 answer_handoff(decision_c.borrow_mut().take(), routed.into());

@@ -1233,7 +1233,8 @@ impl DownloadManager {
         dest_dir: Option<&str>,
         filename: Option<&str>,
     ) -> Result<(DownloadItem, BatchGuard), String> {
-        self.enqueue_async_batched_with_referer(url, dest_dir, filename, None).await
+        self.enqueue_async_batched_with_referer(url, dest_dir, filename, None)
+            .await
     }
 
     pub(crate) async fn enqueue_async_batched_with_referer(
@@ -1252,9 +1253,8 @@ impl DownloadManager {
         .map_err(|error| format!("Could not inspect download folder: {error:?}"))?
         .map_err(|error| format!("Could not inspect download folder: {error}"))?;
         let guard = self.batch_guard();
-        let item = self.enqueue_with_listing_and_referer(
-            url, Some(&dir), filename, &existing, referer,
-        )?;
+        let item =
+            self.enqueue_with_listing_and_referer(url, Some(&dir), filename, &existing, referer)?;
         Ok((item, guard))
     }
 
@@ -1461,7 +1461,8 @@ impl DownloadManager {
         filename: Option<&str>,
         choices: crate::media_types::VideoChoices,
     ) -> Result<(DownloadItem, BatchGuard), String> {
-        self.enqueue_video_async_batched_with_referer(page_url, dest_dir, filename, choices, None).await
+        self.enqueue_video_async_batched_with_referer(page_url, dest_dir, filename, choices, None)
+            .await
     }
 
     pub(crate) async fn enqueue_video_async_batched_with_referer(
@@ -1481,7 +1482,9 @@ impl DownloadManager {
         .map_err(|error| format!("Could not inspect download folder: {error:?}"))?
         .map_err(|error| format!("Could not inspect download folder: {error}"))?;
         let guard = self.batch_guard();
-        let item = self.enqueue_video_staged_with_referer(page_url, &dir, filename, choices, &existing, referer)?;
+        let item = self.enqueue_video_staged_with_referer(
+            page_url, &dir, filename, choices, &existing, referer,
+        )?;
         Ok((item, guard))
     }
 
@@ -1511,7 +1514,8 @@ impl DownloadManager {
         dest_dir: Option<&str>,
         filename: Option<&str>,
     ) -> Result<(DownloadItem, BatchGuard), String> {
-        self.enqueue_manifest_async_batched_with_referer(source, dest_dir, filename, None).await
+        self.enqueue_manifest_async_batched_with_referer(source, dest_dir, filename, None)
+            .await
     }
 
     pub(crate) async fn enqueue_manifest_async_batched_with_referer(
@@ -1540,7 +1544,8 @@ impl DownloadManager {
             Self::manifest_filename_for_container(filename, &source.url, container);
 
         let guard = self.batch_guard();
-        let item = self.enqueue_manifest_staged(source, &dir, Some(&requested_name), &existing, referer)?;
+        let item =
+            self.enqueue_manifest_staged(source, &dir, Some(&requested_name), &existing, referer)?;
         Ok((item, guard))
     }
 
@@ -1797,7 +1802,8 @@ impl DownloadManager {
         }
 
         if let Some(owner) = self.video_playlist_owner_for_url(&url) {
-            let owner = self.extend_video_playlist_staged(&owner, dest_dir, files, &quality, audio_only)?;
+            let owner =
+                self.extend_video_playlist_staged(&owner, dest_dir, files, &quality, audio_only)?;
             if let Some(referer) = referer {
                 owner.set_referer(referer);
                 self.persist_queue();

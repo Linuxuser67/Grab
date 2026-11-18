@@ -166,6 +166,7 @@ async fn gallery_integration_probe_count_download() {
     let job = crate::gallery_argv::GalleryJob {
         item_id: 1,
         page_url: url.clone(),
+        referer: None,
         title: "test-gallery".to_string(),
         file_count: Some(4),
         dest_dir: dest.clone(),
@@ -258,6 +259,7 @@ async fn gallery_integration_filtered_download() {
     let job = crate::gallery_argv::GalleryJob {
         item_id: 2,
         page_url: url.clone(),
+        referer: None,
         title: "test-gallery-filter".to_string(),
         file_count: Some(3),
         dest_dir: dest.clone(),
@@ -351,6 +353,7 @@ async fn gallery_integration_range_indexes_filtered_files() {
     let job = crate::gallery_argv::GalleryJob {
         item_id: 3,
         page_url: url.clone(),
+        referer: None,
         title: "test-gallery-range".to_string(),
         file_count: Some(1),
         dest_dir: dest.clone(),

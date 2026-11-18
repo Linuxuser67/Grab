@@ -335,6 +335,9 @@ pub struct GalleryJob {
     #[serde(skip, default)]
     pub item_id: u64,
     pub page_url: String,
+    /// Browser-provided source page for gallery-dl HTTP requests.
+    #[serde(default)]
+    pub referer: Option<String>,
     /// Display title for the queue row (from probe metadata).
     pub title: String,
     /// File count from the probe (`-g` line count), if available.

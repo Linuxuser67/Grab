@@ -132,6 +132,7 @@ impl DownloadManager {
                     Some(crate::gallery_argv::GalleryJob {
                         item_id: 0, // overwritten on restore
                         page_url: page_url.clone(),
+                        referer: item.referer.clone(),
                         title: item.filename.clone(),
                         file_count: None,
                         dest_dir: std::path::PathBuf::from(&item.dest_dir),

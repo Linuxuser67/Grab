@@ -144,7 +144,7 @@ pub async fn run_gallery_download_with_proxy(
     let event_nonce = crate::event_nonce::new_event_nonce().map_err(|error| {
         GalleryError::runtime(format!("couldn't generate gallery event nonce: {error}"))
     })?;
-    let argv = download_argv_with_proxy(
+    let mut argv = download_argv_with_proxy(
         tool,
         &job.page_url,
         &job.dest_dir,
@@ -156,6 +156,13 @@ pub async fn run_gallery_download_with_proxy(
         proxy,
         &event_nonce,
     );
+    if let Some(referer) = job.referer.as_deref() {
+        let separator = argv.iter().position(|arg| arg == "--").unwrap_or(argv.len());
+        argv.splice(
+            separator..separator,
+            ["-o".to_string(), format!("extractor.*.referer={referer}")],
+        );
+    }
     let guarded_proxy = if untrusted_handoff {
         crate::video_spawn::validate_guarded_proxy_args(&argv).map_err(GalleryError::probe)?;
         Some(crate::subprocess_proxy::ensure_started().map_err(GalleryError::probe)?)
@@ -424,6 +431,7 @@ mod tests {
         let job = GalleryJob {
             item_id: 7,
             page_url: "https://example.com/gallery".to_string(),
+            referer: None,
             title: "Gallery".to_string(),
             file_count: Some(2),
             dest_dir: dir.clone(),
@@ -514,6 +522,7 @@ mod tests {
         let job = GalleryJob {
             item_id: 1,
             page_url: "https://example.com/x".to_string(),
+            referer: None,
             title: "x".to_string(),
             file_count: None,
             dest_dir: dir.clone(),

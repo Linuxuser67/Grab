@@ -19,7 +19,7 @@ use yt_dlp::model::Video;
 const VIDEO_CACHE_TTL: Duration = Duration::from_secs(15 * 60);
 const CLEAN_INTERVAL: Duration = Duration::from_secs(5 * 60);
 
-/// Authenticated previews stay in memory: the Redb layer keys rows by video id,
+/// Authenticated and Referer-bound previews stay in memory: the Redb layer keys rows by video id,
 /// so two identities for one video would overwrite each other, and these entries
 /// carry signed media URLs. A staged handoff jar outlives this window.
 const AUTHENTICATED_PREVIEW_TTL: Duration = VIDEO_CACHE_TTL;
@@ -250,8 +250,6 @@ async fn clean_expired_if_due(cache: &VideoCache) {
     }
 }
 
-/// Cache identity includes all inputs that can affect extractor output. Hash
-/// credentials and proxy URLs instead of writing them into the Redb keys.
 #[cfg(test)]
 pub(crate) fn cache_key(
     raw_url: &str,
@@ -272,6 +270,9 @@ pub(crate) fn cache_key(
     )
 }
 
+/// Cache identity includes all inputs that can affect extractor output.
+/// Hash credentials, proxies, and source-page URLs instead of writing them
+/// into the Redb keys.
 pub(crate) fn cache_key_with_referer(
     raw_url: &str,
     youtube_bin: &Path,

@@ -944,8 +944,7 @@ async fn poll_live_hls_track(
             ManifestRunError::Unsupported(error.to_string()),
         );
     }
-    apply_live_hls_snapshot(transfer, &plan, track, abort, other_rendition_bytes)
-    .await
+    apply_live_hls_snapshot(transfer, &plan, track, abort, other_rendition_bytes).await
 }
 
 #[derive(Clone, Copy)]
@@ -1129,7 +1128,13 @@ pub(super) async fn run_live_hls_tracks(
         }
     }
 
-    match apply_live_hls_snapshot(&transfer, video_plan, &mut video, abort, audio_resource_bytes)
+    match apply_live_hls_snapshot(
+        &transfer,
+        video_plan,
+        &mut video,
+        abort,
+        audio_resource_bytes,
+    )
     .await?
     {
         LiveHlsSnapshotOutcome::Committed => {
@@ -1158,7 +1163,13 @@ pub(super) async fn run_live_hls_tracks(
         }
     }
     if let (Some(plan), Some(track)) = (audio_plan, audio.as_mut()) {
-        let audio_outcome = apply_live_hls_snapshot(&transfer, plan, track, abort, video.accumulator.resource_bytes())
+        let audio_outcome = apply_live_hls_snapshot(
+            &transfer,
+            plan,
+            track,
+            abort,
+            video.accumulator.resource_bytes(),
+        )
         .await;
         let audio_outcome = match audio_outcome {
             Err(ManifestRunError::Unsupported(error)) => {
@@ -1242,7 +1253,13 @@ pub(super) async fn run_live_hls_tracks(
                 .next_poll_at
                 .is_some_and(|deadline| deadline <= Instant::now())
         {
-            match poll_live_hls_track(&transfer, source_url, &mut video, abort, guarded_child_hosts, audio
+            match poll_live_hls_track(
+                &transfer,
+                source_url,
+                &mut video,
+                abort,
+                guarded_child_hosts,
+                audio
                     .as_ref()
                     .map_or(0, |track| track.accumulator.resource_bytes()),
             )
@@ -1283,7 +1300,13 @@ pub(super) async fn run_live_hls_tracks(
                 .next_poll_at
                 .is_some_and(|deadline| deadline <= Instant::now())
         {
-            match poll_live_hls_track(&transfer, source_url, audio, abort, guarded_child_hosts, video.accumulator.resource_bytes(),
+            match poll_live_hls_track(
+                &transfer,
+                source_url,
+                audio,
+                abort,
+                guarded_child_hosts,
+                video.accumulator.resource_bytes(),
             )
             .await?
             {
@@ -1391,9 +1414,7 @@ mod destination_part_tests {
             tx: &tx,
             downloaded: &downloaded,
         };
-        let result =
-            apply_live_hls_snapshot(&transfer, &plan, &mut track, &mut abort, 0)
-        .await;
+        let result = apply_live_hls_snapshot(&transfer, &plan, &mut track, &mut abort, 0).await;
 
         assert!(
             matches!(result, Err(ManifestRunError::Unsupported(_))),

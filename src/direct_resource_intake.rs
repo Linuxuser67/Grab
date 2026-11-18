@@ -289,7 +289,7 @@ mod tests {
                     break;
                 }
                 request.extend_from_slice(&chunk[..count]);
-                if request.windows(4).any(|window| window == b"\\r\\n\\r\\n") {
+                if request.windows(4).any(|window| window == b"\r\n\r\n") {
                     break;
                 }
             }
@@ -301,7 +301,7 @@ mod tests {
 
             stream
                 .write_all(
-                    b"HTTP/1.1 206 Partial Content\\r\\nContent-Type: application/octet-stream\\r\\nContent-Range: bytes 0-0/2000000\\r\\nContent-Length: 2000000\\r\\nConnection: close\\r\\n\\r\\nx",
+                    b"HTTP/1.1 206 Partial Content\r\nContent-Type: application/octet-stream\r\nContent-Range: bytes 0-0/2000000\r\nContent-Length: 2000000\r\nConnection: close\r\n\r\nx",
                 )
                 .await
                 .expect("write response headers");

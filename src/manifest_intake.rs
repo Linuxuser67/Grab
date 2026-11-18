@@ -388,12 +388,8 @@ pub(crate) async fn lookup(
     let handoff_identity = crate::extension_server::live_handoff_identity(raw_url);
     // The source page can affect an access-controlled manifest response.
     // Its hash is part of the key, allowing reuse only for the same context.
-    let cache_key = manifest_preview_cache_key_with_referer(
-        raw_url,
-        proxy,
-        handoff_identity.as_ref(),
-        referer,
-    );
+    let cache_key =
+        manifest_preview_cache_key_with_referer(raw_url, proxy, handoff_identity.as_ref(), referer);
     if let Some(key) = cache_key.as_ref()
         && let Some(mut cached) = manifest_preview_cache_get(key)
     {
@@ -2649,9 +2645,15 @@ segment.ts?f=418899&srv=server&i=0.4&sp=500&p1=one&p2=two&asn=327934
             manifest_preview_cache_key_with_referer(url, None, None, Some(different_source))
                 .expect("different source-page key");
 
-        assert_ne!(anonymous, first, "anonymous and Referer-bound previews differ");
+        assert_ne!(
+            anonymous, first,
+            "anonymous and Referer-bound previews differ"
+        );
         assert_eq!(first, same, "URL fragments do not affect Referer identity");
-        assert_ne!(first, different, "different source pages must not share a preview");
+        assert_ne!(
+            first, different,
+            "different source pages must not share a preview"
+        );
     }
 
     #[test]

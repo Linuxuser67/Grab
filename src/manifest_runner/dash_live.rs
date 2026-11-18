@@ -1036,7 +1036,13 @@ pub(super) async fn run_live_dash_tracks(
     };
     let mut next_refresh_at = dash_next_refresh_deadline(&current_video_plan.presentation)?;
 
-    match apply_dash_live_snapshot(transfer, &current_video_plan, &mut video, abort, audio_bytes)
+    match apply_dash_live_snapshot(
+        transfer,
+        &current_video_plan,
+        &mut video,
+        abort,
+        audio_bytes,
+    )
     .await?
     {
         DashLiveUpdateOutcome::Committed => {
@@ -1074,7 +1080,7 @@ pub(super) async fn run_live_dash_tracks(
         )
         .await?;
         match apply_dash_live_snapshot(transfer, plan, &mut audio.0, abort, updated_video_bytes)
-        .await?
+            .await?
         {
             DashLiveUpdateOutcome::Committed => {
                 ensure_manifest_mux_spaces(
@@ -1208,7 +1214,13 @@ pub(super) async fn run_live_dash_tracks(
             None => 0,
         };
 
-        match apply_dash_live_snapshot(transfer, &current_video_plan, &mut video, abort, current_audio_bytes)
+        match apply_dash_live_snapshot(
+            transfer,
+            &current_video_plan,
+            &mut video,
+            abort,
+            current_audio_bytes,
+        )
         .await?
         {
             DashLiveUpdateOutcome::Committed => {
@@ -1243,8 +1255,7 @@ pub(super) async fn run_live_dash_tracks(
                     video.committed_bytes,
                 )
                 .await?;
-                match apply_dash_live_snapshot(transfer, plan, track, abort, video_bytes)
-                .await?
+                match apply_dash_live_snapshot(transfer, plan, track, abort, video_bytes).await?
                 {
                     DashLiveUpdateOutcome::Committed => {
                         ensure_manifest_mux_spaces(
@@ -1293,7 +1304,7 @@ pub(super) async fn run_live_dash_tracks(
                 )
                 .await?;
                 match apply_dash_live_snapshot(transfer, plan, &mut track, abort, video_bytes)
-                .await?
+                    .await?
                 {
                     DashLiveUpdateOutcome::Committed => {
                         ensure_manifest_mux_spaces(

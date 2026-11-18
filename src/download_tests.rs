@@ -10369,7 +10369,7 @@ fn single_entry_playlist_staged_import_keeps_collection_owner() {
 
     let owner = manager
         .enqueue_video_playlist_staged(crate::download::VideoPlaylistEnqueue {
-            page_url: "https://example.com/playlist",
+            page_url: "https://example.com/playlist".to_string(),
             title: "One-entry playlist".to_string(),
             dest_dir: destination
                 .to_str()
@@ -10417,7 +10417,7 @@ fn playlist_staged_import_extends_existing_owner_without_duplicate_children() {
 
     let first = manager
         .enqueue_video_playlist_staged(crate::download::VideoPlaylistEnqueue {
-            page_url: "https://example.com/playlist",
+            page_url: "https://example.com/playlist".to_string(),
             title: "Shared playlist".to_string(),
             dest_dir: destination.to_string(),
             files: vec![crate::media_types::VideoPlaylistFile {
@@ -10450,7 +10450,7 @@ fn playlist_staged_import_extends_existing_owner_without_duplicate_children() {
 
     let second = manager
         .enqueue_video_playlist_staged(crate::download::VideoPlaylistEnqueue {
-            page_url: "https://example.com/playlist",
+            page_url: "https://example.com/playlist".to_string(),
             title: "Shared playlist".to_string(),
             dest_dir: destination.to_string(),
             files: vec![
@@ -10524,7 +10524,7 @@ fn playlist_staged_import_restarts_a_downloading_owner_with_new_entries() {
 
     let owner = manager
         .enqueue_video_playlist_staged(crate::download::VideoPlaylistEnqueue {
-            page_url: "https://example.com/restart-playlist",
+            page_url: "https://example.com/restart-playlist".to_string(),
             title: "Restart playlist".to_string(),
             dest_dir: destination.to_string(),
             files: vec![crate::media_types::VideoPlaylistFile {
@@ -10549,7 +10549,7 @@ fn playlist_staged_import_restarts_a_downloading_owner_with_new_entries() {
 
     let extended = manager
         .enqueue_video_playlist_staged(crate::download::VideoPlaylistEnqueue {
-            page_url: "https://example.com/restart-playlist",
+            page_url: "https://example.com/restart-playlist".to_string(),
             title: "Restart playlist".to_string(),
             dest_dir: destination.to_string(),
             files: vec![crate::media_types::VideoPlaylistFile {
@@ -10613,7 +10613,7 @@ fn playlist_staged_import_requeues_a_failed_owner_with_new_entries() {
     };
     let owner = manager
         .enqueue_video_playlist_staged(crate::download::VideoPlaylistEnqueue {
-            page_url: "https://example.com/failed-playlist",
+            page_url: "https://example.com/failed-playlist".to_string(),
             title: "Failed playlist".to_string(),
             dest_dir: destination
                 .to_str()
@@ -10637,7 +10637,7 @@ fn playlist_staged_import_requeues_a_failed_owner_with_new_entries() {
 
     let extended = manager
         .enqueue_video_playlist_staged(crate::download::VideoPlaylistEnqueue {
-            page_url: "https://example.com/failed-playlist",
+            page_url: "https://example.com/failed-playlist".to_string(),
             title: "Failed playlist".to_string(),
             dest_dir: destination
                 .to_str()

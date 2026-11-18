@@ -2455,7 +2455,7 @@ impl AddCard {
     /// Reveal the card, pre-filling `initial_url` when given (drops and
     /// Open With). An already-open card only gains focus — no reset;
     /// collapse always resets, so a reopened card starts fresh.
-#[allow(dead_code)]
+    #[allow(dead_code)]
     pub fn open(&self, initial_url: Option<String>) {
         self.public_host_leases.borrow_mut().activate();
         (self.open)(initial_url, None)

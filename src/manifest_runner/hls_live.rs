@@ -875,9 +875,6 @@ async fn poll_live_hls_track(
     other_rendition_bytes: u64,
 ) -> Result<LiveHlsSnapshotOutcome, ManifestRunError> {
     let client = transfer.client;
-    let connections = transfer.connections;
-    let tx = transfer.tx;
-    let downloaded = transfer.downloaded;
     let result = tokio::select! {
         biased;
         stop = &mut *abort => {

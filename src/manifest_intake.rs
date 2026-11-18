@@ -394,7 +394,8 @@ pub(crate) async fn lookup(
 
     let request_url = raw_url.to_string();
     let (auth, lookup) = tokio::time::timeout(MANIFEST_LOOKUP_BUDGET, async move {
-        let (client, auth) = client_for_preview(&request_url, proxy, handoff_identity, referer).await?;
+        let (client, auth) =
+            client_for_preview(&request_url, proxy, handoff_identity, referer).await?;
         let lookup = lookup_preview_with_client(&client, &request_url)
             .await
             .map_err(|error| error.to_string())?;
@@ -496,10 +497,8 @@ async fn client_for_preview(
 ) -> Result<(reqwest::Client, ManifestClientAuth), String> {
     validate_handoff_proxy(raw_url)?;
     if let Some((path, user_agent)) = handoff_identity
-        && let Some(client) = client_from_handoff_jar(
-            &path, user_agent.as_deref(), proxy, referer,
-        )
-        .await?
+        && let Some(client) =
+            client_from_handoff_jar(&path, user_agent.as_deref(), proxy, referer).await?
     {
         return Ok((client, ManifestClientAuth::Handoff));
     }
@@ -532,7 +531,9 @@ async fn client_with_browser_jar(
     })
     .await
     {
-        Ok(Ok(Some(jar))) => crate::download_net::http_client_with_jar_and_referer(proxy, jar, referer).map(Some),
+        Ok(Ok(Some(jar))) => {
+            crate::download_net::http_client_with_jar_and_referer(proxy, jar, referer).map(Some)
+        }
         Ok(Ok(None)) => Ok(None),
         Ok(Err(error)) => {
             tracing::warn!(error = %error, "browser-cookie export skipped for native manifest");

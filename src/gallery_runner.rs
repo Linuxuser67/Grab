@@ -157,7 +157,10 @@ pub async fn run_gallery_download_with_proxy(
         &event_nonce,
     );
     if let Some(referer) = job.referer.as_deref() {
-        let separator = argv.iter().position(|arg| arg == "--").unwrap_or(argv.len());
+        let separator = argv
+            .iter()
+            .position(|arg| arg == "--")
+            .unwrap_or(argv.len());
         argv.splice(
             separator..separator,
             ["-o".to_string(), format!("extractor.*.referer={referer}")],

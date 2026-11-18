@@ -111,13 +111,10 @@ async fn verify_destination_identity_blocking(
     path: &Path,
     expected: DestinationIdentity,
 ) -> std::io::Result<()> {
-    let actual = identity_from_path_blocking(path).await?;
-    if actual != expected {
-        return Err(std::io::Error::other(
-            "published destination was replaced before rollback or commit",
-        ));
-    }
-    Ok(())
+    let path = path.to_path_buf();
+    tokio::task::spawn_blocking(move || verify_destination_identity(&path, expected))
+        .await
+        .map_err(std::io::Error::other)?
 }
 
 impl RollbackJob {

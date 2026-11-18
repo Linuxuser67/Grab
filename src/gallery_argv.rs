@@ -380,7 +380,8 @@ impl GalleryJob {
     pub(crate) fn is_direct_single_file(&self, destination: &Path) -> bool {
         self.file_count == Some(1)
             && self.dest_dir.as_path() == destination
-            && self.single_file_name
+            && self
+                .single_file_name
                 .as_deref()
                 .is_some_and(crate::file_names::sane_filename)
     }
@@ -413,7 +414,10 @@ mod tests {
 
     #[test]
     fn literal_gallery_filename_escapes_format_braces_only() {
-        assert_eq!(literal_filename_format("100% {sample}.jpg"), "100% {{sample}}.jpg");
+        assert_eq!(
+            literal_filename_format("100% {sample}.jpg"),
+            "100% {{sample}}.jpg"
+        );
         assert_eq!(literal_filename_format("plain.jpg"), "plain.jpg");
     }
 
@@ -424,7 +428,9 @@ mod tests {
         assert!(!single.is_direct_single_file(destination));
         single.single_file_name = Some("image.jpg".to_string());
         assert!(single.is_direct_single_file(destination));
-        assert!(!gallery_job(Some(2), destination.to_path_buf()).is_direct_single_file(destination));
+        assert!(
+            !gallery_job(Some(2), destination.to_path_buf()).is_direct_single_file(destination)
+        );
         assert!(!gallery_job(None, destination.to_path_buf()).is_direct_single_file(destination));
         let mut nested = gallery_job(Some(1), destination.join("Gallery"));
         nested.single_file_name = Some("image.jpg".to_string());

@@ -1852,7 +1852,11 @@ impl DownloadManager {
             proxy,
             // Take the probe's raw info JSON if cached (single videos only).
             // Lets the download use --load-info-json instead of re-extracting.
-            info_json: self.take_probe_json(&probe_json_key),
+            info_json: if item.referer().is_empty() {
+                self.take_probe_json(&probe_json_key)
+            } else {
+                None
+            },
         };
         let handle = tokio_rt().spawn(async move {
             let worker_tx = tx.clone();

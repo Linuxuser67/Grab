@@ -35,9 +35,9 @@ use crate::video_progress::{
 use crate::video_quality::selector_for_quality;
 use crate::video_quality::{default_quality_index, default_video_filename, quality_for_height};
 use crate::video_runner::{
-    RecordingWatcherGuard, YtdlpAttemptContext, await_child, live_capture_argv_with_ffmpeg, pick_subtitle_lang,
-    remux_live_capture, resolve_subtitle_lang, run_hls_ytdlp, run_live_ytdlp, run_unified_ytdlp,
-    spawn_recording_watcher,
+    RecordingWatcherGuard, YtdlpAttemptContext, await_child, live_capture_argv_with_ffmpeg,
+    pick_subtitle_lang, remux_live_capture, resolve_subtitle_lang, run_hls_ytdlp, run_live_ytdlp,
+    run_unified_ytdlp, spawn_recording_watcher,
 };
 use crate::video_spawn::{
     ProcessGroupGuard, fetch_raw_dump_json, fetch_video_page, reap_child, ytdlp_command,
@@ -4504,19 +4504,19 @@ fn live_capture_abort_adopts_partial() {
             let _ = abort_tx.send(crate::video::StopIntent::Finish);
         });
         run_live_ytdlp(
-        &YtdlpAttemptContext {
-            youtube_bin: &fake_yt,
-            ffmpeg_bin: &fake_ff,
-            staging: &staging,
-            gate: &AttemptGate::new(),
-            timeout: std::time::Duration::from_secs(30),
-            tx: tx,
-            playlist_index: None,
-        },
-        &job,
-        "https://youtu.be/grabtest",
-        "h1080",
-        abort_rx,
+            &YtdlpAttemptContext {
+                youtube_bin: &fake_yt,
+                ffmpeg_bin: &fake_ff,
+                staging: &staging,
+                gate: &AttemptGate::new(),
+                timeout: std::time::Duration::from_secs(30),
+                tx: tx,
+                playlist_index: None,
+            },
+            &job,
+            "https://youtu.be/grabtest",
+            "h1080",
+            abort_rx,
     )
         .await
     });
@@ -4756,19 +4756,19 @@ fn a_discard_signal_reaps_the_whole_recorder_group_and_delivers_nothing() {
                 let _ = stop_tx.send(StopIntent::Discard);
             });
             run_live_ytdlp(
-        &YtdlpAttemptContext {
-            youtube_bin: &fake_yt,
-            ffmpeg_bin: &fake_ff,
-            staging: &staging,
-            gate: &AttemptGate::new(),
-            timeout: std::time::Duration::from_secs(600),
-            tx: tx,
-            playlist_index: None,
-        },
-        &job,
-        "https://youtu.be/grabtest",
-        "h1080",
-        stop_rx,
+                &YtdlpAttemptContext {
+                    youtube_bin: &fake_yt,
+                    ffmpeg_bin: &fake_ff,
+                    staging: &staging,
+                    gate: &AttemptGate::new(),
+                    timeout: std::time::Duration::from_secs(600),
+                    tx: tx,
+                    playlist_index: None,
+                },
+                &job,
+                "https://youtu.be/grabtest",
+                "h1080",
+                stop_rx,
     )
             .await
         }
@@ -4913,19 +4913,19 @@ fn a_discard_that_lands_mid_remux_still_delivers_nothing() {
                 }
             });
             run_live_ytdlp(
-        &YtdlpAttemptContext {
-            youtube_bin: &fake_yt,
-            ffmpeg_bin: &fake_ff,
-            staging: &staging,
-            gate: &gate,
-            timeout: std::time::Duration::from_secs(60),
-            tx: tx,
-            playlist_index: None,
-        },
-        &job,
-        "https://youtu.be/grabtest",
-        "h1080",
-        stop_rx,
+                &YtdlpAttemptContext {
+                    youtube_bin: &fake_yt,
+                    ffmpeg_bin: &fake_ff,
+                    staging: &staging,
+                    gate: &gate,
+                    timeout: std::time::Duration::from_secs(60),
+                    tx: tx,
+                    playlist_index: None,
+                },
+                &job,
+                "https://youtu.be/grabtest",
+                "h1080",
+                stop_rx,
     )
             .await
         }
@@ -5609,19 +5609,19 @@ fn aborting_a_live_capture_kills_the_recorder() {
             let (_abort_tx, abort_rx) = tokio::sync::oneshot::channel::<crate::video::StopIntent>();
             // A long stall timeout so the capture cannot finish on its own.
             let _ = run_live_ytdlp(
-        &YtdlpAttemptContext {
-            youtube_bin: &fake_yt,
-            ffmpeg_bin: &fake_ff,
-            staging: &staging_for_task,
-            gate: &AttemptGate::new(),
-            timeout: std::time::Duration::from_secs(600),
-            tx: tx,
-            playlist_index: None,
-        },
-        &job,
-        "https://youtu.be/grabtest",
-        "h1080",
-        abort_rx,
+                &YtdlpAttemptContext {
+                    youtube_bin: &fake_yt,
+                    ffmpeg_bin: &fake_ff,
+                    staging: &staging_for_task,
+                    gate: &AttemptGate::new(),
+                    timeout: std::time::Duration::from_secs(600),
+                    tx: tx,
+                    playlist_index: None,
+                },
+                &job,
+                "https://youtu.be/grabtest",
+                "h1080",
+                abort_rx,
     )
             .await;
         }
@@ -9807,20 +9807,20 @@ fn unified_runner_abort_stays_quiet() {
     let (abort_tx, mut abort_rx) = tokio::sync::oneshot::channel::<crate::video::StopIntent>();
     let handle = std::thread::spawn(move || {
         crate::runtime::tokio_rt().block_on(run_unified_ytdlp(
-        &YtdlpAttemptContext {
-            youtube_bin: &bin,
-            ffmpeg_bin: std::path::Path::new("/usr/bin/ffmpeg"),
-            staging: &staging,
-            gate: &AttemptGate::new(),
-            timeout: std::time::Duration::from_secs(30),
-            tx: tx,
-            playlist_index: None,
-        },
-        &job,
-        "v123+a456/bv*+ba/b",
-        Some("mp4"),
-        None,
-        &mut abort_rx,
+            &YtdlpAttemptContext {
+                youtube_bin: &bin,
+                ffmpeg_bin: std::path::Path::new("/usr/bin/ffmpeg"),
+                staging: &staging,
+                gate: &AttemptGate::new(),
+                timeout: std::time::Duration::from_secs(30),
+                tx: tx,
+                playlist_index: None,
+            },
+            &job,
+            "v123+a456/bv*+ba/b",
+            Some("mp4"),
+            None,
+            &mut abort_rx,
     ))
     });
     std::thread::sleep(std::time::Duration::from_millis(500));
@@ -10564,19 +10564,19 @@ sleep 30 & wait
         let worker_gate = std::sync::Arc::clone(&gate);
         let worker = tokio::spawn(async move {
             run_live_ytdlp(
-        &YtdlpAttemptContext {
-            youtube_bin: &worker_yt,
-            ffmpeg_bin: &worker_ff,
-            staging: &worker_staging,
-            gate: &worker_gate,
-            timeout: std::time::Duration::from_secs(30),
-            tx: tx,
-            playlist_index: None,
-        },
-        &worker_job,
-        "https://youtu.be/grabtest",
-        "h1080",
-        stop_rx,
+                &YtdlpAttemptContext {
+                    youtube_bin: &worker_yt,
+                    ffmpeg_bin: &worker_ff,
+                    staging: &worker_staging,
+                    gate: &worker_gate,
+                    timeout: std::time::Duration::from_secs(30),
+                    tx: tx,
+                    playlist_index: None,
+                },
+                &worker_job,
+                "https://youtu.be/grabtest",
+                "h1080",
+                stop_rx,
     )
             .await
         });

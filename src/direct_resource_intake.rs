@@ -203,20 +203,11 @@ fn is_direct_resource_metadata(
 }
 
 fn has_download_disposition(value: &str) -> bool {
-    let mut parameters = value.split(';');
-    let disposition = parameters.next().unwrap_or_default().trim();
-    disposition.eq_ignore_ascii_case("attachment")
-        || parameters.any(|parameter| {
-            parameter
-                .trim()
-                .split_once('=')
-                .is_some_and(|(name, filename)| {
-                    matches!(
-                        name.trim().to_ascii_lowercase().as_str(),
-                        "filename" | "filename*"
-                    ) && !filename.trim().trim_matches('"').is_empty()
-                })
-        })
+    value
+        .split(';')
+        .next()
+        .is_some_and(|kind| kind.trim().eq_ignore_ascii_case("attachment"))
+        || crate::download_fetch::filename_from_content_disposition(value).is_some()
 }
 
 #[cfg(test)]

@@ -36,6 +36,7 @@ mod media_types;
 mod mp4_reader;
 mod net_types;
 mod preferences;
+mod referrer;
 mod runtime;
 mod settings;
 mod subprocess_proxy;

@@ -307,7 +307,6 @@ impl Drop for AbortOnDrop {
 /// Returns the parsed result plus the raw `--dump-single-json` for single videos
 /// (used for `--load-info-json` at download time to skip re-extraction).
 /// Playlists return `None` (their entries are re-probed individually).
-#[cfg(test)]
 pub async fn fetch_video_infos(
     youtube_bin: PathBuf,
     url: String,

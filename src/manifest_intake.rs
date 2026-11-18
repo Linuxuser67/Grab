@@ -1213,7 +1213,7 @@ video.m3u8
     async fn youtube_playlist_page_skips_native_preview_before_any_request() {
         let result = tokio::time::timeout(
             Duration::from_secs(1),
-            lookup("https://www.youtube.com/playlist?list=PL_test", None),
+            lookup("https://www.youtube.com/playlist?list=PL_test", None, None),
         )
         .await
         .expect("YouTube playlist URLs must be rejected before any manifest request");
@@ -2661,7 +2661,7 @@ segment.ts?f=418899&srv=server&i=0.4&sp=500&p1=one&p2=two&asn=327934
         );
         std::fs::write(&path, contents).expect("write handoff jar");
 
-        let client = client_from_handoff_jar(&path, Some("Grab-Test-UA"), None)
+        let client = client_from_handoff_jar(&path, Some("Grab-Test-UA"), None, None)
             .await
             .expect("handoff preview client");
         assert!(

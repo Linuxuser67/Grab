@@ -1006,6 +1006,7 @@ fn resume_attempt_labels_reresolve_as_resuming() {
     .unwrap();
 
     let job = VideoJob {
+        referer: None,
         item_id,
         page_url: "https://vimeo.com/123456".into(),
         playlist_item_id: None,
@@ -1059,6 +1060,7 @@ fn pipeline_reports_missing_tools() {
     let _guard = NoVideoTools::apply();
     let item_id = 800_000 + std::process::id() as u64;
     let job = VideoJob {
+        referer: None,
         item_id,
         page_url: "https://vimeo.com/123456".into(),
         playlist_item_id: None,
@@ -3572,6 +3574,7 @@ fn playlist_download_argv_uses_original_selected_indices_and_tagged_events() {
 
 fn direct_test_job() -> VideoJob {
     VideoJob {
+        referer: None,
         item_id: 1,
         page_url: "https://x.com/u/status/1".into(),
         playlist_item_id: None,
@@ -3817,6 +3820,7 @@ fn default_quality_index_preselects() {
 
 fn live_test_job() -> VideoJob {
     VideoJob {
+        referer: None,
         item_id: 1,
         page_url: "https://x.com/u/status/1".into(),
         playlist_item_id: None,
@@ -6438,6 +6442,7 @@ fn vod_hls_pins_planner_variant_id() {
     let fake = fake_ytdlp_hls(&dir);
     let staging = dir.join("staging");
     let job = VideoJob {
+        referer: None,
         item_id: 1,
         page_url: "https://x.com/u/status/1".into(),
         playlist_item_id: None,
@@ -6506,6 +6511,7 @@ fn vod_hls_refuses_existing_dest() {
     let fake = fake_ytdlp_hls(&dir);
     let staging = dir.join("staging");
     let job = VideoJob {
+        referer: None,
         item_id: 1,
         page_url: "https://x.com/u/status/1".into(),
         playlist_item_id: None,
@@ -9173,6 +9179,7 @@ fn hls_collects_sidecar_beside_finished_file() {
     let fake = fake_ytdlp_hls_subs(&dir);
     let staging = dir.join("staging");
     let job = VideoJob {
+        referer: None,
         item_id: 1,
         page_url: "https://x.com/u/status/1".into(),
         playlist_item_id: None,

@@ -1330,7 +1330,7 @@ mod tests {
                 "a public direct-file handoff skips confirmation when auto-add is enabled"
             );
             gtk4::glib::MainContext::default()
-                .block_on(enqueue_direct_handoff(&manager, &uri))
+                .block_on(enqueue_direct_handoff(&manager, &uri, None))
                 .expect("direct handoff should enqueue");
             assert_eq!(manager.store().n_items(), 1);
             let item = manager
@@ -1378,7 +1378,7 @@ mod tests {
             // This is the confirmation dialog's acceptance route: once the
             // user approves, it invokes the same direct enqueue path as auto-add.
             gtk4::glib::MainContext::default()
-                .block_on(enqueue_direct_handoff(&manager, &uri))
+                .block_on(enqueue_direct_handoff(&manager, &uri, None))
                 .expect("a confirmed direct handoff should enqueue");
             assert_eq!(manager.store().n_items(), 1);
             assert!(

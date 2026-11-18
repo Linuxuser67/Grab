@@ -7252,6 +7252,7 @@ segment-2.ts
             .expect("create fMP4 audio staging directory");
 
         let job = ManifestJob {
+            referer: None,
             item_id,
             source: crate::media_types::ManifestSource {
                 url: "https://cdn.example.test/playlist.m3u8".to_string(),
@@ -7657,6 +7658,7 @@ segment-2.ts
             .expect("create audio staging directory");
 
         let job = ManifestJob {
+            referer: None,
             item_id,
             source: crate::media_types::ManifestSource {
                 url: "https://cdn.example.test/master.m3u8".to_string(),

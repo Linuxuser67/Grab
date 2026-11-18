@@ -1099,6 +1099,7 @@ mod attempt_subtitle_language_tests {
 
     fn video_job() -> VideoJob {
         VideoJob {
+            referer: None,
             item_id: 7,
             page_url: "https://example.test/video".to_string(),
             playlist_item_id: None,
@@ -1163,6 +1164,7 @@ mod live_capture_start_tests {
 
     fn live_job() -> VideoJob {
         VideoJob {
+            referer: None,
             item_id: 7,
             page_url: "https://example.test/live".to_string(),
             playlist_item_id: None,

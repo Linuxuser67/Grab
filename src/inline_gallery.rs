@@ -723,6 +723,7 @@ mod tests {
             cookies_browser: None,
             handoff_cookie_hash: None,
             user_agent: None,
+            referer_hash: None,
             proxy: None,
         };
         let items = vec![crate::gallery_probe::GalleryItem {
@@ -753,6 +754,7 @@ mod tests {
             cookies_browser: None,
             handoff_cookie_hash: None,
             user_agent: None,
+            referer_hash: None,
             proxy: None,
         };
         let start = Instant::now();

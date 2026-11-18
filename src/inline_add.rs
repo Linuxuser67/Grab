@@ -1907,8 +1907,8 @@ async fn import_playlist_selection(
     }
 
     if !playlist_files.is_empty() {
-        let owner = manager.enqueue_video_playlist_staged(
-            crate::download::VideoPlaylistEnqueue {
+        let owner =
+            manager.enqueue_video_playlist_staged(crate::download::VideoPlaylistEnqueue {
                 page_url,
                 title: group_title,
                 dest_dir: dir,
@@ -1916,8 +1916,7 @@ async fn import_playlist_selection(
                 quality: manager.settings().video_quality(),
                 audio_only,
                 referer,
-            },
-        )?;
+            })?;
         apply_scheduled_at(&owner, scheduled_at);
     }
 
@@ -2125,10 +2124,7 @@ fn push_playlist_items_page(
 }
 
 /// Torrent intake presents a selection page when the user explicitly requests one.
-fn push_torrent_picker_page(
-    context: TorrentPickerContext<'_>,
-    selection: TorrentPickerSelection,
-) {
+fn push_torrent_picker_page(context: TorrentPickerContext<'_>, selection: TorrentPickerSelection) {
     let TorrentPickerContext {
         nav,
         manager,

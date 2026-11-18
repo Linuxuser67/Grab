@@ -188,7 +188,7 @@ fn gallery_preview_cache_key_with_referer(
     if crate::video_cache::has_known_rotating_auth_query(&url) {
         return None;
     }
-    let referer_hash = crate::referrer::cache_identity(referer)?;
+    let referer_hash = crate::referrer::cache_identity(referer).ok()?;
     let handoff_cookie_hash = match auth.cookies_path.as_deref() {
         Some(path) => Some(crate::extension_server::handoff_cookie_hash(path)?),
         None => None,

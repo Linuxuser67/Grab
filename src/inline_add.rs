@@ -432,10 +432,11 @@ async fn lookup_media(
     browser: String,
     newest_first: bool,
     proxy: Option<crate::net_types::ResolvedProxy>,
+    referer: Option<String>,
 ) -> Result<MediaLookupOutcome, MediaLookupFailure> {
     let started = std::time::Instant::now();
     let host = crate::video_probe::page_host(&url);
-    let result = lookup_media_inner(url, browser, newest_first, proxy).await;
+    let result = lookup_media_inner(url, browser, newest_first, proxy, referer).await;
     tracing::info!(
         url_host = %host,
         total_ms = started.elapsed().as_millis() as u64,
@@ -572,9 +573,10 @@ async fn lookup_media_inner(
     browser: String,
     newest_first: bool,
     proxy: Option<crate::net_types::ResolvedProxy>,
+    referer: Option<String>,
 ) -> Result<MediaLookupOutcome, MediaLookupFailure> {
     if !crate::manifest_intake::supports(&url) {
-        return lookup_extractors_inner(url, browser, newest_first, proxy).await;
+        return lookup_extractors_inner(url, browser, newest_first, proxy, referer).await;
     }
 
     let host = crate::video_probe::page_host(&url);
@@ -582,7 +584,11 @@ async fn lookup_media_inner(
     let native_url = url.clone();
     let native_proxy = proxy.clone();
     let native_future = async move {
-        let result = crate::manifest_intake::lookup(&native_url, native_proxy.as_ref())
+        let result = crate::manifest_intake::lookup(
+            &native_url,
+            native_proxy.as_ref(),
+            referer.as_deref(),
+        )
             .await
             .and_then(|manifest| {
                 manifest.ok_or_else(|| {
@@ -594,7 +600,7 @@ async fn lookup_media_inner(
 
     // Tool lookup is part of this future, so it starts as soon as native intake
     // first yields. It is not awaited as a prerequisite to the native request.
-    let extractor_future = lookup_extractors_inner(url, browser, newest_first, proxy);
+    let extractor_future = lookup_extractors_inner(url, browser, newest_first, proxy, referer);
     match prefer_native_manifest(native_future, extractor_future).await {
         NativePriorityOutcome::Native {
             manifest,
@@ -635,6 +641,7 @@ async fn lookup_extractors_inner(
     browser: String,
     newest_first: bool,
     proxy: Option<crate::net_types::ResolvedProxy>,
+    referer: Option<String>,
 ) -> Result<MediaLookupOutcome, MediaLookupFailure> {
     let needs_gallery_tool = needs_gallery_probe(&url);
     let tool_started = std::time::Instant::now();
@@ -695,12 +702,14 @@ async fn lookup_extractors_inner(
 
     let (ytdlp_result, gallery_error) = if let Some(tool) = gallery_tool {
         let probe_url = url.clone();
+        let probe_referer = referer.clone();
         let probe_browser = browser.clone();
         let probe_proxy = proxy.clone();
         let probe_youtube_bin = youtube_bin.clone();
         let probe_handle = crate::runtime::tokio_rt().spawn(async move {
             crate::inline_gallery::dual_probe(crate::inline_gallery::DualProbeCtx {
                 url: &probe_url,
+                referer: probe_referer,
                 browser: probe_browser,
                 newest_first,
                 proxy: probe_proxy,
@@ -3509,7 +3518,9 @@ fn build_video_lookup_kicker(context: VideoLookupContext) -> VideoLookupKick {
                         }
                         // Cache the raw info JSON for --load-info-json at download time.
                         // Single videos only; playlists re-probe per entry.
-                        if let Some(json) = raw_json {
+                        if source_referer.is_none()
+                            && let Some(json) = raw_json
+                        {
                             // The probe canonically retargets some pages
                             // (youtu.be/… → …/watch?v=…) and enqueue stores the
                             // probed page URL, which the download keys the cache on.

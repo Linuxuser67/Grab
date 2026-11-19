@@ -8,6 +8,7 @@
 //! grid from `gallery_grid`.
 
 use crate::gallery_grid::GalleryGrid;
+use crate::picker_context::PickerContext;
 use crate::window_rows::{
     apply_scheduled_at, picker_enter_confirms, picker_header, selection_action_bar,
 };
@@ -367,12 +368,12 @@ impl GalleryPickerStream {
 /// `GalleryPickerStream`); `None` means another picker page already owns
 /// the screen, so the caller should drop its enumeration.
 pub(crate) fn push_gallery_picker_page(
-    context: crate::picker_context::PickerContext<'_>,
+    context: PickerContext<'_>,
     scheduled_at: Option<i64>,
     source: GalleryPickerSource,
     grid: GalleryGrid,
 ) -> Option<GalleryPickerStream> {
-    let crate::picker_context::PickerContext {
+    let PickerContext {
         nav,
         manager,
         dest_dir,

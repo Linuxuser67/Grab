@@ -84,6 +84,7 @@ const MAX_DASH_LIVE_SEGMENTS: usize = crate::manifest_types::MAX_MANIFEST_SEGMEN
 const MAX_DASH_LIVE_STATE_BYTES: usize = 16 * 1024 * 1024;
 
 /// Shared network, concurrency, and progress-reporting state for live renditions.
+#[derive(Clone, Copy)]
 struct LiveManifestTransfer<'a> {
     client: &'a reqwest::Client,
     concurrency: usize,
@@ -1775,7 +1776,7 @@ enum LiveCapturePreparation {
 
 /// Inputs for capturing a live HLS presentation and preparing its staged playlists.
 struct ManifestLiveHlsFinalization<'a> {
-    client: &'a reqwest::Client,
+    transfer: LiveManifestTransfer<'a>,
     source_url: &'a str,
     dest_dir: &'a Path,
     destination: &'a Path,
@@ -1786,9 +1787,6 @@ struct ManifestLiveHlsFinalization<'a> {
     audio: Option<&'a HlsPlan>,
     video_dir: &'a Path,
     audio_dir: &'a Path,
-    concurrency: usize,
-    tx: &'a tokio::sync::mpsc::UnboundedSender<EngineMsg>,
-    downloaded: &'a Arc<AtomicU64>,
     has_audio: bool,
     guarded_child_hosts: &'a mut crate::download_net::PublicResolutionSet,
     abort: &'a mut tokio::sync::oneshot::Receiver<crate::video::StopIntent>,
@@ -1920,7 +1918,7 @@ async fn prepare_live_hls_finalization(
     context: ManifestLiveHlsFinalization<'_>,
 ) -> Result<LiveCapturePreparation, ManifestRunError> {
     let ManifestLiveHlsFinalization {
-        client,
+        transfer,
         source_url,
         dest_dir,
         destination,
@@ -1931,21 +1929,13 @@ async fn prepare_live_hls_finalization(
         audio,
         video_dir,
         audio_dir,
-        concurrency,
-        tx,
-        downloaded,
         mut has_audio,
         guarded_child_hosts,
         abort,
     } = context;
 
     let capture = run_live_hls_tracks(LiveHlsTrackRun {
-        transfer: LiveManifestTransfer {
-            client,
-            concurrency,
-            tx,
-            downloaded,
-        },
+        transfer,
         source_url,
         destination_dir: dest_dir,
         destination,
@@ -2054,10 +2044,10 @@ async fn prepare_live_hls_finalization(
         }
     }
 
-    ensure_live_finish_marker(staging, downloaded.load(Ordering::Relaxed))
+    ensure_live_finish_marker(staging, transfer.downloaded.load(Ordering::Relaxed))
         .await
         .map_err(ManifestRunError::Failed)?;
-    tx.send(EngineMsg::LiveFinalizing).ok();
+    transfer.tx.send(EngineMsg::LiveFinalizing).ok();
 
     Ok(LiveCapturePreparation::Ready {
         has_audio,
@@ -2260,7 +2250,12 @@ pub(crate) async fn run_manifest_download(
             ));
         };
         match prepare_live_hls_finalization(ManifestLiveHlsFinalization {
-            client: &client,
+            transfer: LiveManifestTransfer {
+                client: &client,
+                concurrency,
+                tx: &tx,
+                downloaded: &downloaded,
+            },
             source_url: &job.source.url,
             dest_dir: &dest_dir,
             destination: &job.dest,
@@ -2271,9 +2266,6 @@ pub(crate) async fn run_manifest_download(
             audio: audio.as_deref(),
             video_dir: &video_dir,
             audio_dir: &audio_dir,
-            concurrency,
-            tx: &tx,
-            downloaded: &downloaded,
             has_audio,
             guarded_child_hosts: &mut guarded_child_hosts,
             abort: &mut abort,

@@ -12,7 +12,7 @@ use reqwest::header::{CONTENT_DISPOSITION, CONTENT_TYPE, HeaderMap, RANGE};
 
 const DIRECT_RESOURCE_PROBE_BUDGET: Duration = Duration::from_secs(3);
 
-/// Use HEAD for query-bearing URLs so the probe cannot consume a signed URL body.
+/// Use HEAD for query-bearing URLs instead of spending a speculative GET.
 fn should_use_head_probe(url: &url::Url) -> bool {
     url.query().is_some_and(|query| !query.is_empty())
 }
@@ -398,7 +398,7 @@ mod tests {
                     break;
                 }
                 request.extend_from_slice(&chunk[..count]);
-                if request.windows(4).any(|window| window == b"\r\\n\r\\n") {
+                if request.windows(4).any(|window| window == b"\r\n\r\n") {
                     break;
                 }
             }
@@ -418,7 +418,7 @@ mod tests {
 
             stream
                 .write_all(
-                    b"HTTP/1.1 200 OK\r\\nContent-Type: application/octet-stream\r\\nContent-Length: 2000000\r\\nConnection: close\r\\n\r\\n",
+                    b"HTTP/1.1 200 OK\r\nContent-Type: application/octet-stream\r\nContent-Length: 2000000\r\nConnection: close\r\n\r\n",
                 )
                 .await
                 .expect("write HEAD response headers");

@@ -2573,7 +2573,7 @@ mod tests {
         let directory = tempfile::tempdir().expect("temporary directory");
         let binary = directory.path().join("yt-dlp");
         std::fs::write(&binary, b"fake yt-dlp binary").expect("write fake binary");
-        let key = crate::video_cache::cache_key_with_referer(
+        let key = crate::video_cache::cache_key(
             url,
             &binary,
             "2026.10.23",

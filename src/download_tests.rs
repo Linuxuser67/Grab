@@ -5364,16 +5364,25 @@ fn aborted_engine_marks_failed() {
     run_loop(&main_loop, 60);
 }
 
-#[test]
-fn deleting_the_destination_stops_a_single_stream_download() {
+#[derive(Clone, Copy)]
+enum DestinationMutation {
+    Delete,
+    Replace,
+}
+
+fn destination_mutation_stops_a_single_stream_download(mutation: DestinationMutation) {
     // 4 MB at the fixture's ~160 KB/s keeps the body open for ~24s, so a
     // transfer that only verifies after sync_all would still be writing when
     // the test's 10s deadline expires.
     let (_lock, _loop) = test_locks();
-    let _qf = test_queue_file("destgone");
+    let suffix = match mutation {
+        DestinationMutation::Delete => "destgone",
+        DestinationMutation::Replace => "destreplaced",
+    };
+    let _qf = test_queue_file(suffix);
     let settings = test_settings();
 
-    let dir = std::env::temp_dir().join(format!("grab-destgone-{}", std::process::id()));
+    let dir = std::env::temp_dir().join(format!("grab-{suffix}-{}", std::process::id()));
     let srv = dir.join("srv");
     let dl = dir.join("dl");
     std::fs::create_dir_all(&srv).unwrap();
@@ -5410,6 +5419,7 @@ fn deleting_the_destination_stops_a_single_stream_download() {
     let url = format!("http://127.0.0.1:{port}/t.bin");
     let dest = dl.to_string_lossy().into_owned();
     let file = dl.join("t.bin");
+    const REPLACEMENT_CONTENTS: &[u8] = b"replacement inode must remain untouched";
 
     let main_loop = glib::MainLoop::new(None, false);
     let quit = main_loop.clone();
@@ -5428,10 +5438,35 @@ fn deleting_the_destination_stops_a_single_stream_download() {
         if item.status() != DownloadStatus::Downloading || item.progress() <= 0.0 {
             abort(&server, "download never wrote any bytes");
         }
-        // Simulate the file manager: unlink the path while the writer holds it open.
-        std::fs::remove_file(&file).unwrap_or_else(|error| {
-            abort(&server, &format!("could not delete destination: {error}"))
-        });
+
+        match mutation {
+            DestinationMutation::Delete => {
+                std::fs::remove_file(&file).unwrap_or_else(|error| {
+                    abort(&server, &format!("could not delete destination: {error}"))
+                });
+            }
+            DestinationMutation::Replace => {
+                let original = std::fs::metadata(&file)
+                    .unwrap_or_else(|error| abort(&server, &format!("inspect original: {error}")));
+                let replacement = dl.join("replacement.tmp");
+                std::fs::write(&replacement, REPLACEMENT_CONTENTS)
+                    .unwrap_or_else(|error| abort(&server, &format!("write replacement: {error}")));
+                let replacement_metadata =
+                    std::fs::metadata(&replacement).unwrap_or_else(|error| {
+                        abort(&server, &format!("inspect replacement: {error}"))
+                    });
+                use std::os::unix::fs::MetadataExt as _;
+                assert_ne!(
+                    original.ino(),
+                    replacement_metadata.ino(),
+                    "replacement must be a different inode"
+                );
+                std::fs::rename(&replacement, &file).unwrap_or_else(|error| {
+                    abort(&server, &format!("replace destination: {error}"))
+                });
+            }
+        }
+
         let mut waited = 0;
         while item.status() != DownloadStatus::Failed && waited < 100 {
             glib::timeout_future(std::time::Duration::from_millis(100)).await;
@@ -5440,17 +5475,36 @@ fn deleting_the_destination_stops_a_single_stream_download() {
         if item.status() != DownloadStatus::Failed {
             abort(
                 &server,
-                &format!("deleted destination left row {:?}", item.status()),
+                &format!("changed destination left row {:?}", item.status()),
             );
         }
-        assert_eq!(
-            item.detail(),
-            "Destination file disappeared during download"
-        );
+
+        match mutation {
+            DestinationMutation::Delete => {
+                assert!(!file.exists(), "deleted destination must remain absent");
+            }
+            DestinationMutation::Replace => {
+                assert_eq!(
+                    std::fs::read(&file).expect("read replacement"),
+                    REPLACEMENT_CONTENTS,
+                    "the download must not write through a replaced destination path"
+                );
+            }
+        }
         cleanup(&server, &dir);
         quit.quit();
     });
     run_loop(&main_loop, 60);
+}
+
+#[test]
+fn deleting_the_destination_stops_a_single_stream_download() {
+    destination_mutation_stops_a_single_stream_download(DestinationMutation::Delete);
+}
+
+#[test]
+fn replacing_the_destination_stops_a_single_stream_download() {
+    destination_mutation_stops_a_single_stream_download(DestinationMutation::Replace);
 }
 
 #[test]

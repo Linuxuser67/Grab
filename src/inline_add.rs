@@ -2350,7 +2350,12 @@ fn push_torrent_picker_page(
                                 crate::torrent::stage_selection(&url, selection);
                             }
                             let result = enqueue_manager
-                                .enqueue_async_batched(&url, d.as_deref(), Some(&enqueue_name), None)
+                                .enqueue_async_batched(
+                                    &url,
+                                    d.as_deref(),
+                                    Some(&enqueue_name),
+                                    None,
+                                )
                                 .await;
                             if result.is_err() {
                                 crate::torrent::drop_selection(&url);
@@ -4195,12 +4200,7 @@ fn build_submit_handler(context: SubmitContext) -> SubmitHandler {
                 scheduled_at.get(),
                 move |d| async move {
                     enqueue_manager
-                        .enqueue_async_batched(
-                            &enqueue_url,
-                            d.as_deref(),
-                            None,
-                            referer.as_deref(),
-                        )
+                        .enqueue_async_batched(&enqueue_url, d.as_deref(), None, referer.as_deref())
                         .await
                 },
                 // Form-validation pattern: the error state lives on the entry

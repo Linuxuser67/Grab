@@ -107,31 +107,6 @@ fn ytdlp_failure_is_retryable(detail: &str) -> bool {
     .any(|needle| lower.contains(needle))
 }
 
-/// Fetch page metadata without a source referrer.
-pub(crate) async fn fetch_raw_dump_json(
-    youtube_bin: &Path,
-    url: &str,
-    cookies_browser: &str,
-    timeout: Duration,
-    fetch_proxy: Option<&crate::net_types::ResolvedProxy>,
-    flat_playlist: bool,
-    identity_args: Option<&[String]>,
-) -> Result<serde_json::Value, VideoError> {
-    fetch_raw_dump_json_with_referer(
-        youtube_bin,
-        url,
-        RawDumpOptions {
-            cookies_browser,
-            timeout,
-            fetch_proxy,
-            flat_playlist,
-            identity_args,
-            referer: None,
-        },
-    )
-    .await
-}
-
 /// Options applied to one yt-dlp metadata subprocess.
 struct RawDumpOptions<'a> {
     cookies_browser: &'a str,
@@ -142,7 +117,7 @@ struct RawDumpOptions<'a> {
     referer: Option<&'a str>,
 }
 
-async fn fetch_raw_dump_json_with_referer(
+async fn fetch_raw_dump_json(
     youtube_bin: &Path,
     url: &str,
     options: RawDumpOptions<'_>,
@@ -265,11 +240,14 @@ pub(crate) async fn fetch_video_page(
     let value = fetch_raw_dump_json(
         youtube_bin,
         url,
-        cookies_browser,
-        timeout,
-        fetch_proxy,
-        false,
-        None,
+        RawDumpOptions {
+            cookies_browser,
+            timeout,
+            fetch_proxy,
+            flat_playlist: false,
+            identity_args: None,
+            referer: None,
+        },
     )
     .await?;
     if let Some(playlist) = parse_playlist_json(&value, url) {
@@ -303,7 +281,7 @@ impl Drop for AbortOnDrop {
     }
 }
 
-pub async fn fetch_video_infos_with_referer(
+pub async fn fetch_video_infos(
     youtube_bin: PathBuf,
     url: String,
     cookies_browser: String,
@@ -343,7 +321,7 @@ pub async fn fetch_video_infos_with_referer(
             // every Referer-bearing lookup.
             let (cache_key, playlist_base_key) =
                 match tokio::task::spawn_blocking(move || {
-                    let video = crate::video_cache::cache_key_with_referer(
+                    let video = crate::video_cache::cache_key(
                         &cache_url,
                         &cache_binary,
                         &cache_version,
@@ -352,7 +330,7 @@ pub async fn fetch_video_infos_with_referer(
                         &cache_identity_args,
                         cache_referer.as_deref(),
                     );
-                    let playlist = crate::video_cache::playlist_cache_key_with_referer(
+                    let playlist = crate::video_cache::playlist_cache_key(
                         &cache_url,
                         &cache_binary,
                         &cache_version,
@@ -418,7 +396,7 @@ pub async fn fetch_video_infos_with_referer(
             let phase_started = std::time::Instant::now();
             let fetch_result = tokio::time::timeout(
                 Duration::from_secs(FETCH_TIMEOUT_SECS),
-                fetch_raw_dump_json_with_referer(
+                fetch_raw_dump_json(
                     &youtube_bin,
                     &url,
                     RawDumpOptions {
@@ -1243,7 +1221,7 @@ mod tests {
         let (tx, rx) = tokio::sync::oneshot::channel();
         tx.send(()).expect("receiver alive");
         let youtube_bin = std::path::PathBuf::from("/nonexistent/yt-dlp");
-        let r = crate::runtime::tokio_rt().block_on(fetch_video_infos_with_referer(
+        let r = crate::runtime::tokio_rt().block_on(fetch_video_infos(
             youtube_bin,
             "https://example.com/video".to_string(),
             String::new(),

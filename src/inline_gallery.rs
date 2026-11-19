@@ -153,7 +153,7 @@ type GalleryPreviewCache = Mutex<GalleryPreviewCacheMap>;
 static GALLERY_PREVIEW_CACHE: LazyLock<GalleryPreviewCache> =
     LazyLock::new(|| Mutex::new(HashMap::new()));
 
-fn gallery_preview_cache_key_with_referer(
+fn gallery_preview_cache_key(
     raw_url: &str,
     auth: &GalleryAuth,
     proxy: Option<&crate::net_types::ResolvedProxy>,
@@ -164,7 +164,7 @@ fn gallery_preview_cache_key_with_referer(
     if crate::video_cache::has_known_rotating_auth_query(&url) {
         return None;
     }
-    let referer_hash = crate::referrer::cache_identity(referer).ok()?;
+    let referer_hash = crate::referrer::cache_identity(referer)?;
     let handoff_cookie_hash = match auth.cookies_path.as_deref() {
         Some(path) => Some(crate::extension_server::handoff_cookie_hash(path)?),
         None => None,
@@ -246,7 +246,7 @@ pub(crate) async fn dual_probe(ctx: DualProbeCtx<'_>) -> DualProbeOutcome {
     let host = crate::video_probe::page_host(&url);
     // yt-dlp starts immediately: it uses the handoff jar or
     // --cookies-from-browser, not the exported file below.
-    let ytdlp_fut = crate::video::fetch_video_infos_with_referer(
+    let ytdlp_fut = crate::video::fetch_video_infos(
         ctx.youtube_bin,
         url.clone(),
         ctx.browser.clone(),
@@ -260,7 +260,7 @@ pub(crate) async fn dual_probe(ctx: DualProbeCtx<'_>) -> DualProbeOutcome {
     let gallery_fut = async {
         let gallery_started = Instant::now();
         let auth = resolve_gallery_auth(&url, &ctx.browser);
-        let cache_key = gallery_preview_cache_key_with_referer(
+        let cache_key = gallery_preview_cache_key(
             &url,
             &auth,
             ctx.proxy.as_ref(),
@@ -284,7 +284,7 @@ pub(crate) async fn dual_probe(ctx: DualProbeCtx<'_>) -> DualProbeOutcome {
             // Errors may be transient and Retry must actually retry. Re-hash
             // after the probe: a replaced or removed jar must not store its
             // result under the old credentials' key.
-            let unchanged = gallery_preview_cache_key_with_referer(
+            let unchanged = gallery_preview_cache_key(
                 &url,
                 &auth,
                 ctx.proxy.as_ref(),
@@ -600,10 +600,10 @@ mod tests {
     fn gallery_preview_cache_key_separates_urls_auth_and_proxies() {
         let url = "https://gallery-cache.example.test/collection#top";
         let anonymous = cache_auth(None, None, None);
-        let base = gallery_preview_cache_key_with_referer(url, &anonymous, None, None)
+        let base = gallery_preview_cache_key(url, &anonymous, None, None)
             .expect("anonymous key");
         assert!(
-            gallery_preview_cache_key_with_referer(
+            gallery_preview_cache_key(
                 "https://gallery-cache.example.test/collection",
                 &anonymous,
                 None,
@@ -613,12 +613,12 @@ mod tests {
         );
         let other_url = "https://gallery-cache.example.test/other";
         assert!(
-            gallery_preview_cache_key_with_referer(other_url, &anonymous, None, None)
+            gallery_preview_cache_key(other_url, &anonymous, None, None)
                 != Some(base.clone()),
             "different page URLs must not share a cache key"
         );
         assert!(
-            gallery_preview_cache_key_with_referer(
+            gallery_preview_cache_key(
                 url,
                 &cache_auth(None, Some("firefox"), None),
                 None,
@@ -627,7 +627,7 @@ mod tests {
             "a browser profile must not reuse an anonymous probe"
         );
         assert!(
-            gallery_preview_cache_key_with_referer(
+            gallery_preview_cache_key(
                 url,
                 &cache_auth(None, None, Some("Grab-Test-UA")),
                 None,
@@ -641,7 +641,7 @@ mod tests {
             no_proxy_env: String::new(),
         };
         assert!(
-            gallery_preview_cache_key_with_referer(url, &anonymous, Some(&proxy), None)
+            gallery_preview_cache_key(url, &anonymous, Some(&proxy), None)
                 != Some(base),
             "a proxy can change what the extractor returns"
         );
@@ -655,14 +655,14 @@ mod tests {
         let same_source = "https://origin.example.test/watch?id=one#other";
         let different_source = "https://origin.example.test/watch?id=two";
 
-        let base = gallery_preview_cache_key_with_referer(url, &auth, None, None)
+        let base = gallery_preview_cache_key(url, &auth, None, None)
             .expect("without a Referer");
-        let first = gallery_preview_cache_key_with_referer(url, &auth, None, Some(source))
+        let first = gallery_preview_cache_key(url, &auth, None, Some(source))
             .expect("with a Referer");
-        let same = gallery_preview_cache_key_with_referer(url, &auth, None, Some(same_source))
+        let same = gallery_preview_cache_key(url, &auth, None, Some(same_source))
             .expect("equivalent Referer");
         let different =
-            gallery_preview_cache_key_with_referer(url, &auth, None, Some(different_source))
+            gallery_preview_cache_key(url, &auth, None, Some(different_source))
                 .expect("different Referer");
 
         assert_ne!(base, first, "a source page changes the extractor request");
@@ -686,14 +686,14 @@ mod tests {
         std::fs::write(&second, contents).expect("second jar");
         let url = "https://gallery-cache.example.test/collection";
 
-        let first_key = gallery_preview_cache_key_with_referer(
+        let first_key = gallery_preview_cache_key(
             url,
             &cache_auth(Some(first), None, None),
             None,
             None,
         )
         .expect("handoff key");
-        let second_key = gallery_preview_cache_key_with_referer(
+        let second_key = gallery_preview_cache_key(
             url,
             &cache_auth(Some(second.clone()), None, None),
             None,
@@ -707,7 +707,7 @@ mod tests {
 
         std::fs::write(&second, b"# Netscape HTTP Cookie File\n").expect("changed jar");
         assert!(
-            gallery_preview_cache_key_with_referer(
+            gallery_preview_cache_key(
                 url,
                 &cache_auth(Some(second), None, None),
                 None,
@@ -719,7 +719,7 @@ mod tests {
         );
 
         assert!(
-            gallery_preview_cache_key_with_referer(
+            gallery_preview_cache_key(
                 "https://gallery-cache.example.test/collection?token=secret",
                 &cache_auth(None, None, None),
                 None,

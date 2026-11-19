@@ -246,8 +246,6 @@ impl DownloadManager {
         })
     }
 
-
-
     /// Test helper for assertions over the serialized queue representation.
     #[cfg(test)]
     pub(super) fn serialize_queue(&self) -> Option<String> {
@@ -362,7 +360,7 @@ mod referrer_persistence_tests {
             Some("https://source.example.test/")
         );
     }
-    
+
     #[test]
     fn gallery_payload_persistence_uses_the_sanitized_queue_row_referer() {
         let manager = DownloadManager::new(

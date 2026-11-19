@@ -479,7 +479,7 @@ async fn client_from_handoff_jar(
         return Ok(None);
     }
     let user_agent = user_agent.unwrap_or(crate::download_net::DEFAULT_USER_AGENT);
-    crate::download_net::http_client_with_jar_and_user_agent_and_referer(
+    crate::download_net::http_client_with_jar_and_user_agent(
         proxy, jar, user_agent, referer,
     )
     .map(Some)
@@ -545,7 +545,7 @@ async fn client_with_browser_jar(
     .await
     {
         Ok(Ok(Some(jar))) => {
-            crate::download_net::http_client_with_jar_and_referer(proxy, jar, referer).map(Some)
+            crate::download_net::http_client_with_jar(proxy, jar, referer).map(Some)
         }
         Ok(Ok(None)) => Ok(None),
         Ok(Err(error)) => {
@@ -2366,7 +2366,7 @@ video/720.m3u8
         let cookie_url = Url::parse("http://manifest.example.test/").expect("cookie origin URL");
         let jar = Arc::new(reqwest::cookie::Jar::default());
         jar.add_cookie_str("sid=manifest-fixture", &cookie_url);
-        let client = crate::download_net::http_client_with_jar(Some(&proxy), jar)
+        let client = crate::download_net::http_client_with_jar(Some(&proxy), jar, None)
             .expect("build manifest client with proxy and cookie provider");
 
         let lookup_result = tokio::time::timeout(

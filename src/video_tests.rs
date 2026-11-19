@@ -40,7 +40,8 @@ use crate::video_runner::{
     run_unified_ytdlp, spawn_recording_watcher,
 };
 use crate::video_spawn::{
-    ProcessGroupGuard, fetch_raw_dump_json, fetch_video_page, reap_child, ytdlp_command,
+    ProcessGroupGuard, RawDumpOptions, fetch_raw_dump_json, fetch_video_page, reap_child,
+    ytdlp_command,
 };
 use crate::video_staging::{
     ResumePlan, ResumeQuery, VideoManifest, clean_staging, collect_sidecar, dest_part_path,
@@ -2958,7 +2959,7 @@ fn fetch_video_infos_succeeds_with_yt_dlp_only_and_no_staging_root() {
 
     let _env = ScopedEnv::apply(path_only.to_str().expect("UTF-8 temp path"), &xdg);
     assert!(crate::video_tools::resolve_libraries().is_err());
-    let result = crate::runtime::tokio_rt().block_on(crate::video::fetch_video_infos_with_referer(
+    let result = crate::runtime::tokio_rt().block_on(crate::video::fetch_video_infos(
         youtube,
         "https://example.com/v".to_string(),
         "none".to_string(),
@@ -7025,11 +7026,14 @@ fn dump_json_flat_playlist_flag_per_caller() {
             .block_on(fetch_raw_dump_json(
                 &bin,
                 "https://example.com/v",
-                "none",
-                std::time::Duration::from_secs(30),
-                None,
-                flat,
-                None,
+                RawDumpOptions {
+                    cookies_browser: "none",
+                    timeout: std::time::Duration::from_secs(30),
+                    fetch_proxy: None,
+                    flat_playlist: flat,
+                    identity_args: None,
+                    referer: None,
+                },
             ))
             .expect("fake dump parses");
         let argv = fake_bin_argv(&bin);

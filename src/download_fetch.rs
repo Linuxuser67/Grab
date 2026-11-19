@@ -1449,27 +1449,21 @@ pub(crate) enum StartMode {
     Resume(SegmentState),
 }
 
-/// Origin (scheme + host + port, no path/query) for a Referer header.
-/// Browsers send `strict-origin-when-cross-origin` by default; Grab matches
-/// it. An origin-only Referer satisfies hotlink guards that check the origin
-/// without leaking the page path or query (which may carry tokens).
-fn origin_referer(url: &str) -> Option<String> {
-    crate::referrer::origin_only(url)
-}
-
-/// Produce a redirect-safe Referer. The HTTP client may follow redirects
-/// without giving Grab a chance to rewrite request headers at each hop, so a
-/// full source-page URL must never be attached to the initial request.
+/// Produce a redirect-safe Referer using only a scheme, host, and port.
+/// This matches browsers' `strict-origin-when-cross-origin` default and
+/// avoids leaking a source page's path or query, which may carry tokens.
+/// The HTTP client may follow redirects without giving Grab a chance to rewrite
+/// request headers at each hop, so a full source-page URL is never attached.
 fn request_referer(target: &str, source: Option<&str>) -> Option<String> {
     let Some(source) = source else {
-        return origin_referer(target);
+        return crate::referrer::origin_only(target);
     };
     let source_url = crate::referrer::parse_source(source)?;
     let target_url = url::Url::parse(target).ok()?;
     if source_url.scheme() == "https" && target_url.scheme() == "http" {
         return None;
     }
-    origin_referer(source_url.as_str())
+    crate::referrer::origin_only(source_url.as_str())
 }
 
 #[cfg(test)]
@@ -1551,7 +1545,8 @@ mod request_referer_tests {
             request
         });
 
-        let client = crate::download_net::http_client_for(None).expect("build guarded client");
+        let client =
+            crate::download_net::http_client_for(None, None).expect("build guarded client");
         let target = format!("http://{first_address}/media");
         let source = format!("http://{first_address}/watch?token=private");
         let request =

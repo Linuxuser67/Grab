@@ -1655,7 +1655,7 @@ fn enqueue_video_spawns_and_fails_without_tools() {
         .to_string_lossy()
         .into_owned();
     let item = glib::MainContext::default()
-        .block_on(manager.enqueue_video_async_batched_with_referer(
+        .block_on(manager.enqueue_video_async_batched(
             "https://www.youtube.com/watch?v=gXtp6C-3JKo",
             Some(&dest),
             Some("My Video.mp4"),
@@ -1711,7 +1711,7 @@ fn enqueue_video_restrict_filenames_folds_name() {
     std::fs::create_dir_all(&dest).unwrap();
     let dest = dest.to_string_lossy().into_owned();
     let item = glib::MainContext::default()
-        .block_on(manager.enqueue_video_async_batched_with_referer(
+        .block_on(manager.enqueue_video_async_batched(
             "https://www.youtube.com/watch?v=gXtp6C-3JKo",
             Some(&dest),
             Some("Café & Croissants.mp4"),
@@ -1914,7 +1914,7 @@ fn video_source_survives_restore_and_retry() {
         let settings = test_settings();
         let manager = DownloadManager::new(gio::ListStore::new::<DownloadItem>(), settings);
         let item = glib::MainContext::default()
-            .block_on(manager.enqueue_video_async_batched_with_referer(
+            .block_on(manager.enqueue_video_async_batched(
                 "https://vimeo.com/123456",
                 Some(&dest),
                 Some("Clip.mp4"),
@@ -2364,7 +2364,7 @@ fn unremove_restores_video_source() {
         .to_string_lossy()
         .into_owned();
     let item = glib::MainContext::default()
-        .block_on(manager.enqueue_video_async_batched_with_referer(
+        .block_on(manager.enqueue_video_async_batched(
             "https://vimeo.com/123456",
             Some(&dest),
             Some("Clip.mp4"),
@@ -2430,7 +2430,7 @@ fn queue_file_never_carries_cookies() {
     settings.set_string("cookies-browser", "firefox").unwrap();
     let manager = DownloadManager::new(gio::ListStore::new::<DownloadItem>(), settings);
     let item = glib::MainContext::default()
-        .block_on(manager.enqueue_video_async_batched_with_referer(
+        .block_on(manager.enqueue_video_async_batched(
             "https://vimeo.com/123456",
             Some("/tmp/dl"),
             Some("Clip.mp4"),
@@ -3357,7 +3357,7 @@ fn enqueue_video_keeps_name_when_file_exists() {
     std::fs::write(dest.join("clip.mp4"), b"someone else").unwrap();
     let dest_s = dest.to_string_lossy().into_owned();
     let item = glib::MainContext::default()
-        .block_on(manager.enqueue_video_async_batched_with_referer(
+        .block_on(manager.enqueue_video_async_batched(
             "https://www.youtube.com/watch?v=gXtp6C-3JKo",
             Some(&dest_s),
             Some("clip.mp4"),
@@ -3663,7 +3663,7 @@ fn expand_playlist_rows_use_titled_subfolder() {
     std::fs::create_dir_all(&dest).unwrap();
     let dest_s = dest.to_string_lossy().into_owned();
     let parent = glib::MainContext::default()
-        .block_on(manager.enqueue_video_async_batched_with_referer(
+        .block_on(manager.enqueue_video_async_batched(
             "https://www.youtube.com/playlist?list=PLx",
             Some(&dest_s),
             Some("parent.mp4"),
@@ -6255,8 +6255,8 @@ fn proxy_manual_builds_remote_dns_socks() {
         .expect("valid")
         .expect("proxied");
     assert_ne!(proxy.cli_url, other.cli_url);
-    assert!(http_client_for(Some(&proxy)).is_ok());
-    assert!(http_client_for(Some(&again)).is_ok());
+    assert!(http_client_for(Some(&proxy), None).is_ok());
+    assert!(http_client_for(Some(&again), None).is_ok());
 }
 
 #[test]
@@ -6324,8 +6324,8 @@ fn proxy_clients_are_built_per_download_policy_scope() {
         .proxy_config()
         .expect("valid")
         .expect("proxied");
-    assert!(http_client_for(Some(&proxy)).is_ok());
-    assert!(http_client_for(Some(&proxy)).is_ok());
+    assert!(http_client_for(Some(&proxy), None).is_ok());
+    assert!(http_client_for(Some(&proxy), None).is_ok());
 }
 
 #[test]
@@ -6969,7 +6969,7 @@ fn enqueue_video_reserves_part_namespaced_stems() {
     std::fs::write(dest.join("Clip.video.mp4"), b"foreign").unwrap();
     let dest_s = dest.to_string_lossy().into_owned();
     let item = glib::MainContext::default()
-        .block_on(manager.enqueue_video_async_batched_with_referer(
+        .block_on(manager.enqueue_video_async_batched(
             "https://www.youtube.com/watch?v=gXtp6C-3JKo",
             Some(&dest_s),
             Some("Clip.mp4"),
@@ -7095,7 +7095,7 @@ fn enqueue_video_reserves_subtitle_sidecar_stems() {
     std::fs::write(dest.join("Clip.en.srt"), b"foreign").unwrap();
     let dest_s = dest.to_string_lossy().into_owned();
     let item = glib::MainContext::default()
-        .block_on(manager.enqueue_video_async_batched_with_referer(
+        .block_on(manager.enqueue_video_async_batched(
             "https://www.youtube.com/watch?v=gXtp6C-3JKo",
             Some(&dest_s),
             Some("Clip.mp4"),
@@ -7136,7 +7136,7 @@ fn enqueue_video_accepts_unlisted_url() {
         playlist_item_id: None,
     };
     let item = glib::MainContext::default()
-        .block_on(manager.enqueue_video_async_batched_with_referer(
+        .block_on(manager.enqueue_video_async_batched(
             "https://example.com/f.iso",
             Some("/tmp/dl"),
             None,
@@ -7151,7 +7151,7 @@ fn enqueue_video_accepts_unlisted_url() {
     assert_eq!(item.filename(), "f.iso");
     assert!(
         glib::MainContext::default()
-            .block_on(manager.enqueue_video_async_batched_with_referer(
+            .block_on(manager.enqueue_video_async_batched(
                 "not a url",
                 Some("/tmp/dl"),
                 None,
@@ -7679,7 +7679,7 @@ fn a_reserved_destination_forces_video_intake_to_dedupe() {
     let dest_s = dest.to_string_lossy().into_owned();
     manager.reserve_dest(&dest.join("Clip.mp4"));
     let item = glib::MainContext::default()
-        .block_on(manager.enqueue_video_async_batched_with_referer(
+        .block_on(manager.enqueue_video_async_batched(
             "https://www.youtube.com/watch?v=gXtp6C-3JKo",
             Some(&dest_s),
             Some("Clip.mp4"),
@@ -7750,7 +7750,7 @@ fn a_reserved_stem_forces_video_intake_to_dedupe() {
     let dest_s = dest.to_string_lossy().into_owned();
     manager.reserve_dest(&dest.join("Clip.mp4"));
     let item = glib::MainContext::default()
-        .block_on(manager.enqueue_video_async_batched_with_referer(
+        .block_on(manager.enqueue_video_async_batched(
             "https://www.youtube.com/watch?v=gXtp6C-3JKo",
             Some(&dest_s),
             Some("Clip.m4a"),
@@ -10851,7 +10851,7 @@ fn playlist_staged_import_does_not_duplicate_identical_entry() {
         is_live: false,
         playlist_item_id: Some("a".to_string()),
     };
-    let first = manager.enqueue_video_staged_with_referer(
+    let first = manager.enqueue_video_staged(
         "https://example.com/album",
         &dest,
         Some("one.mp4"),
@@ -10860,7 +10860,7 @@ fn playlist_staged_import_does_not_duplicate_identical_entry() {
         None,
     );
     assert!(first.is_ok(), "first staged enqueue should succeed");
-    let second = manager.enqueue_video_staged_with_referer(
+    let second = manager.enqueue_video_staged(
         "https://example.com/album",
         &dest,
         Some("two.mp4"),

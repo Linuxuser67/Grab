@@ -3646,7 +3646,7 @@ fn build_video_lookup_kicker(context: VideoLookupContext) -> VideoLookupKick {
                                     final_url,
                                     probe_json_key.1.clone(),
                                     probe_json_key.2.clone(),
-                                    probe_json_key.3.clone(),
+                                    probe_json_key.3,
                                 );
                                 manager_b.cache_probe_json(retarget_key, json);
                             }

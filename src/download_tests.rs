@@ -1666,7 +1666,8 @@ fn enqueue_video_spawns_and_fails_without_tools() {
                 is_live: false,
                 playlist_item_id: None,
             },
-         None))
+            None,
+        ))
         .map(|(item, guard)| {
             drop(guard);
             item
@@ -1721,7 +1722,8 @@ fn enqueue_video_restrict_filenames_folds_name() {
                 is_live: false,
                 playlist_item_id: None,
             },
-         None))
+            None,
+        ))
         .map(|(item, guard)| {
             drop(guard);
             item
@@ -1923,7 +1925,8 @@ fn video_source_survives_restore_and_retry() {
                     is_live: false,
                     playlist_item_id: None,
                 },
-             None))
+                None,
+            ))
             .map(|(item, guard)| {
                 drop(guard);
                 item
@@ -2372,7 +2375,8 @@ fn unremove_restores_video_source() {
                 is_live: false,
                 playlist_item_id: None,
             },
-         None))
+            None,
+        ))
         .map(|(item, guard)| {
             drop(guard);
             item
@@ -2437,7 +2441,8 @@ fn queue_file_never_carries_cookies() {
                 is_live: false,
                 playlist_item_id: None,
             },
-         None))
+            None,
+        ))
         .map(|(item, guard)| {
             drop(guard);
             item
@@ -3363,7 +3368,8 @@ fn enqueue_video_keeps_name_when_file_exists() {
                 is_live: false,
                 playlist_item_id: None,
             },
-         None))
+            None,
+        ))
         .map(|(item, guard)| {
             drop(guard);
             item
@@ -3668,7 +3674,8 @@ fn expand_playlist_rows_use_titled_subfolder() {
                 is_live: false,
                 playlist_item_id: None,
             },
-         None))
+            None,
+        ))
         .map(|(item, guard)| {
             drop(guard);
             item
@@ -6884,7 +6891,8 @@ fn enqueue_video_reserves_part_namespaced_stems() {
                 is_live: false,
                 playlist_item_id: None,
             },
-         None))
+            None,
+        ))
         .map(|(item, guard)| {
             drop(guard);
             item
@@ -7009,7 +7017,8 @@ fn enqueue_video_reserves_subtitle_sidecar_stems() {
                 is_live: false,
                 playlist_item_id: None,
             },
-         None))
+            None,
+        ))
         .map(|(item, guard)| {
             drop(guard);
             item
@@ -7043,7 +7052,8 @@ fn enqueue_video_accepts_unlisted_url() {
             Some("/tmp/dl"),
             None,
             choices.clone(),
-         None))
+            None,
+        ))
         .map(|(item, guard)| {
             drop(guard);
             item
@@ -7052,7 +7062,13 @@ fn enqueue_video_accepts_unlisted_url() {
     assert_eq!(item.filename(), "f.iso");
     assert!(
         glib::MainContext::default()
-            .block_on(manager.enqueue_video_async_batched_with_referer("not a url", Some("/tmp/dl"), None, choices, None))
+            .block_on(manager.enqueue_video_async_batched_with_referer(
+                "not a url",
+                Some("/tmp/dl"),
+                None,
+                choices,
+                None
+            ))
             .is_err()
     );
     // Drain the spawned worker (fails fast without tools) so no woken
@@ -7585,7 +7601,8 @@ fn a_reserved_destination_forces_video_intake_to_dedupe() {
                 is_live: false,
                 playlist_item_id: None,
             },
-         None))
+            None,
+        ))
         .map(|(item, guard)| {
             drop(guard);
             item
@@ -7655,7 +7672,8 @@ fn a_reserved_stem_forces_video_intake_to_dedupe() {
                 is_live: false,
                 playlist_item_id: None,
             },
-         None))
+            None,
+        ))
         .map(|(item, guard)| {
             drop(guard);
             item

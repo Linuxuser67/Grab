@@ -75,7 +75,7 @@ fn has_query_parameters(url: &Url) -> bool {
     url.query().is_some_and(|query| !query.is_empty())
 }
 
-fn manifest_preview_cache_key_with_referer(
+fn manifest_preview_cache_key(
     raw_url: &str,
     proxy: Option<&crate::net_types::ResolvedProxy>,
     handoff_identity: Option<&(PathBuf, Option<String>)>,
@@ -86,7 +86,7 @@ fn manifest_preview_cache_key_with_referer(
     if crate::video_cache::has_known_rotating_auth_query(&url) {
         return None;
     }
-    let referer_hash = crate::referrer::cache_identity(referer).ok()?;
+    let referer_hash = crate::referrer::cache_identity(referer)?;
 
     let handoff_cookie_hash =
         handoff_identity.and_then(|(path, _)| crate::extension_server::handoff_cookie_hash(path));
@@ -377,7 +377,7 @@ pub(crate) async fn lookup(
     // The source page can affect an access-controlled manifest response.
     // Its hash is part of the key, allowing reuse only for the same context.
     let cache_key =
-        manifest_preview_cache_key_with_referer(raw_url, proxy, handoff_identity.as_ref(), referer);
+        manifest_preview_cache_key(raw_url, proxy, handoff_identity.as_ref(), referer);
     if let Some(key) = cache_key.as_ref()
         && let Some(mut cached) = manifest_preview_cache_get(key)
     {
@@ -428,7 +428,7 @@ pub(crate) async fn client_for_manifest(
     if let Some(client) = client_with_browser_jar(raw_url, cookies_browser, proxy, referer).await? {
         return Ok(client);
     }
-    crate::download_net::http_client_for_with_referer(proxy, referer)
+    crate::download_net::http_client_for(proxy, referer)
         .map_err(|_| gettext("The configured proxy could not be used for this manifest"))
 }
 
@@ -498,7 +498,7 @@ async fn client_for_preview(
     {
         return Ok((client, ManifestClientAuth::Handoff));
     }
-    crate::download_net::http_client_for_with_referer(proxy, referer)
+    crate::download_net::http_client_for(proxy, referer)
         .map(|client| (client, ManifestClientAuth::Anonymous))
         .map_err(|_| gettext("The configured proxy could not be used for this manifest"))
 }
@@ -2539,7 +2539,7 @@ segment.ts
     #[test]
     fn preview_cache_rejects_any_query_bearing_hls_source_and_child_resources() {
         assert!(
-            manifest_preview_cache_key_with_referer(
+            manifest_preview_cache_key(
                 "https://cache-preview.example.test/master.m3u8?X-Amz-Signature=secret",
                 None,
                 None,
@@ -2549,7 +2549,7 @@ segment.ts
             "known signed source URLs must not be cached"
         );
         assert!(
-            manifest_preview_cache_key_with_referer(
+            manifest_preview_cache_key(
                 "https://cache-preview.example.test/master.m3u8?f=418899&srv=server&i=0.4&sp=500&p1=one&p2=two&asn=327934",
                 None,
                 None,
@@ -2640,13 +2640,13 @@ segment.ts?f=418899&srv=server&i=0.4&sp=500&p1=one&p2=two&asn=327934
         let different_source = "https://origin.example.test/watch?id=two";
 
         let anonymous =
-            manifest_preview_cache_key_with_referer(url, None, None, None).expect("anonymous key");
-        let first = manifest_preview_cache_key_with_referer(url, None, None, Some(source))
+            manifest_preview_cache_key(url, None, None, None).expect("anonymous key");
+        let first = manifest_preview_cache_key(url, None, None, Some(source))
             .expect("source-page key");
-        let same = manifest_preview_cache_key_with_referer(url, None, None, Some(same_source))
+        let same = manifest_preview_cache_key(url, None, None, Some(same_source))
             .expect("equivalent source-page key");
         let different =
-            manifest_preview_cache_key_with_referer(url, None, None, Some(different_source))
+            manifest_preview_cache_key(url, None, None, Some(different_source))
                 .expect("different source-page key");
 
         assert_ne!(
@@ -2725,10 +2725,10 @@ segment.ts?f=418899&srv=server&i=0.4&sp=500&p1=one&p2=two&asn=327934
         let url = "https://cache-preview.example.test/master.m3u8";
         let first_identity = (jar.clone(), Some("Grab-UA-One".to_string()));
         let second_identity = (jar.clone(), Some("Grab-UA-Two".to_string()));
-        let first = manifest_preview_cache_key_with_referer(url, None, Some(&first_identity), None)
+        let first = manifest_preview_cache_key(url, None, Some(&first_identity), None)
             .expect("first handoff cache key");
         let second =
-            manifest_preview_cache_key_with_referer(url, None, Some(&second_identity), None)
+            manifest_preview_cache_key(url, None, Some(&second_identity), None)
                 .expect("second handoff cache key");
 
         assert_eq!(
@@ -2750,8 +2750,8 @@ segment.ts?f=418899&srv=server&i=0.4&sp=500&p1=one&p2=two&asn=327934
             Some(crate::download_net::DEFAULT_USER_AGENT.to_string()),
         );
         assert_eq!(
-            manifest_preview_cache_key_with_referer(url, None, Some(&default_identity), None),
-            manifest_preview_cache_key_with_referer(
+            manifest_preview_cache_key(url, None, Some(&default_identity), None),
+            manifest_preview_cache_key(
                 url,
                 None,
                 Some(&explicit_default_identity),
@@ -2765,7 +2765,7 @@ segment.ts?f=418899&srv=server&i=0.4&sp=500&p1=one&p2=two&asn=327934
     fn preview_cache_key_only_matches_the_source_that_served_it() {
         let url = "https://cache-preview.example.test/master.m3u8";
         let anonymous =
-            manifest_preview_cache_key_with_referer(url, None, None, None).expect("anonymous key");
+            manifest_preview_cache_key(url, None, None, None).expect("anonymous key");
         let handoff = ManifestPreviewCacheKey {
             handoff_cookie_hash: Some([7_u8; 32]),
             handoff_user_agent_hash: Some([8_u8; 32]),

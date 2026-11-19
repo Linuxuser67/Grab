@@ -235,6 +235,7 @@ pub(crate) async fn fetch_video_page(
     cookies_browser: &str,
     timeout: Duration,
     fetch_proxy: Option<&crate::net_types::ResolvedProxy>,
+    identity_args: Option<&[String]>,
     playlist_item_id: Option<&str>,
 ) -> Result<FetchedVideo, VideoError> {
     let value = fetch_raw_dump_json(
@@ -245,7 +246,7 @@ pub(crate) async fn fetch_video_page(
             timeout,
             fetch_proxy,
             flat_playlist: false,
-            identity_args: None,
+            identity_args,
             referer: None,
         },
     )

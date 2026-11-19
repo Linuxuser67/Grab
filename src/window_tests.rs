@@ -681,8 +681,8 @@ fn status_views_use_gnome_adaptive_view_switcher() {
                 search_clamp.margin_start(),
                 search_clamp.margin_end(),
             ],
-            [12, 12, 12, 12],
-            "the outer search surface retains the standard HIG spacing on all sides"
+            [0, 0, 12, 12],
+            "the collapsed search wrapper must not reserve vertical space"
         );
         assert_eq!(
             search_bar
@@ -710,11 +710,22 @@ fn status_views_use_gnome_adaptive_view_switcher() {
         );
         search_bar.set_search_mode(true);
         drain_gtk_events();
+        assert_eq!(
+            [search_clamp.margin_top(), search_clamp.margin_bottom()],
+            [12, 12],
+            "the expanded search surface retains 12 px vertical HIG spacing"
+        );
         assert!(
             search_bar.width() <= 600,
             "the visible search bar never exceeds the HIG width clamp"
         );
         search_bar.set_search_mode(false);
+        drain_gtk_events();
+        assert_eq!(
+            [search_clamp.margin_top(), search_clamp.margin_bottom()],
+            [0, 0],
+            "closing search removes its collapsed vertical spacer"
+        );
         add_card.open(None, None);
         drain_gtk_events();
         let inline_add_card = find_widget_by_name(window.upcast_ref(), "inline-add-card")

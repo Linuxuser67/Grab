@@ -788,9 +788,7 @@ pub(crate) fn probe_json_key(
     referer: Option<&str>,
 ) -> ProbeJsonKey {
     let source_origin = referer.and_then(crate::referrer::origin_only);
-    let referer_hash = crate::referrer::cache_identity(source_origin.as_deref())
-        .ok()
-        .flatten();
+    let referer_hash = crate::referrer::cache_identity(source_origin.as_deref());
 
     (page_url, cookies_browser, proxy_cli_url, referer_hash)
 }
@@ -1254,16 +1252,6 @@ impl DownloadManager {
         url: &str,
         dest_dir: Option<&str>,
         filename: Option<&str>,
-    ) -> Result<(DownloadItem, BatchGuard), String> {
-        self.enqueue_async_batched_with_referer(url, dest_dir, filename, None)
-            .await
-    }
-
-    pub(crate) async fn enqueue_async_batched_with_referer(
-        self: &Rc<Self>,
-        url: &str,
-        dest_dir: Option<&str>,
-        filename: Option<&str>,
         referer: Option<&str>,
     ) -> Result<(DownloadItem, BatchGuard), String> {
         let dir = self.resolve_dir(dest_dir);
@@ -1449,7 +1437,7 @@ impl DownloadManager {
     ///
     /// # Errors
     /// Returns a display-ready message when the URL or filename is invalid.
-    pub(crate) async fn enqueue_video_async_batched_with_referer(
+    pub(crate) async fn enqueue_video_async_batched(
         self: &Rc<Self>,
         page_url: &str,
         dest_dir: Option<&str>,
@@ -1466,7 +1454,7 @@ impl DownloadManager {
         .map_err(|error| format!("Could not inspect download folder: {error:?}"))?
         .map_err(|error| format!("Could not inspect download folder: {error}"))?;
         let guard = self.batch_guard();
-        let item = self.enqueue_video_staged_with_referer(
+        let item = self.enqueue_video_staged(
             page_url, &dir, filename, choices, &existing, referer,
         )?;
         Ok((item, guard))
@@ -1491,7 +1479,7 @@ impl DownloadManager {
         format!("{stem}.{}", container.extension())
     }
 
-    pub(crate) async fn enqueue_manifest_async_batched_with_referer(
+    pub(crate) async fn enqueue_manifest_async_batched(
         self: &Rc<Self>,
         source: crate::media_types::ManifestSource,
         dest_dir: Option<&str>,
@@ -1589,7 +1577,7 @@ impl DownloadManager {
         Ok((self.insert(item), guard))
     }
 
-    fn enqueue_video_staged_with_referer(
+    fn enqueue_video_staged(
         self: &Rc<Self>,
         page_url: &str,
         dir: &str,

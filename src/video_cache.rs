@@ -824,10 +824,29 @@ mod tests {
         let args = vec!["--".to_string(), url.to_string()];
         let invalid = "file:///etc/passwd";
 
-        assert!(cache_key(url, &binary, "2026.10.23", "none", None, &args, Some(invalid)).is_none());
         assert!(
-            playlist_cache_key(url, &binary, "2026.10.23", "none", None, &args, Some(invalid))
-                .is_none()
+            cache_key(
+                url,
+                &binary,
+                "2026.10.23",
+                "none",
+                None,
+                &args,
+                Some(invalid)
+            )
+            .is_none()
+        );
+        assert!(
+            playlist_cache_key(
+                url,
+                &binary,
+                "2026.10.23",
+                "none",
+                None,
+                &args,
+                Some(invalid)
+            )
+            .is_none()
         );
     }
 

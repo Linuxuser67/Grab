@@ -58,6 +58,14 @@
     </screenshot>
   </screenshots>
   <releases>
+    <release version="6.5.5" date="2026-11-19">
+      <description>
+        <ul>
+          <li>Restore direct-file detection for signed opaque CDN URLs with query parameters using a HEAD-only metadata probe, without sending speculative Range GET requests.</li>
+          <li>Remove excess vertical space above the inline New Download bar while preserving the 12 px search spacing when search is open.</li>
+        </ul>
+      </description>
+    </release>
     <release version="6.5.4" date="2026-11-19">
       <description>
         <ul>

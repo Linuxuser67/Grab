@@ -7079,8 +7079,7 @@ fn dump_json_referer_is_origin_only_and_invalid_values_are_omitted() {
             .position(|argument| *argument == "--referer")
             .and_then(|index| args.get(index + 1))
             .copied();
-        assert_eq!(actual, expected, "referer argv for {name}:
-{argv}");
+        assert_eq!(actual, expected, "referer argv for {name}:\n{argv}");
         assert!(!argv.contains("token=secret"));
         assert!(!argv.contains("/watch/private"));
         let _ = std::fs::remove_dir_all(bin.parent().unwrap());

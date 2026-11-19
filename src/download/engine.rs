@@ -393,10 +393,7 @@ impl DownloadManager {
             // If a handoff jar is accepted at attempt start, run_download also
             // applies its matching UA. Otherwise use the default with live-browser cookies.
             user_agent: crate::download_net::DEFAULT_USER_AGENT.to_string(),
-            referer: {
-                let value = item.referer();
-                (!value.is_empty()).then_some(value)
-            },
+            referer: item.referer_opt(),
             timeout,
             tx,
         };
@@ -1829,10 +1826,7 @@ impl DownloadManager {
             live_from_start: self.settings.live_from_start(),
             newest_codecs: self.settings.video_codec_newest(),
             cookies_browser: self.settings.cookies_browser(),
-            referer: {
-                let value = item.referer();
-                (!value.is_empty()).then_some(value)
-            },
+            referer: item.referer_opt(),
             // Audio-only rows never subtitle or remux (no video leg exists): resolve to `None` here rather than gating at every use.
             subtitles: if audio_only {
                 None
@@ -1948,10 +1942,7 @@ impl DownloadManager {
             live_from_start: false,
             newest_codecs: self.settings.video_codec_newest(),
             cookies_browser: self.settings.cookies_browser(),
-            referer: {
-                let value = item.referer();
-                (!value.is_empty()).then_some(value)
-            },
+            referer: item.referer_opt(),
             subtitles: if audio_only {
                 None
             } else {
@@ -2050,10 +2041,7 @@ impl DownloadManager {
         let job = crate::manifest_runner::ManifestJob {
             item_id: id,
             source,
-            referer: {
-                let value = item.referer();
-                (!value.is_empty()).then_some(value)
-            },
+            referer: item.referer_opt(),
             dest: item.file_path(),
             proxy,
             cookies_browser: opts.cookies_browser.clone(),

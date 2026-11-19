@@ -5451,16 +5451,19 @@ fn destination_mutation_stops_a_single_stream_download(mutation: DestinationMuta
                 const REPLACEMENT_CONTENTS: &[u8] = b"replacement inode must remain untouched";
                 std::fs::write(&replacement, REPLACEMENT_CONTENTS)
                     .unwrap_or_else(|error| abort(&server, &format!("write replacement: {error}")));
-                let replacement_metadata = std::fs::metadata(&replacement)
-                    .unwrap_or_else(|error| abort(&server, &format!("inspect replacement: {error}")));
+                let replacement_metadata =
+                    std::fs::metadata(&replacement).unwrap_or_else(|error| {
+                        abort(&server, &format!("inspect replacement: {error}"))
+                    });
                 use std::os::unix::fs::MetadataExt as _;
                 assert_ne!(
                     original.ino(),
                     replacement_metadata.ino(),
                     "replacement must be a different inode"
                 );
-                std::fs::rename(&replacement, &file)
-                    .unwrap_or_else(|error| abort(&server, &format!("replace destination: {error}")));
+                std::fs::rename(&replacement, &file).unwrap_or_else(|error| {
+                    abort(&server, &format!("replace destination: {error}"))
+                });
             }
         }
 

@@ -646,9 +646,14 @@ mod opaque_resource_arbitration_tests {
         }
     }
 
-    async fn pending_direct_probe(dropped: Arc<AtomicBool>) -> bool {
-        let _drop_flag = DropFlag(dropped);
-        std::future::pending::<bool>().await
+    fn pending_direct_probe(
+        dropped: Arc<AtomicBool>,
+    ) -> impl std::future::Future<Output = bool> {
+        let drop_flag = DropFlag(dropped);
+        async move {
+            let _drop_flag = drop_flag;
+            std::future::pending::<bool>().await
+        }
     }
 
     #[tokio::test]

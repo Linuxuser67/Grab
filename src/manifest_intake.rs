@@ -75,18 +75,6 @@ fn has_query_parameters(url: &Url) -> bool {
     url.query().is_some_and(|query| !query.is_empty())
 }
 
-/// Build a preview cache key from the URL, the staged jar (if any), the
-/// source page, and the proxy. Referer identity is hashed so cache keys never
-/// retain a source URL's path or query.
-#[cfg(test)]
-fn manifest_preview_cache_key(
-    raw_url: &str,
-    proxy: Option<&crate::net_types::ResolvedProxy>,
-    handoff_identity: Option<&(PathBuf, Option<String>)>,
-) -> Option<ManifestPreviewCacheKey> {
-    manifest_preview_cache_key_with_referer(raw_url, proxy, handoff_identity, None)
-}
-
 fn manifest_preview_cache_key_with_referer(
     raw_url: &str,
     proxy: Option<&crate::net_types::ResolvedProxy>,
@@ -2551,19 +2539,21 @@ segment.ts
     #[test]
     fn preview_cache_rejects_any_query_bearing_hls_source_and_child_resources() {
         assert!(
-            manifest_preview_cache_key(
+            manifest_preview_cache_key_with_referer(
                 "https://cache-preview.example.test/master.m3u8?X-Amz-Signature=secret",
                 None,
                 None,
+                None
             )
             .is_none(),
             "known signed source URLs must not be cached"
         );
         assert!(
-            manifest_preview_cache_key(
+            manifest_preview_cache_key_with_referer(
                 "https://cache-preview.example.test/master.m3u8?f=418899&srv=server&i=0.4&sp=500&p1=one&p2=two&asn=327934",
                 None,
                 None,
+                None
             )
             .is_some(),
             "unknown query fields are not classified as signatures at URL-key creation"
@@ -2735,10 +2725,11 @@ segment.ts?f=418899&srv=server&i=0.4&sp=500&p1=one&p2=two&asn=327934
         let url = "https://cache-preview.example.test/master.m3u8";
         let first_identity = (jar.clone(), Some("Grab-UA-One".to_string()));
         let second_identity = (jar.clone(), Some("Grab-UA-Two".to_string()));
-        let first = manifest_preview_cache_key(url, None, Some(&first_identity))
+        let first = manifest_preview_cache_key_with_referer(url, None, Some(&first_identity), None)
             .expect("first handoff cache key");
-        let second = manifest_preview_cache_key(url, None, Some(&second_identity))
-            .expect("second handoff cache key");
+        let second =
+            manifest_preview_cache_key_with_referer(url, None, Some(&second_identity), None)
+                .expect("second handoff cache key");
 
         assert_eq!(
             first.handoff_cookie_hash, second.handoff_cookie_hash,
@@ -2759,8 +2750,13 @@ segment.ts?f=418899&srv=server&i=0.4&sp=500&p1=one&p2=two&asn=327934
             Some(crate::download_net::DEFAULT_USER_AGENT.to_string()),
         );
         assert_eq!(
-            manifest_preview_cache_key(url, None, Some(&default_identity)),
-            manifest_preview_cache_key(url, None, Some(&explicit_default_identity)),
+            manifest_preview_cache_key_with_referer(url, None, Some(&default_identity), None),
+            manifest_preview_cache_key_with_referer(
+                url,
+                None,
+                Some(&explicit_default_identity),
+                None
+            ),
             "an omitted handoff UA and an explicit default UA produce the same request identity"
         );
     }
@@ -2768,7 +2764,8 @@ segment.ts?f=418899&srv=server&i=0.4&sp=500&p1=one&p2=two&asn=327934
     #[test]
     fn preview_cache_key_only_matches_the_source_that_served_it() {
         let url = "https://cache-preview.example.test/master.m3u8";
-        let anonymous = manifest_preview_cache_key(url, None, None).expect("anonymous key");
+        let anonymous =
+            manifest_preview_cache_key_with_referer(url, None, None, None).expect("anonymous key");
         let handoff = ManifestPreviewCacheKey {
             handoff_cookie_hash: Some([7_u8; 32]),
             handoff_user_agent_hash: Some([8_u8; 32]),

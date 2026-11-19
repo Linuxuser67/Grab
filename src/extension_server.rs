@@ -1090,13 +1090,28 @@ fn handoff_jar_usable_at(entry: &HandoffCookies, now: SystemTime) -> bool {
         .is_ok_and(|age| age < HANDOFF_FRESH)
 }
 
-fn ytdlp_spawn_identity_at(cookies_browser: &str, page_url: &str, now: SystemTime) -> Vec<String> {
+fn effective_handoff_entry(
+    cookies_browser: &str,
+    page_url: &str,
+    now: SystemTime,
+) -> Option<HandoffCookies> {
     let browser_configured = crate::video_tools::cookies_browser_spec(cookies_browser).is_some();
-    let entry = handoff_entry(page_url);
     // Prefer a fresh handoff over a browser export. When no browser source is
     // configured, retain the staged jar as the only available credential even
     // after its freshness window; its cookie-file identity stays memory-only.
-    let usable = entry.filter(|entry| handoff_jar_usable_at(entry, now) || !browser_configured);
+    handoff_entry(page_url).filter(|entry| handoff_jar_usable_at(entry, now) || !browser_configured)
+}
+
+/// Whether yt-dlp will use browser-profile or staged handoff cookies for this URL.
+/// Kept separate from argv construction so callers can check the policy without
+/// resolving Deno or building the rest of the extractor argument vector.
+pub(crate) fn ytdlp_uses_cookie_auth(cookies_browser: &str, page_url: &str) -> bool {
+    crate::video_tools::cookies_browser_spec(cookies_browser).is_some()
+        || effective_handoff_entry(cookies_browser, page_url, SystemTime::now()).is_some()
+}
+
+fn ytdlp_spawn_identity_at(cookies_browser: &str, page_url: &str, now: SystemTime) -> Vec<String> {
+    let usable = effective_handoff_entry(cookies_browser, page_url, now);
     let user_agent = usable
         .as_ref()
         .and_then(|entry| entry.user_agent.as_deref());
@@ -3916,5 +3931,21 @@ mod tests {
         let (status, discard) = handoff_outcome_response(&HandoffOutcome::Failed);
         assert_eq!(status, axum::http::StatusCode::CONFLICT);
         assert!(discard);
+    }
+}
+
+#[cfg(test)]
+mod ytdlp_cookie_auth_policy_tests {
+    #[test]
+    fn cookie_auth_policy_matches_the_actual_yt_dlp_identity_args() {
+        for browser in ["none", "chrome"] {
+            let url = "https://auth-policy.example.test/watch";
+            let args = super::ytdlp_spawn_identity(browser, url);
+            assert_eq!(
+                super::ytdlp_uses_cookie_auth(browser, url),
+                !crate::video_spawn::probe_json_reuse_allowed(&args),
+                "cookie-auth predicate and yt-dlp argv must stay aligned for {browser}"
+            );
+        }
     }
 }

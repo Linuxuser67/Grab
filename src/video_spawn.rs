@@ -281,6 +281,62 @@ impl Drop for AbortOnDrop {
     }
 }
 
+/// Whether raw probe JSON can safely be reused by the download attempt.
+///
+/// The JSON contains signed media URLs and headers. Cookie-backed probes are
+/// deliberately not cached here: a browser profile or staged handoff jar can
+/// change while a queue row waits, and this small cache has no stable cookie
+/// snapshot identity. The separate video metadata cache has its own auth-aware
+/// key and remains enabled for authenticated lookups.
+pub(crate) fn probe_json_reuse_allowed(identity_args: &[String]) -> bool {
+    !identity_args.iter().any(|argument| {
+        argument == "--cookies"
+            || argument.starts_with("--cookies=")
+            || argument == "--cookies-from-browser"
+            || argument.starts_with("--cookies-from-browser=")
+    })
+}
+
+#[cfg(test)]
+mod probe_json_reuse_tests {
+    use super::probe_json_reuse_allowed;
+
+    #[test]
+    fn raw_probe_json_reuse_is_limited_to_anonymous_extractions() {
+        let anonymous = vec![
+            "--extractor-args".to_string(),
+            "youtube:player_client=web".to_string(),
+            "--".to_string(),
+            "https://video.example.test/watch".to_string(),
+        ];
+        assert!(probe_json_reuse_allowed(&anonymous));
+
+        for authenticated in [
+            vec![
+                "--cookies".to_string(),
+                "/run/user/1000/grab-cookies/handoff".to_string(),
+                "--".to_string(),
+                "https://video.example.test/watch".to_string(),
+            ],
+            vec![
+                "--cookies-from-browser=chrome".to_string(),
+                "--".to_string(),
+                "https://video.example.test/watch".to_string(),
+            ],
+            vec![
+                "--cookies=handoff.txt".to_string(),
+                "--".to_string(),
+                "https://video.example.test/watch".to_string(),
+            ],
+        ] {
+            assert!(
+                !probe_json_reuse_allowed(&authenticated),
+                "authenticated extraction must not enter the raw JSON reuse cache: {authenticated:?}"
+            );
+        }
+    }
+}
+
 pub async fn fetch_video_infos(
     youtube_bin: PathBuf,
     url: String,
@@ -307,6 +363,7 @@ pub async fn fetch_video_infos(
             // extension handoff cannot change the identity between those steps.
             let identity_args =
                 crate::extension_server::ytdlp_spawn_identity(&cookies_browser, &url);
+            let cache_raw_json = probe_json_reuse_allowed(&identity_args);
             // Cache identity performs filesystem metadata checks and reads
             // process environment; keep that synchronous work off Tokio workers.
             let cache_url = url.clone();
@@ -438,7 +495,7 @@ pub async fn fetch_video_infos(
             }
             Ok((
                 ProbeResult::Single(VideoInfo::from(&video, &url, newest_first)),
-                Some(raw_json),
+                cache_raw_json.then_some(raw_json),
             ))
         }
         .await;

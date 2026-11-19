@@ -766,6 +766,13 @@ async fn run_video_download_inner(
     if job.playlist_item_id.is_some() {
         job.info_json = None;
     }
+    // A queued row may receive a browser handoff after its preview. Do not
+    // reuse an anonymous probe's JSON with newly available browser cookies.
+    if job.info_json.is_some()
+        && crate::extension_server::ytdlp_uses_cookie_auth(&job.cookies_browser, &job.page_url)
+    {
+        job.info_json = None;
+    }
     if let Some(json) = job.info_json.as_ref() {
         match crate::video_probe::parse_single_video(json.clone()) {
             Ok(v) => {

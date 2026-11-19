@@ -1160,9 +1160,8 @@ mod attempt_subtitle_language_tests {
     #[test]
     fn video_argv_uses_only_the_validated_source_origin() {
         let mut job = video_job();
-        job.referer = crate::referrer::origin_only(
-            "https://example.test/watch/private?token=secret#player",
-        );
+        job.referer =
+            crate::referrer::origin_only("https://example.test/watch/private?token=secret#player");
 
         let unified = unified_download_argv(
             &job,
@@ -1178,7 +1177,11 @@ mod attempt_subtitle_language_tests {
             .find(|pair| pair[0] == "--referer")
             .map(|pair| pair[1].as_str());
         assert_eq!(unified_referer, Some("https://example.test/"));
-        assert!(!unified.iter().any(|argument| argument.contains("token=secret")));
+        assert!(
+            !unified
+                .iter()
+                .any(|argument| argument.contains("token=secret"))
+        );
 
         let live = live_capture_argv_with_mode(
             &job,

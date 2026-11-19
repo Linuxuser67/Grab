@@ -1442,41 +1442,13 @@ impl DownloadManager {
         }
     }
 
-    /// Enqueue a video page: dialog-routed or probe-proven. The source is staged
-    /// before insert, so the persist inside [`DownloadManager::insert`] already
-    /// carries it and [`DownloadManager::start_next`] parks the row for the
-    /// resolver worker instead of feeding the page to the HTTP engine.
+    /// Enqueue a video page after preparing its destination listing off GTK.
+    ///
+    /// The source page is attached before the row is persisted, so the resolver
+    /// worker receives the same request context as the Add-card probe.
     ///
     /// # Errors
     /// Returns a display-ready message when the URL or filename is invalid.
-    /// Enqueue a video page after preparing its directory listing off GTK.
-    #[cfg(test)]
-    pub async fn enqueue_video_async(
-        self: &Rc<Self>,
-        page_url: &str,
-        dest_dir: Option<&str>,
-        filename: Option<&str>,
-        choices: crate::media_types::VideoChoices,
-    ) -> Result<DownloadItem, String> {
-        let (item, guard) = self
-            .enqueue_video_async_batched(page_url, dest_dir, filename, choices)
-            .await?;
-        drop(guard);
-        Ok(item)
-    }
-
-    #[cfg(test)]
-    pub(crate) async fn enqueue_video_async_batched(
-        self: &Rc<Self>,
-        page_url: &str,
-        dest_dir: Option<&str>,
-        filename: Option<&str>,
-        choices: crate::media_types::VideoChoices,
-    ) -> Result<(DownloadItem, BatchGuard), String> {
-        self.enqueue_video_async_batched_with_referer(page_url, dest_dir, filename, choices, None)
-            .await
-    }
-
     pub(crate) async fn enqueue_video_async_batched_with_referer(
         self: &Rc<Self>,
         page_url: &str,
@@ -1615,18 +1587,6 @@ impl DownloadManager {
         stored_job.item_id = item.id();
         self.gallery_jobs.borrow_mut().insert(item.id(), stored_job);
         Ok((self.insert(item), guard))
-    }
-
-    #[cfg(test)]
-    pub(crate) fn enqueue_video_staged(
-        self: &Rc<Self>,
-        page_url: &str,
-        dir: &str,
-        filename: Option<&str>,
-        choices: crate::media_types::VideoChoices,
-        existing: &[String],
-    ) -> Result<DownloadItem, String> {
-        self.enqueue_video_staged_with_referer(page_url, dir, filename, choices, existing, None)
     }
 
     fn enqueue_video_staged_with_referer(

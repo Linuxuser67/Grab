@@ -140,6 +140,14 @@ pub(crate) struct GalleryDownloadOptions<'a> {
     pub event_nonce: &'a str,
 }
 
+/// Build gallery-dl's extractor Referer option. Browser handoffs supply the
+/// already validated, origin-only value.
+pub(crate) fn referer_cli_args(referer: Option<&str>) -> Vec<String> {
+    referer
+        .map(|value| vec!["-o".to_string(), format!("extractor.*.referer={value}")])
+        .unwrap_or_default()
+}
+
 pub fn download_argv_with_proxy(
     tool: &Path,
     url: &str,
@@ -347,6 +355,20 @@ mod tests {
 
     fn tool() -> PathBuf {
         PathBuf::from("/tmp/gallery-dl")
+    }
+
+    #[test]
+    fn referer_argv_contains_only_the_validated_source_origin() {
+        let source =
+            crate::referrer::origin_only("https://example.test/watch/private?token=secret#player")
+                .expect("valid source page");
+        let args = referer_cli_args(Some(&source));
+        assert_eq!(args, ["-o", "extractor.*.referer=https://example.test/"]);
+        assert!(
+            !args
+                .iter()
+                .any(|argument| argument.contains("token=secret"))
+        );
     }
 
     #[test]

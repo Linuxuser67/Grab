@@ -101,6 +101,14 @@ glib::wrapper! {
 }
 
 impl DownloadItem {
+    /// Return a validated origin-only source Referer, or None when absent/invalid.
+    ///
+    /// This also sanitizes older queue entries written before handoff ingress
+    /// began discarding source-page paths and query parameters.
+    pub(crate) fn referer_opt(&self) -> Option<String> {
+        crate::referrer::origin_only(&self.referer())
+    }
+
     /// Whether this row owns the queue entry for a gallery or video collection.
     pub(crate) fn is_collection_parent(&self) -> bool {
         matches!(

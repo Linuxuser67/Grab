@@ -1,14 +1,23 @@
 //! Bounded HTTP response-header detection for direct resources with opaque URLs.
 //!
-//! This is an intake probe only: it requests one byte to coax headers from
-//! servers that reject HEAD, then drops the response without reading its body.
+//! This is an intake probe only: it sends a one-byte Range GET to coax headers
+//! from servers that reject HEAD, then drops the response without reading its body.
+//!
+//! A Range GET is not side-effect free: some servers consume a one-shot or
+//! expiring URL before honoring Range. Known rotating-auth query parameters are
+//! therefore excluded. Custom token names cannot be identified reliably, so
+//! callers should not treat this probe as safe for every opaque URL.
 
 use std::time::Duration;
 
 use reqwest::header::{CONTENT_DISPOSITION, CONTENT_TYPE, HeaderMap, RANGE};
 
 const DIRECT_RESOURCE_PROBE_BUDGET: Duration = Duration::from_secs(3);
-const DIRECT_RESOURCE_REQUEST_TIMEOUT: Duration = Duration::from_secs(3);
+
+/// Avoid speculative GETs for URLs carrying conventional single-use credentials.
+fn should_probe_url(url: &url::Url) -> bool {
+    !crate::video_cache::has_known_rotating_auth_query(url)
+}
 
 /// Return true when the server response is strong evidence of a downloadable
 /// resource rather than a web page or a stream manifest.
@@ -25,6 +34,7 @@ pub(crate) async fn probe(
         || parsed_url.host_str().is_none()
         || !parsed_url.username().is_empty()
         || parsed_url.password().is_some()
+        || !should_probe_url(&parsed_url)
     {
         return false;
     }
@@ -79,7 +89,6 @@ async fn inspect_response_headers(
     let response = client
         .get(raw_url)
         .header(RANGE, "bytes=0-0")
-        .timeout(DIRECT_RESOURCE_REQUEST_TIMEOUT)
         .send()
         .await
         .map_err(|error| error.without_url().to_string())?;
@@ -212,7 +221,26 @@ fn has_download_disposition(value: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::{has_download_disposition, is_direct_resource_metadata};
+    use super::{has_download_disposition, is_direct_resource_metadata, should_probe_url};
+
+    #[test]
+    fn skips_speculative_get_for_known_rotating_auth_query_parameters() {
+        for url in [
+            "https://example.test/opaque?token=single-use",
+            "https://example.test/opaque?X-Amz-Signature=rotating",
+            "https://example.test/opaque?access_token=short-lived",
+        ] {
+            let parsed = url::Url::parse(url).expect("valid fixture URL");
+            assert!(
+                !should_probe_url(&parsed),
+                "{url} must not receive a speculative GET"
+            );
+        }
+
+        let stable =
+            url::Url::parse("https://example.test/opaque?id=42").expect("valid fixture URL");
+        assert!(should_probe_url(&stable));
+    }
 
     #[test]
     fn identifies_common_media_and_file_mime_types() {

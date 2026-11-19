@@ -583,6 +583,104 @@ fn attach_native_fallback_reason(
     }
 }
 
+/// Race the direct-resource header probe against the established extractors.
+///
+/// A positive header result wins immediately. If extraction is definitive,
+/// its result is returned and the losing probe is dropped; only an extractor
+/// failure waits for the bounded probe before deciding whether this is a file.
+async fn arbitrate_opaque_resource_lookup(
+    direct_future: impl std::future::Future<Output = bool>,
+    extractor_future: impl std::future::Future<Output = Result<MediaLookupOutcome, MediaLookupFailure>>,
+) -> Result<MediaLookupOutcome, MediaLookupFailure> {
+    tokio::pin!(direct_future);
+    tokio::pin!(extractor_future);
+
+    tokio::select! {
+        direct_file = &mut direct_future => {
+            if direct_file {
+                Ok(MediaLookupOutcome::DirectFile)
+            } else {
+                extractor_future.await
+            }
+        }
+        extractor_result = &mut extractor_future => {
+            match extractor_result {
+                Ok(MediaLookupOutcome::Video(video)) if video.ytdlp_result.is_err() => {
+                    if direct_future.await {
+                        Ok(MediaLookupOutcome::DirectFile)
+                    } else {
+                        Ok(MediaLookupOutcome::Video(video))
+                    }
+                }
+                Err(error) => {
+                    if direct_future.await {
+                        Ok(MediaLookupOutcome::DirectFile)
+                    } else {
+                        Err(error)
+                    }
+                }
+                other => other,
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod opaque_resource_arbitration_tests {
+    use super::{MediaLookupFailure, MediaLookupOutcome, arbitrate_opaque_resource_lookup};
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::time::Duration;
+
+    struct DropFlag(Arc<AtomicBool>);
+
+    impl Drop for DropFlag {
+        fn drop(&mut self) {
+            self.0.store(true, Ordering::SeqCst);
+        }
+    }
+
+    fn pending_direct_probe(dropped: Arc<AtomicBool>) -> impl std::future::Future<Output = bool> {
+        let drop_flag = DropFlag(dropped);
+        async move {
+            let _drop_flag = drop_flag;
+            std::future::pending::<bool>().await
+        }
+    }
+
+    #[tokio::test]
+    async fn definitive_extractor_success_drops_the_losing_probe() {
+        let dropped = Arc::new(AtomicBool::new(false));
+        let result =
+            arbitrate_opaque_resource_lookup(pending_direct_probe(dropped.clone()), async {
+                Ok(MediaLookupOutcome::Gallery(Vec::new()))
+            })
+            .await
+            .unwrap_or_else(|_| panic!("successful gallery extraction"));
+
+        assert!(matches!(result, MediaLookupOutcome::Gallery(_)));
+        assert!(
+            dropped.load(Ordering::SeqCst),
+            "the unused direct probe must be cancelled"
+        );
+    }
+
+    #[tokio::test]
+    async fn extractor_failure_waits_for_a_positive_direct_probe() {
+        let result = arbitrate_opaque_resource_lookup(
+            async {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+                true
+            },
+            async { Err(MediaLookupFailure::Failed("extractor failed".to_string())) },
+        )
+        .await
+        .unwrap_or_else(|_| panic!("positive direct-resource result takes precedence"));
+
+        assert!(matches!(result, MediaLookupOutcome::DirectFile));
+    }
+}
+
 /// Resolve native HLS/DASH manifests or opaque direct resources alongside
 /// the established yt-dlp/gallery-dl lookup.
 ///
@@ -607,37 +705,7 @@ async fn lookup_media_inner(
         let direct_future =
             crate::direct_resource_intake::probe(url.clone(), proxy.clone(), referer.clone());
         let extractor_future = lookup_extractors_inner(url, browser, newest_first, proxy, referer);
-        tokio::pin!(direct_future);
-        tokio::pin!(extractor_future);
-
-        return tokio::select! {
-            direct_file = &mut direct_future => {
-                if direct_file {
-                    Ok(MediaLookupOutcome::DirectFile)
-                } else {
-                    extractor_future.await
-                }
-            }
-            extractor_result = &mut extractor_future => {
-                match extractor_result {
-                    Ok(MediaLookupOutcome::Video(video)) if video.ytdlp_result.is_err() => {
-                        if direct_future.await {
-                            Ok(MediaLookupOutcome::DirectFile)
-                        } else {
-                            Ok(MediaLookupOutcome::Video(video))
-                        }
-                    }
-                    Err(error) => {
-                        if direct_future.await {
-                            Ok(MediaLookupOutcome::DirectFile)
-                        } else {
-                            Err(error)
-                        }
-                    }
-                    other => other,
-                }
-            }
-        };
+        return arbitrate_opaque_resource_lookup(direct_future, extractor_future).await;
     }
 
     let host = crate::video_probe::page_host(&url);
@@ -756,10 +824,11 @@ async fn lookup_extractors_inner(
 
     // The raw JSON cache key must match the download conditions exactly.
     let key_url = crate::download::normalize_url(&url).unwrap_or_else(|_| url.clone());
-    let probe_json_key: crate::download::ProbeJsonKey = (
+    let probe_json_key = crate::download::probe_json_key(
         key_url,
         browser.clone(),
         proxy.as_ref().map(|p| p.cli_url.clone()),
+        referer.as_deref(),
     );
 
     let (ytdlp_result, gallery_error) = if let Some(tool) = gallery_tool {
@@ -3629,8 +3698,8 @@ fn build_video_lookup_kicker(context: VideoLookupContext) -> VideoLookupKick {
                         }
                         // Cache the raw info JSON for --load-info-json at download time.
                         // Single videos only; playlists re-probe per entry.
-                        if source_referer.is_none()
-                            && let Some(json) = raw_json
+                        if let Some(json) = raw_json
+                            && probe_json_key.3.is_ok()
                         {
                             // The probe canonically retargets some pages
                             // (youtu.be/… → …/watch?v=…) and enqueue stores the
@@ -3645,6 +3714,7 @@ fn build_video_lookup_kicker(context: VideoLookupContext) -> VideoLookupKick {
                                     final_url,
                                     probe_json_key.1.clone(),
                                     probe_json_key.2.clone(),
+                                    probe_json_key.3,
                                 );
                                 manager_b.cache_probe_json(retarget_key, json);
                             }

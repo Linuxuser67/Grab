@@ -1451,31 +1451,14 @@ fn origin_referer(url: &str) -> Option<String> {
     Some(format!("{}://{host}{port}/", u.scheme()))
 }
 
-/// Stamp one outbound request like a browser (User-Agent + origin-only
-/// Referer); single choke point for all requests. No Cookie: cookie-bearing
-/// downloads use a client with the jar as provider (see `http_client_with_jar`),
-/// which re-applies in-scope cookies on every hop.
 /// Produce a redirect-safe Referer. The HTTP client may follow redirects
 /// without giving Grab a chance to rewrite request headers at each hop, so a
 /// full source-page URL must never be attached to the initial request.
-/// Origin-only values preserve hotlink compatibility without leaking paths or
-/// query parameters to a later redirect destination.
 fn request_referer(target: &str, source: Option<&str>) -> Option<String> {
     let Some(source) = source else {
         return origin_referer(target);
     };
-    let source = source.trim();
-    if source.len() > 2048 {
-        return None;
-    }
-    let source_url = url::Url::parse(source).ok()?;
-    if !matches!(source_url.scheme(), "http" | "https")
-        || source_url.host_str().is_none()
-        || !source_url.username().is_empty()
-        || source_url.password().is_some()
-    {
-        return None;
-    }
+    let source_url = crate::referrer::parse_source(source)?;
     let target_url = url::Url::parse(target).ok()?;
     if source_url.scheme() == "https" && target_url.scheme() == "http" {
         return None;
@@ -1628,6 +1611,10 @@ mod request_referer_tests {
     }
 }
 
+/// Stamp one outbound request like a browser (User-Agent + origin-only
+/// Referer); single choke point for all requests. No Cookie: cookie-bearing
+/// downloads use a client with the jar as provider (see `http_client_with_jar`),
+/// which re-applies in-scope cookies on every hop.
 pub(crate) fn stamp_request(
     mut req: reqwest::RequestBuilder,
     user_agent: &str,

@@ -1,7 +1,7 @@
 //! Download attempt preparation, backend execution and message-pump lifecycle.
 
 use super::{
-    DownloadManager, FinalNameReservations, ProbeJsonKey, RestoreState, ensure_contained_parent,
+    DownloadManager, FinalNameReservations, RestoreState, ensure_contained_parent,
     format_gettext_template,
 };
 use crate::download_fetch::{
@@ -393,10 +393,7 @@ impl DownloadManager {
             // If a handoff jar is accepted at attempt start, run_download also
             // applies its matching UA. Otherwise use the default with live-browser cookies.
             user_agent: crate::download_net::DEFAULT_USER_AGENT.to_string(),
-            referer: {
-                let value = item.referer();
-                (!value.is_empty()).then_some(value)
-            },
+            referer: item.referer_opt(),
             timeout,
             tx,
         };
@@ -1808,11 +1805,15 @@ impl DownloadManager {
         } else {
             self.live_rows.borrow_mut().remove(&id);
         }
-        // Probe JSON is only reusable under the conditions it was probed with.
-        let probe_json_key: ProbeJsonKey = (
+        // Probe JSON is reusable only under the same page, authentication,
+        // proxy, and source-page context used for the preview.
+        let cookies_browser = self.settings.cookies_browser();
+        let referer = item.referer_opt();
+        let probe_json_key = crate::download::probe_json_key(
             page_url.clone(),
-            self.settings.cookies_browser(),
+            cookies_browser.clone(),
             proxy.as_ref().map(|p| p.cli_url.clone()),
+            referer.as_deref(),
         );
         let job = crate::video::VideoJob {
             item_id: id,
@@ -1828,11 +1829,8 @@ impl DownloadManager {
             is_live,
             live_from_start: self.settings.live_from_start(),
             newest_codecs: self.settings.video_codec_newest(),
-            cookies_browser: self.settings.cookies_browser(),
-            referer: {
-                let value = item.referer();
-                (!value.is_empty()).then_some(value)
-            },
+            cookies_browser,
+            referer,
             // Audio-only rows never subtitle or remux (no video leg exists): resolve to `None` here rather than gating at every use.
             subtitles: if audio_only {
                 None
@@ -1852,11 +1850,7 @@ impl DownloadManager {
             proxy,
             // Take the probe's raw info JSON if cached (single videos only).
             // Lets the download use --load-info-json instead of re-extracting.
-            info_json: if item.referer().is_empty() {
-                self.take_probe_json(&probe_json_key)
-            } else {
-                None
-            },
+            info_json: self.take_probe_json(&probe_json_key),
         };
         let handle = tokio_rt().spawn(async move {
             let worker_tx = tx.clone();
@@ -1948,10 +1942,7 @@ impl DownloadManager {
             live_from_start: false,
             newest_codecs: self.settings.video_codec_newest(),
             cookies_browser: self.settings.cookies_browser(),
-            referer: {
-                let value = item.referer();
-                (!value.is_empty()).then_some(value)
-            },
+            referer: item.referer_opt(),
             subtitles: if audio_only {
                 None
             } else {
@@ -2050,10 +2041,7 @@ impl DownloadManager {
         let job = crate::manifest_runner::ManifestJob {
             item_id: id,
             source,
-            referer: {
-                let value = item.referer();
-                (!value.is_empty()).then_some(value)
-            },
+            referer: item.referer_opt(),
             dest: item.file_path(),
             proxy,
             cookies_browser: opts.cookies_browser.clone(),

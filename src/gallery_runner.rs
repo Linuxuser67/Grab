@@ -158,15 +158,13 @@ pub async fn run_gallery_download_with_proxy(
             event_nonce: &event_nonce,
         },
     );
-    if let Some(referer) = job.referer.as_deref() {
+    let referer_args = crate::gallery_argv::referer_cli_args(job.referer.as_deref());
+    if !referer_args.is_empty() {
         let separator = argv
             .iter()
             .position(|arg| arg == "--")
             .unwrap_or(argv.len());
-        argv.splice(
-            separator..separator,
-            ["-o".to_string(), format!("extractor.*.referer={referer}")],
-        );
+        argv.splice(separator..separator, referer_args);
     }
     let guarded_proxy = if untrusted_handoff {
         crate::video_spawn::validate_guarded_proxy_args(&argv).map_err(GalleryError::probe)?;

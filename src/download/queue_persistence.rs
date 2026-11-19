@@ -206,10 +206,7 @@ impl DownloadManager {
                 items.push(StoredItem {
                     id: Some(it.id()),
                     url: it.url().to_string(),
-                    referer: {
-                        let value = it.referer();
-                        (!value.is_empty()).then_some(value)
-                    },
+                    referer: it.referer_opt(),
                     dest_dir: it.dest_dir().to_string(),
                     filename: it.filename().to_string(),
                     status: it.status(),

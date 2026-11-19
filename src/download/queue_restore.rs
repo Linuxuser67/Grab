@@ -44,7 +44,13 @@ fn is_normalized_absolute(path: &std::path::Path) -> bool {
 
 impl DownloadManager {
     /// Validate one persisted queue entry for restore. Invalid entries warn-skip; valid ones collect for the apply phase. Pure: never inserts or spawns.
-    fn validate_stored_item(item: StoredItem) -> Option<PendingRestore> {
+    fn validate_stored_item(mut item: StoredItem) -> Option<PendingRestore> {
+        // Normalize legacy values written before handoff ingress began storing
+        // origin-only Referers. Queue restore must not replay a page path/query.
+        item.referer = item
+            .referer
+            .as_deref()
+            .and_then(crate::referrer::origin_only);
         // The recorded engine folder is only trusted when it sits directly inside the row's own dest.
         let output_dir = item.output_dir.clone().filter(|dir| {
             let folder = std::path::PathBuf::from(dir);
@@ -100,8 +106,10 @@ impl DownloadManager {
         let gallery_job = match &item.gallery {
             Some(v) => match serde_json::from_value::<crate::gallery_argv::GalleryJob>(v.clone()) {
                 Ok(mut job) => {
-                    // Overwrite identity from the stored item, not the payload.
+                    // Overwrite identity and sanitized source Referer from
+                    // the stored item, not the gallery payload.
                     job.page_url = item.url.clone();
+                    job.referer = item.referer.clone();
                     // The payload's dest_dir is the gallery subfolder enqueue
                     // stored: parent + row filename — the only record of the
                     // uniquifying -2 suffix. A payload matching that shape is

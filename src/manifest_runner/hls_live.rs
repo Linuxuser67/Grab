@@ -1024,11 +1024,7 @@ pub(super) async fn run_live_hls_tracks(
         guarded_child_hosts,
         abort,
     } = context;
-    let super::LiveManifestTransfer {
-        tx,
-        downloaded,
-        ..
-    } = transfer;
+    let super::LiveManifestTransfer { tx, downloaded, .. } = transfer;
     let mut video = load_live_hls_track(video_plan, video_dir).await?;
     let mut audio = match audio_plan {
         Some(plan) => Some(load_live_hls_track(plan, audio_dir).await?),

@@ -1200,9 +1200,11 @@ mod attempt_subtitle_language_tests {
             .iter()
             .position(|argument| argument == "--")
             .expect("yt-dlp identity tail includes a positional separator");
-        let actual_identity = &argv[separator - identity.len() + 1..];
+        let identity_start = separator + 1 - (identity.len() - 1);
+        let identity_end = separator + 2;
+        let actual_identity = &argv[identity_start..identity_end];
         assert_eq!(
-            actual_identity, &identity[1..],
+            actual_identity, identity.as_slice(),
             "the download must use the identity snapshot checked before parsing cached JSON"
         );
     }

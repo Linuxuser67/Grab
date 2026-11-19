@@ -170,11 +170,17 @@ impl DownloadManager {
                 // direct download (the old phase-11b hazard).
                 let gallery = if it.is_gallery() {
                     match self.gallery_jobs.borrow().get(&it.id()) {
-                        Some(job) => match serde_json::to_value(job) {
-                            Ok(v) => Some(v),
-                            Err(e) => {
-                                tracing::warn!("skipping gallery row: job serialize failed: {e}");
-                                None
+                        Some(job) => {
+                            // The queue row is the source-context authority.
+                            // Never persist a duplicate gallery payload's raw page URL.
+                            let mut job = job.clone();
+                            job.referer = it.referer_opt();
+                            match serde_json::to_value(job) {
+                                Ok(v) => Some(v),
+                                Err(e) => {
+                                    tracing::warn!("skipping gallery row: job serialize failed: {e}");
+                                    None
+                                }
                             }
                         },
                         None => {
@@ -238,6 +244,66 @@ impl DownloadManager {
             version: QUEUE_VERSION,
             items,
         })
+    }
+
+
+    #[cfg(test)]
+    #[test]
+    fn gallery_payload_persistence_uses_the_sanitized_queue_row_referer() {
+        let manager = DownloadManager::new(
+            gtk4::gio::ListStore::new::<crate::download_row::DownloadItem>(),
+            crate::settings::AppSettings::new(),
+        );
+        let item = crate::download_row::DownloadItem::new(
+            42,
+            "https://gallery.example.test/collection",
+            "Collection",
+            "/tmp/grab-gallery-referrer-persistence",
+        );
+        item.set_referer(
+            "https://source.example.test/watch/private?token=must-not-persist#player".to_string(),
+        );
+        item.set_is_gallery(true);
+        manager.store().append(&item);
+        manager.gallery_jobs.borrow_mut().insert(
+            item.id(),
+            crate::gallery_argv::GalleryJob {
+                item_id: item.id(),
+                page_url: item.url(),
+                // Simulate a stale or unsanitized duplicate payload.
+                referer: Some(
+                    "https://source.example.test/watch/private?token=must-not-persist#player"
+                        .to_string(),
+                ),
+                title: "Collection".to_string(),
+                file_count: Some(1),
+                dest_dir: std::path::PathBuf::from("/tmp/grab-gallery-referrer-persistence/Collection"),
+                filter: crate::gallery_argv::GalleryFilter::All,
+                cookies_browser: "none".to_string(),
+                speed_limit: None,
+                range: None,
+                file_rows: Vec::new(),
+            },
+        );
+
+        let serialized = manager
+            .serialize_queue()
+            .expect("queue snapshot should serialize");
+        assert!(
+            !serialized.contains("token="),
+            "gallery job payload must not retain a source-page query"
+        );
+        let queue: crate::download_store::StoredQueue =
+            serde_json::from_str(&serialized).expect("queue should deserialize");
+        assert_eq!(
+            queue.items[0]
+                .gallery
+                .as_ref()
+                .and_then(|job| job.get("referer"))
+                .and_then(serde_json::Value::as_str),
+            Some("https://source.example.test/"),
+            "the gallery payload must carry the queue row's sanitized source origin"
+        );
     }
 
     /// Test helper for assertions over the serialized queue representation.

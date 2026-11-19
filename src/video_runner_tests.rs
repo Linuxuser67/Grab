@@ -482,6 +482,7 @@ fn subtitle_probe_drain_times_out_when_pipe_stays_open() {
         embed_chapters: false,
         proxy: None,
         info_json: None,
+        attempt_identity_args: None,
     };
     let (_abort_tx, mut abort_rx) = tokio::sync::oneshot::channel::<StopIntent>();
     let start = std::time::Instant::now();
@@ -542,6 +543,7 @@ fn subtitle_probe_rejects_oversized_json_output() {
         embed_chapters: false,
         proxy: None,
         info_json: None,
+        attempt_identity_args: None,
     };
     let (_abort_tx, mut abort_rx) = tokio::sync::oneshot::channel::<StopIntent>();
     let result =
@@ -798,6 +800,7 @@ fn staging_claim_skips_existing_base_file() {
         embed_chapters: false,
         proxy: None,
         info_json: None,
+        attempt_identity_args: None,
     };
 
     // Claim a staging name: should skip Title.mp4 (== dest) and Title.1.mp4 (exists),

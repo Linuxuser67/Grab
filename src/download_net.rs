@@ -329,25 +329,7 @@ fn client_builder_with_referer(referer: Option<&str>) -> reqwest::ClientBuilder 
 }
 
 fn normalized_referer(raw: Option<&str>) -> Option<String> {
-    let raw = raw?.trim();
-    if raw.is_empty() || raw.len() > 2048 {
-        return None;
-    }
-    let mut parsed = url::Url::parse(raw).ok()?;
-    if !matches!(parsed.scheme(), "http" | "https")
-        || parsed.host_str().is_none()
-        || !parsed.username().is_empty()
-        || parsed.password().is_some()
-    {
-        return None;
-    }
-    // Native manifest clients reuse this value for child requests and
-    // redirects, so expose only the source origin. The direct HTTP engine
-    // applies the full same-origin / origin-only cross-origin policy per request.
-    parsed.set_path("/");
-    parsed.set_query(None);
-    parsed.set_fragment(None);
-    Some(parsed.to_string())
+    raw.and_then(crate::referrer::origin_only)
 }
 
 #[cfg(test)]

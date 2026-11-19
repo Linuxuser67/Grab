@@ -183,7 +183,11 @@ fn push_vod_tail_args(args: &mut Vec<String>, job: &VideoJob, subtitle_language:
         args.extend(subtitle_cli_args(lang));
     }
     args.extend(proxy_cli_args(job.proxy.as_ref()));
-    if let Some(referer) = job.referer.as_deref().and_then(crate::referrer::origin_only) {
+    if let Some(referer) = job
+        .referer
+        .as_deref()
+        .and_then(crate::referrer::origin_only)
+    {
         args.push("--referer".to_string());
         args.push(referer);
     }
@@ -561,7 +565,11 @@ pub(crate) fn live_capture_argv_with_mode(
         args.push("--live-from-start".to_string());
     }
     args.extend(proxy_cli_args(job.proxy.as_ref()));
-    if let Some(referer) = job.referer.as_deref().and_then(crate::referrer::origin_only) {
+    if let Some(referer) = job
+        .referer
+        .as_deref()
+        .and_then(crate::referrer::origin_only)
+    {
         args.push("--referer".to_string());
         args.push(referer);
     }
@@ -1160,8 +1168,7 @@ mod attempt_subtitle_language_tests {
     #[test]
     fn video_argv_normalizes_source_origin_and_omits_invalid_referers() {
         let mut job = video_job();
-        job.referer =
-            Some("https://example.test/watch/private?token=secret#player".to_string());
+        job.referer = Some("https://example.test/watch/private?token=secret#player".to_string());
 
         let unified = unified_download_argv(
             &job,
@@ -1218,7 +1225,11 @@ mod attempt_subtitle_language_tests {
             None,
             LiveCaptureStart::LiveEdge,
         );
-        assert!(!invalid_unified.iter().any(|argument| argument == "--referer"));
+        assert!(
+            !invalid_unified
+                .iter()
+                .any(|argument| argument == "--referer")
+        );
         assert!(!invalid_live.iter().any(|argument| argument == "--referer"));
     }
 }

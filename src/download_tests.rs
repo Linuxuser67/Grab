@@ -31,6 +31,38 @@ static QUEUE_FILE_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 /// wrong thread. Take AFTER QUEUE_FILE_LOCK, always that order.
 static MAIN_LOOP_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
+#[test]
+fn probe_json_keys_are_scoped_to_the_source_page_identity() {
+    let key = super::probe_json_key(
+        "https://example.test/watch".to_string(),
+        "none".to_string(),
+        None,
+        Some("https://source.test/watch?id=one#player"),
+    );
+    let same_source_without_fragment = super::probe_json_key(
+        "https://example.test/watch".to_string(),
+        "none".to_string(),
+        None,
+        Some("https://source.test/watch?id=one#other"),
+    );
+    let different_source_page = super::probe_json_key(
+        "https://example.test/watch".to_string(),
+        "none".to_string(),
+        None,
+        Some("https://source.test/watch?id=two"),
+    );
+    let no_source_page = super::probe_json_key(
+        "https://example.test/watch".to_string(),
+        "none".to_string(),
+        None,
+        None,
+    );
+
+    assert_eq!(key, same_source_without_fragment);
+    assert_ne!(key, different_source_page);
+    assert_ne!(key, no_source_page);
+}
+
 fn lock_queue_file() -> std::sync::MutexGuard<'static, ()> {
     QUEUE_FILE_LOCK
         .lock()

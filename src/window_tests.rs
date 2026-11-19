@@ -621,7 +621,18 @@ fn status_views_use_gnome_adaptive_view_switcher() {
         }
 
         let add_button = find_widget_by_name(window.upcast_ref(), "add-download-button")
-            .expect("New Download remains in the header");
+            .expect("New Download remains in the header")
+            .downcast::<gtk4::ToggleButton>()
+            .expect("New Download is a GtkToggleButton");
+        assert_eq!(
+            add_button.icon_name().as_deref(),
+            Some("tab-new-symbolic"),
+            "the header uses KGX's new-tab glyph"
+        );
+        assert!(
+            !add_button.has_css_class("suggested-action"),
+            "the header New Download button has no accent fill"
+        );
         assert_eq!(
             add_button
                 .next_sibling()

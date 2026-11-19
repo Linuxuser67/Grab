@@ -312,9 +312,10 @@ pub fn build_window(
     // Stateful toggle: reflects the card's open state (set_on_state_changed
     // mirrors Escape / successful-add / toggle closes too), so the button
     // itself is the dismissal affordance — no separate close button needed.
+    // The header button follows KGX's new-tab button: the tab-new glyph and
+    // no accent fill, so the header stays visually quiet.
     let add_btn = gtk4::ToggleButton::builder()
-        .icon_name("list-add-symbolic")
-        .css_classes(["suggested-action"])
+        .icon_name("tab-new-symbolic")
         .tooltip_text(gettext("New Download (Ctrl+N)"))
         .build();
     add_btn.set_widget_name("add-download-button");

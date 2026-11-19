@@ -31,8 +31,8 @@ mod imp {
         pub id: Cell<u64>,
         #[property(get, set)]
         pub url: RefCell<String>,
-        /// Optional browser-provided page used for HTTP Referer headers.
-        #[property(get, set)]
+        /// Optional origin-only browser source used for HTTP Referer headers.
+        #[property(get, set = Self::set_referer)]
         pub referer: RefCell<String>,
         #[property(get, set)]
         pub filename: RefCell<String>,
@@ -86,6 +86,13 @@ mod imp {
         pub(crate) group: RefCell<Option<DownloadGroup>>,
     }
 
+    impl DownloadItem {
+        fn set_referer(&self, value: String) {
+            *self.referer.borrow_mut() =
+                crate::referrer::origin_only(&value).unwrap_or_default();
+        }
+    }
+
     #[glib::object_subclass]
     impl ObjectSubclass for DownloadItem {
         const NAME: &'static str = "GrabDownloadItem";
@@ -101,12 +108,10 @@ glib::wrapper! {
 }
 
 impl DownloadItem {
-    /// Return a validated origin-only source Referer, or None when absent/invalid.
-    ///
-    /// This also sanitizes older queue entries written before handoff ingress
-    /// began discarding source-page paths and query parameters.
+    /// Return the normalized source origin, or None when no source is attached.
     pub(crate) fn referer_opt(&self) -> Option<String> {
-        crate::referrer::origin_only(&self.referer())
+        let referer = self.referer();
+        (!referer.is_empty()).then_some(referer)
     }
 
     /// Whether this row owns the queue entry for a gallery or video collection.
@@ -212,6 +217,19 @@ impl DownloadItem {
 #[cfg(test)]
 mod tests {
     use super::{DownloadGroup, DownloadItem};
+
+    #[test]
+    fn referer_setter_stores_only_a_valid_source_origin() {
+        let item = DownloadItem::new(7, "https://example.test/file", "File", "/tmp");
+
+        item.set_referer(
+            "https://source.test/watch/private?token=secret#player".to_string(),
+        );
+        assert_eq!(item.referer(), "https://source.test/");
+
+        item.set_referer("file:///etc/passwd".to_string());
+        assert!(item.referer().is_empty());
+    }
 
     #[test]
     fn collection_role_is_mutually_exclusive() {

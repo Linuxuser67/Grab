@@ -1440,15 +1440,7 @@ pub(crate) enum StartMode {
 /// it. An origin-only Referer satisfies hotlink guards that check the origin
 /// without leaking the page path or query (which may carry tokens).
 fn origin_referer(url: &str) -> Option<String> {
-    let u = url::Url::parse(url).ok()?;
-    let host = u.host_str()?;
-    let port = match (u.scheme(), u.port()) {
-        ("http", Some(80)) | ("http", None) => String::new(),
-        ("https", Some(443)) | ("https", None) => String::new(),
-        (_, Some(p)) => format!(":{p}"),
-        (_, None) => String::new(),
-    };
-    Some(format!("{}://{host}{port}/", u.scheme()))
+    crate::referrer::origin_only(url)
 }
 
 /// Produce a redirect-safe Referer. The HTTP client may follow redirects

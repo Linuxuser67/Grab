@@ -140,12 +140,16 @@ pub(crate) struct GalleryDownloadOptions<'a> {
     pub event_nonce: &'a str,
 }
 
-/// Build gallery-dl's extractor Referer option. Browser handoffs supply the
-/// already validated, origin-only value.
+/// Build gallery-dl's extractor Referer option from a validated source origin.
+#[must_use]
 pub(crate) fn referer_cli_args(referer: Option<&str>) -> Vec<String> {
-    referer
-        .map(|value| vec!["-o".to_string(), format!("extractor.*.referer={value}")])
-        .unwrap_or_default()
+    let Some(origin) = referer.and_then(crate::referrer::origin_only) else {
+        return Vec::new();
+    };
+    vec![
+        "-o".to_string(),
+        format!("extractor.*.referer={origin}"),
+    ]
 }
 
 pub fn download_argv(
@@ -368,17 +372,18 @@ mod tests {
     }
 
     #[test]
-    fn referer_argv_contains_only_the_validated_source_origin() {
-        let source =
-            crate::referrer::origin_only("https://example.test/watch/private?token=secret#player")
-                .expect("valid source page");
-        let args = referer_cli_args(Some(&source));
+    fn referer_argv_normalizes_source_and_omits_invalid_values() {
+        let args = referer_cli_args(Some(
+            "https://example.test/watch/private?token=secret#player",
+        ));
         assert_eq!(args, ["-o", "extractor.*.referer=https://example.test/"]);
         assert!(
             !args
                 .iter()
                 .any(|argument| argument.contains("token=secret"))
         );
+        assert!(referer_cli_args(Some("file:///etc/passwd")).is_empty());
+        assert!(referer_cli_args(None).is_empty());
     }
 
     #[test]

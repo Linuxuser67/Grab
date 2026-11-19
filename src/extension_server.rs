@@ -1276,23 +1276,12 @@ pub(crate) fn purge_handoff_cookies() {
     });
 }
 
-/// Accept only a bounded HTTP(S) source URL. Invalid optional metadata is
-/// ignored rather than turning an otherwise valid browser handoff into an error.
+/// Accept optional browser source metadata, retaining only its origin.
+///
+/// Invalid metadata is ignored rather than turning an otherwise valid browser
+/// handoff into an error. The full page URL never enters the queue or argv.
 fn validated_referer(raw: Option<String>) -> Option<String> {
-    let raw = raw?;
-    if raw.len() > 2048 {
-        return None;
-    }
-    let mut parsed = url::Url::parse(raw.trim()).ok()?;
-    if !matches!(parsed.scheme(), "http" | "https")
-        || parsed.host_str().is_none()
-        || !parsed.username().is_empty()
-        || parsed.password().is_some()
-    {
-        return None;
-    }
-    parsed.set_fragment(None);
-    Some(parsed.to_string())
+    raw.as_deref().and_then(crate::referrer::origin_only)
 }
 
 #[derive(Deserialize)]
@@ -1791,6 +1780,34 @@ async fn handle_add(
             };
             cookie_report_response(0, status)
         }
+    }
+}
+
+#[cfg(test)]
+mod validated_referer_tests {
+    use super::validated_referer;
+
+    #[test]
+    fn browser_handoff_keeps_only_the_source_origin() {
+        assert_eq!(
+            validated_referer(Some(
+                "https://example.test:8443/watch/private?token=secret#player".to_string()
+            )),
+            Some("https://example.test:8443/".to_string())
+        );
+    }
+
+    #[test]
+    fn invalid_browser_source_metadata_is_ignored() {
+        for value in [
+            "file:///etc/passwd".to_string(),
+            "https://user:pass@example.test/watch".to_string(),
+            "javascript:alert(1)".to_string(),
+            format!("https://example.test/{}", "x".repeat(2048)),
+        ] {
+            assert_eq!(validated_referer(Some(value)), None);
+        }
+        assert_eq!(validated_referer(None), None);
     }
 }
 

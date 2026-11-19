@@ -336,7 +336,7 @@ fn identity_key(
         return None;
     }
     canonicalize_youtube_url(&mut url);
-    let referer_hash = crate::referrer::cache_identity(referer)?;
+    let referer_hash = crate::referrer::cache_identity(referer);
 
     let browser_profile_is_active =
         crate::video_tools::cookies_browser_spec(cookies_browser).is_some();

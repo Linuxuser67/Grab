@@ -675,6 +675,7 @@ async fn ensure_destination_unclaimed(destination: &Path) -> Result<(), VideoErr
 }
 
 /// Shared executable and lifecycle state for one resolved yt-dlp attempt.
+#[derive(Clone)]
 pub(crate) struct YtdlpAttemptContext<'a> {
     pub(crate) youtube_bin: &'a Path,
     pub(crate) ffmpeg_bin: &'a Path,
@@ -1428,13 +1429,15 @@ pub(crate) async fn run_unified_ytdlp(
     abort: &mut oneshot::Receiver<StopIntent>,
 ) -> Result<Option<u64>, VideoError> {
     use crate::engine_msg::EngineMsg;
-    let youtube_bin = context.youtube_bin;
-    let ffmpeg_bin = context.ffmpeg_bin;
-    let staging = context.staging;
-    let gate = context.gate;
-    let timeout = context.timeout;
-    let tx = context.tx.clone();
-    let playlist_index = context.playlist_index;
+    let YtdlpAttemptContext {
+        youtube_bin,
+        ffmpeg_bin,
+        staging,
+        gate,
+        timeout,
+        tx,
+        playlist_index,
+    } = (*context).clone();
     // Split rows merge; adopted singles download one file, nothing to merge.
     let merging = video_ext.is_some();
     let merge_ext = video_ext.map(merge_output_ext).unwrap_or_default();
@@ -2796,13 +2799,15 @@ pub(crate) async fn run_live_ytdlp(
     mut abort: oneshot::Receiver<StopIntent>,
 ) -> Result<Option<u64>, VideoError> {
     use crate::engine_msg::EngineMsg;
-    let youtube_bin = context.youtube_bin;
-    let ffmpeg_bin = context.ffmpeg_bin;
-    let staging = context.staging;
-    let gate = context.gate;
-    let timeout = context.timeout;
-    let tx = context.tx.clone();
-    let playlist_index = context.playlist_index;
+    let YtdlpAttemptContext {
+        youtube_bin,
+        ffmpeg_bin,
+        staging,
+        gate,
+        timeout,
+        tx,
+        playlist_index,
+    } = (*context).clone();
     // Fresh capture: a crashed run's live file must never be resumed into (append-only stream) nor adopted as an empty fresh capture.
     let ext = if job.audio_only { "m4a" } else { "mp4" };
     // Capture inside the row's staging dir: the `.part` shell stays hidden while
@@ -3343,13 +3348,15 @@ pub(crate) async fn run_hls_ytdlp(
     abort: &mut oneshot::Receiver<StopIntent>,
 ) -> Result<Option<u64>, VideoError> {
     use crate::engine_msg::EngineMsg;
-    let youtube_bin = context.youtube_bin;
-    let ffmpeg_bin = context.ffmpeg_bin;
-    let staging = context.staging;
-    let gate = context.gate;
-    let timeout = context.timeout;
-    let tx = context.tx.clone();
-    let playlist_index = context.playlist_index;
+    let YtdlpAttemptContext {
+        youtube_bin,
+        ffmpeg_bin,
+        staging,
+        gate,
+        timeout,
+        tx,
+        playlist_index,
+    } = (*context).clone();
     tokio::fs::create_dir_all(staging)
         .await
         .map_err(VideoError::staging)?;

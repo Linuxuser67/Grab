@@ -146,10 +146,7 @@ pub(crate) fn referer_cli_args(referer: Option<&str>) -> Vec<String> {
     let Some(origin) = referer.and_then(crate::referrer::origin_only) else {
         return Vec::new();
     };
-    vec![
-        "-o".to_string(),
-        format!("extractor.*.referer={origin}"),
-    ]
+    vec!["-o".to_string(), format!("extractor.*.referer={origin}")]
 }
 
 pub fn download_argv(

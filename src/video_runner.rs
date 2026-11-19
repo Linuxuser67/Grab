@@ -236,7 +236,7 @@ struct PlaylistStreamSummary {
 }
 
 async fn run_video_playlist_download_inner(
-    job: VideoJob,
+    mut job: VideoJob,
     state: crate::media_types::VideoPlaylistState,
     gate: &std::sync::Arc<AttemptGate>,
     mut abort: oneshot::Receiver<StopIntent>,
@@ -247,6 +247,8 @@ async fn run_video_playlist_download_inner(
     let libs = resolve_libraries()?;
     let (_yt_version, ff_version) = ensure_tool_versions(&libs).await?;
     crate::video_tools::ensure_deno(&job.page_url).await?;
+    let attempt_identity_args = job.spawn_identity_args();
+    job.attempt_identity_args = Some(attempt_identity_args);
     tracing::debug!(
         item_id = job.item_id,
         host = %page_host(&job.page_url),
@@ -289,6 +291,7 @@ async fn run_video_playlist_download_inner(
         &job.cookies_browser,
         Duration::from_secs(300),
         job.proxy.as_ref(),
+        job.attempt_identity_args.as_deref(),
         None,
     )
     .await?
@@ -766,13 +769,18 @@ async fn run_video_download_inner(
     if job.playlist_item_id.is_some() {
         job.info_json = None;
     }
-    // A queued row may receive a browser handoff after its preview. Do not
-    // reuse an anonymous probe's JSON with newly available browser cookies.
+    // Pin one cookie/User-Agent identity before checking or using probe JSON.
+    // Every later yt-dlp spawn in this attempt uses this same snapshot, so a
+    // handoff arriving during subtitle or download setup cannot change identity
+    // after the cache-reuse decision.
+    let attempt_identity_args =
+        crate::extension_server::ytdlp_spawn_identity(&job.cookies_browser, &job.page_url);
     if job.info_json.is_some()
-        && crate::extension_server::ytdlp_uses_cookie_auth(&job.cookies_browser, &job.page_url)
+        && !crate::video_spawn::probe_json_reuse_allowed(&attempt_identity_args)
     {
         job.info_json = None;
     }
+    job.attempt_identity_args = Some(attempt_identity_args);
     if let Some(json) = job.info_json.as_ref() {
         match crate::video_probe::parse_single_video(json.clone()) {
             Ok(v) => {
@@ -798,6 +806,7 @@ async fn run_video_download_inner(
                     &job.cookies_browser,
                     Duration::from_secs(300),
                     job.proxy.as_ref(),
+                    job.attempt_identity_args.as_deref(),
                     job.playlist_item_id.as_deref(),
                 ),
             )
@@ -2383,10 +2392,7 @@ pub(crate) async fn resolve_subtitle_lang(
     argv.extend(proxy_cli_args(job.proxy.as_ref()));
     // The subtitle probe extracts too, so it uses the same handoff jar (or
     // configured browser) plus the shared identity tail ending in `-- <url>`.
-    argv.extend(crate::extension_server::ytdlp_spawn_identity(
-        &job.cookies_browser,
-        &job.page_url,
-    ));
+    argv.extend(job.spawn_identity_args());
     let guarded_proxy = match crate::video_spawn::guard_untrusted_args(&argv) {
         Ok(proxy) => proxy,
         Err(e) => {

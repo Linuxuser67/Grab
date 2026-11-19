@@ -4046,12 +4046,8 @@ mod probe_json_key_tests {
             Some("https://other.example.test/watch?token=one"),
         );
         let no_source = probe_json_key(page.clone(), "none".to_string(), None, None);
-        let invalid_source = probe_json_key(
-            page,
-            "none".to_string(),
-            None,
-            Some("file:///etc/passwd"),
-        );
+        let invalid_source =
+            probe_json_key(page, "none".to_string(), None, Some("file:///etc/passwd"));
 
         assert_eq!(
             first, same_origin,

@@ -339,10 +339,8 @@ async fn route_open_uri(
                     return Routed::Failed;
                 }
             };
-        let client = match crate::download_net::http_client_for(
-            proxy.as_ref(),
-            referer.as_deref(),
-        ) {
+        let client = match crate::download_net::http_client_for(proxy.as_ref(), referer.as_deref())
+        {
             Ok(c) => c,
             Err(e) => {
                 toasts.add_toast(crate::ui_util::plain_toast(&e));

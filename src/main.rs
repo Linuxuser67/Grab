@@ -37,6 +37,7 @@ mod media_types;
 mod mp4_reader;
 mod net_types;
 mod preferences;
+mod picker_context;
 mod referrer;
 mod runtime;
 mod settings;

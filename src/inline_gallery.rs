@@ -21,15 +21,6 @@ use std::rc::Rc;
 use std::sync::{LazyLock, Mutex};
 use std::time::{Duration, Instant};
 
-/// UI lifetime and destination state shared by a gallery picker page.
-pub(crate) struct GalleryPickerContext<'a> {
-    pub nav: &'a adw::NavigationView,
-    pub manager: Rc<DownloadManager>,
-    pub dest_dir: Rc<RefCell<String>>,
-    pub close_card: Rc<dyn Fn()>,
-    pub scheduled_at: Option<i64>,
-}
-
 /// Metadata that defines the gallery being enumerated and selected.
 pub(crate) struct GalleryPickerSource {
     pub title: String,
@@ -398,16 +389,16 @@ impl GalleryPickerStream {
 /// `GalleryPickerStream`); `None` means another picker page already owns
 /// the screen, so the caller should drop its enumeration.
 pub(crate) fn push_gallery_picker_page(
-    context: GalleryPickerContext<'_>,
+    context: crate::picker_context::PickerContext<'_>,
+    scheduled_at: Option<i64>,
     source: GalleryPickerSource,
     grid: GalleryGrid,
 ) -> Option<GalleryPickerStream> {
-    let GalleryPickerContext {
+    let crate::picker_context::PickerContext {
         nav,
         manager,
         dest_dir,
         close_card,
-        scheduled_at,
     } = context;
     let GalleryPickerSource {
         title,

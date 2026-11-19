@@ -1531,7 +1531,8 @@ mod request_referer_tests {
             request
         });
 
-        let client = crate::download_net::http_client_for(None, None).expect("build guarded client");
+        let client =
+            crate::download_net::http_client_for(None, None).expect("build guarded client");
         let target = format!("http://{first_address}/media");
         let source = format!("http://{first_address}/watch?token=private");
         let request =

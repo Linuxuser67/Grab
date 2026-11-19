@@ -754,6 +754,14 @@ async fn run_video_download_inner(
     });
     let mut video: Option<Video> = None;
     let mut playlist_index: Option<usize> = None;
+    // A queued row may receive a browser handoff after its preview. Do not
+    // reuse an anonymous probe's JSON with newly available browser cookies.
+    let identity_args =
+        crate::extension_server::ytdlp_spawn_identity(&job.cookies_browser, &job.page_url);
+    if !crate::video_spawn::probe_json_reuse_allowed(&identity_args) {
+        job.info_json = None;
+    }
+
     // Fast path: the card probe cached the info JSON — parse it locally
     // instead of spawning yt-dlp for a second extraction. Invariant: the
     // JSON is loaded (--load-info-json) iff the Video was built from that

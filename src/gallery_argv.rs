@@ -357,7 +357,7 @@ mod tests {
         PathBuf::from("/tmp/gallery-dl")
     }
 
-    fn test_options(filter: GalleryFilter) -> GalleryDownloadOptions<'static> {
+    fn test_options<'a>(filter: GalleryFilter) -> GalleryDownloadOptions<'a> {
         GalleryDownloadOptions {
             filter,
             speed_limit: None,

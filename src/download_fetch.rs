@@ -374,6 +374,11 @@ async fn single_loop(
 
 const FALLBACK_ACK_TIMEOUT: Duration = Duration::from_secs(30);
 
+/// How often a single-stream transfer re-checks that its destination path still
+/// names the file it opened. Writes through the open descriptor keep succeeding
+/// after an unlink, so without this the transfer only notices when the body ends.
+const DESTINATION_CHECK_INTERVAL: Duration = Duration::from_secs(1);
+
 /// Wait for the UI to confirm that the segmented file was truncated and the bitmap dropped.
 /// A closed ack (the handler drops `ack` on failure or `break`) or a stall must stop the
 /// worker: continuing single-stream after the row was failed leaves a detached writer behind.
@@ -907,6 +912,7 @@ async fn attempt_once(
         let pace_start = Instant::now();
         let mut paced: u64 = 0;
         let mut last_sent = Instant::now();
+        let mut last_destination_check = Instant::now();
         let mut rate = live_rate_limit();
         let mut empty_streak: u32 = 0;
         use tokio::io::AsyncWriteExt as _;
@@ -939,6 +945,14 @@ async fn attempt_once(
                 .await
                 .map_err(|error| AttemptFail::Retryable(format!("Cannot write file: {error}")))?;
             downloaded += chunk.len() as u64;
+            if last_destination_check.elapsed() >= DESTINATION_CHECK_INTERVAL {
+                // Deleting or replacing the path does not interrupt writes
+                // through the open descriptor; stop once the claim is gone
+                // instead of downloading the rest of the body into an
+                // unlinked or foreign inode.
+                claim.verify(&ctx.dest).await?;
+                last_destination_check = Instant::now();
+            }
             pace_chunk(&mut paced, pace_start, rate, chunk.len()).await;
             if last_sent.elapsed() >= Duration::from_millis(50) {
                 rate = live_rate_limit();

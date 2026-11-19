@@ -5365,6 +5365,95 @@ fn aborted_engine_marks_failed() {
 }
 
 #[test]
+fn deleting_the_destination_stops_a_single_stream_download() {
+    // 4 MB at the fixture's ~160 KB/s keeps the body open for ~24s, so a
+    // transfer that only verifies after sync_all would still be writing when
+    // the test's 10s deadline expires.
+    let (_lock, _loop) = test_locks();
+    let _qf = test_queue_file("destgone");
+    let settings = test_settings();
+
+    let dir = std::env::temp_dir().join(format!("grab-destgone-{}", std::process::id()));
+    let srv = dir.join("srv");
+    let dl = dir.join("dl");
+    std::fs::create_dir_all(&srv).unwrap();
+    std::fs::create_dir_all(&dl).unwrap();
+    let payload: Vec<u8> = (0..4_000_000u32).map(|i| (i % 251) as u8).collect();
+    std::fs::write(srv.join("t.bin"), &payload).unwrap();
+
+    let port = test_port(61);
+    let ranges_log = dir.join("ranges.log");
+    let server = std::process::Command::new("python3")
+        .arg(format!(
+            "{}/tests/throttled_server.py",
+            env!("CARGO_MANIFEST_DIR")
+        ))
+        .arg(port.to_string())
+        .arg(srv.join("t.bin"))
+        .arg(&ranges_log)
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .expect("python3 range server");
+    let mut ready = false;
+    for _ in 0..100 {
+        if std::net::TcpStream::connect(format!("127.0.0.1:{port}")).is_ok() {
+            ready = true;
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(100));
+    }
+    assert!(ready, "test HTTP server did not listen on port {port}");
+
+    let store = gio::ListStore::new::<DownloadItem>();
+    let manager = DownloadManager::new(store, settings);
+    let url = format!("http://127.0.0.1:{port}/t.bin");
+    let dest = dl.to_string_lossy().into_owned();
+    let file = dl.join("t.bin");
+
+    let main_loop = glib::MainLoop::new(None, false);
+    let quit = main_loop.clone();
+    let server = Rc::new(RefCell::new(server));
+    glib::MainContext::default().spawn_local(async move {
+        let item = manager
+            .enqueue(&url, Some(&dest), Some("t.bin"))
+            .unwrap_or_else(|e| abort(&server, &e));
+        let mut waited = 0;
+        while (item.status() != DownloadStatus::Downloading || item.progress() <= 0.0)
+            && waited < 200
+        {
+            glib::timeout_future(std::time::Duration::from_millis(100)).await;
+            waited += 1;
+        }
+        if item.status() != DownloadStatus::Downloading || item.progress() <= 0.0 {
+            abort(&server, "download never wrote any bytes");
+        }
+        // Simulate the file manager: unlink the path while the writer holds it open.
+        std::fs::remove_file(&file).unwrap_or_else(|error| {
+            abort(&server, &format!("could not delete destination: {error}"))
+        });
+        let mut waited = 0;
+        while item.status() != DownloadStatus::Failed && waited < 100 {
+            glib::timeout_future(std::time::Duration::from_millis(100)).await;
+            waited += 1;
+        }
+        if item.status() != DownloadStatus::Failed {
+            abort(
+                &server,
+                &format!("deleted destination left row {:?}", item.status()),
+            );
+        }
+        assert_eq!(
+            item.detail(),
+            "Destination file disappeared during download"
+        );
+        cleanup(&server, &dir);
+        quit.quit();
+    });
+    run_loop(&main_loop, 60);
+}
+
+#[test]
 fn failed_download_reports_cause() {
     let (_lock, _loop) = test_locks();
     let _qf = test_queue_file("http-error");

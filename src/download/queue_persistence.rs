@@ -422,5 +422,4 @@ mod referrer_persistence_tests {
             "the gallery payload must carry the queue row's sanitized source origin"
         );
     }
-
 }

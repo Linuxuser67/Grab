@@ -231,11 +231,14 @@ mod tests {
             "https://example.test/opaque?access_token=short-lived",
         ] {
             let parsed = url::Url::parse(url).expect("valid fixture URL");
-            assert!(!should_probe_url(&parsed), "{url} must not receive a speculative GET");
+            assert!(
+                !should_probe_url(&parsed),
+                "{url} must not receive a speculative GET"
+            );
         }
 
-        let stable = url::Url::parse("https://example.test/opaque?id=42")
-            .expect("valid fixture URL");
+        let stable =
+            url::Url::parse("https://example.test/opaque?id=42").expect("valid fixture URL");
         assert!(should_probe_url(&stable));
     }
 

@@ -315,3 +315,43 @@ impl DownloadManager {
         }
     }
 }
+
+#[cfg(test)]
+mod referrer_persistence_tests {
+    use super::DownloadManager;
+    use crate::download_row::DownloadItem;
+    use crate::download_store::StoredQueue;
+    use gtk4::gio;
+
+    #[test]
+    fn serialized_queue_contains_only_the_source_origin() {
+        let manager = DownloadManager::new(
+            gio::ListStore::new::<DownloadItem>(),
+            crate::settings::AppSettings::new(),
+        );
+        let item = DownloadItem::new(
+            11,
+            "https://media.example.test/file",
+            "file.mp4",
+            "/tmp/grab-referrer-persistence",
+        );
+        item.set_referer(
+            "https://source.example.test/watch/private?token=must-not-persist#player".to_string(),
+        );
+        manager.store().append(&item);
+
+        let serialized = manager
+            .serialize_queue()
+            .expect("queue snapshot should serialize");
+        assert!(
+            !serialized.contains("token="),
+            "persisted queue must not retain source-page tokens"
+        );
+        let queue: StoredQueue =
+            serde_json::from_str(&serialized).expect("serialized queue should deserialize");
+        assert_eq!(
+            queue.items[0].referer.as_deref(),
+            Some("https://source.example.test/")
+        );
+    }
+}

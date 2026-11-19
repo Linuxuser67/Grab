@@ -2592,15 +2592,18 @@ impl AddCard {
         &self.nav
     }
 
-    /// Reveal a browser URL together with the page that initiated it.
-    /// The source is retained only for that exact submitted URL.
     #[cfg(test)]
     pub fn open(&self, initial_url: Option<String>) {
         self.public_host_leases.borrow_mut().activate();
         (self.open)(initial_url, None)
     }
 
+    /// Reveal a browser URL and retain only the source page's origin.
+    ///
+    /// The source is scoped to the exact submitted URL. If the card is already
+    /// open, this focuses it; collapsing the card always resets the form.
     pub fn open_with_referer(&self, initial_url: Option<String>, referer: Option<String>) {
+        let referer = referer.as_deref().and_then(crate::referrer::origin_only);
         self.public_host_leases.borrow_mut().activate();
         (self.open)(initial_url, referer)
     }
@@ -3698,9 +3701,7 @@ fn build_video_lookup_kicker(context: VideoLookupContext) -> VideoLookupKick {
                         }
                         // Cache the raw info JSON for --load-info-json at download time.
                         // Single videos only; playlists re-probe per entry.
-                        if let Some(json) = raw_json
-                            && probe_json_key.3.is_ok()
-                        {
+                        if let Some(json) = raw_json {
                             // The probe canonically retargets some pages
                             // (youtu.be/… → …/watch?v=…) and enqueue stores the
                             // probed page URL, which the download keys the cache on.

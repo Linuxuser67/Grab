@@ -777,9 +777,8 @@ thread_local! {
         const { RefCell::new(None) };
 }
 
-/// Cache key for probe info JSON: page URL, cookie source, proxy, and a
-/// hashed source-page identity. Never retain the Referer path/query in this key.
-pub(crate) type ProbeJsonKey = (String, String, Option<String>, Result<Option<[u8; 32]>, ()>);
+/// Cache key for probe info JSON: page URL, cookie source, proxy, and source origin.
+pub(crate) type ProbeJsonKey = (String, String, Option<String>, Option<[u8; 32]>);
 
 /// Build the identity shared by a media probe and the eventual download.
 pub(crate) fn probe_json_key(
@@ -788,12 +787,12 @@ pub(crate) fn probe_json_key(
     proxy_cli_url: Option<String>,
     referer: Option<&str>,
 ) -> ProbeJsonKey {
-    (
-        page_url,
-        cookies_browser,
-        proxy_cli_url,
-        crate::referrer::cache_identity(referer),
-    )
+    let source_origin = referer.and_then(crate::referrer::origin_only);
+    let referer_hash = crate::referrer::cache_identity(source_origin.as_deref())
+        .ok()
+        .flatten();
+
+    (page_url, cookies_browser, proxy_cli_url, referer_hash)
 }
 
 /// Probe info JSON older than this is never reused: signed media URLs inside
@@ -4074,37 +4073,40 @@ mod probe_json_key_tests {
     use super::probe_json_key;
 
     #[test]
-    fn probe_json_key_includes_source_page_identity_without_storing_it() {
+    fn probe_json_key_uses_the_same_origin_identity_as_downloads() {
         let page = "https://media.example.test/watch?id=42".to_string();
         let first = probe_json_key(
             page.clone(),
             "none".to_string(),
             None,
-            Some("https://source.example.test/watch?token=one#player"),
+            Some("https://source.example.test/watch/private?token=one#player"),
         );
-        let same_source = probe_json_key(
+        let same_origin = probe_json_key(
             page.clone(),
             "none".to_string(),
             None,
-            Some("https://source.example.test/watch?token=one#other"),
+            Some("https://source.example.test/other/path?token=two#other"),
         );
-        let changed_source = probe_json_key(
+        let different_origin = probe_json_key(
             page.clone(),
             "none".to_string(),
             None,
-            Some("https://source.example.test/watch?token=two"),
+            Some("https://other.example.test/watch?token=one"),
         );
         let no_source = probe_json_key(page, "none".to_string(), None, None);
 
-        assert_eq!(first, same_source, "fragments do not affect HTTP identity");
+        assert_eq!(
+            first, same_origin,
+            "source page paths and queries do not change the forwarded origin"
+        );
         assert_ne!(
-            first, changed_source,
-            "different source pages must not share JSON"
+            first, different_origin,
+            "different source origins must not share JSON"
         );
         assert_ne!(
             first, no_source,
             "a source-bound probe must not match an unbound download"
         );
-        assert_eq!(no_source.3, Ok(None));
+        assert_eq!(no_source.3, None);
     }
 }

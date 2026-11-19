@@ -664,3 +664,49 @@ mod queue_read_tests {
         assert!(queue_file.with_extension("json.bak").is_file());
     }
 }
+
+#[cfg(test)]
+mod referrer_restore_tests {
+    use super::DownloadManager;
+    use crate::download_store::StoredItem;
+    use crate::gallery_argv::{GalleryFilter, GalleryJob};
+
+    #[test]
+    fn restore_sanitizes_row_and_gallery_referers_from_legacy_queue_data() {
+        let gallery = GalleryJob {
+            item_id: 7,
+            page_url: "https://gallery.example.test/".to_string(),
+            referer: Some("https://payload.example.test/path?token=payload".to_string()),
+            title: "Gallery".to_string(),
+            file_count: Some(1),
+            dest_dir: std::path::PathBuf::from("/tmp/grab-referrer-restore/Gallery"),
+            filter: GalleryFilter::All,
+            cookies_browser: "none".to_string(),
+            speed_limit: None,
+            range: None,
+            file_rows: Vec::new(),
+        };
+        let item: StoredItem = serde_json::from_value(serde_json::json!({
+            "id": 7,
+            "url": "https://gallery.example.test/",
+            "referer": "https://source.example.test/watch/private?token=stored",
+            "dest_dir": "/tmp/grab-referrer-restore",
+            "filename": "Gallery",
+            "status": "queued",
+            "gallery": serde_json::to_value(gallery).expect("serialize gallery job")
+        }))
+        .expect("deserialize stored gallery row");
+
+        let restored = DownloadManager::validate_stored_item(item)
+            .expect("valid stored gallery item should restore");
+        assert_eq!(
+            restored.item.referer.as_deref(),
+            Some("https://source.example.test/")
+        );
+        let gallery = restored.gallery_job.expect("gallery job should restore");
+        assert_eq!(
+            gallery.referer.as_deref(),
+            Some("https://source.example.test/")
+        );
+    }
+}

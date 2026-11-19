@@ -659,9 +659,9 @@ pub(crate) fn has_untrusted_cache_query(url: &url::Url) -> bool {
 mod tests {
     use super::{
         AUTHENTICATED_PREVIEW_TTL, AUTHENTICATED_VIDEO_NAMESPACE, cache_key,
-        has_known_rotating_auth_query, lookup_video, persistent_cache_record,
-        playlist_cache_key, prune_authenticated_previews,
-        restore_persistent_cache_record, store_video, validate_cache_file_path,
+        has_known_rotating_auth_query, lookup_video, persistent_cache_record, playlist_cache_key,
+        prune_authenticated_previews, restore_persistent_cache_record, store_video,
+        validate_cache_file_path,
     };
     use crate::net_types::ResolvedProxy;
     use std::collections::HashMap;
@@ -818,10 +818,7 @@ mod tests {
         let binary = fake_binary(directory.path());
         let url = "https://example.test/watch?v=1";
         let anonymous = vec!["--".to_string(), url.to_string()];
-        assert!(
-            cache_key(url, &binary, "2026.10.23", "chrome", None, &anonymous, None)
-                .is_none()
-        );
+        assert!(cache_key(url, &binary, "2026.10.23", "chrome", None, &anonymous, None).is_none());
 
         let cookie_file = directory.path().join("handoff.cookies");
         std::fs::write(&cookie_file, "# Netscape HTTP Cookie File\n").expect("write cookie jar");
@@ -867,8 +864,7 @@ mod tests {
             url.to_string(),
         ];
         assert!(
-            cache_key(url, &binary, "2026.10.23", "none", None, &equals_form, None)
-                .is_some(),
+            cache_key(url, &binary, "2026.10.23", "none", None, &equals_form, None).is_some(),
             "both --cookies spellings are cacheable"
         );
 

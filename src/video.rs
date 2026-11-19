@@ -59,9 +59,6 @@ mod stop_intent_tests {
 }
 /// Facade: spawn plumbing + fetch resolve live in
 /// [`video_spawn`](crate::video_spawn) now.
-/// Test-only facade for callers without a browser source page.
-#[cfg(test)]
-pub use crate::video_spawn::fetch_video_infos;
 /// Referrer-aware yt-dlp metadata lookup.
 pub use crate::video_spawn::fetch_video_infos_with_referer;
 #[cfg(test)]

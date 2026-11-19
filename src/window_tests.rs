@@ -705,7 +705,7 @@ fn status_views_use_gnome_adaptive_view_switcher() {
             "the visible search bar never exceeds the HIG width clamp"
         );
         search_bar.set_search_mode(false);
-        add_card.open(None);
+        add_card.open_with_referer(None, None);
         drain_gtk_events();
         let inline_add_card = find_widget_by_name(window.upcast_ref(), "inline-add-card")
             .expect("the inline add card is present after opening it");

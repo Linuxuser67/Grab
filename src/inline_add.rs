@@ -2586,12 +2586,6 @@ impl AddCard {
         &self.nav
     }
 
-    #[cfg(test)]
-    pub fn open(&self, initial_url: Option<String>) {
-        self.public_host_leases.borrow_mut().activate();
-        (self.open)(initial_url, None)
-    }
-
     /// Reveal a browser URL and retain only the source page's origin.
     ///
     /// The source is scoped to the exact submitted URL. If the card is already

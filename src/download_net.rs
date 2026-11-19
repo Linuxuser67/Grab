@@ -285,7 +285,7 @@ impl DownloadOptions {
 
 #[cfg(test)]
 pub(crate) fn http_client() -> Result<reqwest::Client, String> {
-    client_builder().build().map_err(|e| e.to_string())
+    client_builder(None).build().map_err(|e| e.to_string())
 }
 
 /// Apply the resolved proxy chain consistently to every attempt-scoped client.
@@ -301,31 +301,16 @@ fn apply_proxies(
     builder
 }
 
-/// Build one client per download attempt. Connection pooling stays shared within
-/// its requests and range workers, but DNS policy does not leak to other rows.
-pub(crate) fn http_client_for(proxy: Option<&ResolvedProxy>) -> Result<reqwest::Client, String> {
-    http_client_for_with_referer(proxy, None)
-}
-
-/// Build a guarded client with an optional browser-provided Referer header.
-pub(crate) fn http_client_for_with_referer(
+/// Build one guarded client per download attempt. Connection pooling stays shared
+/// within its requests and range workers, but DNS policy does not leak to other rows.
+/// An optional source page is reduced to its origin before it becomes a request header.
+pub(crate) fn http_client_for(
     proxy: Option<&ResolvedProxy>,
     referer: Option<&str>,
 ) -> Result<reqwest::Client, String> {
-    apply_proxies(client_builder_with_referer(referer), proxy)
+    apply_proxies(client_builder(referer), proxy)
         .build()
         .map_err(|error| error.to_string())
-}
-
-fn client_builder_with_referer(referer: Option<&str>) -> reqwest::ClientBuilder {
-    let Some(value) = normalized_referer(referer)
-        .and_then(|value| reqwest::header::HeaderValue::from_str(&value).ok())
-    else {
-        return client_builder();
-    };
-    let mut headers = reqwest::header::HeaderMap::new();
-    headers.insert(reqwest::header::REFERER, value);
-    client_builder().default_headers(headers)
 }
 
 fn normalized_referer(raw: Option<&str>) -> Option<String> {
@@ -372,7 +357,7 @@ pub(crate) fn http_client_with_jar_and_referer(
     referer: Option<&str>,
 ) -> Result<reqwest::Client, String> {
     apply_proxies(
-        client_builder_with_referer(referer).cookie_provider(jar),
+        client_builder(referer).cookie_provider(jar),
         proxy,
     )
     .build()
@@ -387,7 +372,7 @@ pub(crate) fn http_client_with_jar_and_user_agent_and_referer(
     referer: Option<&str>,
 ) -> Result<reqwest::Client, String> {
     apply_proxies(
-        client_builder_with_referer(referer)
+        client_builder(referer)
             .cookie_provider(jar)
             .user_agent(user_agent),
         proxy,
@@ -1008,11 +993,19 @@ fn redirect_policy(public_dns_hosts: PublicDnsPolicy) -> reqwest::redirect::Poli
     })
 }
 
-/// Shared builder: bounded hops, no downgrades.
-pub(crate) fn client_builder() -> reqwest::ClientBuilder {
-    // Bounded hops; refuse https->http downgrades; no ambient proxy (explicit settings or nothing); no automatic Referer (leaks URLs/tokens).
+/// Shared guarded builder: bounded hops, no downgrades, and no automatic source URL leakage.
+pub(crate) fn client_builder(referer: Option<&str>) -> reqwest::ClientBuilder {
+    // Bounded hops; refuse https->http downgrades; no ambient proxy (explicit settings or nothing).
     let (redirect, resolver) = guarded_network_policy();
-    client_builder_with_policy(redirect, resolver)
+    let builder = client_builder_with_policy(redirect, resolver);
+    let Some(value) = normalized_referer(referer)
+        .and_then(|value| reqwest::header::HeaderValue::from_str(&value).ok())
+    else {
+        return builder;
+    };
+    let mut headers = reqwest::header::HeaderMap::new();
+    headers.insert(reqwest::header::REFERER, value);
+    builder.default_headers(headers)
 }
 
 #[cfg(test)]

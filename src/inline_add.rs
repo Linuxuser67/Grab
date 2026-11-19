@@ -3997,6 +3997,7 @@ fn build_submit_handler(context: SubmitContext) -> SubmitHandler {
                                                     &enqueue_url,
                                                     directory.as_deref(),
                                                     Some(&name),
+                                                    None,
                                                 )
                                                 .await
                                         },

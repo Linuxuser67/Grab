@@ -669,9 +669,7 @@ mod tests {
     fn invalid_source_referrer_disables_gallery_preview_cache() {
         let url = "https://gallery-cache.example.test/collection";
         let auth = cache_auth(None, None, None);
-        assert!(
-            gallery_preview_cache_key(url, &auth, None, Some("file:///etc/passwd")).is_none()
-        );
+        assert!(gallery_preview_cache_key(url, &auth, None, Some("file:///etc/passwd")).is_none());
     }
 
     #[test]

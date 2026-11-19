@@ -376,8 +376,7 @@ pub(crate) async fn lookup(
     let handoff_identity = crate::extension_server::live_handoff_identity(raw_url);
     // The source page can affect an access-controlled manifest response.
     // Its hash is part of the key, allowing reuse only for the same context.
-    let cache_key =
-        manifest_preview_cache_key(raw_url, proxy, handoff_identity.as_ref(), referer);
+    let cache_key = manifest_preview_cache_key(raw_url, proxy, handoff_identity.as_ref(), referer);
     if let Some(key) = cache_key.as_ref()
         && let Some(mut cached) = manifest_preview_cache_get(key)
     {
@@ -2639,15 +2638,13 @@ segment.ts?f=418899&srv=server&i=0.4&sp=500&p1=one&p2=two&asn=327934
         let same_source = "https://origin.example.test/watch?id=one#other";
         let different_source = "https://origin.example.test/watch?id=two";
 
-        let anonymous =
-            manifest_preview_cache_key(url, None, None, None).expect("anonymous key");
-        let first = manifest_preview_cache_key(url, None, None, Some(source))
-            .expect("source-page key");
+        let anonymous = manifest_preview_cache_key(url, None, None, None).expect("anonymous key");
+        let first =
+            manifest_preview_cache_key(url, None, None, Some(source)).expect("source-page key");
         let same = manifest_preview_cache_key(url, None, None, Some(same_source))
             .expect("equivalent source-page key");
-        let different =
-            manifest_preview_cache_key(url, None, None, Some(different_source))
-                .expect("different source-page key");
+        let different = manifest_preview_cache_key(url, None, None, Some(different_source))
+            .expect("different source-page key");
 
         assert_ne!(
             anonymous, first,
@@ -2727,9 +2724,8 @@ segment.ts?f=418899&srv=server&i=0.4&sp=500&p1=one&p2=two&asn=327934
         let second_identity = (jar.clone(), Some("Grab-UA-Two".to_string()));
         let first = manifest_preview_cache_key(url, None, Some(&first_identity), None)
             .expect("first handoff cache key");
-        let second =
-            manifest_preview_cache_key(url, None, Some(&second_identity), None)
-                .expect("second handoff cache key");
+        let second = manifest_preview_cache_key(url, None, Some(&second_identity), None)
+            .expect("second handoff cache key");
 
         assert_eq!(
             first.handoff_cookie_hash, second.handoff_cookie_hash,
@@ -2751,12 +2747,7 @@ segment.ts?f=418899&srv=server&i=0.4&sp=500&p1=one&p2=two&asn=327934
         );
         assert_eq!(
             manifest_preview_cache_key(url, None, Some(&default_identity), None),
-            manifest_preview_cache_key(
-                url,
-                None,
-                Some(&explicit_default_identity),
-                None
-            ),
+            manifest_preview_cache_key(url, None, Some(&explicit_default_identity), None),
             "an omitted handoff UA and an explicit default UA produce the same request identity"
         );
     }
@@ -2764,8 +2755,7 @@ segment.ts?f=418899&srv=server&i=0.4&sp=500&p1=one&p2=two&asn=327934
     #[test]
     fn preview_cache_key_only_matches_the_source_that_served_it() {
         let url = "https://cache-preview.example.test/master.m3u8";
-        let anonymous =
-            manifest_preview_cache_key(url, None, None, None).expect("anonymous key");
+        let anonymous = manifest_preview_cache_key(url, None, None, None).expect("anonymous key");
         let handoff = ManifestPreviewCacheKey {
             handoff_cookie_hash: Some([7_u8; 32]),
             handoff_user_agent_hash: Some([8_u8; 32]),

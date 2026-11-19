@@ -777,10 +777,31 @@ thread_local! {
         const { RefCell::new(None) };
 }
 
-/// Cache key for probe info JSON: the JSON is only reusable when the
-/// download runs under the same conditions the probe did — same page, same
-/// cookie source, same proxy. (page_url, cookies_browser, proxy cli_url)
-pub(crate) type ProbeJsonKey = (String, String, Option<String>);
+/// Cache key for probe info JSON: the download must use the same page,
+/// cookie source, proxy, and source-page Referer as the probe.
+///
+/// The Referer identity is hashed, so a full source URL never lives in a key.
+pub(crate) type ProbeJsonKey = (
+    String,
+    String,
+    Option<String>,
+    Result<Option<[u8; 32]>, ()>,
+);
+
+/// Build a probe JSON key from the conditions shared by lookup and download.
+pub(crate) fn probe_json_key(
+    page_url: String,
+    cookies_browser: String,
+    proxy_cli_url: Option<String>,
+    referer: Option<&str>,
+) -> ProbeJsonKey {
+    (
+        page_url,
+        cookies_browser,
+        proxy_cli_url,
+        crate::referrer::cache_identity(referer),
+    )
+}
 
 /// Probe info JSON older than this is never reused: signed media URLs inside
 /// go stale, and the extractor's format list may have rotated.
@@ -815,6 +836,11 @@ impl DownloadManager {
     /// probed-but-never-downloaded URLs must not accumulate ~100KB each
     /// for the whole session.
     pub(crate) fn cache_probe_json(&self, key: ProbeJsonKey, json: serde_json::Value) {
+        // Invalid optional source metadata must never collapse into the
+        // no-Referer identity and make metadata reusable across contexts.
+        if key.3.is_err() {
+            return;
+        }
         let mut cache = self.probe_json_cache.borrow_mut();
         // A probed video may occupy two entries (typed + retargeted URL keys).
         if cache.len() >= 64 {
@@ -827,6 +853,9 @@ impl DownloadManager {
     /// consumes it). Entries older than `PROBE_JSON_TTL` are dropped —
     /// signed media URLs inside go stale.
     pub(crate) fn take_probe_json(&self, key: &ProbeJsonKey) -> Option<serde_json::Value> {
+        if key.3.is_err() {
+            return None;
+        }
         let (cached_at, json) = self.probe_json_cache.borrow_mut().remove(key)?;
         if probe_json_expired(cached_at) {
             None

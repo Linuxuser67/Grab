@@ -10696,20 +10696,22 @@ fn playlist_staged_import_does_not_duplicate_identical_entry() {
         is_live: false,
         playlist_item_id: Some("a".to_string()),
     };
-    let first = manager.enqueue_video_staged(
+    let first = manager.enqueue_video_staged_with_referer(
         "https://example.com/album",
         &dest,
         Some("one.mp4"),
         choices.clone(),
         &[],
+        None,
     );
     assert!(first.is_ok(), "first staged enqueue should succeed");
-    let second = manager.enqueue_video_staged(
+    let second = manager.enqueue_video_staged_with_referer(
         "https://example.com/album",
         &dest,
         Some("two.mp4"),
         choices.clone(),
         &[],
+        None,
     );
     assert!(
         second.is_err(),

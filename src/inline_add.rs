@@ -583,12 +583,6 @@ fn attach_native_fallback_reason(
     }
 }
 
-/// Resolve native HLS/DASH manifests or opaque direct resources alongside
-/// the established yt-dlp/gallery-dl lookup.
-///
-/// Known video pages and manifests avoid the direct-resource probe. Unknown
-/// plain-fallback candidates use a bounded header request concurrently with
-/// extractor discovery.
 /// Race the direct-resource header probe against the established extractors.
 ///
 /// A positive header result wins immediately. If extraction is definitive,
@@ -689,6 +683,12 @@ mod opaque_resource_arbitration_tests {
     }
 }
 
+/// Resolve native HLS/DASH manifests or opaque direct resources alongside
+/// the established yt-dlp/gallery-dl lookup.
+///
+/// Known video pages and manifests avoid the direct-resource probe. Unknown
+/// plain-fallback candidates use a bounded header request concurrently with
+/// extractor discovery.
 async fn lookup_media_inner(
     url: String,
     browser: String,

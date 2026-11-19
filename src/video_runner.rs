@@ -1437,6 +1437,8 @@ pub(crate) async fn run_unified_ytdlp(
         tx: context_tx,
         playlist_index,
     } = context;
+    let timeout = *timeout;
+    let playlist_index = *playlist_index;
     let tx = (*context_tx).clone();
     // Split rows merge; adopted singles download one file, nothing to merge.
     let merging = video_ext.is_some();
@@ -2808,6 +2810,8 @@ pub(crate) async fn run_live_ytdlp(
         tx: context_tx,
         playlist_index,
     } = context;
+    let timeout = *timeout;
+    let playlist_index = *playlist_index;
     let tx = (*context_tx).clone();
     // Fresh capture: a crashed run's live file must never be resumed into (append-only stream) nor adopted as an empty fresh capture.
     let ext = if job.audio_only { "m4a" } else { "mp4" };
@@ -3358,6 +3362,8 @@ pub(crate) async fn run_hls_ytdlp(
         tx: context_tx,
         playlist_index,
     } = context;
+    let timeout = *timeout;
+    let playlist_index = *playlist_index;
     let tx = (*context_tx).clone();
     tokio::fs::create_dir_all(staging)
         .await

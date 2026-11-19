@@ -183,9 +183,9 @@ fn push_vod_tail_args(args: &mut Vec<String>, job: &VideoJob, subtitle_language:
         args.extend(subtitle_cli_args(lang));
     }
     args.extend(proxy_cli_args(job.proxy.as_ref()));
-    if let Some(referer) = job.referer.as_deref() {
+    if let Some(referer) = job.referer.as_deref().and_then(crate::referrer::origin_only) {
         args.push("--referer".to_string());
-        args.push(referer.to_string());
+        args.push(referer);
     }
     // Fresh handoff jar (or the configured browser) plus the shared identity
     // tail, which ends with `-- <url>`.
@@ -561,9 +561,9 @@ pub(crate) fn live_capture_argv_with_mode(
         args.push("--live-from-start".to_string());
     }
     args.extend(proxy_cli_args(job.proxy.as_ref()));
-    if let Some(referer) = job.referer.as_deref() {
+    if let Some(referer) = job.referer.as_deref().and_then(crate::referrer::origin_only) {
         args.push("--referer".to_string());
-        args.push(referer.to_string());
+        args.push(referer);
     }
     // Fresh handoff jar (or the configured browser) plus the shared identity
     // tail, which ends with `-- <url>`.
@@ -1158,10 +1158,10 @@ mod attempt_subtitle_language_tests {
     }
 
     #[test]
-    fn video_argv_uses_only_the_validated_source_origin() {
+    fn video_argv_normalizes_source_origin_and_omits_invalid_referers() {
         let mut job = video_job();
         job.referer =
-            crate::referrer::origin_only("https://example.test/watch/private?token=secret#player");
+            Some("https://example.test/watch/private?token=secret#player".to_string());
 
         let unified = unified_download_argv(
             &job,
@@ -1200,6 +1200,26 @@ mod attempt_subtitle_language_tests {
                 .iter()
                 .any(|argument| argument.contains("token=secret"))
         );
+
+        job.referer = Some("file:///etc/passwd".to_string());
+        let invalid_unified = unified_download_argv(
+            &job,
+            "bv*+ba/b",
+            true,
+            "mp4",
+            Path::new("/usr/bin/ffmpeg"),
+            Path::new("/tmp/video.mp4"),
+            None,
+        );
+        let invalid_live = live_capture_argv_with_mode(
+            &job,
+            "hls-1080p",
+            Path::new("/tmp/live.ts"),
+            None,
+            LiveCaptureStart::LiveEdge,
+        );
+        assert!(!invalid_unified.iter().any(|argument| argument == "--referer"));
+        assert!(!invalid_live.iter().any(|argument| argument == "--referer"));
     }
 }
 

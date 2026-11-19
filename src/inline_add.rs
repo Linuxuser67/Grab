@@ -21,6 +21,7 @@
 use crate::download::DownloadManager;
 use crate::download_row::DownloadItem;
 use crate::gallery_grid::GalleryGrid;
+use PickerContext;
 use crate::window_rows::{
     apply_scheduled_at, default_name_for, picker_enter_confirms, picker_header,
     selection_action_bar,
@@ -2229,11 +2230,11 @@ fn push_playlist_items_page(
 
 /// Torrent intake presents a selection page when the user explicitly requests one.
 fn push_torrent_picker_page(
-    context: crate::picker_context::PickerContext<'_>,
+    context: PickerContext<'_>,
     scheduled_at: Rc<Cell<Option<i64>>>,
     selection: TorrentPickerSelection,
 ) {
-    let crate::picker_context::PickerContext {
+    let PickerContext {
         nav,
         manager,
         dest_dir,
@@ -2460,7 +2461,7 @@ fn wire_torrent_picker(
                 return;
             }
             push_torrent_picker_page(
-                crate::picker_context::PickerContext {
+                PickerContext {
                     nav: &nav,
                     manager: m,
                     dest_dir: dd,
@@ -3964,7 +3965,7 @@ fn build_submit_handler(context: SubmitContext) -> SubmitHandler {
                             match magnet_resolution_action(source, entries.len()) {
                                 MagnetResolutionAction::OpenPicker => {
                                     push_torrent_picker_page(
-                                        crate::picker_context::PickerContext {
+                                        PickerContext {
                                             nav: &lookup_nav,
                                             manager: lookup_manager,
                                             dest_dir: lookup_dest,
@@ -4911,7 +4912,7 @@ pub fn build_add_card(manager: Rc<DownloadManager>) -> AddCard {
                   entries: Vec<crate::torrent::TorrentFileEntry>| {
                 reveal();
                 push_torrent_picker_page(
-                    crate::picker_context::PickerContext {
+                    PickerContext {
                         nav: &nav,
                         manager: manager.clone(),
                         dest_dir: dest_dir.clone(),
@@ -5084,7 +5085,7 @@ fn make_gallery_picker_opener(
                     }
                     restore_btn();
                     page = match crate::inline_gallery::push_gallery_picker_page(
-                        crate::picker_context::PickerContext {
+                        PickerContext {
                             nav: &nav3,
                             manager: manager3.clone(),
                             dest_dir: dest3.clone(),
@@ -5313,7 +5314,7 @@ mod tests {
             .build();
         torrent_nav.push(&torrent_form);
         push_torrent_picker_page(
-            crate::picker_context::PickerContext {
+            PickerContext {
                 nav: &torrent_nav,
                 manager: Rc::clone(&manager),
                 dest_dir: Rc::clone(&destination),
@@ -5346,7 +5347,7 @@ mod tests {
             .build();
         single_magnet_nav.push(&single_magnet_form);
         push_torrent_picker_page(
-            crate::picker_context::PickerContext {
+            PickerContext {
                 nav: &single_magnet_nav,
                 manager: Rc::clone(&manager),
                 dest_dir: Rc::clone(&destination),
@@ -5379,7 +5380,7 @@ mod tests {
             .build();
         magnet_nav.push(&magnet_form);
         push_torrent_picker_page(
-            crate::picker_context::PickerContext {
+            PickerContext {
                 nav: &magnet_nav,
                 manager: Rc::clone(&manager),
                 dest_dir: Rc::clone(&destination),

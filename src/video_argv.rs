@@ -72,6 +72,18 @@ pub struct VideoJob {
     /// to skip re-extraction. Memory-only; the struct is never serialized,
     /// so queue restore falls back to normal extraction. `None` = not available.
     pub info_json: Option<serde_json::Value>,
+    /// Authentication and User-Agent identity pinned for this download attempt.
+    /// Set by the runner before reusing probe JSON; never persisted in the queue.
+    pub(crate) attempt_identity_args: Option<Vec<String>>,
+}
+
+impl VideoJob {
+    /// Use the attempt snapshot when present, otherwise resolve the current handoff.
+    pub(crate) fn spawn_identity_args(&self) -> Vec<String> {
+        self.attempt_identity_args.clone().unwrap_or_else(|| {
+            crate::extension_server::ytdlp_spawn_identity(&self.cookies_browser, &self.page_url)
+        })
+    }
 }
 
 /// Fallback `-f` spec when the pinned id rotated since the dialog resolve. Pure.
@@ -193,10 +205,7 @@ fn push_vod_tail_args(args: &mut Vec<String>, job: &VideoJob, subtitle_language:
     }
     // Fresh handoff jar (or the configured browser) plus the shared identity
     // tail, which ends with `-- <url>`.
-    args.extend(crate::extension_server::ytdlp_spawn_identity(
-        &job.cookies_browser,
-        &job.page_url,
-    ));
+    args.extend(job.spawn_identity_args());
 }
 
 /// Playlist scoping for a yt-dlp download argv. A row picked from a playlist
@@ -575,10 +584,7 @@ pub(crate) fn live_capture_argv_with_mode(
     }
     // Fresh handoff jar (or the configured browser) plus the shared identity
     // tail, which ends with `-- <url>`.
-    args.extend(crate::extension_server::ytdlp_spawn_identity(
-        &job.cookies_browser,
-        &job.page_url,
-    ));
+    args.extend(job.spawn_identity_args());
     args
 }
 
@@ -1129,6 +1135,7 @@ mod attempt_subtitle_language_tests {
             embed_chapters: false,
             proxy: None,
             info_json: None,
+            attempt_identity_args: None,
         }
     }
 
@@ -1163,6 +1170,41 @@ mod attempt_subtitle_language_tests {
         assert!(has_subtitle_language(&hls, "en"));
         assert!(!has_subtitle_language(&hls, "fr"));
         assert_eq!(job.subtitles.as_deref(), Some("fr"));
+    }
+
+    #[test]
+    fn download_argv_uses_the_same_pinned_identity_that_gates_probe_json() {
+        let mut job = video_job();
+        let identity = vec![
+            "--cookies".to_string(),
+            "/run/user/1000/grab-cookies/attempt-snapshot".to_string(),
+            "--".to_string(),
+            job.page_url.clone(),
+        ];
+        assert!(
+            !crate::video_spawn::probe_json_reuse_allowed(&identity),
+            "cookie-backed attempt identities must reject raw probe JSON reuse"
+        );
+        job.attempt_identity_args = Some(identity.clone());
+
+        let argv = unified_download_argv(
+            &job,
+            "bv*+ba/b",
+            true,
+            "mp4",
+            Path::new("/usr/bin/ffmpeg"),
+            Path::new("/tmp/video.mp4"),
+            None,
+        );
+        let separator = argv
+            .iter()
+            .position(|argument| argument == "--")
+            .expect("yt-dlp identity tail includes a positional separator");
+        let actual_identity = &argv[separator - identity.len() + 1..];
+        assert_eq!(
+            actual_identity, &identity[1..],
+            "the download must use the identity snapshot checked before parsing cached JSON"
+        );
     }
 
     #[test]
@@ -1262,6 +1304,7 @@ mod live_capture_start_tests {
             embed_chapters: false,
             proxy: None,
             info_json: None,
+            attempt_identity_args: None,
         }
     }
 

@@ -671,8 +671,18 @@ fn status_views_use_gnome_adaptive_view_switcher() {
                 search_bar.margin_start(),
                 search_bar.margin_end(),
             ],
+            [0, 0, 0, 0],
+            "the 350 px clamp width is reserved for the search control itself"
+        );
+        assert_eq!(
+            [
+                search_clamp.margin_top(),
+                search_clamp.margin_bottom(),
+                search_clamp.margin_start(),
+                search_clamp.margin_end(),
+            ],
             [12, 12, 12, 12],
-            "the search surface retains the standard HIG spacing on all sides"
+            "the outer search surface retains the standard HIG spacing on all sides"
         );
         assert_eq!(
             search_bar

@@ -178,11 +178,13 @@ impl DownloadManager {
                             match serde_json::to_value(job) {
                                 Ok(v) => Some(v),
                                 Err(e) => {
-                                    tracing::warn!("skipping gallery row: job serialize failed: {e}");
+                                    tracing::warn!(
+                                        "skipping gallery row: job serialize failed: {e}"
+                                    );
                                     None
                                 }
                             }
-                        },
+                        }
                         None => {
                             tracing::warn!("skipping gallery row with no job entry");
                             None

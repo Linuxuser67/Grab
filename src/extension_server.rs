@@ -2573,7 +2573,7 @@ mod tests {
         let directory = tempfile::tempdir().expect("temporary directory");
         let binary = directory.path().join("yt-dlp");
         std::fs::write(&binary, b"fake yt-dlp binary").expect("write fake binary");
-        let key = crate::video_cache::cache_key(url, &binary, "2026.10.23", "none", None, &args)
+        let key = crate::video_cache::cache_key_with_referer(url, &binary, "2026.10.23", "none", None, &args, None)
             .expect("an offline handoff jar should still produce an extraction key");
         assert!(
             key.starts_with("grab-ytdlp-video-auth-v1:"),

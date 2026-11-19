@@ -88,8 +88,7 @@ mod imp {
 
     impl DownloadItem {
         fn set_referer(&self, value: String) {
-            *self.referer.borrow_mut() =
-                crate::referrer::origin_only(&value).unwrap_or_default();
+            *self.referer.borrow_mut() = crate::referrer::origin_only(&value).unwrap_or_default();
         }
     }
 

@@ -9699,7 +9699,7 @@ fn probe_json_cache_roundtrip() {
         "https://example.com/v".to_string(),
         "chrome".to_string(),
         None,
-        Ok(None),
+        None,
     );
     m.cache_probe_json(key.clone(), json.clone());
     // Take consumes (single use).
@@ -9710,7 +9710,7 @@ fn probe_json_cache_roundtrip() {
         "https://example.com/other".to_string(),
         "chrome".to_string(),
         None,
-        Ok(None),
+        None,
     );
     assert_eq!(m.take_probe_json(&other), None);
     let _ = std::fs::remove_file(&qf);
@@ -9728,7 +9728,7 @@ fn probe_json_cache_key_includes_conditions() {
         "https://example.com/v".to_string(),
         "chrome".to_string(),
         None,
-        Ok(None),
+        None,
     );
     m.cache_probe_json(key.clone(), json.clone());
     // Different cookie source: miss.
@@ -9736,7 +9736,7 @@ fn probe_json_cache_key_includes_conditions() {
         "https://example.com/v".to_string(),
         "firefox".to_string(),
         None,
-        Ok(None),
+        None,
     );
     assert_eq!(m.take_probe_json(&other_browser), None);
     // Different proxy: miss (the chrome entry is still there).
@@ -9744,7 +9744,7 @@ fn probe_json_cache_key_includes_conditions() {
         "https://example.com/v".to_string(),
         "chrome".to_string(),
         Some("socks5h://127.0.0.1:9050".to_string()),
-        Ok(None),
+        None,
     );
     assert_eq!(m.take_probe_json(&proxied), None);
     // Exact key: hit.
@@ -9770,7 +9770,7 @@ fn probe_json_cache_drops_expired_entries() {
         "https://example.com/v".to_string(),
         "none".to_string(),
         None,
-        Ok(None),
+        None,
     );
     // Insert with a backdated timestamp: take must drop it, not return it.
     m.probe_json_cache.borrow_mut().insert(

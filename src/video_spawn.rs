@@ -108,16 +108,16 @@ fn ytdlp_failure_is_retryable(detail: &str) -> bool {
 }
 
 /// Options applied to one yt-dlp metadata subprocess.
-struct RawDumpOptions<'a> {
-    cookies_browser: &'a str,
-    timeout: Duration,
-    fetch_proxy: Option<&'a crate::net_types::ResolvedProxy>,
-    flat_playlist: bool,
-    identity_args: Option<&'a [String]>,
-    referer: Option<&'a str>,
+pub(crate) struct RawDumpOptions<'a> {
+    pub(crate) cookies_browser: &'a str,
+    pub(crate) timeout: Duration,
+    pub(crate) fetch_proxy: Option<&'a crate::net_types::ResolvedProxy>,
+    pub(crate) flat_playlist: bool,
+    pub(crate) identity_args: Option<&'a [String]>,
+    pub(crate) referer: Option<&'a str>,
 }
 
-async fn fetch_raw_dump_json(
+pub(crate) async fn fetch_raw_dump_json(
     youtube_bin: &Path,
     url: &str,
     options: RawDumpOptions<'_>,

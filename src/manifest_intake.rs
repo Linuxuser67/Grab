@@ -86,7 +86,7 @@ fn manifest_preview_cache_key(
     if crate::video_cache::has_known_rotating_auth_query(&url) {
         return None;
     }
-    let referer_hash = crate::referrer::cache_identity(referer)?;
+    let referer_hash = crate::referrer::cache_identity(referer);
 
     let handoff_cookie_hash =
         handoff_identity.and_then(|(path, _)| crate::extension_server::handoff_cookie_hash(path));

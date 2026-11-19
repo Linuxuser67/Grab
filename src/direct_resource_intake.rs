@@ -243,8 +243,7 @@ mod tests {
             );
         }
 
-        let stable =
-            url::Url::parse("https://example.test/opaque").expect("valid fixture URL");
+        let stable = url::Url::parse("https://example.test/opaque").expect("valid fixture URL");
         assert!(should_probe_url(&stable));
     }
 

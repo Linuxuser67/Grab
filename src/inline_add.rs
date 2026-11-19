@@ -640,9 +640,7 @@ mod opaque_resource_arbitration_tests {
         }
     }
 
-    fn pending_direct_probe(
-        dropped: Arc<AtomicBool>,
-    ) -> impl std::future::Future<Output = bool> {
+    fn pending_direct_probe(dropped: Arc<AtomicBool>) -> impl std::future::Future<Output = bool> {
         let drop_flag = DropFlag(dropped);
         async move {
             let _drop_flag = drop_flag;
@@ -658,7 +656,7 @@ mod opaque_resource_arbitration_tests {
                 Ok(MediaLookupOutcome::Gallery(Vec::new()))
             })
             .await
-            .expect("successful gallery extraction");
+            .unwrap_or_else(|_| panic!("successful gallery extraction"));
 
         assert!(matches!(result, MediaLookupOutcome::Gallery(_)));
         assert!(
@@ -677,7 +675,7 @@ mod opaque_resource_arbitration_tests {
             async { Err(MediaLookupFailure::Failed("extractor failed".to_string())) },
         )
         .await
-        .expect("positive direct-resource result takes precedence");
+        .unwrap_or_else(|_| panic!("positive direct-resource result takes precedence"));
 
         assert!(matches!(result, MediaLookupOutcome::DirectFile));
     }

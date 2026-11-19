@@ -7,7 +7,6 @@
 //! cycle). The picker's shared widgets come from `window_rows`; the entry
 //! grid from `gallery_grid`.
 
-use crate::download::DownloadManager;
 use crate::gallery_grid::GalleryGrid;
 use crate::window_rows::{
     apply_scheduled_at, picker_enter_confirms, picker_header, selection_action_bar,

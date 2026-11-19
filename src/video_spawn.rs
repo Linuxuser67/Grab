@@ -303,31 +303,6 @@ impl Drop for AbortOnDrop {
     }
 }
 
-/// Extract metadata for one URL (the page URL is what survives restarts, not the media URLs).
-/// Returns the parsed result plus the raw `--dump-single-json` for single videos
-/// (used for `--load-info-json` at download time to skip re-extraction).
-/// Playlists return `None` (their entries are re-probed individually).
-#[cfg(test)]
-pub async fn fetch_video_infos(
-    youtube_bin: PathBuf,
-    url: String,
-    cookies_browser: String,
-    newest_first: bool,
-    fetch_proxy: Option<crate::net_types::ResolvedProxy>,
-    cancel: Option<tokio::sync::oneshot::Receiver<()>>,
-) -> Result<(ProbeResult, Option<serde_json::Value>), VideoError> {
-    fetch_video_infos_with_referer(
-        youtube_bin,
-        url,
-        cookies_browser,
-        newest_first,
-        fetch_proxy,
-        None,
-        cancel,
-    )
-    .await
-}
-
 pub async fn fetch_video_infos_with_referer(
     youtube_bin: PathBuf,
     url: String,
@@ -1268,11 +1243,12 @@ mod tests {
         let (tx, rx) = tokio::sync::oneshot::channel();
         tx.send(()).expect("receiver alive");
         let youtube_bin = std::path::PathBuf::from("/nonexistent/yt-dlp");
-        let r = crate::runtime::tokio_rt().block_on(fetch_video_infos(
+        let r = crate::runtime::tokio_rt().block_on(fetch_video_infos_with_referer(
             youtube_bin,
             "https://example.com/video".to_string(),
             String::new(),
             false,
+            None,
             None,
             Some(rx),
         ));

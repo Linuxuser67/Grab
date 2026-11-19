@@ -2958,11 +2958,12 @@ fn fetch_video_infos_succeeds_with_yt_dlp_only_and_no_staging_root() {
 
     let _env = ScopedEnv::apply(path_only.to_str().expect("UTF-8 temp path"), &xdg);
     assert!(crate::video_tools::resolve_libraries().is_err());
-    let result = crate::runtime::tokio_rt().block_on(crate::video::fetch_video_infos(
+    let result = crate::runtime::tokio_rt().block_on(crate::video::fetch_video_infos_with_referer(
         youtube,
         "https://example.com/v".to_string(),
         "none".to_string(),
         false,
+        None,
         None,
         None,
     ));

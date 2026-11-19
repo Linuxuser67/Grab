@@ -663,9 +663,8 @@ mod tests {
     use super::{
         AUTHENTICATED_PREVIEW_TTL, AUTHENTICATED_VIDEO_NAMESPACE, cache_key_with_referer,
         has_known_rotating_auth_query, lookup_video, persistent_cache_record,
-        playlist_cache_key_with_referer,
-        prune_authenticated_previews, restore_persistent_cache_record, store_video,
-        validate_cache_file_path,
+        playlist_cache_key_with_referer, prune_authenticated_previews,
+        restore_persistent_cache_record, store_video, validate_cache_file_path,
     };
     use crate::net_types::ResolvedProxy;
     use std::collections::HashMap;
@@ -698,7 +697,15 @@ mod tests {
             url.to_string(),
         ];
         assert_ne!(
-            cache_key_with_referer(url, &binary, "2026.10.23", "none", None, &changed_args, None),
+            cache_key_with_referer(
+                url,
+                &binary,
+                "2026.10.23",
+                "none",
+                None,
+                &changed_args,
+                None
+            ),
             Some(base.clone())
         );
 
@@ -708,7 +715,15 @@ mod tests {
             no_proxy_env: "localhost".to_string(),
         };
         assert_ne!(
-            cache_key_with_referer(url, &binary, "2026.10.23", "none", Some(&proxy), &args, None),
+            cache_key_with_referer(
+                url,
+                &binary,
+                "2026.10.23",
+                "none",
+                Some(&proxy),
+                &args,
+                None
+            ),
             Some(base)
         );
     }
@@ -806,7 +821,10 @@ mod tests {
         let binary = fake_binary(directory.path());
         let url = "https://example.test/watch?v=1";
         let anonymous = vec!["--".to_string(), url.to_string()];
-        assert!(cache_key_with_referer(url, &binary, "2026.10.23", "chrome", None, &anonymous, None).is_none());
+        assert!(
+            cache_key_with_referer(url, &binary, "2026.10.23", "chrome", None, &anonymous, None)
+                .is_none()
+        );
 
         let cookie_file = directory.path().join("handoff.cookies");
         std::fs::write(&cookie_file, "# Netscape HTTP Cookie File\n").expect("write cookie jar");
@@ -818,15 +836,31 @@ mod tests {
             "--".to_string(),
             url.to_string(),
         ];
-        let handoff_key = cache_key_with_referer(url, &binary, "2026.10.23", "none", None, &with_handoff, None)
-            .expect("a staged handoff jar may cache video metadata for its lifetime");
+        let handoff_key = cache_key_with_referer(
+            url,
+            &binary,
+            "2026.10.23",
+            "none",
+            None,
+            &with_handoff,
+            None,
+        )
+        .expect("a staged handoff jar may cache video metadata for its lifetime");
         assert!(
             handoff_key.starts_with(AUTHENTICATED_VIDEO_NAMESPACE),
             "authenticated video entries must stay out of the persistent cache"
         );
         assert_eq!(
             Some(handoff_key.clone()),
-            cache_key_with_referer(url, &binary, "2026.10.23", "firefox", None, &with_handoff, None),
+            cache_key_with_referer(
+                url,
+                &binary,
+                "2026.10.23",
+                "firefox",
+                None,
+                &with_handoff,
+                None
+            ),
             "a live jar replaces the configured profile, so the profile must not refuse it"
         );
 
@@ -836,7 +870,8 @@ mod tests {
             url.to_string(),
         ];
         assert!(
-            cache_key_with_referer(url, &binary, "2026.10.23", "none", None, &equals_form, None).is_some(),
+            cache_key_with_referer(url, &binary, "2026.10.23", "none", None, &equals_form, None)
+                .is_some(),
             "both --cookies spellings are cacheable"
         );
 
@@ -878,7 +913,15 @@ mod tests {
         ];
         assert_ne!(
             Some(handoff_key),
-            cache_key_with_referer(url, &binary, "2026.10.23", "none", None, &other_handoff, None),
+            cache_key_with_referer(
+                url,
+                &binary,
+                "2026.10.23",
+                "none",
+                None,
+                &other_handoff,
+                None
+            ),
             "changed cookie contents must not reuse authenticated metadata"
         );
     }
@@ -973,7 +1016,8 @@ mod tests {
             "2026.10.23",
             "none",
             None,
-            &["--".to_string(), canonical.to_string()], None,
+            &["--".to_string(), canonical.to_string()],
+            None,
         )
         .expect("anonymous lookup should be cacheable");
         for url in [
@@ -989,7 +1033,8 @@ mod tests {
                     "2026.10.23",
                     "none",
                     None,
-                    &["--".to_string(), url.to_string()], None,
+                    &["--".to_string(), url.to_string()],
+                    None,
                 ),
                 Some(base.clone()),
                 "expected {url} to share the canonical key"
@@ -1008,7 +1053,8 @@ mod tests {
             "2026.10.23",
             "none",
             None,
-            &["--".to_string(), canonical.to_string()], None,
+            &["--".to_string(), canonical.to_string()],
+            None,
         )
         .expect("anonymous lookup should be cacheable");
         for url in [
@@ -1022,7 +1068,8 @@ mod tests {
                     "2026.10.23",
                     "none",
                     None,
-                    &["--".to_string(), url.to_string()], None,
+                    &["--".to_string(), url.to_string()],
+                    None,
                 ),
                 Some(with_playlist.clone()),
                 "expected {url} to keep its playlist context"
@@ -1036,7 +1083,8 @@ mod tests {
             "2026.10.23",
             "none",
             None,
-            &["--".to_string(), plain.to_string()], None,
+            &["--".to_string(), plain.to_string()],
+            None,
         )
         .expect("anonymous lookup should be cacheable");
         assert_ne!(without_playlist, with_playlist);
@@ -1201,13 +1249,29 @@ mod tests {
             url.to_string(),
         ];
         assert_eq!(
-            cache_key_with_referer(url, &binary, "2026.10.23", "firefox", None, &profile_args, None),
+            cache_key_with_referer(
+                url,
+                &binary,
+                "2026.10.23",
+                "firefox",
+                None,
+                &profile_args,
+                None
+            ),
             None,
             "profile-scoped video metadata must stay out of the cache"
         );
         assert!(
-            playlist_cache_key_with_referer(url, &binary, "2026.10.23", "firefox", None, &profile_args, None)
-                .is_some(),
+            playlist_cache_key_with_referer(
+                url,
+                &binary,
+                "2026.10.23",
+                "firefox",
+                None,
+                &profile_args,
+                None
+            )
+            .is_some(),
             "a playlist listing has no signed URLs and may be cached per profile"
         );
         let handoff_jar = directory.path().join("handoff.jar");
@@ -1219,21 +1283,53 @@ mod tests {
             url.to_string(),
         ];
         assert!(
-            cache_key_with_referer(url, &binary, "2026.10.23", "none", None, &handoff_args, None).is_some(),
+            cache_key_with_referer(
+                url,
+                &binary,
+                "2026.10.23",
+                "none",
+                None,
+                &handoff_args,
+                None
+            )
+            .is_some(),
             "video metadata is scoped to a staged handoff jar"
         );
-        let handoff_key =
-            playlist_cache_key_with_referer(url, &binary, "2026.10.23", "none", None, &handoff_args, None)
-                .expect("a playlist may be cached for the lifetime of its handoff jar");
+        let handoff_key = playlist_cache_key_with_referer(
+            url,
+            &binary,
+            "2026.10.23",
+            "none",
+            None,
+            &handoff_args,
+            None,
+        )
+        .expect("a playlist may be cached for the lifetime of its handoff jar");
         assert_eq!(
             Some(handoff_key.clone()),
-            playlist_cache_key_with_referer(url, &binary, "2026.10.23", "firefox", None, &handoff_args, None),
+            playlist_cache_key_with_referer(
+                url,
+                &binary,
+                "2026.10.23",
+                "firefox",
+                None,
+                &handoff_args,
+                None
+            ),
             "a live jar drops the configured profile out of the key"
         );
         let anonymous_args = vec!["--".to_string(), url.to_string()];
         assert_ne!(
             Some(handoff_key.clone()),
-            playlist_cache_key_with_referer(url, &binary, "2026.10.23", "none", None, &anonymous_args, None),
+            playlist_cache_key_with_referer(
+                url,
+                &binary,
+                "2026.10.23",
+                "none",
+                None,
+                &anonymous_args,
+                None
+            ),
             "an anonymous lookup must not read a jar-scoped entry"
         );
         let other_jar = directory.path().join("other-handoff.jar");
@@ -1247,7 +1343,15 @@ mod tests {
         ];
         assert_ne!(
             Some(handoff_key),
-            playlist_cache_key_with_referer(url, &binary, "2026.10.23", "none", None, &other_jar_args, None),
+            playlist_cache_key_with_referer(
+                url,
+                &binary,
+                "2026.10.23",
+                "none",
+                None,
+                &other_jar_args,
+                None
+            ),
             "each staged jar must get its own playlist entry"
         );
     }

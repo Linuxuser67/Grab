@@ -2603,9 +2603,7 @@ impl AddCard {
     /// The source is scoped to the exact submitted URL. If the card is already
     /// open, this focuses it; collapsing the card always resets the form.
     pub fn open_with_referer(&self, initial_url: Option<String>, referer: Option<String>) {
-        let referer = referer
-            .as_deref()
-            .and_then(crate::referrer::origin_only);
+        let referer = referer.as_deref().and_then(crate::referrer::origin_only);
         self.public_host_leases.borrow_mut().activate();
         (self.open)(initial_url, referer)
     }

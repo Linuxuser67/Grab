@@ -222,9 +222,7 @@ mod tests {
     fn referer_setter_stores_only_a_valid_source_origin() {
         let item = DownloadItem::new(7, "https://example.test/file", "File", "/tmp");
 
-        item.set_referer(
-            "https://source.test/watch/private?token=secret#player".to_string(),
-        );
+        item.set_referer("https://source.test/watch/private?token=secret#player".to_string());
         assert_eq!(item.referer(), "https://source.test/");
 
         item.set_referer("file:///etc/passwd".to_string());

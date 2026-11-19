@@ -14,9 +14,12 @@ use reqwest::header::{CONTENT_DISPOSITION, CONTENT_TYPE, HeaderMap, RANGE};
 
 const DIRECT_RESOURCE_PROBE_BUDGET: Duration = Duration::from_secs(3);
 
-/// Avoid speculative GETs for URLs carrying conventional single-use credentials.
+/// Avoid speculative GETs when an opaque URL has query parameters.
+///
+/// Query parameter names are server-defined; a custom name may carry a
+/// single-use credential that a preview request would consume before download.
 fn should_probe_url(url: &url::Url) -> bool {
-    !crate::video_cache::has_known_rotating_auth_query(url)
+    url.query().is_none_or(str::is_empty)
 }
 
 /// Return true when the server response is strong evidence of a downloadable
@@ -224,11 +227,14 @@ mod tests {
     use super::{has_download_disposition, is_direct_resource_metadata, should_probe_url};
 
     #[test]
-    fn skips_speculative_get_for_known_rotating_auth_query_parameters() {
+    fn skips_speculative_get_for_query_bearing_opaque_urls() {
         for url in [
             "https://example.test/opaque?token=single-use",
             "https://example.test/opaque?X-Amz-Signature=rotating",
             "https://example.test/opaque?access_token=short-lived",
+            // Unknown server-defined names can carry the same one-use credentials.
+            "https://example.test/opaque?session_ticket=one-shot",
+            "https://example.test/opaque?id=42",
         ] {
             let parsed = url::Url::parse(url).expect("valid fixture URL");
             assert!(
@@ -237,8 +243,7 @@ mod tests {
             );
         }
 
-        let stable =
-            url::Url::parse("https://example.test/opaque?id=42").expect("valid fixture URL");
+        let stable = url::Url::parse("https://example.test/opaque").expect("valid fixture URL");
         assert!(should_probe_url(&stable));
     }
 

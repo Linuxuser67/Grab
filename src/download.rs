@@ -1454,9 +1454,8 @@ impl DownloadManager {
         .map_err(|error| format!("Could not inspect download folder: {error:?}"))?
         .map_err(|error| format!("Could not inspect download folder: {error}"))?;
         let guard = self.batch_guard();
-        let item = self.enqueue_video_staged(
-            page_url, &dir, filename, choices, &existing, referer,
-        )?;
+        let item =
+            self.enqueue_video_staged(page_url, &dir, filename, choices, &existing, referer)?;
         Ok((item, guard))
     }
 

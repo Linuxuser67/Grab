@@ -86,7 +86,11 @@ fn manifest_preview_cache_key(
     if crate::video_cache::has_known_rotating_auth_query(&url) {
         return None;
     }
-    let referer_hash = crate::referrer::cache_identity(referer);
+    let referer_hash = match crate::referrer::cache_identity(referer) {
+        crate::referrer::SourceIdentity::Absent => None,
+        crate::referrer::SourceIdentity::Origin(hash) => Some(hash),
+        crate::referrer::SourceIdentity::Invalid => return None,
+    };
 
     let handoff_cookie_hash =
         handoff_identity.and_then(|(path, _)| crate::extension_server::handoff_cookie_hash(path));
@@ -2635,8 +2639,8 @@ segment.ts?f=418899&srv=server&i=0.4&sp=500&p1=one&p2=two&asn=327934
     fn preview_cache_identity_includes_the_source_page() {
         let url = "https://cache-preview.example.test/master.m3u8";
         let source = "https://origin.example.test/watch?id=one#player";
-        let same_source = "https://origin.example.test/watch?id=one#other";
-        let different_source = "https://origin.example.test/watch?id=two";
+        let same_source = "https://origin.example.test/other/path?token=two#other";
+        let different_source = "https://other.example.test/watch?id=one";
 
         let anonymous = manifest_preview_cache_key(url, None, None, None).expect("anonymous key");
         let first =
@@ -2653,7 +2657,15 @@ segment.ts?f=418899&srv=server&i=0.4&sp=500&p1=one&p2=two&asn=327934
         assert_eq!(first, same, "URL fragments do not affect Referer identity");
         assert_ne!(
             first, different,
-            "different source pages must not share a preview"
+            "different source origins must not share a preview"
+        );
+    }
+
+    #[test]
+    fn invalid_source_referrer_disables_manifest_preview_cache() {
+        let url = "https://cache-preview.example.test/master.m3u8";
+        assert!(
+            manifest_preview_cache_key(url, None, None, Some("file:///etc/passwd")).is_none()
         );
     }
 

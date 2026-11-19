@@ -756,10 +756,11 @@ async fn lookup_extractors_inner(
 
     // The raw JSON cache key must match the download conditions exactly.
     let key_url = crate::download::normalize_url(&url).unwrap_or_else(|_| url.clone());
-    let probe_json_key: crate::download::ProbeJsonKey = (
+    let probe_json_key = crate::download::probe_json_key(
         key_url,
         browser.clone(),
         proxy.as_ref().map(|p| p.cli_url.clone()),
+        referer.as_deref(),
     );
 
     let (ytdlp_result, gallery_error) = if let Some(tool) = gallery_tool {
@@ -3629,8 +3630,8 @@ fn build_video_lookup_kicker(context: VideoLookupContext) -> VideoLookupKick {
                         }
                         // Cache the raw info JSON for --load-info-json at download time.
                         // Single videos only; playlists re-probe per entry.
-                        if source_referer.is_none()
-                            && let Some(json) = raw_json
+                        if let Some(json) = raw_json
+                            && probe_json_key.3.is_ok()
                         {
                             // The probe canonically retargets some pages
                             // (youtu.be/… → …/watch?v=…) and enqueue stores the
@@ -3645,6 +3646,7 @@ fn build_video_lookup_kicker(context: VideoLookupContext) -> VideoLookupKick {
                                     final_url,
                                     probe_json_key.1.clone(),
                                     probe_json_key.2.clone(),
+                                    probe_json_key.3.clone(),
                                 );
                                 manager_b.cache_probe_json(retarget_key, json);
                             }

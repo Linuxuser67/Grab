@@ -7,7 +7,6 @@
 //! cycle). The picker's shared widgets come from `window_rows`; the entry
 //! grid from `gallery_grid`.
 
-use crate::download::DownloadManager;
 use crate::gallery_grid::GalleryGrid;
 use crate::window_rows::{
     apply_scheduled_at, picker_enter_confirms, picker_header, selection_action_bar,
@@ -15,20 +14,10 @@ use crate::window_rows::{
 use gettextrs::{gettext, ngettext};
 use gtk4::prelude::*;
 use libadwaita as adw;
-use std::cell::RefCell;
 use std::collections::HashMap;
 use std::rc::Rc;
 use std::sync::{LazyLock, Mutex};
 use std::time::{Duration, Instant};
-
-/// UI lifetime and destination state shared by a gallery picker page.
-pub(crate) struct GalleryPickerContext<'a> {
-    pub nav: &'a adw::NavigationView,
-    pub manager: Rc<DownloadManager>,
-    pub dest_dir: Rc<RefCell<String>>,
-    pub close_card: Rc<dyn Fn()>,
-    pub scheduled_at: Option<i64>,
-}
 
 /// Metadata that defines the gallery being enumerated and selected.
 pub(crate) struct GalleryPickerSource {
@@ -385,16 +374,16 @@ impl GalleryPickerStream {
 /// `GalleryPickerStream`); `None` means another picker page already owns
 /// the screen, so the caller should drop its enumeration.
 pub(crate) fn push_gallery_picker_page(
-    context: GalleryPickerContext<'_>,
+    context: crate::picker_context::PickerContext<'_>,
+    scheduled_at: Option<i64>,
     source: GalleryPickerSource,
     grid: GalleryGrid,
 ) -> Option<GalleryPickerStream> {
-    let GalleryPickerContext {
+    let crate::picker_context::PickerContext {
         nav,
         manager,
         dest_dir,
         close_card,
-        scheduled_at,
     } = context;
     let GalleryPickerSource {
         title,

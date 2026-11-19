@@ -36,6 +36,7 @@ mod manifest_writer;
 mod media_types;
 mod mp4_reader;
 mod net_types;
+mod picker_context;
 mod preferences;
 mod referrer;
 mod runtime;

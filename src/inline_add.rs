@@ -155,15 +155,6 @@ enum TorrentPickerSource {
     Magnet { url: String },
 }
 
-/// UI lifetime and destination state shared by a torrent picker page.
-struct TorrentPickerContext<'a> {
-    nav: &'a adw::NavigationView,
-    manager: Rc<DownloadManager>,
-    dest_dir: Rc<RefCell<String>>,
-    close_card: Rc<dyn Fn()>,
-    scheduled_at: Rc<Cell<Option<i64>>>,
-}
-
 /// Resolved torrent payload shown by the picker.
 struct TorrentPickerSelection {
     file_name: String,
@@ -2237,13 +2228,16 @@ fn push_playlist_items_page(
 }
 
 /// Torrent intake presents a selection page when the user explicitly requests one.
-fn push_torrent_picker_page(context: TorrentPickerContext<'_>, selection: TorrentPickerSelection) {
-    let TorrentPickerContext {
+fn push_torrent_picker_page(
+    context: crate::picker_context::PickerContext<'_>,
+    scheduled_at: Rc<Cell<Option<i64>>>,
+    selection: TorrentPickerSelection,
+) {
+    let crate::picker_context::PickerContext {
         nav,
         manager,
         dest_dir,
         close_card,
-        scheduled_at,
     } = context;
     let TorrentPickerSelection {
         file_name,
@@ -2466,13 +2460,13 @@ fn wire_torrent_picker(
                 return;
             }
             push_torrent_picker_page(
-                TorrentPickerContext {
+                crate::picker_context::PickerContext {
                     nav: &nav,
                     manager: m,
                     dest_dir: dd,
                     close_card,
-                    scheduled_at,
                 },
+                scheduled_at,
                 TorrentPickerSelection {
                     file_name: name,
                     source: TorrentPickerSource::File { bytes },
@@ -3976,13 +3970,13 @@ fn build_submit_handler(context: SubmitContext) -> SubmitHandler {
                             match magnet_resolution_action(source, entries.len()) {
                                 MagnetResolutionAction::OpenPicker => {
                                     push_torrent_picker_page(
-                                        TorrentPickerContext {
+                                        crate::picker_context::PickerContext {
                                             nav: &lookup_nav,
                                             manager: lookup_manager,
                                             dest_dir: lookup_dest,
                                             close_card: lookup_close,
-                                            scheduled_at: lookup_scheduled,
                                         },
+                                        lookup_scheduled,
                                         TorrentPickerSelection {
                                             file_name: name,
                                             source: TorrentPickerSource::Magnet { url: magnet },
@@ -4923,13 +4917,13 @@ pub fn build_add_card(manager: Rc<DownloadManager>) -> AddCard {
                   entries: Vec<crate::torrent::TorrentFileEntry>| {
                 reveal();
                 push_torrent_picker_page(
-                    TorrentPickerContext {
+                    crate::picker_context::PickerContext {
                         nav: &nav,
                         manager: manager.clone(),
                         dest_dir: dest_dir.clone(),
                         close_card: close_card.clone(),
-                        scheduled_at: Rc::clone(&scheduled_at),
                     },
+                    Rc::clone(&scheduled_at),
                     TorrentPickerSelection {
                         file_name,
                         source: TorrentPickerSource::File { bytes },
@@ -5096,13 +5090,13 @@ fn make_gallery_picker_opener(
                     }
                     restore_btn();
                     page = match crate::inline_gallery::push_gallery_picker_page(
-                        crate::inline_gallery::GalleryPickerContext {
+                        crate::picker_context::PickerContext {
                             nav: &nav3,
                             manager: manager3.clone(),
                             dest_dir: dest3.clone(),
                             close_card: close3.clone(),
-                            scheduled_at: scheduled3.get(),
                         },
+                        scheduled3.get(),
                         crate::inline_gallery::GalleryPickerSource {
                             title: title.clone(),
                             url: url.clone(),
@@ -5325,13 +5319,13 @@ mod tests {
             .build();
         torrent_nav.push(&torrent_form);
         push_torrent_picker_page(
-            TorrentPickerContext {
+            crate::picker_context::PickerContext {
                 nav: &torrent_nav,
                 manager: Rc::clone(&manager),
                 dest_dir: Rc::clone(&destination),
                 close_card: Rc::clone(&close_card),
-                scheduled_at: Rc::new(Cell::new(None)),
             },
+            Rc::new(Cell::new(None)),
             TorrentPickerSelection {
                 file_name: "archive.torrent".into(),
                 source: TorrentPickerSource::File { bytes: vec![0] },
@@ -5358,13 +5352,13 @@ mod tests {
             .build();
         single_magnet_nav.push(&single_magnet_form);
         push_torrent_picker_page(
-            TorrentPickerContext {
+            crate::picker_context::PickerContext {
                 nav: &single_magnet_nav,
                 manager: Rc::clone(&manager),
                 dest_dir: Rc::clone(&destination),
                 close_card: Rc::clone(&close_card),
-                scheduled_at: Rc::new(Cell::new(None)),
             },
+            Rc::new(Cell::new(None)),
             TorrentPickerSelection {
                 file_name: "Single-file magnet".into(),
                 source: TorrentPickerSource::Magnet {
@@ -5391,13 +5385,13 @@ mod tests {
             .build();
         magnet_nav.push(&magnet_form);
         push_torrent_picker_page(
-            TorrentPickerContext {
+            crate::picker_context::PickerContext {
                 nav: &magnet_nav,
                 manager: Rc::clone(&manager),
                 dest_dir: Rc::clone(&destination),
                 close_card: Rc::clone(&close_card),
-                scheduled_at: Rc::new(Cell::new(None)),
             },
+            Rc::new(Cell::new(None)),
             TorrentPickerSelection {
                 file_name: "Magnet archive".into(),
                 source: TorrentPickerSource::Magnet {

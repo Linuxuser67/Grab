@@ -157,7 +157,7 @@ pub(crate) async fn run_download(mut ctx: FetchCtx, connections: usize, mode: St
                 return;
             }
         };
-        match crate::download_net::http_client_with_jar(proxy.as_ref(), jar) {
+        match crate::download_net::http_client_with_jar(proxy.as_ref(), jar, None) {
             Ok(client) => ctx.client = client,
             Err(e) => {
                 ctx.tx.send(EngineMsg::Failed(e)).ok();

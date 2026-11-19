@@ -479,10 +479,8 @@ async fn client_from_handoff_jar(
         return Ok(None);
     }
     let user_agent = user_agent.unwrap_or(crate::download_net::DEFAULT_USER_AGENT);
-    crate::download_net::http_client_with_jar_and_user_agent(
-        proxy, jar, user_agent, referer,
-    )
-    .map(Some)
+    crate::download_net::http_client_with_jar_and_user_agent(proxy, jar, user_agent, referer)
+        .map(Some)
 }
 
 /// Preview client: a live handoff jar when one is staged, otherwise anonymous.
@@ -2664,9 +2662,7 @@ segment.ts?f=418899&srv=server&i=0.4&sp=500&p1=one&p2=two&asn=327934
     #[test]
     fn invalid_source_referrer_disables_manifest_preview_cache() {
         let url = "https://cache-preview.example.test/master.m3u8";
-        assert!(
-            manifest_preview_cache_key(url, None, None, Some("file:///etc/passwd")).is_none()
-        );
+        assert!(manifest_preview_cache_key(url, None, None, Some("file:///etc/passwd")).is_none());
     }
 
     #[test]

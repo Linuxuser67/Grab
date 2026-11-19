@@ -286,8 +286,8 @@ enum CacheScope {
 }
 
 /// Playlist keys are scoped by the profile spec, staged jar contents, and
-/// source origin. Equivalent origins share a key while cookie or origin changes
-/// produce a distinct identity.
+/// source page. Equivalent handoffs and Referer spellings share a key while
+/// cookie or source-page changes produce a distinct identity.
 pub(crate) fn playlist_cache_key_with_referer(
     raw_url: &str,
     youtube_bin: &Path,

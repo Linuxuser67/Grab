@@ -75,6 +75,9 @@ fn has_query_parameters(url: &Url) -> bool {
     url.query().is_some_and(|query| !query.is_empty())
 }
 
+/// Build a preview cache key from the URL, the staged jar (if any), the
+/// source page, and the proxy. Referer identity is hashed so cache keys never
+/// retain a source URL's path or query.
 fn manifest_preview_cache_key_with_referer(
     raw_url: &str,
     proxy: Option<&crate::net_types::ResolvedProxy>,

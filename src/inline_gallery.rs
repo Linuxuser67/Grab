@@ -164,6 +164,10 @@ type GalleryPreviewCache = Mutex<GalleryPreviewCacheMap>;
 static GALLERY_PREVIEW_CACHE: LazyLock<GalleryPreviewCache> =
     LazyLock::new(|| Mutex::new(HashMap::new()));
 
+/// Cache identity for one gallery-dl preview. Cookie jars are keyed by content
+/// so a re-handoff of the same credentials reuses the result despite a new
+/// staged path; source Referers are hashed so their path and query are not
+/// retained in the cache key.
 fn gallery_preview_cache_key_with_referer(
     raw_url: &str,
     auth: &GalleryAuth,

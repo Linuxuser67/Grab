@@ -859,8 +859,9 @@ mod tests {
                 "2026.10.23",
                 "none",
                 None,
-                &equivalent_handoff
-            , None),
+                &equivalent_handoff,
+                None,
+            ),
             "identical cookie contents at a new staged path must reuse the in-memory preview"
         );
 
@@ -972,7 +973,7 @@ mod tests {
             "2026.10.23",
             "none",
             None,
-            &["--".to_string(), canonical.to_string()] None,
+            &["--".to_string(), canonical.to_string()], None,
         )
         .expect("anonymous lookup should be cacheable");
         for url in [
@@ -988,7 +989,7 @@ mod tests {
                     "2026.10.23",
                     "none",
                     None,
-                    &["--".to_string(), url.to_string()] None,
+                    &["--".to_string(), url.to_string()], None,
                 ),
                 Some(base.clone()),
                 "expected {url} to share the canonical key"
@@ -1007,7 +1008,7 @@ mod tests {
             "2026.10.23",
             "none",
             None,
-            &["--".to_string(), canonical.to_string()] None,
+            &["--".to_string(), canonical.to_string()], None,
         )
         .expect("anonymous lookup should be cacheable");
         for url in [
@@ -1021,7 +1022,7 @@ mod tests {
                     "2026.10.23",
                     "none",
                     None,
-                    &["--".to_string(), url.to_string()] None,
+                    &["--".to_string(), url.to_string()], None,
                 ),
                 Some(with_playlist.clone()),
                 "expected {url} to keep its playlist context"
@@ -1035,7 +1036,7 @@ mod tests {
             "2026.10.23",
             "none",
             None,
-            &["--".to_string(), plain.to_string()] None,
+            &["--".to_string(), plain.to_string()], None,
         )
         .expect("anonymous lookup should be cacheable");
         assert_ne!(without_playlist, with_playlist);
@@ -1205,7 +1206,7 @@ mod tests {
             "profile-scoped video metadata must stay out of the cache"
         );
         assert!(
-            playlist_cache_key_with_referer(url, &binary, "2026.10.23", "firefox", None, &profile_args)
+            playlist_cache_key_with_referer(url, &binary, "2026.10.23", "firefox", None, &profile_args, None)
                 .is_some(),
             "a playlist listing has no signed URLs and may be cached per profile"
         );
@@ -1222,17 +1223,17 @@ mod tests {
             "video metadata is scoped to a staged handoff jar"
         );
         let handoff_key =
-            playlist_cache_key_with_referer(url, &binary, "2026.10.23", "none", None, &handoff_args)
+            playlist_cache_key_with_referer(url, &binary, "2026.10.23", "none", None, &handoff_args, None)
                 .expect("a playlist may be cached for the lifetime of its handoff jar");
         assert_eq!(
             Some(handoff_key.clone()),
-            playlist_cache_key_with_referer(url, &binary, "2026.10.23", "firefox", None, &handoff_args),
+            playlist_cache_key_with_referer(url, &binary, "2026.10.23", "firefox", None, &handoff_args, None),
             "a live jar drops the configured profile out of the key"
         );
         let anonymous_args = vec!["--".to_string(), url.to_string()];
         assert_ne!(
             Some(handoff_key.clone()),
-            playlist_cache_key_with_referer(url, &binary, "2026.10.23", "none", None, &anonymous_args),
+            playlist_cache_key_with_referer(url, &binary, "2026.10.23", "none", None, &anonymous_args, None),
             "an anonymous lookup must not read a jar-scoped entry"
         );
         let other_jar = directory.path().join("other-handoff.jar");
@@ -1246,7 +1247,7 @@ mod tests {
         ];
         assert_ne!(
             Some(handoff_key),
-            playlist_cache_key_with_referer(url, &binary, "2026.10.23", "none", None, &other_jar_args),
+            playlist_cache_key_with_referer(url, &binary, "2026.10.23", "none", None, &other_jar_args, None),
             "each staged jar must get its own playlist entry"
         );
     }

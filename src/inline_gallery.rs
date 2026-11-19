@@ -616,7 +616,7 @@ mod tests {
             gallery_preview_cache_key_with_referer(
                 "https://gallery-cache.example.test/collection",
                 &anonymous,
-                None None,
+                None, None,
             ) == Some(base.clone()),
             "the fragment is not part of the page identity"
         );
@@ -707,7 +707,7 @@ mod tests {
             gallery_preview_cache_key_with_referer(
                 "https://gallery-cache.example.test/collection?token=secret",
                 &cache_auth(None, None, None),
-                None None,
+                None, None,
             )
             .is_none(),
             "signed page URLs must not be retained"

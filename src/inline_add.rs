@@ -589,6 +589,102 @@ fn attach_native_fallback_reason(
 /// Known video pages and manifests avoid the direct-resource probe. Unknown
 /// plain-fallback candidates use a bounded header request concurrently with
 /// extractor discovery.
+/// Race the direct-resource header probe against the established extractors.
+///
+/// A positive header result wins immediately. If extraction is definitive,
+/// its result is returned and the losing probe is dropped; only an extractor
+/// failure waits for the bounded probe before deciding whether this is a file.
+async fn arbitrate_opaque_resource_lookup(
+    direct_future: impl std::future::Future<Output = bool>,
+    extractor_future: impl std::future::Future<
+        Output = Result<MediaLookupOutcome, MediaLookupFailure>,
+    >,
+) -> Result<MediaLookupOutcome, MediaLookupFailure> {
+    tokio::pin!(direct_future);
+    tokio::pin!(extractor_future);
+
+    tokio::select! {
+        direct_file = &mut direct_future => {
+            if direct_file {
+                Ok(MediaLookupOutcome::DirectFile)
+            } else {
+                extractor_future.await
+            }
+        }
+        extractor_result = &mut extractor_future => {
+            match extractor_result {
+                Ok(MediaLookupOutcome::Video(video)) if video.ytdlp_result.is_err() => {
+                    if direct_future.await {
+                        Ok(MediaLookupOutcome::DirectFile)
+                    } else {
+                        Ok(MediaLookupOutcome::Video(video))
+                    }
+                }
+                Err(error) => {
+                    if direct_future.await {
+                        Ok(MediaLookupOutcome::DirectFile)
+                    } else {
+                        Err(error)
+                    }
+                }
+                other => other,
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod opaque_resource_arbitration_tests {
+    use super::{MediaLookupOutcome, MediaLookupFailure, arbitrate_opaque_resource_lookup};
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::time::Duration;
+
+    struct DropFlag(Arc<AtomicBool>);
+
+    impl Drop for DropFlag {
+        fn drop(&mut self) {
+            self.0.store(true, Ordering::SeqCst);
+        }
+    }
+
+    async fn pending_direct_probe(dropped: Arc<AtomicBool>) -> bool {
+        let _drop_flag = DropFlag(dropped);
+        std::future::pending::<bool>().await
+    }
+
+    #[tokio::test]
+    async fn definitive_extractor_success_drops_the_losing_probe() {
+        let dropped = Arc::new(AtomicBool::new(false));
+        let result = arbitrate_opaque_resource_lookup(
+            pending_direct_probe(dropped.clone()),
+            async { Ok(MediaLookupOutcome::Gallery(Vec::new())) },
+        )
+        .await
+        .expect("successful gallery extraction");
+
+        assert!(matches!(result, MediaLookupOutcome::Gallery(_)));
+        assert!(dropped.load(Ordering::SeqCst), "the unused direct probe must be cancelled");
+    }
+
+    #[tokio::test]
+    async fn extractor_failure_waits_for_a_positive_direct_probe() {
+        let result = arbitrate_opaque_resource_lookup(
+            async {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+                true
+            },
+            async {
+                Err(MediaLookupFailure::Failed("extractor failed".to_string()))
+            },
+        )
+        .await
+        .expect("positive direct-resource result takes precedence");
+
+        assert!(matches!(result, MediaLookupOutcome::DirectFile));
+    }
+}
+
 async fn lookup_media_inner(
     url: String,
     browser: String,
@@ -607,37 +703,7 @@ async fn lookup_media_inner(
         let direct_future =
             crate::direct_resource_intake::probe(url.clone(), proxy.clone(), referer.clone());
         let extractor_future = lookup_extractors_inner(url, browser, newest_first, proxy, referer);
-        tokio::pin!(direct_future);
-        tokio::pin!(extractor_future);
-
-        return tokio::select! {
-            direct_file = &mut direct_future => {
-                if direct_file {
-                    Ok(MediaLookupOutcome::DirectFile)
-                } else {
-                    extractor_future.await
-                }
-            }
-            extractor_result = &mut extractor_future => {
-                match extractor_result {
-                    Ok(MediaLookupOutcome::Video(video)) if video.ytdlp_result.is_err() => {
-                        if direct_future.await {
-                            Ok(MediaLookupOutcome::DirectFile)
-                        } else {
-                            Ok(MediaLookupOutcome::Video(video))
-                        }
-                    }
-                    Err(error) => {
-                        if direct_future.await {
-                            Ok(MediaLookupOutcome::DirectFile)
-                        } else {
-                            Err(error)
-                        }
-                    }
-                    other => other,
-                }
-            }
-        };
+        return arbitrate_opaque_resource_lookup(direct_future, extractor_future).await;
     }
 
     let host = crate::video_probe::page_host(&url);

@@ -21,7 +21,7 @@
 use crate::download::DownloadManager;
 use crate::download_row::DownloadItem;
 use crate::gallery_grid::GalleryGrid;
-use PickerContext;
+use crate::picker_context::PickerContext;
 use crate::window_rows::{
     apply_scheduled_at, default_name_for, picker_enter_confirms, picker_header,
     selection_action_bar,

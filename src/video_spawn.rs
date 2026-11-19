@@ -136,9 +136,9 @@ pub(crate) async fn fetch_raw_dump_json(
     }
     args.push("--dump-single-json".to_string());
     args.extend(proxy_cli_args(fetch_proxy));
-    if let Some(referer) = referer {
+    if let Some(referer) = referer.and_then(crate::referrer::origin_only) {
         args.push("--referer".to_string());
-        args.push(referer.to_string());
+        args.push(referer);
     }
     // Extension handoff (Cloudflare bypass): staged by the handoff receiver,
     // peeked here. The entry outlives the probe — the subtitle probe and the

@@ -778,7 +778,12 @@ thread_local! {
 }
 
 /// Cache key for probe info JSON: page URL, cookie source, proxy, and source origin.
-pub(crate) type ProbeJsonKey = (String, String, Option<String>, Option<[u8; 32]>);
+pub(crate) type ProbeJsonKey = (
+    String,
+    String,
+    Option<String>,
+    crate::referrer::SourceIdentity,
+);
 
 /// Build the identity shared by a media probe and the eventual download.
 pub(crate) fn probe_json_key(
@@ -787,10 +792,9 @@ pub(crate) fn probe_json_key(
     proxy_cli_url: Option<String>,
     referer: Option<&str>,
 ) -> ProbeJsonKey {
-    let source_origin = referer.and_then(crate::referrer::origin_only);
-    let referer_hash = crate::referrer::cache_identity(source_origin.as_deref());
+    let referer_identity = crate::referrer::cache_identity(referer);
 
-    (page_url, cookies_browser, proxy_cli_url, referer_hash)
+    (page_url, cookies_browser, proxy_cli_url, referer_identity)
 }
 
 /// Probe info JSON older than this is never reused: signed media URLs inside
@@ -4018,6 +4022,7 @@ mod tests;
 #[cfg(test)]
 mod probe_json_key_tests {
     use super::probe_json_key;
+    use crate::referrer::SourceIdentity;
 
     #[test]
     fn probe_json_key_uses_the_same_origin_identity_as_downloads() {
@@ -4040,7 +4045,9 @@ mod probe_json_key_tests {
             None,
             Some("https://other.example.test/watch?token=one"),
         );
-        let no_source = probe_json_key(page, "none".to_string(), None, None);
+        let no_source = probe_json_key(page.clone(), "none".to_string(), None, None);
+        let invalid_source =
+            probe_json_key(page, "none".to_string(), None, Some("file:///etc/passwd"));
 
         assert_eq!(
             first, same_origin,
@@ -4054,6 +4061,11 @@ mod probe_json_key_tests {
             first, no_source,
             "a source-bound probe must not match an unbound download"
         );
-        assert_eq!(no_source.3, None);
+        assert_eq!(no_source.3, SourceIdentity::Absent);
+        assert_eq!(invalid_source.3, SourceIdentity::Invalid);
+        assert_ne!(
+            invalid_source, no_source,
+            "an invalid source must not be treated as an absent source"
+        );
     }
 }

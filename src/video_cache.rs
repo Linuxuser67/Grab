@@ -336,7 +336,11 @@ fn identity_key(
         return None;
     }
     canonicalize_youtube_url(&mut url);
-    let referer_hash = crate::referrer::cache_identity(referer);
+    let referer_hash = match crate::referrer::cache_identity(referer) {
+        crate::referrer::SourceIdentity::Absent => None,
+        crate::referrer::SourceIdentity::Origin(hash) => Some(hash),
+        crate::referrer::SourceIdentity::Invalid => return None,
+    };
 
     let browser_profile_is_active =
         crate::video_tools::cookies_browser_spec(cookies_browser).is_some();
@@ -732,8 +736,8 @@ mod tests {
         let url = "https://example.test/watch?v=1";
         let args = vec!["--".to_string(), url.to_string()];
         let source = "https://origin.example.test/watch?id=one#player";
-        let same_source = "https://origin.example.test/watch?id=one#other";
-        let different_source = "https://origin.example.test/watch?id=two";
+        let same_source = "https://origin.example.test/other/path?token=two#other";
+        let different_source = "https://other.example.test/watch?id=one";
 
         let video_key = super::cache_key(
             url,
@@ -773,7 +777,7 @@ mod tests {
                 &args,
                 Some(different_source),
             ),
-            "different source-page queries must not share metadata"
+            "different source origins must not share metadata"
         );
 
         let playlist_key = super::playlist_cache_key(
@@ -809,6 +813,40 @@ mod tests {
                 &args,
                 Some(different_source),
             )
+        );
+    }
+
+    #[test]
+    fn invalid_source_referrers_disable_video_and_playlist_cache_keys() {
+        let directory = tempfile::tempdir().expect("temporary directory");
+        let binary = fake_binary(directory.path());
+        let url = "https://example.test/watch?v=1";
+        let args = vec!["--".to_string(), url.to_string()];
+        let invalid = "file:///etc/passwd";
+
+        assert!(
+            cache_key(
+                url,
+                &binary,
+                "2026.10.23",
+                "none",
+                None,
+                &args,
+                Some(invalid)
+            )
+            .is_none()
+        );
+        assert!(
+            playlist_cache_key(
+                url,
+                &binary,
+                "2026.10.23",
+                "none",
+                None,
+                &args,
+                Some(invalid)
+            )
+            .is_none()
         );
     }
 

@@ -33,17 +33,33 @@ pub(crate) fn origin_only(raw: &str) -> Option<String> {
     Some(source.to_string())
 }
 
-/// Hash a validated source-page URL for cache identity without retaining its
-/// path or query in cache keys. Fragments do not participate in HTTP requests.
-pub(crate) fn cache_identity(raw: Option<&str>) -> Option<[u8; 32]> {
-    let raw = raw?;
-    let source = parse_source(raw)?;
-    Some(Sha256::digest(source.as_str().as_bytes()).into())
+/// Identity of the source context used by an outbound request.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub(crate) enum SourceIdentity {
+    /// No source page was supplied.
+    Absent,
+    /// The canonical source origin used in the Referer header.
+    Origin([u8; 32]),
+    /// A supplied source page failed validation and must not share cache entries
+    /// with an unbound request.
+    Invalid,
+}
+
+/// Identify a source page by the validated origin used for outbound Referer headers.
+#[must_use]
+pub(crate) fn cache_identity(raw: Option<&str>) -> SourceIdentity {
+    let Some(raw) = raw else {
+        return SourceIdentity::Absent;
+    };
+    let Some(origin) = origin_only(raw) else {
+        return SourceIdentity::Invalid;
+    };
+    SourceIdentity::Origin(Sha256::digest(origin.as_bytes()).into())
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{cache_identity, origin_only, parse_source};
+    use super::{SourceIdentity, cache_identity, origin_only, parse_source};
 
     #[test]
     fn parse_source_accepts_only_bounded_credential_free_http_urls() {
@@ -73,24 +89,33 @@ mod tests {
     }
 
     #[test]
-    fn cache_identity_hashes_the_full_source_url_without_its_fragment() {
-        let source =
-            cache_identity(Some("https://example.test/watch?id=one#player")).expect("source hash");
+    fn cache_identity_matches_the_canonical_request_origin() {
+        let source = cache_identity(Some("https://example.test/watch?id=one#player"));
+        assert!(matches!(source, SourceIdentity::Origin(_)));
         assert_eq!(
-            Some(source),
-            cache_identity(Some("https://example.test/watch?id=one#other"))
+            source,
+            cache_identity(Some("https://example.test/other/path?token=two#other"))
         );
         assert_ne!(
-            Some(source),
-            cache_identity(Some("https://example.test/watch?id=two"))
+            source,
+            cache_identity(Some("https://other.example.test/watch?id=one"))
         );
         assert_ne!(
-            Some(source),
-            cache_identity(Some("https://example.test/other?id=one"))
+            source,
+            cache_identity(Some("http://example.test/watch?id=one"))
         );
-        assert_eq!(None, cache_identity(None));
-        assert!(cache_identity(Some("file:///etc/passwd")).is_none());
-        assert!(cache_identity(Some("https://user:pass@example.test/watch")).is_none());
-        assert!(cache_identity(Some(&"x".repeat(2049))).is_none());
+        assert_eq!(SourceIdentity::Absent, cache_identity(None));
+        assert_eq!(
+            SourceIdentity::Invalid,
+            cache_identity(Some("file:///etc/passwd"))
+        );
+        assert_eq!(
+            SourceIdentity::Invalid,
+            cache_identity(Some("https://user:pass@example.test/watch"))
+        );
+        assert_eq!(
+            SourceIdentity::Invalid,
+            cache_identity(Some(&"x".repeat(2049)))
+        );
     }
 }

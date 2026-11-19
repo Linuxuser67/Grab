@@ -6457,7 +6457,7 @@ fn cookies_reapplied_after_cross_host_redirect() {
     let jar = std::sync::Arc::new(reqwest::cookie::Jar::default());
     jar.add_cookie_str("sid=loc123", &"http://localhost/".parse().unwrap());
     jar.add_cookie_str("sid=ip456", &"http://127.0.0.1/".parse().unwrap());
-    let client = crate::download_net::http_client_with_jar(None, jar).expect("jar client");
+    let client = crate::download_net::http_client_with_jar(None, jar, None).expect("jar client");
     let resp = crate::runtime::tokio_rt()
         .block_on(client.get(format!("http://localhost:{port}/start")).send())
         .expect("redirect fetch");
@@ -9854,7 +9854,7 @@ fn probe_json_cache_roundtrip() {
         "https://example.com/v".to_string(),
         "chrome".to_string(),
         None,
-        None,
+        crate::referrer::SourceIdentity::Absent,
     );
     m.cache_probe_json(key.clone(), json.clone());
     // Take consumes (single use).
@@ -9865,7 +9865,7 @@ fn probe_json_cache_roundtrip() {
         "https://example.com/other".to_string(),
         "chrome".to_string(),
         None,
-        None,
+        crate::referrer::SourceIdentity::Absent,
     );
     assert_eq!(m.take_probe_json(&other), None);
     let _ = std::fs::remove_file(&qf);
@@ -9883,7 +9883,7 @@ fn probe_json_cache_key_includes_conditions() {
         "https://example.com/v".to_string(),
         "chrome".to_string(),
         None,
-        None,
+        crate::referrer::SourceIdentity::Absent,
     );
     m.cache_probe_json(key.clone(), json.clone());
     // Different cookie source: miss.
@@ -9891,7 +9891,7 @@ fn probe_json_cache_key_includes_conditions() {
         "https://example.com/v".to_string(),
         "firefox".to_string(),
         None,
-        None,
+        crate::referrer::SourceIdentity::Absent,
     );
     assert_eq!(m.take_probe_json(&other_browser), None);
     // Different proxy: miss (the chrome entry is still there).
@@ -9899,7 +9899,7 @@ fn probe_json_cache_key_includes_conditions() {
         "https://example.com/v".to_string(),
         "chrome".to_string(),
         Some("socks5h://127.0.0.1:9050".to_string()),
-        None,
+        crate::referrer::SourceIdentity::Absent,
     );
     assert_eq!(m.take_probe_json(&proxied), None);
     // Exact key: hit.
@@ -9925,7 +9925,7 @@ fn probe_json_cache_drops_expired_entries() {
         "https://example.com/v".to_string(),
         "none".to_string(),
         None,
-        None,
+        crate::referrer::SourceIdentity::Absent,
     );
     // Insert with a backdated timestamp: take must drop it, not return it.
     m.probe_json_cache.borrow_mut().insert(

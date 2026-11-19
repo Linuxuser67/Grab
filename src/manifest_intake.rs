@@ -86,7 +86,11 @@ fn manifest_preview_cache_key(
     if crate::video_cache::has_known_rotating_auth_query(&url) {
         return None;
     }
-    let referer_hash = crate::referrer::cache_identity(referer);
+    let referer_hash = match crate::referrer::cache_identity(referer) {
+        crate::referrer::SourceIdentity::Absent => None,
+        crate::referrer::SourceIdentity::Origin(hash) => Some(hash),
+        crate::referrer::SourceIdentity::Invalid => return None,
+    };
 
     let handoff_cookie_hash =
         handoff_identity.and_then(|(path, _)| crate::extension_server::handoff_cookie_hash(path));
@@ -475,10 +479,8 @@ async fn client_from_handoff_jar(
         return Ok(None);
     }
     let user_agent = user_agent.unwrap_or(crate::download_net::DEFAULT_USER_AGENT);
-    crate::download_net::http_client_with_jar_and_user_agent_and_referer(
-        proxy, jar, user_agent, referer,
-    )
-    .map(Some)
+    crate::download_net::http_client_with_jar_and_user_agent(proxy, jar, user_agent, referer)
+        .map(Some)
 }
 
 /// Preview client: a live handoff jar when one is staged, otherwise anonymous.
@@ -541,7 +543,7 @@ async fn client_with_browser_jar(
     .await
     {
         Ok(Ok(Some(jar))) => {
-            crate::download_net::http_client_with_jar_and_referer(proxy, jar, referer).map(Some)
+            crate::download_net::http_client_with_jar(proxy, jar, referer).map(Some)
         }
         Ok(Ok(None)) => Ok(None),
         Ok(Err(error)) => {
@@ -2362,7 +2364,7 @@ video/720.m3u8
         let cookie_url = Url::parse("http://manifest.example.test/").expect("cookie origin URL");
         let jar = Arc::new(reqwest::cookie::Jar::default());
         jar.add_cookie_str("sid=manifest-fixture", &cookie_url);
-        let client = crate::download_net::http_client_with_jar(Some(&proxy), jar)
+        let client = crate::download_net::http_client_with_jar(Some(&proxy), jar, None)
             .expect("build manifest client with proxy and cookie provider");
 
         let lookup_result = tokio::time::timeout(
@@ -2635,8 +2637,8 @@ segment.ts?f=418899&srv=server&i=0.4&sp=500&p1=one&p2=two&asn=327934
     fn preview_cache_identity_includes_the_source_page() {
         let url = "https://cache-preview.example.test/master.m3u8";
         let source = "https://origin.example.test/watch?id=one#player";
-        let same_source = "https://origin.example.test/watch?id=one#other";
-        let different_source = "https://origin.example.test/watch?id=two";
+        let same_source = "https://origin.example.test/other/path?token=two#other";
+        let different_source = "https://other.example.test/watch?id=one";
 
         let anonymous = manifest_preview_cache_key(url, None, None, None).expect("anonymous key");
         let first =
@@ -2653,8 +2655,14 @@ segment.ts?f=418899&srv=server&i=0.4&sp=500&p1=one&p2=two&asn=327934
         assert_eq!(first, same, "URL fragments do not affect Referer identity");
         assert_ne!(
             first, different,
-            "different source pages must not share a preview"
+            "different source origins must not share a preview"
         );
+    }
+
+    #[test]
+    fn invalid_source_referrer_disables_manifest_preview_cache() {
+        let url = "https://cache-preview.example.test/master.m3u8";
+        assert!(manifest_preview_cache_key(url, None, None, Some("file:///etc/passwd")).is_none());
     }
 
     #[test]

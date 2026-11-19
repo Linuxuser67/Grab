@@ -283,9 +283,7 @@ pub async fn probe_gallery_with_proxy(
     if let Some(ua) = user_agent {
         cmd.arg("--user-agent").arg(ua);
     }
-    if let Some(referer) = referer {
-        cmd.arg("-o").arg(format!("extractor.*.referer={referer}"));
-    }
+    cmd.args(crate::gallery_argv::referer_cli_args(referer));
     // Instagram throttling for extraction requests (probe doesn't download).
     for arg in crate::gallery_argv::instagram_throttle_args(url, false) {
         cmd.arg(arg);

@@ -148,7 +148,7 @@ pub(crate) fn referer_cli_args(referer: Option<&str>) -> Vec<String> {
         .unwrap_or_default()
 }
 
-pub fn download_argv_with_proxy(
+pub fn download_argv(
     tool: &Path,
     url: &str,
     dest_dir: &Path,
@@ -357,6 +357,17 @@ mod tests {
         PathBuf::from("/tmp/gallery-dl")
     }
 
+
+    fn test_options(filter: GalleryFilter) -> GalleryDownloadOptions<'static> {
+        GalleryDownloadOptions {
+            filter,
+            speed_limit: None,
+            range: None,
+            proxy: None,
+            event_nonce: "test-run",
+        }
+    }
+
     #[test]
     fn referer_argv_contains_only_the_validated_source_origin() {
         let source =
@@ -395,19 +406,13 @@ mod tests {
 
     #[test]
     fn download_argv_uses_exact_dir() {
-        let argv = download_argv_with_proxy(
+        let argv = download_argv(
             &tool(),
             "https://example.com/gallery",
             Path::new("/tmp/dest"),
             None,
             None,
-            GalleryDownloadOptions {
-                filter: GalleryFilter::All,
-                speed_limit: None,
-                range: None,
-                proxy: None,
-                event_nonce: "test-run",
-            },
+            test_options(GalleryFilter::All),
         );
         // `-D`, not `-d` (exact dir, no nesting).
         let d_pos = argv.iter().position(|a| a == "-D").unwrap();
@@ -417,19 +422,13 @@ mod tests {
 
     #[test]
     fn download_argv_original_filenames() {
-        let argv = download_argv_with_proxy(
+        let argv = download_argv(
             &tool(),
             "https://example.com/gallery",
             Path::new("/tmp/dest"),
             None,
             None,
-            GalleryDownloadOptions {
-                filter: GalleryFilter::All,
-                speed_limit: None,
-                range: None,
-                proxy: None,
-                event_nonce: "test-run",
-            },
+            test_options(GalleryFilter::All),
         );
         let f_pos = argv.iter().position(|a| a == "-f").unwrap();
         assert_eq!(argv[f_pos + 1], "/O");
@@ -437,19 +436,13 @@ mod tests {
 
     #[test]
     fn download_argv_emits_parseable_file_and_percentage_progress() {
-        let argv = download_argv_with_proxy(
+        let argv = download_argv(
             &tool(),
             "https://example.com/gallery",
             Path::new("/tmp/dest"),
             None,
             None,
-            GalleryDownloadOptions {
-                filter: GalleryFilter::All,
-                speed_limit: None,
-                range: None,
-                proxy: None,
-                event_nonce: "test-run",
-            },
+            test_options(GalleryFilter::All),
         );
         assert!(argv.contains(&"downloader.http.progress=0.5".to_string()));
         assert!(argv.contains(&"output.shorten=false".to_string()));
@@ -494,38 +487,26 @@ mod tests {
 
     #[test]
     fn download_argv_flat_output() {
-        let argv = download_argv_with_proxy(
+        let argv = download_argv(
             &tool(),
             "https://example.com/gallery",
             Path::new("/tmp/dest"),
             None,
             None,
-            GalleryDownloadOptions {
-                filter: GalleryFilter::All,
-                speed_limit: None,
-                range: None,
-                proxy: None,
-                event_nonce: "test-run",
-            },
+            test_options(GalleryFilter::All),
         );
         assert!(argv.contains(&"extractor.directory=[]".to_string()));
     }
 
     #[test]
     fn download_argv_cookies() {
-        let argv = download_argv_with_proxy(
+        let argv = download_argv(
             &tool(),
             "https://example.com/gallery",
             Path::new("/tmp/dest"),
             Some(Path::new("/tmp/cookies.txt")),
             None,
-            GalleryDownloadOptions {
-                filter: GalleryFilter::All,
-                speed_limit: None,
-                range: None,
-                proxy: None,
-                event_nonce: "test-run",
-            },
+            test_options(GalleryFilter::All),
         );
         let c_pos = argv.iter().position(|a| a == "-C").unwrap();
         assert_eq!(argv[c_pos + 1], "/tmp/cookies.txt");
@@ -533,19 +514,13 @@ mod tests {
 
     #[test]
     fn download_argv_user_agent() {
-        let argv = download_argv_with_proxy(
+        let argv = download_argv(
             &tool(),
             "https://example.com/gallery",
             Path::new("/tmp/dest"),
             None,
             Some("Mozilla/5.0 Test"),
-            GalleryDownloadOptions {
-                filter: GalleryFilter::All,
-                speed_limit: None,
-                range: None,
-                proxy: None,
-                event_nonce: "test-run",
-            },
+            test_options(GalleryFilter::All),
         );
         let ua_pos = argv.iter().position(|a| a == "--user-agent").unwrap();
         assert_eq!(argv[ua_pos + 1], "Mozilla/5.0 Test");
@@ -553,19 +528,13 @@ mod tests {
 
     #[test]
     fn download_argv_no_user_agent_by_default() {
-        let argv = download_argv_with_proxy(
+        let argv = download_argv(
             &tool(),
             "https://example.com/gallery",
             Path::new("/tmp/dest"),
             None,
             None,
-            GalleryDownloadOptions {
-                filter: GalleryFilter::All,
-                speed_limit: None,
-                range: None,
-                proxy: None,
-                event_nonce: "test-run",
-            },
+            test_options(GalleryFilter::All),
         );
         assert!(!argv.iter().any(|a| a == "--user-agent"));
     }
@@ -579,19 +548,13 @@ mod tests {
 
     #[test]
     fn download_argv_filter_images() {
-        let argv = download_argv_with_proxy(
+        let argv = download_argv(
             &tool(),
             "https://example.com/gallery",
             Path::new("/tmp/dest"),
             None,
             None,
-            GalleryDownloadOptions {
-                filter: GalleryFilter::ImagesOnly,
-                speed_limit: None,
-                range: None,
-                proxy: None,
-                event_nonce: "test-run",
-            },
+            test_options(GalleryFilter::ImagesOnly),
         );
         let f_pos = argv.iter().position(|a| a == "--filter").unwrap();
         assert!(argv[f_pos + 1].contains("jpg"));
@@ -600,19 +563,13 @@ mod tests {
 
     #[test]
     fn download_argv_filter_videos() {
-        let argv = download_argv_with_proxy(
+        let argv = download_argv(
             &tool(),
             "https://example.com/gallery",
             Path::new("/tmp/dest"),
             None,
             None,
-            GalleryDownloadOptions {
-                filter: GalleryFilter::VideosOnly,
-                speed_limit: None,
-                range: None,
-                proxy: None,
-                event_nonce: "test-run",
-            },
+            test_options(GalleryFilter::VideosOnly),
         );
         let f_pos = argv.iter().position(|a| a == "--filter").unwrap();
         assert!(argv[f_pos + 1].contains("mp4"));
@@ -621,19 +578,13 @@ mod tests {
 
     #[test]
     fn download_argv_no_filter_for_all() {
-        let argv = download_argv_with_proxy(
+        let argv = download_argv(
             &tool(),
             "https://example.com/gallery",
             Path::new("/tmp/dest"),
             None,
             None,
-            GalleryDownloadOptions {
-                filter: GalleryFilter::All,
-                speed_limit: None,
-                range: None,
-                proxy: None,
-                event_nonce: "test-run",
-            },
+            test_options(GalleryFilter::All),
         );
         assert!(!argv.iter().any(|a| a == "--filter"));
     }
@@ -650,19 +601,13 @@ mod tests {
             GalleryFilter::ImagesOnly,
             GalleryFilter::VideosOnly,
         ] {
-            let argv = download_argv_with_proxy(
+            let argv = download_argv(
                 &tool(),
                 "https://example.com/gallery",
                 Path::new("/tmp/dest"),
                 None,
                 None,
-                GalleryDownloadOptions {
-                    filter,
-                    speed_limit: None,
-                    range: None,
-                    proxy: None,
-                    event_nonce: "test-run",
-                },
+                test_options(filter),
             );
             let mut expected = Vec::new();
             push_filter(&mut expected, filter);
@@ -682,7 +627,7 @@ mod tests {
             cli_url: "http://127.0.0.1:8080".into(),
             no_proxy_env: "localhost,127.0.0.1,::1".into(),
         };
-        let a = download_argv_with_proxy(
+        let a = download_argv(
             &tool(),
             "https://example.com/",
             Path::new("/tmp/dest"),
@@ -762,19 +707,13 @@ mod tests {
 
     #[test]
     fn download_argv_instagram_gets_sleep_request() {
-        let argv = download_argv_with_proxy(
+        let argv = download_argv(
             &tool(),
             "https://www.instagram.com/p/ABC123/",
             Path::new("/tmp/dest"),
             None,
             None,
-            GalleryDownloadOptions {
-                filter: GalleryFilter::All,
-                speed_limit: None,
-                range: None,
-                proxy: None,
-                event_nonce: "test-run",
-            },
+            test_options(GalleryFilter::All),
         );
         let pos = argv
             .iter()
@@ -791,7 +730,7 @@ mod tests {
     #[test]
     fn download_argv_range_selection() {
         // RED: a picker selection must reach gallery-dl as `--range <spec>`.
-        let argv = download_argv_with_proxy(
+        let argv = download_argv(
             &tool(),
             "https://example.com/gallery",
             Path::new("/tmp/dest"),
@@ -815,19 +754,13 @@ mod tests {
     #[test]
     fn download_argv_no_range_by_default() {
         // No selection: no `--range` flag at all (download everything).
-        let argv = download_argv_with_proxy(
+        let argv = download_argv(
             &tool(),
             "https://example.com/gallery",
             Path::new("/tmp/dest"),
             None,
             None,
-            GalleryDownloadOptions {
-                filter: GalleryFilter::All,
-                speed_limit: None,
-                range: None,
-                proxy: None,
-                event_nonce: "test-run",
-            },
+            test_options(GalleryFilter::All),
         );
         assert!(!argv.iter().any(|a| a == "--range"));
     }
@@ -864,19 +797,13 @@ mod tests {
 
     #[test]
     fn download_argv_non_instagram_no_sleep_request() {
-        let argv = download_argv_with_proxy(
+        let argv = download_argv(
             &tool(),
             "https://example.com/gallery",
             Path::new("/tmp/dest"),
             None,
             None,
-            GalleryDownloadOptions {
-                filter: GalleryFilter::All,
-                speed_limit: None,
-                range: None,
-                proxy: None,
-                event_nonce: "test-run",
-            },
+            test_options(GalleryFilter::All),
         );
         assert!(!argv.iter().any(|a| a == "--sleep-request"));
     }

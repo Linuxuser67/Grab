@@ -9,7 +9,7 @@ use std::path::Path;
 use tokio::io::{AsyncReadExt, BufReader};
 use tokio::process::Command;
 
-use crate::gallery_argv::{GalleryDownloadOptions, GalleryJob, download_argv_with_proxy};
+use crate::gallery_argv::{GalleryDownloadOptions, GalleryJob, download_argv};
 use crate::gallery_progress::{GalleryProgress, ProgressLine, parse_progress_line};
 use crate::gallery_tools::GalleryError;
 use crate::video_spawn::ProcessGroupGuard;
@@ -144,7 +144,7 @@ pub async fn run_gallery_download_with_proxy(
     let event_nonce = crate::event_nonce::new_event_nonce().map_err(|error| {
         GalleryError::runtime(format!("couldn't generate gallery event nonce: {error}"))
     })?;
-    let mut argv = download_argv_with_proxy(
+    let mut argv = download_argv(
         tool,
         &job.page_url,
         &job.dest_dir,

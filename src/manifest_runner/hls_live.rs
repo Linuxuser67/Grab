@@ -415,7 +415,7 @@ pub(super) async fn apply_live_hls_snapshot(
     other_rendition_bytes: u64,
 ) -> Result<LiveHlsSnapshotOutcome, ManifestRunError> {
     let client = transfer.client;
-    let connections = transfer.connections;
+    let connections = transfer.concurrency;
     let tx = transfer.tx;
     let downloaded = transfer.downloaded;
     if plan.is_live == plan.end_list {

@@ -86,7 +86,7 @@ const MAX_DASH_LIVE_STATE_BYTES: usize = 16 * 1024 * 1024;
 /// Shared network, concurrency, and progress-reporting state for live renditions.
 struct LiveManifestTransfer<'a> {
     client: &'a reqwest::Client,
-    connections: usize,
+    concurrency: usize,
     tx: &'a tokio::sync::mpsc::UnboundedSender<EngineMsg>,
     downloaded: &'a Arc<AtomicU64>,
 }
@@ -1942,7 +1942,7 @@ async fn prepare_live_hls_finalization(
     let capture = run_live_hls_tracks(LiveHlsTrackRun {
         transfer: LiveManifestTransfer {
             client,
-            connections: concurrency,
+            concurrency,
             tx,
             downloaded,
         },
@@ -2320,7 +2320,7 @@ pub(crate) async fn run_manifest_download(
             source_url: &job.source.url,
             transfer: LiveManifestTransfer {
                 client: &client,
-                connections: concurrency,
+                concurrency,
                 tx: &tx,
                 downloaded: &downloaded,
             },

@@ -642,7 +642,7 @@ pub(super) async fn apply_dash_live_snapshot(
     other_rendition_bytes: u64,
 ) -> Result<DashLiveUpdateOutcome, ManifestRunError> {
     let client = transfer.client;
-    let connections = transfer.connections;
+    let connections = transfer.concurrency;
     let tx = transfer.tx;
     let downloaded = transfer.downloaded;
     if plan.representation.live_key != track.state.representation_key.as_str() {

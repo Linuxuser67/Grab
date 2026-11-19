@@ -7047,6 +7047,47 @@ fn dump_json_flat_playlist_flag_per_caller() {
 }
 
 #[test]
+fn dump_json_referer_is_origin_only_and_invalid_values_are_omitted() {
+    for (name, referer, expected) in [
+        (
+            "grab-referer-origin",
+            Some("https://source.example.test:8443/watch/private?token=secret#player"),
+            Some("https://source.example.test:8443/"),
+        ),
+        ("grab-referer-invalid", Some("file:///etc/passwd"), None),
+        ("grab-referer-absent", None, None),
+    ] {
+        let bin = fake_argv_dump_bin(name, r#"{"id":"x","title":"T"}"#);
+        crate::runtime::tokio_rt()
+            .block_on(fetch_raw_dump_json(
+                &bin,
+                "https://example.com/v",
+                RawDumpOptions {
+                    cookies_browser: "none",
+                    timeout: std::time::Duration::from_secs(30),
+                    fetch_proxy: None,
+                    flat_playlist: false,
+                    identity_args: None,
+                    referer,
+                },
+            ))
+            .expect("fake dump parses");
+        let argv = fake_bin_argv(&bin);
+        let args: Vec<_> = argv.lines().collect();
+        let actual = args
+            .iter()
+            .position(|argument| *argument == "--referer")
+            .and_then(|index| args.get(index + 1))
+            .copied();
+        assert_eq!(actual, expected, "referer argv for {name}:
+{argv}");
+        assert!(!argv.contains("token=secret"));
+        assert!(!argv.contains("/watch/private"));
+        let _ = std::fs::remove_dir_all(bin.parent().unwrap());
+    }
+}
+
+#[test]
 fn fetch_video_page_returns_playlist_for_expansion() {
     // Collection URLs expand for dialog-less rows, never parse as empty videos.
     let bin = fake_argv_dump_bin(

@@ -870,7 +870,7 @@ async fn lookup_extractors_inner(
         }
     } else {
         (
-            crate::video::fetch_video_infos_with_referer(
+            crate::video::fetch_video_infos(
                 youtube_bin,
                 url.clone(),
                 browser,
@@ -1564,7 +1564,7 @@ fn submit_probed_single(
         scheduled_at,
         move |d| async move {
             enqueue_manager
-                .enqueue_video_async_batched_with_referer(
+                .enqueue_video_async_batched(
                     &page_url,
                     d.as_deref(),
                     name.as_deref(),
@@ -1821,7 +1821,7 @@ async fn queue_plain(
     let destination = Some(dest.borrow().clone());
     // Batch guard defers start_next until the Scheduled status is set.
     let (item, guard) = manager
-        .enqueue_async_batched_with_referer(url, destination.as_deref(), None, referer.as_deref())
+        .enqueue_async_batched(url, destination.as_deref(), None, referer.as_deref())
         .await?;
     apply_scheduled_at(&item, scheduled_at);
     close_card();
@@ -2350,7 +2350,7 @@ fn push_torrent_picker_page(
                                 crate::torrent::stage_selection(&url, selection);
                             }
                             let result = enqueue_manager
-                                .enqueue_async_batched(&url, d.as_deref(), Some(&enqueue_name))
+                                .enqueue_async_batched(&url, d.as_deref(), Some(&enqueue_name), None)
                                 .await;
                             if result.is_err() {
                                 crate::torrent::drop_selection(&url);
@@ -2590,7 +2590,7 @@ impl AddCard {
     ///
     /// The source is scoped to the exact submitted URL. If the card is already
     /// open, this focuses it; collapsing the card always resets the form.
-    pub fn open_with_referer(&self, initial_url: Option<String>, referer: Option<String>) {
+    pub fn open(&self, initial_url: Option<String>, referer: Option<String>) {
         let referer = referer.as_deref().and_then(crate::referrer::origin_only);
         self.public_host_leases.borrow_mut().activate();
         (self.open)(initial_url, referer)
@@ -3539,7 +3539,7 @@ fn build_video_lookup_kicker(context: VideoLookupContext) -> VideoLookupKick {
                                         scheduled_at_b.get(),
                                         move |directory| async move {
                                             enqueue_manager
-                                                .enqueue_manifest_async_batched_with_referer(
+                                                .enqueue_manifest_async_batched(
                                                     source,
                                                     directory.as_deref(),
                                                     Some(&filename),
@@ -4045,7 +4045,7 @@ fn build_submit_handler(context: SubmitContext) -> SubmitHandler {
                         scheduled_at.get(),
                         move |directory| async move {
                             enqueue_manager
-                                .enqueue_manifest_async_batched_with_referer(
+                                .enqueue_manifest_async_batched(
                                     source,
                                     directory.as_deref(),
                                     Some(&filename),
@@ -4194,7 +4194,7 @@ fn build_submit_handler(context: SubmitContext) -> SubmitHandler {
                 scheduled_at.get(),
                 move |d| async move {
                     enqueue_manager
-                        .enqueue_async_batched_with_referer(
+                        .enqueue_async_batched(
                             &enqueue_url,
                             d.as_deref(),
                             None,

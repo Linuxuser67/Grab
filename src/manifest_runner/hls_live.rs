@@ -1025,10 +1025,9 @@ pub(super) async fn run_live_hls_tracks(
         abort,
     } = context;
     let super::LiveManifestTransfer {
-        client,
-        concurrency: connections,
         tx,
         downloaded,
+        ..
     } = transfer;
     let mut video = load_live_hls_track(video_plan, video_dir).await?;
     let mut audio = match audio_plan {

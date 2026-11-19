@@ -779,12 +779,7 @@ thread_local! {
 
 /// Cache key for probe info JSON: page URL, cookie source, proxy, and a
 /// hashed source-page identity. Never retain the Referer path/query in this key.
-pub(crate) type ProbeJsonKey = (
-    String,
-    String,
-    Option<String>,
-    Result<Option<[u8; 32]>, ()>,
-);
+pub(crate) type ProbeJsonKey = (String, String, Option<String>, Result<Option<[u8; 32]>, ()>);
 
 /// Build the identity shared by a media probe and the eventual download.
 pub(crate) fn probe_json_key(
@@ -4074,7 +4069,6 @@ impl DownloadManager {
 #[path = "download_tests.rs"]
 mod tests;
 
-
 #[cfg(test)]
 mod probe_json_key_tests {
     use super::probe_json_key;
@@ -4103,8 +4097,14 @@ mod probe_json_key_tests {
         let no_source = probe_json_key(page, "none".to_string(), None, None);
 
         assert_eq!(first, same_source, "fragments do not affect HTTP identity");
-        assert_ne!(first, changed_source, "different source pages must not share JSON");
-        assert_ne!(first, no_source, "a source-bound probe must not match an unbound download");
+        assert_ne!(
+            first, changed_source,
+            "different source pages must not share JSON"
+        );
+        assert_ne!(
+            first, no_source,
+            "a source-bound probe must not match an unbound download"
+        );
         assert_eq!(no_source.3, Ok(None));
     }
 }

@@ -5375,14 +5375,14 @@ fn destination_mutation_stops_a_single_stream_download(mutation: DestinationMuta
     // transfer that only verifies after sync_all would still be writing when
     // the test's 10s deadline expires.
     let (_lock, _loop) = test_locks();
-    let (queue_name, directory_name) = match mutation {
-        DestinationMutation::Delete => ("destgone", "destgone"),
-        DestinationMutation::Replace => ("destreplaced", "destreplaced"),
+    let suffix = match mutation {
+        DestinationMutation::Delete => "destgone",
+        DestinationMutation::Replace => "destreplaced",
     };
-    let _qf = test_queue_file(queue_name);
+    let _qf = test_queue_file(suffix);
     let settings = test_settings();
 
-    let dir = std::env::temp_dir().join(format!("grab-{directory_name}-{}", std::process::id()));
+    let dir = std::env::temp_dir().join(format!("grab-{suffix}-{}", std::process::id()));
     let srv = dir.join("srv");
     let dl = dir.join("dl");
     std::fs::create_dir_all(&srv).unwrap();
@@ -5419,6 +5419,7 @@ fn destination_mutation_stops_a_single_stream_download(mutation: DestinationMuta
     let url = format!("http://127.0.0.1:{port}/t.bin");
     let dest = dl.to_string_lossy().into_owned();
     let file = dl.join("t.bin");
+    const REPLACEMENT_CONTENTS: &[u8] = b"replacement inode must remain untouched";
 
     let main_loop = glib::MainLoop::new(None, false);
     let quit = main_loop.clone();
@@ -5448,7 +5449,6 @@ fn destination_mutation_stops_a_single_stream_download(mutation: DestinationMuta
                 let original = std::fs::metadata(&file)
                     .unwrap_or_else(|error| abort(&server, &format!("inspect original: {error}")));
                 let replacement = dl.join("replacement.tmp");
-                const REPLACEMENT_CONTENTS: &[u8] = b"replacement inode must remain untouched";
                 std::fs::write(&replacement, REPLACEMENT_CONTENTS)
                     .unwrap_or_else(|error| abort(&server, &format!("write replacement: {error}")));
                 let replacement_metadata =
@@ -5486,7 +5486,7 @@ fn destination_mutation_stops_a_single_stream_download(mutation: DestinationMuta
             DestinationMutation::Replace => {
                 assert_eq!(
                     std::fs::read(&file).expect("read replacement"),
-                    b"replacement inode must remain untouched",
+                    REPLACEMENT_CONTENTS,
                     "the download must not write through a replaced destination path"
                 );
             }

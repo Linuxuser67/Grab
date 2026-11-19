@@ -1665,12 +1665,14 @@ fn enqueue_video_spawns_and_fails_without_tools() {
                 video_format_id: None,
                 is_live: false,
                 playlist_item_id: None,
-            }, None,
+            },
+            None,
         ))
         .map(|(item, guard)| {
             drop(guard);
             item
-        }).expect("video enqueue");
+        })
+        .expect("video enqueue");
     let id = item.id();
     // The worker runs and fails fast on the missing tools (no network).
     drain_engine(&manager, id);
@@ -1719,12 +1721,14 @@ fn enqueue_video_restrict_filenames_folds_name() {
                 video_format_id: None,
                 is_live: false,
                 playlist_item_id: None,
-            }, None,
+            },
+            None,
         ))
         .map(|(item, guard)| {
             drop(guard);
             item
-        }).expect("video enqueue");
+        })
+        .expect("video enqueue");
     assert_eq!(item.filename(), "Cafe_Croissants.mp4");
     let id = item.id();
     drain_engine(&manager, id);
@@ -1920,12 +1924,14 @@ fn video_source_survives_restore_and_retry() {
                     video_format_id: None,
                     is_live: false,
                     playlist_item_id: None,
-                }, None,
+                },
+                None,
             ))
             .map(|(item, guard)| {
-            drop(guard);
-            item
-        }).expect("video enqueue");
+                drop(guard);
+                item
+            })
+            .expect("video enqueue");
         // Persisted with the Page marker (not silently dropped).
         let text = std::fs::read_to_string(&qf).unwrap();
         assert!(text.contains("\"video_source\""));
@@ -2368,12 +2374,14 @@ fn unremove_restores_video_source() {
                 video_format_id: None,
                 is_live: false,
                 playlist_item_id: None,
-            }, None,
+            },
+            None,
         ))
         .map(|(item, guard)| {
             drop(guard);
             item
-        }).expect("video enqueue");
+        })
+        .expect("video enqueue");
     let id = item.id();
     drain_engine(&manager, id);
     assert_eq!(item.status(), DownloadStatus::Failed);
@@ -2432,12 +2440,14 @@ fn queue_file_never_carries_cookies() {
                 video_format_id: None,
                 is_live: false,
                 playlist_item_id: None,
-            }, None,
+            },
+            None,
         ))
         .map(|(item, guard)| {
             drop(guard);
             item
-        }).expect("video enqueue");
+        })
+        .expect("video enqueue");
     // Drain the worker here so no woken pump tail trips another test's thread guard.
     drain_engine(&manager, item.id());
     // The worker stages dest-side before failing on the missing tools.
@@ -3357,12 +3367,14 @@ fn enqueue_video_keeps_name_when_file_exists() {
                 video_format_id: None,
                 is_live: false,
                 playlist_item_id: None,
-            }, None,
+            },
+            None,
         ))
         .map(|(item, guard)| {
             drop(guard);
             item
-        }).expect("video enqueue");
+        })
+        .expect("video enqueue");
     assert_eq!(item.filename(), "clip.mp4");
     assert_eq!(
         std::fs::read(dest.join("clip.mp4")).unwrap(),
@@ -3661,12 +3673,14 @@ fn expand_playlist_rows_use_titled_subfolder() {
                 video_format_id: None,
                 is_live: false,
                 playlist_item_id: None,
-            }, None,
+            },
+            None,
         ))
         .map(|(item, guard)| {
             drop(guard);
             item
-        }).expect("parent enqueue");
+        })
+        .expect("parent enqueue");
     // Stage a Page source so the expansion reads quality/audio_only.
     manager.video_sources.borrow_mut().insert(
         parent.id(),
@@ -6876,12 +6890,14 @@ fn enqueue_video_reserves_part_namespaced_stems() {
                 video_format_id: None,
                 is_live: false,
                 playlist_item_id: None,
-            }, None,
+            },
+            None,
         ))
         .map(|(item, guard)| {
             drop(guard);
             item
-        }).expect("video enqueue");
+        })
+        .expect("video enqueue");
     assert_eq!(item.filename(), "Clip (1).mp4");
     // The foreign file is untouched and the fresh stem is unreserved.
     assert_eq!(
@@ -7000,12 +7016,14 @@ fn enqueue_video_reserves_subtitle_sidecar_stems() {
                 video_format_id: None,
                 is_live: false,
                 playlist_item_id: None,
-            }, None,
+            },
+            None,
         ))
         .map(|(item, guard)| {
             drop(guard);
             item
-        }).expect("video enqueue");
+        })
+        .expect("video enqueue");
     assert_eq!(item.filename(), "Clip (1).mp4");
     assert_eq!(std::fs::read(dest.join("Clip.en.srt")).unwrap(), b"foreign");
     drain_engine(&manager, item.id());
@@ -7033,16 +7051,24 @@ fn enqueue_video_accepts_unlisted_url() {
             "https://example.com/f.iso",
             Some("/tmp/dl"),
             None,
-            choices.clone(), None,
+            choices.clone(),
+            None,
         ))
         .map(|(item, guard)| {
             drop(guard);
             item
-        }).expect("probed intake");
+        })
+        .expect("probed intake");
     assert_eq!(item.filename(), "f.iso");
     assert!(
         glib::MainContext::default()
-            .block_on(manager.enqueue_video_async_batched_with_referer("not a url", Some("/tmp/dl"), None, choices, None))
+            .block_on(manager.enqueue_video_async_batched_with_referer(
+                "not a url",
+                Some("/tmp/dl"),
+                None,
+                choices,
+                None
+            ))
             .is_err()
     );
     // Drain the spawned worker (fails fast without tools) so no woken
@@ -7574,12 +7600,14 @@ fn a_reserved_destination_forces_video_intake_to_dedupe() {
                 video_format_id: None,
                 is_live: false,
                 playlist_item_id: None,
-            }, None,
+            },
+            None,
         ))
         .map(|(item, guard)| {
             drop(guard);
             item
-        }).expect("video enqueue");
+        })
+        .expect("video enqueue");
     assert_eq!(
         item.filename(),
         "Clip (1).mp4",
@@ -7643,12 +7671,14 @@ fn a_reserved_stem_forces_video_intake_to_dedupe() {
                 video_format_id: None,
                 is_live: false,
                 playlist_item_id: None,
-            }, None,
+            },
+            None,
         ))
         .map(|(item, guard)| {
             drop(guard);
             item
-        }).expect("video enqueue");
+        })
+        .expect("video enqueue");
     assert_eq!(
         item.filename(),
         "Clip (1).m4a",
@@ -10737,7 +10767,8 @@ fn playlist_staged_import_does_not_duplicate_identical_entry() {
         &dest,
         Some("one.mp4"),
         choices.clone(),
-        &[], None,
+        &[],
+        None,
     );
     assert!(first.is_ok(), "first staged enqueue should succeed");
     let second = manager.enqueue_video_staged_with_referer(
@@ -10745,7 +10776,8 @@ fn playlist_staged_import_does_not_duplicate_identical_entry() {
         &dest,
         Some("two.mp4"),
         choices.clone(),
-        &[], None,
+        &[],
+        None,
     );
     assert!(
         second.is_err(),

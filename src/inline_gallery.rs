@@ -611,28 +611,39 @@ mod tests {
     fn gallery_preview_cache_key_separates_urls_auth_and_proxies() {
         let url = "https://gallery-cache.example.test/collection#top";
         let anonymous = cache_auth(None, None, None);
-        let base = gallery_preview_cache_key_with_referer(url, &anonymous, None, None).expect("anonymous key");
+        let base = gallery_preview_cache_key_with_referer(url, &anonymous, None, None)
+            .expect("anonymous key");
         assert!(
             gallery_preview_cache_key_with_referer(
                 "https://gallery-cache.example.test/collection",
                 &anonymous,
                 None,
-             None) == Some(base.clone()),
+                None
+            ) == Some(base.clone()),
             "the fragment is not part of the page identity"
         );
         let other_url = "https://gallery-cache.example.test/other";
         assert!(
-            gallery_preview_cache_key_with_referer(other_url, &anonymous, None, None) != Some(base.clone()),
+            gallery_preview_cache_key_with_referer(other_url, &anonymous, None, None)
+                != Some(base.clone()),
             "different page URLs must not share a cache key"
         );
         assert!(
-            gallery_preview_cache_key_with_referer(url, &cache_auth(None, Some("firefox"), None), None, None)
-                != Some(base.clone()),
+            gallery_preview_cache_key_with_referer(
+                url,
+                &cache_auth(None, Some("firefox"), None),
+                None,
+                None
+            ) != Some(base.clone()),
             "a browser profile must not reuse an anonymous probe"
         );
         assert!(
-            gallery_preview_cache_key_with_referer(url, &cache_auth(None, None, Some("Grab-Test-UA")), None, None)
-                != Some(base.clone()),
+            gallery_preview_cache_key_with_referer(
+                url,
+                &cache_auth(None, None, Some("Grab-Test-UA")),
+                None,
+                None
+            ) != Some(base.clone()),
             "the paired user agent is part of the identity"
         );
         let proxy = crate::net_types::ResolvedProxy {
@@ -641,7 +652,8 @@ mod tests {
             no_proxy_env: String::new(),
         };
         assert!(
-            gallery_preview_cache_key_with_referer(url, &anonymous, Some(&proxy), None) != Some(base),
+            gallery_preview_cache_key_with_referer(url, &anonymous, Some(&proxy), None)
+                != Some(base),
             "a proxy can change what the extractor returns"
         );
     }
@@ -685,11 +697,20 @@ mod tests {
         std::fs::write(&second, contents).expect("second jar");
         let url = "https://gallery-cache.example.test/collection";
 
-        let first_key = gallery_preview_cache_key_with_referer(url, &cache_auth(Some(first), None, None), None, None)
-            .expect("handoff key");
-        let second_key =
-            gallery_preview_cache_key_with_referer(url, &cache_auth(Some(second.clone()), None, None), None, None)
-                .expect("handoff key");
+        let first_key = gallery_preview_cache_key_with_referer(
+            url,
+            &cache_auth(Some(first), None, None),
+            None,
+            None,
+        )
+        .expect("handoff key");
+        let second_key = gallery_preview_cache_key_with_referer(
+            url,
+            &cache_auth(Some(second.clone()), None, None),
+            None,
+            None,
+        )
+        .expect("handoff key");
         assert!(
             first_key == second_key,
             "a new staged path with the same cookies must reuse the probe"
@@ -697,8 +718,13 @@ mod tests {
 
         std::fs::write(&second, b"# Netscape HTTP Cookie File\n").expect("changed jar");
         assert!(
-            gallery_preview_cache_key_with_referer(url, &cache_auth(Some(second), None, None), None, None)
-                .expect("handoff key")
+            gallery_preview_cache_key_with_referer(
+                url,
+                &cache_auth(Some(second), None, None),
+                None,
+                None
+            )
+            .expect("handoff key")
                 != first_key,
             "changed cookies must invalidate the probe"
         );
@@ -708,7 +734,8 @@ mod tests {
                 "https://gallery-cache.example.test/collection?token=secret",
                 &cache_auth(None, None, None),
                 None,
-             None)
+                None
+            )
             .is_none(),
             "signed page URLs must not be retained"
         );

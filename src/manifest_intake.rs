@@ -2543,7 +2543,8 @@ segment.ts
                 "https://cache-preview.example.test/master.m3u8?X-Amz-Signature=secret",
                 None,
                 None,
-             None)
+                None
+            )
             .is_none(),
             "known signed source URLs must not be cached"
         );
@@ -2725,8 +2726,9 @@ segment.ts?f=418899&srv=server&i=0.4&sp=500&p1=one&p2=two&asn=327934
         let second_identity = (jar.clone(), Some("Grab-UA-Two".to_string()));
         let first = manifest_preview_cache_key_with_referer(url, None, Some(&first_identity), None)
             .expect("first handoff cache key");
-        let second = manifest_preview_cache_key_with_referer(url, None, Some(&second_identity), None)
-            .expect("second handoff cache key");
+        let second =
+            manifest_preview_cache_key_with_referer(url, None, Some(&second_identity), None)
+                .expect("second handoff cache key");
 
         assert_eq!(
             first.handoff_cookie_hash, second.handoff_cookie_hash,
@@ -2748,7 +2750,12 @@ segment.ts?f=418899&srv=server&i=0.4&sp=500&p1=one&p2=two&asn=327934
         );
         assert_eq!(
             manifest_preview_cache_key_with_referer(url, None, Some(&default_identity), None),
-            manifest_preview_cache_key_with_referer(url, None, Some(&explicit_default_identity), None),
+            manifest_preview_cache_key_with_referer(
+                url,
+                None,
+                Some(&explicit_default_identity),
+                None
+            ),
             "an omitted handoff UA and an explicit default UA produce the same request identity"
         );
     }
@@ -2756,7 +2763,8 @@ segment.ts?f=418899&srv=server&i=0.4&sp=500&p1=one&p2=two&asn=327934
     #[test]
     fn preview_cache_key_only_matches_the_source_that_served_it() {
         let url = "https://cache-preview.example.test/master.m3u8";
-        let anonymous = manifest_preview_cache_key_with_referer(url, None, None, None).expect("anonymous key");
+        let anonymous =
+            manifest_preview_cache_key_with_referer(url, None, None, None).expect("anonymous key");
         let handoff = ManifestPreviewCacheKey {
             handoff_cookie_hash: Some([7_u8; 32]),
             handoff_user_agent_hash: Some([8_u8; 32]),

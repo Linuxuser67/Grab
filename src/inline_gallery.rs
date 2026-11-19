@@ -165,7 +165,11 @@ fn gallery_preview_cache_key(
     if crate::video_cache::has_known_rotating_auth_query(&url) {
         return None;
     }
-    let referer_hash = crate::referrer::cache_identity(referer);
+    let referer_hash = match crate::referrer::cache_identity(referer) {
+        crate::referrer::SourceIdentity::Absent => None,
+        crate::referrer::SourceIdentity::Origin(hash) => Some(hash),
+        crate::referrer::SourceIdentity::Invalid => return None,
+    };
     let handoff_cookie_hash = match auth.cookies_path.as_deref() {
         Some(path) => Some(crate::extension_server::handoff_cookie_hash(path)?),
         None => None,
@@ -639,8 +643,8 @@ mod tests {
         let url = "https://gallery-cache.example.test/collection";
         let auth = cache_auth(None, None, None);
         let source = "https://origin.example.test/watch?id=one#player";
-        let same_source = "https://origin.example.test/watch?id=one#other";
-        let different_source = "https://origin.example.test/watch?id=two";
+        let same_source = "https://origin.example.test/other/path?token=two#other";
+        let different_source = "https://other.example.test/watch?id=one";
 
         let base = gallery_preview_cache_key(url, &auth, None, None).expect("without a Referer");
         let first =
@@ -657,7 +661,16 @@ mod tests {
         );
         assert_ne!(
             first, different,
-            "different source pages must not share a preview"
+            "different source origins must not share a preview"
+        );
+    }
+
+    #[test]
+    fn invalid_source_referrer_disables_gallery_preview_cache() {
+        let url = "https://gallery-cache.example.test/collection";
+        let auth = cache_auth(None, None, None);
+        assert!(
+            gallery_preview_cache_key(url, &auth, None, Some("file:///etc/passwd")).is_none()
         );
     }
 

@@ -359,16 +359,16 @@ mod tests {
 
     #[test]
     fn referer_argv_contains_only_the_validated_source_origin() {
-        let source = crate::referrer::origin_only(
-            "https://example.test/watch/private?token=secret#player",
-        )
-        .expect("valid source page");
+        let source =
+            crate::referrer::origin_only("https://example.test/watch/private?token=secret#player")
+                .expect("valid source page");
         let args = referer_cli_args(Some(&source));
-        assert_eq!(
-            args,
-            ["-o", "extractor.*.referer=https://example.test/"]
+        assert_eq!(args, ["-o", "extractor.*.referer=https://example.test/"]);
+        assert!(
+            !args
+                .iter()
+                .any(|argument| argument.contains("token=secret"))
         );
-        assert!(!args.iter().any(|argument| argument.contains("token=secret")));
     }
 
     #[test]

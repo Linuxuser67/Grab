@@ -273,8 +273,12 @@ pub fn build_window(
     let search_clamp = adw::Clamp::builder().maximum_size(350).build();
     search_clamp.set_widget_name("download-search-clamp");
     search_clamp.set_hexpand(true);
-    search_clamp.set_margin_top(12);
-    search_clamp.set_margin_bottom(12);
+    // A hidden GtkSearchBar collapses its own content, but the wrapper's
+    // margins still reserve space in ToolbarView. Add vertical HIG spacing
+    // only while search is revealed so the inline add card stays flush below
+    // the header when search is closed.
+    search_clamp.set_margin_top(0);
+    search_clamp.set_margin_bottom(0);
     search_clamp.set_margin_start(12);
     search_clamp.set_margin_end(12);
     search_clamp.set_child(Some(&search_bar));
@@ -549,7 +553,11 @@ pub fn build_window(
     // Ctrl+F activation, as well as when Escape dismisses search mode.
     {
         let toggle = search_toggle.clone();
+        let clamp = search_clamp.clone();
         search_bar.connect_search_mode_enabled_notify(move |bar| {
+            let vertical_margin = if bar.is_search_mode() { 12 } else { 0 };
+            clamp.set_margin_top(vertical_margin);
+            clamp.set_margin_bottom(vertical_margin);
             toggle.set_active(bar.is_search_mode());
         });
     }

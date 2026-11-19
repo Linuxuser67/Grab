@@ -74,8 +74,8 @@ mod tests {
 
     #[test]
     fn cache_identity_hashes_the_full_source_url_without_its_fragment() {
-        let source = cache_identity(Some("https://example.test/watch?id=one#player"))
-            .expect("source hash");
+        let source =
+            cache_identity(Some("https://example.test/watch?id=one#player")).expect("source hash");
         assert_eq!(
             Some(source),
             cache_identity(Some("https://example.test/watch?id=one#other"))

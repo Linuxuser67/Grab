@@ -46,6 +46,7 @@ pub(crate) enum SourceIdentity {
 }
 
 /// Identify a source page by the validated origin used for outbound Referer headers.
+#[must_use]
 pub(crate) fn cache_identity(raw: Option<&str>) -> SourceIdentity {
     let Some(raw) = raw else {
         return SourceIdentity::Absent;

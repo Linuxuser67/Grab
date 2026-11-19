@@ -8,7 +8,7 @@
 //! grid from `gallery_grid`.
 
 use crate::gallery_grid::GalleryGrid;
-use PickerContext;
+use crate::picker_context::PickerContext;
 use crate::window_rows::{
     apply_scheduled_at, picker_enter_confirms, picker_header, selection_action_bar,
 };

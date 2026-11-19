@@ -302,7 +302,7 @@ async fn enqueue_direct_handoff(
     referer: Option<&str>,
 ) -> Result<(), String> {
     manager
-        .enqueue_async_batched_with_referer(uri.as_str(), None, None, referer)
+        .enqueue_async_batched(uri.as_str(), None, None, referer)
         .await
         .map(|(item, guard)| {
             drop(guard);
@@ -339,7 +339,7 @@ async fn route_open_uri(
                     return Routed::Failed;
                 }
             };
-        let client = match crate::download_net::http_client_for_with_referer(
+        let client = match crate::download_net::http_client_for(
             proxy.as_ref(),
             referer.as_deref(),
         ) {
@@ -359,7 +359,7 @@ async fn route_open_uri(
     // like a pasted URL. Plain enqueue would save a raw page — or a manifest
     // — as a file.
     if handoff_goes_to_card(&uri) {
-        add_card.open_with_referer(Some(uri.as_str().to_string()), referer);
+        add_card.open(Some(uri.as_str().to_string()), referer);
         if let Some(lease) = public_host_lease {
             add_card.retain_public_resolution_lease(lease);
         }

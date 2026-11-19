@@ -1,12 +1,10 @@
 //! Bounded HTTP response-header detection for direct resources with opaque URLs.
 //!
-//! This is an intake probe only: it sends a one-byte Range GET to coax headers
-//! from servers that reject HEAD, then drops the response without reading its body.
+//! This is an intake probe only: it reads response headers without consuming the body.
 //!
-//! A Range GET is not side-effect free: some servers consume a one-shot or
-//! expiring URL before honoring Range. Known rotating-auth query parameters are
-//! therefore excluded. Custom token names cannot be identified reliably, so
-//! callers should not treat this probe as safe for every opaque URL.
+//! Query-bearing URLs use HEAD only because a speculative Range GET can consume
+//! a signed or one-shot URL before the actual download. If HEAD is unsupported,
+//! normal extractor fallback remains available; the probe never retries with GET.
 
 use std::time::Duration;
 
@@ -14,12 +12,9 @@ use reqwest::header::{CONTENT_DISPOSITION, CONTENT_TYPE, HeaderMap, RANGE};
 
 const DIRECT_RESOURCE_PROBE_BUDGET: Duration = Duration::from_secs(3);
 
-/// Avoid speculative GETs when an opaque URL has query parameters.
-///
-/// Query parameter names are server-defined; a custom name may carry a
-/// single-use credential that a preview request would consume before download.
-fn should_probe_url(url: &url::Url) -> bool {
-    url.query().is_none_or(str::is_empty)
+/// Use HEAD for query-bearing URLs so the probe cannot consume a signed URL body.
+fn should_use_head_probe(url: &url::Url) -> bool {
+    url.query().is_some_and(|query| !query.is_empty())
 }
 
 /// Return true when the server response is strong evidence of a downloadable
@@ -37,10 +32,10 @@ pub(crate) async fn probe(
         || parsed_url.host_str().is_none()
         || !parsed_url.username().is_empty()
         || parsed_url.password().is_some()
-        || !should_probe_url(&parsed_url)
     {
         return false;
     }
+    let head_only = should_use_head_probe(&parsed_url);
 
     let result = tokio::time::timeout(DIRECT_RESOURCE_PROBE_BUDGET, async {
         let client = crate::manifest_intake::client_for_direct_resource_probe(
@@ -50,7 +45,7 @@ pub(crate) async fn probe(
         )
         .await?;
 
-        inspect_response_headers(&client, &raw_url).await
+        inspect_response_headers(&client, &raw_url, head_only).await
     })
     .await;
 
@@ -83,15 +78,19 @@ pub(crate) async fn probe(
     }
 }
 
-/// Send a bounded range request and classify only the response headers. The
-/// body is intentionally never consumed, including when a server ignores Range.
+/// Inspect only response headers, using HEAD for query-bearing URLs and a one-byte
+/// Range GET for queryless URLs. The response body is never consumed.
 async fn inspect_response_headers(
     client: &reqwest::Client,
     raw_url: &str,
+    head_only: bool,
 ) -> Result<Option<String>, String> {
-    let response = client
-        .get(raw_url)
-        .header(RANGE, "bytes=0-0")
+    let request = if head_only {
+        client.head(raw_url)
+    } else {
+        client.get(raw_url).header(RANGE, "bytes=0-0")
+    };
+    let response = request
         .send()
         .await
         .map_err(|error| error.without_url().to_string())?;
@@ -224,10 +223,10 @@ fn has_download_disposition(value: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::{has_download_disposition, is_direct_resource_metadata, should_probe_url};
+    use super::{has_download_disposition, is_direct_resource_metadata, should_use_head_probe};
 
     #[test]
-    fn skips_speculative_get_for_query_bearing_opaque_urls() {
+    fn uses_head_for_query_bearing_opaque_urls() {
         for url in [
             "https://example.test/opaque?token=single-use",
             "https://example.test/opaque?X-Amz-Signature=rotating",
@@ -238,13 +237,13 @@ mod tests {
         ] {
             let parsed = url::Url::parse(url).expect("valid fixture URL");
             assert!(
-                !should_probe_url(&parsed),
-                "{url} must not receive a speculative GET"
+                should_use_head_probe(&parsed),
+                "{url} must use HEAD instead of a speculative Range GET"
             );
         }
 
         let stable = url::Url::parse("https://example.test/opaque").expect("valid fixture URL");
-        assert!(should_probe_url(&stable));
+        assert!(!should_use_head_probe(&stable));
     }
 
     #[test]
@@ -368,9 +367,72 @@ mod tests {
             .build()
             .expect("build fixture client");
         let url = format!("http://{address}/opaque/resource");
-        let result = super::inspect_response_headers(&client, &url)
+        let result = super::inspect_response_headers(&client, &url, false)
             .await
             .expect("inspect response headers");
+
+        assert_eq!(result.as_deref(), Some("application/octet-stream"));
+        server.await.expect("fixture server task");
+    }
+
+    #[tokio::test]
+    async fn query_bearing_opaque_probe_uses_head_without_a_range_get() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        use tokio::net::TcpListener;
+
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind local fixture");
+        let address = listener.local_addr().expect("fixture address");
+        let server = tokio::spawn(async move {
+            let (mut stream, _) =
+                tokio::time::timeout(std::time::Duration::from_secs(1), listener.accept())
+                    .await
+                    .expect("probe connection timeout")
+                    .expect("accept probe");
+            let mut request = Vec::new();
+            let mut chunk = [0_u8; 1024];
+            loop {
+                let count = stream.read(&mut chunk).await.expect("read request");
+                if count == 0 {
+                    break;
+                }
+                request.extend_from_slice(&chunk[..count]);
+                if request.windows(4).any(|window| window == b"\\r\\n\\r\\n") {
+                    break;
+                }
+            }
+            let request = String::from_utf8_lossy(&request);
+            assert!(
+                request.lines().next().is_some_and(|line| {
+                    line.starts_with("HEAD /opaque/resource?token=single-use&expiry=123 ")
+                }),
+                "query-bearing URLs must use HEAD: {request}"
+            );
+            assert!(
+                !request
+                    .lines()
+                    .any(|line| line.eq_ignore_ascii_case("range: bytes=0-0")),
+                "HEAD must not carry the Range header: {request}"
+            );
+
+            stream
+                .write_all(
+                    b"HTTP/1.1 200 OK\\r\\nContent-Type: application/octet-stream\\r\\nContent-Length: 2000000\\r\\nConnection: close\\r\\n\\r\\n",
+                )
+                .await
+                .expect("write HEAD response headers");
+        });
+
+        let client = reqwest::Client::builder()
+            .no_proxy()
+            .redirect(reqwest::redirect::Policy::none())
+            .build()
+            .expect("build fixture client");
+        let url = format!("http://{address}/opaque/resource?token=single-use&expiry=123");
+        let result = super::inspect_response_headers(&client, &url, true)
+            .await
+            .expect("inspect HEAD response headers");
 
         assert_eq!(result.as_deref(), Some("application/octet-stream"));
         server.await.expect("fixture server task");

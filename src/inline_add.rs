@@ -596,9 +596,7 @@ fn attach_native_fallback_reason(
 /// failure waits for the bounded probe before deciding whether this is a file.
 async fn arbitrate_opaque_resource_lookup(
     direct_future: impl std::future::Future<Output = bool>,
-    extractor_future: impl std::future::Future<
-        Output = Result<MediaLookupOutcome, MediaLookupFailure>,
-    >,
+    extractor_future: impl std::future::Future<Output = Result<MediaLookupOutcome, MediaLookupFailure>>,
 ) -> Result<MediaLookupOutcome, MediaLookupFailure> {
     tokio::pin!(direct_future);
     tokio::pin!(extractor_future);
@@ -635,7 +633,7 @@ async fn arbitrate_opaque_resource_lookup(
 
 #[cfg(test)]
 mod opaque_resource_arbitration_tests {
-    use super::{MediaLookupOutcome, MediaLookupFailure, arbitrate_opaque_resource_lookup};
+    use super::{MediaLookupFailure, MediaLookupOutcome, arbitrate_opaque_resource_lookup};
     use std::sync::Arc;
     use std::sync::atomic::{AtomicBool, Ordering};
     use std::time::Duration;
@@ -656,15 +654,18 @@ mod opaque_resource_arbitration_tests {
     #[tokio::test]
     async fn definitive_extractor_success_drops_the_losing_probe() {
         let dropped = Arc::new(AtomicBool::new(false));
-        let result = arbitrate_opaque_resource_lookup(
-            pending_direct_probe(dropped.clone()),
-            async { Ok(MediaLookupOutcome::Gallery(Vec::new())) },
-        )
-        .await
-        .expect("successful gallery extraction");
+        let result =
+            arbitrate_opaque_resource_lookup(pending_direct_probe(dropped.clone()), async {
+                Ok(MediaLookupOutcome::Gallery(Vec::new()))
+            })
+            .await
+            .expect("successful gallery extraction");
 
         assert!(matches!(result, MediaLookupOutcome::Gallery(_)));
-        assert!(dropped.load(Ordering::SeqCst), "the unused direct probe must be cancelled");
+        assert!(
+            dropped.load(Ordering::SeqCst),
+            "the unused direct probe must be cancelled"
+        );
     }
 
     #[tokio::test]
@@ -674,9 +675,7 @@ mod opaque_resource_arbitration_tests {
                 tokio::time::sleep(Duration::from_millis(10)).await;
                 true
             },
-            async {
-                Err(MediaLookupFailure::Failed("extractor failed".to_string()))
-            },
+            async { Err(MediaLookupFailure::Failed("extractor failed".to_string())) },
         )
         .await
         .expect("positive direct-resource result takes precedence");
@@ -3712,7 +3711,7 @@ fn build_video_lookup_kicker(context: VideoLookupContext) -> VideoLookupKick {
                                     final_url,
                                     probe_json_key.1.clone(),
                                     probe_json_key.2.clone(),
-                                    probe_json_key.3.clone(),
+                                    probe_json_key.3,
                                 );
                                 manager_b.cache_probe_json(retarget_key, json);
                             }

@@ -1576,6 +1576,7 @@ impl DownloadManager {
         let mut stored_job = job.clone();
         stored_job.dest_dir = gallery_dir;
         stored_job.item_id = item.id();
+        stored_job.referer = item.referer_opt();
         self.gallery_jobs.borrow_mut().insert(item.id(), stored_job);
         Ok((self.insert(item), guard))
     }

@@ -2,9 +2,11 @@
 //!
 //! This is an intake probe only: it reads response headers without consuming the body.
 //!
-//! Query-bearing URLs use HEAD only because a speculative Range GET can consume
-//! a signed or one-shot URL before the actual download. If HEAD is unsupported,
-//! normal extractor fallback remains available; the probe never retries with GET.
+//! Query-bearing URLs use HEAD rather than a speculative Range GET. HEAD still
+//! reaches the origin, so server-specific one-shot semantics may count it; there
+//! is no generic way to guarantee a credential is untouched. If HEAD is
+//! unsupported, normal extractor fallback remains available; the probe never
+//! retries with GET.
 
 use std::time::Duration;
 
@@ -12,7 +14,7 @@ use reqwest::header::{CONTENT_DISPOSITION, CONTENT_TYPE, HeaderMap, RANGE};
 
 const DIRECT_RESOURCE_PROBE_BUDGET: Duration = Duration::from_secs(3);
 
-/// Use HEAD for query-bearing URLs instead of spending a speculative GET.
+/// Use HEAD for query-bearing URLs instead of requesting a speculative GET body.
 fn should_use_head_probe(url: &url::Url) -> bool {
     url.query().is_some_and(|query| !query.is_empty())
 }

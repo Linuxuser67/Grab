@@ -58,6 +58,16 @@
     </screenshot>
   </screenshots>
   <releases>
+    <release version="6.5.4" date="2026-11-19">
+      <description>
+        <ul>
+          <li>Stop single-stream writes when the destination is deleted or replaced, preserving files Grab no longer owns.</li>
+          <li>Normalize source-page origins consistently across media probes, cache identities and extractor referrer arguments.</li>
+          <li>Skip speculative header probes for opaque query URLs and sanitize gallery source context before use.</li>
+          <li>Refine failure-banner and search-bar spacing in the GNOME interface.</li>
+        </ul>
+      </description>
+    </release>
     <release version="6.5.3" date="2026-11-18">
       <description>
         <ul>

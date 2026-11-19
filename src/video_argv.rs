@@ -1195,7 +1195,11 @@ mod attempt_subtitle_language_tests {
             .find(|pair| pair[0] == "--referer")
             .map(|pair| pair[1].as_str());
         assert_eq!(live_referer, Some("https://example.test/"));
-        assert!(!live.iter().any(|argument| argument.contains("token=secret")));
+        assert!(
+            !live
+                .iter()
+                .any(|argument| argument.contains("token=secret"))
+        );
     }
 }
 

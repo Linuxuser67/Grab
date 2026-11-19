@@ -15,7 +15,6 @@ use crate::window_rows::{
 use gettextrs::{gettext, ngettext};
 use gtk4::prelude::*;
 use libadwaita as adw;
-use std::cell::RefCell;
 use std::collections::HashMap;
 use std::rc::Rc;
 use std::sync::{LazyLock, Mutex};

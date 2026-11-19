@@ -1,7 +1,6 @@
 //! Shared UI lifetime and destination state for selection picker pages.
 
 use crate::download::DownloadManager;
-use gtk4::prelude::*;
 use libadwaita as adw;
 use std::cell::RefCell;
 use std::rc::Rc;

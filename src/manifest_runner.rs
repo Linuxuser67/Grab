@@ -83,7 +83,7 @@ const MAX_DASH_LIVE_SEGMENTS: usize = crate::manifest_types::MAX_MANIFEST_SEGMEN
 /// Bound for a serialized dynamic DASH resume index.
 const MAX_DASH_LIVE_STATE_BYTES: usize = 16 * 1024 * 1024;
 
-/// Immutable network and progress state shared by live manifest rendition updates.
+/// Shared network, concurrency, and progress-reporting state for live renditions.
 struct LiveManifestTransfer<'a> {
     client: &'a reqwest::Client,
     connections: usize,
@@ -92,6 +92,7 @@ struct LiveManifestTransfer<'a> {
 }
 
 /// Destination paths and row identity for one live DASH capture.
+#[derive(Clone, Copy)]
 struct DashLiveStorage<'a> {
     destination_dir: &'a Path,
     destination: &'a Path,
@@ -101,6 +102,7 @@ struct DashLiveStorage<'a> {
 }
 
 /// Selected live DASH representations for one capture.
+#[derive(Clone, Copy)]
 struct DashLiveSelection<'a> {
     representation_key: &'a str,
     audio_key: Option<&'a str>,
@@ -1938,7 +1940,12 @@ async fn prepare_live_hls_finalization(
     } = context;
 
     let capture = run_live_hls_tracks(LiveHlsTrackRun {
-        client,
+        transfer: LiveManifestTransfer {
+            client,
+            connections: concurrency,
+            tx,
+            downloaded,
+        },
         source_url,
         destination_dir: dest_dir,
         destination,
@@ -1949,9 +1956,6 @@ async fn prepare_live_hls_finalization(
         finish_only,
         video_dir,
         audio_dir,
-        connections: concurrency,
-        tx,
-        downloaded,
         guarded_child_hosts: &mut *guarded_child_hosts,
         abort: &mut *abort,
     })
@@ -2064,21 +2068,11 @@ async fn prepare_live_hls_finalization(
 
 /// Inputs for capturing live DASH tracks and preparing their local track files.
 struct ManifestLiveDashFinalization<'a> {
-    client: &'a reqwest::Client,
     source_url: &'a str,
-    dest_dir: &'a Path,
-    destination: &'a Path,
-    item_id: u64,
-    representation_key: &'a str,
-    audio_key: Option<&'a str>,
-    video_plan: Option<&'a DashRepresentationPlan>,
-    audio_plan: Option<&'a DashRepresentationPlan>,
-    video_dir: &'a Path,
-    audio_dir: &'a Path,
+    transfer: LiveManifestTransfer<'a>,
+    storage: DashLiveStorage<'a>,
+    selection: DashLiveSelection<'a>,
     staging: &'a Path,
-    concurrency: usize,
-    tx: &'a tokio::sync::mpsc::UnboundedSender<EngineMsg>,
-    downloaded: &'a Arc<AtomicU64>,
     guarded_child_hosts: &'a mut crate::download_net::PublicResolutionSet,
     abort: &'a mut tokio::sync::oneshot::Receiver<crate::video::StopIntent>,
 }
@@ -2088,47 +2082,20 @@ async fn prepare_live_dash_finalization(
     context: ManifestLiveDashFinalization<'_>,
 ) -> Result<LiveCapturePreparation, ManifestRunError> {
     let ManifestLiveDashFinalization {
-        client,
         source_url,
-        dest_dir,
-        destination,
-        item_id,
-        representation_key,
-        audio_key,
-        video_plan,
-        audio_plan,
-        video_dir,
-        audio_dir,
+        transfer,
+        storage,
+        selection,
         staging,
-        concurrency,
-        tx,
-        downloaded,
         guarded_child_hosts,
         abort,
     } = context;
 
-    let transfer = LiveManifestTransfer {
-        client,
-        connections: concurrency,
-        tx,
-        downloaded,
-    };
     let capture = run_live_dash_tracks(
         &transfer,
         source_url,
-        DashLiveStorage {
-            destination_dir: dest_dir,
-            destination,
-            item_id,
-            video_dir,
-            audio_dir,
-        },
-        DashLiveSelection {
-            representation_key,
-            audio_key,
-            video_plan,
-            audio_plan,
-        },
+        storage,
+        selection,
         guarded_child_hosts,
         abort,
     )
@@ -2168,13 +2135,13 @@ async fn prepare_live_dash_finalization(
         // ownership record are still available in XDG staging.
         crate::manifest_destination::remove_owned_part_async(
             staging.to_path_buf(),
-            dest_dir.to_path_buf(),
-            item_id,
+            storage.destination_dir.to_path_buf(),
+            storage.item_id,
             TrackKind::Audio,
         )
         .await
         .map_err(ManifestRunError::Failed)?;
-        remove_regular_file_if_present(&audio_dir.join(DASH_LIVE_STATE_NAME))
+        remove_regular_file_if_present(&storage.audio_dir.join(DASH_LIVE_STATE_NAME))
             .await
             .map_err(ManifestRunError::Failed)?;
         false
@@ -2187,20 +2154,20 @@ async fn prepare_live_dash_finalization(
     };
 
     dash_live::ensure_live_dash_destination_parts(
-        representation_key,
-        audio_key,
-        video_dir,
-        audio_dir,
-        destination,
-        item_id,
+        selection.representation_key,
+        selection.audio_key,
+        storage.video_dir,
+        storage.audio_dir,
+        storage.destination,
+        storage.item_id,
         has_audio,
     )
     .await?;
 
-    ensure_live_finish_marker(staging, downloaded.load(Ordering::Relaxed))
+    ensure_live_finish_marker(staging, transfer.downloaded.load(Ordering::Relaxed))
         .await
         .map_err(ManifestRunError::Failed)?;
-    tx.send(EngineMsg::LiveFinalizing).ok();
+    transfer.tx.send(EngineMsg::LiveFinalizing).ok();
 
     Ok(LiveCapturePreparation::Ready {
         has_audio,
@@ -2350,21 +2317,27 @@ pub(crate) async fn run_manifest_download(
             }
         };
         match prepare_live_dash_finalization(ManifestLiveDashFinalization {
-            client: &client,
             source_url: &job.source.url,
-            dest_dir: &dest_dir,
-            destination: &job.dest,
-            item_id: job.item_id,
-            representation_key: job.source.representation_key.as_str(),
-            audio_key: job.source.audio_key.as_deref(),
-            video_plan,
-            audio_plan,
-            video_dir: &video_dir,
-            audio_dir: &audio_dir,
+            transfer: LiveManifestTransfer {
+                client: &client,
+                connections: concurrency,
+                tx: &tx,
+                downloaded: &downloaded,
+            },
+            storage: DashLiveStorage {
+                destination_dir: &dest_dir,
+                destination: &job.dest,
+                item_id: job.item_id,
+                video_dir: &video_dir,
+                audio_dir: &audio_dir,
+            },
+            selection: DashLiveSelection {
+                representation_key: job.source.representation_key.as_str(),
+                audio_key: job.source.audio_key.as_deref(),
+                video_plan,
+                audio_plan,
+            },
             staging: &staging,
-            concurrency,
-            tx: &tx,
-            downloaded: &downloaded,
             guarded_child_hosts: &mut guarded_child_hosts,
             abort: &mut abort,
         })

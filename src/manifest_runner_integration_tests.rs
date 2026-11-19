@@ -1299,7 +1299,6 @@ async fn saved_live_hls_capture_finalizes_without_contacting_the_origin() {
     let mut guarded_child_hosts = crate::download_net::PublicResolutionSet::default();
     let (_stop_tx, mut abort) = tokio::sync::oneshot::channel();
     let outcome = run_live_hls_tracks(LiveHlsTrackRun {
-        client: &client,
         source_url: "https://origin.example.test/master.m3u8",
         destination_dir: root.path(),
         destination: &destination,
@@ -1310,9 +1309,12 @@ async fn saved_live_hls_capture_finalizes_without_contacting_the_origin() {
         finish_only: false,
         video_dir: &video_dir,
         audio_dir: &audio_dir,
-        connections: 1,
-        tx: &tx,
-        downloaded: &downloaded,
+        transfer: LiveManifestTransfer {
+            client: &client,
+            concurrency: 1,
+            tx: &tx,
+            downloaded: &downloaded,
+        },
         guarded_child_hosts: &mut guarded_child_hosts,
         abort: &mut abort,
     })
@@ -1329,7 +1331,6 @@ async fn saved_live_hls_capture_finalizes_without_contacting_the_origin() {
 
     let (_finish_tx, mut finish_abort) = tokio::sync::oneshot::channel();
     let finish_outcome = run_live_hls_tracks(LiveHlsTrackRun {
-        client: &client,
         source_url: "https://origin.example.test/master.m3u8",
         destination_dir: root.path(),
         destination: &destination,
@@ -1340,9 +1341,12 @@ async fn saved_live_hls_capture_finalizes_without_contacting_the_origin() {
         finish_only: true,
         video_dir: &video_dir,
         audio_dir: &audio_dir,
-        connections: 1,
-        tx: &tx,
-        downloaded: &downloaded,
+        transfer: LiveManifestTransfer {
+            client: &client,
+            concurrency: 1,
+            tx: &tx,
+            downloaded: &downloaded,
+        },
         guarded_child_hosts: &mut guarded_child_hosts,
         abort: &mut finish_abort,
     })
@@ -1421,7 +1425,7 @@ async fn live_hls_snapshots_append_only_new_media_sequences_and_resume() {
         apply_live_hls_snapshot(
             &LiveManifestTransfer {
                 client: &client,
-                connections: 2,
+                concurrency: 2,
                 tx: &tx,
                 downloaded: &downloaded,
             },
@@ -1466,7 +1470,7 @@ async fn live_hls_snapshots_append_only_new_media_sequences_and_resume() {
         apply_live_hls_snapshot(
             &LiveManifestTransfer {
                 client: &client,
-                connections: 2,
+                concurrency: 2,
                 tx: &tx,
                 downloaded: &downloaded,
             },
@@ -1594,7 +1598,7 @@ async fn llhls_live_capture_reuses_parts_when_complete_parent_segments_arrive() 
         apply_live_hls_snapshot(
             &LiveManifestTransfer {
                 client: &client,
-                connections: 2,
+                concurrency: 2,
                 tx: &tx,
                 downloaded: &downloaded,
             },
@@ -1620,7 +1624,7 @@ async fn llhls_live_capture_reuses_parts_when_complete_parent_segments_arrive() 
         apply_live_hls_snapshot(
             &LiveManifestTransfer {
                 client: &client,
-                connections: 2,
+                concurrency: 2,
                 tx: &tx,
                 downloaded: &downloaded,
             },
@@ -1709,7 +1713,7 @@ async fn llhls_mapless_parts_are_staged_without_packet_sniffing() {
         apply_live_hls_snapshot(
             &LiveManifestTransfer {
                 client: &client,
-                connections: 1,
+                concurrency: 1,
                 tx: &tx,
                 downloaded: &downloaded,
             },
@@ -1777,7 +1781,7 @@ async fn llhls_mapless_non_transport_stream_part_is_staged_for_ffmpeg() {
         apply_live_hls_snapshot(
             &LiveManifestTransfer {
                 client: &client,
-                connections: 1,
+                concurrency: 1,
                 tx: &tx,
                 downloaded: &downloaded,
             },
@@ -1921,7 +1925,7 @@ async fn live_hls_accumulated_playlist_finalizes_to_a_playable_mp4() {
         apply_live_hls_snapshot(
             &LiveManifestTransfer {
                 client: &client,
-                connections: 4,
+                concurrency: 4,
                 tx: &tx,
                 downloaded: &downloaded,
             },
@@ -1938,7 +1942,7 @@ async fn live_hls_accumulated_playlist_finalizes_to_a_playable_mp4() {
         apply_live_hls_snapshot(
             &LiveManifestTransfer {
                 client: &client,
-                connections: 4,
+                concurrency: 4,
                 tx: &tx,
                 downloaded: &downloaded,
             },
@@ -2018,7 +2022,7 @@ async fn live_hls_sequence_gap_preserves_already_committed_media() {
     let outcome = apply_live_hls_snapshot(
         &LiveManifestTransfer {
             client: &client,
-            connections: 1,
+            concurrency: 1,
             tx: &tx,
             downloaded: &downloaded,
         },
@@ -2086,7 +2090,7 @@ async fn live_hls_pause_keeps_the_last_committed_window() {
         apply_live_hls_snapshot(
             &LiveManifestTransfer {
                 client: &client,
-                connections: 1,
+                concurrency: 1,
                 tx: &tx,
                 downloaded: &downloaded,
             },
@@ -2109,7 +2113,7 @@ async fn live_hls_pause_keeps_the_last_committed_window() {
         apply_live_hls_snapshot(
             &LiveManifestTransfer {
                 client: &client,
-                connections: 1,
+                concurrency: 1,
                 tx: &tx,
                 downloaded: &downloaded,
             },
@@ -2143,7 +2147,6 @@ async fn live_hls_pause_keeps_the_last_committed_window() {
         .expect("queue finish after pausing the committed capture");
     let mut guarded_child_hosts = crate::download_net::PublicResolutionSet::default();
     let finished = run_live_hls_tracks(LiveHlsTrackRun {
-        client: &client,
         source_url: "https://origin.example.test/live.m3u8",
         destination_dir: root.path(),
         destination: &destination,
@@ -2154,9 +2157,12 @@ async fn live_hls_pause_keeps_the_last_committed_window() {
         finish_only: false,
         video_dir: &video_dir,
         audio_dir: &audio_dir,
-        connections: 1,
-        tx: &tx,
-        downloaded: &downloaded,
+        transfer: LiveManifestTransfer {
+            client: &client,
+            concurrency: 1,
+            tx: &tx,
+            downloaded: &downloaded,
+        },
         guarded_child_hosts: &mut guarded_child_hosts,
         abort: &mut finish_abort,
     })
@@ -2225,7 +2231,6 @@ async fn live_hls_runner_returns_paused_without_finalizing() {
     let mut guarded_child_hosts = crate::download_net::PublicResolutionSet::default();
 
     let outcome = run_live_hls_tracks(LiveHlsTrackRun {
-        client: &client,
         source_url: "https://origin.example.test/live.m3u8",
         destination_dir: root.path(),
         destination: root.path(),
@@ -2236,9 +2241,12 @@ async fn live_hls_runner_returns_paused_without_finalizing() {
         finish_only: false,
         video_dir: &video_dir,
         audio_dir: &audio_dir,
-        connections: 1,
-        tx: &tx,
-        downloaded: &downloaded,
+        transfer: LiveManifestTransfer {
+            client: &client,
+            concurrency: 1,
+            tx: &tx,
+            downloaded: &downloaded,
+        },
         guarded_child_hosts: &mut guarded_child_hosts,
         abort: &mut abort,
     })
@@ -2279,7 +2287,7 @@ async fn live_hls_pause_does_not_commit_an_interrupted_window() {
     let stopped = apply_live_hls_snapshot(
         &LiveManifestTransfer {
             client: &client,
-            connections: 1,
+            concurrency: 1,
             tx: &tx,
             downloaded: &downloaded,
         },
@@ -2435,7 +2443,7 @@ async fn dynamic_dash_snapshot_resumes_overlapping_window_and_repairs_missing_se
         apply_dash_live_snapshot(
             &LiveManifestTransfer {
                 client: &client,
-                connections: 3,
+                concurrency: 3,
                 tx: &tx,
                 downloaded: &downloaded,
             },
@@ -2477,7 +2485,7 @@ async fn dynamic_dash_snapshot_resumes_overlapping_window_and_repairs_missing_se
         apply_dash_live_snapshot(
             &LiveManifestTransfer {
                 client: &client,
-                connections: 3,
+                concurrency: 3,
                 tx: &tx,
                 downloaded: &downloaded,
             },
@@ -2666,7 +2674,7 @@ async fn low_latency_dash_fetches_initialization_then_oldest_segments_with_one_r
         let outcome = apply_dash_live_snapshot(
             &LiveManifestTransfer {
                 client: &client,
-                connections: 8,
+                concurrency: 8,
                 tx: &tx,
                 downloaded: &downloaded,
             },
@@ -2807,7 +2815,7 @@ async fn low_latency_dash_does_not_commit_interrupted_tail_and_refetches_on_resu
         apply_dash_live_snapshot(
             &LiveManifestTransfer {
                 client: &client,
-                connections: 8,
+                concurrency: 8,
                 tx: &tx,
                 downloaded: &downloaded,
             },
@@ -2850,7 +2858,7 @@ async fn low_latency_dash_does_not_commit_interrupted_tail_and_refetches_on_resu
         let outcome = apply_dash_live_snapshot(
             &LiveManifestTransfer {
                 client: &attempt_client,
-                connections: 8,
+                concurrency: 8,
                 tx: &attempt_tx,
                 downloaded: &attempt_downloaded,
             },
@@ -2939,7 +2947,7 @@ async fn low_latency_dash_does_not_commit_interrupted_tail_and_refetches_on_resu
         apply_dash_live_snapshot(
             &LiveManifestTransfer {
                 client: &client,
-                connections: 8,
+                concurrency: 8,
                 tx: &tx,
                 downloaded: &downloaded,
             },
@@ -3962,7 +3970,7 @@ async fn dynamic_dash_fmp4_fixture_runs_live_capture_and_finalizes_playable_mp4(
     let capture = run_live_dash_tracks(
         &LiveManifestTransfer {
             client: &client,
-            connections: 3,
+            concurrency: 3,
             tx: &tx,
             downloaded: &downloaded,
         },
@@ -4101,7 +4109,7 @@ async fn dynamic_dash_live_runner_pauses_and_retains_committed_window() {
     let capture = run_live_dash_tracks(
         &LiveManifestTransfer {
             client: &client,
-            connections: 3,
+            concurrency: 3,
             tx: &tx,
             downloaded: &downloaded,
         },
@@ -4162,7 +4170,7 @@ async fn dynamic_dash_live_runner_pauses_and_retains_committed_window() {
     let finished = run_live_dash_tracks(
         &LiveManifestTransfer {
             client: &client,
-            connections: 3,
+            concurrency: 3,
             tx: &tx,
             downloaded: &downloaded,
         },
@@ -4255,7 +4263,7 @@ async fn live_hls_snapshot_appends_fetched_mpegts_fragments_to_visible_destinati
         apply_live_hls_snapshot(
             &LiveManifestTransfer {
                 client: &client,
-                connections: 2,
+                concurrency: 2,
                 tx: &tx,
                 downloaded: &downloaded,
             },

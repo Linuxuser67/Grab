@@ -415,7 +415,7 @@ pub(super) async fn apply_live_hls_snapshot(
     other_rendition_bytes: u64,
 ) -> Result<LiveHlsSnapshotOutcome, ManifestRunError> {
     let client = transfer.client;
-    let connections = transfer.connections;
+    let connections = transfer.concurrency;
     let tx = transfer.tx;
     let downloaded = transfer.downloaded;
     if plan.is_live == plan.end_list {
@@ -991,7 +991,7 @@ async fn finish_after_live_hls_continuity_loss(
 
 /// Inputs for polling and finalizing one live HLS rendition pair.
 pub(super) struct LiveHlsTrackRun<'a> {
-    pub(super) client: &'a reqwest::Client,
+    pub(super) transfer: super::LiveManifestTransfer<'a>,
     pub(super) source_url: &'a str,
     pub(super) destination_dir: &'a Path,
     pub(super) destination: &'a Path,
@@ -1002,9 +1002,6 @@ pub(super) struct LiveHlsTrackRun<'a> {
     pub(super) finish_only: bool,
     pub(super) video_dir: &'a Path,
     pub(super) audio_dir: &'a Path,
-    pub(super) connections: usize,
-    pub(super) tx: &'a tokio::sync::mpsc::UnboundedSender<EngineMsg>,
-    pub(super) downloaded: &'a Arc<AtomicU64>,
     pub(super) guarded_child_hosts: &'a mut crate::download_net::PublicResolutionSet,
     pub(super) abort: &'a mut tokio::sync::oneshot::Receiver<crate::video::StopIntent>,
 }
@@ -1013,7 +1010,7 @@ pub(super) async fn run_live_hls_tracks(
     context: LiveHlsTrackRun<'_>,
 ) -> Result<LiveHlsCapture, ManifestRunError> {
     let LiveHlsTrackRun {
-        client,
+        transfer,
         source_url,
         destination_dir,
         destination,
@@ -1024,18 +1021,10 @@ pub(super) async fn run_live_hls_tracks(
         finish_only,
         video_dir,
         audio_dir,
-        connections,
-        tx,
-        downloaded,
         guarded_child_hosts,
         abort,
     } = context;
-    let transfer = LiveManifestTransfer {
-        client,
-        connections,
-        tx,
-        downloaded,
-    };
+    let super::LiveManifestTransfer { tx, downloaded, .. } = transfer;
     let mut video = load_live_hls_track(video_plan, video_dir).await?;
     let mut audio = match audio_plan {
         Some(plan) => Some(load_live_hls_track(plan, audio_dir).await?),
@@ -1407,7 +1396,7 @@ mod destination_part_tests {
 
         let transfer = LiveManifestTransfer {
             client: &client,
-            connections: 1,
+            concurrency: 1,
             tx: &tx,
             downloaded: &downloaded,
         };

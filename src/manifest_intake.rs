@@ -2553,7 +2553,8 @@ segment.ts
                 "https://cache-preview.example.test/master.m3u8?f=418899&srv=server&i=0.4&sp=500&p1=one&p2=two&asn=327934",
                 None,
                 None,
-             None)
+                None
+            )
             .is_some(),
             "unknown query fields are not classified as signatures at URL-key creation"
         );

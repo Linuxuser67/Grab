@@ -501,9 +501,7 @@ mod tests {
             .redirect(reqwest::redirect::Policy::none())
             .build()
             .expect("build fixture client");
-        let url = format!(
-            "http://{address}/opaque/resource?X-Amz-Signature=method-bound",
-        );
+        let url = format!("http://{address}/opaque/resource?X-Amz-Signature=method-bound",);
         let result = super::inspect_response_headers(&client, &url, true)
             .await
             .expect("inspect rejected HEAD response");

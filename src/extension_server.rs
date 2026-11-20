@@ -90,6 +90,7 @@ const MAX_PENDING_CONFIRMATIONS: usize = 8;
 const SECRET_LEN: usize = 32;
 const SERVER_CONTEXT: &[u8] = b"grab-server\0";
 const CLIENT_CONTEXT: &[u8] = b"grab-client\0";
+const HLS_INSPECTION_CONTEXT: &[u8] = b"grab-inspect-hls\0";
 const HANDOFF_CLOCK_SKEW_MS: u64 = 120_000;
 const MAX_RECENT_HANDOFF_NONCES: usize = 4096;
 type HmacSha256 = Hmac<Sha256>;
@@ -219,10 +220,20 @@ impl Pairing {
         )
     }
 
-    /// Constant-time check of an `X-Grab-Token` over the raw request body.
+    /// Constant-time check of an `X-Grab-Token` over the standard handoff context.
     fn verify_token(&self, body: &[u8], token_hex: &str) -> bool {
+        self.verify_token_with_context(CLIENT_CONTEXT, body, token_hex)
+    }
+
+    /// Verify a request under an endpoint-specific HMAC context.
+    fn verify_token_with_context(
+        &self,
+        context: &[u8],
+        body: &[u8],
+        token_hex: &str,
+    ) -> bool {
         hex_decode(token_hex)
-            .is_some_and(|tag| self.mac(CLIENT_CONTEXT, body).verify_slice(&tag).is_ok())
+            .is_some_and(|tag| self.mac(context, body).verify_slice(&tag).is_ok())
     }
 }
 
@@ -1647,6 +1658,7 @@ fn add_hls_inspection_child_key(base: &url::Url, reference: &str, output: &mut H
 }
 
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct InspectHlsRequest {
     url: String,
     timestamp_ms: u64,
@@ -1688,7 +1700,7 @@ async fn handle_inspect_hls(
     else {
         return StatusCode::FORBIDDEN.into_response();
     };
-    if !pairing.verify_token(&body, token) {
+    if !pairing.verify_token_with_context(HLS_INSPECTION_CONTEXT, &body, token) {
         return StatusCode::FORBIDDEN.into_response();
     }
     let request: InspectHlsRequest = match serde_json::from_slice(&body) {
@@ -2077,10 +2089,20 @@ mod tests {
         Server { port, rx }
     }
 
-    /// `X-Grab-Token` value a paired extension would send for `body`.
-    fn token(body: &str) -> String {
-        let mac = Pairing::from_secret(TEST_SECRET).mac(CLIENT_CONTEXT, body.as_bytes());
+    /// `X-Grab-Token` value signed for the supplied request context.
+    fn token_with_context(body: &str, context: &[u8]) -> String {
+        let mac = Pairing::from_secret(TEST_SECRET).mac(context, body.as_bytes());
         hex_encode(&mac.finalize().into_bytes())
+    }
+
+    /// `/add` request token, retained for ordinary handoff tests.
+    fn token(body: &str) -> String {
+        token_with_context(body, CLIENT_CONTEXT)
+    }
+
+    /// `/inspect-hls` request token.
+    fn hls_token(body: &str) -> String {
+        token_with_context(body, HLS_INSPECTION_CONTEXT)
     }
 
     /// One request on a fresh connection; returns the raw response.
@@ -2185,6 +2207,51 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn hls_inspection_rejects_the_download_hmac_context() {
+        let mut srv = start(4).await;
+        let host = format!("127.0.0.1:{}", srv.port);
+        let body = serde_json::json!({
+            "url": "https://example.test/master.m3u8",
+            "timestamp_ms": unix_time_ms().expect("system clock"),
+            "nonce": format!("{:032x}", fresh_test_nonce())
+        })
+        .to_string();
+        let token_value = token(&body);
+        let headers = [
+            ("Host", host.as_str()),
+            JSON,
+            ("X-Grab-Token", token_value.as_str()),
+        ];
+        let response = request_with_target(srv.port, "/inspect-hls", &headers, &body).await;
+
+        assert_eq!(status(&response), "403", "{response}");
+        assert!(srv.rx.try_recv().is_err());
+    }
+
+    #[tokio::test]
+    async fn hls_inspection_rejects_unknown_request_fields() {
+        let mut srv = start(4).await;
+        let host = format!("127.0.0.1:{}", srv.port);
+        let body = serde_json::json!({
+            "url": "https://example.test/master.m3u8",
+            "timestamp_ms": unix_time_ms().expect("system clock"),
+            "nonce": format!("{:032x}", fresh_test_nonce()),
+            "cookies": []
+        })
+        .to_string();
+        let token_value = hls_token(&body);
+        let headers = [
+            ("Host", host.as_str()),
+            JSON,
+            ("X-Grab-Token", token_value.as_str()),
+        ];
+        let response = request_with_target(srv.port, "/inspect-hls", &headers, &body).await;
+
+        assert_eq!(status(&response), "422", "{response}");
+        assert!(srv.rx.try_recv().is_err());
+    }
+
+    #[tokio::test]
     async fn hls_inspection_fails_closed_for_private_literal_hosts() {
         let mut srv = start(4).await;
         let host = format!("127.0.0.1:{}", srv.port);
@@ -2194,7 +2261,7 @@ mod tests {
             "nonce": format!("{:032x}", fresh_test_nonce())
         })
         .to_string();
-        let token_value = token(&body);
+        let token_value = hls_token(&body);
         let headers = [
             ("Host", host.as_str()),
             JSON,
@@ -2232,7 +2299,7 @@ mod tests {
                 "nonce": format!("{:032x}", fresh_test_nonce())
             })
             .to_string();
-            let token_value = token(&body);
+            let token_value = hls_token(&body);
             let headers = [
                 ("Host", host.as_str()),
                 JSON,

@@ -5579,7 +5579,7 @@ fn segmented_destination_mutation_stops_download(mutation: DestinationMutation) 
         .arg(&ranges_log)
         // The 0-0 capability probe stays fast; each actual range body stalls
         // before its first byte so ownership is checked while workers are idle.
-        .args(["0.05", "", "normal", "\"test-etag-123\"", "8"]);
+        .args(["0.05", "", "normal", "\"test-etag-123\"", "8", "threaded"]);
     let server = Rc::new(RefCell::new(
         server_command
             .stdout(std::process::Stdio::null())

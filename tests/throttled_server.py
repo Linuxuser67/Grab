@@ -9,7 +9,7 @@ Usage: throttled_server.py PORT FILE RANGELOG [SLEEP] [DISPOSITION] [MODE] [ETAG
 """
 import sys
 import time
-from http.server import BaseHTTPRequestHandler, HTTPServer
+from http.server import BaseHTTPRequestHandler, HTTPServer, ThreadingHTTPServer
 
 with open(sys.argv[2], "rb") as f:
     DATA = f.read()
@@ -104,4 +104,5 @@ class H(BaseHTTPRequestHandler):
         pass
 
 
-HTTPServer(("127.0.0.1", int(sys.argv[1])), H).serve_forever()
+server = ThreadingHTTPServer if len(sys.argv) > 9 and sys.argv[9] == "threaded" else HTTPServer
+server(("127.0.0.1", int(sys.argv[1])), H).serve_forever()

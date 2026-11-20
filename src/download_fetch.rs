@@ -605,8 +605,24 @@ async fn attempt_multi(
             // triggered by visible progress has a safe bitmap.
             let durable_batch_bytes = piece_len(total).saturating_mul(4);
             let mut rate = live_rate_limit();
+            let mut destination_check = tokio::time::interval(DESTINATION_CHECK_INTERVAL);
+            destination_check.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+            // Consume interval's immediate first tick; subsequent checks are spaced
+            // by the full interval even when the writer is otherwise idle.
+            destination_check.tick().await;
             use tokio::io::{AsyncSeekExt as _, AsyncWriteExt as _};
-            while let Some((offset, bytes, idx)) = wrx.recv().await {
+            loop {
+                let next = tokio::select! {
+                    biased;
+                    _ = destination_check.tick() => {
+                        claim.verify_opened_file(&dest, &file, "downloaded file").await?;
+                        continue;
+                    }
+                    next = wrx.recv() => next,
+                };
+                let Some((offset, bytes, idx)) = next else {
+                    break;
+                };
                 file.seek(std::io::SeekFrom::Start(offset))
                     .await
                     .map_err(|error| {
@@ -619,7 +635,17 @@ async fn attempt_multi(
                 written += bytes.len() as u64;
                 unsynced_bytes = unsynced_bytes.saturating_add(bytes.len() as u64);
                 completed_indices.push(idx);
-                pace_chunk(&mut paced, pace_start, rate, bytes.len()).await;
+                let pacing = pace_chunk(&mut paced, pace_start, rate, bytes.len());
+                tokio::pin!(pacing);
+                loop {
+                    tokio::select! {
+                        biased;
+                        _ = destination_check.tick() => {
+                            claim.verify_opened_file(&dest, &file, "downloaded file").await?;
+                        }
+                        () = &mut pacing => break,
+                    }
+                }
                 if last_rate_update.elapsed() >= Duration::from_millis(50) {
                     rate = live_rate_limit();
                     last_rate_update = Instant::now();
@@ -664,8 +690,22 @@ async fn attempt_multi(
             Ok::<u64, AttemptFail>(written)
         }
     };
-    let (wres, _) = tokio::join!(writer, futures_util::future::join_all(workers));
+    let mut worker_futures = futures_util::future::join_all(workers);
+    tokio::pin!(worker_futures);
+    tokio::pin!(writer);
+    // The writer owns destination checks. A writer failure must drop in-flight
+    // range requests instead of waiting for their body timeouts to expire.
+    let writer_result = tokio::select! {
+        biased;
+        result = &mut writer => Some(result),
+        _ = &mut worker_futures => None,
+    };
+    let wres = match writer_result {
+        Some(result) => result,
+        None => (&mut writer).await,
+    };
     let written = wres?;
+    worker_futures.await;
     if let Some(problem) = lock_recover(&destination_problem).take() {
         return Err(AttemptFail::Destination(problem));
     }

@@ -88,7 +88,9 @@ class H(BaseHTTPRequestHandler):
         if DISPOSITION:
             self.send_header("Content-Disposition", DISPOSITION)
         self.end_headers()
-        if INITIAL_BODY_DELAY:
+        # Keep the one-byte range-capability probe fast; delay real bodies so
+        # segmented ownership tests can mutate the destination before any piece arrives.
+        if INITIAL_BODY_DELAY and not (is_range and start == 0 and end == 0):
             time.sleep(INITIAL_BODY_DELAY)
         try:
             for i in range(0, len(body), 8192):

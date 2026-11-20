@@ -690,7 +690,7 @@ async fn attempt_multi(
             Ok::<u64, AttemptFail>(written)
         }
     };
-    let mut worker_futures = futures_util::future::join_all(workers);
+    let worker_futures = futures_util::future::join_all(workers);
     tokio::pin!(worker_futures);
     tokio::pin!(writer);
     // The writer owns destination checks. A writer failure must drop in-flight

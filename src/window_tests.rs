@@ -712,8 +712,8 @@ fn status_views_use_gnome_adaptive_view_switcher() {
         drain_gtk_events();
         assert_eq!(
             [search_clamp.margin_top(), search_clamp.margin_bottom()],
-            [12, 12],
-            "the expanded search surface retains 12 px vertical HIG spacing"
+            [12, 0],
+            "only the top margin is added; GtkSearchBar already spaces the entry below"
         );
         assert!(
             search_bar.width() <= 600,

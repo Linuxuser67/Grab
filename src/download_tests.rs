@@ -5549,6 +5549,211 @@ fn replacing_the_destination_during_a_stalled_body_stops_single_stream_download(
     destination_mutation_stops_a_single_stream_download(DestinationMutation::Replace, true);
 }
 
+fn segmented_destination_mutation_stops_download(mutation: DestinationMutation) {
+    let (_lock, _loop) = test_locks();
+    let suffix = match mutation {
+        DestinationMutation::Delete => "segmented-destgone",
+        DestinationMutation::Replace => "segmented-destreplaced",
+    };
+    let dir = std::env::temp_dir().join(format!("grab-{suffix}-{}", std::process::id()));
+    let srv = dir.join("srv");
+    let dl = dir.join("dl");
+    std::fs::create_dir_all(&srv).unwrap();
+    std::fs::create_dir_all(&dl).unwrap();
+    // At 16 MiB and four connections, Fresh must enter the segmented path.
+    let payload: Vec<u8> = (0..(16 * 1024 * 1024u32))
+        .map(|index| (index % 251) as u8)
+        .collect();
+    std::fs::write(srv.join("t.bin"), &payload).unwrap();
+
+    let port = test_port(62);
+    let ranges_log = dir.join("ranges.log");
+    let mut server_command = std::process::Command::new("python3");
+    server_command
+        .arg(format!(
+            "{}/tests/throttled_server.py",
+            env!("CARGO_MANIFEST_DIR")
+        ))
+        .arg(port.to_string())
+        .arg(srv.join("t.bin"))
+        .arg(&ranges_log)
+        // The 0-0 capability probe stays fast; each actual range body stalls
+        // before its first byte so ownership is checked while workers are idle.
+        .args(["0.05", "", "normal", "\"test-etag-123\"", "8", "threaded"]);
+    let server = Rc::new(RefCell::new(
+        server_command
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .expect("python3 range server"),
+    ));
+    let mut ready = false;
+    for _ in 0..100 {
+        if std::net::TcpStream::connect(format!("127.0.0.1:{port}")).is_ok() {
+            ready = true;
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(100));
+    }
+    if !ready {
+        abort(&server, "segmented HTTP server did not listen");
+    }
+
+    let url = format!("http://127.0.0.1:{port}/t.bin");
+    let file = dl.join("t.bin");
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+    let ctx = FetchCtx {
+        client: http_client().expect("http client").clone(),
+        url,
+        dest: file.clone(),
+        opts: DownloadOptions {
+            ..Default::default()
+        },
+        cookies: None,
+        user_agent: crate::download_net::DEFAULT_USER_AGENT.to_string(),
+        referer: None,
+        timeout: Duration::from_secs(30),
+        tx,
+        if_range: std::sync::Arc::new(std::sync::OnceLock::new()),
+    };
+
+    let expected_problem = match mutation {
+        DestinationMutation::Delete => crate::download_fetch::DestinationProblem::Disappeared,
+        DestinationMutation::Replace => crate::download_fetch::DestinationProblem::Replaced,
+    };
+    tokio_rt().block_on(async {
+        let mut task = tokio::spawn(run_download(ctx, 4, StartMode::Fresh));
+        let destination_deadline = tokio::time::Instant::now() + Duration::from_secs(20);
+        let mut segments_initialized = false;
+        while !file.exists() || !segments_initialized {
+            while let Ok(message) = rx.try_recv() {
+                if let EngineMsg::SegmentsInit { ack, .. } = message {
+                    if ack.try_send(()).is_err() {
+                        abort(
+                            &server,
+                            "segmented writer did not accept its initialization ack",
+                        );
+                    }
+                    segments_initialized = true;
+                }
+            }
+            if tokio::time::Instant::now() >= destination_deadline {
+                abort(&server, "segmented destination was never created");
+            }
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
+        if !segments_initialized {
+            abort(
+                &server,
+                "segmented path did not initialize its resume bitmap",
+            );
+        }
+
+        // The second logged request is a real piece fetch (the first is the
+        // bytes=0-0 probe). Wait until it is inside the fixture's body delay.
+        let request_deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+        loop {
+            let request_count = std::fs::read_to_string(&ranges_log)
+                .map(|log| log.lines().count())
+                .unwrap_or(0);
+            if request_count >= 2 {
+                break;
+            }
+            if tokio::time::Instant::now() >= request_deadline {
+                abort(
+                    &server,
+                    "no segmented range request reached the stalled response",
+                );
+            }
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
+        tokio::time::sleep(Duration::from_millis(250)).await;
+
+        match mutation {
+            DestinationMutation::Delete => {
+                std::fs::remove_file(&file).unwrap_or_else(|error| {
+                    abort(
+                        &server,
+                        &format!("could not delete segmented destination: {error}"),
+                    )
+                });
+            }
+            DestinationMutation::Replace => {
+                let original = std::fs::metadata(&file).unwrap_or_else(|error| {
+                    abort(&server, &format!("inspect segmented destination: {error}"))
+                });
+                let replacement = dl.join("replacement.tmp");
+                const REPLACEMENT_CONTENTS: &[u8] = b"replacement inode must remain untouched";
+                std::fs::write(&replacement, REPLACEMENT_CONTENTS)
+                    .unwrap_or_else(|error| abort(&server, &format!("write replacement: {error}")));
+                let replacement_metadata =
+                    std::fs::metadata(&replacement).unwrap_or_else(|error| {
+                        abort(&server, &format!("inspect replacement: {error}"))
+                    });
+                use std::os::unix::fs::MetadataExt as _;
+                if original.ino() == replacement_metadata.ino() {
+                    abort(&server, "replacement must use a different inode");
+                }
+                std::fs::rename(&replacement, &file).unwrap_or_else(|error| {
+                    abort(&server, &format!("replace segmented destination: {error}"))
+                });
+            }
+        }
+
+        match tokio::time::timeout(Duration::from_secs(5), &mut task).await {
+            Ok(Ok(())) => {}
+            Ok(Err(error)) => abort(
+                &server,
+                &format!("segmented download task panicked: {error}"),
+            ),
+            Err(_) => abort(
+                &server,
+                "segmented download did not stop promptly after destination ownership was lost",
+            ),
+        }
+
+        let mut failure = None;
+        while let Ok(message) = rx.try_recv() {
+            if let EngineMsg::FailedDestination(problem) = message {
+                failure = Some(problem);
+            }
+        }
+        if failure != Some(expected_problem) {
+            abort(
+                &server,
+                &format!("expected destination failure {expected_problem:?}, got {failure:?}"),
+            );
+        }
+        match mutation {
+            DestinationMutation::Delete => {
+                if file.exists() {
+                    abort(&server, "deleted segmented destination was recreated");
+                }
+            }
+            DestinationMutation::Replace => {
+                const REPLACEMENT_CONTENTS: &[u8] = b"replacement inode must remain untouched";
+                let replacement_is_unchanged = std::fs::read(&file)
+                    .is_ok_and(|contents| contents.as_slice() == REPLACEMENT_CONTENTS);
+                if !replacement_is_unchanged {
+                    abort(&server, "segmented writer modified the replacement inode");
+                }
+            }
+        }
+    });
+
+    cleanup(&server, &dir);
+}
+
+#[test]
+fn deleting_the_destination_during_a_stalled_segmented_body_stops_download() {
+    segmented_destination_mutation_stops_download(DestinationMutation::Delete);
+}
+
+#[test]
+fn replacing_the_destination_during_a_stalled_segmented_body_stops_download() {
+    segmented_destination_mutation_stops_download(DestinationMutation::Replace);
+}
+
 #[test]
 fn failed_download_reports_cause() {
     let (_lock, _loop) = test_locks();

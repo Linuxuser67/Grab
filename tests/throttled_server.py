@@ -9,7 +9,7 @@ Usage: throttled_server.py PORT FILE RANGELOG [SLEEP] [DISPOSITION] [MODE] [ETAG
 """
 import sys
 import time
-from http.server import BaseHTTPRequestHandler, HTTPServer
+from http.server import BaseHTTPRequestHandler, HTTPServer, ThreadingHTTPServer
 
 with open(sys.argv[2], "rb") as f:
     DATA = f.read()
@@ -88,7 +88,9 @@ class H(BaseHTTPRequestHandler):
         if DISPOSITION:
             self.send_header("Content-Disposition", DISPOSITION)
         self.end_headers()
-        if INITIAL_BODY_DELAY:
+        # Keep the one-byte range-capability probe fast; delay real bodies so
+        # segmented ownership tests can mutate the destination before any piece arrives.
+        if INITIAL_BODY_DELAY and not (is_range and start == 0 and end == 0):
             time.sleep(INITIAL_BODY_DELAY)
         try:
             for i in range(0, len(body), 8192):
@@ -102,4 +104,5 @@ class H(BaseHTTPRequestHandler):
         pass
 
 
-HTTPServer(("127.0.0.1", int(sys.argv[1])), H).serve_forever()
+server = ThreadingHTTPServer if len(sys.argv) > 9 and sys.argv[9] == "threaded" else HTTPServer
+server(("127.0.0.1", int(sys.argv[1])), H).serve_forever()

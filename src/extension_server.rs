@@ -2018,9 +2018,8 @@ mod tests {
 
     const TEST_SECRET: [u8; SECRET_LEN] = [7; SECRET_LEN];
 
-    fn rand_nonce_for_test() -> u64 {
-        static COUNTER: AtomicU64 = AtomicU64::new(1);
-        COUNTER.fetch_add(1, Ordering::Relaxed)
+    fn fresh_test_nonce() -> u128 {
+        rand::random()
     }
 
     fn test_pairing() -> Option<Arc<Pairing>> {
@@ -2189,7 +2188,7 @@ mod tests {
         let body = serde_json::json!({
             "url": "http://127.0.0.1:1234/master.m3u8",
             "timestamp_ms": unix_time_ms().expect("system clock"),
-            "nonce": format!("{:032x}", rand_nonce_for_test())
+            "nonce": format!("{:032x}", fresh_test_nonce())
         })
         .to_string();
         let token_value = token(&body);
@@ -2227,7 +2226,7 @@ mod tests {
             let body = serde_json::json!({
                 "url": url,
                 "timestamp_ms": unix_time_ms().expect("system clock"),
-                "nonce": format!("{:032x}", rand_nonce_for_test())
+                "nonce": format!("{:032x}", fresh_test_nonce())
             })
             .to_string();
             let token_value = token(&body);

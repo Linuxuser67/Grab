@@ -5453,7 +5453,10 @@ fn destination_mutation_stops_a_single_stream_download(
             }
         }
         if !destination_ready {
-            abort(&server, "download did not reach the destination mutation point");
+            abort(
+                &server,
+                "download did not reach the destination mutation point",
+            );
         }
 
         match mutation {

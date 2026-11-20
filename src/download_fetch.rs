@@ -913,23 +913,53 @@ async fn attempt_once(
         let mut paced: u64 = 0;
         let mut last_sent = Instant::now();
         let mut last_destination_check = Instant::now();
+        // Keep the read-inactivity deadline separate from pacing and writes:
+        // a quiet response must not postpone destination ownership checks,
+        // while throttling must not count as a stalled network read.
+        let mut read_wait_started = Instant::now();
         let mut rate = live_rate_limit();
         let mut empty_streak: u32 = 0;
         use tokio::io::AsyncWriteExt as _;
         loop {
-            let chunk = match tokio::time::timeout(ctx.timeout, stream.next()).await {
-                Ok(Some(Ok(chunk))) => chunk,
-                Ok(Some(Err(error))) => {
-                    return Err(AttemptFail::Retryable(format!(
-                        "Download interrupted: {error}"
-                    )));
+            // Keep one pending next() future across timer wake-ups so a body
+            // chunk is not lost when the destination-check timer fires first.
+            let chunk = {
+                let next_chunk = stream.next();
+                tokio::pin!(next_chunk);
+                loop {
+                    let until_destination_check =
+                        DESTINATION_CHECK_INTERVAL.saturating_sub(last_destination_check.elapsed());
+                    let until_stall = ctx.timeout.saturating_sub(read_wait_started.elapsed());
+                    match tokio::time::timeout(
+                        until_destination_check.min(until_stall),
+                        &mut next_chunk,
+                    )
+                    .await
+                    {
+                        Ok(Some(Ok(chunk))) => break Some(chunk),
+                        Ok(Some(Err(error))) => {
+                            return Err(AttemptFail::Retryable(format!(
+                                "Download interrupted: {error}"
+                            )));
+                        }
+                        Ok(None) => break None,
+                        Err(_) if read_wait_started.elapsed() >= ctx.timeout => {
+                            return Err(AttemptFail::Retryable(gettext(
+                                "Stalled connection timed out",
+                            )));
+                        }
+                        Err(_) => {
+                            // The body is still within its inactivity budget, but
+                            // the destination may have been removed while no chunk
+                            // arrived. Stop before the next write if ownership is lost.
+                            claim.verify(&ctx.dest).await?;
+                            last_destination_check = Instant::now();
+                        }
+                    }
                 }
-                Ok(None) => break,
-                Err(_) => {
-                    return Err(AttemptFail::Retryable(gettext(
-                        "Stalled connection timed out",
-                    )));
-                }
+            };
+            let Some(chunk) = chunk else {
+                break;
             };
             if chunk.is_empty() {
                 empty_streak += 1;
@@ -938,6 +968,7 @@ async fn attempt_once(
                         "Stalled connection timed out",
                     )));
                 }
+                read_wait_started = Instant::now();
                 continue;
             }
             empty_streak = 0;
@@ -959,6 +990,7 @@ async fn attempt_once(
                 ctx.tx.send(progress_msg(downloaded, total)).ok();
                 last_sent = Instant::now();
             }
+            read_wait_started = Instant::now();
         }
         file.flush()
             .await

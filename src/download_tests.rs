@@ -5370,14 +5370,19 @@ enum DestinationMutation {
     Replace,
 }
 
-fn destination_mutation_stops_a_single_stream_download(mutation: DestinationMutation) {
-    // 4 MB at the fixture's ~160 KB/s keeps the body open for ~24s, so a
-    // transfer that only verifies after sync_all would still be writing when
-    // the test's 10s deadline expires.
+fn destination_mutation_stops_a_single_stream_download(
+    mutation: DestinationMutation,
+    stall_before_body: bool,
+) {
+    // The regular body stays open for ~24s. In the stalled case the server
+    // sends headers, creates the destination, then withholds the first byte
+    // for 5s so the test can remove or replace the path before any write.
     let (_lock, _loop) = test_locks();
-    let suffix = match mutation {
-        DestinationMutation::Delete => "destgone",
-        DestinationMutation::Replace => "destreplaced",
+    let suffix = match (mutation, stall_before_body) {
+        (DestinationMutation::Delete, false) => "destgone",
+        (DestinationMutation::Replace, false) => "destreplaced",
+        (DestinationMutation::Delete, true) => "destgone-stalled",
+        (DestinationMutation::Replace, true) => "destreplaced-stalled",
     };
     let _qf = test_queue_file(suffix);
     let settings = test_settings();
@@ -5392,14 +5397,19 @@ fn destination_mutation_stops_a_single_stream_download(mutation: DestinationMuta
 
     let port = test_port(61);
     let ranges_log = dir.join("ranges.log");
-    let server = std::process::Command::new("python3")
+    let mut server_command = std::process::Command::new("python3");
+    server_command
         .arg(format!(
             "{}/tests/throttled_server.py",
             env!("CARGO_MANIFEST_DIR")
         ))
         .arg(port.to_string())
         .arg(srv.join("t.bin"))
-        .arg(&ranges_log)
+        .arg(&ranges_log);
+    if stall_before_body {
+        server_command.args(["0.05", "", "normal", "\"test-etag-123\"", "5"]);
+    }
+    let server = server_command
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
         .spawn()
@@ -5429,14 +5439,21 @@ fn destination_mutation_stops_a_single_stream_download(mutation: DestinationMuta
             .enqueue(&url, Some(&dest), Some("t.bin"))
             .unwrap_or_else(|e| abort(&server, &e));
         let mut waited = 0;
-        while (item.status() != DownloadStatus::Downloading || item.progress() <= 0.0)
-            && waited < 200
-        {
-            glib::timeout_future(std::time::Duration::from_millis(100)).await;
-            waited += 1;
+        let mut destination_ready = false;
+        while !destination_ready && waited < 200 {
+            destination_ready = item.status() == DownloadStatus::Downloading
+                && if stall_before_body {
+                    file.exists()
+                } else {
+                    item.progress() > 0.0
+                };
+            if !destination_ready {
+                glib::timeout_future(std::time::Duration::from_millis(100)).await;
+                waited += 1;
+            }
         }
-        if item.status() != DownloadStatus::Downloading || item.progress() <= 0.0 {
-            abort(&server, "download never wrote any bytes");
+        if !destination_ready {
+            abort(&server, "download did not reach the destination mutation point");
         }
 
         match mutation {
@@ -5468,7 +5485,8 @@ fn destination_mutation_stops_a_single_stream_download(mutation: DestinationMuta
         }
 
         let mut waited = 0;
-        while item.status() != DownloadStatus::Failed && waited < 100 {
+        let failure_wait_limit = if stall_before_body { 30 } else { 100 };
+        while item.status() != DownloadStatus::Failed && waited < failure_wait_limit {
             glib::timeout_future(std::time::Duration::from_millis(100)).await;
             waited += 1;
         }
@@ -5499,12 +5517,22 @@ fn destination_mutation_stops_a_single_stream_download(mutation: DestinationMuta
 
 #[test]
 fn deleting_the_destination_stops_a_single_stream_download() {
-    destination_mutation_stops_a_single_stream_download(DestinationMutation::Delete);
+    destination_mutation_stops_a_single_stream_download(DestinationMutation::Delete, false);
 }
 
 #[test]
 fn replacing_the_destination_stops_a_single_stream_download() {
-    destination_mutation_stops_a_single_stream_download(DestinationMutation::Replace);
+    destination_mutation_stops_a_single_stream_download(DestinationMutation::Replace, false);
+}
+
+#[test]
+fn deleting_the_destination_during_a_stalled_body_stops_single_stream_download() {
+    destination_mutation_stops_a_single_stream_download(DestinationMutation::Delete, true);
+}
+
+#[test]
+fn replacing_the_destination_during_a_stalled_body_stops_single_stream_download() {
+    destination_mutation_stops_a_single_stream_download(DestinationMutation::Replace, true);
 }
 
 #[test]

@@ -5,7 +5,7 @@ Honors Range requests with 206 (exercises real resume); logs each
 request's range (or "full") for assertions.
 Supports If-Range: logs the header, sends ETag, and in "if-range-strict"
 mode returns 200 if If-Range doesn't match (simulating a changed file).
-Usage: throttled_server.py PORT FILE RANGELOG [SLEEP] [DISPOSITION] [MODE] [ETAG]
+Usage: throttled_server.py PORT FILE RANGELOG [SLEEP] [DISPOSITION] [MODE] [ETAG] [INITIAL_BODY_DELAY]
 """
 import sys
 import time
@@ -23,6 +23,8 @@ DISPOSITION = sys.argv[5] if len(sys.argv) > 5 else None
 MODE = sys.argv[6] if len(sys.argv) > 6 else "normal"
 # ETag to send; defaults to a fixed value for If-Range testing.
 ETAG = sys.argv[7] if len(sys.argv) > 7 else '"test-etag-123"'
+# Optional delay after response headers but before the first body byte.
+INITIAL_BODY_DELAY = float(sys.argv[8]) if len(sys.argv) > 8 else 0.0
 
 
 class H(BaseHTTPRequestHandler):
@@ -86,6 +88,8 @@ class H(BaseHTTPRequestHandler):
         if DISPOSITION:
             self.send_header("Content-Disposition", DISPOSITION)
         self.end_headers()
+        if INITIAL_BODY_DELAY:
+            time.sleep(INITIAL_BODY_DELAY)
         try:
             for i in range(0, len(body), 8192):
                 self.wfile.write(body[i : i + 8192])

@@ -58,6 +58,15 @@
     </screenshot>
   </screenshots>
   <releases>
+    <release version="6.5.6~beta.1" type="development" date="2026-11-20">
+      <description>
+        <ul>
+          <li>Downloads: the destination is re-verified while response bodies are idle and during segmented transfers, so a removed or replaced file stops the transfer instead of writing somewhere else.</li>
+          <li>UI: the search bar now has even spacing above and below its entry.</li>
+          <li>Extension: add a paired HLS inspection endpoint for detected streams.</li>
+        </ul>
+      </description>
+    </release>
     <release version="6.5.5" date="2026-11-19">
       <description>
         <ul>

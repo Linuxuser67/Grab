@@ -214,21 +214,18 @@ impl From<String> for ManifestIntakeError {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum ManifestTransportPolicy {
     HttpsOnly,
-    /// Public-only HTTP(S) transport for authenticated extension playlist inspection.
-    GuardedHttpOrHttps,
     #[cfg(test)]
     HttpFixture,
 }
 
 impl ManifestTransportPolicy {
     fn accepts_url(self, url: &Url) -> bool {
-        let accepted_scheme = match self {
-            Self::HttpsOnly => url.scheme() == "https",
-            Self::GuardedHttpOrHttps => matches!(url.scheme(), "http" | "https"),
+        let expected_scheme = match self {
+            Self::HttpsOnly => "https",
             #[cfg(test)]
-            Self::HttpFixture => url.scheme() == "http",
+            Self::HttpFixture => "http",
         };
-        accepted_scheme
+        url.scheme() == expected_scheme
             && url.host_str().is_some()
             && url.username().is_empty()
             && url.password().is_none()
@@ -236,7 +233,7 @@ impl ManifestTransportPolicy {
 
     fn planning_url(self, url: Url) -> Result<Url, ManifestIntakeError> {
         match self {
-            Self::HttpsOnly | Self::GuardedHttpOrHttps => Ok(url),
+            Self::HttpsOnly => Ok(url),
             #[cfg(test)]
             Self::HttpFixture => {
                 let mut url = url;
@@ -591,54 +588,6 @@ pub(crate) async fn lookup_preview_with_client(
         ManifestFetchMode::Preview,
     )
     .await
-}
-
-/// Inspect a public HLS candidate without selecting or fetching any child
-/// resources. The caller must retain a public-resolution lease for the source
-/// host for the full request lifetime and provide a guarded, no-redirect client.
-pub(crate) async fn inspect_hls_master_children_with_client(
-    client: &reqwest::Client,
-    raw_url: &str,
-) -> Result<Option<Vec<String>>, ManifestIntakeError> {
-    let Some(ManifestLookup {
-        manifest: NativeManifest::HlsMaster(master),
-        ..
-    }) = lookup_with_client_policy(
-        client,
-        raw_url,
-        ManifestTransportPolicy::GuardedHttpOrHttps,
-        ManifestFetchMode::Preview,
-    )
-    .await?
-    else {
-        return Ok(None);
-    };
-
-    let mut child_keys = HashSet::new();
-    for variant in master.variants.iter() {
-        child_keys.insert(hls_inspection_path_key(&variant.url));
-    }
-    for rendition in master.audio_renditions.iter() {
-        if let Some(url) = rendition.url.as_ref() {
-            child_keys.insert(hls_inspection_path_key(url));
-        }
-    }
-    for rendition in master.subtitle_renditions.iter() {
-        child_keys.insert(hls_inspection_path_key(&rendition.url));
-    }
-
-    let mut child_keys: Vec<_> = child_keys.into_iter().collect();
-    child_keys.sort_unstable();
-    // The extension menu can contain at most 50 entries. Bound the response
-    // even for unusually large, untrusted master playlists.
-    child_keys.truncate(256);
-    Ok(Some(child_keys))
-}
-
-/// Match the extension's origin+pathname identity while deliberately omitting
-/// query strings and fragments, which may contain rotating signed tokens.
-fn hls_inspection_path_key(url: &Url) -> String {
-    format!("{}{}", url.origin().ascii_serialization(), url.path())
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -1250,97 +1199,6 @@ video.m3u8
                 .is_some_and(|url| { url.query().is_some_and(|query| query.contains("t=token")) })
         );
         assert_eq!(master.subtitle_renditions[0].url.query(), None);
-    }
-
-    #[tokio::test(flavor = "current_thread")]
-    async fn hls_inspection_returns_query_free_child_path_keys() {
-        use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
-
-        let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0))
-            .await
-            .expect("bind HLS inspection fixture");
-        let address = listener.local_addr().expect("fixture address");
-        let body = concat!(
-            "#EXTM3U\n",
-            "#EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID=\"aud\",NAME=\"English\",URI=\"audio.m3u8?sig=audio\"\n",
-            "#EXT-X-MEDIA:TYPE=SUBTITLES,GROUP-ID=\"subs\",NAME=\"English\",URI=\"https://subtitles.example.test/subs.m3u8?sig=subtitle\"\n",
-            "#EXT-X-STREAM-INF:BANDWIDTH=1000000,AUDIO=\"aud\",SUBTITLES=\"subs\"\n",
-            "video.m3u8?sig=video\n"
-        );
-        let response_body = body.to_string();
-        let server = tokio::spawn(async move {
-            let (mut socket, _) = listener.accept().await.expect("accept HLS inspection request");
-            let mut request = Vec::new();
-            loop {
-                let mut chunk = [0_u8; 1024];
-                let read = socket.read(&mut chunk).await.expect("read request headers");
-                assert_ne!(read, 0, "request ended before headers");
-                request.extend_from_slice(&chunk[..read]);
-                if request.windows(4).any(|window| window == b"\r\n\r\n") {
-                    break;
-                }
-                assert!(request.len() < 16 * 1024, "request headers stay bounded");
-            }
-            let request = String::from_utf8_lossy(&request);
-            assert!(request.starts_with("GET /master.m3u8?token=secret HTTP/1.1"));
-            assert!(!request.to_ascii_lowercase().contains("cookie:"));
-            assert!(!request.to_ascii_lowercase().contains("referer:"));
-            let response = format!(
-                "HTTP/1.1 200 OK\r\nContent-Type: application/vnd.apple.mpegurl\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
-                response_body.len(),
-                response_body
-            );
-            socket.write_all(response.as_bytes()).await.expect("write HLS body");
-        });
-
-        let url = format!("http://{address}/master.m3u8?token=secret");
-        let client = reqwest::Client::builder()
-            .no_proxy()
-            .build()
-            .expect("build local inspector client");
-        let children = inspect_hls_master_children_with_client(&client, &url)
-            .await
-            .expect("inspect HLS master")
-            .expect("response should be an HLS master");
-        server.await.expect("fixture server task");
-
-        let prefix = format!("http://127.0.0.1:{}/", address.port());
-        assert!(children.contains(&format!("{prefix}audio.m3u8")));
-        assert!(children.contains(&format!("{prefix}video.m3u8")));
-        assert!(children.contains(&"https://subtitles.example.test/subs.m3u8".to_string()));
-        assert!(children.iter().all(|key| !key.contains('?')));
-        assert!(children.iter().all(|key| !key.contains("token=secret")));
-    }
-
-    #[tokio::test]
-    async fn hls_inspection_rejects_dns_answers_that_rebind_to_loopback() {
-        use std::net::{IpAddr, Ipv4Addr, SocketAddr};
-        use std::sync::atomic::Ordering;
-
-        let host = "hls-inspection-rebind.example.test";
-        let _lease =
-            crate::download_net::acquire_public_resolution(host).expect("public hostname lease");
-        let override_address = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 443);
-        let (client, resolver_used) =
-            crate::download_net::http_client_for_with_dns_overrides_for_test(
-                None,
-                std::collections::HashMap::from([(host.to_string(), vec![override_address])]),
-            )
-            .expect("build resolver test client");
-
-        let result = inspect_hls_master_children_with_client(
-            &client,
-            &format!("https://{host}/master.m3u8"),
-        )
-        .await;
-        assert!(
-            resolver_used.load(Ordering::Relaxed),
-            "the guarded resolver was used"
-        );
-        assert!(
-            result.is_err(),
-            "the inspection must fail when the DNS answer is loopback"
-        );
     }
 
     #[test]

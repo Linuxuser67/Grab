@@ -52,7 +52,7 @@ use hyper::body::Incoming;
 use hyper::server::conn::http1;
 use hyper_util::rt::{TokioIo, TokioTimer};
 use hyper_util::service::TowerToHyperService;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::io::Read as _;
@@ -1493,6 +1493,7 @@ fn router(state: AppState, port: u16) -> Router {
         Arc::from([format!("127.0.0.1:{port}"), format!("localhost:{port}")]);
     Router::new()
         .route("/add", post(handle_add))
+        .route("/inspect-hls", post(handle_inspect_hls))
         .route("/hello", get(handle_hello))
         .layer(DefaultBodyLimit::max(MAX_BODY_BYTES))
         // Outermost: rejected before the body is read.
@@ -1563,6 +1564,114 @@ fn is_json_content_type(headers: &HeaderMap) -> bool {
         .and_then(|v| v.to_str().ok())
         .and_then(|v| v.split(';').next())
         .is_some_and(|v| v.trim().eq_ignore_ascii_case("application/json"))
+}
+
+#[derive(Deserialize)]
+struct InspectHlsRequest {
+    url: String,
+    timestamp_ms: u64,
+    nonce: String,
+}
+
+#[derive(Serialize)]
+struct InspectHlsResponse {
+    is_master: bool,
+    child_keys: Vec<String>,
+}
+
+impl InspectHlsResponse {
+    fn unknown() -> Self {
+        Self {
+            is_master: false,
+            child_keys: Vec::new(),
+        }
+    }
+}
+
+/// Inspect a browser-observed public HLS URL. This endpoint is paired-only,
+/// read-only, bounded, and performs the fetch inside Grab's public-only DNS
+/// resolver. It never follows redirects or forwards cookies/Referer values.
+async fn handle_inspect_hls(
+    State(st): State<AppState>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> Response {
+    if !is_json_content_type(&headers) {
+        return StatusCode::UNSUPPORTED_MEDIA_TYPE.into_response();
+    }
+    let Some(pairing) = st.pairing.as_ref() else {
+        return StatusCode::SERVICE_UNAVAILABLE.into_response();
+    };
+    let Some(token) = headers.get("x-grab-token").and_then(|value| value.to_str().ok()) else {
+        return StatusCode::FORBIDDEN.into_response();
+    };
+    if !pairing.verify_token(&body, token) {
+        return StatusCode::FORBIDDEN.into_response();
+    }
+    let request: InspectHlsRequest = match serde_json::from_slice(&body) {
+        Ok(request) => request,
+        Err(error) if error.is_data() => return StatusCode::UNPROCESSABLE_ENTITY.into_response(),
+        Err(_) => return StatusCode::BAD_REQUEST.into_response(),
+    };
+    if request.url.len() > crate::download_intake::MAX_URL_LEN {
+        return StatusCode::URI_TOO_LONG.into_response();
+    }
+    let Ok(url) = url::Url::parse(&request.url) else {
+        return StatusCode::BAD_REQUEST.into_response();
+    };
+    let path = url.path().to_ascii_lowercase();
+    if !matches!(url.scheme(), "http" | "https")
+        || url.host_str().is_none()
+        || !url.username().is_empty()
+        || url.password().is_some()
+        || !(path.ends_with(".m3u8") || path.ends_with(".m3u"))
+    {
+        return StatusCode::BAD_REQUEST.into_response();
+    }
+    if let Err(status) = reserve_handoff_nonce(Some(request.timestamp_ms), Some(&request.nonce)) {
+        return status.into_response();
+    }
+
+    // DNS names are not trusted because the browser fetched them first. Keep
+    // a lease for the exact source host so the socket's own DNS resolution
+    // filters private/local answers with no check/connect gap.
+    let Some(host) = url.host_str() else {
+        return StatusCode::BAD_REQUEST.into_response();
+    };
+    let Some(_resolution_lease) = crate::download_net::acquire_public_resolution(host) else {
+        return Json(InspectHlsResponse::unknown()).into_response();
+    };
+    // Match the untrusted-handoff policy: never bypass a configured proxy or
+    // delegate this guarded lookup to an upstream resolver.
+    if crate::subprocess_proxy::validate_proxy_compatibility().is_err() {
+        return Json(InspectHlsResponse::unknown()).into_response();
+    }
+    let client = match crate::download_net::client_builder(None)
+        .redirect(reqwest::redirect::Policy::none())
+        .build()
+    {
+        Ok(client) => client,
+        Err(error) => {
+            tracing::debug!(error = %error, "could not build guarded HLS inspection client");
+            return Json(InspectHlsResponse::unknown()).into_response();
+        }
+    };
+
+    let lookup = tokio::time::timeout(
+        Duration::from_secs(5),
+        crate::manifest_intake::inspect_hls_master_children_with_client(&client, &request.url),
+    )
+    .await;
+    match lookup {
+        Ok(Ok(Some(child_keys))) if !child_keys.is_empty() => {
+            Json(InspectHlsResponse {
+                is_master: true,
+                child_keys,
+            })
+            .into_response()
+        }
+        _ => Json(InspectHlsResponse::unknown()).into_response(),
+    }
 }
 
 /// Attach the number of cookies serialized into the staged jar.

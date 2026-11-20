@@ -214,18 +214,21 @@ impl From<String> for ManifestIntakeError {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum ManifestTransportPolicy {
     HttpsOnly,
+    /// Public-only HTTP(S) transport for authenticated extension playlist inspection.
+    GuardedHttpOrHttps,
     #[cfg(test)]
     HttpFixture,
 }
 
 impl ManifestTransportPolicy {
     fn accepts_url(self, url: &Url) -> bool {
-        let expected_scheme = match self {
-            Self::HttpsOnly => "https",
+        let accepted_scheme = match self {
+            Self::HttpsOnly => url.scheme() == "https",
+            Self::GuardedHttpOrHttps => matches!(url.scheme(), "http" | "https"),
             #[cfg(test)]
-            Self::HttpFixture => "http",
+            Self::HttpFixture => url.scheme() == "http",
         };
-        url.scheme() == expected_scheme
+        accepted_scheme
             && url.host_str().is_some()
             && url.username().is_empty()
             && url.password().is_none()
@@ -233,7 +236,7 @@ impl ManifestTransportPolicy {
 
     fn planning_url(self, url: Url) -> Result<Url, ManifestIntakeError> {
         match self {
-            Self::HttpsOnly => Ok(url),
+            Self::HttpsOnly | Self::GuardedHttpOrHttps => Ok(url),
             #[cfg(test)]
             Self::HttpFixture => {
                 let mut url = url;
@@ -588,6 +591,54 @@ pub(crate) async fn lookup_preview_with_client(
         ManifestFetchMode::Preview,
     )
     .await
+}
+
+/// Inspect a public HLS candidate without selecting or fetching any child
+/// resources. The caller must retain a public-resolution lease for the source
+/// host for the full request lifetime and provide a guarded, no-redirect client.
+pub(crate) async fn inspect_hls_master_children_with_client(
+    client: &reqwest::Client,
+    raw_url: &str,
+) -> Result<Option<Vec<String>>, ManifestIntakeError> {
+    let Some(ManifestLookup {
+        manifest: NativeManifest::HlsMaster(master),
+        ..
+    }) = lookup_with_client_policy(
+        client,
+        raw_url,
+        ManifestTransportPolicy::GuardedHttpOrHttps,
+        ManifestFetchMode::Preview,
+    )
+    .await?
+    else {
+        return Ok(None);
+    };
+
+    let mut child_keys = HashSet::new();
+    for variant in master.variants.iter() {
+        child_keys.insert(hls_inspection_path_key(&variant.url));
+    }
+    for rendition in master.audio_renditions.iter() {
+        if let Some(url) = rendition.url.as_ref() {
+            child_keys.insert(hls_inspection_path_key(url));
+        }
+    }
+    for rendition in master.subtitle_renditions.iter() {
+        child_keys.insert(hls_inspection_path_key(&rendition.url));
+    }
+
+    let mut child_keys: Vec<_> = child_keys.into_iter().collect();
+    child_keys.sort_unstable();
+    // The extension menu can contain at most 50 entries. Bound the response
+    // even for unusually large, untrusted master playlists.
+    child_keys.truncate(256);
+    Ok(Some(child_keys))
+}
+
+/// Match the extension's origin+pathname identity while deliberately omitting
+/// query strings and fragments, which may contain rotating signed tokens.
+fn hls_inspection_path_key(url: &Url) -> String {
+    format!("{}{}", url.origin().ascii_serialization(), url.path())
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

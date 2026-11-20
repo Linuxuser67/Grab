@@ -1745,7 +1745,7 @@ async fn handle_inspect_hls(
     )
     .await;
     match lookup {
-        Ok(Ok(Some(child_keys))) if !child_keys.is_empty() => {
+        Ok(Some(child_keys)) if !child_keys.is_empty() => {
             Json(InspectHlsResponse {
                 is_master: true,
                 child_keys,
@@ -2286,7 +2286,6 @@ mod tests {
             .expect("build local inspector client");
         let children = inspect_hls_master_children_with_client(&client, &url)
             .await
-            .expect("inspect HLS master")
             .expect("response should be an HLS master");
         server.await.expect("fixture server task");
 
@@ -2324,7 +2323,7 @@ mod tests {
             "the guarded resolver was used"
         );
         assert!(
-            result.is_err(),
+            result.is_none(),
             "the inspection must fail when the DNS answer is loopback"
         );
     }

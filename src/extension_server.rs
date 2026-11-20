@@ -2019,7 +2019,10 @@ mod tests {
     const TEST_SECRET: [u8; SECRET_LEN] = [7; SECRET_LEN];
 
     fn fresh_test_nonce() -> u128 {
-        rand::random()
+        static COUNTER: AtomicU64 = AtomicU64::new(1);
+        (u128::from(std::process::id()) << 96)
+            | (u128::from(unix_time_ms().expect("system clock")) << 32)
+            | u128::from(COUNTER.fetch_add(1, Ordering::Relaxed))
     }
 
     fn test_pairing() -> Option<Arc<Pairing>> {

@@ -5579,7 +5579,7 @@ fn segmented_destination_mutation_stops_download(mutation: DestinationMutation) 
         .arg(&ranges_log)
         // The 0-0 capability probe stays fast; each actual range body stalls
         // before its first byte so ownership is checked while workers are idle.
-        .args(["0.05", "", "normal", "\\"test-etag-123\\"", "8"]);
+        .args(["0.05", "", "normal", "\"test-etag-123\"", "8"]);
     let server = Rc::new(RefCell::new(
         server_command
             .stdout(std::process::Stdio::null())
@@ -5621,11 +5621,11 @@ fn segmented_destination_mutation_stops_download(mutation: DestinationMutation) 
         DestinationMutation::Delete => crate::download_fetch::DestinationProblem::Disappeared,
         DestinationMutation::Replace => crate::download_fetch::DestinationProblem::Replaced,
     };
-    let outcome = tokio_rt().block_on(async {
+    tokio_rt().block_on(async {
         let mut task = tokio::spawn(run_download(ctx, 4, StartMode::Fresh));
         let destination_deadline = tokio::time::Instant::now() + Duration::from_secs(20);
         let mut segments_initialized = false;
-        while !file.exists() {
+        while !file.exists() || !segments_initialized {
             while let Ok(message) = rx.try_recv() {
                 if let EngineMsg::SegmentsInit { ack, .. } = message {
                     if ack.try_send(()).is_err() {
@@ -5679,28 +5679,22 @@ fn segmented_destination_mutation_stops_download(mutation: DestinationMutation) 
                     abort(&server, &format!("inspect replacement: {error}"))
                 });
                 use std::os::unix::fs::MetadataExt as _;
-                assert_ne!(
-                    original.ino(),
-                    replacement_metadata.ino(),
-                    "replacement must be a different inode",
-                );
+                if original.ino() == replacement_metadata.ino() {
+                    abort(&server, "replacement must use a different inode");
+                }
                 std::fs::rename(&replacement, &file).unwrap_or_else(|error| {
                     abort(&server, &format!("replace segmented destination: {error}"))
                 });
             }
         }
 
-        if tokio::time::timeout(Duration::from_secs(5), &mut task)
-            .await
-            .is_err()
-        {
-            abort(
+        match tokio::time::timeout(Duration::from_secs(5), &mut task).await {
+            Ok(Ok(())) => {}
+            Ok(Err(error)) => abort(&server, &format!("segmented download task panicked: {error}")),
+            Err(_) => abort(
                 &server,
                 "segmented download did not stop promptly after destination ownership was lost",
-            );
-        }
-        if task.await.is_err() {
-            abort(&server, "segmented download task panicked");
+            ),
         }
 
         let mut failure = None;
@@ -5723,14 +5717,15 @@ fn segmented_destination_mutation_stops_download(mutation: DestinationMutation) 
             }
             DestinationMutation::Replace => {
                 const REPLACEMENT_CONTENTS: &[u8] = b"replacement inode must remain untouched";
-                if std::fs::read(&file).as_deref() != Ok(REPLACEMENT_CONTENTS) {
+                let replacement_is_unchanged = std::fs::read(&file)
+                    .is_ok_and(|contents| contents.as_slice() == REPLACEMENT_CONTENTS);
+                if !replacement_is_unchanged {
                     abort(&server, "segmented writer modified the replacement inode");
                 }
             }
         }
     });
 
-    let _ = outcome;
     cleanup(&server, &dir);
 }
 

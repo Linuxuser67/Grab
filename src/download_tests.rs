@@ -5458,6 +5458,17 @@ fn destination_mutation_stops_a_single_stream_download(
                 "download did not reach the destination mutation point",
             );
         }
+        if stall_before_body {
+            // Let the asynchronous open/claim checks finish while the server is
+            // still withholding the first body chunk. This keeps the mutation
+            // inside the stream's pending-read window, not the open sequence.
+            glib::timeout_future(std::time::Duration::from_millis(250)).await;
+            assert_eq!(
+                item.progress(),
+                0.0,
+                "the destination must be removed before the first body byte",
+            );
+        }
 
         match mutation {
             DestinationMutation::Delete => {

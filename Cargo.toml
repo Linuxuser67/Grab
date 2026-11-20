@@ -1,6 +1,6 @@
 [package]
 name = "grab"
-version = "6.5.6-beta.1"
+version = "6.5.6"
 edition = "2024"
 # Keep in sync with the Flatpak SDK's rust-stable extension: the release
 # builds use org.freedesktop.Sdk.Extension.rust-stable//26.08, which ships

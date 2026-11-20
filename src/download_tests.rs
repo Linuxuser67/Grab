@@ -5499,7 +5499,9 @@ fn destination_mutation_stops_a_single_stream_download(
         }
 
         let mut waited = 0;
-        let failure_wait_limit = if stall_before_body { 30 } else { 100 };
+        // Leave room for a loaded CI runner to schedule the one-second monitor,
+        // while remaining well below the fixture's ~24-second body duration.
+        let failure_wait_limit = if stall_before_body { 80 } else { 100 };
         while item.status() != DownloadStatus::Failed && waited < failure_wait_limit {
             glib::timeout_future(std::time::Duration::from_millis(100)).await;
             waited += 1;

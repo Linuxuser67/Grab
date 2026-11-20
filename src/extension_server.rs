@@ -1573,7 +1573,7 @@ struct InspectHlsRequest {
     nonce: String,
 }
 
-#[derive(Serialize)]
+#[derive(Deserialize, Serialize)]
 struct InspectHlsResponse {
     is_master: bool,
     child_keys: Vec<String>,
@@ -1937,6 +1937,11 @@ mod tests {
 
     const TEST_SECRET: [u8; SECRET_LEN] = [7; SECRET_LEN];
 
+    fn rand_nonce_for_test() -> u64 {
+        static COUNTER: AtomicU64 = AtomicU64::new(1);
+        COUNTER.fetch_add(1, Ordering::Relaxed)
+    }
+
     fn test_pairing() -> Option<Arc<Pairing>> {
         Some(Arc::new(Pairing::from_secret(TEST_SECRET)))
     }
@@ -2073,6 +2078,83 @@ mod tests {
 
     const JSON: (&str, &str) = ("Content-Type", "application/json");
     const BODY: &str = r#"{"url":"https://example.com/file.zip"}"#;
+
+    #[tokio::test]
+    async fn hls_inspection_requires_a_valid_pairing_token() {
+        let srv = start(4).await;
+        let host = format!("127.0.0.1:{}", srv.port);
+        let body = r#"{"url":"http://127.0.0.1:1234/master.m3u8","timestamp_ms":1,"nonce":"00000000000000000000000000000001"}"#;
+
+        let response = request_to(
+            srv.port,
+            "POST",
+            "/inspect-hls",
+            &[("Host", &host), JSON],
+            body,
+        )
+        .await;
+
+        assert_eq!(status(&response), "403", "{response}");
+        assert!(srv.rx.try_recv().is_err(), "inspection must not enqueue a download");
+    }
+
+    #[tokio::test]
+    async fn hls_inspection_fails_closed_for_private_literal_hosts() {
+        let srv = start(4).await;
+        let host = format!("127.0.0.1:{}", srv.port);
+        let body = serde_json::json!({
+            "url": "http://127.0.0.1:1234/master.m3u8",
+            "timestamp_ms": unix_time_ms().expect("system clock"),
+            "nonce": format!("{:032x}", rand_nonce_for_test())
+        })
+        .to_string();
+        let token_value = token(&body);
+        let headers = [
+            ("Host", host.as_str()),
+            JSON,
+            ("X-Grab-Token", token_value.as_str()),
+        ];
+        let response = request_with_target(srv.port, "/inspect-hls", &headers, &body).await;
+
+        assert_eq!(status(&response), "200", "{response}");
+        let response_body = response
+            .split_once("\r\n\r\n")
+            .map(|(_, body)| body)
+            .expect("HTTP response body");
+        let parsed: InspectHlsResponse =
+            serde_json::from_str(response_body).expect("inspection response JSON");
+        assert!(!parsed.is_master);
+        assert!(parsed.child_keys.is_empty());
+        assert!(srv.rx.try_recv().is_err(), "inspection must not enqueue a download");
+    }
+
+    #[tokio::test]
+    async fn hls_inspection_rejects_non_hls_and_credential_urls() {
+        let srv = start(4).await;
+        let host = format!("127.0.0.1:{}", srv.port);
+        for url in [
+            "https://example.test/video.mp4",
+            "https://user:pass@example.test/master.m3u8",
+            "file:///tmp/master.m3u8",
+        ] {
+            let body = serde_json::json!({
+                "url": url,
+                "timestamp_ms": unix_time_ms().expect("system clock"),
+                "nonce": format!("{:032x}", rand_nonce_for_test())
+            })
+            .to_string();
+            let token_value = token(&body);
+            let headers = [
+                ("Host", host.as_str()),
+                JSON,
+                ("X-Grab-Token", token_value.as_str()),
+            ];
+            let response =
+                request_with_target(srv.port, "/inspect-hls", &headers, &body).await;
+            assert_eq!(status(&response), "400", "{url}: {response}");
+        }
+        assert!(srv.rx.try_recv().is_err());
+    }
 
     #[tokio::test]
     async fn accepts_loopback_host_without_origin() {

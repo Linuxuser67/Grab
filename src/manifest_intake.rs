@@ -1252,6 +1252,95 @@ video.m3u8
         assert_eq!(master.subtitle_renditions[0].url.query(), None);
     }
 
+    #[tokio::test(flavor = "current_thread")]
+    async fn hls_inspection_returns_query_free_child_path_keys() {
+        use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+
+        let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0))
+            .await
+            .expect("bind HLS inspection fixture");
+        let address = listener.local_addr().expect("fixture address");
+        let body = concat!(
+            "#EXTM3U\n",
+            "#EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID=\"aud\",NAME=\"English\",URI=\"audio.m3u8?sig=audio\"\n",
+            "#EXT-X-MEDIA:TYPE=SUBTITLES,GROUP-ID=\"subs\",NAME=\"English\",URI=\"https://subtitles.example.test/subs.m3u8?sig=subtitle\"\n",
+            "#EXT-X-STREAM-INF:BANDWIDTH=1000000,AUDIO=\"aud\",SUBTITLES=\"subs\"\n",
+            "video.m3u8?sig=video\n"
+        );
+        let response_body = body.to_string();
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.expect("accept HLS inspection request");
+            let mut request = Vec::new();
+            loop {
+                let mut chunk = [0_u8; 1024];
+                let read = socket.read(&mut chunk).await.expect("read request headers");
+                assert_ne!(read, 0, "request ended before headers");
+                request.extend_from_slice(&chunk[..read]);
+                if request.windows(4).any(|window| window == b"\r\n\r\n") {
+                    break;
+                }
+                assert!(request.len() < 16 * 1024, "request headers stay bounded");
+            }
+            let request = String::from_utf8_lossy(&request);
+            assert!(request.starts_with("GET /master.m3u8?token=secret HTTP/1.1"));
+            assert!(!request.to_ascii_lowercase().contains("cookie:"));
+            assert!(!request.to_ascii_lowercase().contains("referer:"));
+            let response = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/vnd.apple.mpegurl\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                response_body.len(),
+                response_body
+            );
+            socket.write_all(response.as_bytes()).await.expect("write HLS body");
+        });
+
+        let url = format!("http://{address}/master.m3u8?token=secret");
+        let client = reqwest::Client::builder()
+            .no_proxy()
+            .build()
+            .expect("build local inspector client");
+        let children = inspect_hls_master_children_with_client(&client, &url)
+            .await
+            .expect("inspect HLS master")
+            .expect("response should be an HLS master");
+        server.await.expect("fixture server task");
+
+        let prefix = format!("http://127.0.0.1:{}/", address.port());
+        assert!(children.contains(&format!("{prefix}audio.m3u8")));
+        assert!(children.contains(&format!("{prefix}video.m3u8")));
+        assert!(children.contains(&"https://subtitles.example.test/subs.m3u8".to_string()));
+        assert!(children.iter().all(|key| !key.contains('?')));
+        assert!(children.iter().all(|key| !key.contains("token=secret")));
+    }
+
+    #[tokio::test]
+    async fn hls_inspection_rejects_dns_answers_that_rebind_to_loopback() {
+        use std::net::{IpAddr, Ipv4Addr, SocketAddr};
+        use std::sync::atomic::Ordering;
+
+        let host = "hls-inspection-rebind.example.test";
+        let _lease =
+            crate::download_net::acquire_public_resolution(host).expect("public hostname lease");
+        let override_address = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 443);
+        let (client, resolver_used) =
+            crate::download_net::http_client_for_with_dns_overrides_for_test(
+                None,
+                std::collections::HashMap::from([(host.to_string(), vec![override_address])]),
+            )
+            .expect("build resolver test client");
+
+        let result = inspect_hls_master_children_with_client(
+            &client,
+            &format!("https://{host}/master.m3u8"),
+        )
+        .await;
+        assert!(resolver_used.load(Ordering::Relaxed), "the guarded resolver was used");
+        let error = result.expect_err("loopback DNS answer must be rejected");
+        assert!(
+            error.to_string().contains("resolves to a local or private address"),
+            "unexpected inspection error: {error}"
+        );
+    }
+
     #[test]
     fn native_manifest_gate_accepts_explicit_format_query_hints() {
         assert!(supports("https://cdn.example.test/stream?format=m3u8"));

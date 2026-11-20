@@ -226,14 +226,8 @@ impl Pairing {
     }
 
     /// Verify a request under an endpoint-specific HMAC context.
-    fn verify_token_with_context(
-        &self,
-        context: &[u8],
-        body: &[u8],
-        token_hex: &str,
-    ) -> bool {
-        hex_decode(token_hex)
-            .is_some_and(|tag| self.mac(context, body).verify_slice(&tag).is_ok())
+    fn verify_token_with_context(&self, context: &[u8], body: &[u8], token_hex: &str) -> bool {
+        hex_decode(token_hex).is_some_and(|tag| self.mac(context, body).verify_slice(&tag).is_ok())
     }
 }
 

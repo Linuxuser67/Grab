@@ -2162,7 +2162,7 @@ mod tests {
 
     #[tokio::test]
     async fn hls_inspection_requires_a_valid_pairing_token() {
-        let srv = start(4).await;
+        let mut srv = start(4).await;
         let host = format!("127.0.0.1:{}", srv.port);
         let body = r#"{"url":"http://127.0.0.1:1234/master.m3u8","timestamp_ms":1,"nonce":"00000000000000000000000000000001"}"#;
 
@@ -2184,7 +2184,7 @@ mod tests {
 
     #[tokio::test]
     async fn hls_inspection_fails_closed_for_private_literal_hosts() {
-        let srv = start(4).await;
+        let mut srv = start(4).await;
         let host = format!("127.0.0.1:{}", srv.port);
         let body = serde_json::json!({
             "url": "http://127.0.0.1:1234/master.m3u8",
@@ -2217,7 +2217,7 @@ mod tests {
 
     #[tokio::test]
     async fn hls_inspection_rejects_non_hls_and_credential_urls() {
-        let srv = start(4).await;
+        let mut srv = start(4).await;
         let host = format!("127.0.0.1:{}", srv.port);
         for url in [
             "https://example.test/video.mp4",

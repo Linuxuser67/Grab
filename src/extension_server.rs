@@ -1604,9 +1604,7 @@ async fn inspect_hls_master_children_with_client(
         body.extend_from_slice(&chunk);
     }
 
-    let m3u8_rs::Playlist::MasterPlaylist(master) =
-        m3u8_rs::parse_playlist_res(&body).ok()?
-    else {
+    let m3u8_rs::Playlist::MasterPlaylist(master) = m3u8_rs::parse_playlist_res(&body).ok()? else {
         return None;
     };
     let base = url::Url::parse(raw_url).ok()?;
@@ -1684,7 +1682,10 @@ async fn handle_inspect_hls(
     let Some(pairing) = st.pairing.as_ref() else {
         return StatusCode::SERVICE_UNAVAILABLE.into_response();
     };
-    let Some(token) = headers.get("x-grab-token").and_then(|value| value.to_str().ok()) else {
+    let Some(token) = headers
+        .get("x-grab-token")
+        .and_then(|value| value.to_str().ok())
+    else {
         return StatusCode::FORBIDDEN.into_response();
     };
     if !pairing.verify_token(&body, token) {
@@ -1745,13 +1746,11 @@ async fn handle_inspect_hls(
     )
     .await;
     match lookup {
-        Ok(Some(child_keys)) if !child_keys.is_empty() => {
-            Json(InspectHlsResponse {
-                is_master: true,
-                child_keys,
-            })
-            .into_response()
-        }
+        Ok(Some(child_keys)) if !child_keys.is_empty() => Json(InspectHlsResponse {
+            is_master: true,
+            child_keys,
+        })
+        .into_response(),
         _ => Json(InspectHlsResponse::unknown()).into_response(),
     }
 }
@@ -2177,7 +2176,10 @@ mod tests {
         .await;
 
         assert_eq!(status(&response), "403", "{response}");
-        assert!(srv.rx.try_recv().is_err(), "inspection must not enqueue a download");
+        assert!(
+            srv.rx.try_recv().is_err(),
+            "inspection must not enqueue a download"
+        );
     }
 
     #[tokio::test]
@@ -2207,7 +2209,10 @@ mod tests {
             serde_json::from_str(response_body).expect("inspection response JSON");
         assert!(!parsed.is_master);
         assert!(parsed.child_keys.is_empty());
-        assert!(srv.rx.try_recv().is_err(), "inspection must not enqueue a download");
+        assert!(
+            srv.rx.try_recv().is_err(),
+            "inspection must not enqueue a download"
+        );
     }
 
     #[tokio::test]
@@ -2231,8 +2236,7 @@ mod tests {
                 JSON,
                 ("X-Grab-Token", token_value.as_str()),
             ];
-            let response =
-                request_with_target(srv.port, "/inspect-hls", &headers, &body).await;
+            let response = request_with_target(srv.port, "/inspect-hls", &headers, &body).await;
             assert_eq!(status(&response), "400", "{url}: {response}");
         }
         assert!(srv.rx.try_recv().is_err());
@@ -2255,7 +2259,10 @@ mod tests {
         );
         let response_body = body.to_string();
         let server = tokio::spawn(async move {
-            let (mut socket, _) = listener.accept().await.expect("accept HLS inspection request");
+            let (mut socket, _) = listener
+                .accept()
+                .await
+                .expect("accept HLS inspection request");
             let mut request = Vec::new();
             loop {
                 let mut chunk = [0_u8; 1024];
@@ -2276,7 +2283,10 @@ mod tests {
                 response_body.len(),
                 response_body
             );
-            socket.write_all(response.as_bytes()).await.expect("write HLS body");
+            socket
+                .write_all(response.as_bytes())
+                .await
+                .expect("write HLS body");
         });
 
         let url = format!("http://{address}/master.m3u8?token=secret");

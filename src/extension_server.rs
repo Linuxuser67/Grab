@@ -52,7 +52,7 @@ use hyper::body::Incoming;
 use hyper::server::conn::http1;
 use hyper_util::rt::{TokioIo, TokioTimer};
 use hyper_util::service::TowerToHyperService;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::io::Read as _;
@@ -1493,6 +1493,7 @@ fn router(state: AppState, port: u16) -> Router {
         Arc::from([format!("127.0.0.1:{port}"), format!("localhost:{port}")]);
     Router::new()
         .route("/add", post(handle_add))
+        .route("/inspect-hls", post(handle_inspect_hls))
         .route("/hello", get(handle_hello))
         .layer(DefaultBodyLimit::max(MAX_BODY_BYTES))
         // Outermost: rejected before the body is read.
@@ -1563,6 +1564,195 @@ fn is_json_content_type(headers: &HeaderMap) -> bool {
         .and_then(|v| v.to_str().ok())
         .and_then(|v| v.split(';').next())
         .is_some_and(|v| v.trim().eq_ignore_ascii_case("application/json"))
+}
+
+const MAX_HLS_INSPECTION_BODY_BYTES: usize = 256 * 1024;
+
+/// Inspect a public HLS master with the caller's guarded DNS resolver.
+/// Only URI path identities are returned: query strings may contain signed
+/// tokens and must not cross the local extension API boundary.
+async fn inspect_hls_master_children_with_client(
+    client: &reqwest::Client,
+    raw_url: &str,
+) -> Option<Vec<String>> {
+    use futures_util::StreamExt as _;
+
+    let response = client
+        .get(raw_url)
+        .header(
+            reqwest::header::USER_AGENT,
+            crate::download_net::DEFAULT_USER_AGENT,
+        )
+        .send()
+        .await
+        .ok()?;
+    if !response.status().is_success()
+        || response
+            .content_length()
+            .is_some_and(|length| length > MAX_HLS_INSPECTION_BODY_BYTES as u64)
+    {
+        return None;
+    }
+
+    let mut stream = response.bytes_stream();
+    let mut body = Vec::new();
+    while let Some(chunk) = stream.next().await {
+        let chunk = chunk.ok()?;
+        if body.len().saturating_add(chunk.len()) > MAX_HLS_INSPECTION_BODY_BYTES {
+            return None;
+        }
+        body.extend_from_slice(&chunk);
+    }
+
+    let m3u8_rs::Playlist::MasterPlaylist(master) = m3u8_rs::parse_playlist_res(&body).ok()? else {
+        return None;
+    };
+    let base = url::Url::parse(raw_url).ok()?;
+    let mut child_keys = HashSet::new();
+
+    for variant in master.variants {
+        add_hls_inspection_child_key(&base, &variant.uri, &mut child_keys);
+    }
+    for rendition in master.alternatives {
+        if let Some(uri) = rendition.uri.as_deref() {
+            add_hls_inspection_child_key(&base, uri, &mut child_keys);
+        }
+    }
+
+    let mut child_keys: Vec<_> = child_keys.into_iter().collect();
+    child_keys.sort_unstable();
+    child_keys.truncate(256);
+    Some(child_keys)
+}
+
+fn add_hls_inspection_child_key(base: &url::Url, reference: &str, output: &mut HashSet<String>) {
+    if reference.is_empty() {
+        return;
+    }
+    let Ok(child) = base.join(reference) else {
+        return;
+    };
+    if !matches!(child.scheme(), "http" | "https")
+        || child.host_str().is_none()
+        || !child.username().is_empty()
+        || child.password().is_some()
+    {
+        return;
+    }
+    output.insert(format!(
+        "{}{}",
+        child.origin().ascii_serialization(),
+        child.path()
+    ));
+}
+
+#[derive(Deserialize)]
+struct InspectHlsRequest {
+    url: String,
+    timestamp_ms: u64,
+    nonce: String,
+}
+
+#[derive(Deserialize, Serialize)]
+struct InspectHlsResponse {
+    is_master: bool,
+    child_keys: Vec<String>,
+}
+
+impl InspectHlsResponse {
+    fn unknown() -> Self {
+        Self {
+            is_master: false,
+            child_keys: Vec::new(),
+        }
+    }
+}
+
+/// Inspect a browser-observed public HLS URL. This endpoint is paired-only,
+/// read-only, bounded, and performs the fetch inside Grab's public-only DNS
+/// resolver. It never follows redirects or forwards cookies/Referer values.
+async fn handle_inspect_hls(
+    State(st): State<AppState>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> Response {
+    if !is_json_content_type(&headers) {
+        return StatusCode::UNSUPPORTED_MEDIA_TYPE.into_response();
+    }
+    let Some(pairing) = st.pairing.as_ref() else {
+        return StatusCode::SERVICE_UNAVAILABLE.into_response();
+    };
+    let Some(token) = headers
+        .get("x-grab-token")
+        .and_then(|value| value.to_str().ok())
+    else {
+        return StatusCode::FORBIDDEN.into_response();
+    };
+    if !pairing.verify_token(&body, token) {
+        return StatusCode::FORBIDDEN.into_response();
+    }
+    let request: InspectHlsRequest = match serde_json::from_slice(&body) {
+        Ok(request) => request,
+        Err(error) if error.is_data() => return StatusCode::UNPROCESSABLE_ENTITY.into_response(),
+        Err(_) => return StatusCode::BAD_REQUEST.into_response(),
+    };
+    if request.url.len() > crate::download_intake::MAX_URL_LEN {
+        return StatusCode::URI_TOO_LONG.into_response();
+    }
+    let Ok(url) = url::Url::parse(&request.url) else {
+        return StatusCode::BAD_REQUEST.into_response();
+    };
+    let path = url.path().to_ascii_lowercase();
+    if !matches!(url.scheme(), "http" | "https")
+        || url.host_str().is_none()
+        || !url.username().is_empty()
+        || url.password().is_some()
+        || !(path.ends_with(".m3u8") || path.ends_with(".m3u"))
+    {
+        return StatusCode::BAD_REQUEST.into_response();
+    }
+    if let Err(status) = reserve_handoff_nonce(Some(request.timestamp_ms), Some(&request.nonce)) {
+        return status.into_response();
+    }
+
+    // DNS names are not trusted because the browser fetched them first. Keep
+    // a lease for the exact source host so the socket's own DNS resolution
+    // filters private/local answers with no check/connect gap.
+    let Some(host) = url.host_str() else {
+        return StatusCode::BAD_REQUEST.into_response();
+    };
+    let Some(_resolution_lease) = crate::download_net::acquire_public_resolution(host) else {
+        return Json(InspectHlsResponse::unknown()).into_response();
+    };
+    // Match the untrusted-handoff policy: never bypass a configured proxy or
+    // delegate this guarded lookup to an upstream resolver.
+    if crate::subprocess_proxy::validate_proxy_compatibility().is_err() {
+        return Json(InspectHlsResponse::unknown()).into_response();
+    }
+    let client = match crate::download_net::client_builder(None)
+        .redirect(reqwest::redirect::Policy::none())
+        .build()
+    {
+        Ok(client) => client,
+        Err(error) => {
+            tracing::debug!(error = %error, "could not build guarded HLS inspection client");
+            return Json(InspectHlsResponse::unknown()).into_response();
+        }
+    };
+
+    let lookup = tokio::time::timeout(
+        Duration::from_secs(5),
+        inspect_hls_master_children_with_client(&client, &request.url),
+    )
+    .await;
+    match lookup {
+        Ok(Some(child_keys)) if !child_keys.is_empty() => Json(InspectHlsResponse {
+            is_master: true,
+            child_keys,
+        })
+        .into_response(),
+        _ => Json(InspectHlsResponse::unknown()).into_response(),
+    }
 }
 
 /// Attach the number of cookies serialized into the staged jar.
@@ -1828,6 +2018,13 @@ mod tests {
 
     const TEST_SECRET: [u8; SECRET_LEN] = [7; SECRET_LEN];
 
+    fn fresh_test_nonce() -> u128 {
+        static COUNTER: AtomicU64 = AtomicU64::new(1);
+        (u128::from(std::process::id()) << 96)
+            | (u128::from(unix_time_ms().expect("system clock")) << 32)
+            | u128::from(COUNTER.fetch_add(1, Ordering::Relaxed))
+    }
+
     fn test_pairing() -> Option<Arc<Pairing>> {
         Some(Arc::new(Pairing::from_secret(TEST_SECRET)))
     }
@@ -1964,6 +2161,184 @@ mod tests {
 
     const JSON: (&str, &str) = ("Content-Type", "application/json");
     const BODY: &str = r#"{"url":"https://example.com/file.zip"}"#;
+
+    #[tokio::test]
+    async fn hls_inspection_requires_a_valid_pairing_token() {
+        let mut srv = start(4).await;
+        let host = format!("127.0.0.1:{}", srv.port);
+        let body = r#"{"url":"http://127.0.0.1:1234/master.m3u8","timestamp_ms":1,"nonce":"00000000000000000000000000000001"}"#;
+
+        let response = request_to(
+            srv.port,
+            "POST",
+            "/inspect-hls",
+            &[("Host", &host), JSON],
+            body,
+        )
+        .await;
+
+        assert_eq!(status(&response), "403", "{response}");
+        assert!(
+            srv.rx.try_recv().is_err(),
+            "inspection must not enqueue a download"
+        );
+    }
+
+    #[tokio::test]
+    async fn hls_inspection_fails_closed_for_private_literal_hosts() {
+        let mut srv = start(4).await;
+        let host = format!("127.0.0.1:{}", srv.port);
+        let body = serde_json::json!({
+            "url": "http://127.0.0.1:1234/master.m3u8",
+            "timestamp_ms": unix_time_ms().expect("system clock"),
+            "nonce": format!("{:032x}", fresh_test_nonce())
+        })
+        .to_string();
+        let token_value = token(&body);
+        let headers = [
+            ("Host", host.as_str()),
+            JSON,
+            ("X-Grab-Token", token_value.as_str()),
+        ];
+        let response = request_with_target(srv.port, "/inspect-hls", &headers, &body).await;
+
+        assert_eq!(status(&response), "200", "{response}");
+        let response_body = response
+            .split_once("\r\n\r\n")
+            .map(|(_, body)| body)
+            .expect("HTTP response body");
+        let parsed: InspectHlsResponse =
+            serde_json::from_str(response_body).expect("inspection response JSON");
+        assert!(!parsed.is_master);
+        assert!(parsed.child_keys.is_empty());
+        assert!(
+            srv.rx.try_recv().is_err(),
+            "inspection must not enqueue a download"
+        );
+    }
+
+    #[tokio::test]
+    async fn hls_inspection_rejects_non_hls_and_credential_urls() {
+        let mut srv = start(4).await;
+        let host = format!("127.0.0.1:{}", srv.port);
+        for url in [
+            "https://example.test/video.mp4",
+            "https://user:pass@example.test/master.m3u8",
+            "file:///tmp/master.m3u8",
+        ] {
+            let body = serde_json::json!({
+                "url": url,
+                "timestamp_ms": unix_time_ms().expect("system clock"),
+                "nonce": format!("{:032x}", fresh_test_nonce())
+            })
+            .to_string();
+            let token_value = token(&body);
+            let headers = [
+                ("Host", host.as_str()),
+                JSON,
+                ("X-Grab-Token", token_value.as_str()),
+            ];
+            let response = request_with_target(srv.port, "/inspect-hls", &headers, &body).await;
+            assert_eq!(status(&response), "400", "{url}: {response}");
+        }
+        assert!(srv.rx.try_recv().is_err());
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn hls_inspection_returns_query_free_child_path_keys() {
+        use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+
+        let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0))
+            .await
+            .expect("bind HLS inspection fixture");
+        let address = listener.local_addr().expect("fixture address");
+        let body = concat!(
+            "#EXTM3U\n",
+            "#EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID=\"aud\",NAME=\"English\",URI=\"audio.m3u8?sig=audio\"\n",
+            "#EXT-X-MEDIA:TYPE=SUBTITLES,GROUP-ID=\"subs\",NAME=\"English\",URI=\"https://subtitles.example.test/subs.m3u8?sig=subtitle\"\n",
+            "#EXT-X-STREAM-INF:BANDWIDTH=1000000,AUDIO=\"aud\",SUBTITLES=\"subs\"\n",
+            "video.m3u8?sig=video\n"
+        );
+        let response_body = body.to_string();
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = listener
+                .accept()
+                .await
+                .expect("accept HLS inspection request");
+            let mut request = Vec::new();
+            loop {
+                let mut chunk = [0_u8; 1024];
+                let read = socket.read(&mut chunk).await.expect("read request headers");
+                assert_ne!(read, 0, "request ended before headers");
+                request.extend_from_slice(&chunk[..read]);
+                if request.windows(4).any(|window| window == b"\r\n\r\n") {
+                    break;
+                }
+                assert!(request.len() < 16 * 1024, "request headers stay bounded");
+            }
+            let request = String::from_utf8_lossy(&request);
+            assert!(request.starts_with("GET /master.m3u8?token=secret HTTP/1.1"));
+            assert!(!request.to_ascii_lowercase().contains("cookie:"));
+            assert!(!request.to_ascii_lowercase().contains("referer:"));
+            let response = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/vnd.apple.mpegurl\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                response_body.len(),
+                response_body
+            );
+            socket
+                .write_all(response.as_bytes())
+                .await
+                .expect("write HLS body");
+        });
+
+        let url = format!("http://{address}/master.m3u8?token=secret");
+        let client = reqwest::Client::builder()
+            .no_proxy()
+            .build()
+            .expect("build local inspector client");
+        let children = inspect_hls_master_children_with_client(&client, &url)
+            .await
+            .expect("response should be an HLS master");
+        server.await.expect("fixture server task");
+
+        let prefix = format!("http://127.0.0.1:{}/", address.port());
+        assert!(children.contains(&format!("{prefix}audio.m3u8")));
+        assert!(children.contains(&format!("{prefix}video.m3u8")));
+        assert!(children.contains(&"https://subtitles.example.test/subs.m3u8".to_string()));
+        assert!(children.iter().all(|key| !key.contains('?')));
+        assert!(children.iter().all(|key| !key.contains("token=secret")));
+    }
+
+    #[tokio::test]
+    async fn hls_inspection_rejects_dns_answers_that_rebind_to_loopback() {
+        use std::net::{IpAddr, Ipv4Addr, SocketAddr};
+        use std::sync::atomic::Ordering;
+
+        let host = "hls-inspection-rebind.example.test";
+        let _lease =
+            crate::download_net::acquire_public_resolution(host).expect("public hostname lease");
+        let override_address = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 443);
+        let (client, resolver_used) =
+            crate::download_net::http_client_for_with_dns_overrides_for_test(
+                None,
+                std::collections::HashMap::from([(host.to_string(), vec![override_address])]),
+            )
+            .expect("build resolver test client");
+
+        let result = inspect_hls_master_children_with_client(
+            &client,
+            &format!("https://{host}/master.m3u8"),
+        )
+        .await;
+        assert!(
+            resolver_used.load(Ordering::Relaxed),
+            "the guarded resolver was used"
+        );
+        assert!(
+            result.is_none(),
+            "the inspection must fail when the DNS answer is loopback"
+        );
+    }
 
     #[tokio::test]
     async fn accepts_loopback_host_without_origin() {

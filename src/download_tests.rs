@@ -5629,7 +5629,10 @@ fn segmented_destination_mutation_stops_download(mutation: DestinationMutation) 
             while let Ok(message) = rx.try_recv() {
                 if let EngineMsg::SegmentsInit { ack, .. } = message {
                     if ack.try_send(()).is_err() {
-                        abort(&server, "segmented writer did not accept its initialization ack");
+                        abort(
+                            &server,
+                            "segmented writer did not accept its initialization ack",
+                        );
                     }
                     segments_initialized = true;
                 }
@@ -5640,7 +5643,10 @@ fn segmented_destination_mutation_stops_download(mutation: DestinationMutation) 
             tokio::time::sleep(Duration::from_millis(25)).await;
         }
         if !segments_initialized {
-            abort(&server, "segmented path did not initialize its resume bitmap");
+            abort(
+                &server,
+                "segmented path did not initialize its resume bitmap",
+            );
         }
 
         // The second logged request is a real piece fetch (the first is the
@@ -5654,7 +5660,10 @@ fn segmented_destination_mutation_stops_download(mutation: DestinationMutation) 
                 break;
             }
             if tokio::time::Instant::now() >= request_deadline {
-                abort(&server, "no segmented range request reached the stalled response");
+                abort(
+                    &server,
+                    "no segmented range request reached the stalled response",
+                );
             }
             tokio::time::sleep(Duration::from_millis(25)).await;
         }
@@ -5663,7 +5672,10 @@ fn segmented_destination_mutation_stops_download(mutation: DestinationMutation) 
         match mutation {
             DestinationMutation::Delete => {
                 std::fs::remove_file(&file).unwrap_or_else(|error| {
-                    abort(&server, &format!("could not delete segmented destination: {error}"))
+                    abort(
+                        &server,
+                        &format!("could not delete segmented destination: {error}"),
+                    )
                 });
             }
             DestinationMutation::Replace => {
@@ -5672,12 +5684,12 @@ fn segmented_destination_mutation_stops_download(mutation: DestinationMutation) 
                 });
                 let replacement = dl.join("replacement.tmp");
                 const REPLACEMENT_CONTENTS: &[u8] = b"replacement inode must remain untouched";
-                std::fs::write(&replacement, REPLACEMENT_CONTENTS).unwrap_or_else(|error| {
-                    abort(&server, &format!("write replacement: {error}"))
-                });
-                let replacement_metadata = std::fs::metadata(&replacement).unwrap_or_else(|error| {
-                    abort(&server, &format!("inspect replacement: {error}"))
-                });
+                std::fs::write(&replacement, REPLACEMENT_CONTENTS)
+                    .unwrap_or_else(|error| abort(&server, &format!("write replacement: {error}")));
+                let replacement_metadata =
+                    std::fs::metadata(&replacement).unwrap_or_else(|error| {
+                        abort(&server, &format!("inspect replacement: {error}"))
+                    });
                 use std::os::unix::fs::MetadataExt as _;
                 if original.ino() == replacement_metadata.ino() {
                     abort(&server, "replacement must use a different inode");
@@ -5690,7 +5702,10 @@ fn segmented_destination_mutation_stops_download(mutation: DestinationMutation) 
 
         match tokio::time::timeout(Duration::from_secs(5), &mut task).await {
             Ok(Ok(())) => {}
-            Ok(Err(error)) => abort(&server, &format!("segmented download task panicked: {error}")),
+            Ok(Err(error)) => abort(
+                &server,
+                &format!("segmented download task panicked: {error}"),
+            ),
             Err(_) => abort(
                 &server,
                 "segmented download did not stop promptly after destination ownership was lost",

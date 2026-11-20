@@ -93,6 +93,11 @@ const CLIENT_CONTEXT: &[u8] = b"grab-client\0";
 const HLS_INSPECTION_CONTEXT: &[u8] = b"grab-inspect-hls\0";
 const HANDOFF_CLOCK_SKEW_MS: u64 = 120_000;
 const MAX_RECENT_HANDOFF_NONCES: usize = 4096;
+/// Match the extension's four-worker HLS inspection batch while bounding
+/// authenticated callers that bypass the extension's client-side limit.
+const MAX_CONCURRENT_HLS_INSPECTIONS: usize = 4;
+static HLS_INSPECTION_SLOTS: LazyLock<Semaphore> =
+    LazyLock::new(|| Semaphore::new(MAX_CONCURRENT_HLS_INSPECTIONS));
 type HmacSha256 = Hmac<Sha256>;
 
 #[derive(Default)]
@@ -1717,6 +1722,12 @@ async fn handle_inspect_hls(
     {
         return StatusCode::BAD_REQUEST.into_response();
     }
+    // Reject excess work immediately instead of allowing paired callers
+    // to accumulate unbounded DNS leases and outbound connections. Acquire
+    // before reserving the nonce so a 429 can be retried with the same body.
+    let Ok(_inspection_slot) = HLS_INSPECTION_SLOTS.try_acquire() else {
+        return StatusCode::TOO_MANY_REQUESTS.into_response();
+    };
     if let Err(status) = reserve_handoff_nonce(Some(request.timestamp_ms), Some(&request.nonce)) {
         return status.into_response();
     }
@@ -2179,7 +2190,45 @@ mod tests {
     const BODY: &str = r#"{"url":"https://example.com/file.zip"}"#;
 
     #[tokio::test]
+    async fn hls_inspection_refuses_requests_over_the_concurrency_limit() {
+        let _guard = exclusive();
+        let mut srv = start(4).await;
+        let host = format!("127.0.0.1:{}", srv.port);
+        let permits: Vec<_> = (0..MAX_CONCURRENT_HLS_INSPECTIONS)
+            .map(|_| {
+                HLS_INSPECTION_SLOTS
+                    .try_acquire()
+                    .expect("all test inspection permits should be available")
+            })
+            .collect();
+        let body = serde_json::json!({
+            "url": "http://127.0.0.1:1234/master.m3u8",
+            "timestamp_ms": unix_time_ms().expect("system clock"),
+            "nonce": format!("{:032x}", fresh_test_nonce())
+        })
+        .to_string();
+        let token_value = hls_token(&body);
+        let headers = [
+            ("Host", host.as_str()),
+            JSON,
+            ("X-Grab-Token", token_value.as_str()),
+        ];
+        let response = request_with_target(srv.port, "/inspect-hls", &headers, &body).await;
+
+        assert_eq!(status(&response), "429", "{response}");
+        assert!(srv.rx.try_recv().is_err());
+        drop(permits);
+
+        // Capacity rejection must not burn the nonce. The same signed body
+        // is accepted once a permit is available.
+        let retry = request_with_target(srv.port, "/inspect-hls", &headers, &body).await;
+        assert_eq!(status(&retry), "200", "{retry}");
+        assert!(srv.rx.try_recv().is_err());
+    }
+
+    #[tokio::test]
     async fn hls_inspection_requires_a_valid_pairing_token() {
+        let _guard = exclusive();
         let mut srv = start(4).await;
         let host = format!("127.0.0.1:{}", srv.port);
         let body = r#"{"url":"http://127.0.0.1:1234/master.m3u8","timestamp_ms":1,"nonce":"00000000000000000000000000000001"}"#;
@@ -2247,6 +2296,7 @@ mod tests {
 
     #[tokio::test]
     async fn hls_inspection_fails_closed_for_private_literal_hosts() {
+        let _guard = exclusive();
         let mut srv = start(4).await;
         let host = format!("127.0.0.1:{}", srv.port);
         let body = serde_json::json!({
@@ -2280,6 +2330,7 @@ mod tests {
 
     #[tokio::test]
     async fn hls_inspection_rejects_non_hls_and_credential_urls() {
+        let _guard = exclusive();
         let mut srv = start(4).await;
         let host = format!("127.0.0.1:{}", srv.port);
         for url in [

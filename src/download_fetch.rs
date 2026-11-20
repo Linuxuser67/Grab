@@ -695,17 +695,23 @@ async fn attempt_multi(
     tokio::pin!(writer);
     // The writer owns destination checks. A writer failure must drop in-flight
     // range requests instead of waiting for their body timeouts to expire.
+    let mut workers_finished = false;
     let writer_result = tokio::select! {
         biased;
         result = &mut writer => Some(result),
-        _ = &mut worker_futures => None,
+        _ = &mut worker_futures => {
+            workers_finished = true;
+            None
+        },
     };
     let wres = match writer_result {
         Some(result) => result,
         None => (&mut writer).await,
     };
     let written = wres?;
-    worker_futures.await;
+    if !workers_finished {
+        worker_futures.await;
+    }
     if let Some(problem) = lock_recover(&destination_problem).take() {
         return Err(AttemptFail::Destination(problem));
     }

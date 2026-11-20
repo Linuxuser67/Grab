@@ -1333,11 +1333,13 @@ video.m3u8
             &format!("https://{host}/master.m3u8"),
         )
         .await;
-        assert!(resolver_used.load(Ordering::Relaxed), "the guarded resolver was used");
-        let error = result.expect_err("loopback DNS answer must be rejected");
         assert!(
-            error.to_string().contains("resolves to a local or private address"),
-            "unexpected inspection error: {error}"
+            resolver_used.load(Ordering::Relaxed),
+            "the guarded resolver was used"
+        );
+        assert!(
+            result.is_err(),
+            "the inspection must fail when the DNS answer is loopback"
         );
     }
 

@@ -440,6 +440,88 @@ mod tests {
         server.await.expect("fixture server task");
     }
 
+    async fn assert_rejected_head_is_not_retried(status: u16) {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        use tokio::net::TcpListener;
+
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind local fixture");
+        let address = listener.local_addr().expect("fixture address");
+        let server = tokio::spawn(async move {
+            let (mut stream, _) =
+                tokio::time::timeout(std::time::Duration::from_secs(1), listener.accept())
+                    .await
+                    .expect("HEAD probe connection timeout")
+                    .expect("accept HEAD probe");
+            let mut request = Vec::new();
+            let mut chunk = [0_u8; 1024];
+            loop {
+                let count = stream.read(&mut chunk).await.expect("read request");
+                if count == 0 {
+                    break;
+                }
+                request.extend_from_slice(&chunk[..count]);
+                if request.windows(4).any(|window| window == b"\r\n\r\n") {
+                    break;
+                }
+            }
+            let request = String::from_utf8_lossy(&request);
+            assert!(
+                request.lines().next().is_some_and(|line| {
+                    line.starts_with("HEAD /opaque/resource?X-Amz-Signature=method-bound ")
+                }),
+                "a query-bearing opaque URL must be probed with HEAD: {request}"
+            );
+
+            let reason = match status {
+                403 => "Forbidden",
+                405 => "Method Not Allowed",
+                _ => panic!("unexpected fixture status: {status}"),
+            };
+            let response = format!(
+                "HTTP/1.1 {status} {reason}\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+            );
+            stream
+                .write_all(response.as_bytes())
+                .await
+                .expect("write rejected HEAD response");
+            drop(stream);
+
+            assert!(
+                tokio::time::timeout(std::time::Duration::from_millis(100), listener.accept())
+                    .await
+                    .is_err(),
+                "a rejected HEAD must not trigger a speculative GET retry"
+            );
+        });
+
+        let client = reqwest::Client::builder()
+            .no_proxy()
+            .redirect(reqwest::redirect::Policy::none())
+            .build()
+            .expect("build fixture client");
+        let url = format!("http://{address}/opaque/resource?X-Amz-Signature=method-bound",);
+        let result = super::inspect_response_headers(&client, &url, true)
+            .await
+            .expect("inspect rejected HEAD response");
+
+        assert!(
+            result.is_none(),
+            "HTTP {status} is not direct-resource evidence"
+        );
+        server.await.expect("HEAD rejection fixture");
+    }
+
+    #[tokio::test]
+    async fn rejected_head_probe_does_not_retry_with_get() {
+        // Method-bound signed URLs can reject HEAD. The probe stays conservative:
+        // it returns no direct-resource verdict and leaves extractor routing intact.
+        for status in [403, 405] {
+            assert_rejected_head_is_not_retried(status).await;
+        }
+    }
+
     #[test]
     fn uses_content_disposition_when_mime_is_missing_or_generic() {
         assert!(has_download_disposition(

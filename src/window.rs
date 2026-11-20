@@ -274,9 +274,10 @@ pub fn build_window(
     search_clamp.set_widget_name("download-search-clamp");
     search_clamp.set_hexpand(true);
     // A hidden GtkSearchBar collapses its own content, but the wrapper's
-    // margins still reserve space in ToolbarView. Add vertical HIG spacing
-    // only while search is revealed so the inline add card stays flush below
-    // the header when search is closed.
+    // top margin would still reserve space in ToolbarView. Add it only while
+    // search is revealed so the add card stays flush below the header when
+    // search is closed. The bar already reserves the HIG gap below its entry,
+    // so the wrapper needs no bottom margin (that would double the gap).
     search_clamp.set_margin_top(0);
     search_clamp.set_margin_bottom(0);
     search_clamp.set_margin_start(12);
@@ -555,9 +556,7 @@ pub fn build_window(
         let toggle = search_toggle.clone();
         let clamp = search_clamp.clone();
         search_bar.connect_search_mode_enabled_notify(move |bar| {
-            let vertical_margin = if bar.is_search_mode() { 12 } else { 0 };
-            clamp.set_margin_top(vertical_margin);
-            clamp.set_margin_bottom(vertical_margin);
+            clamp.set_margin_top(if bar.is_search_mode() { 12 } else { 0 });
             toggle.set_active(bar.is_search_mode());
         });
     }

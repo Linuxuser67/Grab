@@ -29,8 +29,10 @@ fn determinate_end(fraction: f64) -> f64 {
 }
 
 /// End of the moving segment while progress is unknown (a 20% sweep).
+/// This may exceed 1.0; the drawing code splits the segment at the outline's
+/// closing point so the animation wraps without drawing a chord across it.
 fn indeterminate_end(phase: f64) -> f64 {
-    (phase + 0.2).min(1.0)
+    phase + 0.2
 }
 
 fn installed_status(version: Option<String>) -> String {
@@ -107,6 +109,19 @@ fn outline_segment(width: f64, height: f64, start: f64, end: f64) -> Vec<(f64, f
         ));
     }
     points
+}
+
+/// Split a segment that crosses the outline's closing point into two
+/// contiguous subpaths. A single polyline would draw a chord across the pill.
+fn outline_segments(width: f64, height: f64, start: f64, end: f64) -> Vec<Vec<(f64, f64)>> {
+    if end <= 1.0 {
+        vec![outline_segment(width, height, start, end)]
+    } else {
+        vec![
+            outline_segment(width, height, start, 1.0),
+            outline_segment(width, height, 0.0, end - 1.0),
+        ]
+    }
 }
 
 fn ensure_ring_css() {
@@ -193,13 +208,19 @@ impl ToolProgressButton {
             if !state.active || width <= 0 || height <= 0 {
                 return;
             }
-            let (start, end) = match state.fraction {
-                Some(fraction) => (0.0, determinate_end(fraction)),
-                None => (state.phase, indeterminate_end(state.phase)),
-            };
-            let points = outline_segment(width as f64, height as f64, start, end);
-            let Some((first, rest)) = points.split_first() else {
-                return;
+            let segments = match state.fraction {
+                Some(fraction) => vec![outline_segment(
+                    width as f64,
+                    height as f64,
+                    0.0,
+                    determinate_end(fraction),
+                )],
+                None => outline_segments(
+                    width as f64,
+                    height as f64,
+                    state.phase,
+                    indeterminate_end(state.phase),
+                ),
             };
             let color = area.color();
             cr.set_source_rgba(
@@ -211,9 +232,14 @@ impl ToolProgressButton {
             cr.set_line_width(STROKE);
             cr.set_line_cap(gtk4::cairo::LineCap::Butt);
             cr.set_line_join(gtk4::cairo::LineJoin::Round);
-            cr.move_to(first.0, first.1);
-            for point in rest {
-                cr.line_to(point.0, point.1);
+            for points in segments {
+                let Some((first, rest)) = points.split_first() else {
+                    continue;
+                };
+                cr.move_to(first.0, first.1);
+                for point in rest {
+                    cr.line_to(point.0, point.1);
+                }
             }
             let _ = cr.stroke();
         });
@@ -308,7 +334,7 @@ impl ToolProgressButton {
                 state.tick = None;
                 return ControlFlow::Break;
             }
-            state.phase = (state.phase + 0.025) % 0.8;
+            state.phase = (state.phase + 1.0 / 90.0) % 1.0;
             drop(state);
             ring.queue_draw();
             ControlFlow::Continue
@@ -435,6 +461,14 @@ mod tests {
         assert_eq!(indeterminate_end(0.0), 0.2);
         assert!((indeterminate_end(0.7) - 0.9).abs() < 1e-9);
         assert!(indeterminate_end(0.775) <= 1.0);
+        assert!((indeterminate_end(0.9) - 1.1).abs() < 1e-9);
+    }
+
+    #[test]
+    fn indeterminate_sweep_wraps_without_a_chord_across_the_pill() {
+        let segments = outline_segments(120.0, 40.0, 0.9, indeterminate_end(0.9));
+        assert_eq!(segments.len(), 2);
+        assert_eq!(segments[0].last(), segments[1].first());
     }
 
     #[test]

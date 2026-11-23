@@ -1099,9 +1099,8 @@ pub fn show(
     video_tools_group.add(&video_tools_row);
     // The button callback holds a Weak reference to avoid a widget cycle.
     // Retain its Rust controller for the lifetime of this preferences group.
-    let progress_owner = std::rc::Rc::new(std::cell::RefCell::new(Some(
-        video_tools_progress.clone(),
-    )));
+    let progress_owner =
+        std::rc::Rc::new(std::cell::RefCell::new(Some(video_tools_progress.clone())));
     let release_progress = progress_owner.clone();
     video_tools_group.connect_destroy(move |_| {
         drop(release_progress.borrow_mut().take());
@@ -1131,11 +1130,9 @@ pub fn show(
             let Some(progress) = progress_weak.upgrade() else {
                 return;
             };
-            let (Some(row), Some(btn), Some(spin)) = (
-                row_weak.upgrade(),
-                btn_weak.upgrade(),
-                spin_weak.upgrade(),
-            ) else {
+            let (Some(row), Some(btn), Some(spin)) =
+                (row_weak.upgrade(), btn_weak.upgrade(), spin_weak.upgrade())
+            else {
                 return;
             };
             // Cancel any older local presence probe before starting an action.

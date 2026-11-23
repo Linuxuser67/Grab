@@ -2794,7 +2794,12 @@ fn build_video_preview(
     select_files_btn: &gtk4::Button,
     add_btn: &gtk4::Button,
     public_host_leases: PublicHostLeases,
-) -> (Rc<VideoStep>, gtk4::Revealer, gtk4::Button, gtk4::Button) {
+) -> (
+    Rc<VideoStep>,
+    gtk4::Revealer,
+    Rc<crate::install_progress::ToolProgressButton>,
+    gtk4::Button,
+) {
     // Video preview block: hidden until a lookup runs; exactly one state shows.
     // HIG AdwPreferencesGroup: title/description are built-in, rows get the
     // 12px internal margins natively.
@@ -2832,9 +2837,9 @@ fn build_video_preview(
         // Subtitles carry raw tool errors: never parse them as Pango markup.
         .use_markup(false)
         .build();
-    let video_install_btn = Rc::new(crate::install_progress::ToolProgressButton::new(
-        &gettext("Install"),
-    ));
+    let video_install_btn = Rc::new(crate::install_progress::ToolProgressButton::new(&gettext(
+        "Install",
+    )));
     video_install_btn
         .button
         .set_tooltip_text(Some(&gettext("Download the yt-dlp support tools")));

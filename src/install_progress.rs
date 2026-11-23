@@ -42,9 +42,7 @@ fn installed_status(version: Option<String>) -> String {
 
 /// Pill outline as a closed polyline, clockwise from the top-left tangent.
 fn pill_outline(width: f64, height: f64) -> Vec<(f64, f64)> {
-    let radius = (height / 2.0 - INSET)
-        .min(width / 2.0 - INSET)
-        .max(1.0);
+    let radius = (height / 2.0 - INSET).min(width / 2.0 - INSET).max(1.0);
     let left = INSET + radius;
     let right = (width - INSET - radius).max(left);
     let center_y = height / 2.0;
@@ -55,12 +53,18 @@ fn pill_outline(width: f64, height: f64) -> Vec<(f64, f64)> {
     points.push((right, top));
     for step in 1..=ARC_STEPS {
         let angle = -PI / 2.0 + PI * step as f64 / ARC_STEPS as f64;
-        points.push((right + radius * angle.cos(), center_y + radius * angle.sin()));
+        points.push((
+            right + radius * angle.cos(),
+            center_y + radius * angle.sin(),
+        ));
     }
     points.push((left, bottom));
     for step in 1..=ARC_STEPS {
         let angle = PI / 2.0 + PI * step as f64 / ARC_STEPS as f64;
-        points.push((left + radius * angle.cos(), center_y + radius * angle.sin()));
+        points.push((
+            left + radius * angle.cos(),
+            center_y + radius * angle.sin(),
+        ));
     }
     points.push((left, top));
     points

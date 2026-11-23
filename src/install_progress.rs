@@ -18,7 +18,7 @@ thread_local! {
 }
 
 const INSET: f64 = 3.0;
-const STROKE: f64 = 4.0;
+const STROKE: f64 = 5.0;
 const ARC_STEPS: usize = 12;
 const SAMPLE_STEPS: usize = 64;
 
@@ -50,8 +50,8 @@ fn pill_outline(width: f64, height: f64) -> Vec<(f64, f64)> {
     let center_y = height / 2.0;
     let top = INSET;
     let bottom = height - INSET;
-    let mut points = Vec::with_capacity(2 * ARC_STEPS + 4);
-    points.push((left, top));
+    let mut points = Vec::with_capacity(2 * ARC_STEPS + 5);
+    points.push((width / 2.0, top));
     points.push((right, top));
     for step in 1..=ARC_STEPS {
         let angle = -PI / 2.0 + PI * step as f64 / ARC_STEPS as f64;
@@ -66,6 +66,7 @@ fn pill_outline(width: f64, height: f64) -> Vec<(f64, f64)> {
         points.push((left + radius * angle.cos(), center_y + radius * angle.sin()));
     }
     points.push((left, top));
+    points.push((width / 2.0, top));
     points
 }
 
@@ -492,6 +493,13 @@ mod tests {
             assert!((0.0..=120.0).contains(x), "x outside area: {x}");
             assert!((0.0..=40.0).contains(y), "y outside area: {y}");
         }
+    }
+
+    #[test]
+    fn outline_starts_at_the_top_center_like_bazaar() {
+        let outline = pill_outline(120.0, 40.0);
+        assert_eq!(outline.first(), Some(&(60.0, INSET)));
+        assert_eq!(outline.first(), outline.last());
     }
 
     #[test]

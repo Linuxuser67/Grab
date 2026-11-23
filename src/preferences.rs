@@ -134,6 +134,19 @@ fn is_manual_proxy(mode: &str) -> bool {
     mode == crate::download::PROXY_MODE_MANUAL
 }
 
+/// Keep the controller alive while its owning preferences group exists.
+/// Button callbacks use Weak<Rc<_>> so they do not form a widget reference cycle.
+fn retain_progress_controller_until_group_destroyed(
+    group: &adw::PreferencesGroup,
+    progress: std::rc::Rc<crate::install_progress::ToolProgressButton>,
+) {
+    let owner = std::rc::Rc::new(std::cell::RefCell::new(Some(progress)));
+    let release_owner = owner.clone();
+    group.connect_destroy(move |_| {
+        drop(release_owner.borrow_mut().take());
+    });
+}
+
 pub fn show(
     parent: &impl gtk4::glib::object::IsA<gtk4::Widget>,
     settings: &crate::settings::AppSettings,
@@ -1097,14 +1110,10 @@ pub fn show(
     video_tools_spin.set_visible(false);
     video_tools_row.add_suffix(&video_tools_spin);
     video_tools_group.add(&video_tools_row);
-    // The button callback holds a Weak reference to avoid a widget cycle.
-    // Retain its Rust controller for the lifetime of this preferences group.
-    let progress_owner =
-        std::rc::Rc::new(std::cell::RefCell::new(Some(video_tools_progress.clone())));
-    let release_progress = progress_owner.clone();
-    video_tools_group.connect_destroy(move |_| {
-        drop(release_progress.borrow_mut().take());
-    });
+    retain_progress_controller_until_group_destroyed(
+        &video_tools_group,
+        video_tools_progress.clone(),
+    );
     // Nothing is probed on open: versions and updates are checked only when
     // the user presses Check for Updates.
     let tool_action = std::rc::Rc::new(std::cell::Cell::new(ToolAction::Install));
@@ -1396,4 +1405,37 @@ pub fn show(
     dialog.add(&net_page);
     dialog.add(&advanced_page);
     dialog.present(Some(parent));
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    #[ignore = "needs a display; run under Xvfb (see ci.yml)"]
+    fn support_tools_progress_controller_lives_with_group() {
+        gtk4::init().expect("gtk::init (run under Xvfb)");
+
+        let group = adw::PreferencesGroup::new();
+        let row = adw::ActionRow::new();
+        let progress =
+            std::rc::Rc::new(crate::install_progress::ToolProgressButton::new("Install"));
+        let weak = std::rc::Rc::downgrade(&progress);
+        row.add_suffix(&progress.root);
+        group.add(&row);
+        drop(row);
+
+        retain_progress_controller_until_group_destroyed(&group, progress.clone());
+        drop(progress);
+        assert!(
+            weak.upgrade().is_some(),
+            "the preferences group must retain the progress controller"
+        );
+
+        drop(group);
+        assert!(
+            weak.upgrade().is_none(),
+            "destroying the preferences group must release the controller"
+        );
+    }
 }

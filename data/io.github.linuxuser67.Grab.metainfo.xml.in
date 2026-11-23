@@ -58,6 +58,13 @@
     </screenshot>
   </screenshots>
   <releases>
+    <release version="6.5.8~beta.1" type="development" date="2026-11-23">
+      <description>
+        <ul>
+          <li>UI: media support tool installation and updates now show a progress ring wrapped around the button instead of a separate popover.</li>
+        </ul>
+      </description>
+    </release>
     <release version="6.5.7" date="2026-11-23">
       <description>
         <ul>

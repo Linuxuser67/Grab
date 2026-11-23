@@ -214,11 +214,11 @@ jobs:
         run: |
           # Scanner pins are NOT Dependabot-tracked: bump the version, URL and
           # sha256 together when a new cargo-audit release lands.
-          curl --retry 5 --retry-all-errors --retry-delay 3 --retry-max-time 180 --connect-timeout 20 --max-time 60 -sSL --fail -H 'Accept: application/octet-stream' https://github.com/rustsec/rustsec/releases/download/cargo-audit/v0.22.2/cargo-audit-x86_64-unknown-linux-gnu-v0.22.2.tgz -o /tmp/cargo-audit.tgz
+          curl --retry 5 --retry-all-errors --retry-delay 3 --retry-max-time 180 --connect-timeout 20 --max-time 60 -sSL --fail -H 'Accept: application/octet-stream' https://github.com/rustsec/rustsec/releases/download/cargo-audit/v0.23.0/cargo-audit-x86_64-unknown-linux-gnu-v0.23.0.tgz -o /tmp/cargo-audit.tgz
           # Pinned hash (no vendor checksums published for this asset; the
-          # extracted binary was verified to report 0.22.2): a swapped
+          # extracted binary was verified to report 0.23.0): a swapped
           # release asset fails here instead of running unverified.
-          echo "ab28a1bdb54db4d5d8ad5981cf1f959410370b3d28250dbd35f6a44248620e39  /tmp/cargo-audit.tgz" | sha256sum -c -
+          echo "b77993532b253fcbf550996d7716465ec3d734d4e74e7f87bfb65a19add0fb59  /tmp/cargo-audit.tgz" | sha256sum -c -
           tar -xzf /tmp/cargo-audit.tgz -C /tmp
-          install -m 755 /tmp/cargo-audit-x86_64-unknown-linux-gnu-v0.22.2/cargo-audit /usr/local/bin/cargo-audit
+          install -m 755 /tmp/cargo-audit-x86_64-unknown-linux-gnu-v0.23.0/cargo-audit /usr/local/bin/cargo-audit
       - run: cargo audit

@@ -1088,9 +1088,11 @@ pub fn show(
         // Subtitles carry version strings and raw install errors: plain text.
         .use_markup(false)
         .build();
-    let video_tools_btn = gtk4::Button::builder().valign(gtk4::Align::Center).build();
-    video_tools_row.set_activatable_widget(Some(&video_tools_btn));
-    video_tools_row.add_suffix(&video_tools_btn);
+    let video_tools_progress = std::rc::Rc::new(crate::install_progress::ToolProgressButton::new(
+        &gettext("Install"),
+    ));
+    video_tools_row.set_activatable_widget(Some(&video_tools_progress.button));
+    video_tools_row.add_suffix(&video_tools_progress.root);
     let video_tools_spin = adw::Spinner::new();
     video_tools_spin.set_visible(false);
     video_tools_row.add_suffix(&video_tools_spin);
@@ -1100,17 +1102,16 @@ pub fn show(
     let tool_action = std::rc::Rc::new(std::cell::Cell::new(ToolAction::Install));
     let tool_probe_generation = std::rc::Rc::new(std::cell::Cell::new(0u64));
     // Tools needing update (from the check); passed to install_progress::run
-    // so the popup only shows what's actually downloading.
+    // so the ring only covers what's actually downloading.
     let pending_updates: std::rc::Rc<std::cell::RefCell<Vec<String>>> =
         std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
     // Start in the safe fresh-install state; the local presence probe below
     // switches to Check for Updates only when the core tools are present.
-    video_tools_btn.set_label(&gettext("Install"));
     video_tools_row.set_subtitle(&gettext("Not installed"));
     {
         let (row, btn, spin) = (
             video_tools_row.clone(),
-            video_tools_btn.clone(),
+            video_tools_progress.button.clone(),
             video_tools_spin.clone(),
         );
         let dialog_weak = dialog.downgrade();
@@ -1118,7 +1119,11 @@ pub fn show(
         let generation = tool_probe_generation.clone();
         let pending = pending_updates.clone();
         let settings_b = settings.clone();
-        video_tools_btn.connect_clicked(move |_| {
+        let progress_weak = std::rc::Rc::downgrade(&video_tools_progress);
+        video_tools_progress.button.connect_clicked(move |_| {
+            let Some(progress) = progress_weak.upgrade() else {
+                return;
+            };
             // Cancel any older local presence probe before starting an action.
             generation.set(generation.get().wrapping_add(1));
             if !crate::video_tools::in_flatpak() {
@@ -1338,7 +1343,7 @@ pub fn show(
                 None
             };
             crate::install_progress::run(
-                &btn,
+                &progress,
                 move |err| {
                     if dialog_err.upgrade().is_none() {
                         return;
@@ -1359,7 +1364,7 @@ pub fn show(
     // exist. This is a local executable-presence check, not an upstream lookup.
     refresh_video_tools(
         &video_tools_row,
-        &video_tools_btn,
+        &video_tools_progress.button,
         &video_tools_spin,
         &tool_action,
         &tool_probe_generation,

@@ -4468,7 +4468,7 @@ fn wire_video_preview_actions(
         let kick = kick_video.clone();
         let btn = video_install_btn.button.clone();
         let btn_weak = video_install_btn.button.downgrade();
-        let progress_weak = Rc::downgrade(&video_install_btn);
+        let progress_weak = Rc::downgrade(video_install_btn);
         // Outside Flatpak there is no bundled binary and host packages can't
         // be installed from here: guide through self-install instead.
         if !crate::video_tools::in_flatpak() {

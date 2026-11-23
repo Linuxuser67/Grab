@@ -61,10 +61,7 @@ fn pill_outline(width: f64, height: f64) -> Vec<(f64, f64)> {
     points.push((left, bottom));
     for step in 1..=ARC_STEPS {
         let angle = PI / 2.0 + PI * step as f64 / ARC_STEPS as f64;
-        points.push((
-            left + radius * angle.cos(),
-            center_y + radius * angle.sin(),
-        ));
+        points.push((left + radius * angle.cos(), center_y + radius * angle.sin()));
     }
     points.push((left, top));
     points
@@ -271,10 +268,10 @@ impl ToolProgressButton {
         let status = self.status.downgrade();
         let state = self.state.clone();
         glib::timeout_add_local_once(Duration::from_secs(3), move || {
-            if !state.borrow().active {
-                if let Some(status) = status.upgrade() {
-                    status.set_visible(false);
-                }
+            if !state.borrow().active
+                && let Some(status) = status.upgrade()
+            {
+                status.set_visible(false);
             }
         });
     }

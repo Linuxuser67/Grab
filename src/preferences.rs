@@ -1104,7 +1104,7 @@ pub fn show(
     )));
     let release_progress = progress_owner.clone();
     video_tools_group.connect_destroy(move |_| {
-        release_progress.borrow_mut().take();
+        drop(release_progress.borrow_mut().take());
     });
     // Nothing is probed on open: versions and updates are checked only when
     // the user presses Check for Updates.

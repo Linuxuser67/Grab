@@ -2832,14 +2832,15 @@ fn build_video_preview(
         // Subtitles carry raw tool errors: never parse them as Pango markup.
         .use_markup(false)
         .build();
-    let video_install_btn = gtk4::Button::builder()
-        .label(gettext("Install"))
-        .tooltip_text(gettext("Download the yt-dlp support tools"))
-        .valign(gtk4::Align::Center)
-        .build();
+    let video_install_btn = Rc::new(crate::install_progress::ToolProgressButton::new(
+        &gettext("Install"),
+    ));
+    video_install_btn
+        .button
+        .set_tooltip_text(Some(&gettext("Download the yt-dlp support tools")));
     // Whole-row click hits Install (same pattern as the torrent row below).
-    video_tools.set_activatable_widget(Some(&video_install_btn));
-    video_tools.add_suffix(&video_install_btn);
+    video_tools.set_activatable_widget(Some(&video_install_btn.button));
+    video_tools.add_suffix(&video_install_btn.root);
     video_group.add(&video_tools);
     // Probe-error state: an ActionRow in the group (4.4.4 pattern) — the
     // message goes in the subtitle, Retry is a suffix.
@@ -4453,32 +4454,39 @@ fn wire_video_preview_actions(
     probe: Rc<RefCell<ProbeState>>,
     kick_video: VideoLookupKick,
     manager: &Rc<DownloadManager>,
-    video_install_btn: &gtk4::Button,
+    video_install_btn: &Rc<crate::install_progress::ToolProgressButton>,
     video_retry_btn: &gtk4::Button,
 ) {
     // Install / retry / revert / audio-mode wiring.
     {
         let step2 = step.clone();
         let kick = kick_video.clone();
-        let btn = video_install_btn.clone();
+        let btn = video_install_btn.button.clone();
+        let btn_weak = video_install_btn.button.downgrade();
+        let progress_weak = Rc::downgrade(&video_install_btn);
         // Outside Flatpak there is no bundled binary and host packages can't
         // be installed from here: guide through self-install instead.
         if !crate::video_tools::in_flatpak() {
             btn.set_label(&gettext("How to Install"));
             btn.set_tooltip_text(Some(&gettext("Show terminal install instructions")));
         }
-        video_install_btn.connect_clicked(move |_| {
+        video_install_btn.button.connect_clicked(move |_| {
+            let Some(progress) = progress_weak.upgrade() else {
+                return;
+            };
+            let Some(btn) = btn_weak.upgrade() else {
+                return;
+            };
             if !crate::video_tools::in_flatpak() {
                 let kick_b = kick.clone();
                 crate::install_help::show(&btn, move || kick_b(true, SubmitSource::Button));
                 return;
             }
-            // Flatpak: staged auto-install under the shared progress popover anchored at
-            // the button (HIG: feedback lives with its control; stages stand in for the
-            // percentages that don't exist).
+            // Flatpak: staged auto-install with a Bazaar-style ring around the
+            // button, so progress stays attached to its control.
             let (step_b, kick_b) = (step2.clone(), kick.clone());
             crate::install_progress::run(
-                &btn,
+                &progress,
                 move |err| {
                     step_b.tools.set_subtitle(&err);
                 },

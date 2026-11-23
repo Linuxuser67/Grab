@@ -1,243 +1,372 @@
-//! Shared install-progress popover for Grab-managed media tools.
-//! Indeterminate pulsing bars (no byte progress); spinner becomes check/error per stage.
+//! Staged media-tool installation progress, shown as a ring that wraps the
+//! button (the pattern Bazaar uses for its install button) plus a caption
+//! underneath for the current stage. No byte progress is available from the
+//! installers yet, so the ring sweeps indeterminately.
 
-use std::cell::{Cell, RefCell};
+use std::cell::RefCell;
+use std::f64::consts::PI;
 use std::rc::Rc;
 use std::time::Duration;
 
 use gettextrs::gettext;
 use gtk4::glib::{self, ControlFlow};
 use gtk4::prelude::*;
-use libadwaita as adw;
 
-// One install in flight + its popover (main-thread thread_local, no locking); later clicks re-open, failures retry.
+// One install in flight; later clicks cannot start a second one.
 thread_local! {
-    static RUNNING: Cell<bool> = const { Cell::new(false) };
-    static SESSION: RefCell<Option<gtk4::Popover>> = const { RefCell::new(None) };
+    static RUNNING: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
 }
 
-/// One tool's row: indicator, name, status, pulsing bar, error label shown only on failure.
-struct ToolRow {
-    root: gtk4::Box,
-    /// Idle/spinner/status icon: exactly one child visible, so swaps never
-    /// move the text column and no visibility juggling is needed.
-    stack: gtk4::Stack,
-    icon: gtk4::Image,
-    status: gtk4::Label,
-    bar: gtk4::ProgressBar,
-    error: gtk4::Label,
-    /// Which bar the shared pulse driver ticks; set/cleared as stages start and finish.
-    active: Rc<RefCell<Option<gtk4::ProgressBar>>>,
+const INSET: f64 = 3.0;
+const STROKE: f64 = 4.0;
+const ARC_STEPS: usize = 12;
+const SAMPLE_STEPS: usize = 64;
+
+/// End of the drawn segment for a known fraction. Mirrors Bazaar: a fraction
+/// of 0 still shows a short segment, so "started" is visible.
+fn determinate_end(fraction: f64) -> f64 {
+    0.05 + 0.95 * fraction.clamp(0.0, 1.0)
 }
 
-impl ToolRow {
-    /// Build one row; `bar_label` is the accessible name (status label already announces state).
-    fn new(name: &str, bar_label: &str, active: &Rc<RefCell<Option<gtk4::ProgressBar>>>) -> Self {
-        // AdwSpinner animates while mapped; the stack unmaps hidden children,
-        // so it runs only while the "spinner" child is visible.
-        let stack = gtk4::Stack::new();
-        stack.set_valign(gtk4::Align::Center);
-        stack.add_named(
-            &gtk4::Box::new(gtk4::Orientation::Horizontal, 0),
-            Some("idle"),
+/// End of the moving segment while progress is unknown (a 20% sweep).
+fn indeterminate_end(phase: f64) -> f64 {
+    (phase + 0.2).min(1.0)
+}
+
+fn installed_status(version: Option<String>) -> String {
+    match version {
+        Some(version) => gettext("Installed • {version}").replace("{version}", &version),
+        None => gettext("Installed"),
+    }
+}
+
+/// Pill outline as a closed polyline, clockwise from the top-left tangent.
+fn pill_outline(width: f64, height: f64) -> Vec<(f64, f64)> {
+    let radius = (height / 2.0 - INSET)
+        .min(width / 2.0 - INSET)
+        .max(1.0);
+    let left = INSET + radius;
+    let right = (width - INSET - radius).max(left);
+    let center_y = height / 2.0;
+    let top = INSET;
+    let bottom = height - INSET;
+    let mut points = Vec::with_capacity(2 * ARC_STEPS + 4);
+    points.push((left, top));
+    points.push((right, top));
+    for step in 1..=ARC_STEPS {
+        let angle = -PI / 2.0 + PI * step as f64 / ARC_STEPS as f64;
+        points.push((right + radius * angle.cos(), center_y + radius * angle.sin()));
+    }
+    points.push((left, bottom));
+    for step in 1..=ARC_STEPS {
+        let angle = PI / 2.0 + PI * step as f64 / ARC_STEPS as f64;
+        points.push((left + radius * angle.cos(), center_y + radius * angle.sin()));
+    }
+    points.push((left, top));
+    points
+}
+
+/// Sample the part of the outline between two fractional distances. Both
+/// bounds stay inside 0..=1 so the segment never crosses the closing edge.
+fn outline_segment(width: f64, height: f64, start: f64, end: f64) -> Vec<(f64, f64)> {
+    let outline = pill_outline(width, height);
+    if outline.len() < 2 {
+        return outline;
+    }
+    let mut cumulative = Vec::with_capacity(outline.len());
+    cumulative.push(0.0);
+    for pair in outline.windows(2) {
+        let length = ((pair[1].0 - pair[0].0).powi(2) + (pair[1].1 - pair[0].1).powi(2)).sqrt();
+        cumulative.push(cumulative.last().copied().unwrap_or(0.0) + length);
+    }
+    let total = cumulative.last().copied().unwrap_or(0.0);
+    if total <= 0.0 {
+        return outline;
+    }
+    let last_segment = outline.len() - 2;
+    let mut points = Vec::with_capacity(SAMPLE_STEPS + 1);
+    for sample in 0..=SAMPLE_STEPS {
+        let fraction = start + (end - start) * sample as f64 / SAMPLE_STEPS as f64;
+        let distance = fraction.clamp(0.0, 1.0) * total;
+        let mut index = 0;
+        while index < last_segment && cumulative[index + 1] < distance {
+            index += 1;
+        }
+        let segment_length = cumulative[index + 1] - cumulative[index];
+        let ratio = if segment_length <= 0.0 {
+            0.0
+        } else {
+            (distance - cumulative[index]) / segment_length
+        };
+        let from = outline[index];
+        let to = outline[index + 1];
+        points.push((
+            from.0 + (to.0 - from.0) * ratio,
+            from.1 + (to.1 - from.1) * ratio,
+        ));
+    }
+    points
+}
+
+fn ensure_ring_css() {
+    static ONCE: std::sync::OnceLock<()> = std::sync::OnceLock::new();
+    if ONCE.set(()).is_ok() {
+        let provider = gtk4::CssProvider::new();
+        provider.load_from_string(
+            ".grab-install-ring { color: var(--accent-bg-color, currentColor); }",
         );
-        stack.add_named(&adw::Spinner::new(), Some("spinner"));
-        let icon = gtk4::Image::from_icon_name("emblem-ok-symbolic");
-        icon.set_pixel_size(16);
-        stack.add_named(&icon, Some("icon"));
+        gtk4::style_context_add_provider_for_display(
+            &gtk4::gdk::Display::default().expect("install ring CSS: no display"),
+            &provider,
+            gtk4::STYLE_PROVIDER_PRIORITY_APPLICATION,
+        );
+    }
+}
 
-        let name_label = gtk4::Label::new(Some(name));
-        name_label.set_halign(gtk4::Align::Start);
-        name_label.add_css_class("heading");
-        let status = gtk4::Label::new(Some(&gettext("Waiting…")));
-        status.set_halign(gtk4::Align::Start);
+#[derive(Default)]
+struct RingState {
+    active: bool,
+    fraction: Option<f64>,
+    phase: f64,
+    tick: Option<glib::source::SourceId>,
+}
+
+/// The install button, a non-interactive ring drawn around it, and a caption
+/// below it for the active stage or a failure message.
+pub struct ToolProgressButton {
+    pub root: gtk4::Box,
+    pub button: gtk4::Button,
+    ring: gtk4::DrawingArea,
+    status: gtk4::Label,
+    state: Rc<RefCell<RingState>>,
+    restore_label: RefCell<String>,
+}
+
+impl ToolProgressButton {
+    pub fn new(label: &str) -> Self {
+        ensure_ring_css();
+        let button = gtk4::Button::builder()
+            .label(label)
+            .valign(gtk4::Align::Center)
+            .build();
+        button.set_margin_start(6);
+        button.set_margin_end(6);
+        button.set_margin_top(6);
+        button.set_margin_bottom(6);
+
+        let ring = gtk4::DrawingArea::new();
+        ring.add_css_class("grab-install-ring");
+        let ring_label = gettext("Media support tool install progress");
+        ring.update_property(&[gtk4::accessible::Property::Label(&ring_label)]);
+        ring.set_can_target(false);
+        ring.set_hexpand(true);
+        ring.set_vexpand(true);
+        ring.set_visible(false);
+        let overlay = gtk4::Overlay::new();
+        overlay.set_child(Some(&button));
+        overlay.add_overlay(&ring);
+
+        let status = gtk4::Label::new(None);
         status.add_css_class("caption");
         status.add_css_class("dimmed");
-        let titles = gtk4::Box::new(gtk4::Orientation::Vertical, 2);
-        titles.set_hexpand(true);
-        titles.append(&name_label);
-        titles.append(&status);
+        status.set_halign(gtk4::Align::Center);
+        status.set_wrap(true);
+        status.set_max_width_chars(32);
+        status.set_ellipsize(gtk4::pango::EllipsizeMode::End);
+        status.set_visible(false);
 
-        let header = gtk4::Box::new(gtk4::Orientation::Horizontal, 12);
-        header.append(&stack);
-        header.append(&titles);
+        let root = gtk4::Box::new(gtk4::Orientation::Vertical, 2);
+        root.append(&overlay);
+        root.append(&status);
 
-        let bar = gtk4::ProgressBar::new();
-        bar.update_property(&[gtk4::accessible::Property::Label(bar_label)]);
-
-        let error = gtk4::Label::new(None);
-        error.set_wrap(true);
-        error.set_max_width_chars(32);
-        error.set_halign(gtk4::Align::Start);
-        error.set_visible(false);
-
-        let root = gtk4::Box::new(gtk4::Orientation::Vertical, 6);
-        root.append(&header);
-        root.append(&bar);
-        root.append(&error);
+        let state = Rc::new(RefCell::new(RingState::default()));
+        let cleanup = state.clone();
+        root.connect_destroy(move |_| {
+            if let Some(id) = cleanup.borrow_mut().tick.take() {
+                id.remove();
+            }
+        });
+        let draw_state = state.clone();
+        ring.set_draw_func(move |area, cr, width, height| {
+            let state = draw_state.borrow();
+            if !state.active || width <= 0 || height <= 0 {
+                return;
+            }
+            let (start, end) = match state.fraction {
+                Some(fraction) => (0.0, determinate_end(fraction)),
+                None => (state.phase, indeterminate_end(state.phase)),
+            };
+            let points = outline_segment(width as f64, height as f64, start, end);
+            let Some((first, rest)) = points.split_first() else {
+                return;
+            };
+            let color = area.color();
+            cr.set_source_rgba(
+                color.red() as f64,
+                color.green() as f64,
+                color.blue() as f64,
+                color.alpha() as f64,
+            );
+            cr.set_line_width(STROKE);
+            cr.set_line_cap(gtk4::cairo::LineCap::Butt);
+            cr.set_line_join(gtk4::cairo::LineJoin::Round);
+            cr.move_to(first.0, first.1);
+            for point in rest {
+                cr.line_to(point.0, point.1);
+            }
+            let _ = cr.stroke();
+        });
 
         Self {
             root,
-            stack,
-            icon,
+            button,
+            ring,
             status,
-            bar,
-            error,
-            active: active.clone(),
+            state,
+            restore_label: RefCell::new(label.to_string()),
         }
     }
 
-    fn widget(&self) -> gtk4::Box {
-        self.root.clone()
+    fn begin(&self) {
+        *self.restore_label.borrow_mut() = self
+            .button
+            .label()
+            .map(|label| label.to_string())
+            .unwrap_or_default();
+        self.button.set_label(&gettext("Installing…"));
+        self.status.set_visible(false);
+        {
+            let mut state = self.state.borrow_mut();
+            state.active = true;
+            state.fraction = None;
+            state.phase = 0.0;
+        }
+        self.ring.set_visible(true);
+        self.button.set_sensitive(false);
+        self.start_tick();
+        self.ring.queue_draw();
     }
 
-    /// Mark the row active: spinner runs and its bar becomes the pulse target.
-    fn set_downloading(&self) {
-        self.stack.set_visible_child_name("spinner");
-        // A new attempt clears the previous failure's tint.
-        self.icon.remove_css_class("error");
-        self.status.set_text(&gettext("Downloading…"));
-        *self.active.borrow_mut() = Some(self.bar.clone());
+    fn set_progress(&self, fraction: f64) {
+        self.state.borrow_mut().fraction = Some(fraction.clamp(0.0, 1.0));
+        self.ring.queue_draw();
     }
 
-    /// Mark the row done: checkmark, full bar, probed version when available.
-    fn set_installed(&self, version: Option<String>) {
-        *self.active.borrow_mut() = None;
-        self.stack.set_visible_child_name("icon");
-        // Success is never red, even after a retried failure.
-        self.icon.remove_css_class("error");
-        self.bar.set_fraction(1.0);
-        let text = match version {
-            Some(v) => gettext("Installed • {version}").replace("{version}", &v),
-            None => gettext("Installed"),
-        };
-        self.status.set_text(&text);
+    fn set_status(&self, text: &str) {
+        self.status.set_label(text);
+        self.status.set_visible(true);
     }
 
-    /// Mark failed: error icon + wrapping text (not color alone); popover stays open, caller re-enables Install for retry.
-    fn set_failed(&self, message: &str) {
-        *self.active.borrow_mut() = None;
-        self.icon.set_icon_name(Some("dialog-error-symbolic"));
-        // Red is the failure signal; the "Failed" text keeps color from being the only signal.
-        self.icon.add_css_class("error");
-        self.stack.set_visible_child_name("icon");
-        self.bar.set_visible(false);
-        self.status.set_text(&gettext("Failed"));
-        self.error.set_text(message);
-        self.error.set_visible(true);
+    /// Another widget owns the in-flight install: tell this one's user why
+    /// nothing started, then clear the hint a few seconds later.
+    fn note_busy(&self) {
+        if self.state.borrow().active {
+            return;
+        }
+        self.set_status(&gettext("An install is already in progress…"));
+        let status = self.status.downgrade();
+        let state = self.state.clone();
+        glib::timeout_add_local_once(Duration::from_secs(3), move || {
+            if !state.borrow().active {
+                if let Some(status) = status.upgrade() {
+                    status.set_visible(false);
+                }
+            }
+        });
+    }
+
+    fn finish(&self) {
+        self.stop_tick();
+        self.state.borrow_mut().active = false;
+        self.ring.set_visible(false);
+        self.status.set_visible(false);
+        self.button.set_label(&self.restore_label.borrow());
+        self.button.set_sensitive(true);
+    }
+
+    fn fail(&self) {
+        // The caller owns the error surface (row subtitle); don't duplicate it
+        // in the caption or overwrite the button's stateful label.
+        self.finish();
+    }
+
+    fn start_tick(&self) {
+        let mut state = self.state.borrow_mut();
+        if state.tick.is_some() {
+            return;
+        }
+        let ring = self.ring.downgrade();
+        let shared = self.state.clone();
+        let id = glib::timeout_add_local(Duration::from_millis(33), move || {
+            let Some(ring) = ring.upgrade() else {
+                shared.borrow_mut().tick = None;
+                return ControlFlow::Break;
+            };
+            let mut state = shared.borrow_mut();
+            if !state.active {
+                state.tick = None;
+                return ControlFlow::Break;
+            }
+            state.phase = (state.phase + 0.025) % 0.8;
+            drop(state);
+            ring.queue_draw();
+            ControlFlow::Continue
+        });
+        state.tick = Some(id);
+    }
+
+    fn stop_tick(&self) {
+        if let Some(id) = self.state.borrow_mut().tick.take() {
+            id.remove();
+        }
     }
 }
 
-/// Staged media-tool installation under a shared popover anchored at `button`.
-/// Rows go Waiting → Downloading → Installed; failure marks its row and leaves the popover open, success lingers briefly.
-/// Button stays sensitive: in-flight clicks re-open, post-failure clicks retry; `on_error`/`on_success` report to caller.
+/// Staged media-tool installation under the wrapped-ring progress button.
+/// `on_error`/`on_success` report to the caller; `tools` limits an update to
+/// the tools actually being downloaded (None = fresh install, show all).
 pub fn run(
-    button: &gtk4::Button,
+    progress: &Rc<ToolProgressButton>,
     on_error: impl Fn(String) + 'static,
     on_success: impl Fn() + 'static,
-    // Tools to install/update. None = all (fresh install). Some(list) = only
-    // those (update flow: popup shows only what's actually downloading).
     tools: Option<Vec<String>>,
 ) {
-    let btn = button.clone();
-
-    // Already running: re-open its popover at the clicked button.
-    if RUNNING.with(|r| r.get()) {
-        SESSION.with(|s| {
-            if let Some(pop) = s.borrow().as_ref() {
-                pop.popdown();
-                pop.unparent();
-                pop.set_parent(&btn);
-                pop.popup();
-            }
-        });
+    if RUNNING.with(|running| running.get()) {
+        progress.note_busy();
         return;
     }
-    // Failed popover still open; this click retires it for a fresh retry.
-    SESSION.with(|s| {
-        if let Some(pop) = s.take() {
-            pop.popdown();
-        }
-    });
-    RUNNING.with(|r| r.set(true));
+    RUNNING.with(|running| running.set(true));
+    let progress = progress.clone();
+    progress.begin();
 
-    let active: Rc<RefCell<Option<gtk4::ProgressBar>>> = Rc::new(RefCell::new(None));
-    // Whether to include a tool: None = all (fresh install), Some(list) = only listed.
     let include = |name: &str| {
         tools
             .as_ref()
-            .map(|t| t.iter().any(|n| n == name))
+            .map(|list| list.iter().any(|item| item == name))
             .unwrap_or(true)
     };
     let do_yt = include("yt-dlp");
     let do_gdl = include("gallery-dl");
     let do_deno = include("deno");
 
-    // Order: yt-dlp, gallery-dl (under yt-dlp), then Deno.
-    let yt = ToolRow::new("yt-dlp", &gettext("yt-dlp install progress"), &active);
-    let gdl = ToolRow::new(
-        "gallery-dl",
-        &gettext("gallery-dl install progress"),
-        &active,
-    );
-    let deno = ToolRow::new("Deno", &gettext("deno install progress"), &active);
-
-    let rows = gtk4::Box::new(gtk4::Orientation::Vertical, 12);
-    // HIG card padding: 12, matching the rest of the app (not 18).
-    rows.set_margin_top(12);
-    rows.set_margin_bottom(12);
-    rows.set_margin_start(12);
-    rows.set_margin_end(12);
-    if do_yt {
-        rows.append(&yt.widget());
-    }
-    if do_gdl {
-        rows.append(&gdl.widget());
-    }
-    if do_deno {
-        rows.append(&deno.widget());
-    }
-    let pop = gtk4::Popover::new();
-    pop.set_child(Some(&rows));
-    pop.set_parent(&btn);
-    pop.popup();
-    // Kept alive so later clicks re-open this popover instead of starting a new install.
-    SESSION.with(|s| *s.borrow_mut() = Some(pop.clone()));
-
     glib::spawn_future_local(async move {
-        // Pulse driver ticks the active row. Started here (before any tool)
-        // so it runs regardless of which tools are included.
-        {
-            let active = active.clone();
-            glib::timeout_add_local(Duration::from_millis(100), move || {
-                if let Some(bar) = active.borrow().as_ref() {
-                    bar.pulse();
-                    ControlFlow::Continue
-                } else {
-                    ControlFlow::Break
-                }
-            });
-        }
         if do_yt {
-            yt.set_downloading();
+            progress.set_status(&gettext("Downloading yt-dlp…"));
             let yt_path = match crate::video::install_ytdlp().await {
                 Ok(path) => path,
-                Err(e) => {
-                    let message = e.to_string();
-                    yt.set_failed(&message);
-                    RUNNING.with(|r| r.set(false));
+                Err(error) => {
+                    let message = error.to_string();
+                    progress.fail();
+                    RUNNING.with(|running| running.set(false));
                     on_error(message);
                     return;
                 }
             };
             let version = crate::video_tools::tool_display_version(yt_path, "--version").await;
-            yt.set_installed(version);
+            progress.set_status(&installed_status(version));
         }
         if do_gdl {
-            // gallery-dl for image galleries and fallback video; installed up front
-            // so gallery pastes never wait on a lazy install.
-            gdl.set_downloading();
-            // Run on Tokio worker (not GTK main) to avoid UI freeze.
+            progress.set_status(&gettext("Downloading gallery-dl…"));
             let gdl_path = match crate::runtime::tokio_rt()
                 .spawn(async move { crate::gallery_tools::install_gallerydl().await })
                 .await
@@ -245,10 +374,10 @@ pub fn run(
                 .unwrap_or_else(|| Err(crate::gallery_tools::GalleryError::install("spawn failed")))
             {
                 Ok(path) => path,
-                Err(e) => {
-                    let message = e.to_string();
-                    gdl.set_failed(&message);
-                    RUNNING.with(|r| r.set(false));
+                Err(error) => {
+                    let message = error.to_string();
+                    progress.fail();
+                    RUNNING.with(|running| running.set(false));
                     on_error(message);
                     return;
                 }
@@ -262,33 +391,79 @@ pub fn run(
                 .await
                 .ok()
                 .flatten();
-            gdl.set_installed(version);
+            progress.set_status(&installed_status(version));
         }
         if do_deno {
-            // Deno is Grab's JavaScript runtime for YouTube; installed up
-            // front so YouTube spawns never wait on a lazy install.
-            deno.set_downloading();
+            progress.set_status(&gettext("Downloading Deno…"));
             let deno_path = match crate::video::install_deno().await {
                 Ok(path) => path,
-                Err(e) => {
-                    let message = e.to_string();
-                    deno.set_failed(&message);
-                    RUNNING.with(|r| r.set(false));
+                Err(error) => {
+                    let message = error.to_string();
+                    progress.fail();
+                    RUNNING.with(|running| running.set(false));
                     on_error(message);
                     return;
                 }
             };
             let version = crate::video_tools::tool_display_version(deno_path, "--version").await;
-            deno.set_installed(version);
+            progress.set_status(&installed_status(version));
         }
 
-        // Linger on checkmarks so completion registers, then close.
+        progress.set_progress(1.0);
         glib::timeout_future(Duration::from_millis(1200)).await;
-        pop.popdown();
-        SESSION.with(|s| {
-            s.take();
-        });
-        RUNNING.with(|r| r.set(false));
+        progress.finish();
+        RUNNING.with(|running| running.set(false));
         on_success();
     });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn determinate_progress_starts_small_and_clamps() {
+        assert_eq!(determinate_end(0.0), 0.05);
+        assert_eq!(determinate_end(1.0), 1.0);
+        assert_eq!(determinate_end(2.0), 1.0);
+        assert_eq!(determinate_end(-1.0), 0.05);
+    }
+
+    #[test]
+    fn indeterminate_sweep_stays_inside_the_outline() {
+        assert_eq!(indeterminate_end(0.0), 0.2);
+        assert!((indeterminate_end(0.7) - 0.9).abs() < 1e-9);
+        assert!(indeterminate_end(0.775) <= 1.0);
+    }
+
+    #[test]
+    fn outline_fits_a_narrow_button() {
+        let points = outline_segment(40.0, 46.0, 0.0, 1.0);
+        for (x, y) in &points {
+            assert!((0.0..=40.0).contains(x), "x outside narrow area: {x}");
+            assert!((0.0..=46.0).contains(y), "y outside narrow area: {y}");
+        }
+    }
+
+    #[test]
+    fn full_outline_is_closed_and_fits_the_area() {
+        let points = outline_segment(120.0, 40.0, 0.0, 1.0);
+        assert!(points.len() > 2);
+        let first = points.first().unwrap();
+        let last = points.last().unwrap();
+        assert!((first.0 - last.0).abs() < 0.001);
+        assert!((first.1 - last.1).abs() < 0.001);
+        for (x, y) in &points {
+            assert!((0.0..=120.0).contains(x), "x outside area: {x}");
+            assert!((0.0..=40.0).contains(y), "y outside area: {y}");
+        }
+    }
+
+    #[test]
+    fn partial_segment_covers_only_its_slice() {
+        let full = outline_segment(120.0, 40.0, 0.0, 1.0);
+        let half = outline_segment(120.0, 40.0, 0.0, 0.5);
+        assert_eq!(half.first(), full.first());
+        assert_ne!(half.last(), full.last());
+    }
 }

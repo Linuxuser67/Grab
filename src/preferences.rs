@@ -1097,6 +1097,15 @@ pub fn show(
     video_tools_spin.set_visible(false);
     video_tools_row.add_suffix(&video_tools_spin);
     video_tools_group.add(&video_tools_row);
+    // The button callback holds a Weak reference to avoid a widget cycle.
+    // Retain its Rust controller for the lifetime of this preferences group.
+    let progress_owner = std::rc::Rc::new(std::cell::RefCell::new(Some(
+        video_tools_progress.clone(),
+    )));
+    let release_progress = progress_owner.clone();
+    video_tools_group.connect_destroy(move |_| {
+        release_progress.borrow_mut().take();
+    });
     // Nothing is probed on open: versions and updates are checked only when
     // the user presses Check for Updates.
     let tool_action = std::rc::Rc::new(std::cell::Cell::new(ToolAction::Install));
@@ -1109,11 +1118,9 @@ pub fn show(
     // switches to Check for Updates only when the core tools are present.
     video_tools_row.set_subtitle(&gettext("Not installed"));
     {
-        let (row, btn, spin) = (
-            video_tools_row.clone(),
-            video_tools_progress.button.clone(),
-            video_tools_spin.clone(),
-        );
+        let row_weak = video_tools_row.downgrade();
+        let btn_weak = video_tools_progress.button.downgrade();
+        let spin_weak = video_tools_spin.downgrade();
         let dialog_weak = dialog.downgrade();
         let action = tool_action.clone();
         let generation = tool_probe_generation.clone();
@@ -1122,6 +1129,13 @@ pub fn show(
         let progress_weak = std::rc::Rc::downgrade(&video_tools_progress);
         video_tools_progress.button.connect_clicked(move |_| {
             let Some(progress) = progress_weak.upgrade() else {
+                return;
+            };
+            let (Some(row), Some(btn), Some(spin)) = (
+                row_weak.upgrade(),
+                btn_weak.upgrade(),
+                spin_weak.upgrade(),
+            ) else {
                 return;
             };
             // Cancel any older local presence probe before starting an action.

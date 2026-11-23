@@ -1,0 +1,14 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="646" height="250" viewBox="0 0 646 250" role="img" aria-labelledby="title desc">
+  <title id="title">Download the latest Grab release from GitHub</title>
+  <desc id="desc">A monochrome GitHub releases badge.</desc>
+  <rect x="42.5" y="43.5" width="561" height="163" rx="20" fill="#000000" stroke="#A6A6A6" stroke-width="5"/>
+  <g fill="none" stroke="#FFFFFF" stroke-width="7" stroke-linecap="round" stroke-linejoin="round">
+    <circle cx="139" cy="125" r="44"/>
+    <path d="M139 91v52m-20-20 20 20 20-20M115 158h48"/>
+  </g>
+  <g fill="#FFFFFF" font-family="Arial, 'Liberation Sans', sans-serif" text-anchor="middle">
+    <text x="394" y="91" font-size="30" font-weight="400" letter-spacing="1.8">DOWNLOAD FROM</text>
+    <text x="394" y="161" font-size="74" font-weight="700" letter-spacing="-1.5">GitHub</text>
+    <text x="394" y="188" font-size="18" font-weight="400" letter-spacing=".55" fill="#D5D5D5">Latest stable releases</text>
+  </g>
+</svg>

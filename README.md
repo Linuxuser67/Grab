@@ -1,5 +1,10 @@
 # Grab
 
+<p align="center">
+  <a href="https://flatpark.org/apps/io.github.linuxuser67.Grab/"><img src="assets/badges/get-it-on-flatpark.svg" alt="Get it on FlatPark" height="56"></a>
+  <a href="https://github.com/Linuxuser67/Grab/releases/latest"><img src="assets/badges/github-releases.svg" alt="Download the latest stable release from GitHub" height="56"></a>
+</p>
+
 **A download manager for GNOME.**
 
 Download files, videos, music, image galleries, torrents, and live streams from one focused app.
@@ -34,8 +39,6 @@ These lists are maintained by the upstream projects and can change over time. A 
 ![Add a download and choose a media format](screenshots/dark-new-download.png)
 
 ## Get Grab
-
-[![Get it on FlatPark](assets/get-it-on-flatpark.png)](https://flatpark.org/apps/io.github.linuxuser67.Grab/)
 
 [Browse the latest releases](https://github.com/Linuxuser67/Grab/releases)
 

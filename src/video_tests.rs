@@ -2617,6 +2617,7 @@ fn browser_override_command_covers_all_channels() {
             "flatpak override --user --filesystem=~/.config/google-chrome:ro \
              --filesystem=~/.config/google-chrome-beta:ro \
              --filesystem=~/.config/google-chrome-unstable:ro \
+             --talk-name=org.freedesktop.secrets \
              io.github.linuxuser67.Grab"
         )
     );
@@ -2644,6 +2645,16 @@ fn browser_override_command_covers_all_channels() {
         browser_override_command_for("mystery", "io.github.linuxuser67.Grab"),
         None
     );
+}
+
+#[test]
+fn chromium_browsers_need_secret_service_for_cookies() {
+    for browser in ["brave", "chrome", "chromium", "edge", "opera", "vivaldi", "whale"] {
+        assert!(crate::video_tools::needs_secret_service(browser), "{browser}");
+    }
+    for browser in ["none", "firefox", "zen", "mystery"] {
+        assert!(!crate::video_tools::needs_secret_service(browser), "{browser}");
+    }
 }
 
 #[test]

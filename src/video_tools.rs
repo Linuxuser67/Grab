@@ -182,6 +182,33 @@ pub(crate) fn in_flatpak() -> bool {
     std::path::Path::new("/.flatpak-info").exists()
 }
 
+/// True when the sandbox's effective session-bus policy grants the Secret
+/// Service. `/.flatpak-info` includes manifest grants and user overrides, so
+/// this is the same policy yt-dlp sees.
+pub(crate) fn secret_service_allowed() -> bool {
+    std::fs::read_to_string("/.flatpak-info")
+        .map(|info| session_bus_policy_allows(&info, "org.freedesktop.secrets"))
+        .unwrap_or(false)
+}
+
+fn session_bus_policy_allows(info: &str, name: &str) -> bool {
+    let mut in_session_bus_policy = false;
+    for line in info.lines() {
+        let line = line.trim();
+        if line.starts_with('[') {
+            in_session_bus_policy = line == "[Session Bus Policy]";
+            continue;
+        }
+        if in_session_bus_policy
+            && let Some((policy_name, access)) = line.split_once('=')
+            && policy_name.trim() == name
+        {
+            return matches!(access.trim(), "talk" | "own");
+        }
+    }
+    false
+}
+
 /// Package manager commands for the detected distro; `None` = unknown, so show
 /// manual install links instead of a wrong command.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1821,6 +1848,12 @@ pub(crate) fn chromium_subdirs(browser: &str) -> &'static [&'static str] {
     }
 }
 
+/// Chromium-family browsers encrypt their cookie database with a key held by
+/// the Secret Service; Firefox and Zen do not.
+pub(crate) fn needs_secret_service(browser: &str) -> bool {
+    !chromium_subdirs(browser).is_empty()
+}
+
 /// Best profile dir across every channel subdir: each channel contributes its
 /// preferred profile (`Default` first), then the freshest `Cookies` mtime wins —
 /// a stale install that merely exists (e.g. Brave stable shadowing Origin Beta)
@@ -1973,6 +2006,9 @@ pub(crate) fn browser_override_command_for(browser: &str, app_id: &str) -> Optio
     let mut cmd = String::from("flatpak override --user");
     for dir in &dirs {
         cmd.push_str(&format!(" --filesystem={dir}:ro"));
+    }
+    if needs_secret_service(browser) {
+        cmd.push_str(" --talk-name=org.freedesktop.secrets");
     }
     cmd.push(' ');
     cmd.push_str(app_id);
@@ -3443,5 +3479,35 @@ mod retryable_video_error_tests {
     #[test]
     fn ordinary_fetch_errors_are_not_retryable() {
         assert!(!VideoError::fetch("Unsupported URL").is_retryable_fetch());
+    }
+}
+
+#[cfg(test)]
+mod secret_service_policy_tests {
+    use super::*;
+
+    #[test]
+    fn requires_a_session_bus_grant() {
+        let granted = "[Application]\nname=io.github.linuxuser67.Grab\n\n\
+                       [Session Bus Policy]\n\
+                       org.gtk.vfs.*=talk\n\
+                       org.freedesktop.secrets=talk\n";
+        assert!(session_bus_policy_allows(granted, "org.freedesktop.secrets"));
+        assert!(session_bus_policy_allows(
+            "[Session Bus Policy]\norg.freedesktop.secrets=own\n",
+            "org.freedesktop.secrets"
+        ));
+        assert!(!session_bus_policy_allows(
+            "[Session Bus Policy]\norg.freedesktop.secrets=none\n",
+            "org.freedesktop.secrets"
+        ));
+        assert!(!session_bus_policy_allows(
+            "[Session Bus Policy]\norg.gtk.vfs.*=talk\n",
+            "org.freedesktop.secrets"
+        ));
+        assert!(!session_bus_policy_allows(
+            "[Environment]\norg.freedesktop.secrets=talk\n",
+            "org.freedesktop.secrets"
+        ));
     }
 }

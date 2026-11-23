@@ -61,11 +61,11 @@ fn mark_rate_row(live: &adw::EntryRow) {
 }
 
 /// Flatpak-only row under "Cookies from Browser": when the picked profile is
-/// unreachable in the sandbox, show the `flatpak override` command as a
-/// copyable action row. Re-runs on dialog open and `COOKIES_BROWSER` changes;
-/// overrides apply only at sandbox startup, so a companion row tells the user
-/// to restart. Takes `&gio::Settings` because that is what `connect_changed`
-/// hands the signal.
+/// unreachable in the sandbox, or a Chromium browser lacks Secret Service
+/// access, show the `flatpak override` command as a copyable action row.
+/// Re-runs on dialog open and `COOKIES_BROWSER` changes; overrides apply only
+/// at sandbox startup, so a companion row tells the user to restart. Takes
+/// `&gio::Settings` because that is what `connect_changed` hands the signal.
 fn sync_cookies_override_row(
     row: &adw::ActionRow,
     restart_row: &adw::ActionRow,
@@ -83,13 +83,16 @@ fn sync_cookies_override_row(
     // Keep that filesystem work off the GTK thread.
     let lookup_browser = browser.clone();
     let lookup = crate::runtime::tokio_rt().spawn_blocking(move || {
-        flatpak
-            && lookup_browser != "none"
-            && crate::video_tools::browser_profile_dir(&lookup_browser).is_none()
+        if !flatpak || lookup_browser == "none" {
+            return false;
+        }
+        crate::video_tools::browser_profile_dir(&lookup_browser).is_none()
+            || (crate::video_tools::needs_secret_service(&lookup_browser)
+                && !crate::video_tools::secret_service_allowed())
     });
     gtk4::glib::MainContext::default().spawn_local(async move {
-        let missing_profile = match lookup.await {
-            Ok(missing_profile) => missing_profile,
+        let needs_override = match lookup.await {
+            Ok(needs_override) => needs_override,
             Err(error) => {
                 tracing::warn!(
                     %error,
@@ -107,7 +110,7 @@ fn sync_cookies_override_row(
         {
             return;
         }
-        let command = if missing_profile {
+        let command = if needs_override {
             crate::video_tools::browser_override_command(&browser)
         } else {
             None

@@ -58,7 +58,7 @@
     </screenshot>
   </screenshots>
   <releases>
-    <release version="6.5.8" date="2026-11-24">
+    <release version="6.5.8~beta.4" type="development" date="2026-11-24">
       <description>
         <ul>
           <li>UI: support-tool install and update progress is now attached to the button, following GNOME Software, and Preferences shows the installed tool versions.</li>

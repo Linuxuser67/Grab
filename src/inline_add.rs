@@ -2657,7 +2657,7 @@ fn show_video_playlist(
     let label_refs = labels.iter().map(String::as_str).collect::<Vec<_>>();
     v.playlist_format
         .set_model(Some(&gtk4::StringList::new(&label_refs)));
-    let selected = crate::media_types::quality_index(preferred_quality).saturating_sub(1);
+    let selected = crate::media_types::quality_index(preferred_quality);
     v.playlist_format
         .set_selected(u32::try_from(selected).unwrap_or(0));
     v.playlist_format.set_visible(true);
@@ -2687,10 +2687,7 @@ fn show_video_playlist(
 
 /// Build the shared playlist-format labels in model order.
 fn playlist_format_labels() -> Vec<String> {
-    let mut labels = crate::video::quality_labels()
-        .into_iter()
-        .skip(1)
-        .collect::<Vec<_>>();
+    let mut labels = crate::video::quality_labels();
     labels.push(gettext("Audio only"));
     labels
 }
@@ -2701,11 +2698,9 @@ fn playlist_format_picker(preferred_quality: &str, audio_only: bool) -> gtk4::Dr
     let label_refs = labels.iter().map(String::as_str).collect::<Vec<_>>();
     let picker = gtk4::DropDown::from_strings(&label_refs);
     let selected = if audio_only {
-        crate::media_types::VIDEO_QUALITY_VALUES
-            .len()
-            .saturating_sub(1)
+        crate::media_types::VIDEO_QUALITY_VALUES.len()
     } else {
-        crate::media_types::quality_index(preferred_quality).saturating_sub(1)
+        crate::media_types::quality_index(preferred_quality)
     };
     picker.set_selected(u32::try_from(selected).unwrap_or(0));
     picker.set_size_request(128, -1);
@@ -2719,14 +2714,12 @@ fn playlist_format_picker(preferred_quality: &str, audio_only: bool) -> gtk4::Dr
 /// Map the collection quality combo to the persisted playlist job choice.
 /// Audio-only does not use a quality cap, so retain the current preference.
 fn playlist_format_choice(index: usize, preferred_quality: &str) -> (String, bool) {
-    // The playlist menu omits the global "Best" preset: its visible quality
-    // rows map to the remaining height caps, followed by Audio only.
-    let audio_index = crate::media_types::VIDEO_QUALITY_VALUES
-        .len()
-        .saturating_sub(1);
+    // Keep the full shared quality ladder, including Best, followed by
+    // Audio only. An invalid/unselected index preserves the saved preference.
+    let audio_index = crate::media_types::VIDEO_QUALITY_VALUES.len();
     let audio_only = index == audio_index;
     let quality_index = if index < audio_index {
-        index + 1
+        index
     } else {
         crate::media_types::quality_index(preferred_quality)
     };
@@ -5405,37 +5398,41 @@ mod tests {
     }
 
     #[test]
-    fn playlist_format_choice_omits_best_and_maps_the_remaining_quality_ladder() {
+    fn playlist_format_choice_preserves_best_and_maps_the_full_quality_ladder() {
         assert_eq!(
             playlist_format_labels().first().map(String::as_str),
-            Some("2160p")
+            Some("Best")
         );
         assert_eq!(
             playlist_format_choice(0, "best"),
-            ("2160p".to_string(), false)
+            ("best".to_string(), false)
         );
         assert_eq!(
             playlist_format_choice(0, "1080p"),
-            ("2160p".to_string(), false)
+            ("best".to_string(), false)
         );
         assert_eq!(
             playlist_format_choice(1, "1080p"),
-            ("1440p".to_string(), false)
+            ("2160p".to_string(), false)
         );
         assert_eq!(
             playlist_format_choice(2, "1080p"),
-            ("1080p".to_string(), false)
+            ("1440p".to_string(), false)
         );
         assert_eq!(
             playlist_format_choice(3, "1080p"),
-            ("720p".to_string(), false)
+            ("1080p".to_string(), false)
         );
         assert_eq!(
             playlist_format_choice(4, "1080p"),
+            ("720p".to_string(), false)
+        );
+        assert_eq!(
+            playlist_format_choice(5, "1080p"),
             ("480p".to_string(), false)
         );
         assert_eq!(
-            playlist_format_choice(crate::media_types::VIDEO_QUALITY_VALUES.len() - 1, "720p"),
+            playlist_format_choice(crate::media_types::VIDEO_QUALITY_VALUES.len(), "720p"),
             ("720p".to_string(), true)
         );
         assert_eq!(
@@ -5665,22 +5662,20 @@ mod tests {
             .expect("dropdown uses the GTK string-list model");
         assert_eq!(
             model.string(0).as_deref(),
-            Some("2160p"),
-            "the playlist menu starts with the highest height cap, not Best"
+            Some("Best"),
+            "the playlist menu preserves the unrestricted Best preset"
         );
         assert_eq!(
             usize::try_from(model.n_items()).unwrap_or(0),
-            crate::media_types::VIDEO_QUALITY_VALUES.len(),
-            "five quality caps plus Audio only"
+            crate::media_types::VIDEO_QUALITY_VALUES.len() + 1,
+            "all six quality choices plus Audio only"
         );
         assert_eq!(
             playlist_format_choice(usize::MAX, "720p"),
             ("720p".to_string(), false),
             "an unselected dropdown must retain the current preference"
         );
-        let audio_only_index = crate::media_types::VIDEO_QUALITY_VALUES
-            .len()
-            .saturating_sub(1);
+        let audio_only_index = crate::media_types::VIDEO_QUALITY_VALUES.len();
         format_picker.set_selected(u32::try_from(audio_only_index).unwrap_or(0));
         assert_eq!(
             selected_playlist_format_row(&format_picker, "720p"),

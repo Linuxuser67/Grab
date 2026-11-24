@@ -25,21 +25,19 @@ url = "2"
 chrono = { version = "0.4.45", default-features = false, features = ["std"] }
 # HLS playlist parsing and local media-playlist serialization.
 m3u8-rs = "6.0.1"
-# Parser requirements use Cargo's compatible ranges; Cargo.lock keeps builds
-# reproducible, while parser fixtures guard deliberate lockfile updates.
 # Exact-pin untrusted-input parsers; upgrades require fixture/security review.
 # The 0.9 API includes bounded parse limits and typed playlist diagnostics.
 broadcast-hls = "=0.9.0"
-# SAMPLE-AES preflight uses the typed PES-start/continuation packet model.
-mpeg2ts = "0.6.1"
+# Keep the SAMPLE-AES preflight on the exact parser used by iori-ssa.
+mpeg2ts-iori = { package = "mpeg2ts", version = "=0.3.1" }
 # Parse ISO BMFF box trees for structural validation of native fMP4 resources.
 mp4box = { version = "=0.14.0", default-features = false }
-# The ADTS preflight rejects malformed frames before iori-ssa; SAMPLE-AES
-# regression tests cover malformed lengths and PES/Raw packet reassembly.
-iori-ssa = "0.2.1"
+# Pin the SAMPLE-AES consumer so the preflight and decryptor share parser behavior.
+iori-ssa = "=0.2.1"
 # Parse HLS diagnostics without exposing playlist contents. m3u8-rs exposes nom 7 parser errors.
 nom = "7"
-# Exact-pin the untrusted DASH MPD parser; upgrades require fixture/security review.
+# DASH MPD parsing and serialization; fixture tests cover the supported and
+# rejected manifest shapes. The 0.1.x range excludes breaking 0.2+ releases.
 dash-mpd-core = "=0.1.0"
 # Read Representation-level DASH Role elements omitted by the typed MPD model.
 quick-xml = "0.42"

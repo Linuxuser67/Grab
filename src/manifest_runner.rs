@@ -4344,10 +4344,10 @@ async fn decrypt_hls_sample_aes_segments(
 }
 
 /// Validate the MPEG-TS packet/PES structure before handing untrusted bytes to
-/// iori-ssa's SAMPLE-AES parser. In particular, iori-ssa's ADTS frame loop does not
-/// advance when a malformed frame advertises a zero length.
+/// iori-ssa's SAMPLE-AES parser. Use the same mpeg2ts release as iori-ssa so
+/// the guard and consumer cannot disagree about packet/PES reassembly.
 fn validate_iori_sample_aes_segment(bytes: &[u8]) -> Result<(), String> {
-    use mpeg2ts::{
+    use mpeg2ts_iori::{
         es::StreamType,
         ts::{ReadTsPacket, TsPacketReader, TsPayload},
     };
@@ -4372,7 +4372,7 @@ fn validate_iori_sample_aes_segment(bytes: &[u8]) -> Result<(), String> {
                     stream_types.insert(stream.elementary_pid.as_u16(), stream.stream_type);
                 }
             }
-            Some(TsPayload::PesStart(pes)) => {
+            Some(TsPayload::Pes(pes)) => {
                 if let Some(previous) = aac_pes.remove(&pid) {
                     validate_iori_adts_pes(&previous)?;
                 }
@@ -4385,7 +4385,7 @@ fn validate_iori_sample_aes_segment(bytes: &[u8]) -> Result<(), String> {
                     aac_pes.insert(pid, pes.data.to_vec());
                 }
             }
-            Some(TsPayload::PesContinuation(payload) | TsPayload::Raw(payload)) => {
+            Some(TsPayload::Raw(payload)) => {
                 if let Some(data) = aac_pes.get_mut(&pid) {
                     data.extend_from_slice(&payload);
                 } else if stream_types.get(&pid).is_some_and(|stream_type| {
@@ -4412,8 +4412,6 @@ fn validate_iori_sample_aes_segment(bytes: &[u8]) -> Result<(), String> {
     Ok(())
 }
 
-/// Reject ADTS frame lengths that could make iori-ssa's audio loop fail to
-/// advance or index beyond the current PES packet.
 fn validate_iori_adts_pes(mut data: &[u8]) -> Result<(), String> {
     while !data.is_empty() {
         if data.len() < 7 || data[0] != 0xff || data[1] & 0xf6 != 0xf0 {

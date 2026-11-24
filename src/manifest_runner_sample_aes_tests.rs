@@ -4,7 +4,7 @@ use super::{
     MAX_SAMPLE_AES_SEGMENT_BYTES, ManifestRunError, read_sample_aes_resource,
     validate_iori_adts_pes, validate_iori_sample_aes_segment,
 };
-use mpeg2ts::{
+use mpeg2ts_iori::{
     es::{StreamId, StreamType},
     pes::PesHeader,
     ts::{
@@ -101,7 +101,7 @@ fn sample_aes_aac_transport_stream(split_at: usize, elementary_stream: &[u8]) ->
         data: Bytes::new(pes_data).expect("fixture PES payload fits in one TS packet"),
     };
     writer
-        .write_ts_packet(&ts_packet(AAC_PID, 0, TsPayload::PesStart(pes)))
+        .write_ts_packet(&ts_packet(AAC_PID, 0, TsPayload::Pes(pes)))
         .expect("write PES start");
 
     for (index, chunk) in continuation.chunks(RAW_CONTINUATION_CHUNK_SIZE).enumerate() {
@@ -110,7 +110,7 @@ fn sample_aes_aac_transport_stream(split_at: usize, elementary_stream: &[u8]) ->
             .write_ts_packet(&ts_packet(
                 AAC_PID,
                 continuity_counter,
-                TsPayload::PesContinuation(
+                TsPayload::Raw(
                     Bytes::new(chunk).expect("fixture continuation fits in one TS packet"),
                 ),
             ))

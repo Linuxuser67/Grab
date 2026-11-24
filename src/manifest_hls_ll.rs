@@ -920,7 +920,7 @@ fn parse_rendition_reports(
             Ok(HlsRenditionReport {
                 playlist_url: resolve_hls_media_resource_url(base_url, &report.uri)?,
                 last_msn: report.last_msn.value(),
-                last_part: report.last_part.map(|part| part.value()),
+                last_part: report.last_part.map(|part| u64::from(part.value())),
             })
         })
         .collect::<Result<Vec<_>, ManifestError>>()

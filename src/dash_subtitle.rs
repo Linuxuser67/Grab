@@ -672,74 +672,70 @@ struct SampleBox<'a> {
     payload: &'a [u8],
 }
 
-/// Parse ISO BMFF box framing with mp4box, then borrow each payload from the sample.
-/// Cue semantics remain validated by `parse_wvtt_sample`.
+/// Parse ISO BMFF box headers with mp4box, enforcing the box budget before
+/// growing the result vector. Cue semantics remain validated by
+/// parse_wvtt_sample.
 fn parse_sample_boxes(bytes: &[u8]) -> Result<Vec<SampleBox<'_>>, DashSubtitleError> {
     let end = u64::try_from(bytes.len())
         .map_err(|_| DashSubtitleError::Unsupported("A WVTT sample box size is out of range"))?;
     let mut reader = Cursor::new(bytes);
-    let parsed = mp4box::parser::parse_boxes(&mut reader, 0, end).map_err(|_| {
-        DashSubtitleError::Unsupported("A WVTT sample contains malformed MP4 boxes")
-    })?;
-    if parsed.len() > MAX_WVTT_BOXES_PER_SAMPLE {
-        return Err(DashSubtitleError::Unsupported(
-            "A WVTT sample contains too many cue boxes",
-        ));
+    let mut boxes = Vec::new();
+
+    while reader.position() < end {
+        let start_position = reader.position();
+        if end - start_position < 8 {
+            return Err(DashSubtitleError::Unsupported(
+                "A WVTT sample contains a truncated box header",
+            ));
+        }
+        if boxes.len() >= MAX_WVTT_BOXES_PER_SAMPLE {
+            return Err(DashSubtitleError::Unsupported(
+                "A WVTT sample contains too many cue boxes",
+            ));
+        }
+
+        let header = mp4box::parser::read_box_header(&mut reader).map_err(|_| {
+            DashSubtitleError::Unsupported("A WVTT sample contains malformed MP4 boxes")
+        })?;
+        let start = usize::try_from(header.start)
+            .map_err(|_| DashSubtitleError::Unsupported("A WVTT sample box offset is out of range"))?;
+        let header_size = usize::try_from(header.header_size).map_err(|_| {
+            DashSubtitleError::Unsupported("A WVTT sample box header is out of range")
+        })?;
+        // ISO BMFF size zero means that this box extends to its containing range.
+        let box_size = if header.size == 0 {
+            bytes.len().checked_sub(start).ok_or(
+                DashSubtitleError::Unsupported("A WVTT sample box offset is out of range"),
+            )?
+        } else {
+            usize::try_from(header.size).map_err(|_| {
+                DashSubtitleError::Unsupported("A WVTT sample box size is out of range")
+            })?
+        };
+        if box_size < header_size {
+            return Err(DashSubtitleError::Unsupported(
+                "A WVTT sample contains a box smaller than its header",
+            ));
+        }
+        let box_end = start
+            .checked_add(box_size)
+            .filter(|box_end| *box_end <= bytes.len())
+            .ok_or(DashSubtitleError::Unsupported(
+                "A WVTT sample box extends beyond its sample",
+            ))?;
+        let payload_start = start.checked_add(header_size).ok_or(
+            DashSubtitleError::Unsupported("A WVTT sample contains an invalid box header"),
+        )?;
+
+        boxes.push(SampleBox {
+            kind: header.typ.0,
+            payload: &bytes[payload_start..box_end],
+        });
+        reader.set_position(u64::try_from(box_end).map_err(|_| {
+            DashSubtitleError::Unsupported("A WVTT sample box offset is out of range")
+        })?);
     }
 
-    let mut next_start = 0_usize;
-    let boxes = parsed
-        .iter()
-        .map(|box_ref| {
-            let start = usize::try_from(box_ref.hdr.start).map_err(|_| {
-                DashSubtitleError::Unsupported("A WVTT sample box offset is out of range")
-            })?;
-            if start != next_start {
-                return Err(DashSubtitleError::Unsupported(
-                    "A WVTT sample contains unparsed or overlapping box data",
-                ));
-            }
-            let header_size = usize::try_from(box_ref.hdr.header_size).map_err(|_| {
-                DashSubtitleError::Unsupported("A WVTT sample box header is out of range")
-            })?;
-            // ISO BMFF size zero means that this box extends to its containing range.
-            let box_size = if box_ref.hdr.size == 0 {
-                bytes
-                    .len()
-                    .checked_sub(start)
-                    .ok_or(DashSubtitleError::Unsupported(
-                        "A WVTT sample box offset is out of range",
-                    ))?
-            } else {
-                usize::try_from(box_ref.hdr.size).map_err(|_| {
-                    DashSubtitleError::Unsupported("A WVTT sample box size is out of range")
-                })?
-            };
-            let box_end = start
-                .checked_add(box_size)
-                .filter(|end| *end <= bytes.len())
-                .ok_or(DashSubtitleError::Unsupported(
-                    "A WVTT sample box extends beyond its sample",
-                ))?;
-            let payload_start = start
-                .checked_add(header_size)
-                .filter(|payload_start| *payload_start <= box_end)
-                .ok_or(DashSubtitleError::Unsupported(
-                    "A WVTT sample contains an invalid box header",
-                ))?;
-            next_start = box_end;
-
-            Ok(SampleBox {
-                kind: box_ref.hdr.typ.0,
-                payload: &bytes[payload_start..box_end],
-            })
-        })
-        .collect::<Result<Vec<_>, DashSubtitleError>>()?;
-    if next_start != bytes.len() {
-        return Err(DashSubtitleError::Unsupported(
-            "A WVTT sample contains a truncated or unparsed box header",
-        ));
-    }
     Ok(boxes)
 }
 
@@ -908,6 +904,20 @@ mod tests {
         assert!(parse_wvtt_sample(b"\0\0\0", 0, 1_000).is_err());
         let unknown = box_bytes(b"free", b"data");
         assert!(parse_wvtt_sample(&unknown, 0, 1_000).is_err());
+    }
+
+    #[test]
+    fn wvtt_sample_rejects_more_than_the_box_budget_before_collecting_them() {
+        let mut sample = Vec::new();
+        for _ in 0..=MAX_WVTT_BOXES_PER_SAMPLE {
+            sample.extend_from_slice(&box_bytes(b"vtte", &[]));
+        }
+        assert!(matches!(
+            parse_wvtt_sample(&sample, 0, 1_000),
+            Err(DashSubtitleError::Unsupported(
+                "A WVTT sample contains too many cue boxes"
+            ))
+        ));
     }
 
     #[test]

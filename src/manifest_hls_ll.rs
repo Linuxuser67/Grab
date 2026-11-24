@@ -352,60 +352,28 @@ pub(crate) fn plan_hls_media_playlist(
     let playlist = LlMediaPlaylist::parse(text).map_err(|error| {
         ManifestError::Parse(format!("could not parse LL-HLS playlist: {error}"))
     })?;
-    // broadcast-hls 0.9 exposes validated PDT values as typed fields. Reuse
-    // m3u8-rs for the output model's date-time representation when a closed
-    // segment carries an anchor; parser diagnostics are rejected below.
-    let source_segments = if playlist
-        .segments
-        .iter()
-        .any(|segment| segment.program_date_time.is_some())
-    {
-        let parsed = m3u8_rs::parse_media_playlist_res(body)
-            .map_err(|error| hls_parse_error(body, error))?;
-        if parsed.segments.len() != playlist.segments.len() {
-            return Err(ManifestError::UnsupportedPlaylist);
-        }
-        Some(parsed.segments)
-    } else {
-        None
-    };
-    build_plan(
-        manifest_url,
-        playlist,
-        tag_flags.trailing_open_discontinuity,
-        source_segments.as_deref(),
-    )
-    .map(Some)
+    build_plan(manifest_url, playlist, tag_flags.trailing_open_discontinuity).map(Some)
 }
 
-fn parse_program_date_time_tag(tag: &str) -> Result<m3u8_rs::MediaSegment, ManifestError> {
-    if tag.len() > 128 || tag.contains(['\r', '\n']) {
+/// Convert broadcast-hls's typed UTC timestamp to m3u8-rs's output date-time type.
+fn output_program_date_time(
+    timestamp: broadcast_hls::ProgramDateTime,
+) -> Result<chrono::DateTime<chrono::FixedOffset>, ManifestError> {
+    chrono::DateTime::parse_from_rfc3339(&timestamp.render())
+        .map_err(|_| ManifestError::UnsupportedPlaylist)
+}
+
+/// Validate a retained PDT tag using broadcast-hls's typed parser.
+fn validate_program_date_time_tag(tag: &str) -> Result<(), ManifestError> {
+    if tag.len() > 128 || tag.contains(['\\r', '\\n']) {
         return Err(ManifestError::UnsupportedPlaylist);
     }
-    let probe = format!(
-        "#EXTM3U\n#EXT-X-TARGETDURATION:1\n{tag}\n#EXTINF:1,\npdt-validation-probe.ts\n#EXT-X-ENDLIST\n"
-    );
-    let parsed = m3u8_rs::parse_media_playlist_res(probe.as_bytes())
-        .map_err(|error| hls_parse_error(probe.as_bytes(), error))?;
-    let segment = parsed
-        .segments
-        .into_iter()
-        .next()
+    let value = tag
+        .strip_prefix("#EXT-X-PROGRAM-DATE-TIME:")
         .ok_or(ManifestError::UnsupportedPlaylist)?;
-    if segment.program_date_time.is_none() {
-        return Err(ManifestError::UnsupportedPlaylist);
-    }
-    Ok(segment)
-}
-
-fn open_segment_program_date_time(
-    open: &broadcast_hls::OpenSegment,
-) -> Result<Option<m3u8_rs::MediaSegment>, ManifestError> {
-    let Some(program_date_time) = open.program_date_time else {
-        return Ok(None);
-    };
-    let tag = format!("#EXT-X-PROGRAM-DATE-TIME:{program_date_time}");
-    parse_program_date_time_tag(&tag).map(Some)
+    broadcast_hls::ProgramDateTime::parse(value)
+        .map(|_| ())
+        .map_err(|_| ManifestError::UnsupportedPlaylist)
 }
 
 /// Validated inputs shared by the LL-HLS planning stages.
@@ -586,12 +554,12 @@ impl LlHlsPlanBuilder {
     fn append_closed_segments(
         &mut self,
         playlist: &LlMediaPlaylist,
-        source_segments: Option<&[m3u8_rs::MediaSegment]>,
     ) -> Result<(), ManifestError> {
         for (segment_index, segment) in playlist.segments.iter().enumerate() {
-            let program_date_time = source_segments
-                .and_then(|segments| segments.get(segment_index))
-                .and_then(|source| source.program_date_time);
+            let program_date_time = segment
+                .program_date_time
+                .map(output_program_date_time)
+                .transpose()?;
             let offset =
                 u64::try_from(segment_index).map_err(|_| ManifestError::DurationOverflow)?;
             let media_sequence = self
@@ -716,8 +684,10 @@ impl LlHlsPlanBuilder {
             &mut self.plan.resources,
             &mut self.map_filenames,
         )?;
-        let open_date_time =
-            open_segment_program_date_time(open)?.and_then(|segment| segment.program_date_time);
+        let open_date_time = open
+            .program_date_time
+            .map(output_program_date_time)
+            .transpose()?;
         let first_part_position = self.plan.local_segments.len();
         self.plan.append_parts(
             PartContext {
@@ -821,11 +791,10 @@ fn build_plan(
     manifest_url: &str,
     playlist: LlMediaPlaylist,
     open_segment_discontinuity: bool,
-    source_segments: Option<&[m3u8_rs::MediaSegment]>,
 ) -> Result<HlsPlan, ManifestError> {
     let validated = validate_ll_hls_playlist(manifest_url, &playlist)?;
     let mut builder = LlHlsPlanBuilder::new(&validated);
-    builder.append_closed_segments(&playlist, source_segments)?;
+    builder.append_closed_segments(&playlist)?;
     builder.append_open_segment(&playlist, open_segment_discontinuity)?;
     builder.finish(&playlist, validated)
 }
@@ -977,7 +946,7 @@ fn validate_playlist_tags(playlist: &LlMediaPlaylist) -> Result<(), ManifestErro
             return Err(ManifestError::UnsupportedEncryption);
         }
         if tag.starts_with("#EXT-X-PROGRAM-DATE-TIME:") {
-            parse_program_date_time_tag(tag)?;
+            validate_program_date_time_tag(tag)?;
             continue;
         }
         // Ad-insertion markers are inert metadata in native planning. Keep
@@ -1591,7 +1560,7 @@ mod tests {
 #EXT-X-TARGETDURATION:2
 #EXT-X-MEDIA-SEQUENCE:30
 #EXT-X-SERVER-CONTROL:CAN-BLOCK-RELOAD=NO
-#EXT-X-PROGRAM-DATE-TIME:2026-11-10T10:00:00.000Z
+#EXT-X-PROGRAM-DATE-TIME:2026-11-10T10:00:00.000+02:00
 #EXTINF:1.0,
 30.m4s
 "#;
@@ -1604,7 +1573,13 @@ mod tests {
                 .expect("serialize local playlist"),
         )
         .expect("local LL-HLS playlist parses");
-        assert!(local.segments[0].program_date_time.is_some());
+        assert_eq!(
+            local.segments[0]
+                .program_date_time
+                .expect("closed-segment PDT")
+                .to_rfc3339(),
+            "2026-11-10T08:00:00+00:00"
+        );
     }
 
     #[test]
@@ -1645,7 +1620,7 @@ mod tests {
 #EXT-X-PART-INF:PART-TARGET=0.5
 #EXTINF:1.0,
 50.m4s
-#EXT-X-PROGRAM-DATE-TIME:2026-11-10T10:00:01.000Z
+#EXT-X-PROGRAM-DATE-TIME:2026-11-10T10:00:01.000+02:00
 #EXT-X-PART:DURATION=0.5,URI="51.0.m4s",INDEPENDENT=YES
 "#;
         let plan = plan_hls_media_playlist(BASE, body)
@@ -1658,7 +1633,13 @@ mod tests {
         )
         .expect("local LL-HLS playlist parses");
         assert_eq!(local.segments.len(), 2);
-        assert!(local.segments[1].program_date_time.is_some());
+        assert_eq!(
+            local.segments[1]
+                .program_date_time
+                .expect("open-segment PDT")
+                .to_rfc3339(),
+            "2026-11-10T08:00:01+00:00"
+        );
     }
 
     #[test]

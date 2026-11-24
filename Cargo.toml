@@ -21,6 +21,8 @@ libadwaita = { version = "0.9", features = ["v1_4", "v1_5", "v1_6", "v1_7", "v1_
 glib = "0.22"
 gio = "0.22"
 url = "2"
+# Convert broadcast-hls's typed PDT timestamps into m3u8-rs's output date-time type.
+chrono = { version = "0.4.45", default-features = false, features = ["std"] }
 # HLS playlist parsing and local media-playlist serialization.
 m3u8-rs = "6.0.1"
 # Parser requirements use Cargo's compatible ranges; Cargo.lock keeps builds

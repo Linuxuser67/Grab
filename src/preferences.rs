@@ -775,41 +775,6 @@ pub fn show(
     fn core_tools_installed() -> bool {
         crate::video_tools::managed_core_tools_installed()
     }
-    fn format_tool_change_summary(
-        completed: &[crate::install_progress::InstalledTool],
-        updated_names: &[String],
-    ) -> String {
-        let mut installed = Vec::new();
-        let mut updated = Vec::new();
-        for tool in completed {
-            let label = tool.display_label();
-            if updated_names
-                .iter()
-                .any(|name| name.eq_ignore_ascii_case(tool.name))
-            {
-                updated.push(label);
-            } else {
-                installed.push(label);
-            }
-        }
-
-        let mut parts = Vec::new();
-        if !installed.is_empty() {
-            parts.push(
-                gettext("Installed: {list}").replace("{list}", &installed.join(", ")),
-            );
-        }
-        if !updated.is_empty() {
-            parts.push(
-                gettext("Updated: {list}").replace("{list}", &updated.join(", ")),
-            );
-        }
-        if parts.is_empty() {
-            gettext("No support tools were changed")
-        } else {
-            parts.join(" • ")
-        }
-    }
     /// What the tools-row button does: Install when tools are missing, Check to
     /// probe each tool's upstream for a newer release, Update once one is
     /// known. The check-then-act shape keeps a permanent Update button off
@@ -1407,6 +1372,7 @@ pub fn show(
             let (btn_b, spin_b, action_b) = (btn.clone(), spin.clone(), action.clone());
             let generation_ok = generation.clone();
             let (tools_to_install, tools_to_update) = pending.borrow().clone();
+            let tools_to_update_for_error = tools_to_update.clone();
             let mut selected_tools = tools_to_install;
             selected_tools.extend(tools_to_update.iter().cloned());
             // For updates, install only the missing or outdated tools.
@@ -1427,8 +1393,10 @@ pub fn show(
                     if dialog_err.upgrade().is_none() {
                         return;
                     }
-                    let summary =
-                        format_tool_change_summary(&completed, &tools_to_update);
+                    let summary = crate::install_progress::summarize_changes(
+                        &completed,
+                        &tools_to_update_for_error,
+                    );
                     let subtitle = if completed.is_empty() {
                         error
                     } else {
@@ -1440,8 +1408,10 @@ pub fn show(
                     if dialog_ok.upgrade().is_none() {
                         return;
                     }
-                    let summary =
-                        format_tool_change_summary(&completed, &tools_to_update);
+                    let summary = crate::install_progress::summarize_changes(
+                        &completed,
+                        &tools_to_update,
+                    );
                     refresh_video_tools(
                         &row_ok,
                         &btn_b,

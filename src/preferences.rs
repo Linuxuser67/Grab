@@ -775,6 +775,41 @@ pub fn show(
     fn core_tools_installed() -> bool {
         crate::video_tools::managed_core_tools_installed()
     }
+    fn format_tool_change_summary(
+        completed: &[crate::install_progress::InstalledTool],
+        updated_names: &[String],
+    ) -> String {
+        let mut installed = Vec::new();
+        let mut updated = Vec::new();
+        for tool in completed {
+            let label = tool.display_label();
+            if updated_names
+                .iter()
+                .any(|name| name.eq_ignore_ascii_case(tool.name))
+            {
+                updated.push(label);
+            } else {
+                installed.push(label);
+            }
+        }
+
+        let mut parts = Vec::new();
+        if !installed.is_empty() {
+            parts.push(
+                gettext("Installed: {list}").replace("{list}", &installed.join(", ")),
+            );
+        }
+        if !updated.is_empty() {
+            parts.push(
+                gettext("Updated: {list}").replace("{list}", &updated.join(", ")),
+            );
+        }
+        if parts.is_empty() {
+            gettext("No support tools were changed")
+        } else {
+            parts.join(" • ")
+        }
+    }
     /// What the tools-row button does: Install when tools are missing, Check to
     /// probe each tool's upstream for a newer release, Update once one is
     /// known. The check-then-act shape keeps a permanent Update button off
@@ -823,6 +858,7 @@ pub fn show(
         spin: &adw::Spinner,
         action: &std::rc::Rc<std::cell::Cell<ToolAction>>,
         generation: &std::rc::Rc<std::cell::Cell<u64>>,
+        status_override: Option<String>,
     ) {
         spin.set_visible(false);
         btn.set_sensitive(false);
@@ -840,6 +876,9 @@ pub fn show(
                 return;
             }
             paint_tools_state(&row, &btn, &action, installed);
+            if let Some(subtitle) = status_override {
+                row.set_subtitle(&subtitle);
+            }
             btn.set_sensitive(true);
         });
     }
@@ -1105,7 +1144,7 @@ pub fn show(
         &gettext("Install"),
     ));
     video_tools_row.set_activatable_widget(Some(&video_tools_progress.button));
-    video_tools_row.add_suffix(&video_tools_progress.root);
+    video_tools_row.add_suffix(&video_tools_progress.button);
     let video_tools_spin = adw::Spinner::new();
     video_tools_spin.set_visible(false);
     video_tools_row.add_suffix(&video_tools_spin);
@@ -1118,10 +1157,11 @@ pub fn show(
     // the user presses Check for Updates.
     let tool_action = std::rc::Rc::new(std::cell::Cell::new(ToolAction::Install));
     let tool_probe_generation = std::rc::Rc::new(std::cell::Cell::new(0u64));
-    // Tools needing update (from the check); passed to install_progress::run
-    // so the ring only covers what's actually downloading.
-    let pending_updates: std::rc::Rc<std::cell::RefCell<Vec<String>>> =
-        std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+    // Keep the install/update distinction so the row can report the exact
+    // tools changed after the operation completes.
+    let pending_changes: std::rc::Rc<
+        std::cell::RefCell<(Vec<String>, Vec<String>)>,
+    > = std::rc::Rc::new(std::cell::RefCell::new((Vec::new(), Vec::new())));
     // Start in the safe fresh-install state; the local presence probe below
     // switches to Check for Updates only when the core tools are present.
     video_tools_row.set_subtitle(&gettext("Not installed"));
@@ -1132,7 +1172,7 @@ pub fn show(
         let dialog_weak = dialog.downgrade();
         let action = tool_action.clone();
         let generation = tool_probe_generation.clone();
-        let pending = pending_updates.clone();
+        let pending = pending_changes.clone();
         let settings_b = settings.clone();
         let progress_weak = std::rc::Rc::downgrade(&video_tools_progress);
         video_tools_progress.button.connect_clicked(move |_| {
@@ -1155,7 +1195,14 @@ pub fn show(
                     if dialog_b.upgrade().is_none() {
                         return;
                     }
-                    refresh_video_tools(&row_b, &btn_b, &spin_b, &action_b, &generation_b);
+                    refresh_video_tools(
+                        &row_b,
+                        &btn_b,
+                        &spin_b,
+                        &action_b,
+                        &generation_b,
+                        None,
+                    );
                 });
                 return;
             }
@@ -1166,6 +1213,7 @@ pub fn show(
                 let action_b = action.clone();
                 let pending_b = pending.clone();
                 let settings_c = settings_b.clone();
+                *pending_b.borrow_mut() = (Vec::new(), Vec::new());
                 btn.set_sensitive(false);
                 spin.set_visible(true);
                 row.set_subtitle(&gettext("Checking for updates…"));
@@ -1291,13 +1339,13 @@ pub fn show(
                     if !missing.is_empty() || !updates.is_empty() {
                         // Combine missing and updates: the install popup handles
                         // both (installs missing, updates the rest).
-                        let mut names: Vec<String> = missing.clone();
-                        names.extend(
-                            updates
-                                .iter()
-                                .filter_map(|u| u.split_whitespace().next().map(str::to_string)),
-                        );
-                        *pending_b.borrow_mut() = names;
+                        let update_names: Vec<String> = updates
+                            .iter()
+                            .filter_map(|update| {
+                                update.split_whitespace().next().map(str::to_string)
+                            })
+                            .collect();
+                        *pending_b.borrow_mut() = (missing.clone(), update_names);
                         // Build subtitle: "Not installed: ..." and/or
                         // "Update available: ..."
                         let mut parts: Vec<String> = Vec::new();
@@ -1350,31 +1398,58 @@ pub fn show(
                 });
                 return;
             }
-            let (row_err, row_ok) = (row.clone(), row.clone());
-            let (dialog_err, dialog_ok) = (dialog_weak.clone(), dialog_weak.clone());
+            let (row_stage, row_err, row_ok) = (row.clone(), row.clone(), row.clone());
+            let (dialog_stage, dialog_err, dialog_ok) = (
+                dialog_weak.clone(),
+                dialog_weak.clone(),
+                dialog_weak.clone(),
+            );
             let (btn_b, spin_b, action_b) = (btn.clone(), spin.clone(), action.clone());
             let generation_ok = generation.clone();
-            // For updates, only show the tools actually being downloaded.
-            // For fresh installs, show all (None).
+            let (tools_to_install, tools_to_update) = pending.borrow().clone();
+            let mut selected_tools = tools_to_install;
+            selected_tools.extend(tools_to_update.iter().cloned());
+            // For updates, install only the missing or outdated tools.
+            // For a fresh install, None selects all support tools.
             let tools_filter = if action.get() == ToolAction::Update {
-                let list = pending.borrow().clone();
-                if list.is_empty() { None } else { Some(list) }
+                Some(selected_tools)
             } else {
                 None
             };
             crate::install_progress::run(
                 &progress,
-                move |err| {
+                move |stage| {
+                    if dialog_stage.upgrade().is_some() {
+                        row_stage.set_subtitle(&stage);
+                    }
+                },
+                move |error, completed| {
                     if dialog_err.upgrade().is_none() {
                         return;
                     }
-                    row_err.set_subtitle(&err);
+                    let summary =
+                        format_tool_change_summary(&completed, &tools_to_update);
+                    let subtitle = if completed.is_empty() {
+                        error
+                    } else {
+                        format!("{summary} • {error}")
+                    };
+                    row_err.set_subtitle(&subtitle);
                 },
-                move || {
+                move |completed| {
                     if dialog_ok.upgrade().is_none() {
                         return;
                     }
-                    refresh_video_tools(&row_ok, &btn_b, &spin_b, &action_b, &generation_ok);
+                    let summary =
+                        format_tool_change_summary(&completed, &tools_to_update);
+                    refresh_video_tools(
+                        &row_ok,
+                        &btn_b,
+                        &spin_b,
+                        &action_b,
+                        &generation_ok,
+                        Some(summary),
+                    );
                 },
                 tools_filter,
             );
@@ -1388,6 +1463,7 @@ pub fn show(
         &video_tools_spin,
         &tool_action,
         &tool_probe_generation,
+        None,
     );
     video_page.add(&video_quality_group);
     video_page.add(&video_auth_group);

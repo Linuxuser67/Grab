@@ -15,7 +15,7 @@ use gtk4::prelude::*;
 const PROGRESS_CLASS: &str = "grab-install-progress";
 
 const PROGRESS_CSS: &str = r#"
-.grab-install-progress {
+.button.grab-install-progress {
   background-image: linear-gradient(to top, var(--accent-bg-color) 2px, transparent 2px);
   background-repeat: no-repeat;
   background-position: left bottom;
@@ -24,8 +24,15 @@ const PROGRESS_CSS: &str = r#"
   transition: none;
 }
 
-.grab-install-progress:dir(rtl) {
+.button.grab-install-progress:dir(rtl) {
   animation-direction: alternate-reverse;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .button.grab-install-progress {
+    animation: none;
+    background-size: 100% 100%;
+  }
 }
 
 @keyframes grab-install-progress-sweep {
@@ -57,6 +64,38 @@ impl InstalledTool {
             }
             _ => self.name.to_string(),
         }
+    }
+}
+
+/// Summarize the completed tools, distinguishing upgrades from fresh installs.
+pub fn summarize_changes(completed: &[InstalledTool], updated_names: &[String]) -> String {
+    let mut installed = Vec::new();
+    let mut updated = Vec::new();
+
+    for tool in completed {
+        let label = tool.display_label();
+        if updated_names
+            .iter()
+            .any(|name| name.eq_ignore_ascii_case(tool.name))
+        {
+            updated.push(label);
+        } else {
+            installed.push(label);
+        }
+    }
+
+    let mut parts = Vec::new();
+    if !installed.is_empty() {
+        parts.push(gettext("Installed: {list}").replace("{list}", &installed.join(", ")));
+    }
+    if !updated.is_empty() {
+        parts.push(gettext("Updated: {list}").replace("{list}", &updated.join(", ")));
+    }
+
+    if parts.is_empty() {
+        gettext("No support tools were changed")
+    } else {
+        parts.join(" • ")
     }
 }
 
@@ -284,6 +323,23 @@ mod tests {
             version: None,
         };
         assert_eq!(tool.display_label(), "gallery-dl");
+    }
+
+    #[test]
+    fn change_summary_distinguishes_new_installs_from_updates() {
+        let completed = [
+            InstalledTool {
+                name: "yt-dlp",
+                version: Some("2026.11.23".to_string()),
+            },
+            InstalledTool {
+                name: "Deno",
+                version: Some("2.6.0".to_string()),
+            },
+        ];
+        let summary = summarize_changes(&completed, &["deno".to_string()]);
+        assert!(summary.contains("Installed: yt-dlp 2026.11.23"));
+        assert!(summary.contains("Updated: Deno 2.6.0"));
     }
 
     #[test]

@@ -15,10 +15,7 @@ pub struct GalleryCard {
     pub filter: Rc<RefCell<GalleryFilter>>,
     /// Probe items (for the file list).
     pub items: Vec<GalleryItem>,
-    /// Per-filter file totals used as progress denominators when available.
-    /// `None` = not yet counted or the count request failed.
-    total: RefCell<std::collections::HashMap<GalleryFilter, Option<u32>>>,
-    /// Source URL, used to retrieve progress totals when the filter changes.
+    /// Source URL, used to count the complete filtered listing before Queue All.
     url: String,
 }
 
@@ -27,7 +24,6 @@ impl GalleryCard {
         Self {
             filter: Rc::new(RefCell::new(GalleryFilter::All)),
             items,
-            total: RefCell::new(std::collections::HashMap::new()),
             url,
         }
     }
@@ -35,26 +31,6 @@ impl GalleryCard {
     /// The gallery URL (for recounts).
     pub fn url(&self) -> &str {
         &self.url
-    }
-
-    /// Store the total file count for a filter.
-    pub fn set_total(&self, filter: GalleryFilter, n: u32) {
-        self.total.borrow_mut().insert(filter, Some(n));
-    }
-
-    /// Mark a filter's count as attempted but failed (don't retry on every toggle).
-    pub fn set_total_failed(&self, filter: GalleryFilter) {
-        self.total.borrow_mut().insert(filter, None);
-    }
-
-    /// Get the cached total for a filter, if counted successfully.
-    pub fn total(&self, filter: GalleryFilter) -> Option<u32> {
-        self.total.borrow().get(&filter).copied().flatten()
-    }
-
-    /// Whether a count has been attempted for a filter (success or failure).
-    pub fn is_count_cached(&self, filter: GalleryFilter) -> bool {
-        self.total.borrow().contains_key(&filter)
     }
 
     /// Filtered items based on the current filter selection.

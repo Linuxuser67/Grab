@@ -807,6 +807,13 @@ fn collection_progress_fraction(owner: &DownloadItem) -> Option<f64> {
     (owner.gallery_file_count() > 0).then(|| owner.progress().clamp(0.0, 1.0))
 }
 
+/// Unknown gallery totals still need a visible progress indicator while downloading.
+fn collection_progress_is_indeterminate(owner: &DownloadItem) -> bool {
+    owner.is_gallery()
+        && owner.gallery_file_count() == 0
+        && owner.status() == DownloadStatus::Downloading
+}
+
 fn group_summary(items: &[DownloadItem]) -> String {
     if items.is_empty() {
         return String::new();
@@ -976,6 +983,9 @@ impl DownloadGroupRow {
         if let Some(owner) = collection_owner {
             if let Some(fraction) = collection_progress_fraction(&owner) {
                 self.progress.set_fraction(fraction);
+                self.progress.set_visible(true);
+            } else if collection_progress_is_indeterminate(&owner) {
+                self.progress.pulse();
                 self.progress.set_visible(true);
             } else {
                 self.progress.set_visible(false);
@@ -1741,6 +1751,26 @@ mod group_row_tests {
 
         owner.set_progress(1.5);
         assert_eq!(collection_progress_fraction(&owner), Some(1.0));
+    }
+
+    #[test]
+    fn unknown_gallery_totals_use_indeterminate_progress_only_while_downloading() {
+        let gallery = DownloadItem::new(1, "https://example.com/gallery", "Gallery", "/tmp");
+        gallery.set_is_gallery(true);
+        gallery.set_status(DownloadStatus::Downloading);
+        assert!(collection_progress_is_indeterminate(&gallery));
+
+        gallery.set_status(DownloadStatus::Paused);
+        assert!(!collection_progress_is_indeterminate(&gallery));
+
+        gallery.set_status(DownloadStatus::Downloading);
+        gallery.set_gallery_file_count(8);
+        assert!(!collection_progress_is_indeterminate(&gallery));
+
+        let playlist = DownloadItem::new(2, "https://example.com/list", "Playlist", "/tmp");
+        playlist.set_is_collection_owner(true);
+        playlist.set_status(DownloadStatus::Downloading);
+        assert!(!collection_progress_is_indeterminate(&playlist));
     }
 
     #[test]

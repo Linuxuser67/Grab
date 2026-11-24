@@ -799,7 +799,13 @@ pub(crate) struct DownloadGroupRow {
     members: Rc<RefCell<Vec<u64>>>,
     progress: gtk4::ProgressBar,
     open_folder_btn: gtk4::Button,
+    trash_btn: gtk4::Button,
     remove_btn: gtk4::Button,
+}
+
+/// Move a collection to Trash only after its owning download has finished.
+fn collection_trash_available(owner: &DownloadItem) -> bool {
+    owner.is_collection_parent() && owner.status() == DownloadStatus::Done
 }
 
 /// Return the owner's aggregate fraction when its collection has a known file count.
@@ -889,6 +895,63 @@ pub(crate) fn build_download_group_row(
     }
 
     let remove_btn = icon_button("list-remove-symbolic", &gettext("Remove from List"));
+    let trash_btn = icon_button("user-trash-symbolic", &gettext("Move to Trash"));
+    trash_btn.add_css_class("destructive-action");
+    {
+        let ids = Rc::clone(&members);
+        let manager = Rc::clone(manager);
+        let toasts = Rc::clone(toasts);
+        let trash_btn_weak = trash_btn.downgrade();
+        let open_folder_btn_weak = open_folder_btn.downgrade();
+        let remove_btn_weak = remove_btn.downgrade();
+        trash_btn.connect_clicked(move |_| {
+            let ids = ids.borrow().clone();
+            let owner_id = ids
+                .iter()
+                .find_map(|id| manager.find(*id).and_then(|item| item.group()))
+                .map(|group| group.id())
+                .filter(|id| {
+                    manager
+                        .find(*id)
+                        .is_some_and(|owner| collection_trash_available(&owner))
+                });
+            let Some(owner_id) = owner_id else {
+                return;
+            };
+            let guard = match manager.begin_trash(owner_id) {
+                Ok(guard) => guard,
+                Err(error) => {
+                    toasts.add_toast(crate::ui_util::plain_toast(&error));
+                    return;
+                }
+            };
+
+            if let Some(button) = trash_btn_weak.upgrade() {
+                button.set_sensitive(false);
+            }
+            if let Some(button) = open_folder_btn_weak.upgrade() {
+                button.set_sensitive(false);
+            }
+            if let Some(button) = remove_btn_weak.upgrade() {
+                button.set_sensitive(false);
+            }
+            let manager = Rc::clone(&manager);
+            let toasts = Rc::clone(&toasts);
+            glib::spawn_future_local(async move {
+                match manager.delete_download_with_guard(owner_id, guard).await {
+                    Ok(()) => {
+                        toasts.add_toast(crate::ui_util::plain_toast(&gettext("Moved to Trash")));
+                    }
+                    Err(error) => {
+                        // Releasing the operation lease refreshes the collection
+                        // header and re-enables actions whose state is still valid.
+                        toasts.add_toast(crate::ui_util::plain_toast(&error));
+                    }
+                }
+            });
+        });
+    }
+
     {
         let ids = Rc::clone(&members);
         let manager = Rc::clone(manager);
@@ -953,6 +1016,7 @@ pub(crate) fn build_download_group_row(
 
     row.add_suffix(&progress);
     row.add_suffix(&open_folder_btn);
+    row.add_suffix(&trash_btn);
     row.add_suffix(&remove_btn);
 
     DownloadGroupRow {
@@ -960,6 +1024,7 @@ pub(crate) fn build_download_group_row(
         members,
         progress,
         open_folder_btn,
+        trash_btn,
         remove_btn,
     }
 }
@@ -980,11 +1045,11 @@ impl DownloadGroupRow {
             .and_then(DownloadItem::group)
             .and_then(|group| manager.find(group.id()))
             .filter(|owner| owner.is_collection_parent());
-        if let Some(owner) = collection_owner {
-            if let Some(fraction) = collection_progress_fraction(&owner) {
+        if let Some(owner) = collection_owner.as_ref() {
+            if let Some(fraction) = collection_progress_fraction(owner) {
                 self.progress.set_fraction(fraction);
                 self.progress.set_visible(true);
-            } else if collection_progress_is_indeterminate(&owner) {
+            } else if collection_progress_is_indeterminate(owner) {
                 self.progress.pulse();
                 self.progress.set_visible(true);
             } else {
@@ -999,11 +1064,19 @@ impl DownloadGroupRow {
             let directory = first.dest_dir();
             group_items.iter().all(|item| item.dest_dir() == directory)
         });
-        self.open_folder_btn.set_visible(one_destination);
-        self.open_folder_btn.set_sensitive(one_destination);
         let trash_blocked = group_items
             .iter()
             .any(|item| manager.is_trash_blocked(item.id()));
+        self.open_folder_btn.set_visible(one_destination);
+        self.open_folder_btn
+            .set_sensitive(one_destination && !trash_blocked);
+        let collection_header = collection_owner.is_some();
+        let trash_available = collection_owner
+            .as_ref()
+            .is_some_and(collection_trash_available);
+        self.trash_btn.set_visible(collection_header);
+        self.trash_btn
+            .set_sensitive(trash_available && !trash_blocked);
         self.remove_btn.set_visible(nonempty);
         self.remove_btn.set_sensitive(nonempty && !trash_blocked);
     }
@@ -1741,6 +1814,26 @@ mod group_row_tests {
     use super::*;
 
     #[test]
+    fn collection_trash_is_available_only_for_finished_collection_owners() {
+        let playlist = DownloadItem::new(1, "https://example.com/list", "Playlist", "/tmp");
+        playlist.set_is_collection_owner(true);
+        playlist.set_status(DownloadStatus::Done);
+        assert!(collection_trash_available(&playlist));
+
+        playlist.set_status(DownloadStatus::Downloading);
+        assert!(!collection_trash_available(&playlist));
+
+        let gallery = DownloadItem::new(2, "https://example.com/gallery", "Gallery", "/tmp");
+        gallery.set_is_gallery(true);
+        gallery.set_status(DownloadStatus::Done);
+        assert!(collection_trash_available(&gallery));
+
+        let ordinary = DownloadItem::new(3, "https://example.com/file", "File", "/tmp");
+        ordinary.set_status(DownloadStatus::Done);
+        assert!(!collection_trash_available(&ordinary));
+    }
+
+    #[test]
     fn collection_progress_fraction_uses_known_owner_progress() {
         let owner = DownloadItem::new(1, "https://example.com/list", "List", "/tmp");
         assert_eq!(collection_progress_fraction(&owner), None);
@@ -1771,6 +1864,73 @@ mod group_row_tests {
         playlist.set_is_collection_owner(true);
         playlist.set_status(DownloadStatus::Downloading);
         assert!(!collection_progress_is_indeterminate(&playlist));
+    }
+
+    #[test]
+    #[ignore = "needs a display; run under Xvfb"]
+    fn expandable_playlist_group_row_shows_trash_only_for_a_finished_owner() {
+        gtk4::init().expect("gtk::init (run under Xvfb)");
+        // SAFETY: this UI test runs in its own process before constructing GSettings.
+        unsafe {
+            std::env::set_var("GSETTINGS_SCHEMA_DIR", env!("GRAB_SCHEMA_DIR"));
+            std::env::set_var("GSETTINGS_BACKEND", "memory");
+        }
+
+        let store = gio::ListStore::new::<DownloadItem>();
+        let manager = DownloadManager::new(store.clone(), crate::settings::AppSettings::new());
+        let owner = DownloadItem::new(9, "https://example.com/course", "Course playlist", "/tmp");
+        owner.set_is_collection_owner(true);
+        owner.set_status(DownloadStatus::Done);
+        let membership =
+            crate::download_store::DownloadGroup::try_new(owner.id(), "Course playlist")
+                .expect("valid collection identity");
+        owner.set_group(Some(membership.clone()));
+        store.append(&owner);
+
+        let child = DownloadItem::new(10, "https://example.com/lesson", "Lesson.mp4", "/tmp");
+        child.set_is_collection_child(true);
+        child.set_group(Some(membership));
+        child.set_status(DownloadStatus::Done);
+        store.append(&child);
+
+        let toasts = Rc::new(adw::ToastOverlay::new());
+        let group = build_download_group_row("Course playlist", &manager, &toasts);
+        group.update(
+            std::slice::from_ref(&child),
+            std::slice::from_ref(&child),
+            &manager,
+        );
+
+        assert!(group.trash_btn.is_visible());
+        assert!(group.trash_btn.is_sensitive());
+
+        owner.set_status(DownloadStatus::Downloading);
+        group.update(
+            std::slice::from_ref(&child),
+            std::slice::from_ref(&child),
+            &manager,
+        );
+        assert!(group.trash_btn.is_visible());
+        assert!(!group.trash_btn.is_sensitive());
+
+        owner.set_status(DownloadStatus::Done);
+        let guard = manager
+            .begin_trash(owner.id())
+            .expect("claim the complete collection for Trash");
+        group.update(
+            std::slice::from_ref(&child),
+            std::slice::from_ref(&child),
+            &manager,
+        );
+        assert!(!group.trash_btn.is_sensitive());
+
+        drop(guard);
+        group.update(
+            std::slice::from_ref(&child),
+            std::slice::from_ref(&child),
+            &manager,
+        );
+        assert!(group.trash_btn.is_sensitive());
     }
 
     #[test]
@@ -1811,6 +1971,7 @@ mod group_row_tests {
         assert!(group.open_folder_btn.is_sensitive());
         assert!(group.remove_btn.is_visible());
         assert!(group.remove_btn.is_sensitive());
+        assert!(!group.trash_btn.is_visible());
 
         // The aggregate bar stays compact between the title and the collection
         // actions in both expansion states; expanding must not resize it.

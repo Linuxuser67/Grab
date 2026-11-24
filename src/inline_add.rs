@@ -2714,9 +2714,8 @@ fn playlist_format_picker(preferred_quality: &str, audio_only: bool) -> adw::Com
 /// Audio-only does not use a quality cap, so retain the current preference.
 fn playlist_format_choice(index: usize, preferred_quality: &str) -> (String, bool) {
     let audio_only = index == crate::media_types::VIDEO_QUALITY_VALUES.len();
-    let fallback = crate::media_types::quality_value(
-        crate::media_types::quality_index(preferred_quality),
-    );
+    let fallback =
+        crate::media_types::quality_value(crate::media_types::quality_index(preferred_quality));
     let quality = crate::media_types::VIDEO_QUALITY_VALUES
         .get(index)
         .copied()
@@ -2724,10 +2723,7 @@ fn playlist_format_choice(index: usize, preferred_quality: &str) -> (String, boo
     (quality.to_string(), audio_only)
 }
 
-fn selected_playlist_format_row(
-    picker: &adw::ComboRow,
-    preferred_quality: &str,
-) -> (String, bool) {
+fn selected_playlist_format_row(picker: &adw::ComboRow, preferred_quality: &str) -> (String, bool) {
     let selected = usize::try_from(picker.selected()).unwrap_or(usize::MAX);
     playlist_format_choice(selected, preferred_quality)
 }

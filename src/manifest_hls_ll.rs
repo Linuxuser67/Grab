@@ -359,7 +359,7 @@ pub(crate) fn plan_hls_media_playlist(
         .segments
         .iter()
         .any(|segment| segment.program_date_time.is_some())
-    } {
+    {
         let parsed = m3u8_rs::parse_media_playlist_res(body)
             .map_err(|error| hls_parse_error(body, error))?;
         if parsed.segments.len() != playlist.segments.len() {

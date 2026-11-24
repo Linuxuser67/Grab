@@ -2657,10 +2657,9 @@ fn show_video_playlist(
     let label_refs = labels.iter().map(String::as_str).collect::<Vec<_>>();
     v.playlist_format
         .set_model(Some(&gtk4::StringList::new(&label_refs)));
-    v.playlist_format.set_selected(
-        crate::media_types::quality_index(preferred_quality)
-            .saturating_sub(1) as u32,
-    );
+    let selected = crate::media_types::quality_index(preferred_quality).saturating_sub(1);
+    v.playlist_format
+        .set_selected(u32::try_from(selected).unwrap_or(0));
     v.playlist_format.set_visible(true);
     v.group_revealer.set_visible(true);
     v.group_revealer.set_reveal_child(true);
@@ -5403,7 +5402,14 @@ mod tests {
 
     #[test]
     fn playlist_format_choice_omits_best_and_maps_the_remaining_quality_ladder() {
-        assert_eq!(playlist_format_labels().first().map(String::as_str), Some("2160p"));
+        assert_eq!(
+            playlist_format_labels().first().map(String::as_str),
+            Some("2160p")
+        );
+        assert_eq!(
+            playlist_format_choice(0, "best"),
+            ("2160p".to_string(), false)
+        );
         assert_eq!(
             playlist_format_choice(0, "1080p"),
             ("2160p".to_string(), false)
@@ -5647,7 +5653,7 @@ mod tests {
             "the playlist menu starts with the highest height cap, not Best"
         );
         assert_eq!(
-            model.n_items() as usize,
+            usize::try_from(model.n_items()).unwrap_or(0),
             crate::media_types::VIDEO_QUALITY_VALUES.len(),
             "five quality caps plus Audio only"
         );
@@ -5656,9 +5662,9 @@ mod tests {
             ("720p".to_string(), false),
             "an unselected dropdown must retain the current preference"
         );
-        format_picker.set_selected(
-            crate::media_types::VIDEO_QUALITY_VALUES.len().saturating_sub(1) as u32
-        );
+        let audio_only_index =
+            crate::media_types::VIDEO_QUALITY_VALUES.len().saturating_sub(1);
+        format_picker.set_selected(u32::try_from(audio_only_index).unwrap_or(0));
         assert_eq!(
             selected_playlist_format_row(&format_picker, "720p"),
             ("720p".to_string(), true),

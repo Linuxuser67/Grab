@@ -32,6 +32,16 @@ pub fn done_count(files_completed: u32, skipped: u32) -> u32 {
     files_completed.saturating_add(skipped)
 }
 
+impl GalleryResult {
+    /// Exact filtered collection size, available only after a clean run.
+    /// A partial failure reports a lower bound, not a complete total.
+    pub fn exact_file_count(&self) -> Option<u32> {
+        self.exit_code
+            .is_none()
+            .then(|| done_count(self.files_completed, self.skipped))
+    }
+}
+
 #[cfg(test)]
 mod done_count_tests {
     use super::done_count;
@@ -46,6 +56,23 @@ mod done_count_tests {
     #[test]
     fn saturates_the_total_file_count() {
         assert_eq!(done_count(u32::MAX, 1), u32::MAX);
+    }
+
+    #[test]
+    fn only_a_clean_run_provides_an_exact_gallery_total() {
+        let clean = super::GalleryResult {
+            files_completed: 7,
+            skipped: 3,
+            exit_code: None,
+        };
+        assert_eq!(clean.exact_file_count(), Some(10));
+
+        let partial = super::GalleryResult {
+            files_completed: 7,
+            skipped: 3,
+            exit_code: Some(4),
+        };
+        assert_eq!(partial.exact_file_count(), None);
     }
 }
 

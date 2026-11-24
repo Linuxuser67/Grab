@@ -2389,6 +2389,14 @@ impl DownloadManager {
                                     gettext("Gallery")
                                 };
                                 item_c.set_gallery_files_done(done);
+                                if let Some(total) = r.exact_file_count() {
+                                    item_c.set_gallery_file_count(total);
+                                    if let Some(job) =
+                                        this.gallery_jobs.borrow_mut().get_mut(&item_c.id())
+                                    {
+                                        job.file_count = Some(total);
+                                    }
+                                }
                                 let progress = if r.exit_code.is_some() {
                                     crate::gallery_progress::progress_fraction(
                                         done,

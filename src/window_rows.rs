@@ -313,6 +313,10 @@ pub(crate) enum PulseTick {
     Stop,
 }
 
+/// Shared cadence for every indeterminate progress bar.
+const INDETERMINATE_PROGRESS_INTERVAL: std::time::Duration =
+    std::time::Duration::from_millis(120);
+
 /// One pulse tick's decision. `Stop` is reserved for `Done`, the only status
 /// no command moves back to an active one: `retry` revives Failed and
 /// Cancelled by mutating the same item, so stopping there would freeze a
@@ -804,6 +808,7 @@ pub(crate) struct DownloadGroupRow {
     pub(crate) row: adw::ExpanderRow,
     members: Rc<RefCell<Vec<u64>>>,
     progress: gtk4::ProgressBar,
+    progress_pulse_active: Rc<Cell<bool>>,
     open_folder_btn: gtk4::Button,
     trash_btn: gtk4::Button,
     remove_btn: gtk4::Button,
@@ -824,6 +829,18 @@ fn collection_progress_is_indeterminate(owner: &DownloadItem) -> bool {
     owner.is_gallery()
         && owner.gallery_file_count() == 0
         && owner.status() == DownloadStatus::Downloading
+}
+
+/// Keep collection-header pulsing on the same timer cadence as download rows.
+/// Only Done is terminal; paused, failed and cancelled galleries can be retried.
+fn collection_progress_pulse_tick(owner: &DownloadItem) -> PulseTick {
+    if owner.status() == DownloadStatus::Done {
+        PulseTick::Stop
+    } else if collection_progress_is_indeterminate(owner) {
+        PulseTick::Pulse
+    } else {
+        PulseTick::Idle
+    }
 }
 
 fn group_summary(items: &[DownloadItem]) -> String {
@@ -872,6 +889,7 @@ pub(crate) fn build_download_group_row(
     progress.set_halign(gtk4::Align::Fill);
     progress.set_valign(gtk4::Align::Center);
     progress.set_visible(false);
+    let progress_pulse_active = Rc::new(Cell::new(false));
     progress.update_property(&[gtk4::accessible::Property::Label(&gettext(
         "Collection progress",
     ))]);
@@ -1029,6 +1047,7 @@ pub(crate) fn build_download_group_row(
         row,
         members,
         progress,
+        progress_pulse_active,
         open_folder_btn,
         trash_btn,
         remove_btn,
@@ -1036,6 +1055,34 @@ pub(crate) fn build_download_group_row(
 }
 
 impl DownloadGroupRow {
+    fn start_indeterminate_pulse(&self, owner: &DownloadItem) {
+        if self.progress_pulse_active.replace(true) {
+            return;
+        }
+
+        let progress = self.progress.downgrade();
+        let owner = owner.downgrade();
+        let pulse_active = Rc::clone(&self.progress_pulse_active);
+        glib::timeout_add_local(INDETERMINATE_PROGRESS_INTERVAL, move || {
+            let (Some(progress), Some(owner)) = (progress.upgrade(), owner.upgrade()) else {
+                pulse_active.set(false);
+                return glib::ControlFlow::Break;
+            };
+
+            match collection_progress_pulse_tick(&owner) {
+                PulseTick::Pulse => {
+                    progress.pulse();
+                    glib::ControlFlow::Continue
+                }
+                PulseTick::Idle => glib::ControlFlow::Continue,
+                PulseTick::Stop => {
+                    pulse_active.set(false);
+                    glib::ControlFlow::Break
+                }
+            }
+        });
+    }
+
     pub(crate) fn update(
         &self,
         section_items: &[DownloadItem],
@@ -1056,7 +1103,7 @@ impl DownloadGroupRow {
                 self.progress.set_fraction(fraction);
                 self.progress.set_visible(true);
             } else if collection_progress_is_indeterminate(owner) {
-                self.progress.pulse();
+                self.start_indeterminate_pulse(owner);
                 self.progress.set_visible(true);
             } else {
                 self.progress.set_visible(false);
@@ -1529,7 +1576,7 @@ pub(crate) fn build_row(
         let bar = progress.downgrade();
         let weak_item = item.downgrade();
         let m = Rc::clone(manager);
-        glib::timeout_add_local(std::time::Duration::from_millis(120), move || {
+        glib::timeout_add_local(INDETERMINATE_PROGRESS_INTERVAL, move || {
             let (Some(bar), Some(it)) = (bar.upgrade(), weak_item.upgrade()) else {
                 return glib::ControlFlow::Break;
             };
@@ -1858,18 +1905,25 @@ mod group_row_tests {
         gallery.set_is_gallery(true);
         gallery.set_status(DownloadStatus::Downloading);
         assert!(collection_progress_is_indeterminate(&gallery));
+        assert_eq!(collection_progress_pulse_tick(&gallery), PulseTick::Pulse);
 
         gallery.set_status(DownloadStatus::Paused);
         assert!(!collection_progress_is_indeterminate(&gallery));
+        assert_eq!(collection_progress_pulse_tick(&gallery), PulseTick::Idle);
 
         gallery.set_status(DownloadStatus::Downloading);
         gallery.set_gallery_file_count(8);
         assert!(!collection_progress_is_indeterminate(&gallery));
+        assert_eq!(collection_progress_pulse_tick(&gallery), PulseTick::Idle);
+
+        gallery.set_status(DownloadStatus::Done);
+        assert_eq!(collection_progress_pulse_tick(&gallery), PulseTick::Stop);
 
         let playlist = DownloadItem::new(2, "https://example.com/list", "Playlist", "/tmp");
         playlist.set_is_collection_owner(true);
         playlist.set_status(DownloadStatus::Downloading);
         assert!(!collection_progress_is_indeterminate(&playlist));
+        assert_eq!(collection_progress_pulse_tick(&playlist), PulseTick::Idle);
     }
 
     #[test]

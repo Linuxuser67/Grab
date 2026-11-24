@@ -31,7 +31,7 @@ button.grab-install-progress:dir(rtl) {
 @media (prefers-reduced-motion: reduce) {
   button.grab-install-progress {
     animation: none;
-    background-size: 100% 100%;
+    background-size: 28% 100%;
   }
 }
 

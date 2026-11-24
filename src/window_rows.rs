@@ -168,7 +168,8 @@ pub(crate) fn form_is_visible(nav: &adw::NavigationView) -> bool {
 /// whole card); the selection actions stay in the bottom action bar.
 ///
 /// Returns the header and count-label handle. Pass an empty count to hide
-/// the count label when a picker does not need to display one.
+/// the count label when a picker does not need to display one. An optional
+/// trailing control is inserted between the title and count.
 pub(crate) fn picker_header(
     nav: &adw::NavigationView,
     title: &str,

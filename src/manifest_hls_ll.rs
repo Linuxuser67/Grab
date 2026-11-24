@@ -365,7 +365,7 @@ fn output_program_date_time(
 
 /// Validate a retained PDT tag using broadcast-hls's typed parser.
 fn validate_program_date_time_tag(tag: &str) -> Result<(), ManifestError> {
-    if tag.len() > 128 || tag.contains(['\\r', '\\n']) {
+    if tag.len() > 128 || tag.contains(['\r', '\n']) {
         return Err(ManifestError::UnsupportedPlaylist);
     }
     let value = tag

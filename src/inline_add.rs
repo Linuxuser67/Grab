@@ -79,6 +79,8 @@ struct PlaylistPickerOwner {
     public_host_leases: PublicHostLeases,
     generation: u64,
     referer: Option<String>,
+    quality: String,
+    audio_only: bool,
 }
 
 /// Tokio detaches a task when its JoinHandle is dropped. Own the abort handle
@@ -930,11 +932,12 @@ pub(crate) struct VideoStep {
     pub(crate) group_revealer: gtk4::Revealer,
     pub(crate) name: adw::EntryRow,
     pub(crate) revert: gtk4::Button,
-    /// Media-format selector, filled per video on resolve: exact pinnable
-    /// formats, tallest first (the preference preselects the closest row),
-    /// a single Automatic row when nothing is pinnable, and always an
-    /// Audio only row — the whole format decision lives in this one row.
+    /// Media-format selector for one resolved video.
     pub(crate) format: adw::ComboRow,
+    /// Collection-wide quality selector for one yt-dlp playlist. Individual
+    /// playlist entries can expose different formats, so this uses the shared
+    /// quality ladder and persists one choice on the playlist owner.
+    pub(crate) playlist_format: adw::ComboRow,
     /// Native HLS/DASH presentation and selected representation key.
     pub(crate) manifest: Rc<RefCell<Option<crate::manifest_intake::ManifestLookup>>>,
     pub(crate) manifest_choices: Rc<RefCell<Vec<crate::manifest_intake::ManifestChoice>>>,
@@ -1146,6 +1149,7 @@ pub(crate) fn hide_video_step(v: &VideoStep) {
     v.name.set_visible(false);
     v.revert.set_visible(false);
     v.format.set_visible(false);
+    v.playlist_format.set_visible(false);
     v.manifest_format.set_visible(false);
     v.manifest_audio_format.set_visible(false);
     v.tools.set_visible(false);
@@ -1646,9 +1650,11 @@ fn submit_probe(
                 set_lookup_add(lookup_add, true);
                 return;
             }
-            // Collections queue through the item picker: one row per chosen
-            // entry, each re-resolving its own page at download time. No
-            // format choice here — pins don't apply across items.
+            // Collections queue through one playlist owner. Its quality and
+            // audio-only choice applies to the entire yt-dlp process, not to
+            // individual entries in the file picker.
+            let (quality, audio_only) =
+                selected_playlist_format(step, &manager.settings().video_quality());
             push_playlist_items_page(
                 nav,
                 manager.clone(),
@@ -1658,6 +1664,8 @@ fn submit_probe(
                     public_host_leases: Rc::clone(&step.public_host_leases),
                     generation: step.public_host_leases.borrow().generation,
                     referer: source_referer_for(step, &submitted_url),
+                    quality,
+                    audio_only,
                 },
                 pl,
                 scheduled_at,
@@ -1966,6 +1974,7 @@ struct PlaylistImportRequest {
     existing_destination: Option<String>,
     chosen: Vec<(usize, crate::media_types::PlaylistItem)>,
     scheduled_at: Option<i64>,
+    quality: String,
     audio_only: bool,
 }
 
@@ -2058,6 +2067,7 @@ async fn import_playlist_selection(
         existing_destination,
         chosen,
         scheduled_at,
+        quality,
         audio_only,
     } = request;
 
@@ -2142,7 +2152,7 @@ async fn import_playlist_selection(
                 title: group_title,
                 dest_dir: dir,
                 files: playlist_files,
-                quality: manager.settings().video_quality(),
+                quality,
                 audio_only,
                 referer,
             })?;
@@ -2218,11 +2228,6 @@ fn push_playlist_items_page(
             .build();
         list_box.append(&notice);
     }
-    let audio_only = gtk4::CheckButton::builder()
-        .label(gettext("Download audio only"))
-        .halign(gtk4::Align::Start)
-        .build();
-    list_box.append(&audio_only);
     list_box.append(grid.widget());
     let error_caption = gtk4::Label::builder()
         .label("")
@@ -2259,6 +2264,8 @@ fn push_playlist_items_page(
     let owner_generation = owner.generation;
     let referer = owner.referer.clone();
     let close_card = Rc::clone(&owner.close_card);
+    let quality = owner.quality.clone();
+    let audio_only = owner.audio_only;
     let grid_for_import = grid.clone();
     let add_btn_click = add_btn.clone();
     let add_btn_guard = add_btn.clone();
@@ -2299,7 +2306,8 @@ fn push_playlist_items_page(
             existing_destination: manager.video_playlist_destination_for_url(&page_url),
             chosen,
             scheduled_at,
-            audio_only: audio_only.is_active(),
+            quality: quality.clone(),
+            audio_only,
         };
 
         // Disable the button while the import is in flight.
@@ -2625,11 +2633,25 @@ fn clear_field_error(field: &impl IsA<gtk4::Widget>) {
     field.update_property(&[gtk4::accessible::Property::Description("")]);
 }
 
-fn show_video_playlist(v: &VideoStep, playlist: &crate::media_types::PlaylistInfo) {
+fn show_video_playlist(
+    v: &VideoStep,
+    playlist: &crate::media_types::PlaylistInfo,
+    preferred_quality: &str,
+) {
     // Select files opens the checklist; the entry's arrow queues every
-    // resolved item. A capped preview describes the subset it can enqueue.
+    // resolved item. Collection quality stays on this card, outside that picker.
     hide_video_step(v);
     set_looking_up(v, false);
+    let mut labels = crate::video::quality_labels();
+    labels.push(gettext("Audio only"));
+    let label_refs = labels.iter().map(String::as_str).collect::<Vec<_>>();
+    v.playlist_format
+        .set_model(Some(&gtk4::StringList::new(&label_refs)));
+    v.playlist_format
+        .set_selected(crate::media_types::quality_index(preferred_quality) as u32);
+    v.playlist_format.set_visible(true);
+    v.group_revealer.set_visible(true);
+    v.group_revealer.set_reveal_child(true);
     v.select_files_btn.set_label(&gettext("Select files"));
     v.select_files_btn.set_sensitive(true);
     v.select_files_btn.set_visible(true);
@@ -2650,6 +2672,22 @@ fn show_video_playlist(v: &VideoStep, playlist: &crate::media_types::PlaylistInf
     v.action_revealer.set_visible(true);
     v.action_revealer.set_reveal_child(true);
     sync_entry_icon(v);
+}
+
+/// Map the collection quality combo to the persisted playlist job choice.
+/// Audio-only does not use a quality cap, so retain the current preference.
+fn playlist_format_choice(index: usize, preferred_quality: &str) -> (String, bool) {
+    let audio_only = index == crate::media_types::VIDEO_QUALITY_VALUES.len();
+    let quality = if audio_only {
+        preferred_quality.to_string()
+    } else {
+        crate::media_types::quality_value(index).to_string()
+    };
+    (quality, audio_only)
+}
+
+fn selected_playlist_format(step: &VideoStep, preferred_quality: &str) -> (String, bool) {
+    playlist_format_choice(step.playlist_format.selected() as usize, preferred_quality)
 }
 
 /// The New Download card's open state, decoupled from the widgets: every
@@ -2953,6 +2991,11 @@ fn build_video_preview(
         .title(gettext("Media format"))
         .build();
     video_group.add(&video_format);
+    let playlist_format = adw::ComboRow::builder()
+        .title(gettext("Media format"))
+        .build();
+    playlist_format.set_visible(false);
+    video_group.add(&playlist_format);
     let video_tools = adw::ActionRow::builder()
         .title(gettext("Support tools"))
         // Subtitles carry raw tool errors: never parse them as Pango markup.
@@ -3031,6 +3074,7 @@ fn build_video_preview(
         name: video_name,
         revert: video_revert_btn,
         format: video_format,
+        playlist_format,
         manifest: Rc::new(RefCell::new(None)),
         manifest_choices: Rc::new(RefCell::new(Vec::new())),
         manifest_selection: Rc::new(RefCell::new(None)),
@@ -3461,7 +3505,7 @@ fn build_video_lookup_kicker(context: VideoLookupContext) -> VideoLookupKick {
                     // with the pre-selected quality.
                     match probe_b.borrow().info.clone() {
                         Some(crate::video::ProbeResult::Playlist(pl)) => {
-                            show_video_playlist(&step_b, &pl)
+                            show_video_playlist(&step_b, &pl, &settings_b.video_quality())
                         }
                         Some(crate::video::ProbeResult::Single(v)) => {
                             if settings_b.auto_add_downloads() {
@@ -3872,7 +3916,7 @@ fn build_video_lookup_kicker(context: VideoLookupContext) -> VideoLookupKick {
                                 probe_b.borrow_mut().last_ok = url;
                                 probe_b.borrow_mut().info =
                                     Some(crate::video::ProbeResult::Playlist(pl.clone()));
-                                show_video_playlist(&step_b, &pl);
+                                show_video_playlist(&step_b, &pl, &settings_b.video_quality());
                                 set_lookup_add(&lookup_add_b, true);
                                 // Auto-add's lookup is the submit: a playlist
                                 // needs a selection, so open its picker too.
@@ -3891,6 +3935,8 @@ fn build_video_lookup_kicker(context: VideoLookupContext) -> VideoLookupKick {
                                                 .borrow()
                                                 .generation,
                                             referer: source_referer.clone(),
+                                            quality: settings_b.video_quality(),
+                                            audio_only: false,
                                         },
                                         pl,
                                         scheduled_at_b.get(),
@@ -4229,20 +4275,20 @@ fn build_submit_handler(context: SubmitContext) -> SubmitHandler {
                                 scheduled_at.get(),
                             );
                         }
-                        Some(crate::video::ProbeResult::Playlist(pl)) => {
-                            push_playlist_items_page(
-                                &nav2,
-                                m.clone(),
-                                dd.clone(),
-                                PlaylistPickerOwner {
-                                    close_card: close_card.clone(),
-                                    public_host_leases: Rc::clone(&step2.public_host_leases),
-                                    generation: step2.public_host_leases.borrow().generation,
-                                    referer: source_referer_for(&step2, &url),
-                                },
-                                pl,
+                        Some(playlist @ crate::video::ProbeResult::Playlist(_)) => {
+                            let context = VideoSubmitContext {
+                                manager: &m,
+                                dest: &dd,
+                                close_card: &close_card,
+                                step: &step2,
+                                lookup_add: &lookup_add_submit,
+                                nav: &nav2,
+                            };
+                            submit_probe(
+                                &context,
+                                playlist,
                                 scheduled_at.get(),
-                                false,
+                                matches!(source, SubmitSource::Button),
                             );
                         }
                         None => {}
@@ -5293,6 +5339,30 @@ fn refresh_gallery_info(v: &VideoStep, title: &str, count_label: &str) {
 mod tests {
     use super::*;
 
+    #[test]
+    fn playlist_format_choice_uses_the_shared_quality_ladder() {
+        assert_eq!(
+            playlist_format_choice(0, "1080p"),
+            ("best".to_string(), false)
+        );
+        assert_eq!(
+            playlist_format_choice(1, "1080p"),
+            ("2160p".to_string(), false)
+        );
+        assert_eq!(
+            playlist_format_choice(5, "1080p"),
+            ("480p".to_string(), false)
+        );
+        assert_eq!(
+            playlist_format_choice(crate::media_types::VIDEO_QUALITY_VALUES.len(), "720p"),
+            ("720p".to_string(), true)
+        );
+        assert_eq!(
+            playlist_format_choice(usize::MAX, "1080p"),
+            ("1080p".to_string(), false)
+        );
+    }
+
     fn gallery_item(extension: &str) -> crate::gallery_probe::GalleryItem {
         crate::gallery_probe::GalleryItem {
             filename: format!("item.{extension}"),
@@ -5441,6 +5511,8 @@ mod tests {
                 },
                 generation: 1,
                 referer: None,
+                quality: crate::media_types::default_video_quality(),
+                audio_only: false,
             },
             crate::media_types::PlaylistInfo {
                 title: "Playlist".into(),

@@ -173,8 +173,10 @@ pub(crate) fn picker_header(
     nav: &adw::NavigationView,
     title: &str,
     count: &str,
+    trailing: Option<&gtk4::Widget>,
 ) -> (gtk4::Box, gtk4::Label) {
     let header = gtk4::Box::new(gtk4::Orientation::Horizontal, 12);
+    header.add_css_class("grab-picker-header");
     header.set_margin_top(6);
     header.set_margin_bottom(6);
     header.set_margin_start(6);
@@ -208,6 +210,9 @@ pub(crate) fn picker_header(
         .build();
     header.append(&back);
     header.append(&title_label);
+    if let Some(trailing) = trailing {
+        header.append(trailing);
+    }
     header.append(&count_label);
     (header, count_label)
 }

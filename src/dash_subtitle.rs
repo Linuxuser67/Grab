@@ -675,9 +675,8 @@ struct SampleBox<'a> {
 /// Parse ISO BMFF box framing with mp4box, then borrow each payload from the sample.
 /// Cue semantics remain validated by `parse_wvtt_sample`.
 fn parse_sample_boxes(bytes: &[u8]) -> Result<Vec<SampleBox<'_>>, DashSubtitleError> {
-    let end = u64::try_from(bytes.len()).map_err(|_| {
-        DashSubtitleError::Unsupported("A WVTT sample box size is out of range")
-    })?;
+    let end = u64::try_from(bytes.len())
+        .map_err(|_| DashSubtitleError::Unsupported("A WVTT sample box size is out of range"))?;
     let mut reader = Cursor::new(bytes);
     let parsed = mp4box::parser::parse_boxes(&mut reader, 0, end).map_err(|_| {
         DashSubtitleError::Unsupported("A WVTT sample contains malformed MP4 boxes")
@@ -699,9 +698,12 @@ fn parse_sample_boxes(bytes: &[u8]) -> Result<Vec<SampleBox<'_>>, DashSubtitleEr
             })?;
             // ISO BMFF size zero means that this box extends to its containing range.
             let box_size = if box_ref.hdr.size == 0 {
-                bytes.len().checked_sub(start).ok_or(
-                    DashSubtitleError::Unsupported("A WVTT sample box offset is out of range"),
-                )?
+                bytes
+                    .len()
+                    .checked_sub(start)
+                    .ok_or(DashSubtitleError::Unsupported(
+                        "A WVTT sample box offset is out of range",
+                    ))?
             } else {
                 usize::try_from(box_ref.hdr.size).map_err(|_| {
                     DashSubtitleError::Unsupported("A WVTT sample box size is out of range")

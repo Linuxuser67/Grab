@@ -352,7 +352,12 @@ pub(crate) fn plan_hls_media_playlist(
     let playlist = LlMediaPlaylist::parse(text).map_err(|error| {
         ManifestError::Parse(format!("could not parse LL-HLS playlist: {error}"))
     })?;
-    build_plan(manifest_url, playlist, tag_flags.trailing_open_discontinuity).map(Some)
+    build_plan(
+        manifest_url,
+        playlist,
+        tag_flags.trailing_open_discontinuity,
+    )
+    .map(Some)
 }
 
 /// Convert broadcast-hls's typed UTC timestamp to m3u8-rs's output date-time type.
@@ -551,10 +556,7 @@ impl LlHlsPlanBuilder {
         }
     }
 
-    fn append_closed_segments(
-        &mut self,
-        playlist: &LlMediaPlaylist,
-    ) -> Result<(), ManifestError> {
+    fn append_closed_segments(&mut self, playlist: &LlMediaPlaylist) -> Result<(), ManifestError> {
         for (segment_index, segment) in playlist.segments.iter().enumerate() {
             let program_date_time = segment
                 .program_date_time

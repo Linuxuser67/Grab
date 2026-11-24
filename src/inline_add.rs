@@ -962,6 +962,8 @@ pub(crate) struct VideoStep {
     pub(crate) collection_group: adw::PreferencesGroup,
     /// True when the current preview is a gallery (not a video).
     pub(crate) is_gallery: Rc<Cell<bool>>,
+    /// Prevent duplicate queue-all submissions while the count and enqueue run.
+    pub(crate) gallery_enqueue_in_flight: Cell<bool>,
     /// The gallery card state (filter, items) when is_gallery is true.
     pub(crate) gallery_card: Rc<RefCell<Option<crate::gallery_card::GalleryCard>>>,
     /// URL-row Select files button: opens the relevant collection picker
@@ -1659,6 +1661,57 @@ fn submit_probe(
     }
 }
 
+/// Count the files gallery-dl will process for one selected filter.
+///
+/// Queue-all needs this before enqueue so its collection header can show a
+/// determinate progress bar even when the user keeps the default All filter.
+async fn count_gallery_files_for_filter(
+    url: String,
+    filter: crate::gallery_argv::GalleryFilter,
+    browser: String,
+    proxy: Result<Option<crate::net_types::ResolvedProxy>, String>,
+) -> Option<u32> {
+    let proxy = match proxy {
+        Ok(proxy) => proxy,
+        Err(error) => {
+            tracing::warn!(error = %error, "gallery progress count proxy invalid");
+            return None;
+        }
+    };
+    let auth = crate::inline_gallery::resolve_gallery_auth(&url, &browser);
+    let count = match crate::gallery_argv::resolve_tool() {
+        Ok(tool) => {
+            crate::gallery_probe::count_gallery_files_with_proxy(
+                &tool,
+                &url,
+                auth.cookies_path.as_deref(),
+                auth.cookies_browser.as_deref(),
+                auth.user_agent.as_deref(),
+                filter,
+                proxy.as_ref(),
+            )
+            .await
+        }
+        Err(error) => {
+            tracing::warn!(error = %error, "gallery progress count tool unavailable");
+            None
+        }
+    };
+    drop(auth);
+    count
+}
+
+/// Use a cached total when available; otherwise wait for the bounded gallery-dl count.
+async fn resolve_gallery_file_count(
+    cached: Option<u32>,
+    count: impl std::future::Future<Output = Option<u32>>,
+) -> Option<u32> {
+    match cached {
+        Some(total) => Some(total),
+        None => count.await,
+    }
+}
+
 /// Queue a gallery as a whole from the URL row's Queue all action. The
 /// separate Select files action continues to provide explicit per-file selection.
 fn submit_gallery_all(
@@ -1697,9 +1750,16 @@ fn submit_gallery_all(
         set_lookup_add(lookup_add, true);
         return;
     }
+    // The count lookup can take several seconds; ignore repeated activation
+    // until this collection has either been queued or the enqueue has failed.
+    if step.gallery_enqueue_in_flight.replace(true) {
+        return;
+    }
 
     let referer = source_referer_for(step, &submitted_url);
     let settings = manager.settings();
+    let count_proxy = crate::download::DownloadOptions::from_settings(settings).proxy_config();
+    let count_host_lease_guard = step.public_host_leases.borrow().lease_guard();
     let job = crate::gallery_argv::GalleryJob {
         item_id: 0,
         page_url,
@@ -1723,9 +1783,26 @@ fn submit_gallery_all(
         move |d| async move {
             let mut job = job;
             job.dest_dir = std::path::PathBuf::from(d.unwrap_or_else(|| ".".to_string()));
+            let count_url = job.page_url.clone();
+            let count_filter = job.filter;
+            let count_browser = job.cookies_browser.clone();
+            job.file_count = resolve_gallery_file_count(job.file_count, async move {
+                crate::runtime::tokio_rt()
+                    .spawn(count_host_lease_guard.hold(count_gallery_files_for_filter(
+                        count_url,
+                        count_filter,
+                        count_browser,
+                        count_proxy,
+                    )))
+                    .await
+                    .ok()
+                    .flatten()
+            })
+            .await;
             enqueue_manager.enqueue_gallery_async_batched(&job).await
         },
         move |e| {
+            error_step.gallery_enqueue_in_flight.set(false);
             show_video_error(&error_step, e);
             set_lookup_add(&error_lookup_add, true);
         },
@@ -2922,6 +2999,7 @@ fn build_video_preview(
         gallery_filter_wrap: filter_wrap,
         collection_group,
         is_gallery: Rc::new(Cell::new(false)),
+        gallery_enqueue_in_flight: Cell::new(false),
         step_action: Cell::new(UrlEntryAction::Submit),
         gallery_card: Rc::new(RefCell::new(None)),
         select_files_btn: select_files_btn.clone(),
@@ -3003,38 +3081,17 @@ fn wire_video_preview(step: Rc<VideoStep>) {
                         let url_for_count = url.clone();
                         let filter_c = filter;
                         let count_settings = crate::settings::AppSettings::new();
-                        let browser = count_settings.cookies_browser();
+                        let browser = count_settings.cookies_browser().to_string();
                         let proxy =
                             crate::download::DownloadOptions::from_settings(&count_settings)
                                 .proxy_config();
                         let count_result = crate::runtime::tokio_rt()
-                            .spawn(count_host_lease_guard.hold(async move {
-                                let proxy = match proxy {
-                                    Ok(proxy) => proxy,
-                                    Err(error) => {
-                                        tracing::warn!(error = %error, "gallery progress count proxy invalid");
-                                        return None;
-                                    }
-                                };
-                                let auth = crate::inline_gallery::resolve_gallery_auth(
-                                    &url_for_count,
-                                    browser.as_str(),
-                                );
-                                if let Ok(tool) = crate::gallery_argv::resolve_tool() {
-                                    crate::gallery_probe::count_gallery_files_with_proxy(
-                                        &tool,
-                                        &url_for_count,
-                                        auth.cookies_path.as_deref(),
-                                        auth.cookies_browser.as_deref(),
-                                        auth.user_agent.as_deref(),
-                                        filter_c,
-                                        proxy.as_ref(),
-                                    )
-                                    .await
-                                } else {
-                                    None
-                                }
-                            }))
+                            .spawn(count_host_lease_guard.hold(count_gallery_files_for_filter(
+                                url_for_count,
+                                filter_c,
+                                browser,
+                                proxy,
+                            )))
                             .await
                             .ok()
                             .flatten();
@@ -5191,6 +5248,7 @@ fn show_gallery_ready(v: &VideoStep, card: crate::gallery_card::GalleryCard, tit
     set_looking_up(v, false);
     v.is_gallery.set(true);
     let count_label = gallery_count_label(&card.items);
+    v.gallery_enqueue_in_flight.set(false);
     // Store the card first so the filter handler can access it.
     *v.gallery_card.borrow_mut() = Some(card);
     // A superseded enumeration can leave the button on "Loading…"; every
@@ -5232,6 +5290,24 @@ fn refresh_gallery_info(v: &VideoStep, title: &str, count_label: &str) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn queue_all_uses_the_count_when_the_default_filter_has_no_cached_total() {
+        let total = resolve_gallery_file_count(None, async { Some(37) }).await;
+        assert_eq!(total, Some(37));
+    }
+
+    #[tokio::test]
+    async fn queue_all_reuses_a_cached_gallery_total() {
+        let count_called = Cell::new(false);
+        let total = resolve_gallery_file_count(Some(12), async {
+            count_called.set(true);
+            Some(37)
+        })
+        .await;
+        assert_eq!(total, Some(12));
+        assert!(!count_called.get());
+    }
 
     fn gallery_item(extension: &str) -> crate::gallery_probe::GalleryItem {
         crate::gallery_probe::GalleryItem {

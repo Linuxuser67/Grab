@@ -5645,6 +5645,19 @@ mod tests {
             header.has_css_class("grab-picker-header"),
             "the format dropdown must share the playlist title row"
         );
+        let item_count = format_picker
+            .prev_sibling()
+            .expect("the item count must appear immediately before the format dropdown");
+        assert!(
+            item_count.is::<gtk4::Label>() && item_count.is_visible(),
+            "the visible item count must precede the format dropdown"
+        );
+        assert!(
+            header
+                .last_child()
+                .is_some_and(|last| last.has_css_class(PLAYLIST_FORMAT_PICKER_CLASS)),
+            "the format dropdown must be the last control in the header"
+        );
         let model = format_picker
             .model()
             .expect("dropdown model")

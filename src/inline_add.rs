@@ -2701,7 +2701,9 @@ fn playlist_format_picker(preferred_quality: &str, audio_only: bool) -> gtk4::Dr
     let label_refs = labels.iter().map(String::as_str).collect::<Vec<_>>();
     let picker = gtk4::DropDown::from_strings(&label_refs);
     let selected = if audio_only {
-        crate::media_types::VIDEO_QUALITY_VALUES.len().saturating_sub(1)
+        crate::media_types::VIDEO_QUALITY_VALUES
+            .len()
+            .saturating_sub(1)
     } else {
         crate::media_types::quality_index(preferred_quality).saturating_sub(1)
     };
@@ -2719,7 +2721,9 @@ fn playlist_format_picker(preferred_quality: &str, audio_only: bool) -> gtk4::Dr
 fn playlist_format_choice(index: usize, preferred_quality: &str) -> (String, bool) {
     // The playlist menu omits the global "Best" preset: its visible quality
     // rows map to the remaining height caps, followed by Audio only.
-    let audio_index = crate::media_types::VIDEO_QUALITY_VALUES.len().saturating_sub(1);
+    let audio_index = crate::media_types::VIDEO_QUALITY_VALUES
+        .len()
+        .saturating_sub(1);
     let audio_only = index == audio_index;
     let quality_index = if index < audio_index {
         index + 1
@@ -5431,10 +5435,7 @@ mod tests {
             ("480p".to_string(), false)
         );
         assert_eq!(
-            playlist_format_choice(
-                crate::media_types::VIDEO_QUALITY_VALUES.len() - 1,
-                "720p"
-            ),
+            playlist_format_choice(crate::media_types::VIDEO_QUALITY_VALUES.len() - 1, "720p"),
             ("720p".to_string(), true)
         );
         assert_eq!(
@@ -5637,7 +5638,9 @@ mod tests {
         let nav_widget: gtk4::Widget = nav.clone().upcast();
         let format_picker = find_playlist_format_picker(&nav_widget)
             .expect("playlist picker must expose its collection format selector");
-        let header = format_picker.parent().expect("dropdown must be in the picker header");
+        let header = format_picker
+            .parent()
+            .expect("dropdown must be in the picker header");
         assert!(
             header.has_css_class("grab-picker-header"),
             "the format dropdown must share the playlist title row"
@@ -5662,8 +5665,9 @@ mod tests {
             ("720p".to_string(), false),
             "an unselected dropdown must retain the current preference"
         );
-        let audio_only_index =
-            crate::media_types::VIDEO_QUALITY_VALUES.len().saturating_sub(1);
+        let audio_only_index = crate::media_types::VIDEO_QUALITY_VALUES
+            .len()
+            .saturating_sub(1);
         format_picker.set_selected(u32::try_from(audio_only_index).unwrap_or(0));
         assert_eq!(
             selected_playlist_format_row(&format_picker, "720p"),

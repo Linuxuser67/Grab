@@ -1679,6 +1679,25 @@ mod tests {
     }
 
     #[test]
+    fn tolerated_dangling_segment_tags_are_rejected_before_planning() {
+        let body = br#"#EXTM3U
+#EXT-X-TARGETDURATION:2
+#EXT-X-MEDIA-SEQUENCE:70
+#EXT-X-MAP:URI="init.mp4"
+#EXT-X-SERVER-CONTROL:CAN-BLOCK-RELOAD=NO,PART-HOLD-BACK=1.5
+#EXT-X-PART-INF:PART-TARGET=0.5
+#EXT-X-PART:DURATION=0.5,URI="70.0.m4s",INDEPENDENT=YES
+#EXT-X-PART:DURATION=0.5,URI="70.1.m4s"
+#EXTINF:1.0,
+"#;
+
+        assert!(matches!(
+            plan_hls_media_playlist(BASE, body),
+            Err(ManifestError::UnsupportedPlaylist)
+        ));
+    }
+
+    #[test]
     fn ext_x_start_required_attributes_remain_unsupported() {
         let body = br#"#EXTM3U
 #EXT-X-TARGETDURATION:2

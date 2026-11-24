@@ -1467,7 +1467,7 @@ mod tests {
         let progress =
             std::rc::Rc::new(crate::install_progress::ToolProgressButton::new("Install"));
         let weak = std::rc::Rc::downgrade(&progress);
-        row.add_suffix(&progress.root);
+        row.add_suffix(&progress.button);
         group.add(&row);
         drop(row);
 

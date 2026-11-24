@@ -1466,6 +1466,7 @@ dependencies = [
  "axum",
  "base64",
  "broadcast-hls",
+ "chrono",
  "dash-mpd-core",
  "futures-util",
  "getrandom 0.4.3",

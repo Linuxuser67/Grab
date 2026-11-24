@@ -325,6 +325,10 @@ pub(crate) fn playlist_count_label(kind: crate::media_types::PlaylistKind, count
 /// split when the gallery mixes both. Unknown extensions count in the total.
 fn gallery_count_label(items: &[crate::gallery_probe::GalleryItem]) -> String {
     let total = items.len();
+    if total >= crate::gallery_probe::GALLERY_PREVIEW_ITEM_LIMIT {
+        return ngettext("At least {} file", "At least {} files", total as u32)
+            .replace("{}", &total.to_string());
+    }
     let mut images = 0usize;
     let mut videos = 0usize;
     for item in items {
@@ -1681,56 +1685,9 @@ fn submit_probe(
     }
 }
 
-/// Count the exact files gallery-dl will handle for the active filter.
-/// Keep the browser-handoff DNS leases alive until the bounded count process exits.
-async fn count_gallery_files_for_queue(
-    manager: &DownloadManager,
-    lease_guard: crate::download_net::PublicResolutionLeaseGuard,
-    page_url: String,
-    filter: crate::gallery_argv::GalleryFilter,
-) -> Option<u32> {
-    let settings = manager.settings();
-    let browser = settings.cookies_browser();
-    let proxy = crate::download::DownloadOptions::from_settings(settings).proxy_config();
-    let count_task = crate::runtime::tokio_rt().spawn(lease_guard.hold(async move {
-        let proxy = match proxy {
-            Ok(proxy) => proxy,
-            Err(error) => {
-                tracing::warn!(error = %error, "gallery progress count proxy invalid");
-                return None;
-            }
-        };
-        let auth = crate::inline_gallery::resolve_gallery_auth(&page_url, browser.as_str());
-        let tool = match crate::gallery_argv::resolve_tool() {
-            Ok(tool) => tool,
-            Err(error) => {
-                tracing::warn!(error = %error, "gallery progress count tool unavailable");
-                return None;
-            }
-        };
-        crate::gallery_probe::count_gallery_files_with_proxy(
-            &tool,
-            &page_url,
-            auth.cookies_path.as_deref(),
-            auth.cookies_browser.as_deref(),
-            auth.user_agent.as_deref(),
-            filter,
-            proxy.as_ref(),
-        )
-        .await
-    }));
-    match count_task.await {
-        Ok(total) => total,
-        Err(error) => {
-            tracing::warn!(error = ?error, "gallery progress count task failed");
-            None
-        }
-    }
-}
-
-/// Queue a gallery as a whole from the URL row's Queue all action.
-/// Count the complete filtered listing before enqueueing: unlike the preview,
-/// gallery-dl's count command is not capped and supplies the progress denominator.
+/// Queue a gallery without a second extraction pass. The bounded preview is
+/// intentionally not used as a progress denominator: the actual download
+/// discovers the complete filtered listing while it runs.
 fn submit_gallery_all(
     manager: &Rc<DownloadManager>,
     dest: &Rc<RefCell<String>>,
@@ -1770,104 +1727,56 @@ fn submit_gallery_all(
         return;
     }
 
-    // Acquire the lease before yielding to the GLib loop. Closing the card
-    // must not release an untrusted handoff's host registrations mid-count.
-    let count_host_lease_guard = step.public_host_leases.borrow().lease_guard();
-
-    // Lock the entry and show its spinner while the uncapped count runs.
+    // No second gallery-dl traversal: Queue All enters the queue immediately.
     let generation = step.gallery_queue_generation.get().wrapping_add(1);
     step.gallery_queue_generation.set(generation);
     step.gallery_queue_in_flight.set(true);
-    set_looking_up(step, true);
-    sync_entry_icon(step);
-    step.url_entry
-        .set_icon_activatable(gtk4::EntryIconPosition::Secondary, false);
 
-    let manager = Rc::clone(manager);
-    let dest = Rc::clone(dest);
+    let referer = source_referer_for(step, &submitted_url);
+    let settings = manager.settings();
+    let job = crate::gallery_argv::GalleryJob {
+        item_id: 0,
+        page_url,
+        referer,
+        title,
+        file_count: None,
+        dest_dir: std::path::PathBuf::from("."),
+        filter,
+        cookies_browser: settings.cookies_browser().to_string(),
+        speed_limit: crate::gallery_runner::gallery_speed_limit(settings),
+        range: None,
+        file_rows: Vec::new(),
+    };
+    let enqueue_manager = Rc::clone(manager);
+    let error_step = Rc::clone(step);
+    let error_lookup_add = Rc::clone(lookup_add);
+    let close_step = Rc::clone(step);
     let close_card = Rc::clone(close_card);
-    let step = Rc::clone(step);
-    let lookup_add = Rc::clone(lookup_add);
-    glib::spawn_future_local(async move {
-        if step.gallery_queue_generation.get() != generation
-            || !step.gallery_queue_in_flight.get()
-            || !step.is_gallery.get()
-        {
-            return;
+    let close_card_after_queue: Rc<dyn Fn()> = Rc::new(move || {
+        if close_step.gallery_queue_generation.get() == generation {
+            close_step.gallery_queue_in_flight.set(false);
         }
-        let file_count = count_gallery_files_for_queue(
-            &manager,
-            count_host_lease_guard,
-            page_url.clone(),
-            filter,
-        )
-        .await;
-
-        // The user may close or replace the preview while gallery-dl counts.
-        // Never let a stale result enqueue a collection from an old card.
-        if step.gallery_queue_generation.get() != generation
-            || !step.gallery_queue_in_flight.get()
-            || !step.is_gallery.get()
-            || !step
-                .gallery_card
-                .borrow()
-                .as_ref()
-                .is_some_and(|card| card.url() == page_url)
-        {
-            return;
-        }
-
-        if file_count.is_none() {
-            tracing::warn!(
-                host = %crate::video_probe::page_host(&page_url),
-                "gallery progress denominator unavailable; queueing with indeterminate progress"
-            );
-        }
-
-        let referer = source_referer_for(&step, &submitted_url);
-        let settings = manager.settings();
-        let job = crate::gallery_argv::GalleryJob {
-            item_id: 0,
-            page_url,
-            referer,
-            title,
-            file_count,
-            dest_dir: std::path::PathBuf::from("."),
-            filter,
-            cookies_browser: settings.cookies_browser().to_string(),
-            speed_limit: crate::gallery_runner::gallery_speed_limit(settings),
-            range: None,
-            file_rows: Vec::new(),
-        };
-        let enqueue_manager = Rc::clone(&manager);
-        let error_step = Rc::clone(&step);
-        let error_lookup_add = Rc::clone(&lookup_add);
-        let close_step = Rc::clone(&step);
-        let close_card_after_queue: Rc<dyn Fn()> = Rc::new(move || {
-            if close_step.gallery_queue_generation.get() == generation {
-                close_step.gallery_queue_in_flight.set(false);
-            }
-            close_card();
-        });
-        enqueue_and_close_async(
-            &dest,
-            &close_card_after_queue,
-            scheduled_at,
-            move |directory| async move {
-                let mut job = job;
-                job.dest_dir =
-                    std::path::PathBuf::from(directory.unwrap_or_else(|| ".".to_string()));
-                enqueue_manager.enqueue_gallery_async_batched(&job).await
-            },
-            move |error| {
-                if error_step.gallery_queue_generation.get() != generation {
-                    return;
-                }
-                show_video_error(&error_step, error);
-                set_lookup_add(&error_lookup_add, true);
-            },
-        );
+        close_card();
     });
+    enqueue_and_close_async(
+        dest,
+        &close_card_after_queue,
+        scheduled_at,
+        move |directory| async move {
+            let mut job = job;
+            job.dest_dir =
+                std::path::PathBuf::from(directory.unwrap_or_else(|| ".".to_string()));
+            enqueue_manager.enqueue_gallery_async_batched(&job).await
+        },
+        move |error| {
+            if error_step.gallery_queue_generation.get() != generation {
+                return;
+            }
+            error_step.gallery_queue_in_flight.set(false);
+            show_video_error(&error_step, error);
+            set_lookup_add(&error_lookup_add, true);
+        },
+    );
 }
 
 /// Report a failed plain-queue fallback on the form: drop the stale probe, log, show the error, re-enable Add.
@@ -3733,8 +3642,8 @@ fn build_video_lookup_kicker(context: VideoLookupContext) -> VideoLookupKick {
                             let card = crate::gallery_card::GalleryCard::new(items, url.clone());
                             let title = crate::gallery_probe::collection_title(&card.items, &url);
                             tracing::info!(
-                                files = card.file_count(),
-                                "gallery-dl items await user selection"
+                                preview_items = card.file_count(),
+                                "gallery-dl preview items await user selection"
                             );
                             show_gallery_ready(&step_b, card, &title);
                             set_lookup_add(&lookup_add_b, true);
@@ -5364,8 +5273,8 @@ fn show_gallery_ready(v: &VideoStep, card: crate::gallery_card::GalleryCard, tit
             "Queue all files",
         ))]);
     set_queue_all_action(v);
-    // The collection row under the URL bar carries the title and counts;
-    // the filter chooses what Queue all and Select files enqueue.
+    // The collection row carries the title and preview count. When the
+    // five-item probe cap is reached, the subtitle is a lower bound, not a total.
     v.gallery_filter.set_active_name(Some("all"));
     refresh_gallery_info(v, title, &count_label);
     v.collection_group.set_visible(true);
@@ -5561,6 +5470,18 @@ mod tests {
     fn gallery_count_label_stays_total_only_for_one_type() {
         let items = vec![gallery_item("jpg"), gallery_item("png")];
         assert_eq!(gallery_count_label(&items), "2 files");
+    }
+
+    #[test]
+    fn gallery_count_label_marks_the_capped_preview_as_a_lower_bound() {
+        let items = vec![
+            gallery_item("jpg"),
+            gallery_item("png"),
+            gallery_item("mp4"),
+            gallery_item("webm"),
+            gallery_item("xyz"),
+        ];
+        assert_eq!(gallery_count_label(&items), "At least 5 files");
     }
 
     #[test]

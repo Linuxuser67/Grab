@@ -15,6 +15,9 @@ use crate::video_spawn::ProcessGroupGuard;
 /// Timeout for the gallery-dl probe (same as the yt-dlp probe).
 const PROBE_TIMEOUT: Duration = Duration::from_secs(15);
 
+/// Maximum number of items returned by the fast inline preview.
+pub(crate) const GALLERY_PREVIEW_ITEM_LIMIT: usize = 5;
+
 /// One file from `gallery-dl -j` output. Extractors emit wildly different
 /// metadata keys; `filename`/`extension`/`category` are the reliable core,
 /// everything else lands in `extra` for best-effort title derivation.
@@ -272,7 +275,7 @@ pub async fn probe_gallery_with_proxy(
         .arg("-j")
         .arg("--no-download")
         .arg("--range")
-        .arg("1-5")
+        .arg(format!("1-{GALLERY_PREVIEW_ITEM_LIMIT}"))
         // Don't let gallery-dl write back to Grab's staged cookies file.
         .arg("-o")
         .arg("extractor.cookies-update=false");
@@ -1027,6 +1030,7 @@ pub async fn count_gallery_files(
     count_gallery_files_with_proxy(tool, url, cookies_file, None, user_agent, filter, None).await
 }
 
+#[cfg(test)]
 pub async fn count_gallery_files_with_proxy(
     tool: &Path,
     url: &str,

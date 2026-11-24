@@ -258,6 +258,7 @@ pub fn count_argv(
     count_argv_with_proxy(tool, url, cookies_file, None, user_agent, filter, None)
 }
 
+#[cfg(test)]
 pub fn count_argv_with_proxy(
     tool: &Path,
     url: &str,
@@ -328,7 +329,7 @@ pub struct GalleryJob {
     pub referer: Option<String>,
     /// Display title for the queue row (from probe metadata).
     pub title: String,
-    /// File count from the probe (`-g` line count), if available.
+    /// Exact filtered file count, when known from a selection or completed download.
     pub file_count: Option<u32>,
     pub dest_dir: PathBuf,
     pub filter: GalleryFilter,

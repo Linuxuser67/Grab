@@ -351,6 +351,14 @@ mod tests {
         gtk4::init().expect("gtk::init (run under Xvfb)");
 
         let progress = ToolProgressButton::new("Install");
+        PROGRESS_CSS_PROVIDER.with(|stored| {
+            assert!(
+                stored.borrow().is_some(),
+                "the display must retain the CSS provider after setup"
+            );
+        });
+        assert!(PROGRESS_CSS.contains("linear-gradient(to top"));
+        assert!(PROGRESS_CSS.contains("2px"));
         assert!(!progress.button.has_css_class(PROGRESS_CLASS));
 
         progress.begin();

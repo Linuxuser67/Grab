@@ -2794,12 +2794,7 @@ fn build_video_preview(
     select_files_btn: &gtk4::Button,
     add_btn: &gtk4::Button,
     public_host_leases: PublicHostLeases,
-) -> (
-    Rc<VideoStep>,
-    gtk4::Revealer,
-    Rc<crate::install_progress::ToolProgressButton>,
-    gtk4::Button,
-) {
+) -> (Rc<VideoStep>, gtk4::Revealer, gtk4::Button, gtk4::Button) {
     // Video preview block: hidden until a lookup runs; exactly one state shows.
     // HIG AdwPreferencesGroup: title/description are built-in, rows get the
     // 12px internal margins natively.
@@ -2837,15 +2832,14 @@ fn build_video_preview(
         // Subtitles carry raw tool errors: never parse them as Pango markup.
         .use_markup(false)
         .build();
-    let video_install_btn = Rc::new(crate::install_progress::ToolProgressButton::new(&gettext(
-        "Install",
-    )));
-    video_install_btn
-        .button
-        .set_tooltip_text(Some(&gettext("Download the yt-dlp support tools")));
+    let video_install_btn = gtk4::Button::builder()
+        .label(gettext("Install"))
+        .valign(gtk4::Align::Center)
+        .tooltip_text(gettext("Download the yt-dlp support tools"))
+        .build();
     // Whole-row click hits Install (same pattern as the torrent row below).
-    video_tools.set_activatable_widget(Some(&video_install_btn.button));
-    video_tools.add_suffix(&video_install_btn.button);
+    video_tools.set_activatable_widget(Some(&video_install_btn));
+    video_tools.add_suffix(&video_install_btn);
     video_group.add(&video_tools);
     // Probe-error state: an ActionRow in the group (4.4.4 pattern) — the
     // message goes in the subtitle, Retry is a suffix.
@@ -4459,26 +4453,22 @@ fn wire_video_preview_actions(
     probe: Rc<RefCell<ProbeState>>,
     kick_video: VideoLookupKick,
     manager: &Rc<DownloadManager>,
-    video_install_btn: &Rc<crate::install_progress::ToolProgressButton>,
+    video_install_btn: &gtk4::Button,
     video_retry_btn: &gtk4::Button,
 ) {
     // Install / retry / revert / audio-mode wiring.
     {
         let step2 = step.clone();
         let kick = kick_video.clone();
-        let btn = video_install_btn.button.clone();
-        let btn_weak = video_install_btn.button.downgrade();
-        let progress_weak = Rc::downgrade(video_install_btn);
+        let btn_weak = video_install_btn.downgrade();
         // Outside Flatpak there is no bundled binary and host packages can't
         // be installed from here: guide through self-install instead.
         if !crate::video_tools::in_flatpak() {
-            btn.set_label(&gettext("How to Install"));
-            btn.set_tooltip_text(Some(&gettext("Show terminal install instructions")));
+            video_install_btn.set_label(&gettext("How to Install"));
+            video_install_btn
+                .set_tooltip_text(Some(&gettext("Show terminal install instructions")));
         }
-        video_install_btn.button.connect_clicked(move |_| {
-            let Some(progress) = progress_weak.upgrade() else {
-                return;
-            };
+        video_install_btn.connect_clicked(move |_| {
             let Some(btn) = btn_weak.upgrade() else {
                 return;
             };
@@ -4491,7 +4481,8 @@ fn wire_video_preview_actions(
             let (step_stage, step_error, step_done) = (step2.clone(), step2.clone(), step2.clone());
             let kick_b = kick.clone();
             crate::install_progress::run(
-                &progress,
+                &btn,
+                crate::install_progress::ToolOperation::Install,
                 move |stage| {
                     step_stage.tools.set_subtitle(&stage);
                 },
@@ -5246,6 +5237,73 @@ mod tests {
             category: String::new(),
             extra: serde_json::Map::new(),
         }
+    }
+
+    fn find_support_tools_install_button(widget: &gtk4::Widget) -> Option<gtk4::Button> {
+        if let Ok(button) = widget.clone().downcast::<gtk4::Button>()
+            && button.label().as_deref() == Some(gettext("How to Install").as_str())
+        {
+            return Some(button);
+        }
+
+        let mut child = widget.first_child();
+        while let Some(current) = child {
+            if let Some(button) = find_support_tools_install_button(&current) {
+                return Some(button);
+            }
+            child = current.next_sibling();
+        }
+        None
+    }
+
+    #[test]
+    #[ignore = "needs a display; run under Xvfb (see ci.yml)"]
+    fn add_card_install_button_is_retained_for_progress() {
+        gtk4::init().expect("gtk::init (run under Xvfb)");
+        // SAFETY: test setup runs serially before constructing GSettings.
+        unsafe {
+            std::env::set_var("GSETTINGS_SCHEMA_DIR", env!("GRAB_SCHEMA_DIR"));
+            std::env::set_var("GSETTINGS_BACKEND", "memory");
+        }
+
+        let store = gio::ListStore::new::<DownloadItem>();
+        let manager = DownloadManager::new(store, crate::settings::AppSettings::new());
+        let add_card = build_add_card(manager);
+        let button = find_support_tools_install_button(add_card.widget())
+            .expect("the Add card must contain its support-tools install button");
+
+        let finished = Rc::new(Cell::new(false));
+        let finished_callback = Rc::clone(&finished);
+        crate::install_progress::run(
+            &button,
+            crate::install_progress::ToolOperation::Install,
+            |_| {},
+            |_, _| panic!("an empty selection must not start an installer"),
+            move |completed| {
+                assert!(completed.is_empty());
+                finished_callback.set(true);
+            },
+            Some(Vec::new()),
+        );
+
+        assert_eq!(
+            button.label().as_deref(),
+            Some(gettext("Installing…").as_str())
+        );
+        assert!(button.has_css_class("grab-install-progress"));
+        assert!(!button.is_sensitive());
+
+        let context = glib::MainContext::default();
+        while !finished.get() {
+            context.iteration(true);
+        }
+
+        assert_eq!(
+            button.label().as_deref(),
+            Some(gettext("How to Install").as_str())
+        );
+        assert!(button.is_sensitive());
+        drop(add_card);
     }
 
     #[test]

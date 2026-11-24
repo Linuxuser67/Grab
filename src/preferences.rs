@@ -1159,14 +1159,7 @@ pub fn show(
                     if dialog_b.upgrade().is_none() {
                         return;
                     }
-                    refresh_video_tools(
-                        &row_b,
-                        &btn_b,
-                        &spin_b,
-                        &action_b,
-                        &generation_b,
-                        None,
-                    );
+                    refresh_video_tools(&row_b, &btn_b, &spin_b, &action_b, &generation_b, None);
                 });
                 return;
             }
@@ -1407,10 +1400,8 @@ pub fn show(
                     if dialog_ok.upgrade().is_none() {
                         return;
                     }
-                    let summary = crate::install_progress::summarize_changes(
-                        &completed,
-                        &tools_to_update,
-                    );
+                    let summary =
+                        crate::install_progress::summarize_changes(&completed, &tools_to_update);
                     refresh_video_tools(
                         &row_ok,
                         &btn_b,

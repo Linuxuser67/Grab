@@ -4372,7 +4372,7 @@ fn validate_iori_sample_aes_segment(bytes: &[u8]) -> Result<(), String> {
                     stream_types.insert(stream.elementary_pid.as_u16(), stream.stream_type);
                 }
             }
-            Some(TsPayload::Pes(pes)) => {
+            Some(TsPayload::PesStart(pes)) => {
                 if let Some(previous) = aac_pes.remove(&pid) {
                     validate_iori_adts_pes(&previous)?;
                 }
@@ -4385,7 +4385,7 @@ fn validate_iori_sample_aes_segment(bytes: &[u8]) -> Result<(), String> {
                     aac_pes.insert(pid, pes.data.to_vec());
                 }
             }
-            Some(TsPayload::Raw(payload)) => {
+            Some(TsPayload::PesContinuation(payload) | TsPayload::Raw(payload)) => {
                 if let Some(data) = aac_pes.get_mut(&pid) {
                     data.extend_from_slice(&payload);
                 } else if stream_types.get(&pid).is_some_and(|stream_type| {

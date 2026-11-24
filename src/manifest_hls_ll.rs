@@ -352,15 +352,14 @@ pub(crate) fn plan_hls_media_playlist(
     let playlist = LlMediaPlaylist::parse(text).map_err(|error| {
         ManifestError::Parse(format!("could not parse LL-HLS playlist: {error}"))
     })?;
-    // broadcast-hls 0.4 retains segment-scoped tags verbatim. Reuse the
-    // already-pinned m3u8-rs parser for RFC 3339 validation and its typed PDT
-    // value when a completed parent segment carries a wall-clock anchor.
-    let source_segments = if playlist.segments.iter().any(|segment| {
-        segment
-            .pre_tags
-            .iter()
-            .any(|tag| tag.starts_with("#EXT-X-PROGRAM-DATE-TIME:"))
-    }) {
+    // broadcast-hls 0.9 exposes validated PDT values as typed fields. Reuse
+    // m3u8-rs for the output model's date-time representation when a closed
+    // segment carries an anchor; parser diagnostics are rejected below.
+    let source_segments = if playlist
+        .segments
+        .iter()
+        .any(|segment| segment.program_date_time.is_some())
+    {
         let parsed = m3u8_rs::parse_media_playlist_res(body)
             .map_err(|error| hls_parse_error(body, error))?;
         if parsed.segments.len() != playlist.segments.len() {
@@ -402,17 +401,11 @@ fn parse_program_date_time_tag(tag: &str) -> Result<m3u8_rs::MediaSegment, Manif
 fn open_segment_program_date_time(
     open: &broadcast_hls::OpenSegment,
 ) -> Result<Option<m3u8_rs::MediaSegment>, ManifestError> {
-    let mut date_tags = open
-        .pre_tags
-        .iter()
-        .filter(|tag| tag.starts_with("#EXT-X-PROGRAM-DATE-TIME:"));
-    let Some(tag) = date_tags.next() else {
+    let Some(program_date_time) = open.program_date_time else {
         return Ok(None);
     };
-    if date_tags.next().is_some() {
-        return Err(ManifestError::UnsupportedPlaylist);
-    }
-    parse_program_date_time_tag(tag).map(Some)
+    let tag = format!("#EXT-X-PROGRAM-DATE-TIME:{program_date_time}");
+    parse_program_date_time_tag(&tag).map(Some)
 }
 
 /// Validated inputs shared by the LL-HLS planning stages.
@@ -549,7 +542,8 @@ fn validate_ll_hls_playlist(
     }
 
     let first_visible_sequence = playlist
-        .media_sequence
+        .msn
+        .value()
         .checked_add(skipped_segments)
         .ok_or(ManifestError::DurationOverflow)?;
     Ok(ValidatedLlHlsPlaylist {
@@ -925,8 +919,8 @@ fn parse_rendition_reports(
             }
             Ok(HlsRenditionReport {
                 playlist_url: resolve_hls_media_resource_url(base_url, &report.uri)?,
-                last_msn: report.last_msn,
-                last_part: report.last_part,
+                last_msn: report.last_msn.value(),
+                last_part: report.last_part.map(|part| u64::from(part.value())),
             })
         })
         .collect::<Result<Vec<_>, ManifestError>>()
@@ -942,6 +936,12 @@ fn low_latency_can_skip_until(playlist: &LlMediaPlaylist) -> Option<Duration> {
 }
 
 fn validate_playlist_tags(playlist: &LlMediaPlaylist) -> Result<(), ManifestError> {
+    // The 0.7+ parser records tolerated defects instead of failing parse.
+    // Native planning remains fail-closed for malformed PDT, truncated segment
+    // records, and ambiguous date-range metadata.
+    if !playlist.diagnostics.is_empty() {
+        return Err(ManifestError::UnsupportedPlaylist);
+    }
     if playlist
         .extra_tags
         .iter()
@@ -1676,6 +1676,25 @@ mod tests {
 60.m4s
 "#;
         assert!(plan_hls_media_playlist(BASE, body).is_err());
+    }
+
+    #[test]
+    fn tolerated_dangling_segment_tags_are_rejected_before_planning() {
+        let body = br#"#EXTM3U
+#EXT-X-TARGETDURATION:2
+#EXT-X-MEDIA-SEQUENCE:70
+#EXT-X-MAP:URI="init.mp4"
+#EXT-X-SERVER-CONTROL:CAN-BLOCK-RELOAD=NO,PART-HOLD-BACK=1.5
+#EXT-X-PART-INF:PART-TARGET=0.5
+#EXT-X-PART:DURATION=0.5,URI="70.0.m4s",INDEPENDENT=YES
+#EXT-X-PART:DURATION=0.5,URI="70.1.m4s"
+#EXTINF:1.0,
+"#;
+
+        assert!(matches!(
+            plan_hls_media_playlist(BASE, body),
+            Err(ManifestError::UnsupportedPlaylist)
+        ));
     }
 
     #[test]

@@ -25,10 +25,11 @@ url = "2"
 m3u8-rs = "6.0.1"
 # Parser requirements use Cargo's compatible ranges; Cargo.lock keeps builds
 # reproducible, while parser fixtures guard deliberate lockfile updates.
-# Typed LL-HLS media-playlist model; the 0.4.x range excludes breaking 0.5+ releases.
-broadcast-hls = "0.4.0"
-# SAMPLE-AES preflight reassembles PES/Raw packets with the API also used by iori-ssa.
-mpeg2ts = "0.3.1"
+# Typed LL-HLS media-playlist parser. The 0.9 API includes bounded parse limits
+# and typed playlist diagnostics; lockfile keeps release builds reproducible.
+broadcast-hls = "0.9.0"
+# SAMPLE-AES preflight uses the typed PES-start/continuation packet model.
+mpeg2ts = "0.6.1"
 # Parse ISO BMFF box trees for structural validation of native fMP4 resources.
 mp4box = { version = "0.14.0", default-features = false }
 # The ADTS preflight rejects malformed frames before iori-ssa; SAMPLE-AES

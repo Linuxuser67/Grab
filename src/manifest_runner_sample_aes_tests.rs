@@ -101,7 +101,7 @@ fn sample_aes_aac_transport_stream(split_at: usize, elementary_stream: &[u8]) ->
         data: Bytes::new(pes_data).expect("fixture PES payload fits in one TS packet"),
     };
     writer
-        .write_ts_packet(&ts_packet(AAC_PID, 0, TsPayload::Pes(pes)))
+        .write_ts_packet(&ts_packet(AAC_PID, 0, TsPayload::PesStart(pes)))
         .expect("write PES start");
 
     for (index, chunk) in continuation.chunks(RAW_CONTINUATION_CHUNK_SIZE).enumerate() {
@@ -110,7 +110,7 @@ fn sample_aes_aac_transport_stream(split_at: usize, elementary_stream: &[u8]) ->
             .write_ts_packet(&ts_packet(
                 AAC_PID,
                 continuity_counter,
-                TsPayload::Raw(
+                TsPayload::PesContinuation(
                     Bytes::new(chunk).expect("fixture continuation fits in one TS packet"),
                 ),
             ))

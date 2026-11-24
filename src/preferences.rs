@@ -1129,6 +1129,10 @@ pub fn show(
             else {
                 return;
             };
+            // Do not let row activation bypass a pending presence probe.
+            if !btn.is_sensitive() {
+                return;
+            }
             // Cancel any older local presence probe before starting an action.
             generation.set(generation.get().wrapping_add(1));
             if !crate::video_tools::in_flatpak() {

@@ -687,12 +687,18 @@ fn parse_sample_boxes(bytes: &[u8]) -> Result<Vec<SampleBox<'_>>, DashSubtitleEr
         ));
     }
 
-    parsed
+    let mut next_start = 0_usize;
+    let boxes = parsed
         .iter()
         .map(|box_ref| {
             let start = usize::try_from(box_ref.hdr.start).map_err(|_| {
                 DashSubtitleError::Unsupported("A WVTT sample box offset is out of range")
             })?;
+            if start != next_start {
+                return Err(DashSubtitleError::Unsupported(
+                    "A WVTT sample contains unparsed or overlapping box data",
+                ));
+            }
             let header_size = usize::try_from(box_ref.hdr.header_size).map_err(|_| {
                 DashSubtitleError::Unsupported("A WVTT sample box header is out of range")
             })?;
@@ -721,13 +727,20 @@ fn parse_sample_boxes(bytes: &[u8]) -> Result<Vec<SampleBox<'_>>, DashSubtitleEr
                 .ok_or(DashSubtitleError::Unsupported(
                     "A WVTT sample contains an invalid box header",
                 ))?;
+            next_start = box_end;
 
             Ok(SampleBox {
                 kind: box_ref.hdr.typ.0,
                 payload: &bytes[payload_start..box_end],
             })
         })
-        .collect()
+        .collect::<Result<Vec<_>, DashSubtitleError>>()?;
+    if next_start != bytes.len() {
+        return Err(DashSubtitleError::Unsupported(
+            "A WVTT sample contains a truncated or unparsed box header",
+        ));
+    }
+    Ok(boxes)
 }
 
 fn decode_wvtt_line(bytes: &[u8], label: &'static str) -> Result<String, DashSubtitleError> {

@@ -1777,8 +1777,7 @@ fn submit_gallery_all(
                 return Err(gettext("The gallery preview is no longer available."));
             }
             let mut job = job;
-            job.dest_dir =
-                std::path::PathBuf::from(directory.unwrap_or_else(|| ".".to_string()));
+            job.dest_dir = std::path::PathBuf::from(directory.unwrap_or_else(|| ".".to_string()));
             enqueue_manager.enqueue_gallery_async_batched(&job).await
         },
         move |error| {

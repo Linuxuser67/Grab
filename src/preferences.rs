@@ -1124,9 +1124,8 @@ pub fn show(
     let tool_probe_generation = std::rc::Rc::new(std::cell::Cell::new(0u64));
     // Keep the install/update distinction so the row can report the exact
     // tools changed after the operation completes.
-    let pending_changes: std::rc::Rc<
-        std::cell::RefCell<(Vec<String>, Vec<String>)>,
-    > = std::rc::Rc::new(std::cell::RefCell::new((Vec::new(), Vec::new())));
+    let pending_changes: std::rc::Rc<std::cell::RefCell<(Vec<String>, Vec<String>)>> =
+        std::rc::Rc::new(std::cell::RefCell::new((Vec::new(), Vec::new())));
     // Start in the safe fresh-install state; the local presence probe below
     // switches to Check for Updates only when the core tools are present.
     video_tools_row.set_subtitle(&gettext("Not installed"));

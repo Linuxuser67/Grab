@@ -697,16 +697,20 @@ fn parse_sample_boxes(bytes: &[u8]) -> Result<Vec<SampleBox<'_>>, DashSubtitleEr
         let header = mp4box::parser::read_box_header(&mut reader).map_err(|_| {
             DashSubtitleError::Unsupported("A WVTT sample contains malformed MP4 boxes")
         })?;
-        let start = usize::try_from(header.start)
-            .map_err(|_| DashSubtitleError::Unsupported("A WVTT sample box offset is out of range"))?;
+        let start = usize::try_from(header.start).map_err(|_| {
+            DashSubtitleError::Unsupported("A WVTT sample box offset is out of range")
+        })?;
         let header_size = usize::try_from(header.header_size).map_err(|_| {
             DashSubtitleError::Unsupported("A WVTT sample box header is out of range")
         })?;
         // ISO BMFF size zero means that this box extends to its containing range.
         let box_size = if header.size == 0 {
-            bytes.len().checked_sub(start).ok_or(
-                DashSubtitleError::Unsupported("A WVTT sample box offset is out of range"),
-            )?
+            bytes
+                .len()
+                .checked_sub(start)
+                .ok_or(DashSubtitleError::Unsupported(
+                    "A WVTT sample box offset is out of range",
+                ))?
         } else {
             usize::try_from(header.size).map_err(|_| {
                 DashSubtitleError::Unsupported("A WVTT sample box size is out of range")
@@ -723,9 +727,12 @@ fn parse_sample_boxes(bytes: &[u8]) -> Result<Vec<SampleBox<'_>>, DashSubtitleEr
             .ok_or(DashSubtitleError::Unsupported(
                 "A WVTT sample box extends beyond its sample",
             ))?;
-        let payload_start = start.checked_add(header_size).ok_or(
-            DashSubtitleError::Unsupported("A WVTT sample contains an invalid box header"),
-        )?;
+        let payload_start =
+            start
+                .checked_add(header_size)
+                .ok_or(DashSubtitleError::Unsupported(
+                    "A WVTT sample contains an invalid box header",
+                ))?;
 
         boxes.push(SampleBox {
             kind: header.typ.0,

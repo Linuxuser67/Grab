@@ -64,6 +64,9 @@
           <li>UI: support-tool install and update progress is now attached to the button, following GNOME Software, and Preferences shows the installed tool versions.</li>
           <li>Fix: the install button in Preferences and the Add card stays responsive during tool installation.</li>
           <li>Tests: broaden UI regression coverage for the support-tool progress controls.</li>
+          <li>Playlists: choose a shared video quality or audio-only format for the entire collection.</li>
+          <li>Galleries: Queue All shows aggregate progress based on the filtered file count.</li>
+          <li>Collections: completed playlist and gallery headers can move the entire collection to Trash.</li>
         </ul>
       </description>
     </release>

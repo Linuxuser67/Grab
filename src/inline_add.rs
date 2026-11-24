@@ -2845,7 +2845,7 @@ fn build_video_preview(
         .set_tooltip_text(Some(&gettext("Download the yt-dlp support tools")));
     // Whole-row click hits Install (same pattern as the torrent row below).
     video_tools.set_activatable_widget(Some(&video_install_btn.button));
-    video_tools.add_suffix(&video_install_btn.root);
+    video_tools.add_suffix(&video_install_btn.button);
     video_group.add(&video_tools);
     // Probe-error state: an ActionRow in the group (4.4.4 pattern) — the
     // message goes in the subtitle, Retry is a suffix.
@@ -4487,15 +4487,26 @@ fn wire_video_preview_actions(
                 crate::install_help::show(&btn, move || kick_b(true, SubmitSource::Button));
                 return;
             }
-            // Flatpak: staged auto-install with a Bazaar-style ring around the
-            // button, so progress stays attached to its control.
-            let (step_b, kick_b) = (step2.clone(), kick.clone());
+            // Flatpak: attach the progress strip to the Install button.
+            let (step_stage, step_error, step_done) = (step2.clone(), step2.clone(), step2.clone());
+            let kick_b = kick.clone();
             crate::install_progress::run(
                 &progress,
-                move |err| {
-                    step_b.tools.set_subtitle(&err);
+                move |stage| {
+                    step_stage.tools.set_subtitle(&stage);
                 },
-                move || {
+                move |error, completed| {
+                    let summary = crate::install_progress::summarize_changes(&completed, &[]);
+                    let subtitle = if completed.is_empty() {
+                        error
+                    } else {
+                        format!("{summary} • {error}")
+                    };
+                    step_error.tools.set_subtitle(&subtitle);
+                },
+                move |completed| {
+                    let summary = crate::install_progress::summarize_changes(&completed, &[]);
+                    step_done.tools.set_subtitle(&summary);
                     // Re-probe, don't just refresh: an unlisted URL that led
                     // here for missing tools has no preview yet.
                     kick_b(true, SubmitSource::Button);

@@ -314,8 +314,7 @@ pub(crate) enum PulseTick {
 }
 
 /// Shared cadence for every indeterminate progress bar.
-const INDETERMINATE_PROGRESS_INTERVAL: std::time::Duration =
-    std::time::Duration::from_millis(120);
+const INDETERMINATE_PROGRESS_INTERVAL: std::time::Duration = std::time::Duration::from_millis(120);
 
 /// One pulse tick's decision. `Stop` is reserved for `Done`, the only status
 /// no command moves back to an active one: `retry` revives Failed and

@@ -71,6 +71,8 @@ impl PublicHostLeaseScope {
 
 type PublicHostLeases = Rc<RefCell<PublicHostLeaseScope>>;
 
+const PLAYLIST_FORMAT_PICKER_CLASS: &str = "grab-playlist-format-picker";
+
 /// Card-owned lifetime for a playlist picker: selected children retain the
 /// card's guarded-host scope until queue rows take over their own references.
 #[derive(Clone)]
@@ -125,6 +127,10 @@ enum SubmitSource {
     SelectFiles,
     /// The debounced submit that auto-add fires after a lookup.
     Auto,
+}
+
+const fn playlist_queue_all_for_submit(source: SubmitSource) -> bool {
+    matches!(source, SubmitSource::Button)
 }
 
 impl SubmitSource {
@@ -2216,6 +2222,10 @@ fn push_playlist_items_page(
     list_box.set_margin_bottom(12);
     list_box.set_margin_start(12);
     list_box.set_margin_end(12);
+    let format_picker = playlist_format_picker(&owner.quality, owner.audio_only);
+    let format_group = adw::PreferencesGroup::new();
+    format_group.add(&format_picker);
+    list_box.append(&format_group);
     if truncated {
         let notice = gtk4::Label::builder()
             .label(
@@ -2264,8 +2274,8 @@ fn push_playlist_items_page(
     let owner_generation = owner.generation;
     let referer = owner.referer.clone();
     let close_card = Rc::clone(&owner.close_card);
-    let quality = owner.quality.clone();
-    let audio_only = owner.audio_only;
+    let preferred_quality = owner.quality.clone();
+    let format_picker_for_import = format_picker.clone();
     let grid_for_import = grid.clone();
     let add_btn_click = add_btn.clone();
     let add_btn_guard = add_btn.clone();
@@ -2294,6 +2304,8 @@ fn push_playlist_items_page(
         // Re-imports use the original owner folder even if the extractor's
         // collection title has changed since the first selection.
         let page_url = playlist.page_url.clone();
+        let (quality, audio_only) =
+            selected_playlist_format_row(&format_picker_for_import, &preferred_quality);
         let request = PlaylistImportRequest {
             manager: manager.clone(),
             guarded_child_hosts: guarded_child_hosts.clone(),
@@ -2306,7 +2318,7 @@ fn push_playlist_items_page(
             existing_destination: manager.video_playlist_destination_for_url(&page_url),
             chosen,
             scheduled_at,
-            quality: quality.clone(),
+            quality,
             audio_only,
         };
 
@@ -2638,12 +2650,11 @@ fn show_video_playlist(
     playlist: &crate::media_types::PlaylistInfo,
     preferred_quality: &str,
 ) {
-    // Select files opens the checklist; the entry's arrow queues every
-    // resolved item. Collection quality stays on this card, outside that picker.
+    // The card selector configures Queue All; the picker repeats the choice so
+    // Select files and auto-add can change it before confirmation.
     hide_video_step(v);
     set_looking_up(v, false);
-    let mut labels = crate::video::quality_labels();
-    labels.push(gettext("Audio only"));
+    let labels = playlist_format_labels();
     let label_refs = labels.iter().map(String::as_str).collect::<Vec<_>>();
     v.playlist_format
         .set_model(Some(&gtk4::StringList::new(&label_refs)));
@@ -2674,20 +2685,51 @@ fn show_video_playlist(
     sync_entry_icon(v);
 }
 
+/// Build the shared playlist-format labels in model order.
+fn playlist_format_labels() -> Vec<String> {
+    let mut labels = crate::video::quality_labels();
+    labels.push(gettext("Audio only"));
+    labels
+}
+
+/// Create the playlist picker's format selector from the current card choice.
+fn playlist_format_picker(preferred_quality: &str, audio_only: bool) -> adw::ComboRow {
+    let labels = playlist_format_labels();
+    let label_refs = labels.iter().map(String::as_str).collect::<Vec<_>>();
+    let picker = adw::ComboRow::builder()
+        .title(gettext("Media format"))
+        .build();
+    picker.set_model(Some(&gtk4::StringList::new(&label_refs)));
+    let selected = if audio_only {
+        crate::media_types::VIDEO_QUALITY_VALUES.len()
+    } else {
+        crate::media_types::quality_index(preferred_quality)
+    };
+    picker.set_selected(u32::try_from(selected).unwrap_or(0));
+    picker.add_css_class(PLAYLIST_FORMAT_PICKER_CLASS);
+    picker
+}
+
 /// Map the collection quality combo to the persisted playlist job choice.
 /// Audio-only does not use a quality cap, so retain the current preference.
 fn playlist_format_choice(index: usize, preferred_quality: &str) -> (String, bool) {
     let audio_only = index == crate::media_types::VIDEO_QUALITY_VALUES.len();
-    let quality = if audio_only {
-        preferred_quality.to_string()
-    } else {
-        crate::media_types::quality_value(index).to_string()
-    };
-    (quality, audio_only)
+    let fallback =
+        crate::media_types::quality_value(crate::media_types::quality_index(preferred_quality));
+    let quality = crate::media_types::VIDEO_QUALITY_VALUES
+        .get(index)
+        .copied()
+        .unwrap_or(fallback);
+    (quality.to_string(), audio_only)
+}
+
+fn selected_playlist_format_row(picker: &adw::ComboRow, preferred_quality: &str) -> (String, bool) {
+    let selected = usize::try_from(picker.selected()).unwrap_or(usize::MAX);
+    playlist_format_choice(selected, preferred_quality)
 }
 
 fn selected_playlist_format(step: &VideoStep, preferred_quality: &str) -> (String, bool) {
-    playlist_format_choice(step.playlist_format.selected() as usize, preferred_quality)
+    selected_playlist_format_row(&step.playlist_format, preferred_quality)
 }
 
 /// The New Download card's open state, decoupled from the widgets: every
@@ -4215,7 +4257,7 @@ fn build_submit_handler(context: SubmitContext) -> SubmitHandler {
                             &context,
                             probe,
                             scheduled_at.get(),
-                            matches!(source, SubmitSource::Button),
+                            playlist_queue_all_for_submit(source),
                         );
                     }
                     None => {
@@ -4288,7 +4330,7 @@ fn build_submit_handler(context: SubmitContext) -> SubmitHandler {
                                 &context,
                                 playlist,
                                 scheduled_at.get(),
-                                matches!(source, SubmitSource::Button),
+                                playlist_queue_all_for_submit(source),
                             );
                         }
                         None => {}
@@ -5340,6 +5382,14 @@ mod tests {
     use super::*;
 
     #[test]
+    fn playlist_queue_all_is_reserved_for_the_primary_button() {
+        assert!(playlist_queue_all_for_submit(SubmitSource::Button));
+        assert!(!playlist_queue_all_for_submit(SubmitSource::Enter));
+        assert!(!playlist_queue_all_for_submit(SubmitSource::SelectFiles));
+        assert!(!playlist_queue_all_for_submit(SubmitSource::Auto));
+    }
+
+    #[test]
     fn playlist_format_choice_uses_the_shared_quality_ladder() {
         assert_eq!(
             playlist_format_choice(0, "1080p"),
@@ -5358,7 +5408,11 @@ mod tests {
             ("720p".to_string(), true)
         );
         assert_eq!(
-            playlist_format_choice(usize::MAX, "1080p"),
+            playlist_format_choice(usize::MAX, "720p"),
+            ("720p".to_string(), false)
+        );
+        assert_eq!(
+            playlist_format_choice(usize::MAX, "unknown"),
             ("1080p".to_string(), false)
         );
     }
@@ -5370,6 +5424,23 @@ mod tests {
             category: String::new(),
             extra: serde_json::Map::new(),
         }
+    }
+
+    fn find_playlist_format_picker(widget: &gtk4::Widget) -> Option<adw::ComboRow> {
+        if let Ok(row) = widget.clone().downcast::<adw::ComboRow>()
+            && row.has_css_class(PLAYLIST_FORMAT_PICKER_CLASS)
+        {
+            return Some(row);
+        }
+
+        let mut child = widget.first_child();
+        while let Some(current) = child {
+            if let Some(row) = find_playlist_format_picker(&current) {
+                return Some(row);
+            }
+            child = current.next_sibling();
+        }
+        None
     }
 
     fn find_support_tools_install_button(widget: &gtk4::Widget) -> Option<gtk4::Button> {
@@ -5532,6 +5603,22 @@ mod tests {
         );
         assert_eq!(nav.visible_page_tag().as_deref(), Some("playlist"));
         assert_eq!(store.n_items(), 0, "playlist must wait for Add");
+
+        let nav_widget: gtk4::Widget = nav.clone().upcast();
+        let format_picker = find_playlist_format_picker(&nav_widget)
+            .expect("playlist picker must expose its collection format selector");
+        let unselected_picker = adw::ComboRow::new();
+        assert_eq!(
+            selected_playlist_format_row(&unselected_picker, "720p"),
+            ("720p".to_string(), false),
+            "an unselected combo must retain the current preference"
+        );
+        format_picker.set_selected(crate::media_types::VIDEO_QUALITY_VALUES.len() as u32);
+        assert_eq!(
+            selected_playlist_format_row(&format_picker, "720p"),
+            ("720p".to_string(), true),
+            "the selected audio-only row must flow into the import format choice"
+        );
 
         let torrent_nav = adw::NavigationView::new();
         let torrent_form = adw::NavigationPage::builder()

@@ -2786,6 +2786,8 @@ fn build_url_controls() -> UrlControls {
     }
 }
 
+const SUPPORT_TOOLS_INSTALL_BUTTON_CLASS: &str = "grab-support-tools-install";
+
 /// Build the video/gallery preview group and its state shared by lookup handlers.
 fn build_video_preview(
     url_entry: &gtk4::Entry,
@@ -2837,6 +2839,7 @@ fn build_video_preview(
         .valign(gtk4::Align::Center)
         .tooltip_text(gettext("Download the yt-dlp support tools"))
         .build();
+    video_install_btn.add_css_class(SUPPORT_TOOLS_INSTALL_BUTTON_CLASS);
     // Whole-row click hits Install (same pattern as the torrent row below).
     video_tools.set_activatable_widget(Some(&video_install_btn));
     video_tools.add_suffix(&video_install_btn);
@@ -5241,7 +5244,7 @@ mod tests {
 
     fn find_support_tools_install_button(widget: &gtk4::Widget) -> Option<gtk4::Button> {
         if let Ok(button) = widget.clone().downcast::<gtk4::Button>()
-            && button.label().as_deref() == Some(gettext("How to Install").as_str())
+            && button.has_css_class(SUPPORT_TOOLS_INSTALL_BUTTON_CLASS)
         {
             return Some(button);
         }
@@ -5271,6 +5274,10 @@ mod tests {
         let add_card = build_add_card(manager);
         let button = find_support_tools_install_button(add_card.widget())
             .expect("the Add card must contain its support-tools install button");
+        let original_label = button
+            .label()
+            .expect("the support-tools button must have a label")
+            .to_string();
 
         let finished = Rc::new(Cell::new(false));
         let finished_callback = Rc::clone(&finished);
@@ -5294,14 +5301,19 @@ mod tests {
         assert!(!button.is_sensitive());
 
         let context = glib::MainContext::default();
-        while !finished.get() {
-            context.iteration(true);
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        while !finished.get() && std::time::Instant::now() < deadline {
+            context.iteration(false);
+            if !finished.get() {
+                std::thread::sleep(std::time::Duration::from_millis(10));
+            }
         }
-
-        assert_eq!(
-            button.label().as_deref(),
-            Some(gettext("How to Install").as_str())
+        assert!(
+            finished.get(),
+            "support-tools progress callback did not finish before the test deadline"
         );
+
+        assert_eq!(button.label().as_deref(), Some(original_label.as_str()));
         assert!(button.is_sensitive());
         drop(add_card);
     }

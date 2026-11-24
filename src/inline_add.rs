@@ -1699,13 +1699,14 @@ fn submit_gallery_all(
     if step.gallery_queue_in_flight.get() {
         return;
     }
-    let (page_url, title, filter) = match step.gallery_card.borrow().as_ref() {
+    let (page_url, title, filter, file_count) = match step.gallery_card.borrow().as_ref() {
         Some(card) => {
             let filter = *card.filter.borrow();
             (
                 card.url().to_string(),
                 step.gallery_info.title().to_string(),
                 filter,
+                card.exact_file_count(),
             )
         }
         None => {
@@ -1727,7 +1728,8 @@ fn submit_gallery_all(
         return;
     }
 
-    // No second gallery-dl traversal: Queue All enters the queue immediately.
+    // No second extraction pass: reuse a total only when the fast preview
+    // completed below its cap; capped previews remain indeterminate.
     let generation = step.gallery_queue_generation.get().wrapping_add(1);
     step.gallery_queue_generation.set(generation);
     step.gallery_queue_in_flight.set(true);
@@ -1742,7 +1744,7 @@ fn submit_gallery_all(
         page_url,
         referer,
         title,
-        file_count: None,
+        file_count,
         dest_dir: std::path::PathBuf::from("."),
         filter,
         cookies_browser: settings.cookies_browser().to_string(),

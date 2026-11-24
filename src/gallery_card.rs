@@ -56,6 +56,15 @@ impl GalleryCard {
     pub fn file_count(&self) -> usize {
         self.filtered_items().len()
     }
+
+    /// Exact count for the active filter when the fast preview is complete.
+    /// Reaching the preview cap means the listing may contain more items.
+    pub fn exact_file_count(&self) -> Option<u32> {
+        if self.items.len() >= crate::gallery_probe::GALLERY_PREVIEW_ITEM_LIMIT {
+            return None;
+        }
+        u32::try_from(self.file_count()).ok()
+    }
 }
 
 #[cfg(test)]
@@ -108,5 +117,35 @@ mod tests {
         );
         set_filter_index(&card, 2);
         assert_eq!(card.file_count(), 1);
+    }
+
+    #[test]
+    fn exact_count_uses_the_complete_filtered_preview() {
+        let card = GalleryCard::new(
+            vec![
+                test_item("a.jpg", "jpg"),
+                test_item("b.png", "png"),
+                test_item("c.mp4", "mp4"),
+                test_item("d.xyz", "xyz"),
+            ],
+            "https://example.com".to_string(),
+        );
+        set_filter_index(&card, 1);
+        assert_eq!(card.exact_file_count(), Some(2));
+    }
+
+    #[test]
+    fn exact_count_is_unknown_when_preview_reaches_its_cap() {
+        let card = GalleryCard::new(
+            vec![
+                test_item("a.jpg", "jpg"),
+                test_item("b.png", "png"),
+                test_item("c.mp4", "mp4"),
+                test_item("d.xyz", "xyz"),
+                test_item("e.webm", "webm"),
+            ],
+            "https://example.com".to_string(),
+        );
+        assert_eq!(card.exact_file_count(), None);
     }
 }

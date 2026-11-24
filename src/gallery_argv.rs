@@ -329,7 +329,7 @@ pub struct GalleryJob {
     pub referer: Option<String>,
     /// Display title for the queue row (from probe metadata).
     pub title: String,
-    /// Exact filtered file count, when known from a selection or completed download.
+    /// Exact filtered count from a complete preview/selection or completed download.
     pub file_count: Option<u32>,
     pub dest_dir: PathBuf,
     pub filter: GalleryFilter,

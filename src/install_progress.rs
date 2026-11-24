@@ -15,7 +15,7 @@ use gtk4::prelude::*;
 const PROGRESS_CLASS: &str = "grab-install-progress";
 
 const PROGRESS_CSS: &str = r#"
-.button.grab-install-progress {
+button.grab-install-progress {
   background-image: linear-gradient(to top, var(--accent-bg-color) 2px, transparent 2px);
   background-repeat: no-repeat;
   background-position: left bottom;
@@ -24,12 +24,12 @@ const PROGRESS_CSS: &str = r#"
   transition: none;
 }
 
-.button.grab-install-progress:dir(rtl) {
+button.grab-install-progress:dir(rtl) {
   animation-direction: alternate-reverse;
 }
 
 @media (prefers-reduced-motion: reduce) {
-  .button.grab-install-progress {
+  button.grab-install-progress {
     animation: none;
     background-size: 100% 100%;
   }

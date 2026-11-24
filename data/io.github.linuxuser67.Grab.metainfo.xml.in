@@ -58,11 +58,12 @@
     </screenshot>
   </screenshots>
   <releases>
-    <release version="6.5.8~beta.3" type="development" date="2026-11-24">
+    <release version="6.5.8" date="2026-11-24">
       <description>
         <ul>
-          <li>UI: support-tool installation progress now uses GNOME Software's button-attached progress strip, and Preferences shows installed tool versions.</li>
-          <li>Fix: the Add card keeps its support-tool progress controller alive while an install is in flight.</li>
+          <li>UI: support-tool install and update progress is now attached to the button, following GNOME Software, and Preferences shows the installed tool versions.</li>
+          <li>Fix: the install button in Preferences and the Add card stays responsive during tool installation.</li>
+          <li>Tests: broaden UI regression coverage for the support-tool progress controls.</li>
         </ul>
       </description>
     </release>

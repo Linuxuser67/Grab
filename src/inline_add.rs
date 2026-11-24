@@ -129,6 +129,10 @@ enum SubmitSource {
     Auto,
 }
 
+const fn playlist_queue_all_for_submit(source: SubmitSource) -> bool {
+    matches!(source, SubmitSource::Button)
+}
+
 impl SubmitSource {
     const fn automatically_enqueues_manifest(self) -> bool {
         matches!(self, Self::Auto)
@@ -2219,7 +2223,9 @@ fn push_playlist_items_page(
     list_box.set_margin_start(12);
     list_box.set_margin_end(12);
     let format_picker = playlist_format_picker(&owner.quality, owner.audio_only);
-    list_box.append(&format_picker);
+    let format_group = adw::PreferencesGroup::new();
+    format_group.add(&format_picker);
+    list_box.append(&format_group);
     if truncated {
         let notice = gtk4::Label::builder()
             .label(
@@ -2644,8 +2650,8 @@ fn show_video_playlist(
     playlist: &crate::media_types::PlaylistInfo,
     preferred_quality: &str,
 ) {
-    // Select files opens the checklist; the entry's arrow queues every
-    // resolved item. Collection quality stays on this card, outside that picker.
+    // The card selector configures Queue All; the picker repeats the choice so
+    // Select files and auto-add can change it before confirmation.
     hide_video_step(v);
     set_looking_up(v, false);
     let labels = playlist_format_labels();
@@ -4255,7 +4261,7 @@ fn build_submit_handler(context: SubmitContext) -> SubmitHandler {
                             &context,
                             probe,
                             scheduled_at.get(),
-                            matches!(source, SubmitSource::Button),
+                            playlist_queue_all_for_submit(source),
                         );
                     }
                     None => {
@@ -4328,7 +4334,7 @@ fn build_submit_handler(context: SubmitContext) -> SubmitHandler {
                                 &context,
                                 playlist,
                                 scheduled_at.get(),
-                                matches!(source, SubmitSource::Button),
+                                playlist_queue_all_for_submit(source),
                             );
                         }
                         None => {}
@@ -5378,6 +5384,14 @@ fn refresh_gallery_info(v: &VideoStep, title: &str, count_label: &str) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn playlist_queue_all_is_reserved_for_the_primary_button() {
+        assert!(playlist_queue_all_for_submit(SubmitSource::Button));
+        assert!(!playlist_queue_all_for_submit(SubmitSource::Enter));
+        assert!(!playlist_queue_all_for_submit(SubmitSource::SelectFiles));
+        assert!(!playlist_queue_all_for_submit(SubmitSource::Auto));
+    }
 
     #[test]
     fn playlist_format_choice_uses_the_shared_quality_ladder() {

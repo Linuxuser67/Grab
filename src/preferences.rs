@@ -134,19 +134,6 @@ fn is_manual_proxy(mode: &str) -> bool {
     mode == crate::download::PROXY_MODE_MANUAL
 }
 
-/// Keep the controller alive while its owning preferences group exists.
-/// Button callbacks use Weak<Rc<_>> so they do not form a widget reference cycle.
-fn retain_progress_controller_until_group_destroyed(
-    group: &adw::PreferencesGroup,
-    progress: std::rc::Rc<crate::install_progress::ToolProgressButton>,
-) {
-    let owner = std::rc::Rc::new(std::cell::RefCell::new(Some(progress)));
-    let release_owner = owner.clone();
-    group.connect_destroy(move |_| {
-        drop(release_owner.borrow_mut().take());
-    });
-}
-
 pub fn show(
     parent: &impl gtk4::glib::object::IsA<gtk4::Widget>,
     settings: &crate::settings::AppSettings,
@@ -827,6 +814,7 @@ pub fn show(
     ) {
         spin.set_visible(false);
         btn.set_sensitive(false);
+        btn.set_label(&gettext("Checking…"));
         // A click or a newer refresh invalidates older presence probes, so a
         // late completion cannot overwrite an action's state or re-enable it.
         let probe_id = generation.get().wrapping_add(1);
@@ -1105,19 +1093,16 @@ pub fn show(
         // Subtitles carry version strings and raw install errors: plain text.
         .use_markup(false)
         .build();
-    let video_tools_progress = std::rc::Rc::new(crate::install_progress::ToolProgressButton::new(
-        &gettext("Install"),
-    ));
-    video_tools_row.set_activatable_widget(Some(&video_tools_progress.button));
-    video_tools_row.add_suffix(&video_tools_progress.button);
+    let video_tools_button = gtk4::Button::builder()
+        .label(gettext("Install"))
+        .valign(gtk4::Align::Center)
+        .build();
+    video_tools_row.set_activatable_widget(Some(&video_tools_button));
+    video_tools_row.add_suffix(&video_tools_button);
     let video_tools_spin = adw::Spinner::new();
     video_tools_spin.set_visible(false);
     video_tools_row.add_suffix(&video_tools_spin);
     video_tools_group.add(&video_tools_row);
-    retain_progress_controller_until_group_destroyed(
-        &video_tools_group,
-        video_tools_progress.clone(),
-    );
     // Nothing is probed on open: versions and updates are checked only when
     // the user presses Check for Updates.
     let tool_action = std::rc::Rc::new(std::cell::Cell::new(ToolAction::Install));
@@ -1131,18 +1116,14 @@ pub fn show(
     video_tools_row.set_subtitle(&gettext("Not installed"));
     {
         let row_weak = video_tools_row.downgrade();
-        let btn_weak = video_tools_progress.button.downgrade();
+        let btn_weak = video_tools_button.downgrade();
         let spin_weak = video_tools_spin.downgrade();
         let dialog_weak = dialog.downgrade();
         let action = tool_action.clone();
         let generation = tool_probe_generation.clone();
         let pending = pending_changes.clone();
         let settings_b = settings.clone();
-        let progress_weak = std::rc::Rc::downgrade(&video_tools_progress);
-        video_tools_progress.button.connect_clicked(move |_| {
-            let Some(progress) = progress_weak.upgrade() else {
-                return;
-            };
+        video_tools_button.connect_clicked(move |_| {
             let (Some(row), Some(btn), Some(spin)) =
                 (row_weak.upgrade(), btn_weak.upgrade(), spin_weak.upgrade())
             else {
@@ -1364,6 +1345,11 @@ pub fn show(
             let (btn_b, spin_b, action_b) = (btn.clone(), spin.clone(), action.clone());
             let generation_ok = generation.clone();
             let (tools_to_install, tools_to_update) = pending.borrow().clone();
+            let operation = if action.get() == ToolAction::Update && tools_to_install.is_empty() {
+                crate::install_progress::ToolOperation::Update
+            } else {
+                crate::install_progress::ToolOperation::Install
+            };
             let tools_to_update_for_error = tools_to_update.clone();
             let mut selected_tools = tools_to_install;
             selected_tools.extend(tools_to_update.iter().cloned());
@@ -1375,7 +1361,8 @@ pub fn show(
                 None
             };
             crate::install_progress::run(
-                &progress,
+                &btn,
+                operation,
                 move |stage| {
                     if dialog_stage.upgrade().is_some() {
                         row_stage.set_subtitle(&stage);
@@ -1419,7 +1406,7 @@ pub fn show(
     // exist. This is a local executable-presence check, not an upstream lookup.
     refresh_video_tools(
         &video_tools_row,
-        &video_tools_progress.button,
+        &video_tools_button,
         &video_tools_spin,
         &tool_action,
         &tool_probe_generation,
@@ -1449,29 +1436,28 @@ mod tests {
 
     #[test]
     #[ignore = "needs a display; run under Xvfb (see ci.yml)"]
-    fn support_tools_progress_controller_lives_with_group() {
+    fn support_tools_button_lives_with_preferences_group() {
         gtk4::init().expect("gtk::init (run under Xvfb)");
 
         let group = adw::PreferencesGroup::new();
         let row = adw::ActionRow::new();
-        let progress =
-            std::rc::Rc::new(crate::install_progress::ToolProgressButton::new("Install"));
-        let weak = std::rc::Rc::downgrade(&progress);
-        row.add_suffix(&progress.button);
+        let button = gtk4::Button::with_label("Install");
+        let weak = button.downgrade();
+        row.set_activatable_widget(Some(&button));
+        row.add_suffix(&button);
         group.add(&row);
+        drop(button);
         drop(row);
 
-        retain_progress_controller_until_group_destroyed(&group, progress.clone());
-        drop(progress);
         assert!(
             weak.upgrade().is_some(),
-            "the preferences group must retain the progress controller"
+            "the Preferences row must own its install button while the group is alive"
         );
 
         drop(group);
         assert!(
             weak.upgrade().is_none(),
-            "destroying the preferences group must release the controller"
+            "destroying the Preferences group must release its install button"
         );
     }
 }

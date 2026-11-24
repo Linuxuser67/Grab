@@ -1,11 +1,9 @@
 //! Media-tool installation progress attached to the install button's bottom edge.
 //!
-//! The button uses the same 2 px CSS progress strip as GNOME Software. The
-//! installers do not currently expose byte progress, so the strip sweeps
-//! indeterminately until the selected tools have finished installing.
+//! The button uses GNOME Software's 2 px progress strip. Installers do not
+//! expose byte-level progress, so the strip sweeps indeterminately.
 
 use std::cell::{Cell, RefCell};
-use std::rc::Rc;
 use std::time::Duration;
 
 use gettextrs::gettext;
@@ -30,8 +28,13 @@ button.grab-install-progress:dir(rtl) {
 
 @media (prefers-reduced-motion: reduce) {
   button.grab-install-progress {
+    background-image: linear-gradient(
+      to top,
+      color-mix(in srgb, var(--accent-bg-color) 40%, transparent) 2px,
+      transparent 2px
+    );
     animation: none;
-    background-size: 28% 100%;
+    background-size: 100% 100%;
   }
 }
 
@@ -47,6 +50,15 @@ thread_local! {
     // provider alive for the display for as long as the application runs.
     static PROGRESS_CSS_PROVIDER: RefCell<Option<gtk4::CssProvider>> =
         const { RefCell::new(None) };
+}
+
+/// Whether this operation installs missing tools or updates existing ones.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum ToolOperation {
+    /// Install tools that are not present.
+    Install,
+    /// Update tools that are already present.
+    Update,
 }
 
 /// A tool installed or updated during one support-tools operation.
@@ -102,6 +114,10 @@ pub fn summarize_changes(completed: &[InstalledTool], updated_names: &[String]) 
     }
 }
 
+fn load_progress_css(provider: &gtk4::CssProvider) {
+    provider.load_from_string(PROGRESS_CSS);
+}
+
 fn ensure_progress_css() {
     PROGRESS_CSS_PROVIDER.with(|stored| {
         if stored.borrow().is_some() {
@@ -112,7 +128,7 @@ fn ensure_progress_css() {
         };
 
         let provider = gtk4::CssProvider::new();
-        provider.load_from_string(PROGRESS_CSS);
+        load_progress_css(&provider);
         gtk4::style_context_add_provider_for_display(
             &display,
             &provider,
@@ -122,100 +138,69 @@ fn ensure_progress_css() {
     });
 }
 
-/// A regular GTK button with GNOME Software's bottom-attached progress strip.
-pub struct ToolProgressButton {
-    pub button: gtk4::Button,
-    restore_label: RefCell<String>,
-    active: Rc<Cell<bool>>,
+fn begin(button: &gtk4::Button, operation: ToolOperation) -> String {
+    let restore_label = button
+        .label()
+        .map(|label| label.to_string())
+        .unwrap_or_default();
+    button.set_label(&gettext(match operation {
+        ToolOperation::Install => "Installing…",
+        ToolOperation::Update => "Updating…",
+    }));
+    button.set_sensitive(false);
+    button.add_css_class(PROGRESS_CLASS);
+    restore_label
 }
 
-impl ToolProgressButton {
-    pub fn new(label: &str) -> Self {
-        ensure_progress_css();
-        let button = gtk4::Button::builder()
-            .label(label)
-            .valign(gtk4::Align::Center)
-            .build();
-
-        Self {
-            button,
-            restore_label: RefCell::new(label.to_string()),
-            active: Rc::new(Cell::new(false)),
-        }
-    }
-
-    fn begin(&self) {
-        let previous_label = self
-            .button
-            .label()
-            .map(|label| label.to_string())
-            .unwrap_or_default();
-        let is_update = previous_label == gettext("Update");
-        *self.restore_label.borrow_mut() = previous_label;
-
-        self.button.set_label(&gettext(if is_update {
-            "Updating…"
-        } else {
-            "Installing…"
-        }));
-        self.button.set_sensitive(false);
-        self.button.add_css_class(PROGRESS_CLASS);
-        self.active.set(true);
-    }
-
-    fn finish(&self) {
-        self.active.set(false);
-        self.button.remove_css_class(PROGRESS_CLASS);
-        self.button.set_label(&self.restore_label.borrow());
-        self.button.set_sensitive(true);
-    }
-
-    /// Tell a second button that another support-tools operation is active.
-    fn note_busy(&self) {
-        if self.active.get() {
-            return;
-        }
-
-        let previous_label = self
-            .button
-            .label()
-            .map(|label| label.to_string())
-            .unwrap_or_default();
-        self.button
-            .set_label(&gettext("Another install is in progress…"));
-
-        let button = self.button.downgrade();
-        let active = self.active.clone();
-        glib::timeout_add_local_once(Duration::from_secs(3), move || {
-            if !active.get()
-                && let Some(button) = button.upgrade()
-            {
-                button.set_label(&previous_label);
-            }
-        });
-    }
+fn finish(button: &gtk4::Button, restore_label: &str) {
+    button.remove_css_class(PROGRESS_CLASS);
+    button.set_label(restore_label);
+    button.set_sensitive(true);
 }
 
-/// Install all tools (None) or only the selected tool names (Some).
+/// Briefly explain that another support-tool operation is already active.
+fn note_busy(button: &gtk4::Button) {
+    let previous_label = button
+        .label()
+        .map(|label| label.to_string())
+        .unwrap_or_default();
+    button.set_label(&gettext("Another install is in progress…"));
+
+    let button = button.downgrade();
+    glib::timeout_add_local_once(Duration::from_secs(3), move || {
+        if let Some(button) = button.upgrade()
+            && button.label().as_deref()
+                == Some(gettext("Another install is in progress…").as_str())
+        {
+            button.set_label(&previous_label);
+        }
+    });
+}
+
+/// Install all tools when no filter is provided, or only selected tool names.
 ///
-/// Progress is shown on the button itself. on_stage updates the owning row's
-/// subtitle, on_error receives any tools completed before a failure, and
-/// on_success receives all successfully installed tools with their versions.
+/// The button is owned by its GTK parent; this function clones the button into
+/// the main-context task, so callers do not need a separate progress controller.
+/// The stage callback updates the row subtitle, the error callback receives
+/// completed tools before a failure, and the success callback receives all
+/// completed tools.
 pub fn run(
-    progress: &Rc<ToolProgressButton>,
+    button: &gtk4::Button,
+    operation: ToolOperation,
     on_stage: impl Fn(String) + 'static,
     on_error: impl Fn(String, Vec<InstalledTool>) + 'static,
     on_success: impl Fn(Vec<InstalledTool>) + 'static,
     tools: Option<Vec<String>>,
 ) {
     if RUNNING.with(Cell::get) {
-        progress.note_busy();
+        note_busy(button);
         return;
     }
+    ensure_progress_css();
     RUNNING.with(|running| running.set(true));
 
-    let progress = progress.clone();
-    progress.begin();
+    let restore_label = begin(button, operation);
+    let button = button.clone();
 
     let include = |name: &str| {
         tools
@@ -235,7 +220,7 @@ pub fn run(
             let path = match crate::video::install_ytdlp().await {
                 Ok(path) => path,
                 Err(error) => {
-                    progress.finish();
+                    finish(&button, &restore_label);
                     RUNNING.with(|running| running.set(false));
                     on_error(error.to_string(), completed);
                     return;
@@ -258,7 +243,7 @@ pub fn run(
             {
                 Ok(path) => path,
                 Err(error) => {
-                    progress.finish();
+                    finish(&button, &restore_label);
                     RUNNING.with(|running| running.set(false));
                     on_error(error.to_string(), completed);
                     return;
@@ -285,7 +270,7 @@ pub fn run(
             let path = match crate::video::install_deno().await {
                 Ok(path) => path,
                 Err(error) => {
-                    progress.finish();
+                    finish(&button, &restore_label);
                     RUNNING.with(|running| running.set(false));
                     on_error(error.to_string(), completed);
                     return;
@@ -298,7 +283,7 @@ pub fn run(
             });
         }
 
-        progress.finish();
+        finish(&button, &restore_label);
         RUNNING.with(|running| running.set(false));
         on_success(completed);
     });
@@ -306,6 +291,8 @@ pub fn run(
 
 #[cfg(test)]
 mod tests {
+    use std::rc::Rc;
+
     use super::*;
 
     #[test]
@@ -348,28 +335,49 @@ mod tests {
     fn progress_strip_is_attached_to_the_button_and_removed_on_finish() {
         gtk4::init().expect("gtk::init (run under Xvfb)");
 
-        let progress = ToolProgressButton::new("Install");
+        let parse_errors = Rc::new(RefCell::new(Vec::new()));
+        let provider = gtk4::CssProvider::new();
+        let recorded_errors = parse_errors.clone();
+        provider.connect_parsing_error(move |_, _, error| {
+            recorded_errors.borrow_mut().push(error.to_string());
+        });
+        load_progress_css(&provider);
+        assert!(
+            parse_errors.borrow().is_empty(),
+            "progress CSS must parse without GTK errors: {:?}",
+            parse_errors.borrow()
+        );
+
+        let progress_button = gtk4::Button::with_label("Install");
+        ensure_progress_css();
         PROGRESS_CSS_PROVIDER.with(|stored| {
             assert!(
                 stored.borrow().is_some(),
                 "the display must retain the CSS provider after setup"
             );
         });
-        assert!(PROGRESS_CSS.contains("linear-gradient(to top"));
-        assert!(PROGRESS_CSS.contains("2px"));
-        assert!(!progress.button.has_css_class(PROGRESS_CLASS));
+        assert!(!progress_button.has_css_class(PROGRESS_CLASS));
 
-        progress.begin();
-        assert!(progress.button.has_css_class(PROGRESS_CLASS));
-        assert!(!progress.button.is_sensitive());
+        let restore_label = begin(&progress_button, ToolOperation::Update);
+        assert!(progress_button.has_css_class(PROGRESS_CLASS));
+        assert!(!progress_button.is_sensitive());
         assert_eq!(
-            progress.button.label().as_deref(),
-            Some(gettext("Installing…").as_str())
+            progress_button.label().as_deref(),
+            Some(gettext("Updating…").as_str())
         );
 
-        progress.finish();
-        assert!(!progress.button.has_css_class(PROGRESS_CLASS));
-        assert!(progress.button.is_sensitive());
-        assert_eq!(progress.button.label().as_deref(), Some("Install"));
+        finish(&progress_button, &restore_label);
+        assert!(!progress_button.has_css_class(PROGRESS_CLASS));
+        assert!(progress_button.is_sensitive());
+        assert_eq!(progress_button.label().as_deref(), Some("Install"));
+
+        let install_button = gtk4::Button::with_label("Install");
+        let restore_label = begin(&install_button, ToolOperation::Install);
+        assert_eq!(
+            install_button.label().as_deref(),
+            Some(gettext("Installing…").as_str())
+        );
+        finish(&install_button, &restore_label);
+        assert_eq!(install_button.label().as_deref(), Some("Install"));
     }
 }

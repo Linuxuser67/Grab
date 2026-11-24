@@ -43,7 +43,10 @@ button.grab-install-progress:dir(rtl) {
 
 thread_local! {
     static RUNNING: Cell<bool> = const { Cell::new(false) };
-    static PROGRESS_CSS_INSTALLED: Cell<bool> = const { Cell::new(false) };
+    // GtkStyleProvider registration does not transfer ownership. Keep the
+    // provider alive for the display for as long as the application runs.
+    static PROGRESS_CSS_PROVIDER: RefCell<Option<gtk4::CssProvider>> =
+        const { RefCell::new(None) };
 }
 
 /// A tool installed or updated during one support-tools operation.
@@ -100,8 +103,8 @@ pub fn summarize_changes(completed: &[InstalledTool], updated_names: &[String]) 
 }
 
 fn ensure_progress_css() {
-    PROGRESS_CSS_INSTALLED.with(|installed| {
-        if installed.get() {
+    PROGRESS_CSS_PROVIDER.with(|stored| {
+        if stored.borrow().is_some() {
             return;
         }
         let Some(display) = gtk4::gdk::Display::default() else {
@@ -115,7 +118,7 @@ fn ensure_progress_css() {
             &provider,
             gtk4::STYLE_PROVIDER_PRIORITY_APPLICATION,
         );
-        installed.set(true);
+        *stored.borrow_mut() = Some(provider);
     });
 }
 

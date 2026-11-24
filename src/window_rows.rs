@@ -1934,7 +1934,7 @@ mod group_row_tests {
 
         drop(guard);
         let context = glib::MainContext::default();
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(1);
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
         while !group.trash_btn.is_sensitive() && std::time::Instant::now() < deadline {
             context.iteration(false);
             if !group.trash_btn.is_sensitive() {

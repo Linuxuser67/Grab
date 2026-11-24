@@ -254,9 +254,7 @@ pub fn run(
                 .spawn(async move { crate::gallery_tools::install_gallerydl().await })
                 .await
                 .ok()
-                .unwrap_or_else(|| {
-                    Err(crate::gallery_tools::GalleryError::install("spawn failed"))
-                })
+                .unwrap_or_else(|| Err(crate::gallery_tools::GalleryError::install("spawn failed")))
             {
                 Ok(path) => path,
                 Err(error) => {

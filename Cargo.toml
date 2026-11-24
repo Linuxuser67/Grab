@@ -30,13 +30,12 @@ m3u8-rs = "6.0.1"
 # Typed LL-HLS media-playlist parser. The 0.9 API includes bounded parse limits
 # and typed playlist diagnostics; lockfile keeps release builds reproducible.
 broadcast-hls = "0.9.0"
-# SAMPLE-AES preflight uses the typed PES-start/continuation packet model.
-mpeg2ts = "0.6.1"
+# Keep the SAMPLE-AES preflight on the exact parser used by iori-ssa.
+mpeg2ts-iori = { package = "mpeg2ts", version = "=0.3.1" }
 # Parse ISO BMFF box trees for structural validation of native fMP4 resources.
 mp4box = { version = "0.14.0", default-features = false }
-# The ADTS preflight rejects malformed frames before iori-ssa; SAMPLE-AES
-# regression tests cover malformed lengths and PES/Raw packet reassembly.
-iori-ssa = "0.2.1"
+# Pin the SAMPLE-AES consumer so the preflight and decryptor share parser behavior.
+iori-ssa = "=0.2.1"
 # Parse HLS diagnostics without exposing playlist contents. m3u8-rs exposes nom 7 parser errors.
 nom = "7"
 # DASH MPD parsing and serialization; fixture tests cover the supported and

@@ -58,6 +58,13 @@
     </screenshot>
   </screenshots>
   <releases>
+    <release version="6.5.9" date="2026-11-24">
+      <description>
+        <ul>
+          <li>Galleries: Queue All progress now follows completed downloads instead of counting files before the queue is filled, and reuses the complete preview counts.</li>
+        </ul>
+      </description>
+    </release>
     <release version="6.5.8" date="2026-11-24">
       <description>
         <ul>

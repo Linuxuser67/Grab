@@ -1914,23 +1914,37 @@ mod group_row_tests {
         assert!(!group.trash_btn.is_sensitive());
 
         owner.set_status(DownloadStatus::Done);
+        let manager_weak = Rc::downgrade(&manager);
+        let group_for_refresh = group.clone();
+        let child_for_refresh = child.clone();
+        manager.set_on_change(move || {
+            if let Some(manager) = manager_weak.upgrade() {
+                group_for_refresh.update(
+                    std::slice::from_ref(&child_for_refresh),
+                    std::slice::from_ref(&child_for_refresh),
+                    &manager,
+                );
+            }
+        });
+
         let guard = manager
             .begin_trash(owner.id())
             .expect("claim the complete collection for Trash");
-        group.update(
-            std::slice::from_ref(&child),
-            std::slice::from_ref(&child),
-            &manager,
-        );
         assert!(!group.trash_btn.is_sensitive());
 
         drop(guard);
-        group.update(
-            std::slice::from_ref(&child),
-            std::slice::from_ref(&child),
-            &manager,
+        let context = glib::MainContext::default();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(1);
+        while !group.trash_btn.is_sensitive() && std::time::Instant::now() < deadline {
+            context.iteration(false);
+            if !group.trash_btn.is_sensitive() {
+                std::thread::sleep(std::time::Duration::from_millis(10));
+            }
+        }
+        assert!(
+            group.trash_btn.is_sensitive(),
+            "releasing the Trash lease must refresh the collection header automatically"
         );
-        assert!(group.trash_btn.is_sensitive());
     }
 
     #[test]

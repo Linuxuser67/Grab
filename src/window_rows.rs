@@ -169,7 +169,7 @@ pub(crate) fn form_is_visible(nav: &adw::NavigationView) -> bool {
 ///
 /// Returns the header and count-label handle. Pass an empty count to hide
 /// the count label when a picker does not need to display one. An optional
-/// trailing control is inserted between the title and count.
+/// trailing control is appended after the count label.
 pub(crate) fn picker_header(
     nav: &adw::NavigationView,
     title: &str,
@@ -211,10 +211,10 @@ pub(crate) fn picker_header(
         .build();
     header.append(&back);
     header.append(&title_label);
+    header.append(&count_label);
     if let Some(trailing) = trailing {
         header.append(trailing);
     }
-    header.append(&count_label);
     (header, count_label)
 }
 

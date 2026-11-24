@@ -1731,6 +1731,9 @@ fn submit_gallery_all(
     let generation = step.gallery_queue_generation.get().wrapping_add(1);
     step.gallery_queue_generation.set(generation);
     step.gallery_queue_in_flight.set(true);
+    // Keep inherited handoff hosts registered through destination inspection;
+    // queue insertion claims its own public-only leases before the card closes.
+    let enqueue_host_lease_guard = step.public_host_leases.borrow().lease_guard();
 
     let referer = source_referer_for(step, &submitted_url);
     let settings = manager.settings();
@@ -1748,6 +1751,7 @@ fn submit_gallery_all(
         file_rows: Vec::new(),
     };
     let enqueue_manager = Rc::clone(manager);
+    let enqueue_step = Rc::clone(step);
     let error_step = Rc::clone(step);
     let error_lookup_add = Rc::clone(lookup_add);
     let close_step = Rc::clone(step);
@@ -1763,6 +1767,13 @@ fn submit_gallery_all(
         &close_card_after_queue,
         scheduled_at,
         move |directory| async move {
+            let _host_lease_guard = enqueue_host_lease_guard;
+            if enqueue_step.gallery_queue_generation.get() != generation
+                || !enqueue_step.gallery_queue_in_flight.get()
+                || !enqueue_step.is_gallery.get()
+            {
+                return Err(gettext("The gallery preview is no longer available."));
+            }
             let mut job = job;
             job.dest_dir =
                 std::path::PathBuf::from(directory.unwrap_or_else(|| ".".to_string()));

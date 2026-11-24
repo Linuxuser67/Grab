@@ -2222,10 +2222,6 @@ fn push_playlist_items_page(
     list_box.set_margin_bottom(12);
     list_box.set_margin_start(12);
     list_box.set_margin_end(12);
-    let format_picker = playlist_format_picker(&owner.quality, owner.audio_only);
-    let format_group = adw::PreferencesGroup::new();
-    format_group.add(&format_picker);
-    list_box.append(&format_group);
     if truncated {
         let notice = gtk4::Label::builder()
             .label(
@@ -2248,10 +2244,13 @@ fn push_playlist_items_page(
     list_box.append(&error_caption);
 
     let toolbar = adw::ToolbarView::new();
+    let format_picker = playlist_format_picker(&owner.quality, owner.audio_only);
+    let format_picker_widget: gtk4::Widget = format_picker.clone().upcast();
     let (header, _count_label) = picker_header(
         nav,
         &playlist.title,
         &playlist_count_label(playlist.kind, count),
+        Some(&format_picker_widget),
     );
     toolbar.add_top_bar(&header);
     toolbar.set_content(Some(&list_box));
@@ -2427,7 +2426,7 @@ fn push_torrent_picker_page(
 
     let toolbar = adw::ToolbarView::new();
     // Same compact header as the playlist picker: back + file name + count.
-    let (header, _count_label) = picker_header(nav, &file_name, &file_count);
+    let (header, _count_label) = picker_header(nav, &file_name, &file_count, None);
     toolbar.add_top_bar(&header);
     toolbar.set_content(Some(&list_box));
     // HIG selection mode: the selection's actions live in a bottom
@@ -2658,8 +2657,9 @@ fn show_video_playlist(
     let label_refs = labels.iter().map(String::as_str).collect::<Vec<_>>();
     v.playlist_format
         .set_model(Some(&gtk4::StringList::new(&label_refs)));
+    let selected = crate::media_types::quality_index(preferred_quality).saturating_sub(1);
     v.playlist_format
-        .set_selected(crate::media_types::quality_index(preferred_quality) as u32);
+        .set_selected(u32::try_from(selected).unwrap_or(0));
     v.playlist_format.set_visible(true);
     v.group_revealer.set_visible(true);
     v.group_revealer.set_reveal_child(true);
@@ -2687,25 +2687,31 @@ fn show_video_playlist(
 
 /// Build the shared playlist-format labels in model order.
 fn playlist_format_labels() -> Vec<String> {
-    let mut labels = crate::video::quality_labels();
+    let mut labels = crate::video::quality_labels()
+        .into_iter()
+        .skip(1)
+        .collect::<Vec<_>>();
     labels.push(gettext("Audio only"));
     labels
 }
 
-/// Create the playlist picker's format selector from the current card choice.
-fn playlist_format_picker(preferred_quality: &str, audio_only: bool) -> adw::ComboRow {
+/// Create the compact playlist format dropdown from the current card choice.
+fn playlist_format_picker(preferred_quality: &str, audio_only: bool) -> gtk4::DropDown {
     let labels = playlist_format_labels();
     let label_refs = labels.iter().map(String::as_str).collect::<Vec<_>>();
-    let picker = adw::ComboRow::builder()
-        .title(gettext("Media format"))
-        .build();
-    picker.set_model(Some(&gtk4::StringList::new(&label_refs)));
+    let picker = gtk4::DropDown::from_strings(&label_refs);
     let selected = if audio_only {
-        crate::media_types::VIDEO_QUALITY_VALUES.len()
+        crate::media_types::VIDEO_QUALITY_VALUES
+            .len()
+            .saturating_sub(1)
     } else {
-        crate::media_types::quality_index(preferred_quality)
+        crate::media_types::quality_index(preferred_quality).saturating_sub(1)
     };
     picker.set_selected(u32::try_from(selected).unwrap_or(0));
+    picker.set_size_request(128, -1);
+    let accessible_label = gettext("Media format");
+    picker.set_tooltip_text(Some(&accessible_label));
+    picker.update_property(&[gtk4::accessible::Property::Label(&accessible_label)]);
     picker.add_css_class(PLAYLIST_FORMAT_PICKER_CLASS);
     picker
 }
@@ -2713,23 +2719,32 @@ fn playlist_format_picker(preferred_quality: &str, audio_only: bool) -> adw::Com
 /// Map the collection quality combo to the persisted playlist job choice.
 /// Audio-only does not use a quality cap, so retain the current preference.
 fn playlist_format_choice(index: usize, preferred_quality: &str) -> (String, bool) {
-    let audio_only = index == crate::media_types::VIDEO_QUALITY_VALUES.len();
-    let fallback =
-        crate::media_types::quality_value(crate::media_types::quality_index(preferred_quality));
-    let quality = crate::media_types::VIDEO_QUALITY_VALUES
-        .get(index)
-        .copied()
-        .unwrap_or(fallback);
+    // The playlist menu omits the global "Best" preset: its visible quality
+    // rows map to the remaining height caps, followed by Audio only.
+    let audio_index = crate::media_types::VIDEO_QUALITY_VALUES
+        .len()
+        .saturating_sub(1);
+    let audio_only = index == audio_index;
+    let quality_index = if index < audio_index {
+        index + 1
+    } else {
+        crate::media_types::quality_index(preferred_quality)
+    };
+    let quality = crate::media_types::quality_value(quality_index);
     (quality.to_string(), audio_only)
 }
 
-fn selected_playlist_format_row(picker: &adw::ComboRow, preferred_quality: &str) -> (String, bool) {
+fn selected_playlist_format_row(
+    picker: &gtk4::DropDown,
+    preferred_quality: &str,
+) -> (String, bool) {
     let selected = usize::try_from(picker.selected()).unwrap_or(usize::MAX);
     playlist_format_choice(selected, preferred_quality)
 }
 
 fn selected_playlist_format(step: &VideoStep, preferred_quality: &str) -> (String, bool) {
-    selected_playlist_format_row(&step.playlist_format, preferred_quality)
+    let selected = usize::try_from(step.playlist_format.selected()).unwrap_or(usize::MAX);
+    playlist_format_choice(selected, preferred_quality)
 }
 
 /// The New Download card's open state, decoupled from the widgets: every
@@ -5390,21 +5405,37 @@ mod tests {
     }
 
     #[test]
-    fn playlist_format_choice_uses_the_shared_quality_ladder() {
+    fn playlist_format_choice_omits_best_and_maps_the_remaining_quality_ladder() {
         assert_eq!(
-            playlist_format_choice(0, "1080p"),
-            ("best".to_string(), false)
+            playlist_format_labels().first().map(String::as_str),
+            Some("2160p")
         );
         assert_eq!(
-            playlist_format_choice(1, "1080p"),
+            playlist_format_choice(0, "best"),
             ("2160p".to_string(), false)
         );
         assert_eq!(
-            playlist_format_choice(5, "1080p"),
+            playlist_format_choice(0, "1080p"),
+            ("2160p".to_string(), false)
+        );
+        assert_eq!(
+            playlist_format_choice(1, "1080p"),
+            ("1440p".to_string(), false)
+        );
+        assert_eq!(
+            playlist_format_choice(2, "1080p"),
+            ("1080p".to_string(), false)
+        );
+        assert_eq!(
+            playlist_format_choice(3, "1080p"),
+            ("720p".to_string(), false)
+        );
+        assert_eq!(
+            playlist_format_choice(4, "1080p"),
             ("480p".to_string(), false)
         );
         assert_eq!(
-            playlist_format_choice(crate::media_types::VIDEO_QUALITY_VALUES.len(), "720p"),
+            playlist_format_choice(crate::media_types::VIDEO_QUALITY_VALUES.len() - 1, "720p"),
             ("720p".to_string(), true)
         );
         assert_eq!(
@@ -5426,17 +5457,17 @@ mod tests {
         }
     }
 
-    fn find_playlist_format_picker(widget: &gtk4::Widget) -> Option<adw::ComboRow> {
-        if let Ok(row) = widget.clone().downcast::<adw::ComboRow>()
-            && row.has_css_class(PLAYLIST_FORMAT_PICKER_CLASS)
+    fn find_playlist_format_picker(widget: &gtk4::Widget) -> Option<gtk4::DropDown> {
+        if let Ok(dropdown) = widget.clone().downcast::<gtk4::DropDown>()
+            && dropdown.has_css_class(PLAYLIST_FORMAT_PICKER_CLASS)
         {
-            return Some(row);
+            return Some(dropdown);
         }
 
         let mut child = widget.first_child();
         while let Some(current) = child {
-            if let Some(row) = find_playlist_format_picker(&current) {
-                return Some(row);
+            if let Some(dropdown) = find_playlist_format_picker(&current) {
+                return Some(dropdown);
             }
             child = current.next_sibling();
         }
@@ -5607,13 +5638,37 @@ mod tests {
         let nav_widget: gtk4::Widget = nav.clone().upcast();
         let format_picker = find_playlist_format_picker(&nav_widget)
             .expect("playlist picker must expose its collection format selector");
-        let unselected_picker = adw::ComboRow::new();
-        assert_eq!(
-            selected_playlist_format_row(&unselected_picker, "720p"),
-            ("720p".to_string(), false),
-            "an unselected combo must retain the current preference"
+        let header = format_picker
+            .parent()
+            .expect("dropdown must be in the picker header");
+        assert!(
+            header.has_css_class("grab-picker-header"),
+            "the format dropdown must share the playlist title row"
         );
-        format_picker.set_selected(crate::media_types::VIDEO_QUALITY_VALUES.len() as u32);
+        let model = format_picker
+            .model()
+            .expect("dropdown model")
+            .downcast::<gtk4::StringList>()
+            .expect("dropdown uses the GTK string-list model");
+        assert_eq!(
+            model.string(0).as_deref(),
+            Some("2160p"),
+            "the playlist menu starts with the highest height cap, not Best"
+        );
+        assert_eq!(
+            usize::try_from(model.n_items()).unwrap_or(0),
+            crate::media_types::VIDEO_QUALITY_VALUES.len(),
+            "five quality caps plus Audio only"
+        );
+        assert_eq!(
+            playlist_format_choice(usize::MAX, "720p"),
+            ("720p".to_string(), false),
+            "an unselected dropdown must retain the current preference"
+        );
+        let audio_only_index = crate::media_types::VIDEO_QUALITY_VALUES
+            .len()
+            .saturating_sub(1);
+        format_picker.set_selected(u32::try_from(audio_only_index).unwrap_or(0));
         assert_eq!(
             selected_playlist_format_row(&format_picker, "720p"),
             ("720p".to_string(), true),

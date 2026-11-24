@@ -416,7 +416,7 @@ pub(crate) fn push_gallery_picker_page(
     list_box.append(&error_caption);
 
     let toolbar = adw::ToolbarView::new();
-    let (header, _) = picker_header(nav, &title, "");
+    let (header, _) = picker_header(nav, &title, "", None);
     toolbar.add_top_bar(&header);
     toolbar.set_content(Some(&list_box));
     let (action_bar, select_all_btn, select_none_btn, add_btn) = selection_action_bar();

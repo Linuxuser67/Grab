@@ -168,13 +168,16 @@ pub(crate) fn form_is_visible(nav: &adw::NavigationView) -> bool {
 /// whole card); the selection actions stay in the bottom action bar.
 ///
 /// Returns the header and count-label handle. Pass an empty count to hide
-/// the count label when a picker does not need to display one.
+/// the count label when a picker does not need to display one. An optional
+/// trailing control is inserted between the title and count.
 pub(crate) fn picker_header(
     nav: &adw::NavigationView,
     title: &str,
     count: &str,
+    trailing: Option<&gtk4::Widget>,
 ) -> (gtk4::Box, gtk4::Label) {
     let header = gtk4::Box::new(gtk4::Orientation::Horizontal, 12);
+    header.add_css_class("grab-picker-header");
     header.set_margin_top(6);
     header.set_margin_bottom(6);
     header.set_margin_start(6);
@@ -208,6 +211,9 @@ pub(crate) fn picker_header(
         .build();
     header.append(&back);
     header.append(&title_label);
+    if let Some(trailing) = trailing {
+        header.append(trailing);
+    }
     header.append(&count_label);
     (header, count_label)
 }

@@ -4488,8 +4488,7 @@ fn wire_video_preview_actions(
                 return;
             }
             // Flatpak: attach the progress strip to the Install button.
-            let (step_stage, step_error, step_done) =
-                (step2.clone(), step2.clone(), step2.clone());
+            let (step_stage, step_error, step_done) = (step2.clone(), step2.clone(), step2.clone());
             let kick_b = kick.clone();
             crate::install_progress::run(
                 &progress,

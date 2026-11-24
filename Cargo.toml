@@ -27,21 +27,20 @@ chrono = { version = "0.4.45", default-features = false, features = ["std"] }
 m3u8-rs = "6.0.1"
 # Parser requirements use Cargo's compatible ranges; Cargo.lock keeps builds
 # reproducible, while parser fixtures guard deliberate lockfile updates.
-# Typed LL-HLS media-playlist parser. The 0.9 API includes bounded parse limits
-# and typed playlist diagnostics; lockfile keeps release builds reproducible.
-broadcast-hls = "0.9.0"
+# Exact-pin untrusted-input parsers; upgrades require fixture/security review.
+# The 0.9 API includes bounded parse limits and typed playlist diagnostics.
+broadcast-hls = "=0.9.0"
 # SAMPLE-AES preflight uses the typed PES-start/continuation packet model.
 mpeg2ts = "0.6.1"
 # Parse ISO BMFF box trees for structural validation of native fMP4 resources.
-mp4box = { version = "0.14.0", default-features = false }
+mp4box = { version = "=0.14.0", default-features = false }
 # The ADTS preflight rejects malformed frames before iori-ssa; SAMPLE-AES
 # regression tests cover malformed lengths and PES/Raw packet reassembly.
 iori-ssa = "0.2.1"
 # Parse HLS diagnostics without exposing playlist contents. m3u8-rs exposes nom 7 parser errors.
 nom = "7"
-# DASH MPD parsing and serialization; fixture tests cover the supported and
-# rejected manifest shapes. The 0.1.x range excludes breaking 0.2+ releases.
-dash-mpd-core = "0.1.0"
+# Exact-pin the untrusted DASH MPD parser; upgrades require fixture/security review.
+dash-mpd-core = "=0.1.0"
 # Read Representation-level DASH Role elements omitted by the typed MPD model.
 quick-xml = "0.42"
 # Read the single verified Deno executable from the official release ZIP.
@@ -50,7 +49,7 @@ percent-encoding = "2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 # Parse byte Content-Range response headers consistently across HTTP download paths.
-http-content-range = "0.2.5"
+http-content-range = "=0.2.6"
 # HTTP-date parser for the keep-server-date option (Last-Modified header).
 httpdate = "1"
 # Local HTTP server for browser extension integration (replaces native messaging).
@@ -79,7 +78,7 @@ gettext-rs = "0.8"
 yt-dlp = { version = "2.10.0", default-features = false, features = ["rustls", "cache-memory", "cache-redb"] }
 libc = "0.2"
 # Mozilla Public Suffix List for validating browser cookie domains.
-psl = "2.1.255"
+psl = "=2.1.262"
 # Safe wrappers for Linux no-replace renameat2 operations.
 rustix = { version = "1.1.6", features = ["fs", "process"] }
 thiserror = "2"
@@ -90,7 +89,7 @@ tempfile = "3.27.0"
 pretty_assertions = "1"
 proptest = "1"
 # Enable ignored-MPD-element diagnostics only in test builds.
-dash-mpd-core = { version = "0.1.0", features = ["warn_ignored_elements"] }
+dash-mpd-core = { version = "=0.1.0", features = ["warn_ignored_elements"] }
 
 # Keep the default unwind strategy: SAMPLE-AES contains iori-ssa panics with catch_unwind.
 # Switching to panic = "abort" would make malformed segments process-fatal.

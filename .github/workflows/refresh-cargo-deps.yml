@@ -1,0 +1,50 @@
+name: Refresh parser and compatible Cargo dependencies
+
+on:
+  push:
+    branches:
+      - deps/update-compatible-dependencies
+
+permissions:
+  contents: write
+
+concurrency:
+  group: cargo-dependency-refresh
+  cancel-in-progress: false
+
+jobs:
+  refresh:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out the update branch
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: true
+
+      - name: Install stable Rust
+        uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
+
+      - name: Update compatible dependencies and explicit parser epochs
+        run: cargo update
+        env:
+          CARGO_RESOLVER_INCOMPATIBLE_RUST_VERSIONS: fallback
+
+      - name: Verify lockfile metadata
+        run: cargo metadata --locked --format-version 1 >/dev/null
+
+      - name: Test and regenerate Flatpak sources
+        run: |
+          python3 build-aux/test-gen-cargo-sources.py
+          python3 build-aux/gen-cargo-sources.py
+          python3 build-aux/gen-cargo-sources.py --check
+
+      - name: Commit dependency lock and vendor updates
+        run: |
+          rm .github/workflows/refresh-cargo-deps.yml
+          git add Cargo.lock build-aux/cargo-sources.json
+          git add -u .github/workflows/refresh-cargo-deps.yml
+          git diff --cached --check
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git commit -m "chore(deps): update parsers and compatible dependencies"
+          git push origin "HEAD:${GITHUB_REF_NAME}"

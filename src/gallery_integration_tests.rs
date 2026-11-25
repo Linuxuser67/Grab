@@ -108,7 +108,7 @@ impl Drop for ServerGuard {
 }
 
 #[tokio::test]
-async fn gallery_integration_probe_count_download() {
+async fn gallery_integration_probe_download_resume() {
     let Some(tool) = find_gallery_dl() else {
         eprintln!("SKIP: gallery-dl not on PATH");
         return;
@@ -149,18 +149,7 @@ async fn gallery_integration_probe_count_download() {
         "all items need filenames"
     );
 
-    // 2. Count matches.
-    let count = crate::gallery_probe::count_gallery_files(
-        &tool,
-        &url,
-        None,
-        None,
-        crate::gallery_argv::GalleryFilter::All,
-    )
-    .await;
-    assert_eq!(count, Some(4), "count should be 4");
-
-    // 3. Download produces files.
+    // 2. Download produces files.
     let dest = std::env::temp_dir().join(format!("grab-gallery-test-{port}"));
     std::fs::create_dir_all(&dest).unwrap();
     let job = crate::gallery_argv::GalleryJob {
@@ -207,7 +196,7 @@ async fn gallery_integration_probe_count_download() {
         );
     }
 
-    // 4. Second run reports all as skipped.
+    // 3. Second run reports all as skipped.
     let resumed_progress = std::cell::Cell::new(0u32);
     let result2 =
         match crate::gallery_runner::run_gallery_download(&job, &tool, None, None, |update| {

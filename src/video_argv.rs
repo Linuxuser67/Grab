@@ -1333,7 +1333,8 @@ mod playlist_info_json_argv_tests {
             proxy: None,
             info_json: None,
         };
-        let info_json = Path::new("/run/user/1000/grab/info-17.json");
+        const INFO_JSON_PATH: &str = "/tmp/info-17.json";
+        let info_json = Path::new(INFO_JSON_PATH);
         let selected_indices = [0, 2];
 
         let args = playlist_download_argv(
@@ -1355,7 +1356,10 @@ mod playlist_info_json_argv_tests {
             .iter()
             .position(|argument| argument == "--load-info-json")
             .expect("playlist JSON must be loaded");
-        assert_eq!(args.get(load_at + 1).map(String::as_str), Some(info_json.to_str().unwrap()));
+        assert_eq!(
+            args.get(load_at + 1).map(String::as_str),
+            Some(INFO_JSON_PATH)
+        );
         assert!(args.iter().any(|argument| argument == "--no-clean-info"));
         let separator = args.iter().position(|argument| argument == "--").unwrap();
         assert!(load_at < separator);

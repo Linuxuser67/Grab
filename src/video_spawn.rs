@@ -6,7 +6,7 @@ use crate::video_probe::{
     page_host, parse_playlist_json, parse_single_video, pick_playlist_entry,
     playlist_resolve_error, retarget_story_items, sanitize_video_json,
 };
-use crate::video_progress::{last_error_line, last_log_line, trace_format_lines};
+use crate::video_progress::{last_error_line, trace_format_lines};
 use crate::video_tools::{VideoError, ensure_ytdlp_version};
 use crate::video_types::{FetchedVideo, ProbeResult, VideoInfo};
 use gettextrs::gettext;
@@ -1376,12 +1376,16 @@ mod ytdlp_retry_classification_tests {
     fn traceback_does_not_hide_http_retry_classification() {
         let cases = [
             (
-                "ERROR: HTTP Error 503: Service Unavailable\\nTraceback (most recent call last):\\n  File \\"extractor.py\\", line 42, in _real_extract",
+                r#"ERROR: HTTP Error 503: Service Unavailable
+Traceback (most recent call last):
+  File "extractor.py", line 42, in _real_extract"#,
                 "ERROR: HTTP Error 503: Service Unavailable",
                 true,
             ),
             (
-                "ERROR: HTTP Error 404: Not Found\\nTraceback (most recent call last):\\n  File \\"extractor.py\\", line 42, in _real_extract",
+                r#"ERROR: HTTP Error 404: Not Found
+Traceback (most recent call last):
+  File "extractor.py", line 42, in _real_extract"#,
                 "ERROR: HTTP Error 404: Not Found",
                 false,
             ),
@@ -1403,7 +1407,7 @@ mod ytdlp_retry_classification_tests {
 }
 
 #[cfg(test)]
-mod raw_dump_argv_tests {
+mod raw_dump_tests {
     use super::{RawDumpOptions, fetch_raw_dump_json, raw_dump_argv};
     use std::time::Duration;
 
@@ -1475,7 +1479,7 @@ mod raw_dump_argv_tests {
 
     #[cfg(unix)]
     #[test]
-    fn raw_dump_timeout_preserves_the_last_ytdlp_error_line() {    
+    fn raw_dump_timeout_preserves_the_last_ytdlp_error_line() {
         let root = tempfile::tempdir().expect("create test directory");
         let youtube_bin = root.path().join("fake-ytdlp-timeout");
         std::fs::write(
@@ -1486,7 +1490,7 @@ mod raw_dump_argv_tests {
         use std::os::unix::fs::PermissionsExt as _;
         std::fs::set_permissions(&youtube_bin, std::fs::Permissions::from_mode(0o755))
             .expect("make fake yt-dlp executable");
-    
+
         let result = crate::runtime::tokio_rt().block_on(fetch_raw_dump_json(
             &youtube_bin,
             "https://example.invalid/playlist",

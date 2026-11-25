@@ -1363,9 +1363,11 @@ mod playlist_info_json_argv_tests {
         assert!(args.iter().any(|argument| argument == "--no-clean-info"));
         let separator = args.iter().position(|argument| argument == "--").unwrap();
         assert!(load_at < separator);
-        assert!(args[..separator].windows(2).any(|pair| {
-            pair[0] == "--playlist-items" && pair[1] == "1,3"
-        }));
+        assert!(
+            args[..separator]
+                .windows(2)
+                .any(|pair| { pair[0] == "--playlist-items" && pair[1] == "1,3" })
+        );
         assert_eq!(
             args.last().map(String::as_str),
             Some("https://www.youtube.com/playlist?list=PL123")

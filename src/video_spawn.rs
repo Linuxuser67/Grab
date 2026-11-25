@@ -232,7 +232,7 @@ pub(crate) async fn fetch_raw_dump_json(
     // so post-hoc is fine).
     crate::backend_debug::echo_stderr(&stderr);
     if !status.success() {
-        let detail = last_log_line(&String::from_utf8_lossy(&stderr), "yt-dlp reported failure");
+        let detail = last_error_line(&String::from_utf8_lossy(&stderr), "yt-dlp reported failure");
         return Err(if ytdlp_failure_is_retryable(&detail) {
             VideoError::retryable_fetch(detail)
         } else {
@@ -411,29 +411,22 @@ pub async fn fetch_video_infos(
             deno_ms = phase_started.elapsed().as_millis() as u64;
             deno_result?;
             let phase_started = std::time::Instant::now();
-            let fetch_result = tokio::time::timeout(
-                Duration::from_secs(FETCH_TIMEOUT_SECS),
-                fetch_raw_dump_json(
-                    &youtube_bin,
-                    &url,
-                    RawDumpOptions {
-                        cookies_browser: &cookies_browser,
-                        timeout: Duration::from_secs(300),
-                        fetch_proxy: fetch_proxy.as_ref(),
-                        flat_playlist: true,
-                        preserve_playlist_entries: false,
-                        identity_args: Some(&identity_args),
-                        referer: referer.as_deref(),
-                    },
-                ),
+            let fetch_result = fetch_raw_dump_json(
+                &youtube_bin,
+                &url,
+                RawDumpOptions {
+                    cookies_browser: &cookies_browser,
+                    timeout: Duration::from_secs(FETCH_TIMEOUT_SECS),
+                    fetch_proxy: fetch_proxy.as_ref(),
+                    flat_playlist: true,
+                    preserve_playlist_entries: false,
+                    identity_args: Some(&identity_args),
+                    referer: referer.as_deref(),
+                },
             )
             .await;
             metadata_lookup_ms = phase_started.elapsed().as_millis() as u64;
-            let mut value = match fetch_result {
-                Ok(Ok(value)) => value,
-                Ok(Err(e)) => return Err(e),
-                Err(_) => return Err(VideoError::fetch(gettext("the lookup timed out"))),
-            };
+            let mut value = fetch_result?;
             let phase_started = std::time::Instant::now();
             if let Some(mut playlist) = parse_playlist_json(&value, &url) {
                 retarget_story_items(&url, &mut playlist);
@@ -1378,11 +1371,41 @@ mod ytdlp_retry_classification_tests {
             );
         }
     }
+
+    #[test]
+    fn traceback_does_not_hide_http_retry_classification() {
+        let cases = [
+            (
+                "ERROR: HTTP Error 503: Service Unavailable\\nTraceback (most recent call last):\\n  File \\"extractor.py\\", line 42, in _real_extract",
+                "ERROR: HTTP Error 503: Service Unavailable",
+                true,
+            ),
+            (
+                "ERROR: HTTP Error 404: Not Found\\nTraceback (most recent call last):\\n  File \\"extractor.py\\", line 42, in _real_extract",
+                "ERROR: HTTP Error 404: Not Found",
+                false,
+            ),
+        ];
+
+        for (stderr, expected_detail, expected_retryable) in cases {
+            let detail = crate::video_progress::last_error_line(
+                stderr,
+                "yt-dlp reported failure",
+            );
+            assert_eq!(detail, expected_detail);
+            assert_eq!(
+                ytdlp_failure_is_retryable(&detail),
+                expected_retryable,
+                "retry classification must use the extractor error, not traceback: {detail}"
+            );
+        }
+    }
 }
 
 #[cfg(test)]
 mod raw_dump_argv_tests {
-    use super::{RawDumpOptions, raw_dump_argv};
+    use super::{RawDumpOptions, fetch_raw_dump_json, raw_dump_argv};
+    use std::time::Duration;
 
     fn options<'a>(
         flat_playlist: bool,
@@ -1449,40 +1472,40 @@ mod raw_dump_argv_tests {
         }));
         assert!(args.iter().any(|argument| argument == "--dump-single-json"));
     }
-}
 
-#[cfg(unix)]
-#[test]
-fn raw_dump_timeout_preserves_the_last_ytdlp_error_line() {
-    let root = tempfile::tempdir().expect("create test directory");
-    let youtube_bin = root.path().join("fake-ytdlp-timeout");
-    std::fs::write(
-        &youtube_bin,
-        "#!/bin/sh\nprintf 'ERROR: synthetic extractor timeout detail\\n' >&2\nsleep 30\n",
-    )
-    .expect("write fake yt-dlp");
-    use std::os::unix::fs::PermissionsExt as _;
-    std::fs::set_permissions(&youtube_bin, std::fs::Permissions::from_mode(0o755))
-        .expect("make fake yt-dlp executable");
-
-    let result = crate::runtime::tokio_rt().block_on(fetch_raw_dump_json(
-        &youtube_bin,
-        "https://example.invalid/playlist",
-        RawDumpOptions {
-            cookies_browser: "none",
-            timeout: Duration::from_millis(500),
-            fetch_proxy: None,
-            flat_playlist: false,
-            preserve_playlist_entries: false,
-            identity_args: None,
-            referer: None,
-        },
-    ));
-    let error = result.expect_err("the fake extractor must time out");
-    assert!(
-        error
-            .to_string()
-            .contains("ERROR: synthetic extractor timeout detail"),
-        "timeout errors must retain yt-dlp stderr, got: {error}"
-    );
+    #[cfg(unix)]
+    #[test]
+    fn raw_dump_timeout_preserves_the_last_ytdlp_error_line() {    
+        let root = tempfile::tempdir().expect("create test directory");
+        let youtube_bin = root.path().join("fake-ytdlp-timeout");
+        std::fs::write(
+            &youtube_bin,
+            "#!/bin/sh\nprintf 'ERROR: synthetic extractor timeout detail\\n' >&2\nsleep 30\n",
+        )
+        .expect("write fake yt-dlp");
+        use std::os::unix::fs::PermissionsExt as _;
+        std::fs::set_permissions(&youtube_bin, std::fs::Permissions::from_mode(0o755))
+            .expect("make fake yt-dlp executable");
+    
+        let result = crate::runtime::tokio_rt().block_on(fetch_raw_dump_json(
+            &youtube_bin,
+            "https://example.invalid/playlist",
+            RawDumpOptions {
+                cookies_browser: "none",
+                timeout: Duration::from_secs(2),
+                fetch_proxy: None,
+                flat_playlist: false,
+                preserve_playlist_entries: false,
+                identity_args: None,
+                referer: None,
+            },
+        ));
+        let error = result.expect_err("the fake extractor must time out");
+        assert!(
+            error
+                .to_string()
+                .contains("ERROR: synthetic extractor timeout detail"),
+            "timeout errors must retain yt-dlp stderr, got: {error}"
+        );
+    }
 }

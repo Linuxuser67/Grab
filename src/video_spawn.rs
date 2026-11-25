@@ -121,25 +121,17 @@ pub(crate) struct RawDumpOptions<'a> {
 
 /// Build a bounded metadata-dump command. Flat playlist JSON must retain
 /// its playlist entries so the same snapshot can later be loaded for download.
-fn raw_dump_argv(
-    url: &str,
-    cookies_browser: &str,
-    fetch_proxy: Option<&crate::net_types::ResolvedProxy>,
-    flat_playlist: bool,
-    preserve_playlist_entries: bool,
-    identity_args: Option<&[String]>,
-    referer: Option<&str>,
-) -> Vec<String> {
+fn raw_dump_argv(url: &str, options: &RawDumpOptions<'_>) -> Vec<String> {
     let mut args = vec!["--ignore-config".to_string(), "--no-progress".to_string()];
-    if flat_playlist {
+    if options.flat_playlist {
         args.push("--flat-playlist".to_string());
     }
-    if flat_playlist && preserve_playlist_entries {
+    if options.flat_playlist && options.preserve_playlist_entries {
         args.push("--no-clean-info".to_string());
     }
     args.push("--dump-single-json".to_string());
-    args.extend(proxy_cli_args(fetch_proxy));
-    if let Some(referer) = referer.and_then(crate::referrer::origin_only) {
+    args.extend(proxy_cli_args(options.fetch_proxy));
+    if let Some(referer) = options.referer.and_then(crate::referrer::origin_only) {
         args.push("--referer".to_string());
         args.push(referer);
     }
@@ -148,8 +140,8 @@ fn raw_dump_argv(
     // media download spawn yt-dlp separately and need it too; the finished
     // download discards it. The tail ends with `-- <url>`, past which yt-dlp
     // reads positionals.
-    args.extend(identity_args.map_or_else(
-        || crate::extension_server::ytdlp_spawn_identity(cookies_browser, url),
+    args.extend(options.identity_args.map_or_else(
+        || crate::extension_server::ytdlp_spawn_identity(options.cookies_browser, url),
         |args| args.to_vec(),
     ));
     args
@@ -160,24 +152,7 @@ pub(crate) async fn fetch_raw_dump_json(
     url: &str,
     options: RawDumpOptions<'_>,
 ) -> Result<serde_json::Value, VideoError> {
-    let RawDumpOptions {
-        cookies_browser,
-        timeout,
-        fetch_proxy,
-        flat_playlist,
-        preserve_playlist_entries,
-        identity_args,
-        referer,
-    } = options;
-    let args = raw_dump_argv(
-        url,
-        cookies_browser,
-        fetch_proxy,
-        flat_playlist,
-        preserve_playlist_entries,
-        identity_args,
-        referer,
-    );
+    let args = raw_dump_argv(url, &options);
     let guarded_proxy = guard_untrusted_args(&args)?;
     // Direct spawn with the same semantics (concurrent drain, timeout kill, stderr detail on failure).
     let mut cmd = ytdlp_command(youtube_bin).await;
@@ -187,7 +162,7 @@ pub(crate) async fn fetch_raw_dump_json(
     // behavior; never set this via the shared ytdlp_command() builder.
     cmd.kill_on_drop(true);
     cmd.args(&args);
-    apply_proxy_env(&mut cmd, fetch_proxy);
+    apply_proxy_env(&mut cmd, options.fetch_proxy);
     apply_guarded_proxy_env(&mut cmd, guarded_proxy.as_deref());
     // Debug: log the full argv before spawning. as_std() captures everything
     // including ytdlp_command()'s --impersonate flag.
@@ -213,7 +188,7 @@ pub(crate) async fn fetch_raw_dump_json(
     let _out_drain = AbortOnDrop(out_task.abort_handle());
     let err_task = drain(stderr, MAX_STDERR_BYTES);
     let _err_drain = AbortOnDrop(err_task.abort_handle());
-    let status = match tokio::time::timeout(timeout, child.wait()).await {
+    let status = match tokio::time::timeout(options.timeout, child.wait()).await {
         Ok(Ok(status)) => {
             group.disarm();
             status
@@ -1395,23 +1370,30 @@ mod ytdlp_retry_classification_tests {
 
 #[cfg(test)]
 mod raw_dump_argv_tests {
-    use super::raw_dump_argv;
+    use super::{RawDumpOptions, raw_dump_argv};
+
+    fn options(
+        flat_playlist: bool,
+        preserve_playlist_entries: bool,
+    ) -> RawDumpOptions<'static> {
+        RawDumpOptions {
+            cookies_browser: "none",
+            timeout: std::time::Duration::from_secs(300),
+            fetch_proxy: None,
+            flat_playlist,
+            preserve_playlist_entries,
+            identity_args: Some(&[
+                "--".to_string(),
+                "https://music.youtube.com/playlist?list=PL123".to_string(),
+            ]),
+            referer: None,
+        }
+    }
 
     #[test]
     fn flat_playlist_download_refresh_preserves_entries_for_load_info_json() {
-        let identity = vec![
-            "--".to_string(),
-            "https://music.youtube.com/playlist?list=PL123".to_string(),
-        ];
-        let args = raw_dump_argv(
-            "https://music.youtube.com/playlist?list=PL123",
-            "none",
-            None,
-            true,
-            true,
-            Some(&identity),
-            None,
-        );
+        let opts = options(true, true);
+        let args = raw_dump_argv("https://music.youtube.com/playlist?list=PL123", &opts);
 
         assert!(args.windows(2).any(|pair| {
             pair[0] == "--flat-playlist" && pair[1] == "--no-clean-info"
@@ -1429,19 +1411,8 @@ mod raw_dump_argv_tests {
 
     #[test]
     fn flat_video_preview_keeps_default_info_json_cleaning() {
-        let identity = vec![
-            "--".to_string(),
-            "https://youtube.com/watch?v=video".to_string(),
-        ];
-        let args = raw_dump_argv(
-            "https://youtube.com/watch?v=video",
-            "none",
-            None,
-            true,
-            false,
-            Some(&identity),
-            None,
-        );
+        let opts = options(true, false);
+        let args = raw_dump_argv("https://music.youtube.com/playlist?list=PL123", &opts);
 
         assert!(args.iter().any(|argument| argument == "--flat-playlist"));
         assert!(!args.iter().any(|argument| argument == "--no-clean-info"));
@@ -1450,19 +1421,8 @@ mod raw_dump_argv_tests {
 
     #[test]
     fn ordinary_video_json_does_not_enable_flat_playlist_mode() {
-        let identity = vec![
-            "--".to_string(),
-            "https://youtube.com/watch?v=video".to_string(),
-        ];
-        let args = raw_dump_argv(
-            "https://youtube.com/watch?v=video",
-            "none",
-            None,
-            false,
-            false,
-            Some(&identity),
-            None,
-        );
+        let opts = options(false, false);
+        let args = raw_dump_argv("https://youtube.com/watch?v=video", &opts);
 
         assert!(!args.iter().any(|argument| {
             matches!(argument.as_str(), "--flat-playlist" | "--no-clean-info")

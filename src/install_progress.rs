@@ -231,13 +231,7 @@ fn note_busy(button: &gtk4::Button) {
     });
 }
 
-/// Install all tools when no filter is provided, or only selected tool names.
-///
-/// The button is owned by its GTK parent; this function clones the button into
-/// the main-context task, so callers do not need a separate progress controller.
-/// The stage callback updates the row subtitle, the error callback receives
-/// completed tools before a failure, and the success callback receives all
-/// completed tools.
+/// Release the operation guard before invoking the caller's error callback.
 fn report_failure(
     operation: OperationGuard,
     on_error: &impl Fn(String, Vec<InstalledTool>),

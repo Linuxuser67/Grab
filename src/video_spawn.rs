@@ -1385,3 +1385,55 @@ mod ytdlp_retry_classification_tests {
         }
     }
 }
+
+#[cfg(test)]
+mod raw_dump_argv_tests {
+    use super::raw_dump_argv;
+
+    #[test]
+    fn flat_playlist_json_keeps_entries_for_load_info_json() {
+        let identity = vec![
+            "--".to_string(),
+            "https://music.youtube.com/playlist?list=PL123".to_string(),
+        ];
+        let args = raw_dump_argv(
+            "https://music.youtube.com/playlist?list=PL123",
+            "none",
+            None,
+            true,
+            Some(&identity),
+            None,
+        );
+
+        assert!(args.windows(2).any(|pair| {
+            pair[0] == "--flat-playlist" && pair[1] == "--no-clean-info"
+        }));
+        assert!(args.iter().any(|argument| argument == "--dump-single-json"));
+        assert_eq!(
+            args.iter().filter(|argument| *argument == "--").count(),
+            1
+        );
+        assert_eq!(args.last().map(String::as_str), Some("https://music.youtube.com/playlist?list=PL123"));
+    }
+
+    #[test]
+    fn ordinary_video_json_does_not_enable_flat_playlist_mode() {
+        let identity = vec![
+            "--".to_string(),
+            "https://youtube.com/watch?v=video".to_string(),
+        ];
+        let args = raw_dump_argv(
+            "https://youtube.com/watch?v=video",
+            "none",
+            None,
+            false,
+            Some(&identity),
+            None,
+        );
+
+        assert!(!args.iter().any(|argument| {
+            matches!(argument.as_str(), "--flat-playlist" | "--no-clean-info")
+        }));
+        assert!(args.iter().any(|argument| argument == "--dump-single-json"));
+    }
+}

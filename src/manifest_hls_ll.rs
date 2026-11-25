@@ -355,6 +355,7 @@ pub(crate) fn plan_hls_media_playlist(
     build_plan(
         manifest_url,
         playlist,
+        body,
         tag_flags.trailing_open_discontinuity,
     )
     .map(Some)
@@ -395,6 +396,7 @@ struct ValidatedLlHlsPlaylist {
 fn validate_ll_hls_playlist(
     manifest_url: &str,
     playlist: &LlMediaPlaylist,
+    body: &[u8],
 ) -> Result<ValidatedLlHlsPlaylist, ManifestError> {
     let base_url = parse_manifest_url(manifest_url)?;
     let source_target_duration = u64::from(playlist.target_duration);
@@ -792,9 +794,10 @@ impl LlHlsPlanBuilder {
 fn build_plan(
     manifest_url: &str,
     playlist: LlMediaPlaylist,
+    body: &[u8],
     open_segment_discontinuity: bool,
 ) -> Result<HlsPlan, ManifestError> {
-    let validated = validate_ll_hls_playlist(manifest_url, &playlist)?;
+    let validated = validate_ll_hls_playlist(manifest_url, &playlist, body)?;
     let mut builder = LlHlsPlanBuilder::new(&validated);
     builder.append_closed_segments(&playlist)?;
     builder.append_open_segment(&playlist, open_segment_discontinuity)?;

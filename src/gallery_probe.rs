@@ -1129,6 +1129,33 @@ mod tests {
         assert!(matches!(err, GalleryError::Install(_)));
     }
 
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn run_to_completion_rejects_stdout_over_the_probe_limit() {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let dir = tempfile::tempdir().expect("create gallery probe fixture directory");
+        let tool = dir.path().join("fake-gallery-dl.sh");
+        std::fs::write(&tool, "#!/bin/sh\nexec head -c 67108865 /dev/zero\n")
+            .expect("write flooding fake gallery-dl");
+        std::fs::set_permissions(&tool, std::fs::Permissions::from_mode(0o755))
+            .expect("make fake gallery-dl executable");
+
+        let cmd = tokio::process::Command::new(&tool);
+        let error = run_to_completion(cmd, Duration::from_secs(10), "gallery-dl probe")
+            .await
+            .expect_err("output above the 64 MiB probe cap must be rejected");
+
+        assert!(
+            matches!(
+                error,
+                GalleryError::Probe(ref message)
+                    if message == "gallery-dl probe produced too much output"
+            ),
+            "unexpected probe error: {error}"
+        );
+    }
+
     #[test]
     fn enumerate_argv_has_no_range_bound() {
         // Galleries enumerate unbounded: the user walks as much of a

@@ -217,9 +217,7 @@ fn finish(button: &gtk4::Button, restore_label: &str) {
 /// Briefly explain that another support-tool operation is already active
 /// without mutating the label captured by a later install attempt.
 fn note_busy(button: &gtk4::Button) {
-    let previous_tooltip = button
-        .tooltip_text()
-        .map(|tooltip| tooltip.to_string());
+    let previous_tooltip = button.tooltip_text().map(|tooltip| tooltip.to_string());
     let busy_tooltip = gettext("Another install is in progress…");
     button.set_tooltip_text(Some(&busy_tooltip));
 
@@ -379,7 +377,10 @@ mod tests {
     #[test]
     fn support_tool_ids_are_parsed_into_known_variants() {
         assert_eq!(SupportTool::from_id("yt-dlp"), Some(SupportTool::YtDlp));
-        assert_eq!(SupportTool::from_id("GALLERY-DL"), Some(SupportTool::GalleryDl));
+        assert_eq!(
+            SupportTool::from_id("GALLERY-DL"),
+            Some(SupportTool::GalleryDl)
+        );
         assert_eq!(SupportTool::from_id("Deno"), Some(SupportTool::Deno));
         assert_eq!(SupportTool::from_id("unknown"), None);
     }

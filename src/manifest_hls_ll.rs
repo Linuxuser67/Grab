@@ -251,18 +251,33 @@ struct LlHlsTagFlags {
     encrypted_media_key: bool,
     delta_update: bool,
     has_ll_hls_tags: bool,
+    duplicate_program_date_time: bool,
     trailing_open_discontinuity: bool,
 }
 
 /// Read the untrusted playlist body once and collect the raw-tag facts used
 /// to route and construct an LL-HLS plan.
 fn scan_ll_hls_tag_flags(body: &[u8]) -> LlHlsTagFlags {
+    const LF: u8 = b'\n';
     const EXTINF: &[u8] = b"#EXTINF:";
     const DISCONTINUITY: &[u8] = b"#EXT-X-DISCONTINUITY";
+    const PROGRAM_DATE_TIME: &[u8] = b"#EXT-X-PROGRAM-DATE-TIME:";
     let mut flags = LlHlsTagFlags::default();
+    let mut pending_program_date_time = false;
 
-    for raw_line in body.split(|byte| *byte == 10) {
-        let line = raw_line.strip_suffix(b"\r").unwrap_or(raw_line);
+    for raw_line in body.split(|byte| *byte == LF) {
+        let line = raw_line.trim_ascii();
+        if line.starts_with(PROGRAM_DATE_TIME) {
+            if pending_program_date_time {
+                flags.duplicate_program_date_time = true;
+            } else {
+                pending_program_date_time = true;
+            }
+        } else if !line.is_empty() && !line.starts_with(b"#") {
+            // A media-segment URI consumes all pending segment-scoped tags.
+            pending_program_date_time = false;
+        }
+
         flags.partial_segments |= raw_line.starts_with(b"#EXT-X-PART:");
         flags.delta_update |= raw_line.starts_with(b"#EXT-X-SKIP:");
         flags.has_ll_hls_tags |= raw_line.starts_with(b"#EXT-X-SERVER-CONTROL:")
@@ -323,6 +338,21 @@ mod ll_hls_tag_flag_tests {
     }
 
     #[test]
+    fn detects_duplicate_program_date_time_tags_in_closed_and_open_segments() {
+        let closed = b"#EXTM3U\n#EXT-X-PROGRAM-DATE-TIME:2026-11-10T10:00:00Z\n#EXT-X-PROGRAM-DATE-TIME:2026-11-10T10:00:01Z\n#EXTINF:1,\n50.ts\n";
+        let open = b"#EXTM3U\n#EXT-X-PROGRAM-DATE-TIME:2026-11-10T10:00:00Z\n#EXT-X-PROGRAM-DATE-TIME:2026-11-10T10:00:01Z\n#EXT-X-PART:DURATION=0.5,URI=50.0.m4s\n";
+
+        assert!(scan_ll_hls_tag_flags(closed).duplicate_program_date_time);
+        assert!(scan_ll_hls_tag_flags(open).duplicate_program_date_time);
+    }
+
+    #[test]
+    fn resets_program_date_time_count_after_each_segment_uri() {
+        let body = b"#EXTM3U\n#EXT-X-PROGRAM-DATE-TIME:2026-11-10T10:00:00Z\n#EXTINF:1,\n50.ts\n#EXT-X-PROGRAM-DATE-TIME:2026-11-10T10:00:01Z\n#EXTINF:1,\n51.ts\n";
+        assert!(!scan_ll_hls_tag_flags(body).duplicate_program_date_time);
+    }
+
+    #[test]
     fn malformed_key_method_fails_closed_and_method_none_is_unencrypted() {
         let encrypted = scan_ll_hls_tag_flags(b"#EXT-X-KEY:URI=key.bin\n");
         let unencrypted = scan_ll_hls_tag_flags(b"#EXT-X-KEY:METHOD=NONE\n");
@@ -352,13 +382,7 @@ pub(crate) fn plan_hls_media_playlist(
     let playlist = LlMediaPlaylist::parse(text).map_err(|error| {
         ManifestError::Parse(format!("could not parse LL-HLS playlist: {error}"))
     })?;
-    build_plan(
-        manifest_url,
-        playlist,
-        body,
-        tag_flags.trailing_open_discontinuity,
-    )
-    .map(Some)
+    build_plan(manifest_url, playlist, tag_flags).map(Some)
 }
 
 /// Convert broadcast-hls's typed UTC timestamp to m3u8-rs's output date-time type.
@@ -396,7 +420,7 @@ struct ValidatedLlHlsPlaylist {
 fn validate_ll_hls_playlist(
     manifest_url: &str,
     playlist: &LlMediaPlaylist,
-    body: &[u8],
+    tag_flags: &LlHlsTagFlags,
 ) -> Result<ValidatedLlHlsPlaylist, ManifestError> {
     let base_url = parse_manifest_url(manifest_url)?;
     let source_target_duration = u64::from(playlist.target_duration);
@@ -503,7 +527,7 @@ fn validate_ll_hls_playlist(
         return Err(ManifestError::UnsupportedPlaylist);
     }
 
-    validate_playlist_tags(playlist, body)?;
+    validate_playlist_tags(playlist, tag_flags)?;
     if end_list && playlist.open_segment.is_some() {
         return Err(ManifestError::UnsupportedPlaylist);
     }
@@ -794,13 +818,12 @@ impl LlHlsPlanBuilder {
 fn build_plan(
     manifest_url: &str,
     playlist: LlMediaPlaylist,
-    body: &[u8],
-    open_segment_discontinuity: bool,
+    tag_flags: LlHlsTagFlags,
 ) -> Result<HlsPlan, ManifestError> {
-    let validated = validate_ll_hls_playlist(manifest_url, &playlist, body)?;
+    let validated = validate_ll_hls_playlist(manifest_url, &playlist, &tag_flags)?;
     let mut builder = LlHlsPlanBuilder::new(&validated);
     builder.append_closed_segments(&playlist)?;
-    builder.append_open_segment(&playlist, open_segment_discontinuity)?;
+    builder.append_open_segment(&playlist, tag_flags.trailing_open_discontinuity)?;
     builder.finish(&playlist, validated)
 }
 
@@ -909,34 +932,14 @@ fn low_latency_can_skip_until(playlist: &LlMediaPlaylist) -> Option<Duration> {
     Duration::try_from_secs_f64(seconds).ok()
 }
 
-/// Detect repeated PDT tags before the playlist parser collapses them into
-/// its single-value `program_date_time` fields.
-fn has_duplicate_program_date_time_tags(body: &[u8]) -> bool {
-    const PROGRAM_DATE_TIME: &[u8] = b"#EXT-X-PROGRAM-DATE-TIME:";
-    let mut pending_program_date_time = false;
-
-    for raw_line in body.split(|byte| *byte == 10) {
-        let line = raw_line.trim_ascii();
-        if line.starts_with(PROGRAM_DATE_TIME) {
-            if pending_program_date_time {
-                return true;
-            }
-            pending_program_date_time = true;
-        } else if !line.is_empty() && !line.starts_with(b"#") {
-            // A media-segment URI consumes the pending segment-scoped tags.
-            // PART tags carry no URI line of their own and remain in this scope.
-            pending_program_date_time = false;
-        }
-    }
-
-    false
-}
-
-fn validate_playlist_tags(playlist: &LlMediaPlaylist, body: &[u8]) -> Result<(), ManifestError> {
+fn validate_playlist_tags(
+    playlist: &LlMediaPlaylist,
+    tag_flags: &LlHlsTagFlags,
+) -> Result<(), ManifestError> {
     // The 0.9+ parser records tolerated defects instead of failing parse.
     // Native planning remains fail-closed for malformed PDT, truncated segment
     // records, and ambiguous date-range metadata.
-    if !playlist.diagnostics.is_empty() || has_duplicate_program_date_time_tags(body) {
+    if !playlist.diagnostics.is_empty() || tag_flags.duplicate_program_date_time {
         return Err(ManifestError::UnsupportedPlaylist);
     }
     if playlist

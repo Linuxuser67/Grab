@@ -93,6 +93,12 @@ const CLIENT_CONTEXT: &[u8] = b"grab-client\0";
 const HLS_INSPECTION_CONTEXT: &[u8] = b"grab-inspect-hls\0";
 const HANDOFF_CLOCK_SKEW_MS: u64 = 120_000;
 const MAX_RECENT_HANDOFF_NONCES: usize = 4096;
+/// Bound read-only inspection independently from real handoff replay state.
+/// At four tokens/second and a 24-token burst, the maximum 240-second nonce
+/// lifetime (including future clock skew) needs fewer than 1,000 slots.
+const MAX_RECENT_HLS_INSPECTION_NONCES: usize = 1024;
+const HLS_INSPECTION_RATE_PER_SECOND: f64 = 4.0;
+const HLS_INSPECTION_BURST: f64 = 24.0;
 /// Match the extension's four-worker HLS inspection batch while bounding
 /// authenticated callers that bypass the extension's client-side limit.
 const MAX_CONCURRENT_HLS_INSPECTIONS: usize = 4;
@@ -109,6 +115,29 @@ struct HandoffReplayCache {
 
 static HANDOFF_REPLAY_CACHE: LazyLock<Mutex<HandoffReplayCache>> =
     LazyLock::new(|| Mutex::new(HandoffReplayCache::default()));
+
+/// Read-only playlist inspection has its own replay cache. A page that causes
+/// many unique playlist lookups must never consume the nonce budget used by
+/// user-initiated /add handoffs.
+static HLS_INSPECTION_REPLAY_CACHE: LazyLock<Mutex<HandoffReplayCache>> =
+    LazyLock::new(|| Mutex::new(HandoffReplayCache::default()));
+
+struct HlsInspectionRateLimiter {
+    tokens: f64,
+    updated_at: Instant,
+}
+
+impl Default for HlsInspectionRateLimiter {
+    fn default() -> Self {
+        Self {
+            tokens: HLS_INSPECTION_BURST,
+            updated_at: Instant::now(),
+        }
+    }
+}
+
+static HLS_INSPECTION_RATE_LIMITER: LazyLock<Mutex<HlsInspectionRateLimiter>> =
+    LazyLock::new(|| Mutex::new(HlsInspectionRateLimiter::default()));
 
 fn unix_time_ms() -> Option<u64> {
     SystemTime::now()
@@ -146,6 +175,80 @@ fn reserve_handoff_nonce(timestamp_ms: Option<u64>, nonce: Option<&str>) -> Resu
         return Err(StatusCode::FORBIDDEN);
     }
     if cache.expires_at_ms.len() >= MAX_RECENT_HANDOFF_NONCES {
+        return Err(StatusCode::TOO_MANY_REQUESTS);
+    }
+    cache
+        .expires_at_ms
+        .insert(nonce, timestamp_ms.saturating_add(HANDOFF_CLOCK_SKEW_MS));
+    Ok(())
+}
+
+/// Consume one read-only inspection token. The bounded burst accommodates a
+/// normal playlist batch; sustained inspection work is limited to four
+/// requests per second, independent of the /add replay cache.
+fn reserve_hls_inspection_rate_token() -> Result<(), StatusCode> {
+    let now = Instant::now();
+    let mut limiter = match HLS_INSPECTION_RATE_LIMITER.lock() {
+        Ok(limiter) => limiter,
+        Err(poisoned) => {
+            tracing::error!("HLS inspection rate limiter mutex poisoned; resetting fail-closed");
+            let mut limiter = poisoned.into_inner();
+            *limiter = HlsInspectionRateLimiter {
+                tokens: 0.0,
+                updated_at: now,
+            };
+            HLS_INSPECTION_RATE_LIMITER.clear_poison();
+            limiter
+        }
+    };
+    let elapsed = now
+        .saturating_duration_since(limiter.updated_at)
+        .as_secs_f64();
+    limiter.tokens =
+        (limiter.tokens + elapsed * HLS_INSPECTION_RATE_PER_SECOND).min(HLS_INSPECTION_BURST);
+    limiter.updated_at = now;
+    if limiter.tokens < 1.0 {
+        return Err(StatusCode::TOO_MANY_REQUESTS);
+    }
+    limiter.tokens -= 1.0;
+    Ok(())
+}
+
+/// Reserve a replay nonce for read-only inspection without touching the
+/// authenticated handoff nonce cache.
+fn reserve_hls_inspection_nonce(
+    timestamp_ms: Option<u64>,
+    nonce: Option<&str>,
+) -> Result<(), StatusCode> {
+    let (Some(timestamp_ms), Some(nonce)) = (timestamp_ms, nonce) else {
+        return Err(StatusCode::FORBIDDEN);
+    };
+    if nonce.len() != 32 || !nonce.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        return Err(StatusCode::FORBIDDEN);
+    }
+    let now_ms = unix_time_ms().ok_or(StatusCode::FORBIDDEN)?;
+    if now_ms.abs_diff(timestamp_ms) > HANDOFF_CLOCK_SKEW_MS {
+        return Err(StatusCode::FORBIDDEN);
+    }
+
+    // Rate-limit before inserting into the replay cache. A 429 is retryable
+    // with the same signed body because no nonce is consumed.
+    reserve_hls_inspection_rate_token()?;
+    let nonce = nonce.to_ascii_lowercase();
+    let mut cache = match HLS_INSPECTION_REPLAY_CACHE.lock() {
+        Ok(cache) => cache,
+        Err(poisoned) => {
+            tracing::error!("HLS inspection replay cache mutex poisoned; recovering");
+            let cache = poisoned.into_inner();
+            HLS_INSPECTION_REPLAY_CACHE.clear_poison();
+            cache
+        }
+    };
+    cache.expires_at_ms.retain(|_, expiry| *expiry >= now_ms);
+    if cache.expires_at_ms.contains_key(&nonce) {
+        return Err(StatusCode::FORBIDDEN);
+    }
+    if cache.expires_at_ms.len() >= MAX_RECENT_HLS_INSPECTION_NONCES {
         return Err(StatusCode::TOO_MANY_REQUESTS);
     }
     cache
@@ -1728,7 +1831,9 @@ async fn handle_inspect_hls(
     let Ok(_inspection_slot) = HLS_INSPECTION_SLOTS.try_acquire() else {
         return StatusCode::TOO_MANY_REQUESTS.into_response();
     };
-    if let Err(status) = reserve_handoff_nonce(Some(request.timestamp_ms), Some(&request.nonce)) {
+    if let Err(status) =
+        reserve_hls_inspection_nonce(Some(request.timestamp_ms), Some(&request.nonce))
+    {
         return status.into_response();
     }
 
@@ -2249,8 +2354,45 @@ mod tests {
         );
     }
 
+    #[test]
+    fn hls_inspection_nonce_budget_is_separate_and_rate_limited() {
+        let _guard = exclusive();
+        let now = unix_time_ms().expect("system clock");
+        let first_inspection_nonce = format!("{:032x}", 1_u128);
+
+        for value in 1..=24_u128 {
+            let nonce = format!("{value:032x}");
+            reserve_hls_inspection_nonce(Some(now), Some(&nonce))
+                .expect("burst inspection token should be available");
+        }
+        assert_eq!(
+            reserve_hls_inspection_nonce(Some(now), Some("00000000000000000000000000000019")),
+            Err(StatusCode::TOO_MANY_REQUESTS),
+            "the next inspection is rejected without consuming its nonce"
+        );
+
+        assert!(
+            reserve_handoff_nonce(Some(now), Some(&first_inspection_nonce)).is_ok(),
+            "inspection nonces do not consume /add replay entries"
+        );
+        assert_eq!(
+            reserve_handoff_nonce(Some(now), Some(&first_inspection_nonce)),
+            Err(StatusCode::FORBIDDEN),
+            "the handoff cache still rejects a replay of its own nonce"
+        );
+        assert!(
+            HLS_INSPECTION_REPLAY_CACHE
+                .lock()
+                .expect("inspection replay cache")
+                .expires_at_ms
+                .len()
+                == 24
+        );
+    }
+
     #[tokio::test]
     async fn hls_inspection_rejects_the_download_hmac_context() {
+        let _guard = exclusive();
         let mut srv = start(4).await;
         let host = format!("127.0.0.1:{}", srv.port);
         let body = serde_json::json!({
@@ -2273,6 +2415,7 @@ mod tests {
 
     #[tokio::test]
     async fn hls_inspection_rejects_unknown_request_fields() {
+        let _guard = exclusive();
         let mut srv = start(4).await;
         let host = format!("127.0.0.1:{}", srv.port);
         let body = serde_json::json!({
@@ -2628,6 +2771,15 @@ mod tests {
     fn exclusive() -> std::sync::MutexGuard<'static, ()> {
         let guard = STORE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         purge_handoff_cookies();
+        if let Ok(mut cache) = HANDOFF_REPLAY_CACHE.lock() {
+            cache.expires_at_ms.clear();
+        }
+        if let Ok(mut cache) = HLS_INSPECTION_REPLAY_CACHE.lock() {
+            cache.expires_at_ms.clear();
+        }
+        if let Ok(mut limiter) = HLS_INSPECTION_RATE_LIMITER.lock() {
+            *limiter = HlsInspectionRateLimiter::default();
+        }
         guard
     }
 

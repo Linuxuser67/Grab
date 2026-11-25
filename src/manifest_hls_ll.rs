@@ -261,7 +261,7 @@ fn scan_ll_hls_tag_flags(body: &[u8]) -> LlHlsTagFlags {
     const DISCONTINUITY: &[u8] = b"#EXT-X-DISCONTINUITY";
     let mut flags = LlHlsTagFlags::default();
 
-    for raw_line in body.split(|byte| *byte == b'\n') {
+    for raw_line in body.split(|byte| *byte == 10) {
         let line = raw_line.strip_suffix(b"\r").unwrap_or(raw_line);
         flags.partial_segments |= raw_line.starts_with(b"#EXT-X-PART:");
         flags.delta_update |= raw_line.starts_with(b"#EXT-X-SKIP:");
@@ -355,6 +355,7 @@ pub(crate) fn plan_hls_media_playlist(
     build_plan(
         manifest_url,
         playlist,
+        body,
         tag_flags.trailing_open_discontinuity,
     )
     .map(Some)
@@ -395,6 +396,7 @@ struct ValidatedLlHlsPlaylist {
 fn validate_ll_hls_playlist(
     manifest_url: &str,
     playlist: &LlMediaPlaylist,
+    body: &[u8],
 ) -> Result<ValidatedLlHlsPlaylist, ManifestError> {
     let base_url = parse_manifest_url(manifest_url)?;
     let source_target_duration = u64::from(playlist.target_duration);
@@ -501,7 +503,7 @@ fn validate_ll_hls_playlist(
         return Err(ManifestError::UnsupportedPlaylist);
     }
 
-    validate_playlist_tags(playlist)?;
+    validate_playlist_tags(playlist, body)?;
     if end_list && playlist.open_segment.is_some() {
         return Err(ManifestError::UnsupportedPlaylist);
     }
@@ -792,9 +794,10 @@ impl LlHlsPlanBuilder {
 fn build_plan(
     manifest_url: &str,
     playlist: LlMediaPlaylist,
+    body: &[u8],
     open_segment_discontinuity: bool,
 ) -> Result<HlsPlan, ManifestError> {
-    let validated = validate_ll_hls_playlist(manifest_url, &playlist)?;
+    let validated = validate_ll_hls_playlist(manifest_url, &playlist, body)?;
     let mut builder = LlHlsPlanBuilder::new(&validated);
     builder.append_closed_segments(&playlist)?;
     builder.append_open_segment(&playlist, open_segment_discontinuity)?;
@@ -906,11 +909,34 @@ fn low_latency_can_skip_until(playlist: &LlMediaPlaylist) -> Option<Duration> {
     Duration::try_from_secs_f64(seconds).ok()
 }
 
-fn validate_playlist_tags(playlist: &LlMediaPlaylist) -> Result<(), ManifestError> {
-    // The 0.7+ parser records tolerated defects instead of failing parse.
+/// Detect repeated PDT tags before the playlist parser collapses them into
+/// its single-value `program_date_time` fields.
+fn has_duplicate_program_date_time_tags(body: &[u8]) -> bool {
+    const PROGRAM_DATE_TIME: &[u8] = b"#EXT-X-PROGRAM-DATE-TIME:";
+    let mut pending_program_date_time = false;
+
+    for raw_line in body.split(|byte| *byte == 10) {
+        let line = raw_line.trim_ascii();
+        if line.starts_with(PROGRAM_DATE_TIME) {
+            if pending_program_date_time {
+                return true;
+            }
+            pending_program_date_time = true;
+        } else if !line.is_empty() && !line.starts_with(b"#") {
+            // A media-segment URI consumes the pending segment-scoped tags.
+            // PART tags carry no URI line of their own and remain in this scope.
+            pending_program_date_time = false;
+        }
+    }
+
+    false
+}
+
+fn validate_playlist_tags(playlist: &LlMediaPlaylist, body: &[u8]) -> Result<(), ManifestError> {
+    // The 0.9+ parser records tolerated defects instead of failing parse.
     // Native planning remains fail-closed for malformed PDT, truncated segment
     // records, and ambiguous date-range metadata.
-    if !playlist.diagnostics.is_empty() {
+    if !playlist.diagnostics.is_empty() || has_duplicate_program_date_time_tags(body) {
         return Err(ManifestError::UnsupportedPlaylist);
     }
     if playlist
@@ -918,15 +944,6 @@ fn validate_playlist_tags(playlist: &LlMediaPlaylist) -> Result<(), ManifestErro
         .iter()
         .any(|tag| tag.starts_with("#EXT-X-PROGRAM-DATE-TIME:"))
     {
-        return Err(ManifestError::UnsupportedPlaylist);
-    }
-    if playlist.segments.iter().any(|segment| {
-        let mut tags = segment
-            .pre_tags
-            .iter()
-            .filter(|tag| tag.starts_with("#EXT-X-PROGRAM-DATE-TIME:"));
-        tags.next().is_some() && tags.next().is_some()
-    }) {
         return Err(ManifestError::UnsupportedPlaylist);
     }
     for tag in playlist.extra_tags.iter().chain(
@@ -1610,6 +1627,69 @@ mod tests {
         assert_eq!(local.segments.len(), 2);
         assert!(local.segments[0].program_date_time.is_some());
         assert!(local.segments[1].program_date_time.is_none());
+    }
+
+    #[test]
+    fn rejects_duplicate_program_date_time_tags_before_open_ll_hls_parts() {
+        let body = br#"#EXTM3U
+#EXT-X-TARGETDURATION:2
+#EXT-X-MEDIA-SEQUENCE:50
+#EXT-X-MAP:URI="init.mp4"
+#EXT-X-SERVER-CONTROL:CAN-BLOCK-RELOAD=NO,PART-HOLD-BACK=1.5
+#EXT-X-PART-INF:PART-TARGET=0.5
+#EXTINF:1.0,
+50.m4s
+#EXT-X-PROGRAM-DATE-TIME:2026-11-10T10:00:01.000Z
+#EXT-X-PROGRAM-DATE-TIME:2026-11-10T10:00:01.500Z
+#EXT-X-PART:DURATION=0.5,URI="51.0.m4s",INDEPENDENT=YES
+"#;
+        assert!(matches!(
+            plan_hls_media_playlist(BASE, body),
+            Err(ManifestError::UnsupportedPlaylist)
+        ));
+    }
+
+    #[test]
+    fn rejects_duplicate_program_date_time_tags_before_closed_segments() {
+        let body = br#"#EXTM3U
+#EXT-X-TARGETDURATION:2
+#EXT-X-MEDIA-SEQUENCE:50
+#EXT-X-SERVER-CONTROL:CAN-BLOCK-RELOAD=NO
+#EXT-X-PROGRAM-DATE-TIME:2026-11-10T10:00:00.000Z
+#EXT-X-PROGRAM-DATE-TIME:2026-11-10T10:00:01.000Z
+#EXTINF:1.0,
+50.ts
+"#;
+        assert!(matches!(
+            plan_hls_media_playlist(BASE, body),
+            Err(ManifestError::UnsupportedPlaylist)
+        ));
+    }
+
+    #[test]
+    fn accepts_program_date_time_tags_for_consecutive_segments() {
+        let body = br#"#EXTM3U
+#EXT-X-TARGETDURATION:2
+#EXT-X-MEDIA-SEQUENCE:50
+#EXT-X-SERVER-CONTROL:CAN-BLOCK-RELOAD=NO
+#EXT-X-PROGRAM-DATE-TIME:2026-11-10T10:00:00.000Z
+#EXTINF:1.0,
+50.ts
+#EXT-X-PROGRAM-DATE-TIME:2026-11-10T10:00:01.000Z
+#EXTINF:1.0,
+51.ts
+"#;
+        let plan = plan_hls_media_playlist(BASE, body)
+            .expect("one PDT tag per segment is valid")
+            .expect("LL-HLS detected");
+        assert!(
+            plan.local_playlist.segments[0].program_date_time.is_some(),
+            "the first segment keeps its PDT"
+        );
+        assert!(
+            plan.local_playlist.segments[1].program_date_time.is_some(),
+            "the second segment keeps its PDT"
+        );
     }
 
     #[test]

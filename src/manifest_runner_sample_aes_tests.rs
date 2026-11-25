@@ -4,7 +4,7 @@ use super::{
     MAX_SAMPLE_AES_SEGMENT_BYTES, ManifestRunError, read_sample_aes_resource,
     validate_iori_adts_pes, validate_iori_sample_aes_segment,
 };
-use mpeg2ts_iori::{
+use mpeg2ts::{
     es::{StreamId, StreamType},
     pes::PesHeader,
     ts::{

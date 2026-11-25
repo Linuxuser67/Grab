@@ -977,9 +977,9 @@ pub(crate) struct VideoStep {
     pub(crate) is_gallery: Rc<Cell<bool>>,
     /// The gallery card state (filter, items) when is_gallery is true.
     pub(crate) gallery_card: Rc<RefCell<Option<crate::gallery_card::GalleryCard>>>,
-    /// Prevent duplicate Queue All submissions while the authoritative file count is resolved.
+    /// Prevent duplicate Queue All submissions while destination selection and enqueue are pending.
     pub(crate) gallery_queue_in_flight: Cell<bool>,
-    /// Invalidates a count/enqueue continuation when the gallery preview is closed or replaced.
+    /// Invalidates an asynchronous Queue All enqueue when the gallery preview is closed or replaced.
     pub(crate) gallery_queue_generation: Cell<u64>,
     /// URL-row Select files button: opens the relevant collection picker
     /// and is visible only when a result can resolve to multiple files.
@@ -1142,7 +1142,7 @@ pub(crate) fn sync_entry_icon(v: &VideoStep) {
 }
 
 pub(crate) fn hide_video_step(v: &VideoStep) {
-    // Closing or replacing a gallery invalidates any count/enqueue continuation.
+    // Closing or replacing a gallery invalidates any pending Queue All enqueue.
     v.gallery_queue_generation
         .set(v.gallery_queue_generation.get().wrapping_add(1));
     v.gallery_queue_in_flight.set(false);
@@ -1685,9 +1685,9 @@ fn submit_probe(
     }
 }
 
-/// Queue a gallery without a second extraction pass. The bounded preview is
-/// intentionally not used as a progress denominator: the actual download
-/// discovers the complete filtered listing while it runs.
+/// Queue a gallery without a second extraction pass. Reuse an exact count
+/// only when the fast preview completed below its cap; capped previews remain
+/// indeterminate until the download completes cleanly.
 fn submit_gallery_all(
     manager: &Rc<DownloadManager>,
     dest: &Rc<RefCell<String>>,
@@ -3109,9 +3109,9 @@ fn wire_video_preview(step: Rc<VideoStep>) {
                 selection.replace(selected_key);
             });
     }
-    // Keep the selected filter in the gallery card. Queue All resolves the
-    // exact denominator when it is submitted; changing this toggle does not
-    // start a background count that could race that submission.
+    // Keep the selected filter in the gallery card. Queue All reuses the
+    // preview count only when the preview is complete; capped previews stay
+    // indeterminate. Changing this toggle never starts a background count.
     {
         let card_rc = step.gallery_card.clone();
         step.gallery_filter

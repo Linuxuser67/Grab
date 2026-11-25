@@ -4347,7 +4347,7 @@ async fn decrypt_hls_sample_aes_segments(
 /// iori-ssa's SAMPLE-AES parser. Use the same mpeg2ts release as iori-ssa so
 /// the guard and consumer cannot disagree about packet/PES reassembly.
 fn validate_iori_sample_aes_segment(bytes: &[u8]) -> Result<(), String> {
-    use mpeg2ts_iori::{
+    use mpeg2ts::{
         es::StreamType,
         ts::{ReadTsPacket, TsPacketReader, TsPayload},
     };

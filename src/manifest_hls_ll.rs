@@ -920,13 +920,21 @@ fn validate_playlist_tags(playlist: &LlMediaPlaylist) -> Result<(), ManifestErro
     {
         return Err(ManifestError::UnsupportedPlaylist);
     }
-    if playlist.segments.iter().any(|segment| {
-        let mut tags = segment
-            .pre_tags
+    let has_duplicate_program_date_time = |tags: &[String]| {
+        let mut tags = tags
             .iter()
             .filter(|tag| tag.starts_with("#EXT-X-PROGRAM-DATE-TIME:"));
         tags.next().is_some() && tags.next().is_some()
-    }) {
+    };
+    if playlist
+        .segments
+        .iter()
+        .any(|segment| has_duplicate_program_date_time(&segment.pre_tags))
+        || playlist
+            .open_segment
+            .as_ref()
+            .is_some_and(|segment| has_duplicate_program_date_time(&segment.pre_tags))
+    {
         return Err(ManifestError::UnsupportedPlaylist);
     }
     for tag in playlist.extra_tags.iter().chain(
@@ -1610,6 +1618,26 @@ mod tests {
         assert_eq!(local.segments.len(), 2);
         assert!(local.segments[0].program_date_time.is_some());
         assert!(local.segments[1].program_date_time.is_none());
+    }
+
+    #[test]
+    fn rejects_duplicate_program_date_time_tags_before_open_ll_hls_parts() {
+        let body = br#"#EXTM3U
+#EXT-X-TARGETDURATION:2
+#EXT-X-MEDIA-SEQUENCE:50
+#EXT-X-MAP:URI="init.mp4"
+#EXT-X-SERVER-CONTROL:CAN-BLOCK-RELOAD=NO,PART-HOLD-BACK=1.5
+#EXT-X-PART-INF:PART-TARGET=0.5
+#EXTINF:1.0,
+50.m4s
+#EXT-X-PROGRAM-DATE-TIME:2026-11-10T10:00:01.000Z
+#EXT-X-PROGRAM-DATE-TIME:2026-11-10T10:00:01.500Z
+#EXT-X-PART:DURATION=0.5,URI="51.0.m4s",INDEPENDENT=YES
+"#;
+        assert!(matches!(
+            plan_hls_media_playlist(BASE, body),
+            Err(ManifestError::UnsupportedPlaylist)
+        ));
     }
 
     #[test]

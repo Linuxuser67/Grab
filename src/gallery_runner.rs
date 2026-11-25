@@ -21,8 +21,8 @@ pub struct GalleryResult {
     pub files_completed: u32,
     /// Files skipped (already existed).
     pub skipped: u32,
-    /// gallery-dl exit code, if it exited non-zero after partial success.
-    /// `None` means clean success.
+    /// Non-zero gallery-dl exit code after partial success; signal termination
+    /// is represented by -1. `None` means clean success.
     pub exit_code: Option<i32>,
 }
 
@@ -73,6 +73,16 @@ mod done_count_tests {
             exit_code: Some(4),
         };
         assert_eq!(partial.exact_file_count(), None);
+    }
+
+    #[test]
+    fn signal_terminated_run_does_not_provide_an_exact_gallery_total() {
+        let signal_terminated = super::GalleryResult {
+            files_completed: 7,
+            skipped: 3,
+            exit_code: Some(-1),
+        };
+        assert_eq!(signal_terminated.exact_file_count(), None);
     }
 }
 
@@ -349,7 +359,7 @@ pub async fn run_gallery_download_with_proxy(
             return Ok(GalleryResult {
                 files_completed: progress.files_completed,
                 skipped: progress.files_skipped,
-                exit_code: code,
+                exit_code: Some(code.unwrap_or(-1)),
             });
         }
         // Total failure: include the full stderr tail and a mapped message.

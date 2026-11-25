@@ -360,6 +360,22 @@ mod ll_hls_tag_flag_tests {
         assert!(encrypted.encrypted_media_key);
         assert!(!unencrypted.encrypted_media_key);
     }
+
+    #[test]
+    fn indented_key_tag_is_still_detected_as_encrypted() {
+        let flags = scan_ll_hls_tag_flags(b"  #EXT-X-KEY:METHOD=AES-128,URI=key.bin\n");
+
+        assert!(flags.encrypted_media_key);
+    }
+
+    #[test]
+    fn trailing_whitespace_after_discontinuity_is_accepted() {
+        let flags = scan_ll_hls_tag_flags(
+            b"#EXTINF:1,\n#EXT-X-DISCONTINUITY   \n#EXT-X-PART:URI=part.m4s,DURATION=0.2\n",
+        );
+
+        assert!(flags.trailing_open_discontinuity);
+    }
 }
 
 pub(crate) fn plan_hls_media_playlist(

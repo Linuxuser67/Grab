@@ -201,7 +201,9 @@ fn reserve_hls_inspection_rate_token() -> Result<(), StatusCode> {
             limiter
         }
     };
-    let elapsed = now.saturating_duration_since(limiter.updated_at).as_secs_f64();
+    let elapsed = now
+        .saturating_duration_since(limiter.updated_at)
+        .as_secs_f64();
     limiter.tokens =
         (limiter.tokens + elapsed * HLS_INSPECTION_RATE_PER_SECOND).min(HLS_INSPECTION_BURST);
     limiter.updated_at = now;
@@ -2383,7 +2385,8 @@ mod tests {
                 .lock()
                 .expect("inspection replay cache")
                 .expires_at_ms
-                .len() == 24
+                .len()
+                == 24
         );
     }
 

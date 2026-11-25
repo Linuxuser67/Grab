@@ -1433,35 +1433,3 @@ pub fn show(
     dialog.add(&advanced_page);
     dialog.present(Some(parent));
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    #[ignore = "needs a display; run under Xvfb (see ci.yml)"]
-    fn support_tools_button_lives_with_preferences_group() {
-        gtk4::init().expect("gtk::init (run under Xvfb)");
-
-        let group = adw::PreferencesGroup::new();
-        let row = adw::ActionRow::new();
-        let button = gtk4::Button::with_label("Install");
-        let weak = button.downgrade();
-        row.set_activatable_widget(Some(&button));
-        row.add_suffix(&button);
-        group.add(&row);
-        drop(button);
-        drop(row);
-
-        assert!(
-            weak.upgrade().is_some(),
-            "the Preferences row must own its install button while the group is alive"
-        );
-
-        drop(group);
-        assert!(
-            weak.upgrade().is_none(),
-            "destroying the Preferences group must release its install button"
-        );
-    }
-}

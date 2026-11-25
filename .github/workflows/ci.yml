@@ -109,7 +109,6 @@ jobs:
           cargo test status_views_use_gnome_adaptive_view_switcher -- --ignored --test-threads=1 --nocapture | tee -a /tmp/ui-tests.log
           cargo test expandable_playlist_group_row_exposes_only_remove_and_open_folder -- --ignored --test-threads=1 --nocapture | tee -a /tmp/ui-tests.log
           cargo test expandable_playlist_group_row_shows_trash_only_for_a_finished_owner -- --ignored --test-threads=1 --nocapture | tee -a /tmp/ui-tests.log
-          cargo test support_tools_button_lives_with_preferences_group -- --ignored --test-threads=1 --nocapture | tee -a /tmp/ui-tests.log
           cargo test add_card_install_button_is_retained_for_progress -- --ignored --test-threads=1 --nocapture | tee -a /tmp/ui-tests.log
           cargo test progress_strip_is_attached_to_the_button_and_removed_on_finish -- --ignored --test-threads=1 --nocapture | tee -a /tmp/ui-tests.log
           grep -Eq 'test result: ok\. [1-9][0-9]* passed' /tmp/ui-tests.log

@@ -414,8 +414,15 @@ async fn run_video_playlist_download_inner(
         },
     )?;
     let guarded_proxy = crate::video_spawn::guard_untrusted_args(&argv)?;
+    // Keep the page URL through policy validation, then omit it from the child:
+    // yt-dlp loads the playlist exclusively from --load-info-json and warns
+    // that positional URLs are ignored when both are supplied.
+    let separator = argv
+        .iter()
+        .position(|argument| argument == "--")
+        .ok_or_else(|| VideoError::fetch("yt-dlp arguments are missing the URL separator"))?;
     let mut cmd = ytdlp_command(&libs.youtube).await;
-    cmd.args(&argv);
+    cmd.args(&argv[..=separator]);
     apply_proxy_env(&mut cmd, job.proxy.as_ref());
     crate::video_spawn::apply_guarded_proxy_env(&mut cmd, guarded_proxy.as_deref());
     let (mut child, stdout, stderr) = spawn_piped_ytdlp(cmd)?;

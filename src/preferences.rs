@@ -1433,4 +1433,3 @@ pub fn show(
     dialog.add(&advanced_page);
     dialog.present(Some(parent));
 }
-

@@ -581,7 +581,7 @@ mod tests {
             cli_url: "http://127.0.0.1:8080".into(),
             no_proxy_env: "localhost,127.0.0.1,::1".into(),
         };
-        let a = download_argv(
+        let argv = download_argv(
             &tool(),
             "https://example.com/",
             Path::new("/tmp/dest"),
@@ -595,9 +595,9 @@ mod tests {
                 event_nonce: "test-run",
             },
         );
-        let end = a.iter().position(|x| x == "--").unwrap();
-        assert_eq!(a[end - 2], "--proxy");
-        assert_eq!(a[end - 1], "http://127.0.0.1:8080");
+        let end = argv.iter().position(|x| x == "--").unwrap();
+        assert_eq!(argv[end - 2], "--proxy");
+        assert_eq!(argv[end - 1], "http://127.0.0.1:8080");
     }
 
     #[test]
@@ -747,6 +747,5 @@ mod tests {
         assert!(instagram_throttle_args("https://example.com/gallery", true).is_empty());
         assert!(instagram_throttle_args("https://example.com/gallery", false).is_empty());
     }
-
 
 }

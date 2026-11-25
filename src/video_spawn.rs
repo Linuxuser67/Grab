@@ -6,7 +6,7 @@ use crate::video_probe::{
     page_host, parse_playlist_json, parse_single_video, pick_playlist_entry,
     playlist_resolve_error, retarget_story_items, sanitize_video_json,
 };
-use crate::video_progress::{last_log_line, trace_format_lines};
+use crate::video_progress::{last_error_line, last_log_line, trace_format_lines};
 use crate::video_tools::{VideoError, ensure_ytdlp_version};
 use crate::video_types::{FetchedVideo, ProbeResult, VideoInfo};
 use gettextrs::gettext;
@@ -195,7 +195,19 @@ pub(crate) async fn fetch_raw_dump_json(
         }
         Err(_) => {
             reap_child(&mut child, &mut group).await;
-            return Err(VideoError::retryable_fetch(gettext("the lookup timed out")));
+            let stderr = join_drain(err_task)
+                .await
+                .and_then(|result| result.ok())
+                .unwrap_or_default();
+            crate::backend_debug::echo_stderr(&stderr);
+            let diagnostic = last_error_line(&String::from_utf8_lossy(&stderr), "");
+            let detail = if diagnostic.is_empty() {
+                gettext("the lookup timed out")
+            } else {
+                format!("{}: {diagnostic}", gettext("the lookup timed out"))
+            };
+            tracing::warn!(error = %detail, "yt-dlp metadata lookup timed out");
+            return Err(VideoError::retryable_fetch(detail));
         }
     };
     // Drains join with a grace period (an orphaned grandchild holding the pipe would stall a bare await); only the ceiling gets the size message.
@@ -1360,4 +1372,37 @@ mod ytdlp_retry_classification_tests {
             );
         }
     }
+}
+
+#[cfg(unix)]
+#[test]
+fn raw_dump_timeout_preserves_the_last_ytdlp_error_line() {
+    let root = tempfile::tempdir().expect("create test directory");
+    let youtube_bin = root.path().join("fake-ytdlp-timeout");
+    std::fs::write(
+        &youtube_bin,
+        "#!/bin/sh\nprintf 'ERROR: synthetic extractor timeout detail\\n' >&2\nsleep 30\n",
+    )
+    .expect("write fake yt-dlp");
+    use std::os::unix::fs::PermissionsExt as _;
+    std::fs::set_permissions(&youtube_bin, std::fs::Permissions::from_mode(0o755))
+        .expect("make fake yt-dlp executable");
+
+    let result = crate::runtime::tokio_rt().block_on(fetch_raw_dump_json(
+        &youtube_bin,
+        "https://example.invalid/playlist",
+        RawDumpOptions {
+            cookies_browser: "none",
+            timeout: Duration::from_millis(50),
+            fetch_proxy: None,
+            flat_playlist: false,
+            identity_args: None,
+            referer: None,
+        },
+    ));
+    let error = result.expect_err("the fake extractor must time out");
+    assert!(
+        error.to_string().contains("ERROR: synthetic extractor timeout detail"),
+        "timeout errors must retain yt-dlp stderr, got: {error}"
+    );
 }

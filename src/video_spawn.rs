@@ -1392,10 +1392,7 @@ Traceback (most recent call last):
         ];
 
         for (stderr, expected_detail, expected_retryable) in cases {
-            let detail = crate::video_progress::last_error_line(
-                stderr,
-                "yt-dlp reported failure",
-            );
+            let detail = crate::video_progress::last_error_line(stderr, "yt-dlp reported failure");
             assert_eq!(detail, expected_detail);
             assert_eq!(
                 ytdlp_failure_is_retryable(&detail),

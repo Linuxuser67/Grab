@@ -465,8 +465,8 @@ mod tests {
         assert!(panic_button.is_sensitive());
         assert!(!panic_button.has_css_class(PROGRESS_CLASS));
         assert_eq!(panic_button.label().as_deref(), Some("Install"));
-        let after_panic = OperationGuard::acquire(&panic_button)
-            .expect("unwinding must release RUNNING");
+        let after_panic =
+            OperationGuard::acquire(&panic_button).expect("unwinding must release RUNNING");
         drop(after_panic);
 
         let install_button = gtk4::Button::with_label("Install");

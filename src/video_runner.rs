@@ -297,12 +297,15 @@ async fn run_video_playlist_download_inner(
         },
     )
     .await?;
-    let mut current_playlist =
-        crate::video_probe::parse_playlist_json(&playlist_json, &job.page_url).ok_or_else(|| {
-            VideoError::fetch(
-                "the collection now resolves to a single video; add it again to refresh the queue",
-            )
-        })?;
+    let mut current_playlist = crate::video_probe::parse_playlist_json(
+        &playlist_json,
+        &job.page_url,
+    )
+    .ok_or_else(|| {
+        VideoError::fetch(
+            "the collection now resolves to a single video; add it again to refresh the queue",
+        )
+    })?;
     crate::video_probe::retarget_story_items(&job.page_url, &mut current_playlist);
 
     // Refresh playlist positions by stable extractor ID. Never trust the old
@@ -395,8 +398,7 @@ async fn run_video_playlist_download_inner(
     let event_marker = format!("@GRAB:{event_nonce}:");
     let playlist_info_path = info_json_path(job.item_id);
     let _info_guard = InfoJsonGuard::new(Some(playlist_info_path.clone()));
-    let playlist_info_json =
-        serde_json::to_vec(&playlist_json).map_err(VideoError::staging)?;
+    let playlist_info_json = serde_json::to_vec(&playlist_json).map_err(VideoError::staging)?;
     write_private(&playlist_info_path, &playlist_info_json)
         .await
         .map_err(VideoError::staging)?;

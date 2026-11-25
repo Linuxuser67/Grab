@@ -244,8 +244,8 @@ fn report_failure(
 
 /// Install all tools when no filter is provided, or only selected tool names.
 ///
-/// The button is owned by its GTK parent; this function clones the button into
-/// the main-context task, so callers do not need a separate progress controller.
+/// The button is owned by its GTK parent; the operation guard holds only a
+/// weak reference so closing Preferences does not retain the widget.
 /// The stage callback updates the row subtitle, the error callback receives
 /// completed tools before a failure, and the success callback receives all
 /// completed tools.

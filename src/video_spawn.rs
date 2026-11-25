@@ -1397,14 +1397,12 @@ mod raw_dump_argv_tests {
         let opts = options(true, true, &identity);
         let args = raw_dump_argv("https://music.youtube.com/playlist?list=PL123", &opts);
 
-        assert!(args.windows(2).any(|pair| {
-            pair[0] == "--flat-playlist" && pair[1] == "--no-clean-info"
-        }));
-        assert!(args.iter().any(|argument| argument == "--dump-single-json"));
-        assert_eq!(
-            args.iter().filter(|argument| *argument == "--").count(),
-            1
+        assert!(
+            args.windows(2)
+                .any(|pair| { pair[0] == "--flat-playlist" && pair[1] == "--no-clean-info" })
         );
+        assert!(args.iter().any(|argument| argument == "--dump-single-json"));
+        assert_eq!(args.iter().filter(|argument| *argument == "--").count(), 1);
         assert_eq!(
             args.last().map(String::as_str),
             Some("https://music.youtube.com/playlist?list=PL123")

@@ -53,14 +53,14 @@ thread_local! {
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum SupportTool {
+pub(crate) enum SupportTool {
     YtDlp,
     GalleryDl,
     Deno,
 }
 
 impl SupportTool {
-    fn from_id(id: &str) -> Option<Self> {
+    pub(crate) fn from_id(id: &str) -> Option<Self> {
         if id.eq_ignore_ascii_case("yt-dlp") {
             Some(Self::YtDlp)
         } else if id.eq_ignore_ascii_case("gallery-dl") {
@@ -71,6 +71,21 @@ impl SupportTool {
             None
         }
     }
+}
+
+/// Parse persisted support-tool IDs at the Preferences boundary. Unknown IDs
+/// are ignored with a warning; the installer itself receives only typed tools.
+pub(crate) fn parse_tool_ids(names: impl IntoIterator<Item = String>) -> Vec<SupportTool> {
+    names
+        .into_iter()
+        .filter_map(|name| match SupportTool::from_id(&name) {
+            Some(tool) => Some(tool),
+            None => {
+                tracing::warn!(tool = %name, "ignoring unknown support-tool selection");
+                None
+            }
+        })
+        .collect()
 }
 
 fn includes_tool(selected: Option<&[SupportTool]>, tool: SupportTool) -> bool {
@@ -242,20 +257,21 @@ fn report_failure(
     on_error(error, completed);
 }
 
-/// Install all tools when no filter is provided, or only selected tool names.
+/// Install all tools when no filter is provided, or only typed selected tools.
+/// An explicit empty selection performs no installs.
 ///
 /// The button is owned by its GTK parent; the operation guard holds only a
 /// weak reference so closing Preferences does not retain the widget.
 /// The stage callback updates the row subtitle, the error callback receives
 /// completed tools before a failure, and the success callback receives all
 /// completed tools.
-pub fn run(
+pub(crate) fn run(
     button: &gtk4::Button,
     operation: ToolOperation,
     on_stage: impl Fn(String) + 'static,
     on_error: impl Fn(String, Vec<InstalledTool>) + 'static,
     on_success: impl Fn(Vec<InstalledTool>) + 'static,
-    tools: Option<Vec<String>>,
+    tools: Option<Vec<SupportTool>>,
 ) {
     let Some(operation_guard) = OperationGuard::acquire(button) else {
         note_busy(button);
@@ -264,15 +280,9 @@ pub fn run(
     ensure_progress_css();
     begin(button, operation);
 
-    let selected_tools = tools.map(|names| {
-        names
-            .iter()
-            .filter_map(|name| SupportTool::from_id(name))
-            .collect::<Vec<_>>()
-    });
-    let do_yt = includes_tool(selected_tools.as_deref(), SupportTool::YtDlp);
-    let do_gdl = includes_tool(selected_tools.as_deref(), SupportTool::GalleryDl);
-    let do_deno = includes_tool(selected_tools.as_deref(), SupportTool::Deno);
+    let do_yt = includes_tool(tools.as_deref(), SupportTool::YtDlp);
+    let do_gdl = includes_tool(tools.as_deref(), SupportTool::GalleryDl);
+    let do_deno = includes_tool(tools.as_deref(), SupportTool::Deno);
 
     glib::spawn_future_local(async move {
         let mut completed = Vec::with_capacity(3);
@@ -377,6 +387,18 @@ mod tests {
         );
         assert_eq!(SupportTool::from_id("Deno"), Some(SupportTool::Deno));
         assert_eq!(SupportTool::from_id("unknown"), None);
+    }
+
+    #[test]
+    fn typed_selection_discards_unknown_ids_at_the_preferences_boundary() {
+        assert_eq!(
+            parse_tool_ids(vec![
+                "yt-dlp".to_string(),
+                "unknown".to_string(),
+                "deno".to_string(),
+            ]),
+            vec![SupportTool::YtDlp, SupportTool::Deno]
+        );
     }
 
     #[test]

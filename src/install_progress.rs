@@ -52,6 +52,67 @@ thread_local! {
         const { RefCell::new(None) };
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum SupportTool {
+    YtDlp,
+    GalleryDl,
+    Deno,
+}
+
+impl SupportTool {
+    fn from_id(id: &str) -> Option<Self> {
+        if id.eq_ignore_ascii_case("yt-dlp") {
+            Some(Self::YtDlp)
+        } else if id.eq_ignore_ascii_case("gallery-dl") {
+            Some(Self::GalleryDl)
+        } else if id.eq_ignore_ascii_case("deno") {
+            Some(Self::Deno)
+        } else {
+            None
+        }
+    }
+}
+
+fn includes_tool(selected: Option<&[SupportTool]>, tool: SupportTool) -> bool {
+    selected.is_none_or(|selected| selected.contains(&tool))
+}
+
+/// Own one support-tool operation. Dropping it restores the button and clears
+/// the process-wide guard, including when the async operation is cancelled or panics.
+struct OperationGuard {
+    button: gtk4::glib::WeakRef<gtk4::Button>,
+    restore_label: String,
+}
+
+impl OperationGuard {
+    fn acquire(button: &gtk4::Button) -> Option<Self> {
+        let restore_label = button
+            .label()
+            .map(|label| label.to_string())
+            .unwrap_or_default();
+        let button = button.downgrade();
+        RUNNING.with(|running| {
+            if running.replace(true) {
+                None
+            } else {
+                Some(Self {
+                    button,
+                    restore_label,
+                })
+            }
+        })
+    }
+}
+
+impl Drop for OperationGuard {
+    fn drop(&mut self) {
+        RUNNING.with(|running| running.set(false));
+        if let Some(button) = self.button.upgrade() {
+            finish(&button, &self.restore_label);
+        }
+    }
+}
+
 /// Whether this operation installs missing tools or updates existing ones.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum ToolOperation {
@@ -138,18 +199,13 @@ fn ensure_progress_css() {
     });
 }
 
-fn begin(button: &gtk4::Button, operation: ToolOperation) -> String {
-    let restore_label = button
-        .label()
-        .map(|label| label.to_string())
-        .unwrap_or_default();
+fn begin(button: &gtk4::Button, operation: ToolOperation) {
     button.set_label(&gettext(match operation {
         ToolOperation::Install => "Installing…",
         ToolOperation::Update => "Updating…",
     }));
     button.set_sensitive(false);
     button.add_css_class(PROGRESS_CLASS);
-    restore_label
 }
 
 fn finish(button: &gtk4::Button, restore_label: &str) {
@@ -158,23 +214,40 @@ fn finish(button: &gtk4::Button, restore_label: &str) {
     button.set_sensitive(true);
 }
 
-/// Briefly explain that another support-tool operation is already active.
+/// Briefly explain that another support-tool operation is already active
+/// without mutating the label captured by a later install attempt.
 fn note_busy(button: &gtk4::Button) {
-    let previous_label = button
-        .label()
-        .map(|label| label.to_string())
-        .unwrap_or_default();
-    button.set_label(&gettext("Another install is in progress…"));
+    let previous_tooltip = button
+        .tooltip_text()
+        .map(|tooltip| tooltip.to_string());
+    let busy_tooltip = gettext("Another install is in progress…");
+    button.set_tooltip_text(Some(&busy_tooltip));
 
     let button = button.downgrade();
     glib::timeout_add_local_once(Duration::from_secs(3), move || {
         if let Some(button) = button.upgrade()
-            && button.label().as_deref()
-                == Some(gettext("Another install is in progress…").as_str())
+            && button.tooltip_text().as_deref() == Some(busy_tooltip.as_str())
         {
-            button.set_label(&previous_label);
+            button.set_tooltip_text(previous_tooltip.as_deref());
         }
     });
+}
+
+/// Install all tools when no filter is provided, or only selected tool names.
+///
+/// The button is owned by its GTK parent; this function clones the button into
+/// the main-context task, so callers do not need a separate progress controller.
+/// The stage callback updates the row subtitle, the error callback receives
+/// completed tools before a failure, and the success callback receives all
+/// completed tools.
+fn report_failure(
+    operation: OperationGuard,
+    on_error: &impl Fn(String, Vec<InstalledTool>),
+    error: String,
+    completed: Vec<InstalledTool>,
+) {
+    drop(operation);
+    on_error(error, completed);
 }
 
 /// Install all tools when no filter is provided, or only selected tool names.
@@ -192,25 +265,22 @@ pub fn run(
     on_success: impl Fn(Vec<InstalledTool>) + 'static,
     tools: Option<Vec<String>>,
 ) {
-    if RUNNING.with(Cell::get) {
+    let Some(operation_guard) = OperationGuard::acquire(button) else {
         note_busy(button);
         return;
-    }
-    ensure_progress_css();
-    RUNNING.with(|running| running.set(true));
-
-    let restore_label = begin(button, operation);
-    let button = button.clone();
-
-    let include = |name: &str| {
-        tools
-            .as_ref()
-            .map(|selected| selected.iter().any(|item| item.eq_ignore_ascii_case(name)))
-            .unwrap_or(true)
     };
-    let do_yt = include("yt-dlp");
-    let do_gdl = include("gallery-dl");
-    let do_deno = include("deno");
+    ensure_progress_css();
+    begin(button, operation);
+
+    let selected_tools = tools.map(|names| {
+        names
+            .iter()
+            .filter_map(|name| SupportTool::from_id(name))
+            .collect::<Vec<_>>()
+    });
+    let do_yt = includes_tool(selected_tools.as_deref(), SupportTool::YtDlp);
+    let do_gdl = includes_tool(selected_tools.as_deref(), SupportTool::GalleryDl);
+    let do_deno = includes_tool(selected_tools.as_deref(), SupportTool::Deno);
 
     glib::spawn_future_local(async move {
         let mut completed = Vec::with_capacity(3);
@@ -220,9 +290,7 @@ pub fn run(
             let path = match crate::video::install_ytdlp().await {
                 Ok(path) => path,
                 Err(error) => {
-                    finish(&button, &restore_label);
-                    RUNNING.with(|running| running.set(false));
-                    on_error(error.to_string(), completed);
+                    report_failure(operation_guard, &on_error, error.to_string(), completed);
                     return;
                 }
             };
@@ -243,9 +311,7 @@ pub fn run(
             {
                 Ok(path) => path,
                 Err(error) => {
-                    finish(&button, &restore_label);
-                    RUNNING.with(|running| running.set(false));
-                    on_error(error.to_string(), completed);
+                    report_failure(operation_guard, &on_error, error.to_string(), completed);
                     return;
                 }
             };
@@ -270,9 +336,7 @@ pub fn run(
             let path = match crate::video::install_deno().await {
                 Ok(path) => path,
                 Err(error) => {
-                    finish(&button, &restore_label);
-                    RUNNING.with(|running| running.set(false));
-                    on_error(error.to_string(), completed);
+                    report_failure(operation_guard, &on_error, error.to_string(), completed);
                     return;
                 }
             };
@@ -283,8 +347,7 @@ pub fn run(
             });
         }
 
-        finish(&button, &restore_label);
-        RUNNING.with(|running| running.set(false));
+        drop(operation_guard);
         on_success(completed);
     });
 }
@@ -311,6 +374,25 @@ mod tests {
             version: None,
         };
         assert_eq!(tool.display_label(), "gallery-dl");
+    }
+
+    #[test]
+    fn support_tool_ids_are_parsed_into_known_variants() {
+        assert_eq!(SupportTool::from_id("yt-dlp"), Some(SupportTool::YtDlp));
+        assert_eq!(SupportTool::from_id("GALLERY-DL"), Some(SupportTool::GalleryDl));
+        assert_eq!(SupportTool::from_id("Deno"), Some(SupportTool::Deno));
+        assert_eq!(SupportTool::from_id("unknown"), None);
+    }
+
+    #[test]
+    fn support_tool_filter_includes_all_by_default_and_only_selected_tools() {
+        assert!(includes_tool(None, SupportTool::YtDlp));
+        assert!(includes_tool(None, SupportTool::GalleryDl));
+        let selected = [SupportTool::Deno];
+        assert!(!includes_tool(Some(&selected), SupportTool::YtDlp));
+        assert!(!includes_tool(Some(&selected), SupportTool::GalleryDl));
+        assert!(includes_tool(Some(&selected), SupportTool::Deno));
+        assert!(!includes_tool(Some(&[]), SupportTool::Deno));
     }
 
     #[test]
@@ -358,7 +440,9 @@ mod tests {
         });
         assert!(!progress_button.has_css_class(PROGRESS_CLASS));
 
-        let restore_label = begin(&progress_button, ToolOperation::Update);
+        let operation = OperationGuard::acquire(&progress_button)
+            .expect("the first support-tool operation should acquire the guard");
+        begin(&progress_button, ToolOperation::Update);
         assert!(progress_button.has_css_class(PROGRESS_CLASS));
         assert!(!progress_button.is_sensitive());
         assert_eq!(
@@ -366,18 +450,32 @@ mod tests {
             Some(gettext("Updating…").as_str())
         );
 
-        finish(&progress_button, &restore_label);
+        drop(operation);
         assert!(!progress_button.has_css_class(PROGRESS_CLASS));
         assert!(progress_button.is_sensitive());
         assert_eq!(progress_button.label().as_deref(), Some("Install"));
+        let next_operation = OperationGuard::acquire(&progress_button)
+            .expect("dropping the previous operation must release RUNNING");
+        drop(next_operation);
 
         let install_button = gtk4::Button::with_label("Install");
-        let restore_label = begin(&install_button, ToolOperation::Install);
+        let operation = OperationGuard::acquire(&install_button).expect("operation guard");
+        begin(&install_button, ToolOperation::Install);
         assert_eq!(
             install_button.label().as_deref(),
             Some(gettext("Installing…").as_str())
         );
-        finish(&install_button, &restore_label);
+        drop(operation);
         assert_eq!(install_button.label().as_deref(), Some("Install"));
+
+        let busy_button = gtk4::Button::with_label("Install");
+        busy_button.set_tooltip_text(Some("Existing help"));
+        let previous_label = busy_button.label();
+        note_busy(&busy_button);
+        assert_eq!(busy_button.label(), previous_label);
+        assert_eq!(
+            busy_button.tooltip_text().as_deref(),
+            Some(gettext("Another install is in progress…").as_str())
+        );
     }
 }

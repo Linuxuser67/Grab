@@ -58,6 +58,16 @@
     </screenshot>
   </screenshots>
   <releases>
+    <release version="6.6.1" date="2026-11-25">
+      <description>
+        <ul>
+          <li>Playlists: collection downloads reuse the loaded flat playlist snapshot so positions stay consistent.</li>
+          <li>Downloads: preserve yt-dlp diagnostics when a metadata lookup times out and unify timeout messages.</li>
+          <li>Extension: isolate HLS inspection replay limits so bursts cannot share a budget across requests.</li>
+          <li>Tests: broaden coverage for playlist child arguments and timeout diagnostics.</li>
+        </ul>
+      </description>
+    </release>
     <release version="6.6.0" date="2026-11-25">
       <description>
         <ul>

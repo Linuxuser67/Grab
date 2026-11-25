@@ -842,6 +842,23 @@ fn collection_progress_pulse_tick(owner: &DownloadItem) -> PulseTick {
     }
 }
 
+/// Start a collection pulse only when no timer already owns the progress row.
+fn activate_collection_pulse(active: &Cell<bool>) -> bool {
+    !active.replace(true)
+}
+
+/// Release the timer's deduplication flag whenever the owner cannot pulse.
+/// Idle is recoverable: the next update can create a fresh timer on retry.
+fn collection_pulse_timer_control(tick: PulseTick, active: &Cell<bool>) -> glib::ControlFlow {
+    match tick {
+        PulseTick::Pulse => glib::ControlFlow::Continue,
+        PulseTick::Idle | PulseTick::Stop => {
+            active.set(false);
+            glib::ControlFlow::Break
+        }
+    }
+}
+
 fn group_summary(items: &[DownloadItem]) -> String {
     if items.is_empty() {
         return String::new();
@@ -1055,7 +1072,7 @@ pub(crate) fn build_download_group_row(
 
 impl DownloadGroupRow {
     fn start_indeterminate_pulse(&self, owner: &DownloadItem) {
-        if self.progress_pulse_active.replace(true) {
+        if !activate_collection_pulse(&self.progress_pulse_active) {
             return;
         }
 
@@ -1068,17 +1085,11 @@ impl DownloadGroupRow {
                 return glib::ControlFlow::Break;
             };
 
-            match collection_progress_pulse_tick(&owner) {
-                PulseTick::Pulse => {
-                    progress.pulse();
-                    glib::ControlFlow::Continue
-                }
-                PulseTick::Idle => glib::ControlFlow::Continue,
-                PulseTick::Stop => {
-                    pulse_active.set(false);
-                    glib::ControlFlow::Break
-                }
+            let tick = collection_progress_pulse_tick(&owner);
+            if tick == PulseTick::Pulse {
+                progress.pulse();
             }
+            collection_pulse_timer_control(tick, &pulse_active)
         });
     }
 
@@ -1896,6 +1907,32 @@ mod group_row_tests {
 
         owner.set_progress(1.5);
         assert_eq!(collection_progress_fraction(&owner), Some(1.0));
+    }
+
+    #[test]
+    fn idle_collection_pulse_releases_timer_guard_and_allows_restart() {
+        let active = Cell::new(false);
+        assert!(activate_collection_pulse(&active));
+        assert!(!activate_collection_pulse(&active));
+
+        assert_eq!(
+            collection_pulse_timer_control(PulseTick::Idle, &active),
+            glib::ControlFlow::Break
+        );
+        assert!(!active.get());
+
+        assert!(activate_collection_pulse(&active));
+        assert_eq!(
+            collection_pulse_timer_control(PulseTick::Pulse, &active),
+            glib::ControlFlow::Continue
+        );
+        assert!(active.get());
+
+        assert_eq!(
+            collection_pulse_timer_control(PulseTick::Stop, &active),
+            glib::ControlFlow::Break
+        );
+        assert!(!active.get());
     }
 
     #[test]

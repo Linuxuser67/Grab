@@ -390,6 +390,18 @@ mod tests {
     }
 
     #[test]
+    fn typed_selection_discards_unknown_ids_at_the_preferences_boundary() {
+        assert_eq!(
+            parse_tool_ids(vec![
+                "yt-dlp".to_string(),
+                "unknown".to_string(),
+                "deno".to_string(),
+            ]),
+            vec![SupportTool::YtDlp, SupportTool::Deno]
+        );
+    }
+
+    #[test]
     fn support_tool_filter_includes_all_by_default_and_only_selected_tools() {
         assert!(includes_tool(None, SupportTool::YtDlp));
         assert!(includes_tool(None, SupportTool::GalleryDl));

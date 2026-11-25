@@ -1400,7 +1400,6 @@ mod playlist_info_json_argv_tests {
             !child_args.iter().any(|argument| argument == &job.page_url),
             "the child must not receive the redundant positional playlist URL"
         );
-
     }
 
     #[test]

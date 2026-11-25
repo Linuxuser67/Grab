@@ -1685,11 +1685,14 @@ mod tests {
         let plan = plan_hls_media_playlist(BASE, body)
             .expect("one PDT tag per segment is valid")
             .expect("LL-HLS detected");
-        assert_eq!(
-            plan.local_playlist.segments[0].program_date_time,
-            plan.local_playlist.segments[0].program_date_time
+        assert!(
+            plan.local_playlist.segments[0].program_date_time.is_some(),
+            "the first segment keeps its PDT"
         );
-        assert_eq!(plan.local_playlist.segments.len(), 2);
+        assert!(
+            plan.local_playlist.segments[1].program_date_time.is_some(),
+            "the second segment keeps its PDT"
+        );
     }
 
     #[test]

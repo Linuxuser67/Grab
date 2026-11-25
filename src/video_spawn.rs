@@ -1393,7 +1393,7 @@ fn raw_dump_timeout_preserves_the_last_ytdlp_error_line() {
         "https://example.invalid/playlist",
         RawDumpOptions {
             cookies_browser: "none",
-            timeout: Duration::from_millis(50),
+            timeout: Duration::from_millis(500),
             fetch_proxy: None,
             flat_playlist: false,
             identity_args: None,

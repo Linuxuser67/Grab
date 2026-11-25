@@ -291,6 +291,7 @@ async fn run_video_playlist_download_inner(
             timeout: Duration::from_secs(300),
             fetch_proxy: job.proxy.as_ref(),
             flat_playlist: true,
+            preserve_playlist_entries: true,
             identity_args: None,
             referer: job.referer.as_deref(),
         },

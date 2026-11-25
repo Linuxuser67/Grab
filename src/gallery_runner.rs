@@ -455,7 +455,7 @@ mod tests {
         let tool = dir.join("fake-gallery-dl.sh");
         let completed = dir.join("one.jpg");
         let script = format!(
-            "#!/bin/sh\nprintf '%s\\n' \"@GRAB:$GRAB_GALLERY_EVENT_NONCE:START:{}\"\nprintf '%s\\n' \"@GRAB:$GRAB_GALLERY_EVENT_NONCE:DONE:{}\"\nkill -KILL $\n",
+            "#!/bin/sh\nprintf '%s\\n' \"@GRAB:$GRAB_GALLERY_EVENT_NONCE:START:{}\"\nprintf '%s\\n' \"@GRAB:$GRAB_GALLERY_EVENT_NONCE:DONE:{}\"\nkill -KILL 0\n",
             completed.display(),
             completed.display()
         );

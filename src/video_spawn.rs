@@ -1458,7 +1458,7 @@ fn raw_dump_timeout_preserves_the_last_ytdlp_error_line() {
     let youtube_bin = root.path().join("fake-ytdlp-timeout");
     std::fs::write(
         &youtube_bin,
-        "#!/bin/sh\\nprintf 'ERROR: synthetic extractor timeout detail\\\\n' >&2\\nsleep 30\\n",
+        "#!/bin/sh\nprintf 'ERROR: synthetic extractor timeout detail\\n' >&2\nsleep 30\n",
     )
     .expect("write fake yt-dlp");
     use std::os::unix::fs::PermissionsExt as _;

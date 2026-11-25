@@ -1360,7 +1360,7 @@ pub fn show(
             // For updates, install only the missing or outdated tools.
             // For a fresh install, None selects all support tools.
             let tools_filter = if action.get() == ToolAction::Update {
-                Some(selected_tools)
+                Some(crate::install_progress::parse_tool_ids(selected_tools))
             } else {
                 None
             };

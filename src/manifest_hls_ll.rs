@@ -261,7 +261,7 @@ fn scan_ll_hls_tag_flags(body: &[u8]) -> LlHlsTagFlags {
     const DISCONTINUITY: &[u8] = b"#EXT-X-DISCONTINUITY";
     let mut flags = LlHlsTagFlags::default();
 
-    for raw_line in body.split(|byte| *byte == b'\n') {
+    for raw_line in body.split(|byte| *byte == 10) {
         let line = raw_line.strip_suffix(b"\r").unwrap_or(raw_line);
         flags.partial_segments |= raw_line.starts_with(b"#EXT-X-PART:");
         flags.delta_update |= raw_line.starts_with(b"#EXT-X-SKIP:");

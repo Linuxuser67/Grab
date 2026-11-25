@@ -3546,6 +3546,7 @@ fn playlist_download_argv_uses_original_selected_indices_and_tagged_events() {
         crate::video_argv::PlaylistRunSelection {
             indices: &[0, 2, 6],
             event_nonce: "testnonce",
+            info_json_path: std::path::Path::new("/tmp/grab-playlist-info.json"),
         },
     )
     .expect("valid playlist selection");
@@ -7031,6 +7032,7 @@ fn dump_json_flat_playlist_flag_per_caller() {
                     timeout: std::time::Duration::from_secs(30),
                     fetch_proxy: None,
                     flat_playlist: flat,
+                    preserve_playlist_entries: false,
                     identity_args: None,
                     referer: None,
                 },
@@ -7067,6 +7069,7 @@ fn dump_json_referer_is_origin_only_and_invalid_values_are_omitted() {
                     timeout: std::time::Duration::from_secs(30),
                     fetch_proxy: None,
                     flat_playlist: false,
+                    preserve_playlist_entries: false,
                     identity_args: None,
                     referer,
                 },

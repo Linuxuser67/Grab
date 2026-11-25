@@ -747,5 +747,4 @@ mod tests {
         assert!(instagram_throttle_args("https://example.com/gallery", true).is_empty());
         assert!(instagram_throttle_args("https://example.com/gallery", false).is_empty());
     }
-
 }

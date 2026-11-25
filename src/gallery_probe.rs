@@ -1136,11 +1136,8 @@ mod tests {
 
         let dir = tempfile::tempdir().expect("create gallery probe fixture directory");
         let tool = dir.path().join("fake-gallery-dl.sh");
-        std::fs::write(
-            &tool,
-            "#!/bin/sh\nexec head -c 67108865 /dev/zero\n",
-        )
-        .expect("write flooding fake gallery-dl");
+        std::fs::write(&tool, "#!/bin/sh\nexec head -c 67108865 /dev/zero\n")
+            .expect("write flooding fake gallery-dl");
         std::fs::set_permissions(&tool, std::fs::Permissions::from_mode(0o755))
             .expect("make fake gallery-dl executable");
 

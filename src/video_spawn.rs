@@ -1402,7 +1402,9 @@ fn raw_dump_timeout_preserves_the_last_ytdlp_error_line() {
     ));
     let error = result.expect_err("the fake extractor must time out");
     assert!(
-        error.to_string().contains("ERROR: synthetic extractor timeout detail"),
+        error
+            .to_string()
+            .contains("ERROR: synthetic extractor timeout detail"),
         "timeout errors must retain yt-dlp stderr, got: {error}"
     );
 }

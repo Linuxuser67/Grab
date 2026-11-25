@@ -1138,7 +1138,7 @@ mod tests {
         let tool = dir.path().join("fake-gallery-dl.sh");
         std::fs::write(
             &tool,
-            "#!/bin/sh\\nexec head -c 67108865 /dev/zero\\n",
+            "#!/bin/sh\nexec head -c 67108865 /dev/zero\n",
         )
         .expect("write flooding fake gallery-dl");
         std::fs::set_permissions(&tool, std::fs::Permissions::from_mode(0o755))

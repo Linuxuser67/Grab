@@ -1401,4 +1401,25 @@ mod playlist_info_json_argv_tests {
             "the child must not receive the redundant positional playlist URL"
         );
     }
+
+    #[test]
+    fn playlist_child_args_requires_a_url_separator() {
+        let args = vec![
+            "--ignore-config".to_string(),
+            "https://www.youtube.com/playlist?list=PL123".to_string(),
+        ];
+
+        let error = playlist_download_child_args(&args)
+            .expect_err("a playlist command without -- must fail");
+        assert!(error.to_string().contains("missing the URL separator"));
+    }
+
+    #[test]
+    fn playlist_child_args_requires_a_url_after_the_separator() {
+        let args = vec!["--ignore-config".to_string(), "--".to_string()];
+
+        let error = playlist_download_child_args(&args)
+            .expect_err("a playlist command without a positional URL must fail");
+        assert!(error.to_string().contains("missing the playlist URL"));
+    }
 }

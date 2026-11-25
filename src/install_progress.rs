@@ -453,6 +453,22 @@ mod tests {
             .expect("dropping the previous operation must release RUNNING");
         drop(next_operation);
 
+        let panic_button = gtk4::Button::with_label("Install");
+        let panic_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let operation = OperationGuard::acquire(&panic_button)
+                .expect("the operation should start before the callback panics");
+            begin(&panic_button, ToolOperation::Update);
+            let _operation = operation;
+            panic!("simulate a callback panic");
+        }));
+        assert!(panic_result.is_err());
+        assert!(panic_button.is_sensitive());
+        assert!(!panic_button.has_css_class(PROGRESS_CLASS));
+        assert_eq!(panic_button.label().as_deref(), Some("Install"));
+        let after_panic = OperationGuard::acquire(&panic_button)
+            .expect("unwinding must release RUNNING");
+        drop(after_panic);
+
         let install_button = gtk4::Button::with_label("Install");
         let operation = OperationGuard::acquire(&install_button).expect("operation guard");
         begin(&install_button, ToolOperation::Install);

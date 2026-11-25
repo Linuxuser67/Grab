@@ -21,9 +21,9 @@ use crate::video_progress::{
 };
 use crate::video_quality::default_video_filename;
 use crate::video_spawn::{
-    LiveScratchGuard, ProcessGroupGuard, ProcessGroupId, discover_ytdlp_output,
-    drain_stderr_to_tail, fetch_video_page, join_drain, reap_child, spawn_piped_ytdlp,
-    ytdlp_command,
+    LiveScratchGuard, ProcessGroupGuard, ProcessGroupId, RawDumpOptions, discover_ytdlp_output,
+    drain_stderr_to_tail, fetch_raw_dump_json, fetch_video_page, join_drain, reap_child,
+    spawn_piped_ytdlp, ytdlp_command,
 };
 use crate::video_staging::{
     ResumePlan, ResumeQuery, VideoManifest, clean_staging_files, collect_sidecar, dest_part_path,
@@ -283,23 +283,29 @@ async fn run_video_playlist_download_inner(
     }
 
     phase_playlist(&tx, gettext("Resolving playlist…"));
-    let mut current_playlist = match fetch_video_page(
+    let playlist_json = fetch_raw_dump_json(
         &libs.youtube,
         &job.page_url,
-        &job.cookies_browser,
-        Duration::from_secs(300),
-        job.proxy.as_ref(),
-        None,
+        RawDumpOptions {
+            cookies_browser: &job.cookies_browser,
+            timeout: Duration::from_secs(300),
+            fetch_proxy: job.proxy.as_ref(),
+            flat_playlist: true,
+            preserve_playlist_entries: true,
+            identity_args: None,
+            referer: job.referer.as_deref(),
+        },
     )
-    .await?
-    {
-        FetchedVideo::Playlist(playlist) => playlist,
-        FetchedVideo::Single { .. } => {
-            return Err(VideoError::fetch(
-                "the collection now resolves to a single video; add it again to refresh the queue",
-            ));
-        }
-    };
+    .await?;
+    let mut current_playlist = crate::video_probe::parse_playlist_json(
+        &playlist_json,
+        &job.page_url,
+    )
+    .ok_or_else(|| {
+        VideoError::fetch(
+            "the collection now resolves to a single video; add it again to refresh the queue",
+        )
+    })?;
     crate::video_probe::retarget_story_items(&job.page_url, &mut current_playlist);
 
     // Refresh playlist positions by stable extractor ID. Never trust the old
@@ -390,6 +396,13 @@ async fn run_video_playlist_download_inner(
         VideoError::Fetch(format!("couldn't generate yt-dlp event nonce: {error}"))
     })?;
     let event_marker = format!("@GRAB:{event_nonce}:");
+    let playlist_info_path = info_json_path(job.item_id);
+    let _info_guard = InfoJsonGuard::new(Some(playlist_info_path.clone()));
+    let playlist_info_json = serde_json::to_vec(&playlist_json).map_err(VideoError::staging)?;
+    write_private(&playlist_info_path, &playlist_info_json)
+        .await
+        .map_err(VideoError::staging)?;
+
     let argv = playlist_download_argv(
         &job,
         &spec,
@@ -400,11 +413,19 @@ async fn run_video_playlist_download_inner(
         PlaylistRunSelection {
             indices: &selected_indices,
             event_nonce: &event_nonce,
+            info_json_path: &playlist_info_path,
         },
     )?;
     let guarded_proxy = crate::video_spawn::guard_untrusted_args(&argv)?;
+    // Keep the page URL through policy validation, then omit it from the child:
+    // yt-dlp loads the playlist exclusively from --load-info-json and warns
+    // that positional URLs are ignored when both are supplied.
+    let separator = argv
+        .iter()
+        .position(|argument| argument == "--")
+        .ok_or_else(|| VideoError::fetch("yt-dlp arguments are missing the URL separator"))?;
     let mut cmd = ytdlp_command(&libs.youtube).await;
-    cmd.args(&argv);
+    cmd.args(&argv[..=separator]);
     apply_proxy_env(&mut cmd, job.proxy.as_ref());
     crate::video_spawn::apply_guarded_proxy_env(&mut cmd, guarded_proxy.as_deref());
     let (mut child, stdout, stderr) = spawn_piped_ytdlp(cmd)?;

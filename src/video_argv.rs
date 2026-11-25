@@ -421,6 +421,7 @@ fn replace_print_template(
 pub(crate) struct PlaylistRunSelection<'a> {
     pub(crate) indices: &'a [usize],
     pub(crate) event_nonce: &'a str,
+    pub(crate) info_json_path: &'a Path,
 }
 
 /// yt-dlp argv for one parent-owned playlist process. A single invocation
@@ -469,6 +470,9 @@ pub(crate) fn playlist_download_argv(
     args.splice(
         separator..separator,
         [
+            "--no-clean-info".to_string(),
+            "--load-info-json".to_string(),
+            selection.info_json_path.to_string_lossy().into_owned(),
             "--print".to_string(),
             format!(
                 "before_dl:@GRAB:{}:START\t%(id)j\t%(playlist_index)j\t%(filename)j",
@@ -1295,5 +1299,78 @@ mod live_capture_start_tests {
         );
         assert!(job.is_live);
         assert!(job.live_from_start);
+    }
+}
+
+#[cfg(test)]
+mod playlist_info_json_argv_tests {
+    use super::{PlaylistRunSelection, VideoJob, playlist_download_argv};
+    use std::path::{Path, PathBuf};
+
+    #[test]
+    fn playlist_run_loads_the_same_flat_json_used_for_index_resolution() {
+        let job = VideoJob {
+            item_id: 17,
+            page_url: "https://www.youtube.com/playlist?list=PL123".to_string(),
+            referer: None,
+            playlist_item_id: None,
+            quality: "1080p".to_string(),
+            dest: PathBuf::from("/tmp/collection"),
+            speed_limit: None,
+            keep_server_date: false,
+            video_format_id: None,
+            is_live: false,
+            live_from_start: false,
+            newest_codecs: true,
+            audio_only: false,
+            cookies_browser: "none".to_string(),
+            subtitles: None,
+            embed_subs: false,
+            sponsorblock_remove: false,
+            sponsorblock_mark: false,
+            remux_video: None,
+            embed_chapters: false,
+            proxy: None,
+            info_json: None,
+        };
+        const INFO_JSON_PATH: &str = "/tmp/info-17.json";
+        let info_json = Path::new(INFO_JSON_PATH);
+        let selected_indices = [0, 2];
+
+        let args = playlist_download_argv(
+            &job,
+            "bv*+ba/b",
+            true,
+            "mp4",
+            Path::new("/usr/bin/ffmpeg"),
+            Path::new("/tmp/collection"),
+            PlaylistRunSelection {
+                indices: &selected_indices,
+                event_nonce: "nonce",
+                info_json_path: info_json,
+            },
+        )
+        .expect("valid playlist command");
+
+        let load_at = args
+            .iter()
+            .position(|argument| argument == "--load-info-json")
+            .expect("playlist JSON must be loaded");
+        assert_eq!(
+            args.get(load_at + 1).map(String::as_str),
+            Some(INFO_JSON_PATH)
+        );
+        assert!(args.iter().any(|argument| argument == "--no-clean-info"));
+        let separator = args.iter().position(|argument| argument == "--").unwrap();
+        assert!(load_at < separator);
+        assert!(
+            args[..separator]
+                .windows(2)
+                .any(|pair| { pair[0] == "--playlist-items" && pair[1] == "1,3" })
+        );
+        assert_eq!(
+            args.last().map(String::as_str),
+            Some("https://www.youtube.com/playlist?list=PL123")
+        );
     }
 }

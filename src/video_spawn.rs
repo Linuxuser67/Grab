@@ -113,6 +113,8 @@ pub(crate) struct RawDumpOptions<'a> {
     pub(crate) timeout: Duration,
     pub(crate) fetch_proxy: Option<&'a crate::net_types::ResolvedProxy>,
     pub(crate) flat_playlist: bool,
+    /// Keep playlist entries intact for a later `--load-info-json` download.
+    pub(crate) preserve_playlist_entries: bool,
     pub(crate) identity_args: Option<&'a [String]>,
     pub(crate) referer: Option<&'a str>,
 }
@@ -124,15 +126,16 @@ fn raw_dump_argv(
     cookies_browser: &str,
     fetch_proxy: Option<&crate::net_types::ResolvedProxy>,
     flat_playlist: bool,
+    preserve_playlist_entries: bool,
     identity_args: Option<&[String]>,
     referer: Option<&str>,
 ) -> Vec<String> {
     let mut args = vec!["--ignore-config".to_string(), "--no-progress".to_string()];
     if flat_playlist {
-        args.extend([
-            "--flat-playlist".to_string(),
-            "--no-clean-info".to_string(),
-        ]);
+        args.push("--flat-playlist".to_string());
+    }
+    if flat_playlist && preserve_playlist_entries {
+        args.push("--no-clean-info".to_string());
     }
     args.push("--dump-single-json".to_string());
     args.extend(proxy_cli_args(fetch_proxy));
@@ -162,6 +165,7 @@ pub(crate) async fn fetch_raw_dump_json(
         timeout,
         fetch_proxy,
         flat_playlist,
+        preserve_playlist_entries,
         identity_args,
         referer,
     } = options;
@@ -170,6 +174,7 @@ pub(crate) async fn fetch_raw_dump_json(
         cookies_browser,
         fetch_proxy,
         flat_playlist,
+        preserve_playlist_entries,
         identity_args,
         referer,
     );
@@ -269,6 +274,7 @@ pub(crate) async fn fetch_video_page(
             timeout,
             fetch_proxy,
             flat_playlist: false,
+            preserve_playlist_entries: false,
             identity_args: None,
             referer: None,
         },
@@ -428,6 +434,7 @@ pub async fn fetch_video_infos(
                         timeout: Duration::from_secs(300),
                         fetch_proxy: fetch_proxy.as_ref(),
                         flat_playlist: true,
+                        preserve_playlist_entries: false,
                         identity_args: Some(&identity_args),
                         referer: referer.as_deref(),
                     },
@@ -1391,7 +1398,7 @@ mod raw_dump_argv_tests {
     use super::raw_dump_argv;
 
     #[test]
-    fn flat_playlist_json_keeps_entries_for_load_info_json() {
+    fn flat_playlist_download_refresh_preserves_entries_for_load_info_json() {
         let identity = vec![
             "--".to_string(),
             "https://music.youtube.com/playlist?list=PL123".to_string(),
@@ -1400,6 +1407,7 @@ mod raw_dump_argv_tests {
             "https://music.youtube.com/playlist?list=PL123",
             "none",
             None,
+            true,
             true,
             Some(&identity),
             None,
@@ -1420,6 +1428,27 @@ mod raw_dump_argv_tests {
     }
 
     #[test]
+    fn flat_video_preview_keeps_default_info_json_cleaning() {
+        let identity = vec![
+            "--".to_string(),
+            "https://youtube.com/watch?v=video".to_string(),
+        ];
+        let args = raw_dump_argv(
+            "https://youtube.com/watch?v=video",
+            "none",
+            None,
+            true,
+            false,
+            Some(&identity),
+            None,
+        );
+
+        assert!(args.iter().any(|argument| argument == "--flat-playlist"));
+        assert!(!args.iter().any(|argument| argument == "--no-clean-info"));
+        assert!(args.iter().any(|argument| argument == "--dump-single-json"));
+    }
+
+    #[test]
     fn ordinary_video_json_does_not_enable_flat_playlist_mode() {
         let identity = vec![
             "--".to_string(),
@@ -1429,6 +1458,7 @@ mod raw_dump_argv_tests {
             "https://youtube.com/watch?v=video",
             "none",
             None,
+            false,
             false,
             Some(&identity),
             None,

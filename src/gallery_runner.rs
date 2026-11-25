@@ -446,6 +446,50 @@ mod tests {
 
     #[cfg(unix)]
     #[tokio::test]
+    async fn signal_terminated_gallery_run_does_not_claim_an_exact_total() {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let dir = std::env::temp_dir().join(format!(
+            "grab-runner-signal-exit-{}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&dir).expect("create signal-exit fixture directory");
+        let tool = dir.join("fake-gallery-dl.sh");
+        let completed = dir.join("one.jpg");
+        let script = format!(
+            "#!/bin/sh\nprintf '%s\\n' \"@GRAB:$GRAB_GALLERY_EVENT_NONCE:START:{}\"\nprintf '%s\\n' \"@GRAB:$GRAB_GALLERY_EVENT_NONCE:DONE:{}\"\nkill -KILL $\n",
+            completed.display(),
+            completed.display()
+        );
+        std::fs::write(&tool, script).expect("write fake gallery-dl");
+        std::fs::set_permissions(&tool, std::fs::Permissions::from_mode(0o755))
+            .expect("make fake gallery-dl executable");
+
+        let job = GalleryJob {
+            item_id: 8,
+            page_url: "https://example.com/gallery".to_string(),
+            referer: None,
+            title: "Gallery".to_string(),
+            file_count: None,
+            dest_dir: dir.clone(),
+            filter: GalleryFilter::All,
+            cookies_browser: "none".to_string(),
+            speed_limit: None,
+            range: None,
+            file_rows: Vec::new(),
+        };
+        let result = run_gallery_download(&job, &tool, None, None, |_| {})
+            .await
+            .expect("a signal exit after one completed file is a partial success");
+
+        assert_eq!(result.files_completed, 1);
+        assert_eq!(result.exit_code, Some(-1));
+        assert_eq!(result.exact_file_count(), None);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
     async fn runner_preserves_order_of_start_progress_and_completion_events() {
         use std::os::unix::fs::PermissionsExt as _;
         use std::sync::{Arc, Mutex};

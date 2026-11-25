@@ -117,22 +117,22 @@ pub(crate) struct RawDumpOptions<'a> {
     pub(crate) referer: Option<&'a str>,
 }
 
-pub(crate) async fn fetch_raw_dump_json(
-    youtube_bin: &Path,
+/// Build a bounded metadata-dump command. Flat playlist JSON must retain
+/// its playlist entries so the same snapshot can later be loaded for download.
+fn raw_dump_argv(
     url: &str,
-    options: RawDumpOptions<'_>,
-) -> Result<serde_json::Value, VideoError> {
-    let RawDumpOptions {
-        cookies_browser,
-        timeout,
-        fetch_proxy,
-        flat_playlist,
-        identity_args,
-        referer,
-    } = options;
+    cookies_browser: &str,
+    fetch_proxy: Option<&crate::net_types::ResolvedProxy>,
+    flat_playlist: bool,
+    identity_args: Option<&[String]>,
+    referer: Option<&str>,
+) -> Vec<String> {
     let mut args = vec!["--ignore-config".to_string(), "--no-progress".to_string()];
     if flat_playlist {
-        args.push("--flat-playlist".to_string());
+        args.extend([
+            "--flat-playlist".to_string(),
+            "--no-clean-info".to_string(),
+        ]);
     }
     args.push("--dump-single-json".to_string());
     args.extend(proxy_cli_args(fetch_proxy));
@@ -149,6 +149,30 @@ pub(crate) async fn fetch_raw_dump_json(
         || crate::extension_server::ytdlp_spawn_identity(cookies_browser, url),
         |args| args.to_vec(),
     ));
+    args
+}
+
+pub(crate) async fn fetch_raw_dump_json(
+    youtube_bin: &Path,
+    url: &str,
+    options: RawDumpOptions<'_>,
+) -> Result<serde_json::Value, VideoError> {
+    let RawDumpOptions {
+        cookies_browser,
+        timeout,
+        fetch_proxy,
+        flat_playlist,
+        identity_args,
+        referer,
+    } = options;
+    let args = raw_dump_argv(
+        url,
+        cookies_browser,
+        fetch_proxy,
+        flat_playlist,
+        identity_args,
+        referer,
+    );
     let guarded_proxy = guard_untrusted_args(&args)?;
     // Direct spawn with the same semantics (concurrent drain, timeout kill, stderr detail on failure).
     let mut cmd = ytdlp_command(youtube_bin).await;

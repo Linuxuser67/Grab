@@ -483,6 +483,24 @@ pub(crate) fn playlist_download_argv(
     Ok(args)
 }
 
+/// Return the playlist command arguments without its redundant positional URL.
+///
+/// The original argv must first pass Grab's untrusted-argument policy check.
+/// yt-dlp reads the collection from `--load-info-json` and ignores positional
+/// URLs in that mode, so the child receives only the option prefix and terminator.
+pub(crate) fn playlist_download_child_args(argv: &[String]) -> Result<&[String], VideoError> {
+    let separator = argv
+        .iter()
+        .position(|argument| argument == "--")
+        .ok_or_else(|| VideoError::fetch("yt-dlp arguments are missing the URL separator"))?;
+    if argv.get(separator + 1).is_none() {
+        return Err(VideoError::fetch(
+            "yt-dlp arguments are missing the playlist URL",
+        ));
+    }
+    Ok(&argv[..=separator])
+}
+
 /// yt-dlp `-f` spec for one HLS attempt over the page URL (muxed files win over lower splits).
 pub(crate) fn hls_format_spec(quality: &str, _pinned: Option<&str>) -> String {
     // The VOD HLS attempt intentionally uses yt-dlp's normal selector: HLS
@@ -1304,7 +1322,9 @@ mod live_capture_start_tests {
 
 #[cfg(test)]
 mod playlist_info_json_argv_tests {
-    use super::{PlaylistRunSelection, VideoJob, playlist_download_argv};
+    use super::{
+        PlaylistRunSelection, VideoJob, playlist_download_argv, playlist_download_child_args,
+    };
     use std::path::{Path, PathBuf};
 
     #[test]
@@ -1371,6 +1391,14 @@ mod playlist_info_json_argv_tests {
         assert_eq!(
             args.last().map(String::as_str),
             Some("https://www.youtube.com/playlist?list=PL123")
+        );
+
+        let child_args =
+            playlist_download_child_args(&args).expect("valid playlist child arguments");
+        assert_eq!(child_args.last().map(String::as_str), Some("--"));
+        assert!(
+            !child_args.iter().any(|argument| argument == &job.page_url),
+            "the child must not receive the redundant positional playlist URL"
         );
     }
 }

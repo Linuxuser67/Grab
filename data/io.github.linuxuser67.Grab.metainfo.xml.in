@@ -58,6 +58,16 @@
     </screenshot>
   </screenshots>
   <releases>
+    <release version="6.6.0" date="2026-11-25">
+      <description>
+        <ul>
+          <li>Galleries: collection progress pulses now keep a consistent cadence and stop when idle; the probe output limit is enforced and covered by tests.</li>
+          <li>Support tools: harden install/update operation lifecycle so timed or failed operations cannot leave stale timers or state behind.</li>
+          <li>HLS: reject duplicate PDT tags before LL-HLS parsing, deduplicate PDT scanning, and document tag whitespace handling.</li>
+          <li>Tests: broaden regression coverage for gallery process handling, HLS tags, and support-tool lifecycle.</li>
+        </ul>
+      </description>
+    </release>
     <release version="6.5.9" date="2026-11-24">
       <description>
         <ul>

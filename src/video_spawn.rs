@@ -1413,7 +1413,10 @@ mod raw_dump_argv_tests {
             args.iter().filter(|argument| *argument == "--").count(),
             1
         );
-        assert_eq!(args.last().map(String::as_str), Some("https://music.youtube.com/playlist?list=PL123"));
+        assert_eq!(
+            args.last().map(String::as_str),
+            Some("https://music.youtube.com/playlist?list=PL123")
+        );
     }
 
     #[test]

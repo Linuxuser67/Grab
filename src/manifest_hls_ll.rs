@@ -929,10 +929,7 @@ fn has_duplicate_program_date_time_tags(body: &[u8]) -> bool {
     false
 }
 
-fn validate_playlist_tags(
-    playlist: &LlMediaPlaylist,
-    body: &[u8],
-) -> Result<(), ManifestError> {
+fn validate_playlist_tags(playlist: &LlMediaPlaylist, body: &[u8]) -> Result<(), ManifestError> {
     // The 0.9+ parser records tolerated defects instead of failing parse.
     // Native planning remains fail-closed for malformed PDT, truncated segment
     // records, and ambiguous date-range metadata.

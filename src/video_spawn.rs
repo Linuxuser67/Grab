@@ -1372,27 +1372,29 @@ mod ytdlp_retry_classification_tests {
 mod raw_dump_argv_tests {
     use super::{RawDumpOptions, raw_dump_argv};
 
-    fn options(
+    fn options<'a>(
         flat_playlist: bool,
         preserve_playlist_entries: bool,
-    ) -> RawDumpOptions<'static> {
+        identity_args: &'a [String],
+    ) -> RawDumpOptions<'a> {
         RawDumpOptions {
             cookies_browser: "none",
             timeout: std::time::Duration::from_secs(300),
             fetch_proxy: None,
             flat_playlist,
             preserve_playlist_entries,
-            identity_args: Some(&[
-                "--".to_string(),
-                "https://music.youtube.com/playlist?list=PL123".to_string(),
-            ]),
+            identity_args: Some(identity_args),
             referer: None,
         }
     }
 
     #[test]
     fn flat_playlist_download_refresh_preserves_entries_for_load_info_json() {
-        let opts = options(true, true);
+        let identity = vec![
+            "--".to_string(),
+            "https://music.youtube.com/playlist?list=PL123".to_string(),
+        ];
+        let opts = options(true, true, &identity);
         let args = raw_dump_argv("https://music.youtube.com/playlist?list=PL123", &opts);
 
         assert!(args.windows(2).any(|pair| {
@@ -1411,8 +1413,12 @@ mod raw_dump_argv_tests {
 
     #[test]
     fn flat_video_preview_keeps_default_info_json_cleaning() {
-        let opts = options(true, false);
-        let args = raw_dump_argv("https://music.youtube.com/playlist?list=PL123", &opts);
+        let identity = vec![
+            "--".to_string(),
+            "https://youtube.com/watch?v=video".to_string(),
+        ];
+        let opts = options(true, false, &identity);
+        let args = raw_dump_argv("https://youtube.com/watch?v=video", &opts);
 
         assert!(args.iter().any(|argument| argument == "--flat-playlist"));
         assert!(!args.iter().any(|argument| argument == "--no-clean-info"));
@@ -1421,7 +1427,11 @@ mod raw_dump_argv_tests {
 
     #[test]
     fn ordinary_video_json_does_not_enable_flat_playlist_mode() {
-        let opts = options(false, false);
+        let identity = vec![
+            "--".to_string(),
+            "https://youtube.com/watch?v=video".to_string(),
+        ];
+        let opts = options(false, false, &identity);
         let args = raw_dump_argv("https://youtube.com/watch?v=video", &opts);
 
         assert!(!args.iter().any(|argument| {

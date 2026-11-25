@@ -449,10 +449,8 @@ mod tests {
     async fn signal_terminated_gallery_run_does_not_claim_an_exact_total() {
         use std::os::unix::fs::PermissionsExt as _;
 
-        let dir = std::env::temp_dir().join(format!(
-            "grab-runner-signal-exit-{}",
-            std::process::id()
-        ));
+        let dir =
+            std::env::temp_dir().join(format!("grab-runner-signal-exit-{}", std::process::id()));
         std::fs::create_dir_all(&dir).expect("create signal-exit fixture directory");
         let tool = dir.join("fake-gallery-dl.sh");
         let completed = dir.join("one.jpg");

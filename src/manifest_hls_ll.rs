@@ -912,11 +912,8 @@ fn has_duplicate_program_date_time_tags(body: &[u8]) -> bool {
     const PROGRAM_DATE_TIME: &[u8] = b"#EXT-X-PROGRAM-DATE-TIME:";
     let mut pending_program_date_time = false;
 
-    for raw_line in body.split(|byte| *byte == b'\\n') {
-        let line = raw_line
-            .strip_suffix(b"\\r")
-            .unwrap_or(raw_line)
-            .trim_ascii();
+    for raw_line in body.split(|byte| *byte == 10) {
+        let line = raw_line.trim_ascii();
         if line.starts_with(PROGRAM_DATE_TIME) {
             if pending_program_date_time {
                 return true;

@@ -4687,25 +4687,15 @@ async fn fetch_resource_once(
         })?;
     let status = response.status();
     if let Some(range) = resource.range {
-        if is_retryable_resource_status(status) {
-            return Err(ManifestRunError::Retryable(format!(
-                "The stream server returned HTTP {} for a byte-range segment",
-                status.as_u16()
-            )));
-        }
-        if status != reqwest::StatusCode::PARTIAL_CONTENT
-            || !content_range_matches(
-                response
-                    .headers()
-                    .get(reqwest::header::CONTENT_RANGE)
-                    .and_then(|value| value.to_str().ok()),
-                range,
-            )
-        {
-            return Err(ManifestRunError::Unsupported(
-                "The stream server did not honor the requested byte range".to_string(),
-            ));
-        }
+        validate_byte_range_response(
+            status,
+            response
+                .headers()
+                .get(reqwest::header::CONTENT_RANGE)
+                .and_then(|value| value.to_str().ok()),
+            range,
+            "a byte-range segment",
+        )?;
     } else if status == reqwest::StatusCode::PARTIAL_CONTENT {
         return Err(ManifestRunError::Unsupported(
             "The stream server returned partial content without a requested byte range".to_string(),
@@ -4852,6 +4842,51 @@ fn progress_message(downloaded: u64) -> EngineMsg {
 
 fn safe_resource_filename(filename: &str) -> bool {
     crate::file_names::is_single_component(filename) && !filename.contains('\\')
+}
+
+/// Preserve the HTTP response that caused a manifest byte-range request to fail.
+///
+/// Authentication/authorization responses such as 403 are distinct from an
+/// origin that ignored the Range header (200) or returned a malformed 206.
+/// Transient statuses retain the existing retry classification.
+fn validate_byte_range_response(
+    status: reqwest::StatusCode,
+    content_range: Option<&str>,
+    range: ManifestByteRange,
+    resource_description: &str,
+) -> Result<(), ManifestRunError> {
+    let last_byte = range
+        .offset
+        .checked_add(range.length)
+        .and_then(|end| end.checked_sub(1))
+        .ok_or_else(|| {
+            ManifestRunError::Unsupported("The manifest contains an invalid byte range".to_string())
+        })?;
+    let requested = format!("bytes {}-{last_byte}", range.offset);
+
+    if is_retryable_resource_status(status) {
+        return Err(ManifestRunError::Retryable(format!(
+            "The stream server returned HTTP {} for {resource_description} ({requested})",
+            status.as_u16()
+        )));
+    }
+    if status != reqwest::StatusCode::PARTIAL_CONTENT {
+        return Err(ManifestRunError::Unsupported(format!(
+            "The stream server returned HTTP {} for {resource_description}; expected HTTP 206 for {requested}",
+            status.as_u16()
+        )));
+    }
+    if !content_range_matches(content_range, range) {
+        let detail = if content_range.is_none() {
+            "a missing"
+        } else {
+            "an invalid or mismatched"
+        };
+        return Err(ManifestRunError::Unsupported(format!(
+            "The stream server returned HTTP 206 with {detail} Content-Range header for {resource_description} ({requested})"
+        )));
+    }
+    Ok(())
 }
 
 fn content_range_matches(header: Option<&str>, range: ManifestByteRange) -> bool {
@@ -5072,25 +5107,15 @@ async fn fetch_hls_resource_to_writer(
         };
         let status = response.status();
         if let Some(range) = resource.range {
-            if is_retryable_resource_status(status) {
-                return Err(ManifestRunError::Retryable(format!(
-                    "The stream server returned HTTP {} for an HLS byte range",
-                    status.as_u16()
-                )));
-            }
-            if status != reqwest::StatusCode::PARTIAL_CONTENT
-                || !content_range_matches(
-                    response
-                        .headers()
-                        .get(reqwest::header::CONTENT_RANGE)
-                        .and_then(|value| value.to_str().ok()),
-                    range,
-                )
-            {
-                return Err(ManifestRunError::Unsupported(
-                    "The stream server did not honor the requested HLS byte range".to_string(),
-                ));
-            }
+            validate_byte_range_response(
+                status,
+                response
+                    .headers()
+                    .get(reqwest::header::CONTENT_RANGE)
+                    .and_then(|value| value.to_str().ok()),
+                range,
+                "an HLS byte range",
+            )?;
         } else if status == reqwest::StatusCode::PARTIAL_CONTENT {
             return Err(ManifestRunError::Failed(
                 "The stream server returned partial content for a complete HLS fragment"
@@ -9559,5 +9584,103 @@ mod ffmpeg_rejected_input_tests {
         assert!(!ffmpeg_rejected_input("No space left on device"));
         assert!(!ffmpeg_rejected_input("Could not write header"));
         assert!(!ffmpeg_rejected_input("Unknown encoder"));
+    }
+}
+
+#[cfg(test)]
+mod byte_range_response_diagnostics_tests {
+    use super::{ManifestRunError, validate_byte_range_response};
+    use crate::manifest::ManifestByteRange;
+
+    const REQUESTED: ManifestByteRange = ManifestByteRange {
+        offset: 10,
+        length: 5,
+    };
+
+    #[test]
+    fn reports_http_status_for_rejected_range_requests() {
+        let forbidden = validate_byte_range_response(
+            reqwest::StatusCode::FORBIDDEN,
+            None,
+            REQUESTED,
+            "a byte-range segment",
+        )
+        .expect_err("403 must reject the native range transfer");
+        assert!(matches!(
+            forbidden,
+            ManifestRunError::Unsupported(message)
+                if message.contains("HTTP 403") && message.contains("bytes 10-14")
+        ));
+
+        let ignored = validate_byte_range_response(
+            reqwest::StatusCode::OK,
+            None,
+            REQUESTED,
+            "a byte-range segment",
+        )
+        .expect_err("200 means the server ignored the Range request");
+        assert!(matches!(
+            ignored,
+            ManifestRunError::Unsupported(message)
+                if message.contains("HTTP 200") && message.contains("expected HTTP 206")
+        ));
+    }
+
+    #[test]
+    fn preserves_retry_classification_for_transient_range_statuses() {
+        let error = validate_byte_range_response(
+            reqwest::StatusCode::SERVICE_UNAVAILABLE,
+            None,
+            REQUESTED,
+            "an HLS byte range",
+        )
+        .expect_err("503 must remain retryable");
+        assert!(matches!(
+            error,
+            ManifestRunError::Retryable(message)
+                if message.contains("HTTP 503") && message.contains("bytes 10-14")
+        ));
+    }
+
+    #[test]
+    fn distinguishes_missing_and_mismatched_content_range() {
+        let missing = validate_byte_range_response(
+            reqwest::StatusCode::PARTIAL_CONTENT,
+            None,
+            REQUESTED,
+            "a byte-range segment",
+        )
+        .expect_err("206 without Content-Range is invalid");
+        assert!(matches!(
+            missing,
+            ManifestRunError::Unsupported(message)
+                if message.contains("HTTP 206") && message.contains("missing Content-Range")
+        ));
+
+        let mismatched = validate_byte_range_response(
+            reqwest::StatusCode::PARTIAL_CONTENT,
+            Some("bytes 0-4/100"),
+            REQUESTED,
+            "a byte-range segment",
+        )
+        .expect_err("206 for a different range is invalid");
+        assert!(matches!(
+            mismatched,
+            ManifestRunError::Unsupported(message)
+                if message.contains("HTTP 206") && message.contains("invalid or mismatched Content-Range")
+        ));
+    }
+
+    #[test]
+    fn accepts_matching_content_range() {
+        assert!(
+            validate_byte_range_response(
+                reqwest::StatusCode::PARTIAL_CONTENT,
+                Some("bytes 10-14/100"),
+                REQUESTED,
+                "a byte-range segment",
+            )
+            .is_ok()
+        );
     }
 }

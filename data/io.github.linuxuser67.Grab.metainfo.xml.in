@@ -58,12 +58,13 @@
     </screenshot>
   </screenshots>
   <releases>
-    <release version="6.6.2~beta.1" type="development" date="2026-11-26">
+    <release version="6.6.2" date="2026-11-26">
       <description>
         <ul>
-          <li>Downloads: omit the Referer header when the source page is unknown and apply Referer forwarding only to compatible target schemes.</li>
-          <li>Downloads: report HTTP status and byte-range details when a native range request fails.</li>
-          <li>Refactor: carry Referer source and target in one typed context across extractors and HTTP clients.</li>
+          <li>Downloads: omit the Referer header when the source page is unknown, apply Referer forwarding only to compatible target schemes, and carry source/target in one typed context.</li>
+          <li>Downloads: report HTTP status and byte-range details for native range failures, and unify HTTP validation of native manifest resources.</li>
+          <li>Browser extension: require replay metadata on every paired handoff instead of accepting legacy metadata-free requests.</li>
+          <li>Supply chain: add a cargo-deny policy for dependency sources, bans and licenses, including the CDLA license for bundled root certificate data.</li>
         </ul>
       </description>
     </release>

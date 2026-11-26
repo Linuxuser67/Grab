@@ -383,10 +383,7 @@ mod browser_referer_tests {
             None
         );
         assert_eq!(
-            normalized_referer_for_target(
-                target,
-                Some("https://user:pass@example.test/watch"),
-            ),
+            normalized_referer_for_target(target, Some("https://user:pass@example.test/watch"),)
             None
         );
         assert_eq!(normalized_referer_for_target(target, None), None);

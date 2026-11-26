@@ -334,8 +334,11 @@ mod tests {
                 .any(|argument| argument.contains("token=secret"))
         );
         assert!(
-            referer_cli_args(Some("file:///etc/passwd"), "https://media.example.test/video")
-                .is_empty()
+            referer_cli_args(
+                Some("file:///etc/passwd"),
+                "https://media.example.test/video"
+            )
+            .is_empty()
         );
         assert!(referer_cli_args(None, "https://media.example.test/video").is_empty());
         assert!(

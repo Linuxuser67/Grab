@@ -132,7 +132,10 @@ mod tests {
             origin_for_target(Some(insecure_source), "https://media.example.test/video"),
             Some("http://source.example.test/".to_string())
         );
-        assert_eq!(origin_for_target(None, "https://media.example.test/video"), None);
+        assert_eq!(
+            origin_for_target(None, "https://media.example.test/video"),
+            None
+        );
         assert_eq!(
             origin_for_target(Some(secure_source), "file:///tmp/video"),
             None

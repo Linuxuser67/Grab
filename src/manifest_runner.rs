@@ -4667,16 +4667,7 @@ async fn fetch_resource_once(
 
     let part = directory.join(format!("{}.part", resource.filename));
     remove_regular_file_if_present(&part).await?;
-    let mut request = client.get(resource.url.clone());
-    if let Some(range) = resource.range {
-        let end = range
-            .inclusive_end()
-            .ok_or_else(|| "The stream manifest contains an invalid byte range".to_string())?;
-        request = request.header(
-            reqwest::header::RANGE,
-            format!("bytes={}-{end}", range.offset),
-        );
-    }
+    let request = build_resource_request(client, resource, "stream segment")?;
     let response = tokio::time::timeout(RESOURCE_IDLE_TIMEOUT, request.send())
         .await
         .map_err(|_| {
@@ -4688,37 +4679,18 @@ async fn fetch_resource_once(
                 error.without_url()
             ))
         })?;
-    let status = response.status();
-    if let Some(range) = resource.range {
-        validate_byte_range_response(
-            status,
-            response
-                .headers()
-                .get(reqwest::header::CONTENT_RANGE)
-                .and_then(|value| value.to_str().ok()),
-            range,
-            "a byte-range segment",
-        )?;
-    } else if status == reqwest::StatusCode::PARTIAL_CONTENT {
-        return Err(ManifestRunError::Unsupported(
-            "The stream server returned partial content without a requested byte range".to_string(),
-        ));
-    } else if !status.is_success() {
-        return Err(resource_status_error(status));
-    }
     let content_length = response.content_length();
-    if content_length.is_some_and(|length| length > MAX_RESOURCE_BYTES) {
-        return Err(ManifestRunError::Unsupported(
-            "A stream segment exceeds the size limit".to_string(),
-        ));
-    }
-    if let Some(range) = resource.range
-        && byte_range_content_length_exceeds(range, content_length)
-    {
-        return Err(ManifestRunError::Unsupported(
-            "The stream server returned more bytes than the requested range".to_string(),
-        ));
-    }
+    validate_resource_response(
+        response.status(),
+        response
+            .headers()
+            .get(reqwest::header::CONTENT_RANGE)
+            .and_then(|value| value.to_str().ok()),
+        content_length,
+        resource.range,
+        "stream segment",
+        "a byte-range segment",
+    )?;
     if resource.key && content_length.is_some_and(|length| length != 16) {
         return Err(ManifestRunError::Unsupported(
             "The HLS identity key is not 16 bytes".to_string(),
@@ -4832,6 +4804,66 @@ fn resource_status_error(status: reqwest::StatusCode) -> ManifestRunError {
     } else {
         ManifestRunError::Unsupported(message)
     }
+}
+
+/// Build the common GET request for a manifest resource, including its optional byte range.
+fn build_resource_request(
+    client: &reqwest::Client,
+    resource: &Resource,
+    resource_description: &str,
+) -> Result<reqwest::RequestBuilder, ManifestRunError> {
+    let mut request = client.get(resource.url.clone());
+    if let Some(range) = resource.range {
+        if range.length == 0 || range.length > MAX_RESOURCE_BYTES {
+            return Err(ManifestRunError::Unsupported(format!(
+                "The {resource_description} byte range is outside the accepted size limit"
+            )));
+        }
+        let end = range.inclusive_end().ok_or_else(|| {
+            ManifestRunError::Unsupported(format!(
+                "The {resource_description} byte range is invalid"
+            ))
+        })?;
+        request = request.header(
+            reqwest::header::RANGE,
+            format!("bytes={}-{end}", range.offset),
+        );
+    }
+    Ok(request)
+}
+
+/// Apply one HTTP status, Content-Range, and declared-size policy to every
+/// manifest resource fetcher. Body streaming and cancellation remain owned by
+/// the caller because the ordered HLS writer has different rollback semantics.
+fn validate_resource_response(
+    status: reqwest::StatusCode,
+    content_range: Option<&str>,
+    content_length: Option<u64>,
+    range: Option<ManifestByteRange>,
+    resource_description: &str,
+    range_description: &str,
+) -> Result<(), ManifestRunError> {
+    if let Some(range) = range {
+        validate_byte_range_response(status, content_range, range, range_description)?;
+    } else if status == reqwest::StatusCode::PARTIAL_CONTENT {
+        return Err(ManifestRunError::Unsupported(format!(
+            "The stream server returned partial content for a complete {resource_description} without a requested byte range"
+        )));
+    } else if !status.is_success() {
+        return Err(resource_status_error(status));
+    }
+
+    if content_length.is_some_and(|length| length > MAX_RESOURCE_BYTES) {
+        return Err(ManifestRunError::Unsupported(format!(
+            "A {resource_description} exceeds the 1 GiB limit"
+        )));
+    }
+    if range.is_some_and(|range| byte_range_content_length_exceeds(range, content_length)) {
+        return Err(ManifestRunError::Unsupported(format!(
+            "The stream server returned more bytes than the requested {resource_description} byte range"
+        )));
+    }
+    Ok(())
 }
 
 fn progress_message(downloaded: u64) -> EngineMsg {
@@ -5072,21 +5104,7 @@ async fn fetch_hls_resource_to_writer(
             ));
         }
 
-        let mut request = client.get(resource.url.clone());
-        if let Some(range) = resource.range {
-            if range.length == 0 || range.length > MAX_RESOURCE_BYTES {
-                return Err(ManifestRunError::Unsupported(
-                    "An HLS byte range is outside the accepted size limit".to_string(),
-                ));
-            }
-            let end = range.inclusive_end().ok_or_else(|| {
-                ManifestRunError::Unsupported("The HLS byte range is invalid".to_string())
-            })?;
-            request = request.header(
-                reqwest::header::RANGE,
-                format!("bytes={}-{end}", range.offset),
-            );
-        }
+        let request = build_resource_request(client, resource, "HLS fragment")?;
 
         let response = tokio::select! {
             biased;
@@ -5102,43 +5120,17 @@ async fn fetch_hls_resource_to_writer(
                     )))?
             }
         };
-        let status = response.status();
-        if let Some(range) = resource.range {
-            validate_byte_range_response(
-                status,
-                response
-                    .headers()
-                    .get(reqwest::header::CONTENT_RANGE)
-                    .and_then(|value| value.to_str().ok()),
-                range,
-                "an HLS byte range",
-            )?;
-        } else if status == reqwest::StatusCode::PARTIAL_CONTENT {
-            return Err(ManifestRunError::Failed(
-                "The stream server returned partial content for a complete HLS fragment"
-                    .to_string(),
-            ));
-        } else if !status.is_success() {
-            // Keep non-transient HTTP responses fallback-eligible: yt-dlp may
-            // have an alternate resource URL or authentication strategy.
-            return Err(resource_status_error(status));
-        }
-        if response
-            .content_length()
-            .is_some_and(|length| length > MAX_RESOURCE_BYTES)
-        {
-            return Err(ManifestRunError::Failed(
-                "An HLS fragment exceeds the 1 GiB limit".to_string(),
-            ));
-        }
-        if resource.range.is_some_and(|range| {
-            byte_range_content_length_exceeds(range, response.content_length())
-        }) {
-            return Err(ManifestRunError::Unsupported(
-                "The stream server returned more bytes than the requested HLS byte range"
-                    .to_string(),
-            ));
-        }
+        validate_resource_response(
+            response.status(),
+            response
+                .headers()
+                .get(reqwest::header::CONTENT_RANGE)
+                .and_then(|value| value.to_str().ok()),
+            response.content_length(),
+            resource.range,
+            "HLS fragment",
+            "an HLS byte range",
+        )?;
 
         let mut stream = response.bytes_stream();
         let mut size = 0_u64;
@@ -9585,7 +9577,10 @@ mod ffmpeg_rejected_input_tests {
 
 #[cfg(test)]
 mod byte_range_response_diagnostics_tests {
-    use super::{EngineMsg, ManifestRunError, resource_status_error, validate_byte_range_response};
+    use super::{
+        EngineMsg, ManifestRunError, Resource, build_resource_request, resource_status_error,
+        validate_byte_range_response, validate_resource_response,
+    };
     use crate::manifest::ManifestByteRange;
 
     const REQUESTED: ManifestByteRange = ManifestByteRange {
@@ -9689,6 +9684,90 @@ mod byte_range_response_diagnostics_tests {
             ManifestRunError::Unsupported(message)
                 if message.contains("HTTP 206") && message.contains("invalid or mismatched Content-Range")
         ));
+    }
+
+    #[test]
+    fn unrequested_partial_content_is_fallback_eligible_for_all_resource_paths() {
+        for description in ["stream segment", "HLS fragment"] {
+            let error = validate_resource_response(
+                reqwest::StatusCode::PARTIAL_CONTENT,
+                None,
+                Some(5),
+                None,
+                description,
+                "a byte-range segment",
+            )
+            .expect_err("206 without a requested range must be rejected");
+            assert!(
+                matches!(&error, ManifestRunError::Unsupported(_)),
+                "{description}: {error:?}"
+            );
+            assert!(
+                matches!(error.into_engine_message(), EngineMsg::ManifestFallback(_)),
+                "{description}: 206 must permit extractor fallback"
+            );
+        }
+    }
+
+    #[test]
+    fn declared_resource_size_limit_has_the_same_fallback_classification() {
+        let too_large = super::MAX_RESOURCE_BYTES + 1;
+        for description in ["stream segment", "HLS fragment"] {
+            let error = validate_resource_response(
+                reqwest::StatusCode::OK,
+                None,
+                Some(too_large),
+                None,
+                description,
+                "a byte-range segment",
+            )
+            .expect_err("an oversized resource must be rejected");
+            assert!(
+                matches!(&error, ManifestRunError::Unsupported(_)),
+                "{description}: {error:?}"
+            );
+            assert!(
+                matches!(error.into_engine_message(), EngineMsg::ManifestFallback(_)),
+                "{description}: oversized response must permit extractor fallback"
+            );
+        }
+    }
+
+    #[test]
+    fn resource_request_builder_sets_the_same_range_header() {
+        let resource = Resource {
+            url: url::Url::parse("https://example.invalid/media.m4s").unwrap(),
+            range: Some(REQUESTED),
+            filename: "media.m4s".to_string(),
+            key: false,
+        };
+        let request = build_resource_request(&reqwest::Client::new(), &resource, "stream segment")
+            .expect("valid byte range")
+            .build()
+            .expect("valid request");
+        assert_eq!(
+            request.headers().get(reqwest::header::RANGE).unwrap(),
+            "bytes=10-14"
+        );
+    }
+
+    #[test]
+    fn resource_request_builder_rejects_empty_ranges_consistently() {
+        let resource = Resource {
+            url: url::Url::parse("https://example.invalid/media.m4s").unwrap(),
+            range: Some(ManifestByteRange {
+                offset: 0,
+                length: 0,
+            }),
+            filename: "media.m4s".to_string(),
+            key: false,
+        };
+        let error = match build_resource_request(&reqwest::Client::new(), &resource, "HLS fragment")
+        {
+            Err(error) => error,
+            Ok(_) => panic!("empty ranges must be rejected"),
+        };
+        assert!(matches!(error, ManifestRunError::Unsupported(_)));
     }
 
     #[test]

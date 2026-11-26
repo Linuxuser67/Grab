@@ -4821,7 +4821,12 @@ async fn hls_fmp4_single_file_rejects_mismatched_content_range() {
         transfer_single_file_fmp4_ranges(SingleFileFmp4RangeResponse::MismatchedContentRange)
             .await
             .expect_err("mismatched Content-Range must be rejected");
-    assert!(error.contains("did not honor"), "unexpected error: {error}");
+    assert!(
+        error.contains("HTTP 206")
+            && error.contains("invalid or mismatched Content-Range")
+            && error.contains("bytes 15-38"),
+        "unexpected error: {error}"
+    );
 }
 
 #[tokio::test]

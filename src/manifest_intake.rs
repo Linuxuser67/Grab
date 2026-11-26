@@ -2722,8 +2722,8 @@ segment.ts?f=418899&srv=server&i=0.4&sp=500&p1=one&p2=two&asn=327934
             None,
             "https://preview-handoff.example.test/master.m3u8",
         )
-            .await
-            .expect("handoff preview client");
+        .await
+        .expect("handoff preview client");
         assert!(
             client.is_some(),
             "a staged handoff jar must authenticate the preview"

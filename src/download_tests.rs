@@ -6760,7 +6760,8 @@ fn cookies_reapplied_after_cross_host_redirect() {
     let jar = std::sync::Arc::new(reqwest::cookie::Jar::default());
     jar.add_cookie_str("sid=loc123", &"http://localhost/".parse().unwrap());
     jar.add_cookie_str("sid=ip456", &"http://127.0.0.1/".parse().unwrap());
-    let client = crate::download_net::http_client_with_jar(None, jar, None, None).expect("jar client");
+    let client =
+        crate::download_net::http_client_with_jar(None, jar, None, None).expect("jar client");
     let resp = crate::runtime::tokio_rt()
         .block_on(client.get(format!("http://localhost:{port}/start")).send())
         .expect("redirect fetch");

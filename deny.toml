@@ -1,0 +1,40 @@
+# Supply-chain policy for the locked application dependency graph.
+# Advisory scanning remains in cargo-audit; this file governs bans, licenses,
+# and dependency origins.
+
+[bans]
+# Keep duplicate versions visible without blocking unavoidable ecosystem splits.
+multiple-versions = "warn"
+
+[licenses]
+version = 2
+confidence-threshold = 0.93
+allow = [
+    "0BSD",
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "BSL-1.0",
+    "CC0-1.0",
+    "GPL-3.0-only",
+    "ISC",
+    "LGPL-2.1-or-later",
+    "MIT",
+    "MPL-2.0",
+    "Unicode-3.0",
+    "Zlib",
+]
+# This exception is intentionally limited to the pinned Mozilla/CCADB root
+# certificate data crate. Its data license text is installed with the app.
+exceptions = [
+    { crate = "webpki-root-certs@1.0.12", allow = ["CDLA-Permissive-2.0"] },
+]
+
+[sources]
+# Cargo.lock currently contains crates.io registry packages only. Keep future
+# dependencies from silently introducing an alternate registry or git source.
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]
+allow-git = []

@@ -185,10 +185,9 @@ jobs:
       - run: python3 build-aux/test-gen-cargo-sources.py
       - run: ./build-aux/gen-cargo-sources.py --check
   # Read-only secret and supply-chain scanning: gitleaks over the full
-  # history plus cargo-audit against the RustSec advisory DB. No system
-  # deps, no behavior risk — fails only when a secret or a
-  # known-vulnerable dependency actually lands. Binaries are pinned like
-  # sentrux above so an upstream release can't silently change the verdict.
+  # history, cargo-audit against the RustSec advisory DB, and cargo-deny
+  # checks for duplicate versions, licenses, and dependency sources. Scanner
+  # versions are pinned so upstream releases cannot silently change verdicts.
   audit:
     runs-on: ubuntu-latest
     steps:
@@ -225,3 +224,10 @@ jobs:
           tar -xzf /tmp/cargo-audit.tgz -C /tmp
           install -m 755 /tmp/cargo-audit-x86_64-unknown-linux-gnu-v0.23.0/cargo-audit /usr/local/bin/cargo-audit
       - run: cargo audit
+      - name: Install cargo-deny
+        # Keep this aligned with deny.toml's configuration schema. Bump
+        # deliberately after checking the new release's changelog.
+        run: cargo install --locked --version 0.22.1 cargo-deny
+      # cargo-audit owns RustSec advisory scanning; avoid running the
+      # overlapping cargo-deny advisory check a second time.
+      - run: cargo deny check bans licenses sources

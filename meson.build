@@ -8,6 +8,11 @@ project('grab', 'rust',
 install_data('LICENSE',
   install_dir: get_option('datadir') / 'licenses' / 'io.github.linuxuser67.Grab',
 )
+# webpki-root-certs ships Mozilla/CCADB root certificate data under CDLA-
+# Permissive-2.0. Install its required license text with the application.
+install_data('data/licenses/CDLA-Permissive-2.0.txt',
+  install_dir: get_option('datadir') / 'licenses' / 'io.github.linuxuser67.Grab',
+)
 
 gnome = import('gnome')
 i18n = import('i18n')

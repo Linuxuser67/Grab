@@ -9736,7 +9736,7 @@ mod byte_range_response_diagnostics_tests {
     #[test]
     fn resource_request_builder_sets_the_same_range_header() {
         let resource = Resource {
-            url: reqwest::Url::parse("https://example.invalid/media.m4s").unwrap(),
+            url: url::Url::parse("https://example.invalid/media.m4s").unwrap(),
             range: Some(REQUESTED),
             filename: "media.m4s".to_string(),
             key: false,
@@ -9758,7 +9758,7 @@ mod byte_range_response_diagnostics_tests {
     #[test]
     fn resource_request_builder_rejects_empty_ranges_consistently() {
         let resource = Resource {
-            url: reqwest::Url::parse("https://example.invalid/media.m4s").unwrap(),
+            url: url::Url::parse("https://example.invalid/media.m4s").unwrap(),
             range: Some(ManifestByteRange {
                 offset: 0,
                 length: 0,
@@ -9766,12 +9766,14 @@ mod byte_range_response_diagnostics_tests {
             filename: "media.m4s".to_string(),
             key: false,
         };
-        let error = build_resource_request(
+        let error = match build_resource_request(
             &reqwest::Client::new(),
             &resource,
             "HLS fragment",
-        )
-        .expect_err("empty ranges are invalid");
+        ) {
+            Err(error) => error,
+            Ok(_) => panic!("empty ranges must be rejected"),
+        };
         assert!(matches!(error, ManifestRunError::Unsupported(_)));
     }
 

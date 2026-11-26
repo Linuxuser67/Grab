@@ -4670,9 +4670,7 @@ async fn fetch_resource_once(
     let mut request = client.get(resource.url.clone());
     if let Some(range) = resource.range {
         let end = range
-            .offset
-            .checked_add(range.length)
-            .and_then(|value| value.checked_sub(1))
+            .inclusive_end()
             .ok_or_else(|| "The stream manifest contains an invalid byte range".to_string())?;
         request = request.header(
             reqwest::header::RANGE,
@@ -4860,13 +4858,9 @@ fn validate_byte_range_response(
     range: ManifestByteRange,
     resource_description: &str,
 ) -> Result<(), ManifestRunError> {
-    let last_byte = range
-        .offset
-        .checked_add(range.length)
-        .and_then(|end| end.checked_sub(1))
-        .ok_or_else(|| {
-            ManifestRunError::Unsupported("The manifest contains an invalid byte range".to_string())
-        })?;
+    let last_byte = range.inclusive_end().ok_or_else(|| {
+        ManifestRunError::Unsupported("The manifest contains an invalid byte range".to_string())
+    })?;
     let requested = format!("bytes {}-{last_byte}", range.offset);
 
     if is_retryable_resource_status(status) {
@@ -4904,12 +4898,9 @@ fn content_range_matches(header: Option<&str>, range: ManifestByteRange) -> bool
         return false;
     };
 
-    range
-        .offset
-        .checked_add(range.length)
-        .is_some_and(|exclusive_end| {
-            first_byte == range.offset && last_byte == exclusive_end - 1 && total >= exclusive_end
-        })
+    range.inclusive_end().is_some_and(|inclusive_end| {
+        first_byte == range.offset && last_byte == inclusive_end && total > inclusive_end
+    })
 }
 
 fn manifest_output_container(path: &Path) -> Result<ManifestContainer, ManifestRunError> {
@@ -5083,13 +5074,9 @@ async fn fetch_hls_resource_to_writer(
                     "An HLS byte range is outside the accepted size limit".to_string(),
                 ));
             }
-            let end = range
-                .offset
-                .checked_add(range.length)
-                .and_then(|exclusive_end| exclusive_end.checked_sub(1))
-                .ok_or_else(|| {
-                    ManifestRunError::Unsupported("The HLS byte range is invalid".to_string())
-                })?;
+            let end = range.inclusive_end().ok_or_else(|| {
+                ManifestRunError::Unsupported("The HLS byte range is invalid".to_string())
+            })?;
             request = request.header(
                 reqwest::header::RANGE,
                 format!("bytes={}-{end}", range.offset),

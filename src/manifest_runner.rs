@@ -9626,13 +9626,8 @@ mod byte_range_response_diagnostics_tests {
             reqwest::StatusCode::UNAUTHORIZED,
             reqwest::StatusCode::FORBIDDEN,
         ] {
-            let error = validate_byte_range_response(
-                status,
-                None,
-                REQUESTED,
-                "an HLS byte range",
-            )
-            .expect_err("authorization denials reject the native range request");
+            let error = validate_byte_range_response(status, None, REQUESTED, "an HLS byte range")
+                .expect_err("authorization denials reject the native range request");
             assert!(
                 matches!(&error, ManifestRunError::Unsupported(_)),
                 "HTTP {status} must remain an unsupported native transfer"

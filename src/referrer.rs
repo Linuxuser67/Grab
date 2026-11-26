@@ -89,7 +89,8 @@ pub(crate) fn cache_identity(raw: Option<&str>) -> SourceIdentity {
 #[cfg(test)]
 mod tests {
     use super::{
-        RefererContext, SourceIdentity, cache_identity, origin_for_target, origin_only, parse_source,
+        RefererContext, SourceIdentity, cache_identity, origin_for_target, origin_only,
+        parse_source,
     };
 
     #[test]
@@ -155,10 +156,7 @@ mod tests {
             })),
             Some("http://source.example.test/".to_string())
         );
-        assert_eq!(
-            origin_for_target(None),
-            None
-        );
+        assert_eq!(origin_for_target(None), None);
         assert_eq!(
             origin_for_target(Some(RefererContext {
                 source: secure_source,

@@ -2721,8 +2721,8 @@ segment.ts?f=418899&srv=server&i=0.4&sp=500&p1=one&p2=two&asn=327934
         std::fs::write(&path, contents).expect("write handoff jar");
 
         let client = client_from_handoff_jar(&path, Some("Grab-Test-UA"), None, None)
-        .await
-        .expect("handoff preview client");
+            .await
+            .expect("handoff preview client");
         assert!(
             client.is_some(),
             "a staged handoff jar must authenticate the preview"

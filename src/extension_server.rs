@@ -3934,16 +3934,17 @@ mod tests {
 
     #[tokio::test]
     async fn authenticated_handoff_requires_valid_timestamp_and_nonce() {
+        let _guard = exclusive();
         let mut srv = start(4).await;
         let host = format!("127.0.0.1:{}", srv.port);
         let timestamp_ms = unix_time_ms().expect("system clock");
         let nonce = format!("{:032x}", fresh_test_nonce());
-        let legacy_url = "https://missing-replay-metadata.example/file.zip";
+        let no_replay_metadata_url = "https://missing-replay-metadata.example/file.zip";
         let requests = [
             // The former compatibility path accepted this correctly signed
             // body, prompting the user while silently dropping its cookies.
             format!(
-                r#"{{"url":"{legacy_url}","cookies":[{{"name":"session","value":"secret"}}]}}"#
+                r#"{{"url":"{no_replay_metadata_url}","cookies":[{{"name":"session","value":"secret"}}]}}"#
             ),
             format!(
                 r#"{{"url":"https://missing-nonce.example/file.zip","timestamp_ms":{timestamp_ms}}}"#
@@ -3952,7 +3953,7 @@ mod tests {
                 r#"{{"url":"https://missing-timestamp.example/file.zip","nonce":"{nonce}"}}"#
             ),
             format!(
-                r#"{{"url":"https://malformed-nonce.example/file.zip","timestamp_ms":{timestamp_ms},"nonce":"not-a-128-bit-nonce"}}"#
+                r#"{{"url":"https://malformed-nonce.example/file.zip","timestamp_ms":{timestamp_ms},"nonce":"gggggggggggggggggggggggggggggggg"}}"#
             ),
             format!(
                 r#"{{"url":"https://stale-timestamp.example/file.zip","timestamp_ms":1,"nonce":"{:032x}"}}"#,
@@ -3961,6 +3962,8 @@ mod tests {
         ];
 
         for body in requests {
+            // Bypass request_with_target: it upgrades valid signed fixtures
+            // with replay metadata, which would hide this regression.
             let signed = token(&body);
             let response = request_to(
                 srv.port,
@@ -3987,7 +3990,7 @@ mod tests {
         }
 
         assert!(
-            handoff_cookie_args(legacy_url).is_empty(),
+            handoff_cookie_args(no_replay_metadata_url).is_empty(),
             "cookies from a rejected no-nonce request must not be staged"
         );
     }

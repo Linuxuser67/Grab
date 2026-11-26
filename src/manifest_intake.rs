@@ -2715,7 +2715,13 @@ segment.ts?f=418899&srv=server&i=0.4&sp=500&p1=one&p2=two&asn=327934
         );
         std::fs::write(&path, contents).expect("write handoff jar");
 
-        let client = client_from_handoff_jar(&path, Some("Grab-Test-UA"), None, None)
+        let client = client_from_handoff_jar(
+            &path,
+            Some("Grab-Test-UA"),
+            None,
+            None,
+            "https://preview-handoff.example.test/master.m3u8",
+        )
             .await
             .expect("handoff preview client");
         assert!(

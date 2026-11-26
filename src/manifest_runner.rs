@@ -9741,14 +9741,10 @@ mod byte_range_response_diagnostics_tests {
             filename: "media.m4s".to_string(),
             key: false,
         };
-        let request = build_resource_request(
-            &reqwest::Client::new(),
-            &resource,
-            "stream segment",
-        )
-        .expect("valid byte range")
-        .build()
-        .expect("valid request");
+        let request = build_resource_request(&reqwest::Client::new(), &resource, "stream segment")
+            .expect("valid byte range")
+            .build()
+            .expect("valid request");
         assert_eq!(
             request.headers().get(reqwest::header::RANGE).unwrap(),
             "bytes=10-14"
@@ -9766,11 +9762,8 @@ mod byte_range_response_diagnostics_tests {
             filename: "media.m4s".to_string(),
             key: false,
         };
-        let error = match build_resource_request(
-            &reqwest::Client::new(),
-            &resource,
-            "HLS fragment",
-        ) {
+        let error = match build_resource_request(&reqwest::Client::new(), &resource, "HLS fragment")
+        {
             Err(error) => error,
             Ok(_) => panic!("empty ranges must be rejected"),
         };

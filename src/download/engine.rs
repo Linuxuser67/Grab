@@ -356,7 +356,7 @@ impl DownloadManager {
                 return;
             }
         };
-        let client = match http_client_for(proxy.as_ref(), None, None) {
+        let client = match http_client_for(proxy.as_ref(), None) {
             Ok(c) => c,
             Err(e) => {
                 item.set_detail(e);

@@ -341,8 +341,10 @@ async fn route_open_uri(
             };
         let client = match crate::download_net::http_client_for(
             proxy.as_ref(),
-            referer.as_deref(),
-            Some(uri.as_str()),
+            referer.as_deref().map(|source| crate::referrer::RefererContext {
+                source,
+                target: uri.as_str(),
+            }),
         ) {
             Ok(c) => c,
             Err(e) => {

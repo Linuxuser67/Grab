@@ -1851,7 +1851,7 @@ async fn handle_inspect_hls(
     if crate::subprocess_proxy::validate_proxy_compatibility().is_err() {
         return Json(InspectHlsResponse::unknown()).into_response();
     }
-    let client = match crate::download_net::client_builder(None, None)
+    let client = match crate::download_net::client_builder(None)
         .redirect(reqwest::redirect::Policy::none())
         .build()
     {

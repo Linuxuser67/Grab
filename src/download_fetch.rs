@@ -97,6 +97,15 @@ pub(crate) struct FetchCtx {
     pub(crate) if_range: std::sync::Arc<std::sync::OnceLock<String>>,
 }
 
+impl FetchCtx {
+    fn referer_context(&self) -> Option<crate::referrer::RefererContext<'_>> {
+        self.referer.as_deref().map(|source| crate::referrer::RefererContext {
+            source,
+            target: &self.url,
+        })
+    }
+}
+
 pub(crate) async fn run_download(mut ctx: FetchCtx, connections: usize, mode: StartMode) {
     let timeout = Duration::from_secs(30);
     let mut tries = 3;
@@ -157,7 +166,7 @@ pub(crate) async fn run_download(mut ctx: FetchCtx, connections: usize, mode: St
                 return;
             }
         };
-        match crate::download_net::http_client_with_jar(proxy.as_ref(), jar, None, None) {
+        match crate::download_net::http_client_with_jar(proxy.as_ref(), jar, None) {
             Ok(client) => ctx.client = client,
             Err(e) => {
                 ctx.tx.send(EngineMsg::Failed(e)).ok();
@@ -191,7 +200,7 @@ pub(crate) async fn run_download(mut ctx: FetchCtx, connections: usize, mode: St
                 &ctx.client,
                 &ctx.url,
                 &ctx.user_agent,
-                ctx.referer.as_deref(),
+                ctx.referer_context(),
                 timeout,
             )
             .await
@@ -786,8 +795,7 @@ async fn attempt_once(
         let mut req = stamp_request(
             ctx.client.get(&ctx.url),
             &ctx.user_agent,
-            &ctx.url,
-            ctx.referer.as_deref(),
+            ctx.referer_context(),
         );
         if start > 0 {
             req = req.header("Range", format!("bytes={start}-"));
@@ -825,8 +833,7 @@ async fn attempt_once(
                 let hreq = stamp_request(
                     ctx.client.head(&ctx.url),
                     &ctx.user_agent,
-                    &ctx.url,
-                    ctx.referer.as_deref(),
+                    ctx.referer_context(),
                 );
                 if let Ok(hresp) = execute_with_timeout(&ctx.client, hreq, ctx.timeout).await {
                     already_complete = hresp.status().is_success()
@@ -1527,34 +1534,22 @@ pub(crate) enum StartMode {
     Resume(SegmentState),
 }
 
-/// Produce an origin-only Referer when a browser source page is known.
-///
-/// A manually pasted URL has no source-page context and must not be used as
-/// its own Referer. Removing the path and query also avoids forwarding page
-/// tokens to the media host.
-fn request_referer(target: &str, source: Option<&str>) -> Option<String> {
-    crate::referrer::origin_for_target(source, target)
-}
-
 #[cfg(test)]
 mod request_referer_tests {
-    use super::request_referer;
+    use crate::referrer::{RefererContext, origin_for_target};
 
     #[test]
     fn absent_source_does_not_synthesize_target_origin() {
-        assert_eq!(
-            request_referer("https://cdn.example.test/video.mp4", None),
-            None
-        );
+        assert_eq!(origin_for_target(None), None);
     }
 
     #[test]
     fn same_origin_uses_only_the_source_origin() {
         assert_eq!(
-            request_referer(
-                "https://example.test/download/file",
-                Some("https://example.test/watch?id=42#player"),
-            ),
+            origin_for_target(Some(RefererContext {
+                source: "https://example.test/watch?id=42#player",
+                target: "https://example.test/download/file",
+            })),
             Some("https://example.test/".to_string())
         );
     }
@@ -1624,11 +1619,18 @@ mod request_referer_tests {
         });
 
         let client =
-            crate::download_net::http_client_for(None, None, None).expect("build guarded client");
+            crate::download_net::http_client_for(None, None).expect("build guarded client");
         let target = format!("http://{first_address}/media");
         let source = format!("http://{first_address}/watch?token=private");
         let request =
-            super::stamp_request(client.get(&target), "Grab-Test-UA", &target, Some(&source));
+            super::stamp_request(
+                client.get(&target),
+                "Grab-Test-UA",
+                Some(RefererContext {
+                    source: &source,
+                    target: &target,
+                }),
+            );
         let response =
             super::execute_with_timeout(&client, request, std::time::Duration::from_secs(3))
                 .await
@@ -1655,10 +1657,10 @@ mod request_referer_tests {
     #[test]
     fn cross_origin_sends_source_origin_only() {
         assert_eq!(
-            request_referer(
-                "https://cdn.example.test/file",
-                Some("https://www.example.test/watch?id=private"),
-            ),
+            origin_for_target(Some(RefererContext {
+                source: "https://www.example.test/watch?id=private",
+                target: "https://cdn.example.test/file",
+            })),
             Some("https://www.example.test/".to_string())
         );
     }
@@ -1666,25 +1668,31 @@ mod request_referer_tests {
     #[test]
     fn downgrade_and_invalid_source_suppress_referer() {
         assert_eq!(
-            request_referer(
-                "http://cdn.example.test/file",
-                Some("https://www.example.test/watch"),
-            ),
+            origin_for_target(Some(RefererContext {
+                source: "https://www.example.test/watch",
+                target: "http://cdn.example.test/file",
+            })),
             None
         );
         assert_eq!(
-            request_referer("https://cdn.example.test/file", Some("javascript:alert(1)"),),
+            origin_for_target(Some(RefererContext {
+                source: "javascript:alert(1)",
+                target: "https://cdn.example.test/file",
+            })),
             None
         );
         assert_eq!(
-            request_referer(
-                "https://cdn.example.test/file",
-                Some("https://user:pass@example.test/watch"),
-            ),
+            origin_for_target(Some(RefererContext {
+                source: "https://user:pass@example.test/watch",
+                target: "https://cdn.example.test/file",
+            })),
             None
         );
         assert_eq!(
-            request_referer("https://cdn.example.test/file", Some(&"x".repeat(2049)),),
+            origin_for_target(Some(RefererContext {
+                source: &"x".repeat(2049),
+                target: "https://cdn.example.test/file",
+            })),
             None
         );
     }
@@ -1697,13 +1705,12 @@ mod request_referer_tests {
 pub(crate) fn stamp_request(
     mut req: reqwest::RequestBuilder,
     user_agent: &str,
-    url: &str,
-    source_referer: Option<&str>,
+    referer_context: Option<crate::referrer::RefererContext<'_>>,
 ) -> reqwest::RequestBuilder {
     if !user_agent.trim().is_empty() {
         req = req.header("User-Agent", user_agent.trim());
     }
-    if let Some(referer) = request_referer(url, source_referer) {
+    if let Some(referer) = crate::referrer::origin_for_target(referer_context) {
         req = req.header("Referer", referer);
     }
     req
@@ -1779,14 +1786,13 @@ async fn probe_ranges(
     client: &reqwest::Client,
     url: &str,
     user_agent: &str,
-    referer: Option<&str>,
+    referer_context: Option<crate::referrer::RefererContext<'_>>,
     timeout: Duration,
 ) -> Result<(u64, crate::engine_msg::ValidatorInfo), String> {
     let req = stamp_request(
         client.get(url).header("Range", "bytes=0-0"),
         user_agent,
-        url,
-        referer,
+        referer_context,
     );
     let resp = execute_with_timeout(client, req, timeout).await?;
     if resp.status() != reqwest::StatusCode::PARTIAL_CONTENT {
@@ -1915,7 +1921,7 @@ pub(crate) async fn fetch_piece(
         if let Some(v) = ctx.if_range.get() {
             builder = builder.header("If-Range", v);
         }
-        let req = stamp_request(builder, &ctx.user_agent, &ctx.url, ctx.referer.as_deref());
+        let req = stamp_request(builder, &ctx.user_agent, ctx.referer_context());
         let resp = match execute_with_timeout(&ctx.client, req, timeout).await {
             Ok(r) => r,
             Err(e) => {

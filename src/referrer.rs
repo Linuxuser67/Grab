@@ -156,7 +156,7 @@ mod tests {
             Some("http://source.example.test/".to_string())
         );
         assert_eq!(
-            origin_for_target(None, "https://media.example.test/video"),
+            origin_for_target(None),
             None
         );
         assert_eq!(

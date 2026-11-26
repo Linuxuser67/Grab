@@ -368,7 +368,7 @@ pub(crate) use crate::manifest_types::{
 pub(crate) async fn lookup(
     raw_url: &str,
     proxy: Option<&crate::net_types::ResolvedProxy>,
-    referer: Option<&str>,
+    referer_context: Option<crate::referrer::RefererContext<'_>>,
 ) -> Result<Option<ManifestLookup>, String> {
     let requested_url = Url::parse(raw_url).map_err(|_| gettext("Invalid stream manifest URL"))?;
     if !is_native_manifest_candidate(&requested_url, ManifestTransportPolicy::HttpsOnly) {
@@ -380,7 +380,12 @@ pub(crate) async fn lookup(
     let handoff_identity = crate::extension_server::live_handoff_identity(raw_url);
     // The source page can affect an access-controlled manifest response.
     // Its hash is part of the key, allowing reuse only for the same context.
-    let cache_key = manifest_preview_cache_key(raw_url, proxy, handoff_identity.as_ref(), referer);
+    let cache_key = manifest_preview_cache_key(
+        raw_url,
+        proxy,
+        handoff_identity.as_ref(),
+        referer_context.map(|context| context.source),
+    );
     if let Some(key) = cache_key.as_ref()
         && let Some(mut cached) = manifest_preview_cache_get(key)
     {
@@ -394,7 +399,7 @@ pub(crate) async fn lookup(
     let request_url = raw_url.to_string();
     let (auth, lookup) = tokio::time::timeout(MANIFEST_LOOKUP_BUDGET, async move {
         let (client, auth) =
-            client_for_preview(&request_url, proxy, handoff_identity, referer).await?;
+            client_for_preview(&request_url, proxy, handoff_identity, referer_context).await?;
         let lookup = lookup_preview_with_client(&client, &request_url)
             .await
             .map_err(|error| error.to_string())?;
@@ -422,16 +427,18 @@ pub(crate) async fn client_for_manifest(
     raw_url: &str,
     cookies_browser: &str,
     proxy: Option<&crate::net_types::ResolvedProxy>,
-    referer: Option<&str>,
+    referer_context: Option<crate::referrer::RefererContext<'_>>,
 ) -> Result<reqwest::Client, String> {
     validate_handoff_proxy(raw_url)?;
-    if let Some(client) = client_with_handoff_jar(raw_url, proxy, referer).await? {
+    if let Some(client) = client_with_handoff_jar(raw_url, proxy, referer_context).await? {
         return Ok(client);
     }
-    if let Some(client) = client_with_browser_jar(raw_url, cookies_browser, proxy, referer).await? {
+    if let Some(client) =
+        client_with_browser_jar(raw_url, cookies_browser, proxy, referer_context).await?
+    {
         return Ok(client);
     }
-    crate::download_net::http_client_for(proxy, referer, Some(raw_url))
+    crate::download_net::http_client_for(proxy, referer_context)
         .map_err(|_| gettext("The configured proxy could not be used for this manifest"))
 }
 
@@ -455,12 +462,12 @@ fn validate_handoff_proxy(raw_url: &str) -> Result<(), String> {
 async fn client_with_handoff_jar(
     raw_url: &str,
     proxy: Option<&crate::net_types::ResolvedProxy>,
-    referer: Option<&str>,
+    referer_context: Option<crate::referrer::RefererContext<'_>>,
 ) -> Result<Option<reqwest::Client>, String> {
     let Some((path, user_agent)) = crate::extension_server::live_handoff_identity(raw_url) else {
         return Ok(None);
     };
-    client_from_handoff_jar(&path, user_agent.as_deref(), proxy, referer, raw_url).await
+    client_from_handoff_jar(&path, user_agent.as_deref(), proxy, referer_context).await
 }
 
 /// Client for one staged handoff jar, with the browser user agent it was
@@ -469,8 +476,7 @@ async fn client_from_handoff_jar(
     path: &std::path::Path,
     user_agent: Option<&str>,
     proxy: Option<&crate::net_types::ResolvedProxy>,
-    referer: Option<&str>,
-    target_url: &str,
+    referer_context: Option<crate::referrer::RefererContext<'_>>,
 ) -> Result<Option<reqwest::Client>, String> {
     let Ok(text) = tokio::fs::read_to_string(path).await else {
         return Ok(None);
@@ -484,8 +490,7 @@ async fn client_from_handoff_jar(
         proxy,
         jar,
         user_agent,
-        referer,
-        Some(target_url),
+        referer_context,
     )
     .map(Some)
 }
@@ -497,16 +502,16 @@ async fn client_for_preview(
     raw_url: &str,
     proxy: Option<&crate::net_types::ResolvedProxy>,
     handoff_identity: Option<(PathBuf, Option<String>)>,
-    referer: Option<&str>,
+    referer_context: Option<crate::referrer::RefererContext<'_>>,
 ) -> Result<(reqwest::Client, ManifestClientAuth), String> {
     validate_handoff_proxy(raw_url)?;
     if let Some((path, user_agent)) = handoff_identity
         && let Some(client) =
-            client_from_handoff_jar(&path, user_agent.as_deref(), proxy, referer, raw_url).await?
+            client_from_handoff_jar(&path, user_agent.as_deref(), proxy, referer_context).await?
     {
         return Ok((client, ManifestClientAuth::Handoff));
     }
-    crate::download_net::http_client_for(proxy, referer, Some(raw_url))
+    crate::download_net::http_client_for(proxy, referer_context)
         .map(|client| (client, ManifestClientAuth::Anonymous))
         .map_err(|_| gettext("The configured proxy could not be used for this manifest"))
 }
@@ -517,10 +522,10 @@ async fn client_for_preview(
 pub(crate) async fn client_for_direct_resource_probe(
     raw_url: &str,
     proxy: Option<&crate::net_types::ResolvedProxy>,
-    referer: Option<&str>,
+    referer_context: Option<crate::referrer::RefererContext<'_>>,
 ) -> Result<reqwest::Client, String> {
     let handoff_identity = crate::extension_server::live_handoff_identity(raw_url);
-    client_for_preview(raw_url, proxy, handoff_identity, referer)
+    client_for_preview(raw_url, proxy, handoff_identity, referer_context)
         .await
         .map(|(client, _)| client)
 }
@@ -532,7 +537,7 @@ async fn client_with_browser_jar(
     raw_url: &str,
     cookies_browser: &str,
     proxy: Option<&crate::net_types::ResolvedProxy>,
-    referer: Option<&str>,
+    referer_context: Option<crate::referrer::RefererContext<'_>>,
 ) -> Result<Option<reqwest::Client>, String> {
     if cookies_browser.is_empty() || cookies_browser == "none" {
         return Ok(None);
@@ -550,7 +555,7 @@ async fn client_with_browser_jar(
     .await
     {
         Ok(Ok(Some(jar))) => {
-            crate::download_net::http_client_with_jar(proxy, jar, referer, Some(raw_url)).map(Some)
+            crate::download_net::http_client_with_jar(proxy, jar, referer_context).map(Some)
         }
         Ok(Ok(None)) => Ok(None),
         Ok(Err(error)) => {
@@ -2371,7 +2376,7 @@ video/720.m3u8
         let cookie_url = Url::parse("http://manifest.example.test/").expect("cookie origin URL");
         let jar = Arc::new(reqwest::cookie::Jar::default());
         jar.add_cookie_str("sid=manifest-fixture", &cookie_url);
-        let client = crate::download_net::http_client_with_jar(Some(&proxy), jar, None, None)
+        let client = crate::download_net::http_client_with_jar(Some(&proxy), jar, None)
             .expect("build manifest client with proxy and cookie provider");
 
         let lookup_result = tokio::time::timeout(
@@ -2715,13 +2720,7 @@ segment.ts?f=418899&srv=server&i=0.4&sp=500&p1=one&p2=two&asn=327934
         );
         std::fs::write(&path, contents).expect("write handoff jar");
 
-        let client = client_from_handoff_jar(
-            &path,
-            Some("Grab-Test-UA"),
-            None,
-            None,
-            "https://preview-handoff.example.test/master.m3u8",
-        )
+        let client = client_from_handoff_jar(&path, Some("Grab-Test-UA"), None, None)
         .await
         .expect("handoff preview client");
         assert!(

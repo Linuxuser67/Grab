@@ -961,7 +961,10 @@ async fn resolve_manifest_tracks(
             &job.source.url,
             &job.cookies_browser,
             job.proxy.as_ref(),
-            job.referer.as_deref(),
+            job.referer.as_deref().map(|source| crate::referrer::RefererContext {
+                source,
+                target: &job.source.url,
+            }),
         )
         .await
         {

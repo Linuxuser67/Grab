@@ -3949,9 +3949,7 @@ mod tests {
             format!(
                 r#"{{"url":"https://missing-nonce.example/file.zip","timestamp_ms":{timestamp_ms}}}"#
             ),
-            format!(
-                r#"{{"url":"https://missing-timestamp.example/file.zip","nonce":"{nonce}"}}"#
-            ),
+            format!(r#"{{"url":"https://missing-timestamp.example/file.zip","nonce":"{nonce}"}}"#),
             format!(
                 r#"{{"url":"https://malformed-nonce.example/file.zip","timestamp_ms":{timestamp_ms},"nonce":"gggggggggggggggggggggggggggggggg"}}"#
             ),

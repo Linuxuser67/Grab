@@ -33,6 +33,23 @@ pub(crate) fn origin_only(raw: &str) -> Option<String> {
     Some(source.to_string())
 }
 
+/// Return the source origin only when it is safe for the target request.
+///
+/// A secure source must not be disclosed in an insecure HTTP request. Requiring
+/// an explicit HTTP(S) target also prevents callers without request context
+/// from accidentally attaching a Referer to an unrelated URL.
+pub(crate) fn origin_for_target(raw_source: Option<&str>, target: &str) -> Option<String> {
+    let source = parse_source(raw_source?)?;
+    let target = url::Url::parse(target).ok()?;
+    if !matches!(target.scheme(), "http" | "https")
+        || target.host_str().is_none()
+        || (source.scheme() == "https" && target.scheme() == "http")
+    {
+        return None;
+    }
+    origin_only(source.as_str())
+}
+
 /// Identity of the source context used by an outbound request.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub(crate) enum SourceIdentity {
@@ -59,7 +76,7 @@ pub(crate) fn cache_identity(raw: Option<&str>) -> SourceIdentity {
 
 #[cfg(test)]
 mod tests {
-    use super::{SourceIdentity, cache_identity, origin_only, parse_source};
+    use super::{SourceIdentity, cache_identity, origin_for_target, origin_only, parse_source};
 
     #[test]
     fn parse_source_accepts_only_bounded_credential_free_http_urls() {
@@ -86,6 +103,43 @@ mod tests {
             Some("http://example.test/".to_string())
         );
         assert_eq!(origin_only("https://user:pass@example.test/watch"), None);
+    }
+
+    #[test]
+    fn origin_for_target_suppresses_secure_source_on_insecure_requests() {
+        assert_eq!(
+            origin_for_target(
+                Some("https://source.example.test/watch?token=secret"),
+                "http://media.example.test/video",
+            ),
+            None
+        );
+    }
+
+    #[test]
+    fn origin_for_target_keeps_only_origin_for_allowed_scheme_pairs() {
+        let secure_source = "https://source.example.test/watch?token=secret";
+        let insecure_source = "http://source.example.test/watch?token=secret";
+        assert_eq!(
+            origin_for_target(Some(secure_source), "https://media.example.test/video"),
+            Some("https://source.example.test/".to_string())
+        );
+        assert_eq!(
+            origin_for_target(Some(insecure_source), "http://media.example.test/video"),
+            Some("http://source.example.test/".to_string())
+        );
+        assert_eq!(
+            origin_for_target(Some(insecure_source), "https://media.example.test/video"),
+            Some("http://source.example.test/".to_string())
+        );
+        assert_eq!(
+            origin_for_target(None, "https://media.example.test/video"),
+            None
+        );
+        assert_eq!(
+            origin_for_target(Some(secure_source), "file:///tmp/video"),
+            None
+        );
     }
 
     #[test]

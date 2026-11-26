@@ -6558,8 +6558,8 @@ fn proxy_manual_builds_remote_dns_socks() {
         .expect("valid")
         .expect("proxied");
     assert_ne!(proxy.cli_url, other.cli_url);
-    assert!(http_client_for(Some(&proxy), None).is_ok());
-    assert!(http_client_for(Some(&again), None).is_ok());
+    assert!(http_client_for(Some(&proxy), None, None).is_ok());
+    assert!(http_client_for(Some(&again), None, None).is_ok());
 }
 
 #[test]
@@ -6627,8 +6627,8 @@ fn proxy_clients_are_built_per_download_policy_scope() {
         .proxy_config()
         .expect("valid")
         .expect("proxied");
-    assert!(http_client_for(Some(&proxy), None).is_ok());
-    assert!(http_client_for(Some(&proxy), None).is_ok());
+    assert!(http_client_for(Some(&proxy), None, None).is_ok());
+    assert!(http_client_for(Some(&proxy), None, None).is_ok());
 }
 
 #[test]
@@ -6760,7 +6760,8 @@ fn cookies_reapplied_after_cross_host_redirect() {
     let jar = std::sync::Arc::new(reqwest::cookie::Jar::default());
     jar.add_cookie_str("sid=loc123", &"http://localhost/".parse().unwrap());
     jar.add_cookie_str("sid=ip456", &"http://127.0.0.1/".parse().unwrap());
-    let client = crate::download_net::http_client_with_jar(None, jar, None).expect("jar client");
+    let client =
+        crate::download_net::http_client_with_jar(None, jar, None, None).expect("jar client");
     let resp = crate::runtime::tokio_rt()
         .block_on(client.get(format!("http://localhost:{port}/start")).send())
         .expect("redirect fetch");

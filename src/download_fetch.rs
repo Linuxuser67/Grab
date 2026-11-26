@@ -157,7 +157,7 @@ pub(crate) async fn run_download(mut ctx: FetchCtx, connections: usize, mode: St
                 return;
             }
         };
-        match crate::download_net::http_client_with_jar(proxy.as_ref(), jar, None) {
+        match crate::download_net::http_client_with_jar(proxy.as_ref(), jar, None, None) {
             Ok(client) => ctx.client = client,
             Err(e) => {
                 ctx.tx.send(EngineMsg::Failed(e)).ok();
@@ -1533,12 +1533,7 @@ pub(crate) enum StartMode {
 /// its own Referer. Removing the path and query also avoids forwarding page
 /// tokens to the media host.
 fn request_referer(target: &str, source: Option<&str>) -> Option<String> {
-    let source_url = crate::referrer::parse_source(source?)?;
-    let target_url = url::Url::parse(target).ok()?;
-    if source_url.scheme() == "https" && target_url.scheme() == "http" {
-        return None;
-    }
-    crate::referrer::origin_only(source_url.as_str())
+    crate::referrer::origin_for_target(source, target)
 }
 
 #[cfg(test)]
@@ -1629,7 +1624,7 @@ mod request_referer_tests {
         });
 
         let client =
-            crate::download_net::http_client_for(None, None).expect("build guarded client");
+            crate::download_net::http_client_for(None, None, None).expect("build guarded client");
         let target = format!("http://{first_address}/media");
         let source = format!("http://{first_address}/watch?token=private");
         let request =

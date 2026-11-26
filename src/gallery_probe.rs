@@ -286,7 +286,7 @@ pub async fn probe_gallery_with_proxy(
     if let Some(ua) = user_agent {
         cmd.arg("--user-agent").arg(ua);
     }
-    cmd.args(crate::gallery_argv::referer_cli_args(referer));
+    cmd.args(crate::gallery_argv::referer_cli_args(referer, url));
     // Instagram throttling for extraction requests (probe doesn't download).
     for arg in crate::gallery_argv::instagram_throttle_args(url, false) {
         cmd.arg(arg);
@@ -520,7 +520,7 @@ fn enumerate_command(
     if let Some(ua) = options.user_agent {
         cmd.arg("--user-agent").arg(ua);
     }
-    cmd.args(crate::gallery_argv::referer_cli_args(options.referer));
+    cmd.args(crate::gallery_argv::referer_cli_args(options.referer, url));
     // Mirror the download's filter so --range indices match.
     let mut filter_argv = Vec::new();
     crate::gallery_argv::push_filter(&mut filter_argv, options.filter);

@@ -285,7 +285,9 @@ impl DownloadOptions {
 
 #[cfg(test)]
 pub(crate) fn http_client() -> Result<reqwest::Client, String> {
-    client_builder(None).build().map_err(|e| e.to_string())
+    client_builder(None, None)
+        .build()
+        .map_err(|e| e.to_string())
 }
 
 /// Apply the resolved proxy chain consistently to every attempt-scoped client.
@@ -307,32 +309,84 @@ fn apply_proxies(
 pub(crate) fn http_client_for(
     proxy: Option<&ResolvedProxy>,
     referer: Option<&str>,
+    target_url: Option<&str>,
 ) -> Result<reqwest::Client, String> {
-    apply_proxies(client_builder(referer), proxy)
+    apply_proxies(client_builder(target_url, referer), proxy)
         .build()
         .map_err(|error| error.to_string())
 }
 
-fn normalized_referer(raw: Option<&str>) -> Option<String> {
-    raw.and_then(crate::referrer::origin_only)
+/// Keep a secure source origin off an insecure target request.
+///
+/// All callers provide the initial request URL. The shared redirect policy
+/// separately refuses HTTPS-to-HTTP redirects, so this default header cannot
+/// cross a later downgrade either.
+fn normalized_referer_for_target(target_url: Option<&str>, raw: Option<&str>) -> Option<String> {
+    crate::referrer::origin_for_target(raw, target_url?)
 }
 
 #[cfg(test)]
 mod browser_referer_tests {
-    use super::normalized_referer;
+    use super::normalized_referer_for_target;
+
+    #[test]
+    fn secure_source_referer_is_omitted_for_insecure_target() {
+        assert_eq!(
+            normalized_referer_for_target(
+                Some("http://media.example.test/video"),
+                Some("https://www.example.test/watch?token=secret"),
+            ),
+            None
+        );
+    }
+
+    #[test]
+    fn source_referer_is_allowed_for_secure_target_without_page_details() {
+        assert_eq!(
+            normalized_referer_for_target(
+                Some("https://cdn.example.test/video"),
+                Some("https://www.example.test/watch?token=secret"),
+            ),
+            Some("https://www.example.test/".to_string())
+        );
+        assert_eq!(
+            normalized_referer_for_target(
+                Some("https://cdn.example.test/video"),
+                Some("http://www.example.test/watch?token=secret"),
+            ),
+            Some("http://www.example.test/".to_string())
+        );
+    }
+
+    #[test]
+    fn source_referer_requires_a_known_http_target() {
+        let source = "https://www.example.test/watch";
+        assert_eq!(normalized_referer_for_target(None, Some(source)), None);
+        assert_eq!(
+            normalized_referer_for_target(Some("file:///tmp/video"), Some(source)),
+            None
+        );
+    }
 
     #[test]
     fn native_client_referer_is_reduced_to_source_origin() {
+        let target = Some("https://media.example.test/video");
         assert_eq!(
-            normalized_referer(Some("https://example.test/watch?id=private#player")),
+            normalized_referer_for_target(
+                target,
+                Some("https://example.test/watch?id=private#player"),
+            ),
             Some("https://example.test/".to_string())
         );
-        assert_eq!(normalized_referer(Some("file:///etc/passwd")), None);
         assert_eq!(
-            normalized_referer(Some("https://user:pass@example.test/watch")),
+            normalized_referer_for_target(target, Some("file:///etc/passwd")),
             None
         );
-        assert_eq!(normalized_referer(None), None);
+        assert_eq!(
+            normalized_referer_for_target(target, Some("https://user:pass@example.test/watch"),),
+            None
+        );
+        assert_eq!(normalized_referer_for_target(target, None), None);
     }
 }
 
@@ -348,10 +402,14 @@ pub(crate) fn http_client_with_jar(
     proxy: Option<&ResolvedProxy>,
     jar: std::sync::Arc<reqwest::cookie::Jar>,
     referer: Option<&str>,
+    target_url: Option<&str>,
 ) -> Result<reqwest::Client, String> {
-    apply_proxies(client_builder(referer).cookie_provider(jar), proxy)
-        .build()
-        .map_err(|error| error.to_string())
+    apply_proxies(
+        client_builder(target_url, referer).cookie_provider(jar),
+        proxy,
+    )
+    .build()
+    .map_err(|error| error.to_string())
 }
 
 /// Build an attempt-scoped client with browser-bound cookies and the matching user agent.
@@ -360,9 +418,10 @@ pub(crate) fn http_client_with_jar_and_user_agent(
     jar: std::sync::Arc<reqwest::cookie::Jar>,
     user_agent: &str,
     referer: Option<&str>,
+    target_url: Option<&str>,
 ) -> Result<reqwest::Client, String> {
     apply_proxies(
-        client_builder(referer)
+        client_builder(target_url, referer)
             .cookie_provider(jar)
             .user_agent(user_agent),
         proxy,
@@ -984,11 +1043,14 @@ fn redirect_policy(public_dns_hosts: PublicDnsPolicy) -> reqwest::redirect::Poli
 }
 
 /// Shared guarded builder: bounded hops, no downgrades, and no automatic source URL leakage.
-pub(crate) fn client_builder(referer: Option<&str>) -> reqwest::ClientBuilder {
+pub(crate) fn client_builder(
+    target_url: Option<&str>,
+    referer: Option<&str>,
+) -> reqwest::ClientBuilder {
     // Bounded hops; refuse https->http downgrades; no ambient proxy (explicit settings or nothing).
     let (redirect, resolver) = guarded_network_policy();
     let builder = client_builder_with_policy(redirect, resolver);
-    let Some(value) = normalized_referer(referer)
+    let Some(value) = normalized_referer_for_target(target_url, referer)
         .and_then(|value| reqwest::header::HeaderValue::from_str(&value).ok())
     else {
         return builder;

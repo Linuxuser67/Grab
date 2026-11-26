@@ -131,7 +131,7 @@ fn raw_dump_argv(url: &str, options: &RawDumpOptions<'_>) -> Vec<String> {
     }
     args.push("--dump-single-json".to_string());
     args.extend(proxy_cli_args(options.fetch_proxy));
-    if let Some(referer) = options.referer.and_then(crate::referrer::origin_only) {
+    if let Some(referer) = crate::referrer::origin_for_target(options.referer, url) {
         args.push("--referer".to_string());
         args.push(referer);
     }
@@ -1422,6 +1422,18 @@ mod raw_dump_tests {
             identity_args: Some(identity_args),
             referer: None,
         }
+    }
+
+    #[test]
+    fn raw_dump_argv_omits_secure_source_referer_for_http_target() {
+        let identity = vec![
+            "--".to_string(),
+            "http://media.example.test/playlist".to_string(),
+        ];
+        let mut opts = options(true, true, &identity);
+        opts.referer = Some("https://source.example.test/watch");
+        let args = raw_dump_argv("http://media.example.test/playlist", &opts);
+        assert!(!args.iter().any(|argument| argument == "--referer"));
     }
 
     #[test]

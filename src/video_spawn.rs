@@ -131,7 +131,12 @@ fn raw_dump_argv(url: &str, options: &RawDumpOptions<'_>) -> Vec<String> {
     }
     args.push("--dump-single-json".to_string());
     args.extend(proxy_cli_args(options.fetch_proxy));
-    if let Some(referer) = crate::referrer::origin_for_target(options.referer, url) {
+    if let Some(referer) = crate::referrer::origin_for_target(options.referer.map(|source| {
+        crate::referrer::RefererContext {
+            source,
+            target: url,
+        }
+    })) {
         args.push("--referer".to_string());
         args.push(referer);
     }

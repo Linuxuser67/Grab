@@ -706,8 +706,18 @@ async fn lookup_media_inner(
         // Unknown HTTP resources can still be direct files when their paths
         // have no extension. Probe response headers while the established
         // extractors run; never read the response body during classification.
-        let direct_future =
-            crate::direct_resource_intake::probe(url.clone(), proxy.clone(), referer.clone());
+        let direct_url = url.clone();
+        let direct_proxy = proxy.clone();
+        let direct_referer = referer.clone();
+        let direct_future = async move {
+            let referer_context = direct_referer.as_deref().map(|source| {
+                crate::referrer::RefererContext {
+                    source,
+                    target: &direct_url,
+                }
+            });
+            crate::direct_resource_intake::probe(&direct_url, direct_proxy, referer_context).await
+        };
         let extractor_future = lookup_extractors_inner(url, browser, newest_first, proxy, referer);
         return arbitrate_opaque_resource_lookup(direct_future, extractor_future).await;
     }
@@ -718,10 +728,16 @@ async fn lookup_media_inner(
     let native_proxy = proxy.clone();
     let native_referer = referer.clone();
     let native_future = async move {
+        let referer_context = native_referer.as_deref().map(|source| {
+            crate::referrer::RefererContext {
+                source,
+                target: &native_url,
+            }
+        });
         let result = crate::manifest_intake::lookup(
             &native_url,
             native_proxy.as_ref(),
-            native_referer.as_deref(),
+            referer_context,
         )
         .await
         .and_then(|manifest| {
@@ -5131,11 +5147,17 @@ fn make_gallery_picker_opener(
                     // list nothing here but download fine).
                     let auth =
                         crate::inline_gallery::resolve_gallery_auth(&url_c, browser3.as_str());
+                    let referer_context = enumeration_referer.as_deref().map(|source| {
+                        crate::referrer::RefererContext {
+                            source,
+                            target: &url_c,
+                        }
+                    });
                     let options = crate::gallery_probe::GalleryEnumerationOptions {
                         cookies_file: auth.cookies_path.as_deref(),
                         cookies_browser: auth.cookies_browser.as_deref(),
                         user_agent: auth.user_agent.as_deref(),
-                        referer: enumeration_referer.as_deref(),
+                        referer_context,
                         filter,
                         proxy: proxy3.as_ref(),
                     };

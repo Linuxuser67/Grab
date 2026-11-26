@@ -195,7 +195,12 @@ pub async fn run_gallery_download_with_proxy(
             event_nonce: &event_nonce,
         },
     );
-    let referer_args = crate::gallery_argv::referer_cli_args(job.referer.as_deref(), &job.page_url);
+    let referer_args = crate::gallery_argv::referer_cli_args(
+        job.referer.as_deref().map(|source| crate::referrer::RefererContext {
+            source,
+            target: &job.page_url,
+        }),
+    );
     if !referer_args.is_empty() {
         let separator = argv
             .iter()

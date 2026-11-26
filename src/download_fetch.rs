@@ -1533,12 +1533,7 @@ pub(crate) enum StartMode {
 /// its own Referer. Removing the path and query also avoids forwarding page
 /// tokens to the media host.
 fn request_referer(target: &str, source: Option<&str>) -> Option<String> {
-    let source_url = crate::referrer::parse_source(source?)?;
-    let target_url = url::Url::parse(target).ok()?;
-    if source_url.scheme() == "https" && target_url.scheme() == "http" {
-        return None;
-    }
-    crate::referrer::origin_only(source_url.as_str())
+    crate::referrer::origin_for_target(source, target)
 }
 
 #[cfg(test)]

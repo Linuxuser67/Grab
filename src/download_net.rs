@@ -316,22 +316,27 @@ pub(crate) fn http_client_for(
         .map_err(|error| error.to_string())
 }
 
-fn normalized_referer(raw: Option<&str>) -> Option<String> {
-    raw.and_then(crate::referrer::origin_only)
-}
-
 /// Keep a secure source origin off an insecure target request.
 ///
 /// All callers provide the initial request URL. The shared redirect policy
 /// separately refuses HTTPS-to-HTTP redirects, so this default header cannot
 /// cross a later downgrade either.
 fn normalized_referer_for_target(target_url: Option<&str>, raw: Option<&str>) -> Option<String> {
-    crate::referrer::origin_for_target(raw, target_url?)
+    let referer = normalized_referer(raw)?;
+    let target = url::Url::parse(target_url?).ok()?;
+    if !matches!(target.scheme(), "http" | "https") {
+        return None;
+    }
+    let source = url::Url::parse(&referer).ok()?;
+    if source.scheme() == "https" && target.scheme() == "http" {
+        return None;
+    }
+    Some(referer)
 }
 
 #[cfg(test)]
 mod browser_referer_tests {
-    use super::{normalized_referer, normalized_referer_for_target};
+    use super::normalized_referer_for_target;
 
     #[test]
     fn secure_source_referer_is_omitted_for_insecure_target() {
@@ -374,16 +379,26 @@ mod browser_referer_tests {
 
     #[test]
     fn native_client_referer_is_reduced_to_source_origin() {
+        let target = Some("https://media.example.test/video");
         assert_eq!(
-            normalized_referer(Some("https://example.test/watch?id=private#player")),
+            normalized_referer_for_target(
+                target,
+                Some("https://example.test/watch?id=private#player"),
+            ),
             Some("https://example.test/".to_string())
         );
-        assert_eq!(normalized_referer(Some("file:///etc/passwd")), None);
         assert_eq!(
-            normalized_referer(Some("https://user:pass@example.test/watch")),
+            normalized_referer_for_target(target, Some("file:///etc/passwd")),
             None
         );
-        assert_eq!(normalized_referer(None), None);
+        assert_eq!(
+            normalized_referer_for_target(
+                target,
+                Some("https://user:pass@example.test/watch"),
+            ),
+            None
+        );
+        assert_eq!(normalized_referer_for_target(target, None), None);
     }
 }
 

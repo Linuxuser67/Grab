@@ -6759,8 +6759,7 @@ fn cookies_reapplied_after_cross_host_redirect() {
     let jar = std::sync::Arc::new(reqwest::cookie::Jar::default());
     jar.add_cookie_str("sid=loc123", &"http://localhost/".parse().unwrap());
     jar.add_cookie_str("sid=ip456", &"http://127.0.0.1/".parse().unwrap());
-    let client =
-        crate::download_net::http_client_with_jar(None, jar, None).expect("jar client");
+    let client = crate::download_net::http_client_with_jar(None, jar, None).expect("jar client");
     let resp = crate::runtime::tokio_rt()
         .block_on(client.get(format!("http://localhost:{port}/start")).send())
         .expect("redirect fetch");
@@ -7019,9 +7018,7 @@ fn single_connection_skips_probe() {
 fn stamp_request_omits_unknown_source_and_reduces_known_source_to_origin() {
     let target = "https://cdn.example.test/video.mp4";
     let client = http_client().expect("http client");
-    let without_source = stamp_request(client.get(target), "", None)
-        .build()
-        .unwrap();
+    let without_source = stamp_request(client.get(target), "", None).build().unwrap();
     assert!(
         !without_source.headers().contains_key("referer"),
         "a manually pasted URL must not be used as its own Referer"
@@ -7033,8 +7030,8 @@ fn stamp_request_omits_unknown_source_and_reduces_known_source_to_origin() {
         "",
         Some(crate::referrer::RefererContext { source, target }),
     )
-        .build()
-        .unwrap();
+    .build()
+    .unwrap();
     assert_eq!(
         with_source
             .headers()

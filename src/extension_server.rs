@@ -22,15 +22,14 @@
 //!   (`HMAC(secret, "grab-server\0" || nonce)`), so the extension can refuse to
 //!   talk to an impostor before sending anything sensitive;
 //! - `POST /add` carries `X-Grab-Token = HMAC(secret, "grab-client\0" || body)`.
-//! - Current paired clients sign a millisecond timestamp and 128-bit nonce in
-//!   that body. The timestamp has a two-minute clock-skew window and each nonce
-//!   may be used only once, preventing a captured POST from being replayed.
+//! - Every paired `POST /add` includes a millisecond timestamp and 128-bit
+//!   nonce in its signed body. The timestamp has a two-minute clock-skew window
+//!   and each nonce may be used only once, preventing a captured POST from being
+//!   replayed. Paired requests missing either field are refused.
 //!
 //! Cookies are accepted only with valid authentication and replay metadata.
-//! Legacy paired clients that omit the metadata still hand off URLs, but are
-//! forced through confirmation and remain URL-only until the extension updates.
-//! Unpaired requests are also confirmation-only and never forward cookies; a
-//! wrong token is refused outright.
+//! Unpaired requests are confirmation-only and never forward cookies; a wrong
+//! token is refused outright.
 //!
 //! Confirmation: `POST /add?confirm=1` holds the response until the user has
 //! answered Grab's dialog (`200` approved, `409` declined, `408` no answer
@@ -1403,9 +1402,8 @@ struct AddRequest {
     /// Browser-provided source page; authenticated as part of the JSON body.
     #[serde(default)]
     referer: Option<String>,
-    /// Millisecond timestamp and unique nonce are included in the signed JSON body.
-    /// Optional only for legacy unauthenticated URL-only requests; authenticated
-    /// requests missing either field are rejected.
+    /// Millisecond timestamp and unique nonce included in authenticated JSON bodies.
+    /// Optional in JSON for unpaired callers; required when the pairing token is valid.
     #[serde(default)]
     timestamp_ms: Option<u64>,
     #[serde(default)]
@@ -1455,8 +1453,8 @@ pub(crate) struct Handoff {
     /// Dropping it unanswered counts as declined.
     pub decision: Option<oneshot::Sender<HandoffOutcome>>,
     /// Whether the extension proved possession of the pairing secret with
-    /// current replay metadata. Unpaired and legacy callers are forced to
-    /// confirm even when the user enabled auto-add.
+    /// current replay metadata. Unpaired callers are forced to confirm even
+    /// when the user enabled auto-add.
     pub authenticated: bool,
     /// GTK closes the dialog at this instant, so it cannot outlive the
     /// server's confirmation window.
@@ -1935,21 +1933,15 @@ async fn handle_add(
     if req.cookies.len() > 100 {
         return StatusCode::BAD_REQUEST.into_response();
     }
-    // Legacy compatibility: old paired extensions do not include the
-    // timestamp/nonce pair. Preserve their URL handoff, but downgrade them to
-    // the same confirmation-only, no-cookie behavior as unpaired callers.
-    // A partially present or malformed pair is never treated as legacy.
-    // Remove after 2027-03-01, once extension builds predating the nonce have
-    // aged out of auto-update.
-    let legacy_authenticated =
-        token_authenticated && req.timestamp_ms.is_none() && req.nonce.is_none();
+    // A pairing token authenticates a handoff only when its freshness and
+    // single-use nonce metadata also pass validation. Missing or malformed
+    // replay metadata fails closed instead of downgrading the paired request.
     if token_authenticated
-        && !legacy_authenticated
         && let Err(status) = reserve_handoff_nonce(req.timestamp_ms, req.nonce.as_deref())
     {
         return status.into_response();
     }
-    let authenticated = token_authenticated && !legacy_authenticated;
+    let authenticated = token_authenticated;
     // Register as soon as the authenticated request is validated. Later
     // cookieless handoffs must see this older request before its async write.
     let cookie_stage_registration = if authenticated && !req.cookies.is_empty() {
@@ -1960,9 +1952,6 @@ async fn handle_add(
     } else {
         None
     };
-    if legacy_authenticated {
-        tracing::debug!("legacy paired extension handoff requires confirmation and drops cookies");
-    }
     // Unauthenticated callers always wait for the user's answer: any local
     // process can POST without a token, so silent queuing would let
     // arbitrary software start downloads. The confirm dialog is the
@@ -3944,47 +3933,64 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn legacy_authenticated_handoff_is_confirmed_and_drops_cookies() {
+    async fn authenticated_handoff_requires_valid_timestamp_and_nonce() {
+        let _guard = exclusive();
         let mut srv = start(4).await;
         let host = format!("127.0.0.1:{}", srv.port);
-        let url = "https://legacy-client.example.test/file.zip";
-        let body = r#"{"url":"https://legacy-client.example.test/file.zip","cookies":[{"name":"session","value":"secret"}]}"#;
-        let signed = token(body);
-        let task = tokio::spawn(async move {
-            request_to(
+        let timestamp_ms = unix_time_ms().expect("system clock");
+        let nonce = format!("{:032x}", fresh_test_nonce());
+        let no_replay_metadata_url = "https://missing-replay-metadata.example/file.zip";
+        let requests = [
+            // The former compatibility path accepted this correctly signed
+            // body, prompting the user while silently dropping its cookies.
+            format!(
+                r#"{{"url":"{no_replay_metadata_url}","cookies":[{{"name":"session","value":"secret"}}]}}"#
+            ),
+            format!(
+                r#"{{"url":"https://missing-nonce.example/file.zip","timestamp_ms":{timestamp_ms}}}"#
+            ),
+            format!(r#"{{"url":"https://missing-timestamp.example/file.zip","nonce":"{nonce}"}}"#),
+            format!(
+                r#"{{"url":"https://malformed-nonce.example/file.zip","timestamp_ms":{timestamp_ms},"nonce":"gggggggggggggggggggggggggggggggg"}}"#
+            ),
+            format!(
+                r#"{{"url":"https://stale-timestamp.example/file.zip","timestamp_ms":1,"nonce":"{:032x}"}}"#,
+                fresh_test_nonce()
+            ),
+        ];
+
+        for body in requests {
+            // Bypass request_with_target: it upgrades valid signed fixtures
+            // with replay metadata, which would hide this regression.
+            let signed = token(&body);
+            let response = request_to(
                 srv.port,
                 "POST",
                 "/add",
-                &[("Host", &host), ("X-Grab-Token", &signed), JSON],
-                body,
+                &[
+                    ("Host", host.as_str()),
+                    ("X-Grab-Token", signed.as_str()),
+                    JSON,
+                ],
+                &body,
             )
-            .await
-        });
+            .await;
 
-        tokio::time::sleep(Duration::from_millis(50)).await;
+            assert_eq!(
+                status(&response),
+                "403",
+                "authenticated handoffs must reject missing or invalid replay metadata: {response}"
+            );
+            assert!(
+                srv.rx.try_recv().is_err(),
+                "a rejected paired handoff must not enter the queue"
+            );
+        }
+
         assert!(
-            !task.is_finished(),
-            "legacy authenticated requests must still require confirmation"
+            handoff_cookie_args(no_replay_metadata_url).is_empty(),
+            "cookies from a rejected no-nonce request must not be staged"
         );
-        let handoff = srv
-            .rx
-            .recv()
-            .await
-            .expect("legacy URL should reach the queue");
-        assert!(
-            handoff.decision.is_some(),
-            "legacy calls must remain confirmation-only"
-        );
-        assert!(
-            handoff_cookie_args(url).is_empty(),
-            "legacy cookies must not be staged"
-        );
-        handoff
-            .decision
-            .expect("legacy request carries a decision")
-            .send(HandoffOutcome::Queued)
-            .unwrap();
-        assert_eq!(status(&task.await.unwrap()), "200");
     }
 
     #[tokio::test]

@@ -285,9 +285,7 @@ impl DownloadOptions {
 
 #[cfg(test)]
 pub(crate) fn http_client() -> Result<reqwest::Client, String> {
-    client_builder(None)
-        .build()
-        .map_err(|e| e.to_string())
+    client_builder(None).build().map_err(|e| e.to_string())
 }
 
 /// Apply the resolved proxy chain consistently to every attempt-scoped client.
@@ -390,12 +388,9 @@ pub(crate) fn http_client_with_jar(
     jar: std::sync::Arc<reqwest::cookie::Jar>,
     referer_context: Option<crate::referrer::RefererContext<'_>>,
 ) -> Result<reqwest::Client, String> {
-    apply_proxies(
-        client_builder(referer_context).cookie_provider(jar),
-        proxy,
-    )
-    .build()
-    .map_err(|error| error.to_string())
+    apply_proxies(client_builder(referer_context).cookie_provider(jar), proxy)
+        .build()
+        .map_err(|error| error.to_string())
 }
 
 /// Build an attempt-scoped client with browser-bound cookies and the matching user agent.

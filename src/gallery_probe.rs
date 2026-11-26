@@ -520,7 +520,9 @@ fn enumerate_command(
     if let Some(ua) = options.user_agent {
         cmd.arg("--user-agent").arg(ua);
     }
-    cmd.args(crate::gallery_argv::referer_cli_args(options.referer_context));
+    cmd.args(crate::gallery_argv::referer_cli_args(
+        options.referer_context,
+    ));
     // Mirror the download's filter so --range indices match.
     let mut filter_argv = Vec::new();
     crate::gallery_argv::push_filter(&mut filter_argv, options.filter);

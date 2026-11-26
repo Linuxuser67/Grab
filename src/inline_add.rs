@@ -710,12 +710,13 @@ async fn lookup_media_inner(
         let direct_proxy = proxy.clone();
         let direct_referer = referer.clone();
         let direct_future = async move {
-            let referer_context = direct_referer.as_deref().map(|source| {
-                crate::referrer::RefererContext {
-                    source,
-                    target: &direct_url,
-                }
-            });
+            let referer_context =
+                direct_referer
+                    .as_deref()
+                    .map(|source| crate::referrer::RefererContext {
+                        source,
+                        target: &direct_url,
+                    });
             crate::direct_resource_intake::probe(&direct_url, direct_proxy, referer_context).await
         };
         let extractor_future = lookup_extractors_inner(url, browser, newest_first, proxy, referer);
@@ -728,23 +729,21 @@ async fn lookup_media_inner(
     let native_proxy = proxy.clone();
     let native_referer = referer.clone();
     let native_future = async move {
-        let referer_context = native_referer.as_deref().map(|source| {
-            crate::referrer::RefererContext {
-                source,
-                target: &native_url,
-            }
-        });
-        let result = crate::manifest_intake::lookup(
-            &native_url,
-            native_proxy.as_ref(),
-            referer_context,
-        )
-        .await
-        .and_then(|manifest| {
-            manifest.ok_or_else(|| {
-                gettext("The URL did not resolve to a supported HLS or DASH manifest")
-            })
-        });
+        let referer_context =
+            native_referer
+                .as_deref()
+                .map(|source| crate::referrer::RefererContext {
+                    source,
+                    target: &native_url,
+                });
+        let result =
+            crate::manifest_intake::lookup(&native_url, native_proxy.as_ref(), referer_context)
+                .await
+                .and_then(|manifest| {
+                    manifest.ok_or_else(|| {
+                        gettext("The URL did not resolve to a supported HLS or DASH manifest")
+                    })
+                });
         (result, native_started.elapsed().as_millis() as u64)
     };
 

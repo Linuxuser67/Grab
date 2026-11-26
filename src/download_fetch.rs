@@ -99,10 +99,12 @@ pub(crate) struct FetchCtx {
 
 impl FetchCtx {
     fn referer_context(&self) -> Option<crate::referrer::RefererContext<'_>> {
-        self.referer.as_deref().map(|source| crate::referrer::RefererContext {
-            source,
-            target: &self.url,
-        })
+        self.referer
+            .as_deref()
+            .map(|source| crate::referrer::RefererContext {
+                source,
+                target: &self.url,
+            })
     }
 }
 
@@ -1622,15 +1624,14 @@ mod request_referer_tests {
             crate::download_net::http_client_for(None, None).expect("build guarded client");
         let target = format!("http://{first_address}/media");
         let source = format!("http://{first_address}/watch?token=private");
-        let request =
-            super::stamp_request(
-                client.get(&target),
-                "Grab-Test-UA",
-                Some(RefererContext {
-                    source: &source,
-                    target: &target,
-                }),
-            );
+        let request = super::stamp_request(
+            client.get(&target),
+            "Grab-Test-UA",
+            Some(RefererContext {
+                source: &source,
+                target: &target,
+            }),
+        );
         let response =
             super::execute_with_timeout(&client, request, std::time::Duration::from_secs(3))
                 .await

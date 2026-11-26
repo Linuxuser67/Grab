@@ -4670,9 +4670,7 @@ async fn fetch_resource_once(
     let mut request = client.get(resource.url.clone());
     if let Some(range) = resource.range {
         let end = range
-            .offset
-            .checked_add(range.length)
-            .and_then(|value| value.checked_sub(1))
+            .inclusive_end()
             .ok_or_else(|| "The stream manifest contains an invalid byte range".to_string())?;
         request = request.header(
             reqwest::header::RANGE,
@@ -4851,22 +4849,19 @@ fn safe_resource_filename(filename: &str) -> bool {
 
 /// Preserve the HTTP response that caused a manifest byte-range request to fail.
 ///
-/// Authentication/authorization responses such as 403 are distinct from an
-/// origin that ignored the Range header (200) or returned a malformed 206.
-/// Transient statuses retain the existing retry classification.
+/// Non-transient HTTP responses are `Unsupported`, which deliberately lets the
+/// engine discard native staging and try yt-dlp's resolver/authentication path.
+/// This differs from an origin that ignored Range (200) or returned a malformed
+/// 206; transient statuses retain their retry classification.
 fn validate_byte_range_response(
     status: reqwest::StatusCode,
     content_range: Option<&str>,
     range: ManifestByteRange,
     resource_description: &str,
 ) -> Result<(), ManifestRunError> {
-    let last_byte = range
-        .offset
-        .checked_add(range.length)
-        .and_then(|end| end.checked_sub(1))
-        .ok_or_else(|| {
-            ManifestRunError::Unsupported("The manifest contains an invalid byte range".to_string())
-        })?;
+    let last_byte = range.inclusive_end().ok_or_else(|| {
+        ManifestRunError::Unsupported("The manifest contains an invalid byte range".to_string())
+    })?;
     let requested = format!("bytes {}-{last_byte}", range.offset);
 
     if is_retryable_resource_status(status) {
@@ -4904,12 +4899,13 @@ fn content_range_matches(header: Option<&str>, range: ManifestByteRange) -> bool
         return false;
     };
 
-    range
-        .offset
-        .checked_add(range.length)
-        .is_some_and(|exclusive_end| {
-            first_byte == range.offset && last_byte == exclusive_end - 1 && total >= exclusive_end
-        })
+    let Some(expected_last_byte) = range.inclusive_end() else {
+        return false;
+    };
+    let Some(exclusive_end) = expected_last_byte.checked_add(1) else {
+        return false;
+    };
+    first_byte == range.offset && last_byte == expected_last_byte && total >= exclusive_end
 }
 
 fn manifest_output_container(path: &Path) -> Result<ManifestContainer, ManifestRunError> {
@@ -5083,13 +5079,9 @@ async fn fetch_hls_resource_to_writer(
                     "An HLS byte range is outside the accepted size limit".to_string(),
                 ));
             }
-            let end = range
-                .offset
-                .checked_add(range.length)
-                .and_then(|exclusive_end| exclusive_end.checked_sub(1))
-                .ok_or_else(|| {
-                    ManifestRunError::Unsupported("The HLS byte range is invalid".to_string())
-                })?;
+            let end = range.inclusive_end().ok_or_else(|| {
+                ManifestRunError::Unsupported("The HLS byte range is invalid".to_string())
+            })?;
             request = request.header(
                 reqwest::header::RANGE,
                 format!("bytes={}-{end}", range.offset),
@@ -5127,10 +5119,9 @@ async fn fetch_hls_resource_to_writer(
                     .to_string(),
             ));
         } else if !status.is_success() {
-            return Err(match resource_status_error(status) {
-                ManifestRunError::Unsupported(message) => ManifestRunError::Failed(message),
-                other => other,
-            });
+            // Keep non-transient HTTP responses fallback-eligible: yt-dlp may
+            // have an alternate resource URL or authentication strategy.
+            return Err(resource_status_error(status));
         }
         if response
             .content_length()
@@ -9594,13 +9585,33 @@ mod ffmpeg_rejected_input_tests {
 
 #[cfg(test)]
 mod byte_range_response_diagnostics_tests {
-    use super::{ManifestRunError, validate_byte_range_response};
+    use super::{EngineMsg, ManifestRunError, resource_status_error, validate_byte_range_response};
     use crate::manifest::ManifestByteRange;
 
     const REQUESTED: ManifestByteRange = ManifestByteRange {
         offset: 10,
         length: 5,
     };
+
+    #[test]
+    fn non_transient_http_resource_rejections_keep_extractor_fallback_eligible() {
+        for status in [
+            reqwest::StatusCode::UNAUTHORIZED,
+            reqwest::StatusCode::FORBIDDEN,
+            reqwest::StatusCode::NOT_FOUND,
+            reqwest::StatusCode::GONE,
+        ] {
+            let error = resource_status_error(status);
+            assert!(
+                matches!(&error, ManifestRunError::Unsupported(_)),
+                "HTTP {status} should reject the native attempt without retrying"
+            );
+            assert!(
+                matches!(error.into_engine_message(), EngineMsg::ManifestFallback(_)),
+                "HTTP {status} should allow yt-dlp fallback"
+            );
+        }
+    }
 
     #[test]
     fn reports_http_status_for_rejected_range_requests() {
@@ -9612,9 +9623,13 @@ mod byte_range_response_diagnostics_tests {
         )
         .expect_err("403 must reject the native range transfer");
         assert!(matches!(
-            forbidden,
+            &forbidden,
             ManifestRunError::Unsupported(message)
                 if message.contains("HTTP 403") && message.contains("bytes 10-14")
+        ));
+        assert!(matches!(
+            forbidden.into_engine_message(),
+            EngineMsg::ManifestFallback(_)
         ));
 
         let ignored = validate_byte_range_response(

@@ -176,6 +176,20 @@ pub(crate) struct ManifestByteRange {
     pub(crate) length: u64,
 }
 
+impl ManifestByteRange {
+    /// Return the last byte included by this non-empty range.
+    ///
+    /// The exclusive end must fit in `u64`; zero-length and overflowing ranges
+    /// are invalid and return `None`.
+    #[must_use]
+    pub(crate) fn inclusive_end(self) -> Option<u64> {
+        if self.length == 0 {
+            return None;
+        }
+        self.offset.checked_add(self.length)?.checked_sub(1)
+    }
+}
+
 /// Generate a stable staging filename for a manifest resource and optional byte range.
 #[must_use]
 pub(crate) fn resource_filename(
@@ -2450,6 +2464,34 @@ mod tests {
     use super::*;
 
     const BASE_URL: &str = "https://cdn.example.test/path/master.m3u8";
+
+    #[test]
+    fn byte_range_inclusive_end_rejects_empty_and_overflowing_ranges() {
+        assert_eq!(
+            ManifestByteRange {
+                offset: 10,
+                length: 5,
+            }
+            .inclusive_end(),
+            Some(14)
+        );
+        assert_eq!(
+            ManifestByteRange {
+                offset: 10,
+                length: 0,
+            }
+            .inclusive_end(),
+            None
+        );
+        assert_eq!(
+            ManifestByteRange {
+                offset: u64::MAX,
+                length: 1,
+            }
+            .inclusive_end(),
+            None
+        );
+    }
 
     #[test]
     fn inherits_all_same_origin_query_parameters_without_utf8_assumptions() {

@@ -326,16 +326,7 @@ fn normalized_referer(raw: Option<&str>) -> Option<String> {
 /// separately refuses HTTPS-to-HTTP redirects, so this default header cannot
 /// cross a later downgrade either.
 fn normalized_referer_for_target(target_url: Option<&str>, raw: Option<&str>) -> Option<String> {
-    let referer = normalized_referer(raw)?;
-    let target = url::Url::parse(target_url?).ok()?;
-    if !matches!(target.scheme(), "http" | "https") {
-        return None;
-    }
-    let source = url::Url::parse(&referer).ok()?;
-    if source.scheme() == "https" && target.scheme() == "http" {
-        return None;
-    }
-    Some(referer)
+    crate::referrer::origin_for_target(raw, target_url?)
 }
 
 #[cfg(test)]

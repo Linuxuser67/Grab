@@ -58,6 +58,15 @@
     </screenshot>
   </screenshots>
   <releases>
+    <release version="6.6.2~beta.1" type="development" date="2026-11-26">
+      <description>
+        <ul>
+          <li>Downloads: omit the Referer header when the source page is unknown and apply Referer forwarding only to compatible target schemes.</li>
+          <li>Downloads: report HTTP status and byte-range details when a native range request fails.</li>
+          <li>Refactor: carry Referer source and target in one typed context across extractors and HTTP clients.</li>
+        </ul>
+      </description>
+    </release>
     <release version="6.6.1" date="2026-11-25">
       <description>
         <ul>

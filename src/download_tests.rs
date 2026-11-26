@@ -6558,8 +6558,8 @@ fn proxy_manual_builds_remote_dns_socks() {
         .expect("valid")
         .expect("proxied");
     assert_ne!(proxy.cli_url, other.cli_url);
-    assert!(http_client_for(Some(&proxy), None, None).is_ok());
-    assert!(http_client_for(Some(&again), None, None).is_ok());
+    assert!(http_client_for(Some(&proxy), None).is_ok());
+    assert!(http_client_for(Some(&again), None).is_ok());
 }
 
 #[test]
@@ -6627,8 +6627,8 @@ fn proxy_clients_are_built_per_download_policy_scope() {
         .proxy_config()
         .expect("valid")
         .expect("proxied");
-    assert!(http_client_for(Some(&proxy), None, None).is_ok());
-    assert!(http_client_for(Some(&proxy), None, None).is_ok());
+    assert!(http_client_for(Some(&proxy), None).is_ok());
+    assert!(http_client_for(Some(&proxy), None).is_ok());
 }
 
 #[test]
@@ -6697,7 +6697,6 @@ fn stamp_request_never_stamps_cookies() {
             .expect("http client")
             .get("https://example.com/v"),
         "Grab-test/1.0",
-        "https://example.com/v",
         None,
     )
     .build()
@@ -6761,7 +6760,7 @@ fn cookies_reapplied_after_cross_host_redirect() {
     jar.add_cookie_str("sid=loc123", &"http://localhost/".parse().unwrap());
     jar.add_cookie_str("sid=ip456", &"http://127.0.0.1/".parse().unwrap());
     let client =
-        crate::download_net::http_client_with_jar(None, jar, None, None).expect("jar client");
+        crate::download_net::http_client_with_jar(None, jar, None).expect("jar client");
     let resp = crate::runtime::tokio_rt()
         .block_on(client.get(format!("http://localhost:{port}/start")).send())
         .expect("redirect fetch");
@@ -7020,7 +7019,7 @@ fn single_connection_skips_probe() {
 fn stamp_request_omits_unknown_source_and_reduces_known_source_to_origin() {
     let target = "https://cdn.example.test/video.mp4";
     let client = http_client().expect("http client");
-    let without_source = stamp_request(client.get(target), "", target, None)
+    let without_source = stamp_request(client.get(target), "", None)
         .build()
         .unwrap();
     assert!(
@@ -7029,7 +7028,11 @@ fn stamp_request_omits_unknown_source_and_reduces_known_source_to_origin() {
     );
 
     let source = "https://www.example.test/watch/private?token=secret#player";
-    let with_source = stamp_request(client.get(target), "", target, Some(source))
+    let with_source = stamp_request(
+        client.get(target),
+        "",
+        Some(crate::referrer::RefererContext { source, target }),
+    )
         .build()
         .unwrap();
     assert_eq!(

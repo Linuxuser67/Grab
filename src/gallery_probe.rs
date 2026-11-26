@@ -595,7 +595,7 @@ pub(crate) async fn enumerate_gallery_files_streamed(
             cookies_file,
             cookies_browser: None,
             user_agent,
-            referer: None,
+            referer_context: None,
             filter,
             proxy: None,
         },

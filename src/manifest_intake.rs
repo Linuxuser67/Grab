@@ -431,7 +431,7 @@ pub(crate) async fn client_for_manifest(
     if let Some(client) = client_with_browser_jar(raw_url, cookies_browser, proxy, referer).await? {
         return Ok(client);
     }
-    crate::download_net::http_client_for(proxy, referer)
+    crate::download_net::http_client_for(proxy, referer, Some(raw_url))
         .map_err(|_| gettext("The configured proxy could not be used for this manifest"))
 }
 
@@ -460,7 +460,7 @@ async fn client_with_handoff_jar(
     let Some((path, user_agent)) = crate::extension_server::live_handoff_identity(raw_url) else {
         return Ok(None);
     };
-    client_from_handoff_jar(&path, user_agent.as_deref(), proxy, referer).await
+    client_from_handoff_jar(&path, user_agent.as_deref(), proxy, referer, raw_url).await
 }
 
 /// Client for one staged handoff jar, with the browser user agent it was
@@ -470,6 +470,7 @@ async fn client_from_handoff_jar(
     user_agent: Option<&str>,
     proxy: Option<&crate::net_types::ResolvedProxy>,
     referer: Option<&str>,
+    target_url: &str,
 ) -> Result<Option<reqwest::Client>, String> {
     let Ok(text) = tokio::fs::read_to_string(path).await else {
         return Ok(None);
@@ -479,8 +480,14 @@ async fn client_from_handoff_jar(
         return Ok(None);
     }
     let user_agent = user_agent.unwrap_or(crate::download_net::DEFAULT_USER_AGENT);
-    crate::download_net::http_client_with_jar_and_user_agent(proxy, jar, user_agent, referer)
-        .map(Some)
+    crate::download_net::http_client_with_jar_and_user_agent(
+        proxy,
+        jar,
+        user_agent,
+        referer,
+        Some(target_url),
+    )
+    .map(Some)
 }
 
 /// Preview client: a live handoff jar when one is staged, otherwise anonymous.
@@ -495,11 +502,11 @@ async fn client_for_preview(
     validate_handoff_proxy(raw_url)?;
     if let Some((path, user_agent)) = handoff_identity
         && let Some(client) =
-            client_from_handoff_jar(&path, user_agent.as_deref(), proxy, referer).await?
+            client_from_handoff_jar(&path, user_agent.as_deref(), proxy, referer, raw_url).await?
     {
         return Ok((client, ManifestClientAuth::Handoff));
     }
-    crate::download_net::http_client_for(proxy, referer)
+    crate::download_net::http_client_for(proxy, referer, Some(raw_url))
         .map(|client| (client, ManifestClientAuth::Anonymous))
         .map_err(|_| gettext("The configured proxy could not be used for this manifest"))
 }
@@ -543,7 +550,7 @@ async fn client_with_browser_jar(
     .await
     {
         Ok(Ok(Some(jar))) => {
-            crate::download_net::http_client_with_jar(proxy, jar, referer).map(Some)
+            crate::download_net::http_client_with_jar(proxy, jar, referer, Some(raw_url)).map(Some)
         }
         Ok(Ok(None)) => Ok(None),
         Ok(Err(error)) => {
@@ -2364,7 +2371,7 @@ video/720.m3u8
         let cookie_url = Url::parse("http://manifest.example.test/").expect("cookie origin URL");
         let jar = Arc::new(reqwest::cookie::Jar::default());
         jar.add_cookie_str("sid=manifest-fixture", &cookie_url);
-        let client = crate::download_net::http_client_with_jar(Some(&proxy), jar, None)
+        let client = crate::download_net::http_client_with_jar(Some(&proxy), jar, None, None)
             .expect("build manifest client with proxy and cookie provider");
 
         let lookup_result = tokio::time::timeout(

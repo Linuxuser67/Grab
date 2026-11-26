@@ -157,7 +157,7 @@ pub(crate) async fn run_download(mut ctx: FetchCtx, connections: usize, mode: St
                 return;
             }
         };
-        match crate::download_net::http_client_with_jar(proxy.as_ref(), jar, None) {
+        match crate::download_net::http_client_with_jar(proxy.as_ref(), jar, None, None) {
             Ok(client) => ctx.client = client,
             Err(e) => {
                 ctx.tx.send(EngineMsg::Failed(e)).ok();
@@ -1629,7 +1629,7 @@ mod request_referer_tests {
         });
 
         let client =
-            crate::download_net::http_client_for(None, None).expect("build guarded client");
+            crate::download_net::http_client_for(None, None, None).expect("build guarded client");
         let target = format!("http://{first_address}/media");
         let source = format!("http://{first_address}/watch?token=private");
         let request =

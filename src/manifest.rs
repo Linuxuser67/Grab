@@ -176,6 +176,17 @@ pub(crate) struct ManifestByteRange {
     pub(crate) length: u64,
 }
 
+impl ManifestByteRange {
+    /// Return the inclusive end byte for a non-empty, non-overflowing range.
+    #[must_use]
+    pub(crate) fn inclusive_end(self) -> Option<u64> {
+        if self.length == 0 {
+            return None;
+        }
+        self.offset.checked_add(self.length)?.checked_sub(1)
+    }
+}
+
 /// Generate a stable staging filename for a manifest resource and optional byte range.
 #[must_use]
 pub(crate) fn resource_filename(
@@ -4810,6 +4821,71 @@ video/720.m3u8
         assert_eq!(
             plan.audio_renditions[0].stable_rendition_id.as_deref(),
             Some("rendition-en")
+        );
+    }
+}
+
+#[cfg(test)]
+mod manifest_byte_range_tests {
+    use super::ManifestByteRange;
+
+    #[test]
+    fn inclusive_end_returns_last_byte_for_valid_ranges() {
+        assert_eq!(
+            ManifestByteRange {
+                offset: 0,
+                length: 1,
+            }
+            .inclusive_end(),
+            Some(0)
+        );
+        assert_eq!(
+            ManifestByteRange {
+                offset: 12,
+                length: 5,
+            }
+            .inclusive_end(),
+            Some(16)
+        );
+    }
+
+    #[test]
+    fn inclusive_end_rejects_empty_ranges() {
+        assert_eq!(
+            ManifestByteRange {
+                offset: 0,
+                length: 0,
+            }
+            .inclusive_end(),
+            None
+        );
+        assert_eq!(
+            ManifestByteRange {
+                offset: 20,
+                length: 0,
+            }
+            .inclusive_end(),
+            None
+        );
+    }
+
+    #[test]
+    fn inclusive_end_rejects_overflowing_ranges() {
+        assert_eq!(
+            ManifestByteRange {
+                offset: u64::MAX,
+                length: 1,
+            }
+            .inclusive_end(),
+            None
+        );
+        assert_eq!(
+            ManifestByteRange {
+                offset: u64::MAX - 1,
+                length: 2,
+            }
+            .inclusive_end(),
+            None
         );
     }
 }

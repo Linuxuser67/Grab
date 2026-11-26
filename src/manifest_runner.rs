@@ -4849,9 +4849,10 @@ fn safe_resource_filename(filename: &str) -> bool {
 
 /// Preserve the HTTP response that caused a manifest byte-range request to fail.
 ///
-/// Authentication/authorization responses such as 403 are distinct from an
-/// origin that ignored the Range header (200) or returned a malformed 206.
-/// Transient statuses retain the existing retry classification.
+/// Non-transient HTTP rejections remain `Unsupported`, which maps to
+/// `ManifestFallback` in the engine. This deliberately gives yt-dlp one chance
+/// to use site-specific authentication handling that the generic native client
+/// does not implement. Native retries remain limited to transient statuses.
 fn validate_byte_range_response(
     status: reqwest::StatusCode,
     content_range: Option<&str>,
@@ -9582,6 +9583,7 @@ mod ffmpeg_rejected_input_tests {
 #[cfg(test)]
 mod byte_range_response_diagnostics_tests {
     use super::{ManifestRunError, validate_byte_range_response};
+    use crate::engine_msg::EngineMsg;
     use crate::manifest::ManifestByteRange;
 
     const REQUESTED: ManifestByteRange = ManifestByteRange {
@@ -9616,6 +9618,30 @@ mod byte_range_response_diagnostics_tests {
             ManifestRunError::Unsupported(message)
                 if message.contains("HTTP 200") && message.contains("expected HTTP 206")
         ));
+    }
+
+    #[test]
+    fn authorization_denials_remain_eligible_for_extractor_fallback() {
+        for status in [
+            reqwest::StatusCode::UNAUTHORIZED,
+            reqwest::StatusCode::FORBIDDEN,
+        ] {
+            let error = validate_byte_range_response(
+                status,
+                None,
+                REQUESTED,
+                "an HLS byte range",
+            )
+            .expect_err("authorization denials reject the native range request");
+            assert!(
+                matches!(&error, ManifestRunError::Unsupported(_)),
+                "HTTP {status} must remain an unsupported native transfer"
+            );
+            assert!(
+                matches!(error.into_engine_message(), EngineMsg::ManifestFallback(_)),
+                "HTTP {status} must leave the row eligible for yt-dlp fallback"
+            );
+        }
     }
 
     #[test]

@@ -4,6 +4,16 @@ use sha2::{Digest, Sha256};
 
 const MAX_SOURCE_URL_LEN: usize = 2048;
 
+/// The source page and the exact request target that gives it meaning.
+///
+/// Keeping both URLs in one named value prevents callers from swapping two
+/// string parameters or supplying a source without a target.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct RefererContext<'a> {
+    pub(crate) source: &'a str,
+    pub(crate) target: &'a str,
+}
+
 /// Parse a bounded, credential-free HTTP(S) source-page URL.
 ///
 /// Fragments do not participate in HTTP requests. Keeping validation here
@@ -38,16 +48,18 @@ pub(crate) fn origin_only(raw: &str) -> Option<String> {
 /// A secure source must not be disclosed in an insecure HTTP request. Requiring
 /// an explicit HTTP(S) target also prevents callers without request context
 /// from accidentally attaching a Referer to an unrelated URL.
-pub(crate) fn origin_for_target(raw_source: Option<&str>, target: &str) -> Option<String> {
-    let source = parse_source(raw_source?)?;
+pub(crate) fn origin_for_target(context: Option<RefererContext<'_>>) -> Option<String> {
+    let RefererContext { source, target } = context?;
+    let mut source = parse_source(source)?;
     let target = url::Url::parse(target).ok()?;
     if !matches!(target.scheme(), "http" | "https")
-        || target.host_str().is_none()
         || (source.scheme() == "https" && target.scheme() == "http")
     {
         return None;
     }
-    origin_only(source.as_str())
+    source.set_path("/");
+    source.set_query(None);
+    Some(source.to_string())
 }
 
 /// Identity of the source context used by an outbound request.
@@ -76,7 +88,10 @@ pub(crate) fn cache_identity(raw: Option<&str>) -> SourceIdentity {
 
 #[cfg(test)]
 mod tests {
-    use super::{SourceIdentity, cache_identity, origin_for_target, origin_only, parse_source};
+    use super::{
+        RefererContext, SourceIdentity, cache_identity, origin_for_target, origin_only,
+        parse_source,
+    };
 
     #[test]
     fn parse_source_accepts_only_bounded_credential_free_http_urls() {
@@ -108,10 +123,10 @@ mod tests {
     #[test]
     fn origin_for_target_suppresses_secure_source_on_insecure_requests() {
         assert_eq!(
-            origin_for_target(
-                Some("https://source.example.test/watch?token=secret"),
-                "http://media.example.test/video",
-            ),
+            origin_for_target(Some(RefererContext {
+                source: "https://source.example.test/watch?token=secret",
+                target: "http://media.example.test/video",
+            })),
             None
         );
     }
@@ -121,23 +136,39 @@ mod tests {
         let secure_source = "https://source.example.test/watch?token=secret";
         let insecure_source = "http://source.example.test/watch?token=secret";
         assert_eq!(
-            origin_for_target(Some(secure_source), "https://media.example.test/video"),
+            origin_for_target(Some(RefererContext {
+                source: secure_source,
+                target: "https://media.example.test/video",
+            })),
             Some("https://source.example.test/".to_string())
         );
         assert_eq!(
-            origin_for_target(Some(insecure_source), "http://media.example.test/video"),
+            origin_for_target(Some(RefererContext {
+                source: insecure_source,
+                target: "http://media.example.test/video",
+            })),
             Some("http://source.example.test/".to_string())
         );
         assert_eq!(
-            origin_for_target(Some(insecure_source), "https://media.example.test/video"),
+            origin_for_target(Some(RefererContext {
+                source: insecure_source,
+                target: "https://media.example.test/video",
+            })),
             Some("http://source.example.test/".to_string())
         );
+        assert_eq!(origin_for_target(None), None);
         assert_eq!(
-            origin_for_target(None, "https://media.example.test/video"),
+            origin_for_target(Some(RefererContext {
+                source: secure_source,
+                target: "file:///tmp/video",
+            })),
             None
         );
         assert_eq!(
-            origin_for_target(Some(secure_source), "file:///tmp/video"),
+            origin_for_target(Some(RefererContext {
+                source: secure_source,
+                target: "ftp://media.example.test/video",
+            })),
             None
         );
     }

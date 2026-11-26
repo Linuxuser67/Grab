@@ -263,7 +263,7 @@ pub async fn probe_gallery_with_proxy(
     cookies_browser: Option<&str>,
     user_agent: Option<&str>,
     proxy: Option<&crate::net_types::ResolvedProxy>,
-    referer: Option<&str>,
+    referer_context: Option<crate::referrer::RefererContext<'_>>,
 ) -> Result<Option<Vec<GalleryItem>>, GalleryError> {
     let mut cmd = tokio::process::Command::new(tool);
     crate::video_spawn::prepend_user_lib_to_path(&mut cmd);
@@ -286,7 +286,7 @@ pub async fn probe_gallery_with_proxy(
     if let Some(ua) = user_agent {
         cmd.arg("--user-agent").arg(ua);
     }
-    cmd.args(crate::gallery_argv::referer_cli_args(referer, url));
+    cmd.args(crate::gallery_argv::referer_cli_args(referer_context));
     // Instagram throttling for extraction requests (probe doesn't download).
     for arg in crate::gallery_argv::instagram_throttle_args(url, false) {
         cmd.arg(arg);
@@ -493,7 +493,7 @@ pub(crate) struct GalleryEnumerationOptions<'a> {
     pub(crate) cookies_file: Option<&'a Path>,
     pub(crate) cookies_browser: Option<&'a str>,
     pub(crate) user_agent: Option<&'a str>,
-    pub(crate) referer: Option<&'a str>,
+    pub(crate) referer_context: Option<crate::referrer::RefererContext<'a>>,
     pub(crate) filter: crate::gallery_argv::GalleryFilter,
     pub(crate) proxy: Option<&'a crate::net_types::ResolvedProxy>,
 }
@@ -520,7 +520,9 @@ fn enumerate_command(
     if let Some(ua) = options.user_agent {
         cmd.arg("--user-agent").arg(ua);
     }
-    cmd.args(crate::gallery_argv::referer_cli_args(options.referer, url));
+    cmd.args(crate::gallery_argv::referer_cli_args(
+        options.referer_context,
+    ));
     // Mirror the download's filter so --range indices match.
     let mut filter_argv = Vec::new();
     crate::gallery_argv::push_filter(&mut filter_argv, options.filter);
@@ -595,7 +597,7 @@ pub(crate) async fn enumerate_gallery_files_streamed(
             cookies_file,
             cookies_browser: None,
             user_agent,
-            referer: None,
+            referer_context: None,
             filter,
             proxy: None,
         },

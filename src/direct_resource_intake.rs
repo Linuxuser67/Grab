@@ -22,12 +22,12 @@ fn should_use_head_probe(url: &url::Url) -> bool {
 /// Return true when the server response is strong evidence of a downloadable
 /// resource rather than a web page or a stream manifest.
 pub(crate) async fn probe(
-    raw_url: String,
+    raw_url: &str,
     proxy: Option<crate::net_types::ResolvedProxy>,
-    referer: Option<String>,
+    referer_context: Option<crate::referrer::RefererContext<'_>>,
 ) -> bool {
-    let host = crate::video_probe::page_host(&raw_url);
-    let Ok(parsed_url) = url::Url::parse(&raw_url) else {
+    let host = crate::video_probe::page_host(raw_url);
+    let Ok(parsed_url) = url::Url::parse(raw_url) else {
         return false;
     };
     if !matches!(parsed_url.scheme(), "http" | "https")
@@ -41,13 +41,13 @@ pub(crate) async fn probe(
 
     let result = tokio::time::timeout(DIRECT_RESOURCE_PROBE_BUDGET, async {
         let client = crate::manifest_intake::client_for_direct_resource_probe(
-            &raw_url,
+            raw_url,
             proxy.as_ref(),
-            referer.as_deref(),
+            referer_context,
         )
         .await?;
 
-        inspect_response_headers(&client, &raw_url, head_only).await
+        inspect_response_headers(&client, raw_url, head_only).await
     })
     .await;
 

@@ -142,8 +142,10 @@ pub(crate) struct GalleryDownloadOptions<'a> {
 
 /// Build gallery-dl's extractor Referer option for a validated source/target pair.
 #[must_use]
-pub(crate) fn referer_cli_args(referer: Option<&str>, target_url: &str) -> Vec<String> {
-    let Some(origin) = crate::referrer::origin_for_target(referer, target_url) else {
+pub(crate) fn referer_cli_args(
+    referer_context: Option<crate::referrer::RefererContext<'_>>,
+) -> Vec<String> {
+    let Some(origin) = crate::referrer::origin_for_target(referer_context) else {
         return Vec::new();
     };
     vec!["-o".to_string(), format!("extractor.*.referer={origin}")]
@@ -323,10 +325,10 @@ mod tests {
 
     #[test]
     fn referer_argv_normalizes_source_and_omits_invalid_values() {
-        let args = referer_cli_args(
-            Some("https://example.test/watch/private?token=secret#player"),
-            "https://media.example.test/video",
-        );
+        let args = referer_cli_args(Some(crate::referrer::RefererContext {
+            source: "https://example.test/watch/private?token=secret#player",
+            target: "https://media.example.test/video",
+        }));
         assert_eq!(args, ["-o", "extractor.*.referer=https://example.test/"]);
         assert!(
             !args
@@ -334,18 +336,18 @@ mod tests {
                 .any(|argument| argument.contains("token=secret"))
         );
         assert!(
-            referer_cli_args(
-                Some("file:///etc/passwd"),
-                "https://media.example.test/video"
-            )
+            referer_cli_args(Some(crate::referrer::RefererContext {
+                source: "file:///etc/passwd",
+                target: "https://media.example.test/video",
+            }))
             .is_empty()
         );
-        assert!(referer_cli_args(None, "https://media.example.test/video").is_empty());
+        assert!(referer_cli_args(None).is_empty());
         assert!(
-            referer_cli_args(
-                Some("https://example.test/watch"),
-                "http://media.example.test/video",
-            )
+            referer_cli_args(Some(crate::referrer::RefererContext {
+                source: "https://example.test/watch",
+                target: "http://media.example.test/video",
+            }))
             .is_empty(),
             "a secure source must not be sent to an insecure target"
         );

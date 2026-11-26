@@ -272,6 +272,13 @@ pub(crate) async fn dual_probe(ctx: DualProbeCtx<'_>) -> DualProbeOutcome {
             tracing::debug!(url_host = %host, "gallery-dl preview cache hit");
             Ok(Some(items))
         } else {
+            let referer_context =
+                ctx.referer
+                    .as_deref()
+                    .map(|source| crate::referrer::RefererContext {
+                        source,
+                        target: &url,
+                    });
             let r = crate::gallery_probe::probe_gallery_with_proxy(
                 &ctx.tool,
                 &url,
@@ -279,7 +286,7 @@ pub(crate) async fn dual_probe(ctx: DualProbeCtx<'_>) -> DualProbeOutcome {
                 auth.cookies_browser.as_deref(),
                 auth.user_agent.as_deref(),
                 ctx.proxy.as_ref(),
-                ctx.referer.as_deref(),
+                referer_context,
             )
             .await;
             // Errors may be transient and Retry must actually retry. Re-hash

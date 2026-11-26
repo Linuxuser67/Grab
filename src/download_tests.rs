@@ -7016,37 +7016,28 @@ fn single_connection_skips_probe() {
 }
 
 #[test]
-fn stamp_request_sends_origin_only_referer() {
-    // Origin-only Referer (strict-origin-when-cross-origin): the origin
-    // satisfies hotlink guards without leaking path or query (which may
-    // carry tokens).
-    let built = stamp_request(
-        http_client()
-            .expect("http client")
-            .get("http://127.0.0.1:8080/a/b?token=<redacted>"),
-        "",
-        "http://127.0.0.1:8080/a/b?token=<redacted>",
-        None,
-    )
-    .build()
-    .unwrap();
-    assert_eq!(
-        built.headers().get("referer").and_then(|v| v.to_str().ok()),
-        Some("http://127.0.0.1:8080/")
+fn stamp_request_omits_unknown_source_and_reduces_known_source_to_origin() {
+    let target = "https://cdn.example.test/video.mp4";
+    let client = http_client().expect("http client");
+    let without_source = stamp_request(client.get(target), "", target, None)
+        .build()
+        .unwrap();
+    assert!(
+        !without_source.headers().contains_key("referer"),
+        "a manually pasted URL must not be used as its own Referer"
     );
-    let built = stamp_request(
-        http_client()
-            .expect("http client")
-            .get("https://example.com/v"),
-        "",
-        "https://example.com/v",
-        None,
-    )
-    .build()
-    .unwrap();
+
+    let source = "https://www.example.test/watch/private?token=secret#player";
+    let with_source = stamp_request(client.get(target), "", target, Some(source))
+        .build()
+        .unwrap();
     assert_eq!(
-        built.headers().get("referer").and_then(|v| v.to_str().ok()),
-        Some("https://example.com/")
+        with_source
+            .headers()
+            .get("referer")
+            .and_then(|value| value.to_str().ok()),
+        Some("https://www.example.test/"),
+        "only the known source origin may be forwarded"
     );
 }
 

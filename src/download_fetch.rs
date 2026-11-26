@@ -1527,16 +1527,13 @@ pub(crate) enum StartMode {
     Resume(SegmentState),
 }
 
-/// Produce a redirect-safe Referer using only a scheme, host, and port.
-/// This matches browsers' `strict-origin-when-cross-origin` default and
-/// avoids leaking a source page's path or query, which may carry tokens.
-/// The HTTP client may follow redirects without giving Grab a chance to rewrite
-/// request headers at each hop, so a full source-page URL is never attached.
+/// Produce an origin-only Referer when a browser source page is known.
+///
+/// A manually pasted URL has no source-page context and must not be used as
+/// its own Referer. Removing the path and query also avoids forwarding page
+/// tokens to the media host.
 fn request_referer(target: &str, source: Option<&str>) -> Option<String> {
-    let Some(source) = source else {
-        return crate::referrer::origin_only(target);
-    };
-    let source_url = crate::referrer::parse_source(source)?;
+    let source_url = crate::referrer::parse_source(source?)?;
     let target_url = url::Url::parse(target).ok()?;
     if source_url.scheme() == "https" && target_url.scheme() == "http" {
         return None;
@@ -1547,6 +1544,14 @@ fn request_referer(target: &str, source: Option<&str>) -> Option<String> {
 #[cfg(test)]
 mod request_referer_tests {
     use super::request_referer;
+
+    #[test]
+    fn absent_source_does_not_synthesize_target_origin() {
+        assert_eq!(
+            request_referer("https://cdn.example.test/video.mp4", None),
+            None
+        );
+    }
 
     #[test]
     fn same_origin_uses_only_the_source_origin() {

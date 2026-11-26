@@ -183,8 +183,7 @@ fn push_vod_tail_args(args: &mut Vec<String>, job: &VideoJob, subtitle_language:
         args.extend(subtitle_cli_args(lang));
     }
     args.extend(proxy_cli_args(job.proxy.as_ref()));
-    if let Some(referer) =
-        crate::referrer::origin_for_target(job.referer.as_deref(), &job.page_url)
+    if let Some(referer) = crate::referrer::origin_for_target(job.referer.as_deref(), &job.page_url)
     {
         args.push("--referer".to_string());
         args.push(referer);
@@ -585,8 +584,7 @@ pub(crate) fn live_capture_argv_with_mode(
         args.push("--live-from-start".to_string());
     }
     args.extend(proxy_cli_args(job.proxy.as_ref()));
-    if let Some(referer) =
-        crate::referrer::origin_for_target(job.referer.as_deref(), &job.page_url)
+    if let Some(referer) = crate::referrer::origin_for_target(job.referer.as_deref(), &job.page_url)
     {
         args.push("--referer".to_string());
         args.push(referer);

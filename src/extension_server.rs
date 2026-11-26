@@ -1453,8 +1453,8 @@ pub(crate) struct Handoff {
     /// Dropping it unanswered counts as declined.
     pub decision: Option<oneshot::Sender<HandoffOutcome>>,
     /// Whether the extension proved possession of the pairing secret with
-    /// current replay metadata. Unpaired and legacy callers are forced to
-    /// confirm even when the user enabled auto-add.
+    /// current replay metadata. Unpaired callers are forced to confirm even
+    /// when the user enabled auto-add.
     pub authenticated: bool,
     /// GTK closes the dialog at this instant, so it cannot outlive the
     /// server's confirmation window.

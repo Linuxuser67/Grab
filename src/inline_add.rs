@@ -182,7 +182,11 @@ fn paste_fingerprint(url: &str) -> String {
 }
 
 /// A queued handoff keeps its URL, source page and caption candidates together.
-type PendingUrl = (String, Option<String>, Vec<crate::extension_server::Caption>);
+type PendingUrl = (
+    String,
+    Option<String>,
+    Vec<crate::extension_server::Caption>,
+);
 
 /// Starts the next queued link once the finished lookup's marker is cleared.
 /// The start is deferred to an idle callback so it never re-enters the task
@@ -1031,10 +1035,7 @@ pub(crate) struct VideoStep {
 }
 
 /// Copy captions only when the preview still belongs to the exact URL.
-fn handoff_captions_for_url(
-    step: &VideoStep,
-    url: &str,
-) -> Vec<crate::extension_server::Caption> {
+fn handoff_captions_for_url(step: &VideoStep, url: &str) -> Vec<crate::extension_server::Caption> {
     step.handoff_captions
         .borrow()
         .as_ref()
@@ -2739,13 +2740,7 @@ pub struct AddCard {
     widget: gtk4::Widget,
     nav: adw::NavigationView,
     public_host_leases: PublicHostLeases,
-    open: Rc<
-        dyn Fn(
-            Option<String>,
-            Option<String>,
-            Vec<crate::extension_server::Caption>,
-        ),
-    >,
+    open: Rc<dyn Fn(Option<String>, Option<String>, Vec<crate::extension_server::Caption>)>,
     toggle: Rc<dyn Fn()>,
     open_torrent_picker: TorrentPickerOpener,
     state: Rc<OpenState>,
@@ -4977,11 +4972,9 @@ pub fn build_add_card(manager: Rc<DownloadManager>) -> AddCard {
             if saved.is_empty() { None } else { Some(saved) }
         }));
         Rc::new(
-            move |
-                initial_url: Option<String>,
-                initial_referer: Option<String>,
-                initial_captions: Vec<crate::extension_server::Caption>,
-            | {
+            move |initial_url: Option<String>,
+                  initial_referer: Option<String>,
+                  initial_captions: Vec<crate::extension_server::Caption>| {
                 public_host_leases.borrow_mut().activate();
                 let already = open_state.is_open();
                 reveal();
@@ -5007,8 +5000,7 @@ pub fn build_add_card(manager: Rc<DownloadManager>) -> AddCard {
                             let mut queue = pending_url.borrow_mut();
                             if let Some((_, _, queued_captions)) =
                                 queue.iter_mut().find(|(queued_url, queued_referer, _)| {
-                                    queued_url == &normalized
-                                        && queued_referer == &initial_referer
+                                    queued_url == &normalized && queued_referer == &initial_referer
                                 })
                             {
                                 *queued_captions = initial_captions;
@@ -5025,8 +5017,7 @@ pub fn build_add_card(manager: Rc<DownloadManager>) -> AddCard {
                         *source_referer.borrow_mut() = initial_referer
                             .filter(|referer| !referer.is_empty())
                             .map(|referer| (normalized.clone(), referer));
-                        *handoff_captions.borrow_mut() =
-                            Some((normalized, initial_captions));
+                        *handoff_captions.borrow_mut() = Some((normalized, initial_captions));
                     }
                 } else if !already && url_entry.text().trim().is_empty() {
                     let next = { pending_url.borrow_mut().pop_front() };

@@ -5,7 +5,6 @@
 //! media download it accompanies.
 
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
 use std::time::Duration;
 
 use futures_util::StreamExt as _;
@@ -18,15 +17,10 @@ use crate::extension_server::Caption;
 const MAX_CAPTION_BYTES: usize = 256 * 1024;
 const CAPTION_FETCH_BUDGET: Duration = Duration::from_secs(10);
 /// Same allowlist the `/add` boundary validates; rechecked before sending.
-const ALLOWED_CAPTION_HEADERS: [&str; 4] = [
-    "referer",
-    "origin",
-    "accept-language",
-    "authorization",
-];
+const ALLOWED_CAPTION_HEADERS: [&str; 4] =
+    ["referer", "origin", "accept-language", "authorization"];
 
 /// One caption file staged for later FFmpeg finalization (slice A3).
-#[allow(dead_code)] // consumed by A3; kept independently revertable
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct StagedCaption {
     pub(crate) path: PathBuf,
@@ -39,7 +33,6 @@ pub(crate) struct StagedCaption {
 /// `staging_dir` is the item's private XDG staging directory (created with
 /// owner-only permissions). Failures are soft: they are logged and omitted
 /// from the returned list, never surfaced to the media download.
-#[allow(dead_code)] // called from the GTK/job setup path in A3
 pub(crate) async fn stage_handoff_captions(
     handoff_url: &str,
     captions: &[Caption],
@@ -74,7 +67,8 @@ pub(crate) async fn stage_handoff_captions(
         return Vec::new();
     }
 
-    let client = match crate::manifest_intake::client_for_caption_handoff(handoff_url, proxy).await {
+    let client = match crate::manifest_intake::client_for_caption_handoff(handoff_url, proxy).await
+    {
         Ok(client) => client,
         Err(error) => {
             tracing::warn!(error = %error, "caption client unavailable; continuing without captions");
@@ -173,7 +167,10 @@ async fn fetch_caption(client: &reqwest::Client, caption: &Caption) -> Result<Ve
         .await
         .map_err(|error| error.without_url().to_string())?;
     if !response.status().is_success() {
-        return Err(format!("caption request returned HTTP {}", response.status()));
+        return Err(format!(
+            "caption request returned HTTP {}",
+            response.status()
+        ));
     }
     // The guarded client already refuses https->http and public->private hops.
     // Recheck the landed URL so an injected client cannot silently bypass it.
@@ -326,9 +323,7 @@ mod tests {
     }
 
     /// One GET per response, in order; returns the raw request headers seen.
-    async fn fixture_server(
-        responses: Vec<Vec<u8>>,
-    ) -> (String, JoinHandle<Vec<String>>) {
+    async fn fixture_server(responses: Vec<Vec<u8>>) -> (String, JoinHandle<Vec<String>>) {
         let listener = TcpListener::bind("127.0.0.1:0")
             .await
             .expect("bind caption fixture");
@@ -336,10 +331,11 @@ mod tests {
         let server = tokio::spawn(async move {
             let mut seen = Vec::new();
             for response in responses {
-                let (mut stream, _) = tokio::time::timeout(Duration::from_secs(5), listener.accept())
-                    .await
-                    .expect("fixture accept")
-                    .expect("accept caption request");
+                let (mut stream, _) =
+                    tokio::time::timeout(Duration::from_secs(5), listener.accept())
+                        .await
+                        .expect("fixture accept")
+                        .expect("accept caption request");
                 let mut request = Vec::new();
                 let mut chunk = [0_u8; 4096];
                 loop {
@@ -365,7 +361,9 @@ mod tests {
 
     #[test]
     fn accepts_vtt_with_bom_and_leading_whitespace() {
-        assert!(valid_vtt(b"\xef\xbb\xbf  \nWEBVTT\n\n00:00:00.000 --> 00:00:01.000\nHi\n"));
+        assert!(valid_vtt(
+            b"\xef\xbb\xbf  \nWEBVTT\n\n00:00:00.000 --> 00:00:01.000\nHi\n"
+        ));
         assert!(valid_vtt(b"WEBVTT"));
     }
 
@@ -396,16 +394,25 @@ mod tests {
 
     #[test]
     fn staged_caption_name_is_a_single_safe_component() {
-        let name = caption_file_name(&caption("https://subs.example.test/en.vtt?sig=x", "en", "vtt"), "vtt");
+        let name = caption_file_name(
+            &caption("https://subs.example.test/en.vtt?sig=x", "en", "vtt"),
+            "vtt",
+        );
         assert!(name.chars().all(|c| !matches!(c, '/' | '\\' | ':' | '?')));
         assert!(name.starts_with("en.") && name.ends_with(".vtt"));
         assert_eq!(
             name,
-            caption_file_name(&caption("https://subs.example.test/en.vtt?sig=x", "en", "vtt"), "vtt")
+            caption_file_name(
+                &caption("https://subs.example.test/en.vtt?sig=x", "en", "vtt"),
+                "vtt"
+            )
         );
         assert_ne!(
             name,
-            caption_file_name(&caption("https://subs.example.test/fr.vtt?sig=x", "fr", "vtt"), "vtt")
+            caption_file_name(
+                &caption("https://subs.example.test/fr.vtt?sig=x", "fr", "vtt"),
+                "vtt"
+            )
         );
     }
 
@@ -435,13 +442,9 @@ mod tests {
         let directory = tempfile::tempdir().expect("staging dir");
         let bad = caption("http://subs.example.test/en.vtt", "en", "vtt");
 
-        let staged = stage_handoff_captions(
-            "https://example.test/watch",
-            &[bad],
-            directory.path(),
-            None,
-        )
-        .await;
+        let staged =
+            stage_handoff_captions("https://example.test/watch", &[bad], directory.path(), None)
+                .await;
 
         assert!(staged.is_empty());
         assert_eq!(
@@ -466,10 +469,7 @@ mod tests {
         assert_eq!(staged[0].format, "vtt");
         assert_eq!(staged[0].path.parent(), Some(directory.path()));
         assert_eq!(
-            std::fs::read(&staged[0].path).expect("staged bytes"),
-            body
-        );
-        assert_eq!(
+        assert_eq!(std::fs::read(&staged[0].path).expect("staged bytes"), body);
             std::fs::read_dir(directory.path())
                 .expect("staging listing")
                 .count(),
@@ -483,7 +483,8 @@ mod tests {
     async fn oversized_body_is_rejected_without_staging() {
         let body = vec![b'x'; MAX_CAPTION_BYTES + 1];
         // Chunked: no declared length, so the streaming bound must catch it.
-        let mut raw = b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\n".to_vec();
+        let mut raw =
+            b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\n".to_vec();
         raw.extend_from_slice(format!("{:x}\r\n", body.len()).as_bytes());
         raw.extend_from_slice(&body);
         raw.extend_from_slice(b"\r\n0\r\n\r\n");
@@ -511,7 +512,10 @@ mod tests {
 
         let staged = stage_with_client(&fixture_client(), &[&track], directory.path()).await;
 
-        assert!(staged.is_empty(), "a bad caption must be skipped, not panic");
+        assert!(
+            staged.is_empty(),
+            "a bad caption must be skipped, not panic"
+        );
         server.await.expect("fixture server");
     }
 
@@ -537,7 +541,10 @@ mod tests {
     async fn caption_headers_and_staged_cookies_are_propagated() {
         let (url, server) = fixture_server(vec![response(b"WEBVTT\n")]).await;
         let jar = Arc::new(reqwest::cookie::Jar::default());
-        jar.set_cookie_str("sid=abc; Path=/", &url::Url::parse(&url).expect("fixture URL"));
+        jar.set_cookies(
+            "sid=abc; Path=/",
+            &url::Url::parse(&url).expect("fixture URL"),
+        );
         let client = reqwest::Client::builder()
             .no_proxy()
             .redirect(reqwest::redirect::Policy::none())
@@ -546,7 +553,10 @@ mod tests {
             .expect("fixture client with jar");
         let mut track = caption(&url, "en", "vtt");
         track.headers = vec![
-            ("Referer".to_string(), "https://example.test/watch".to_string()),
+            (
+                "Referer".to_string(),
+                "https://example.test/watch".to_string(),
+            ),
             ("Authorization".to_string(), "Bearer token".to_string()),
         ];
         let directory = tempfile::tempdir().expect("staging dir");
@@ -557,7 +567,10 @@ mod tests {
         let requests = server.await.expect("fixture server");
         let request = requests.first().expect("one request").to_ascii_lowercase();
         assert!(request.contains("cookie: sid=abc"), "{request}");
-        assert!(request.contains("referer: https://example.test/watch"), "{request}");
+        assert!(
+            request.contains("referer: https://example.test/watch"),
+            "{request}"
+        );
         assert!(request.contains("authorization: Bearer token"), "{request}");
     }
 

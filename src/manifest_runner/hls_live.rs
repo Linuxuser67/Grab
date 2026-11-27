@@ -90,12 +90,12 @@ pub(super) async fn ensure_live_hls_marker(directory: &Path) -> Result<(), Strin
     if read_live_hls_marker(directory).await? {
         return Ok(());
     }
-    super::write_staged_file_atomic(
+    crate::staged_file::write_staged_file_atomic(
         directory,
         "live-hls.capture.part",
         LIVE_HLS_MARKER_NAME,
         LIVE_HLS_MARKER_CONTENT,
-        super::StagedPublish::NoReplace,
+        crate::staged_file::StagedPublish::NoReplace,
     )
     .await?;
     super::sync_staging_directory(directory).await
@@ -223,12 +223,12 @@ pub(super) async fn write_live_playlist(
     let bytes = accumulator
         .local_playlist_bytes()
         .map_err(|error| error.to_string())?;
-    super::write_staged_file_atomic(
+    crate::staged_file::write_staged_file_atomic(
         directory,
         "local.m3u8.next.part",
         "local.m3u8",
         &bytes,
-        super::StagedPublish::Replace,
+        crate::staged_file::StagedPublish::Replace,
     )
     .await?;
     sync_staging_directory(directory).await

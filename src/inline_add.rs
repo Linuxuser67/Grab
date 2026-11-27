@@ -2763,6 +2763,13 @@ impl AddCard {
         &self.nav
     }
 
+    /// Reveal a URL without any browser-supplied caption metadata.
+    ///
+    /// Kept for desktop callers and tests that open the card directly.
+    pub fn open(&self, initial_url: Option<String>, referer: Option<String>) {
+        self.open_with_captions(initial_url, referer, Vec::new());
+    }
+
     /// Reveal a browser URL with its validated, session-only caption candidates.
     /// Candidates are bound to the exact URL and transferred to its queue row
     /// only if the user selects a native manifest download.

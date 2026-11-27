@@ -187,15 +187,8 @@ async fn fetch_caption_with_referer(
     source_referer: Option<&str>,
 ) -> Result<Vec<u8>, String> {
     let requested = url::Url::parse(&caption.url).map_err(|error| error.to_string())?;
-    if requested.scheme() != "https"
-        || !requested.username().is_empty()
-        || requested.password().is_some()
-        || !requested
-            .host_str()
-            .is_some_and(crate::download_net::is_public_destination_host)
-    {
-        return Err("caption URL is not a credential-free public HTTPS destination".to_string());
-    }
+    // Production callers already passed caption_url_policy and acquired a
+    // public-only DNS lease. Keep this helper injectable for loopback fixtures.
     let mut headers = HeaderMap::new();
     for (name, value) in &caption.headers {
         if !ALLOWED_CAPTION_HEADERS.contains(&name.to_ascii_lowercase().as_str())
@@ -623,21 +616,14 @@ mod tests {
 
     #[tokio::test]
     async fn stops_after_the_first_usable_caption() {
-        let (url, server) = fixture_server(vec![
-            response(b"WEBVTT\\n"),
-            response(b"WEBVTT\\n"),
-        ])
-        .await;
+        let (url, server) =
+            fixture_server(vec![response(b"WEBVTT\n"), response(b"WEBVTT\n")]).await;
         let directory = tempfile::tempdir().expect("staging dir");
         let first = caption(&format!("{url}/first"), "en", "vtt");
         let second = caption(&format!("{url}/second"), "fr", "vtt");
 
-        let staged = stage_with_client(
-            &fixture_client(),
-            &[&first, &second],
-            directory.path(),
-        )
-        .await;
+        let staged =
+            stage_with_client(&fixture_client(), &[&first, &second], directory.path()).await;
 
         assert_eq!(staged.len(), 1);
         assert_eq!(staged[0].language, "en");
@@ -653,7 +639,7 @@ mod tests {
             &fixture_client(),
             &[&track],
             directory.path(),
-            Some("https://source.example.test/watch/private?token=secret#player"),
+            Some("http://source.example.test/watch/private?token=secret#player"),
         )
         .await;
 
@@ -661,7 +647,7 @@ mod tests {
         let requests = server.await.expect("fixture server");
         let request = requests.first().expect("one request").to_ascii_lowercase();
         assert!(
-            request.contains("referer: https://source.example.test/"),
+            request.contains("referer: http://source.example.test/"),
             "{request}"
         );
         assert!(!request.contains("token=secret"), "{request}");

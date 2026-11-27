@@ -5661,7 +5661,8 @@ mod tests {
         let directory = tempfile::tempdir().expect("create FFmpeg argument test directory");
         let ffmpeg = fake_ffmpeg_recording_arguments(directory.path());
         let output = directory.path().join("output.mp4");
-        let args = run_ffmpeg_recording_args(&ffmpeg, &output, None, SubtitleOutput::default()).await;
+        let args =
+            run_ffmpeg_recording_args(&ffmpeg, &output, None, SubtitleOutput::default()).await;
 
         assert!(
             args.windows(2)
@@ -5804,8 +5805,14 @@ mod tests {
             },
         )
         .await;
-        let input_count = args.iter().filter(|argument| argument.as_str() == "-i").count();
-        assert_eq!(input_count, 3, "exercise video, audio, and subtitle inputs: {args:?}");
+        let input_count = args
+            .iter()
+            .filter(|argument| argument.as_str() == "-i")
+            .count();
+        assert_eq!(
+            input_count, 3,
+            "exercise video, audio, and subtitle inputs: {args:?}"
+        );
         let last_input = args
             .iter()
             .rposition(|argument| argument == "-i")

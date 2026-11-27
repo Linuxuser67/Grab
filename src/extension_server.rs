@@ -1467,12 +1467,44 @@ fn validated_captions(raw: Vec<Caption>) -> Result<Vec<Caption>, StatusCode> {
 
 /// One optional caption track supplied by a paired browser extension.
 /// `headers` is a list of name/value pairs from the extension's JSON array.
-#[derive(Clone, Debug, Deserialize)]
+#[derive(Clone, Deserialize)]
 pub(crate) struct Caption {
     pub(crate) url: String,
     pub(crate) headers: Vec<(String, String)>,
     pub(crate) language: String,
     pub(crate) format: String,
+}
+
+impl std::fmt::Debug for Caption {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("Caption")
+            .field("url", &"<redacted>")
+            .field("headers", &self.headers.len())
+            .field("language", &self.language)
+            .field("format", &self.format)
+            .finish()
+    }
+}
+
+#[cfg(test)]
+mod caption_debug_tests {
+    use super::Caption;
+
+    #[test]
+    fn debug_redacts_signed_urls_and_header_values() {
+        let caption = Caption {
+            url: "https://subs.example.test/en.vtt?token=secret".to_string(),
+            headers: vec![("Authorization".to_string(), "Bearer secret".to_string())],
+            language: "en".to_string(),
+            format: "vtt".to_string(),
+        };
+        let debug = format!("{caption:?}");
+        assert!(!debug.contains("token=secret"));
+        assert!(!debug.contains("Bearer secret"));
+        assert!(debug.contains("<redacted>"));
+        assert!(debug.contains("Authorization") == false);
+    }
 }
 
 #[derive(Deserialize)]

@@ -58,6 +58,14 @@
     </screenshot>
   </screenshots>
   <releases>
+    <release version="6.6.4~beta.1" type="development" date="2026-11-27">
+      <description>
+        <ul>
+          <li>Downloads: browser-supplied captions detected by the extension can be carried through native HLS/DASH downloads, fetched with guarded policy and muxed as embedded or sidecar tracks.</li>
+          <li>FFmpeg: cover stream maps with video, audio and subtitle inputs; keep media handoffs alive when caption metadata is unusable.</li>
+        </ul>
+      </description>
+    </release>
     <release version="6.6.3" date="2026-11-27">
       <description>
         <ul>

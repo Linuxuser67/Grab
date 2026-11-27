@@ -58,6 +58,13 @@
     </screenshot>
   </screenshots>
   <releases>
+    <release version="6.6.3" date="2026-11-27">
+      <description>
+        <ul>
+          <li>Downloads: remove native identity SAMPLE-AES support and its MPEG-TS/ADTS preflight parsers; affected HLS streams now use the yt-dlp fallback.</li>
+        </ul>
+      </description>
+    </release>
     <release version="6.6.2" date="2026-11-26">
       <description>
         <ul>

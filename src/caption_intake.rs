@@ -42,6 +42,7 @@ pub(crate) async fn stage_handoff_captions(
     captions: &[Caption],
     staging_dir: &Path,
     proxy: Option<&crate::net_types::ResolvedProxy>,
+    source_referer: Option<&str>,
 ) -> Vec<StagedCaption> {
     if captions.is_empty() {
         return Vec::new();
@@ -79,7 +80,13 @@ pub(crate) async fn stage_handoff_captions(
             return Vec::new();
         }
     };
-    let staged = stage_with_client(&client, &accepted, staging_dir).await;
+    let staged = stage_with_client_and_referer(
+        &client,
+        &accepted,
+        staging_dir,
+        source_referer,
+    )
+    .await;
     drop(leases);
     staged
 }
@@ -110,13 +117,22 @@ async fn stage_with_client(
     captions: &[&Caption],
     staging_dir: &Path,
 ) -> Vec<StagedCaption> {
+    stage_with_client_and_referer(client, captions, staging_dir, None).await
+}
+
+async fn stage_with_client_and_referer(
+    client: &reqwest::Client,
+    captions: &[&Caption],
+    staging_dir: &Path,
+    source_referer: Option<&str>,
+) -> Vec<StagedCaption> {
     let mut staged = Vec::new();
     if let Err(error) = crate::video_staging::ensure_real_staging_leaf(staging_dir) {
         tracing::warn!(error = %error, "caption staging directory unavailable; continuing without captions");
         return staged;
     }
     for caption in captions {
-        match stage_one(client, caption, staging_dir).await {
+        match stage_one(client, caption, staging_dir, source_referer).await {
             Ok(item) => {
                 // Finalization selects one external track. Stop after the
                 // first usable candidate (the browser orders these by match
@@ -138,8 +154,9 @@ async fn stage_one(
     client: &reqwest::Client,
     caption: &Caption,
     staging_dir: &Path,
+    source_referer: Option<&str>,
 ) -> Result<StagedCaption, String> {
-    let bytes = fetch_caption(client, caption).await?;
+    let bytes = fetch_caption_with_referer(client, caption, source_referer).await?;
     let format = caption.format.to_ascii_lowercase();
     if !valid_caption(&bytes, &format) {
         return Err(format!("body is not valid {format} content"));
@@ -161,6 +178,14 @@ async fn stage_one(
 }
 
 async fn fetch_caption(client: &reqwest::Client, caption: &Caption) -> Result<Vec<u8>, String> {
+    fetch_caption_with_referer(client, caption, None).await
+}
+
+async fn fetch_caption_with_referer(
+    client: &reqwest::Client,
+    caption: &Caption,
+    source_referer: Option<&str>,
+) -> Result<Vec<u8>, String> {
     let requested = url::Url::parse(&caption.url).map_err(|error| error.to_string())?;
     if requested.scheme() != "https"
         || !requested.username().is_empty()
@@ -181,6 +206,18 @@ async fn fetch_caption(client: &reqwest::Client, caption: &Caption) -> Result<Ve
         let name = HeaderName::from_bytes(name.as_bytes()).map_err(|error| error.to_string())?;
         let value = HeaderValue::from_str(value).map_err(|error| error.to_string())?;
         headers.insert(name, value);
+    }
+    if !headers.contains_key(reqwest::header::REFERER)
+        && let Some(source) = source_referer
+        && let Some(referer) = crate::referrer::origin_for_target(Some(
+            crate::referrer::RefererContext {
+                source,
+                target: requested.as_str(),
+            },
+        ))
+    {
+        let value = HeaderValue::from_str(&referer).map_err(|error| error.to_string())?;
+        headers.insert(reqwest::header::REFERER, value);
     }
 
     let response = client
@@ -605,6 +642,30 @@ mod tests {
         assert_eq!(staged.len(), 1);
         assert_eq!(staged[0].language, "en");
         server.await.expect("fixture server");
+    }
+
+    #[tokio::test]
+    async fn source_referer_is_reduced_to_origin_for_caption_requests() {
+        let (url, server) = fixture_server(vec![response(b"WEBVTT\\n")]).await;
+        let directory = tempfile::tempdir().expect("staging dir");
+        let track = caption(&url, "en", "vtt");
+        let staged = stage_with_client_and_referer(
+            &fixture_client(),
+            &[&track],
+            directory.path(),
+            Some("https://source.example.test/watch/private?token=secret#player"),
+        )
+        .await;
+
+        assert_eq!(staged.len(), 1);
+        let requests = server.await.expect("fixture server");
+        let request = requests.first().expect("one request").to_ascii_lowercase();
+        assert!(
+            request.contains("referer: https://source.example.test/"),
+            "{request}"
+        );
+        assert!(!request.contains("token=secret"), "{request}");
+        assert!(!request.contains("/watch/private"), "{request}");
     }
 
     #[tokio::test]

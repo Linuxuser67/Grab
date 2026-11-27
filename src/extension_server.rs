@@ -4003,8 +4003,7 @@ mod tests {
         let mut unpaired = start_with(4, None, Duration::from_secs(5)).await;
         let host = format!("127.0.0.1:{}", unpaired.port);
         let signed = token(BODY);
-        let (port, request_host, request_body) =
-            (unpaired.port, host.clone(), BODY.to_string());
+        let (port, request_host, request_body) = (unpaired.port, host.clone(), BODY.to_string());
         let task = tokio::spawn(async move {
             request_to(
                 port,
@@ -4019,7 +4018,11 @@ mod tests {
             )
             .await
         });
-        let handoff = unpaired.rx.recv().await.expect("unpaired confirmation handoff");
+        let handoff = unpaired
+            .rx
+            .recv()
+            .await
+            .expect("unpaired confirmation handoff");
         assert!(!handoff.authenticated);
         assert!(handoff.captions.is_empty());
         handoff
@@ -4116,8 +4119,7 @@ mod tests {
             // Bypass request_with_target: it upgrades signed fixtures with
             // replay metadata and would hide this regression.
             let signed = token(&body);
-            let (port, request_host, request_body) =
-                (srv.port, host.clone(), body.clone());
+            let (port, request_host, request_body) = (srv.port, host.clone(), body.clone());
             let task = tokio::spawn(async move {
                 request_to(
                     port,

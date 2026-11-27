@@ -15,6 +15,7 @@ use crate::extension_server::Caption;
 
 /// Upper bound for one subtitle body (matches the extension's HLS inspection cap).
 const MAX_CAPTION_BYTES: usize = 256 * 1024;
+/// Shared deadline for client construction and the ordered candidate intake.
 const CAPTION_FETCH_BUDGET: Duration = Duration::from_secs(10);
 const MAX_CAPTION_REDIRECTS: usize = 5;
 /// Same allowlist the `/add` boundary validates; rechecked before sending.
@@ -41,6 +42,7 @@ pub(crate) async fn stage_handoff_captions(
     proxy: Option<&crate::net_types::ResolvedProxy>,
     source_referer: Option<&str>,
 ) -> Vec<StagedCaption> {
+    let deadline = tokio::time::Instant::now() + CAPTION_FETCH_BUDGET;
     if captions.is_empty() {
         return Vec::new();
     }
@@ -81,16 +83,30 @@ pub(crate) async fn stage_handoff_captions(
         return Vec::new();
     }
 
-    let client = match crate::manifest_intake::client_for_caption_handoff(handoff_url, proxy).await
+    let client = match tokio::time::timeout_at(
+        deadline,
+        crate::manifest_intake::client_for_caption_handoff(handoff_url, proxy),
+    )
+    .await
     {
-        Ok(client) => client,
-        Err(error) => {
+        Ok(Ok(client)) => client,
+        Ok(Err(error)) => {
             tracing::warn!(error = %error, "caption client unavailable; continuing without captions");
             return Vec::new();
         }
+        Err(_) => {
+            tracing::warn!("caption client construction exceeded the total 10-second budget");
+            return Vec::new();
+        }
     };
-    let staged =
-        stage_with_client_and_referer(&client, &accepted, staging_dir, source_referer).await;
+    let staged = stage_with_client_and_referer(
+        &client,
+        &accepted,
+        staging_dir,
+        source_referer,
+        deadline,
+    )
+    .await;
     drop(leases);
     staged
 }
@@ -122,7 +138,8 @@ async fn stage_with_client(
     captions: &[&Caption],
     staging_dir: &Path,
 ) -> Vec<StagedCaption> {
-    stage_with_client_and_referer(client, captions, staging_dir, None).await
+    let deadline = tokio::time::Instant::now() + CAPTION_FETCH_BUDGET;
+    stage_with_client_and_referer(client, captions, staging_dir, None, deadline).await
 }
 
 async fn stage_with_client_and_referer(
@@ -130,6 +147,7 @@ async fn stage_with_client_and_referer(
     captions: &[&Caption],
     staging_dir: &Path,
     source_referer: Option<&str>,
+    deadline: tokio::time::Instant,
 ) -> Vec<StagedCaption> {
     let mut staged = Vec::new();
     if let Err(error) = crate::video_staging::ensure_real_staging_leaf(staging_dir) {
@@ -137,7 +155,11 @@ async fn stage_with_client_and_referer(
         return staged;
     }
     for caption in captions {
-        match stage_one(client, caption, staging_dir, source_referer).await {
+        if tokio::time::Instant::now() >= deadline {
+            tracing::warn!("caption candidates exhausted the total 10-second budget");
+            break;
+        }
+        match stage_one(client, caption, staging_dir, source_referer, deadline).await {
             Ok(item) => {
                 // Finalization selects one external track. Stop after the
                 // first usable candidate (the browser orders these by match
@@ -160,8 +182,9 @@ async fn stage_one(
     caption: &Caption,
     staging_dir: &Path,
     source_referer: Option<&str>,
+    deadline: tokio::time::Instant,
 ) -> Result<StagedCaption, String> {
-    let bytes = fetch_caption_with_referer(client, caption, source_referer).await?;
+    let bytes = fetch_caption_with_referer(client, caption, source_referer, deadline).await?;
     let format = caption.format.to_ascii_lowercase();
     if !valid_caption(&bytes, &format) {
         return Err(format!("body is not valid {format} content"));
@@ -183,13 +206,15 @@ async fn stage_one(
 
 #[cfg(test)]
 async fn fetch_caption(client: &reqwest::Client, caption: &Caption) -> Result<Vec<u8>, String> {
-    fetch_caption_with_referer(client, caption, None).await
+    let deadline = tokio::time::Instant::now() + CAPTION_FETCH_BUDGET;
+    fetch_caption_with_referer(client, caption, None, deadline).await
 }
 
 async fn fetch_caption_with_referer(
     client: &reqwest::Client,
     caption: &Caption,
     source_referer: Option<&str>,
+    deadline: tokio::time::Instant,
 ) -> Result<Vec<u8>, String> {
     let requested = url::Url::parse(&caption.url).map_err(|error| error.to_string())?;
     // Production callers already passed caption_url_policy and acquired a
@@ -221,7 +246,7 @@ async fn fetch_caption_with_referer(
         headers.insert(reqwest::header::REFERER, value);
     }
 
-    tokio::time::timeout(CAPTION_FETCH_BUDGET, async {
+    tokio::time::timeout_at(deadline, async {
         let mut redirect_leases = Vec::new();
         let response =
             send_caption_request_with_redirects(client, &requested, headers, &mut redirect_leases)
@@ -250,7 +275,7 @@ async fn fetch_caption_with_referer(
         Ok(body)
     })
     .await
-    .map_err(|_| "caption fetch exceeded its 10-second time limit".to_string())?
+    .map_err(|_| "caption fetch exceeded the total 10-second time limit".to_string())?
 }
 
 /// Follow a bounded redirect chain without letting Reqwest replay caption
@@ -750,6 +775,7 @@ mod tests {
             &[&track],
             directory.path(),
             Some("http://source.example.test/watch/private?token=secret#player"),
+            tokio::time::Instant::now() + CAPTION_FETCH_BUDGET,
         )
         .await;
 

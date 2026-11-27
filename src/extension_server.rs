@@ -4939,6 +4939,27 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn invalid_caption_does_not_discard_valid_sibling() {
+        let _g = exclusive();
+        let mut srv = start(4).await;
+        let host = format!("127.0.0.1:{}", srv.port);
+        let mut unsafe_caption = caption();
+        unsafe_caption["url"] = serde_json::json!("https://router/en.vtt");
+        let body = body_with_captions(serde_json::json!([caption(), unsafe_caption]));
+        let response = signed_add(srv.port, &host, &body).await;
+        assert_eq!(status(&response), "200", "{response}");
+
+        let handoff = srv.rx.recv().await.expect("media handoff");
+        assert_eq!(handoff.url, "https://example.com/file.zip");
+        assert_eq!(handoff.captions.len(), 1);
+        assert_eq!(
+            handoff.captions[0].url,
+            "https://subs.example.test/en.vtt",
+            "one invalid sibling must not discard an otherwise valid caption"
+        );
+    }
+
+    #[tokio::test]
     async fn private_caption_hosts_are_ignored_without_rejecting_media() {
         let _g = exclusive();
         let mut srv = start(4).await;

@@ -25,11 +25,12 @@
 //! - Every paired `POST /add` includes a millisecond timestamp and 128-bit
 //!   nonce in its signed body. The timestamp has a two-minute clock-skew window
 //!   and each nonce may be used only once, preventing a captured POST from being
-//!   replayed. Paired requests missing either field are refused.
+//!   replayed. Invalid or stale authentication metadata falls back to
+//!   confirmation-only handling.
 //!
-//! Cookies are accepted only with valid authentication and replay metadata.
-//! Unpaired requests are confirmation-only and never forward cookies; a wrong
-//! token is refused outright.
+//! Cookies and captions are accepted only with valid authentication and replay
+//! metadata. Unpaired or stale-pairing requests retain the URL but never forward
+//! browser credentials or optional caption metadata.
 //!
 //! Confirmation: `POST /add?confirm=1` holds the response until the user has
 //! answered Grab's dialog (`200` approved, `409` declined, `408` no answer
@@ -1402,8 +1403,9 @@ fn validated_referer(raw: Option<String>) -> Option<String> {
     raw.as_deref().and_then(crate::referrer::origin_only)
 }
 
-/// Validate browser-supplied caption metadata at the `/add` boundary. Only
-/// rejection statuses escape: header values must never reach a log.
+/// Validate browser-supplied caption metadata at the `/add` boundary.
+/// Invalid entries are warned and dropped independently; only the request-level
+/// count limit rejects the handoff. Header values must never reach a log.
 fn validated_captions(raw: Vec<serde_json::Value>) -> Result<Vec<Caption>, StatusCode> {
     if raw.len() > MAX_CAPTIONS {
         return Err(StatusCode::BAD_REQUEST);
@@ -1479,6 +1481,7 @@ fn validated_captions(raw: Vec<serde_json::Value>) -> Result<Vec<Caption>, Statu
     }
     Ok(captions)
 }
+
 /// One optional caption track supplied by a paired browser extension.
 /// `headers` is a list of name/value pairs from the extension's JSON array.
 #[derive(Clone, Deserialize)]

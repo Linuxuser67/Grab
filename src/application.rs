@@ -310,6 +310,7 @@ async fn enqueue_direct_handoff(
         })
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn route_open_uri(
     manager: Rc<DownloadManager>,
     toasts: Rc<adw::ToastOverlay>,
@@ -317,6 +318,7 @@ async fn route_open_uri(
     settings: AppSettings,
     uri: url::Url,
     referer: Option<String>,
+    captions: Vec<crate::extension_server::Caption>,
     public_host_lease: Option<std::sync::Arc<crate::download_net::PublicResolutionLease>>,
 ) -> Routed {
     // Remote .torrent files: fetch the bytes and run the
@@ -364,6 +366,9 @@ async fn route_open_uri(
     // like a pasted URL. Plain enqueue would save a raw page — or a manifest
     // — as a file.
     if handoff_goes_to_card(&uri) {
+        // The card probes this same URL before enqueueing; keep the optional
+        // caption tracks with the manager so the manifest job can pick them up.
+        manager.note_handoff_captions(&uri, captions);
         add_card.open(Some(uri.as_str().to_string()), referer);
         if let Some(lease) = public_host_lease {
             add_card.retain_public_resolution_lease(lease);
@@ -399,6 +404,7 @@ async fn route_open_uri(
 /// own download only after Grab really has it. Dropping it unanswered counts
 /// as declined. `expires_at` is the server's confirmation deadline, used to
 /// close the dialog before the waiting request expires.
+#[allow(clippy::too_many_arguments)]
 fn dispatch_handoff(
     s: &State,
     uri: url::Url,
@@ -406,6 +412,7 @@ fn dispatch_handoff(
     extension_authenticated: Option<bool>,
     decision: Option<tokio::sync::oneshot::Sender<crate::extension_server::HandoffOutcome>>,
     expires_at: Option<std::time::Instant>,
+    captions: Vec<crate::extension_server::Caption>,
     referer: Option<String>,
 ) {
     let (manager, toasts, add_card, settings) = (
@@ -457,6 +464,7 @@ fn dispatch_handoff(
                 settings,
                 uri,
                 referer,
+                captions,
                 public_host_lease,
             )
             .await;
@@ -510,10 +518,12 @@ fn dispatch_handoff(
             let settings_c = settings.clone();
             let approved_c = approved.clone();
             let referer_c = referer.clone();
+            let captions_c = captions.clone();
             let decision_c = decision.clone();
             glib::spawn_future_local(async move {
                 let routed = route_open_uri(
-                    manager_c, toasts_c, add_card_c, settings_c, approved_c, referer_c, None,
+                    manager_c, toasts_c, add_card_c, settings_c, approved_c, referer_c, captions_c,
+                    None,
                 )
                 .await;
                 answer_handoff(decision_c.borrow_mut().take(), routed.into());
@@ -577,7 +587,7 @@ fn handle_open_files(s: Rc<State>, files: Vec<gio::File>) {
             if let Ok(uri) = uri_text.parse::<url::Url>()
                 && matches!(uri.scheme(), "http" | "https" | "magnet")
             {
-                dispatch_handoff(&s, uri, via_grab, None, None, None, None);
+                dispatch_handoff(&s, uri, via_grab, None, None, None, Vec::new(), None);
                 continue;
             }
             if let Some(path) = f.path() {
@@ -810,8 +820,13 @@ pub fn setup(app: &adw::Application) {
             glib::spawn_future_local(async move {
                 while let Some(handoff) = ext_rx.recv().await {
                     // Early `continue`s below drop `decision`: a decline.
-                    let (url_text, decision, authenticated, expires_at) =
-                        (handoff.url, handoff.decision, handoff.authenticated, handoff.expires_at);
+                    let (url_text, decision, authenticated, expires_at, captions) = (
+                        handoff.url,
+                        handoff.decision,
+                        handoff.authenticated,
+                        handoff.expires_at,
+                        handoff.captions,
+                    );
                     let s = match bridge_state.borrow().as_ref().cloned() {
                         Some(s) => s,
                         None => continue,
@@ -846,6 +861,7 @@ pub fn setup(app: &adw::Application) {
                         Some(authenticated),
                         decision,
                         expires_at,
+                        captions,
                         handoff.referer,
                     );
                 }

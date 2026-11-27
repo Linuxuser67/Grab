@@ -279,6 +279,8 @@ pub(crate) struct ManifestJob {
     pub(crate) cookies_browser: String,
     pub(crate) connections: usize,
     pub(crate) embed_subs: bool,
+    /// Optional browser handoff captions, staged into the item's XDG dir at finalization.
+    pub(crate) captions: Vec<crate::extension_server::Caption>,
 }
 
 /// Classifies native manifest failures so transient transfers do not discard staged resources.
@@ -2194,7 +2196,9 @@ pub(crate) async fn run_manifest_download(
         ) => return Ok(ManifestOutcome::Aborted),
     };
     let mut _finish_stop_sender = None;
-    if !live_hls && !live_dash && tracks.uses_incremental_hls_vod() {
+    // The incremental part writer has no subtitle input. Handoffs with captions
+    // take the ordinary finalizer, which stages and muxes the external track.
+    if !job.captions.is_empty() && !live_hls && !live_dash && tracks.uses_incremental_hls_vod() {
         // Preserve AES-128's established configured concurrency. Complex clear
         // VOD stays sequential, matching the ordinary static-HLS resource path.
         let connections = match &tracks {
@@ -3242,33 +3246,49 @@ async fn finalize_manifest_download(
     } else {
         None
     };
-    let subtitle_input = match &tracks {
-        Tracks::Hls {
-            subtitle: Some(_), ..
-        } => Some(staging.join("subtitles/local.m3u8")),
-        Tracks::Dash {
-            subtitle: Some(_), ..
-        } => {
-            let path = staging
-                .join("subtitles")
-                .join(TrackKind::Subtitles.part_filename(TrackFileFormat::Vtt));
-            match inspect_staged_regular_file(&path).await {
-                Ok(Some(_)) => Some(path),
-                Ok(None) => None,
-                Err(StagedFileError::NotRegularFile) => {
-                    return Err(ManifestRunError::Failed(
-                        "The normalized DASH subtitle staging path is not a regular file"
-                            .to_string(),
-                    ));
-                }
-                Err(StagedFileError::Io(error)) => {
-                    return Err(ManifestRunError::Failed(format!(
-                        "Could not inspect normalized DASH subtitle staging: {error}"
-                    )));
+    // Captions are fetched into the item's private staging dir. Intake is soft:
+    // an unusable track never blocks or fails the media download.
+    let staged_captions = crate::caption_intake::stage_handoff_captions(
+        &job.source.url,
+        &job.captions,
+        staging,
+        job.proxy.as_ref(),
+    )
+    .await;
+    let external_caption = staged_captions.first();
+    let subtitle_input = if let Some(caption) = external_caption {
+        // Prefer the browser-supplied caption when one was staged; the
+        // manifest-declared rendition stays the fallback for ordinary rows.
+        Some(caption.path.clone())
+    } else {
+        match &tracks {
+            Tracks::Hls {
+                subtitle: Some(_), ..
+            } => Some(staging.join("subtitles/local.m3u8")),
+            Tracks::Dash {
+                subtitle: Some(_), ..
+            } => {
+                let path = staging
+                    .join("subtitles")
+                    .join(TrackKind::Subtitles.part_filename(TrackFileFormat::Vtt));
+                match inspect_staged_regular_file(&path).await {
+                    Ok(Some(_)) => Some(path),
+                    Ok(None) => None,
+                    Err(StagedFileError::NotRegularFile) => {
+                        return Err(ManifestRunError::Failed(
+                            "The normalized DASH subtitle staging path is not a regular file"
+                                .to_string(),
+                        ));
+                    }
+                    Err(StagedFileError::Io(error)) => {
+                        return Err(ManifestRunError::Failed(format!(
+                            "Could not inspect normalized DASH subtitle staging: {error}"
+                        )));
+                    }
                 }
             }
+            _ => None,
         }
-        _ => None,
     };
     if matches!(
         mode,
@@ -3313,16 +3333,18 @@ async fn finalize_manifest_download(
             }
         }
     }
-    let subtitle_language = match &tracks {
-        Tracks::Hls {
-            subtitle_language, ..
-        }
-        | Tracks::Dash {
-            subtitle_language, ..
-        } => subtitle_language.as_deref(),
-        Tracks::DashLiveOffline { .. } => None,
-    };
-    let subtitle_language = subtitle_language
+    let declared_language = external_caption
+        .map(|caption| caption.language.as_str())
+        .or(match &tracks {
+            Tracks::Hls {
+                subtitle_language, ..
+            }
+            | Tracks::Dash {
+                subtitle_language, ..
+            } => subtitle_language.as_deref(),
+            Tracks::DashLiveOffline { .. } => None,
+        });
+    let subtitle_language = declared_language
         .filter(|language| {
             !language.is_empty()
                 && language.len() <= 35
@@ -3331,13 +3353,18 @@ async fn finalize_manifest_download(
                     .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-')
         })
         .unwrap_or("und");
-    let subtitle_format = match &tracks {
-        Tracks::Hls {
-            subtitle: Some(_),
-            subtitle_format,
-            ..
-        } => *subtitle_format,
-        _ => SubtitleFormat::Text,
+    let subtitle_format = if external_caption.is_some() {
+        // Staged handoff captions are VTT/SRT text, never fMP4.
+        SubtitleFormat::Text
+    } else {
+        match &tracks {
+            Tracks::Hls {
+                subtitle: Some(_),
+                subtitle_format,
+                ..
+            } => *subtitle_format,
+            _ => SubtitleFormat::Text,
+        }
     };
     let output_container = manifest_output_container(&job.dest)?;
     // Text WebVTT playlists can be normalized to the destination container.
@@ -5812,6 +5839,113 @@ mod tests {
 
     #[cfg(unix)]
     #[tokio::test]
+    async fn external_caption_is_muxed_as_an_extra_ffmpeg_input() {
+        let directory = tempfile::tempdir().expect("create FFmpeg argument test directory");
+        let ffmpeg = fake_ffmpeg_recording_arguments(directory.path());
+        let output = directory.path().join("output.mp4");
+        let caption = directory.path().join("caption.vtt");
+        let caption_text = caption.to_string_lossy().into_owned();
+        let args = run_ffmpeg_recording_args(
+            &ffmpeg,
+            &output,
+            SubtitleOutput {
+                input: Some(&caption),
+                embed: true,
+                sidecar: None,
+                format: SubtitleFormat::Text,
+            },
+        )
+        .await;
+
+        assert_eq!(
+            args.iter().filter(|argument| *argument == "-i").count(),
+            2,
+            "video and external caption must both be inputs: {args:?}"
+        );
+        assert!(
+            args.windows(2)
+                .any(|pair| pair == ["-i", caption_text.as_str()]),
+            "the staged caption must be passed as its own -i: {args:?}"
+        );
+        assert!(
+            args.windows(2).any(|pair| pair == ["-map", "1:s:0"]),
+            "the caption stream must be mapped after the video/audio inputs: {args:?}"
+        );
+        assert!(
+            args.windows(2).any(|pair| pair == ["-c:s", "mov_text"]),
+            "text captions must be converted for MP4 embedding: {args:?}"
+        );
+        let last_input = args
+            .iter()
+            .rposition(|argument| argument == "-i")
+            .expect("video and caption inputs");
+        let first_map = args
+            .iter()
+            .position(|argument| argument == "-map")
+            .expect("base stream maps");
+        assert!(
+            last_input < first_map,
+            "the caption input must precede every -map: {args:?}"
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn external_caption_sidecar_uses_the_language_path() {
+        let directory = tempfile::tempdir().expect("create FFmpeg argument test directory");
+        let ffmpeg = fake_ffmpeg_recording_arguments(directory.path());
+        let output = directory.path().join("output.mkv");
+        let caption = directory.path().join("caption.srt");
+        let sidecar = crate::video_staging::sidecar_path_for(&output, "fr");
+        let sidecar_text = sidecar.to_string_lossy().into_owned();
+        let args = run_ffmpeg_recording_args(
+            &ffmpeg,
+            &output,
+            SubtitleOutput {
+                input: Some(&caption),
+                embed: false,
+                sidecar: Some(&sidecar),
+                format: SubtitleFormat::Text,
+            },
+        )
+        .await;
+
+        assert!(
+            args.windows(2).any(|pair| pair == ["-map", "1:s:0"]),
+            "the sidecar branch maps the caption input stream: {args:?}"
+        );
+        assert!(
+            args.windows(2).any(|pair| pair == ["-c:s", "srt"]),
+            "text captions must be converted to SRT sidecars: {args:?}"
+        );
+        assert!(
+            args.iter()
+                .any(|argument| argument == sidecar_text.as_str()),
+            "the language-named sidecar destination must be passed to FFmpeg: {args:?}"
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn no_staged_caption_adds_no_subtitle_input() {
+        let directory = tempfile::tempdir().expect("create FFmpeg argument test directory");
+        let ffmpeg = fake_ffmpeg_recording_arguments(directory.path());
+        let output = directory.path().join("output.mp4");
+        let args = run_ffmpeg_recording_args(&ffmpeg, &output, SubtitleOutput::default()).await;
+
+        assert_eq!(
+            args.iter().filter(|argument| *argument == "-i").count(),
+            1,
+            "without a staged caption only the video input remains: {args:?}"
+        );
+        assert!(
+            !args.iter().any(|argument| argument.contains(":s:")),
+            "no subtitle stream may be mapped without a subtitle input: {args:?}"
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
     async fn ffmpeg_finish_intent_allows_mux_to_complete() {
         assert_eq!(
             mux_with_stop_intent(Some(crate::video::StopIntent::Finish)).await,
@@ -6555,6 +6689,7 @@ segment-2.ts
             cookies_browser: "none".to_string(),
             connections: 4,
             embed_subs: false,
+            captions: Vec::new(),
         };
         let gate = crate::attempt_gate::AttemptGate::new();
         let downloaded = Arc::new(AtomicU64::new(0));
@@ -6944,6 +7079,7 @@ segment-2.ts
             cookies_browser: "none".to_string(),
             connections: 4,
             embed_subs: false,
+            captions: Vec::new(),
         };
         let gate = crate::attempt_gate::AttemptGate::new();
         let downloaded = Arc::new(AtomicU64::new(0));
@@ -7350,6 +7486,7 @@ segment-2.ts
             cookies_browser: "none".to_string(),
             connections: 1,
             embed_subs: false,
+            captions: Vec::new(),
         };
         let gate = crate::attempt_gate::AttemptGate::new();
         let downloaded = Arc::new(AtomicU64::new(0));
@@ -8244,6 +8381,7 @@ segment-2.m4s
             cookies_browser: "none".to_string(),
             connections: 1,
             embed_subs: false,
+            captions: Vec::new(),
         };
         let gate = crate::attempt_gate::AttemptGate::new();
         let (_stop_tx, stop_rx) = tokio::sync::oneshot::channel();

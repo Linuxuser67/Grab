@@ -695,7 +695,7 @@ mod tests {
             &client,
             &[&track],
             directory.path(),
-            Some("https://source.example.test/watch/private?token=secret"),
+            Some("http://source.example.test/watch/private?token=secret"),
         )
         .await;
 
@@ -704,7 +704,7 @@ mod tests {
         let initial = initial.first().expect("initial request").to_ascii_lowercase();
         assert!(initial.contains("authorization: bearer private-token"), "{initial}");
         assert!(initial.contains("origin: https://player.example.test"), "{initial}");
-        assert!(initial.contains("referer: https://source.example.test/"), "{initial}");
+        assert!(initial.contains("referer: http://source.example.test/"), "{initial}");
 
         let redirected = target_server.await.expect("redirected request");
         let redirected = redirected.first().expect("follow-up request").to_ascii_lowercase();

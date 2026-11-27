@@ -579,8 +579,7 @@ mod tests {
 
     #[tokio::test]
     async fn stops_after_the_first_usable_caption() {
-        let (url, server) =
-            fixture_server(vec![response(b"WEBVTT\n"), response(b"WEBVTT\n")]).await;
+        let (url, server) = fixture_server(vec![response(b"WEBVTT\n")]).await;
         let directory = tempfile::tempdir().expect("staging dir");
         let first = caption(&format!("{url}/first"), "en", "vtt");
         let second = caption(&format!("{url}/second"), "fr", "vtt");
@@ -590,7 +589,12 @@ mod tests {
 
         assert_eq!(staged.len(), 1);
         assert_eq!(staged[0].language, "en");
-        server.await.expect("fixture server");
+        let requests = server.await.expect("fixture server");
+        assert_eq!(
+            requests.len(),
+            1,
+            "the first usable caption prevents later candidates from being fetched",
+        );
     }
 
     #[tokio::test]

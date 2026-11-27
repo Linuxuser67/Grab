@@ -3894,12 +3894,12 @@ async fn ensure_live_finish_marker(directory: &Path, staged_bytes: u64) -> Resul
     }
 
     let contents = format!("{LIVE_FINISH_MARKER_VERSION}\n{staged_bytes}\n");
-    write_staged_file_atomic(
+    crate::staged_file::write_staged_file_atomic(
         directory,
         "live-capture.finished.part",
         LIVE_FINISH_MARKER_NAME,
         contents.as_bytes(),
-        StagedPublish::NoReplace,
+        crate::staged_file::StagedPublish::NoReplace,
     )
     .await?;
     sync_staging_directory(directory).await
@@ -3919,70 +3919,6 @@ async fn sync_staging_directory(directory: &Path) -> Result<(), String> {
         .sync_all()
         .await
         .map_err(|error| format!("Could not sync staging directory: {error}"))
-}
-
-#[derive(Clone, Copy)]
-pub(crate) enum StagedPublish {
-    Replace,
-    NoReplace,
-}
-
-pub(crate) async fn write_staged_file_atomic(
-    directory: &Path,
-    temporary_name: &str,
-    target_name: &str,
-    bytes: &[u8],
-    publish: StagedPublish,
-) -> Result<(), String> {
-    let temporary = directory.join(temporary_name);
-    let target = directory.join(target_name);
-    remove_regular_file_if_present(&temporary).await?;
-
-    let result = async {
-        let mut file = tokio::fs::OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(&temporary)
-            .await
-            .map_err(|error| format!("Could not create staged file {target_name}: {error}"))?;
-        file.write_all(bytes)
-            .await
-            .map_err(|error| format!("Could not write staged file {target_name}: {error}"))?;
-        file.sync_all()
-            .await
-            .map_err(|error| format!("Could not flush staged file {target_name}: {error}"))?;
-        drop(file);
-
-        match publish {
-            StagedPublish::Replace => {
-                match tokio::fs::symlink_metadata(&target).await {
-                    Ok(metadata) if metadata.file_type().is_symlink() || !metadata.is_file() => {
-                        return Err(format!("Staged target {target_name} is not a regular file"));
-                    }
-                    Ok(_) => {}
-                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-                    Err(error) => {
-                        return Err(format!(
-                            "Could not inspect staged target {target_name}: {error}"
-                        ));
-                    }
-                }
-                tokio::fs::rename(&temporary, &target)
-                    .await
-                    .map_err(|error| {
-                        format!("Could not publish staged file {target_name}: {error}")
-                    })
-            }
-            StagedPublish::NoReplace => crate::file_names::rename_noreplace(&temporary, &target)
-                .map_err(|error| format!("Could not publish staged file {target_name}: {error}")),
-        }
-    }
-    .await;
-
-    if result.is_err() {
-        let _ = remove_regular_file_if_present(&temporary).await;
-    }
-    result
 }
 
 struct IncrementalHlsFetch<'fetch> {
@@ -4102,12 +4038,12 @@ async fn fetch_hls_resources_incrementally(
                                 crate::manifest::HlsPlaylistFinality::Growing,
                             )
                             .map_err(|error| ManifestRunError::Failed(error.to_string()))?;
-                        write_staged_file_atomic(
+                        crate::staged_file::write_staged_file_atomic(
                             directory,
                             "local.m3u8.next",
                             "local.m3u8",
                             &bytes,
-                            StagedPublish::Replace,
+                            crate::staged_file::StagedPublish::Replace,
                         )
                         .await
                         .map_err(ManifestRunError::Failed)?;
@@ -4158,12 +4094,12 @@ async fn fetch_hls_resources_incrementally(
             crate::manifest::HlsPlaylistFinality::Complete,
         )
         .map_err(|error| ManifestRunError::Failed(error.to_string()))?;
-    write_staged_file_atomic(
+    crate::staged_file::write_staged_file_atomic(
         directory,
         "local.m3u8.next",
         "local.m3u8",
         &bytes,
-        StagedPublish::Replace,
+        crate::staged_file::StagedPublish::Replace,
     )
     .await
     .map_err(ManifestRunError::Failed)?;
@@ -4178,12 +4114,12 @@ async fn write_playlist(directory: &Path, plan: &HlsPlan) -> Result<(), String> 
             crate::manifest::HlsPlaylistFinality::Complete,
         )
         .map_err(|error| error.to_string())?;
-    write_staged_file_atomic(
+    crate::staged_file::write_staged_file_atomic(
         directory,
         "local.m3u8.part",
         "local.m3u8",
         &bytes,
-        StagedPublish::Replace,
+        crate::staged_file::StagedPublish::Replace,
     )
     .await
 }
@@ -9226,12 +9162,12 @@ mod staged_file_atomic_tests {
             .await
             .expect("write existing playlist");
 
-        write_staged_file_atomic(
+        crate::staged_file::write_staged_file_atomic(
             directory.path(),
             "local.m3u8.part",
             "local.m3u8",
             b"new playlist",
-            StagedPublish::Replace,
+            crate::staged_file::StagedPublish::Replace,
         )
         .await
         .expect("atomically replace playlist");
@@ -9259,12 +9195,12 @@ mod staged_file_atomic_tests {
             .expect("write existing marker");
 
         assert!(
-            write_staged_file_atomic(
+            crate::staged_file::write_staged_file_atomic(
                 directory.path(),
                 "marker.part",
                 "marker",
                 b"new marker",
-                StagedPublish::NoReplace,
+                crate::staged_file::StagedPublish::NoReplace,
             )
             .await
             .is_err(),

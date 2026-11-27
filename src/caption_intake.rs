@@ -4,6 +4,10 @@
 //! track is logged and skipped here. A caption must never block or fail the
 //! media download it accompanies.
 
+// The intake API is consumed by the later finalization slice; until then the
+// whole module is intentionally unreferenced by production code.
+#![allow(dead_code)]
+
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
@@ -468,8 +472,8 @@ mod tests {
         assert_eq!(staged[0].language, "en");
         assert_eq!(staged[0].format, "vtt");
         assert_eq!(staged[0].path.parent(), Some(directory.path()));
-        assert_eq!(
         assert_eq!(std::fs::read(&staged[0].path).expect("staged bytes"), body);
+        assert_eq!(
             std::fs::read_dir(directory.path())
                 .expect("staging listing")
                 .count(),

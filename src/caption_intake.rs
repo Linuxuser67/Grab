@@ -827,7 +827,7 @@ mod tests {
 
     #[tokio::test]
     async fn same_origin_redirect_keeps_caption_request_headers() {
-        let redirect = b"HTTP/1.1 302 Found\\r\\nLocation: /caption/final\\r\\nContent-Length: 0\\r\\nConnection: close\\r\\n\\r\\n".to_vec();
+        let redirect = b"HTTP/1.1 302 Found\r\nLocation: /caption/final\r\nContent-Length: 0\r\nConnection: close\r\n\r\n".to_vec();
         let (url, server) = fixture_server(vec![redirect, response(b"WEBVTT\\n")]).await;
         let client = fixture_client();
         let mut track = caption(&format!("{url}/start"), "en", "vtt");
@@ -871,7 +871,7 @@ mod tests {
 
     #[tokio::test]
     async fn caption_redirect_chain_is_limited_to_five_hops() {
-        let redirect = b"HTTP/1.1 302 Found\\r\\nLocation: /caption\\r\\nContent-Length: 0\\r\\nConnection: close\\r\\n\\r\\n".to_vec();
+        let redirect = b"HTTP/1.1 302 Found\r\nLocation: /caption\r\nContent-Length: 0\r\nConnection: close\r\n\r\n".to_vec();
         let (url, server) = fixture_server(vec![redirect; MAX_CAPTION_REDIRECTS + 2]).await;
         let client = fixture_client();
         let track = caption(&url, "en", "vtt");

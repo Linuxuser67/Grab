@@ -4028,7 +4028,9 @@ mod tests {
             .send(HandoffOutcome::Queued)
             .unwrap();
         assert_eq!(status(&task.await.unwrap()), "200");
-    }    #[test]
+    }
+
+    #[test]
     fn regenerate_changes_the_secret_and_persists_it() {
         use std::os::unix::fs::PermissionsExt as _;
         let dir = std::env::temp_dir().join(format!("grab-pairing-test-{}", std::process::id()));
@@ -4144,7 +4146,9 @@ mod tests {
                 .unwrap();
             assert_eq!(status(&task.await.unwrap()), "200");
         }
-    }    #[tokio::test]
+    }
+
+    #[tokio::test]
     async fn authenticated_handoff_replay_requires_confirmation() {
         let mut srv = start(4).await;
         let host = format!("127.0.0.1:{}", srv.port);
@@ -4197,7 +4201,9 @@ mod tests {
             .send(HandoffOutcome::Queued)
             .unwrap();
         assert_eq!(status(&task.await.unwrap()), "200");
-    }    #[tokio::test]
+    }
+
+    #[tokio::test]
     async fn authenticated_nonce_stays_reserved_after_queue_full_requires_confirmation_on_replay() {
         let mut srv = start(1).await;
         let host = format!("127.0.0.1:{}", srv.port);
@@ -4264,7 +4270,9 @@ mod tests {
             .send(HandoffOutcome::Queued)
             .unwrap();
         assert_eq!(status(&task.await.unwrap()), "200");
-    }    #[test]
+    }
+
+    #[test]
     fn handoff_cookie_hash_is_content_based_and_rejects_oversized_files() {
         let directory = tempfile::tempdir().expect("temporary directory");
         let first = directory.path().join("first.cookies");

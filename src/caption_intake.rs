@@ -632,7 +632,7 @@ mod tests {
 
     #[tokio::test]
     async fn source_referer_is_reduced_to_origin_for_caption_requests() {
-        let (url, server) = fixture_server(vec![response(b"WEBVTT\\n")]).await;
+        let (url, server) = fixture_server(vec![response(b"WEBVTT\n")]).await;
         let directory = tempfile::tempdir().expect("staging dir");
         let track = caption(&url, "en", "vtt");
         let staged = stage_with_client_and_referer(

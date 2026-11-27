@@ -2237,7 +2237,6 @@ pub(crate) async fn run_manifest_download(
             dest_dir: &dest_dir,
             video_dir: &video_dir,
             audio_dir: &audio_dir,
-            output_part,
             caption_tasks,
             tracks,
             ffmpeg,
@@ -2429,7 +2428,6 @@ struct ManifestIncrementalHlsVod<'a> {
     dest_dir: &'a Path,
     video_dir: &'a Path,
     audio_dir: &'a Path,
-    output_part: PathBuf,
     caption_tasks: tokio::task::JoinSet<Option<crate::caption_intake::StagedCaption>>,
     tracks: Tracks,
     ffmpeg: PathBuf,
@@ -2613,7 +2611,6 @@ async fn run_incremental_hls_vod(
         dest_dir,
         video_dir,
         audio_dir,
-        output_part,
         mut caption_tasks,
         tracks,
         ffmpeg,
@@ -2635,7 +2632,14 @@ async fn run_incremental_hls_vod(
         ));
     };
 
-    let part_path = output_part;
+    let part_path = crate::manifest_destination::part_path_async(
+        staging.to_path_buf(),
+        job.dest.clone(),
+        job.item_id,
+        TrackKind::Video,
+    )
+    .await
+    .map_err(ManifestRunError::Failed)?;
     let mut output_file = crate::manifest_destination::open_owned_part_async(
         staging.to_path_buf(),
         job.dest.clone(),
@@ -6763,7 +6767,6 @@ segment-2.ts
                 dest_dir: &task_dest_dir,
                 video_dir: &task_video_dir,
                 audio_dir: &task_audio_dir,
-                output_part: part_path.clone(),
                 caption_tasks: tokio::task::JoinSet::new(),
                 tracks: Tracks::Hls {
                     video: Box::new(plan),
@@ -7153,7 +7156,6 @@ segment-2.ts
                 dest_dir: &task_dest_dir,
                 video_dir: &task_video_dir,
                 audio_dir: &task_audio_dir,
-                output_part: part_path.clone(),
                 caption_tasks: tokio::task::JoinSet::new(),
                 tracks: Tracks::Hls {
                     video: Box::new(plan),
@@ -7562,7 +7564,6 @@ segment-2.ts
                 dest_dir: &task_dest_dir,
                 video_dir: &task_video_dir,
                 audio_dir: &task_audio_dir,
-                output_part: part_path.clone(),
                 caption_tasks: tokio::task::JoinSet::new(),
                 tracks: Tracks::Hls {
                     video: Box::new(video_plan),

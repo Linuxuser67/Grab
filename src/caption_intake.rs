@@ -397,11 +397,20 @@ mod tests {
     }
 
     /// One GET per response, in order; returns the raw request headers seen.
+    /// One GET per response, in order; returns the raw request headers seen.
     async fn fixture_server(responses: Vec<Vec<u8>>) -> (String, JoinHandle<Vec<String>>) {
-        let listener = TcpListener::bind("127.0.0.1:0")
+        fixture_server_at("127.0.0.1:0", "127.0.0.1", responses).await
+    }
+
+    async fn fixture_server_at(
+        bind_address: &str,
+        host: &str,
+        responses: Vec<Vec<u8>>,
+    ) -> (String, JoinHandle<Vec<String>>) {
+        let listener = TcpListener::bind(bind_address)
             .await
             .expect("bind caption fixture");
-        let address = listener.local_addr().expect("fixture address");
+        let port = listener.local_addr().expect("fixture address").port();
         let server = tokio::spawn(async move {
             let mut seen = Vec::new();
             for response in responses {
@@ -430,9 +439,8 @@ mod tests {
             }
             seen
         });
-        (format!("http://{address}/caption"), server)
+        (format!("http://{host}:{port}/caption"), server)
     }
-
     #[test]
     fn accepts_vtt_with_bom_and_leading_whitespace() {
         assert!(valid_vtt(
@@ -660,9 +668,13 @@ mod tests {
 
     #[tokio::test]
     async fn source_context_and_authorization_headers_are_not_forwarded_across_redirects() {
-        let (target_url, target_server) =
-            fixture_server(vec![response(b"WEBVTT\n")]).await;
-        let redirected_url = target_url.replacen("127.0.0.1", "localhost", 1);
+        let (target_url, target_server) = fixture_server_at(
+            "0.0.0.0:0",
+            "127.0.0.2",
+            vec![response(b"WEBVTT\n")],
+        )
+        .await;
+        let redirected_url = target_url;
         let redirect = format!(
             "HTTP/1.1 302 Found\r\nLocation: {redirected_url}\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
         )

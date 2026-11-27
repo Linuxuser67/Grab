@@ -1978,7 +1978,14 @@ fn native_manifest_source_survives_queue_restore() {
         let manager = DownloadManager::new(gio::ListStore::new::<DownloadItem>(), test_settings());
         let guard = manager.batch_guard();
         let item = manager
-            .enqueue_manifest_staged(source.clone(), &dest_string, Some("Stream.mkv"), &[], None, Vec::new())
+            .enqueue_manifest_staged(
+                source.clone(),
+                &dest_string,
+                Some("Stream.mkv"),
+                &[],
+                None,
+                Vec::new(),
+            )
             .expect("native manifest enqueue");
         item.set_status(DownloadStatus::Paused);
         let id = item.id();
@@ -2042,10 +2049,24 @@ fn native_manifest_queue_deduplicates_repeated_requested_filenames() {
     };
 
     let first = manager
-        .enqueue_manifest_staged(source.clone(), &directory, Some("Stream.mp4"), &[], None, Vec::new())
+        .enqueue_manifest_staged(
+            source.clone(),
+            &directory,
+            Some("Stream.mp4"),
+            &[],
+            None,
+            Vec::new(),
+        )
         .expect("first native manifest queue row");
     let second = manager
-        .enqueue_manifest_staged(source, &directory, Some("Stream.mp4"), &[], None, Vec::new())
+        .enqueue_manifest_staged(
+            source,
+            &directory,
+            Some("Stream.mp4"),
+            &[],
+            None,
+            Vec::new(),
+        )
         .expect("second native manifest queue row");
 
     assert_ne!(first.filename(), second.filename());
@@ -2075,7 +2096,14 @@ fn native_manifest_without_a_supplied_name_uses_a_title_from_the_manifest_url() 
     };
 
     let item = manager
-        .enqueue_manifest_staged(source, &directory, None, &[], None, Vec::new())
+        .enqueue_manifest_staged(
+            source,
+            &directory,
+            None,
+            &[],
+            None,
+            Vec::new(),
+        )
         .expect("enqueue manifest with a derived filename");
 
     assert_eq!(item.filename(), "my video.mkv");
@@ -2101,19 +2129,47 @@ fn native_manifest_accepts_mp4_mkv_and_ts_but_rejects_other_containers() {
     };
 
     let mkv = manager
-        .enqueue_manifest_staged(source.clone(), &directory, Some("Stream.mkv"), &[], None, Vec::new())
+        .enqueue_manifest_staged(
+            source.clone(),
+            &directory,
+            Some("Stream.mkv"),
+            &[],
+            None,
+            Vec::new(),
+        )
         .expect("MKV native manifest row");
     assert_eq!(mkv.filename(), "Stream.mkv");
     let ts = manager
-        .enqueue_manifest_staged(source.clone(), &directory, Some("Transport.ts"), &[], None, Vec::new())
+        .enqueue_manifest_staged(
+            source.clone(),
+            &directory,
+            Some("Transport.ts"),
+            &[],
+            None,
+            Vec::new(),
+        )
         .expect("MPEG-TS native manifest row");
     assert_eq!(ts.filename(), "Transport.ts");
     let mp4 = manager
-        .enqueue_manifest_staged(source.clone(), &directory, Some("Clip.mp4"), &[], None, Vec::new())
+        .enqueue_manifest_staged(
+            source.clone(),
+            &directory,
+            Some("Clip.mp4"),
+            &[],
+            None,
+            Vec::new(),
+        )
         .expect("MP4 native manifest row");
     assert_eq!(mp4.filename(), "Clip.mp4");
-    let unsupported =
-        manager.enqueue_manifest_staged(source, &directory, Some("Stream.webm"), &[], None, Vec::new());
+    let unsupported = manager
+        .enqueue_manifest_staged(
+            source,
+            &directory,
+            Some("Stream.webm"),
+            &[],
+            None,
+            Vec::new(),
+        );
     assert!(unsupported.is_err());
     assert_eq!(manager.store().n_items(), 3);
 

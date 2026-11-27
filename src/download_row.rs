@@ -287,4 +287,20 @@ mod tests {
         let ordinary = DownloadItem::new(4, "https://example.com/file", "File", "/tmp");
         assert!(!ordinary.is_collection_parent());
     }
+
+    #[test]
+    fn handoff_captions_are_owned_by_one_row_and_are_not_shared_by_url() {
+        let first = DownloadItem::new(1, "https://example.com/video.m3u8", "First", "/tmp");
+        let second = DownloadItem::new(2, "https://example.com/video.m3u8", "Second", "/tmp");
+        let caption = crate::extension_server::Caption {
+            url: "https://subs.example.test/en.vtt?token=private".to_string(),
+            headers: vec![("Authorization".to_string(), "Bearer private".to_string())],
+            language: "en".to_string(),
+            format: "vtt".to_string(),
+        };
+
+        first.set_handoff_captions(vec![caption.clone()]);
+        assert_eq!(first.handoff_captions().len(), 1);
+        assert!(second.handoff_captions().is_empty());
+    }
 }

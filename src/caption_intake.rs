@@ -612,7 +612,7 @@ mod tests {
             request.contains("referer: https://example.test/watch"),
             "{request}"
         );
-        assert!(request.contains("authorization: Bearer token"), "{request}");
+        assert!(request.contains("authorization: bearer token"), "{request}");
     }
 
     #[test]

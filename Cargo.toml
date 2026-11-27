@@ -28,12 +28,8 @@ m3u8-rs = "6.0.1"
 # Exact-pin untrusted-input parsers; upgrades require fixture/security review.
 # The 0.9 API includes bounded parse limits and typed playlist diagnostics.
 broadcast-hls = "=0.9.0"
-# Keep the SAMPLE-AES preflight on the exact parser used by iori-ssa.
-mpeg2ts = "=0.3.1"
 # Parse ISO BMFF box trees for structural validation of native fMP4 resources.
 mp4box = { version = "=0.14.0", default-features = false }
-# Pin the SAMPLE-AES consumer so the preflight and decryptor share parser behavior.
-iori-ssa = "=0.2.1"
 # Parse HLS diagnostics without exposing playlist contents. m3u8-rs exposes nom 7 parser errors.
 nom = "7"
 # DASH MPD parsing and serialization; pin the audited 0.1.0 API used by the planner.
@@ -88,8 +84,6 @@ proptest = "1"
 # Enable ignored-MPD-element diagnostics only in test builds.
 dash-mpd-core = { version = "=0.1.0", features = ["warn_ignored_elements"] }
 
-# Keep the default unwind strategy: SAMPLE-AES contains iori-ssa panics with catch_unwind.
-# Switching to panic = "abort" would make malformed segments process-fatal.
 [profile.release]
 opt-level = 3
 lto = "fat"

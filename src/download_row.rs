@@ -240,6 +240,7 @@ impl DownloadItem {
 #[cfg(test)]
 mod tests {
     use super::{DownloadGroup, DownloadItem};
+    use crate::download_store::DownloadStatus;
 
     #[test]
     fn referer_setter_stores_only_a_valid_source_origin() {

@@ -9,7 +9,6 @@
 #![allow(dead_code)]
 
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
 use std::time::Duration;
 
 use futures_util::StreamExt as _;
@@ -295,6 +294,7 @@ fn caption_file_name(caption: &Caption, format: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Arc;
     use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
     use tokio::net::TcpListener;
     use tokio::task::JoinHandle;

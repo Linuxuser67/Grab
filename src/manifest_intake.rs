@@ -458,6 +458,12 @@ fn validate_handoff_proxy(raw_url: &str) -> Result<(), String> {
     Ok(())
 }
 
+#[derive(Clone, Copy)]
+enum RedirectHandling {
+    GuardedAutomatic,
+    Manual,
+}
+
 /// Client carrying a live extension handoff jar, when one is staged for the URL.
 async fn client_with_handoff_jar(
     raw_url: &str,
@@ -467,7 +473,14 @@ async fn client_with_handoff_jar(
     let Some((path, user_agent)) = crate::extension_server::live_handoff_identity(raw_url) else {
         return Ok(None);
     };
-    client_from_handoff_jar(&path, user_agent.as_deref(), proxy, referer_context).await
+    client_from_handoff_jar(
+        &path,
+        user_agent.as_deref(),
+        proxy,
+        referer_context,
+        RedirectHandling::Manual,
+    )
+    .await
 }
 
 /// Client for one staged handoff jar, with the browser user agent it was
@@ -477,6 +490,7 @@ async fn client_from_handoff_jar(
     user_agent: Option<&str>,
     proxy: Option<&crate::net_types::ResolvedProxy>,
     referer_context: Option<crate::referrer::RefererContext<'_>>,
+    redirect_handling: RedirectHandling,
 ) -> Result<Option<reqwest::Client>, String> {
     let Ok(text) = tokio::fs::read_to_string(path).await else {
         return Ok(None);
@@ -486,13 +500,22 @@ async fn client_from_handoff_jar(
         return Ok(None);
     }
     let user_agent = user_agent.unwrap_or(crate::download_net::DEFAULT_USER_AGENT);
-    crate::download_net::http_client_with_jar_and_user_agent(
-        proxy,
-        jar,
-        user_agent,
-        referer_context,
-    )
-    .map(Some)
+    let client = match redirect_handling {
+        RedirectHandling::GuardedAutomatic => {
+            crate::download_net::http_client_with_jar_and_user_agent(
+                proxy,
+                jar,
+                user_agent,
+                referer_context,
+            )
+        }
+        RedirectHandling::Manual => {
+            crate::download_net::http_client_with_jar_and_user_agent_manual_redirects(
+                proxy, jar, user_agent,
+            )
+        }
+    }?;
+    Ok(Some(client))
 }
 
 /// Preview client: a live handoff jar when one is staged, otherwise anonymous.
@@ -507,7 +530,14 @@ async fn client_for_preview(
     validate_handoff_proxy(raw_url)?;
     if let Some((path, user_agent)) = handoff_identity
         && let Some(client) =
-            client_from_handoff_jar(&path, user_agent.as_deref(), proxy, referer_context).await?
+            client_from_handoff_jar(
+                &path,
+                user_agent.as_deref(),
+                proxy,
+                referer_context,
+                RedirectHandling::GuardedAutomatic,
+            )
+            .await?
     {
         return Ok((client, ManifestClientAuth::Handoff));
     }
@@ -540,7 +570,7 @@ pub(crate) async fn client_for_caption_handoff(
     if let Some(client) = client_with_handoff_jar(raw_url, proxy, None).await? {
         return Ok(client);
     }
-    crate::download_net::http_client_for(proxy, None)
+    crate::download_net::http_client_for_manual_redirects(proxy)
         .map_err(|_| gettext("The configured proxy could not be used for this caption fetch"))
 }
 
@@ -2734,7 +2764,13 @@ segment.ts?f=418899&srv=server&i=0.4&sp=500&p1=one&p2=two&asn=327934
         );
         std::fs::write(&path, contents).expect("write handoff jar");
 
-        let client = client_from_handoff_jar(&path, Some("Grab-Test-UA"), None, None)
+        let client = client_from_handoff_jar(
+            &path,
+            Some("Grab-Test-UA"),
+            None,
+            None,
+            RedirectHandling::GuardedAutomatic,
+        )
             .await
             .expect("handoff preview client");
         assert!(

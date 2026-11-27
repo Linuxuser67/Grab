@@ -934,8 +934,8 @@ pub(crate) enum UrlEntryAction {
 }
 
 /// Captions stay attached to the URL they came with while the card probes.
-type UrlBoundCaptions = (String, Vec<crate::extension_server::Caption>);
-type HandoffCaptionState = Rc<RefCell<Option<UrlBoundCaptions>>>;
+pub(crate) type UrlBoundCaptions = (String, Vec<crate::extension_server::Caption>);
+pub(crate) type HandoffCaptionState = Rc<RefCell<Option<UrlBoundCaptions>>>;
 type AddCardOpen =
     Rc<dyn Fn(Option<String>, Option<String>, Vec<crate::extension_server::Caption>)>;
 

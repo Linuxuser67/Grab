@@ -42,6 +42,7 @@ mod preferences;
 mod referrer;
 mod runtime;
 mod settings;
+mod staged_file;
 mod subprocess_proxy;
 mod torrent;
 mod ui_util;

@@ -279,6 +279,8 @@ pub(crate) struct ManifestJob {
     pub(crate) cookies_browser: String,
     pub(crate) connections: usize,
     pub(crate) embed_subs: bool,
+    /// Optional, session-only browser caption candidates bound to this queue row.
+    pub(crate) captions: Vec<crate::extension_server::Caption>,
 }
 
 /// Classifies native manifest failures so transient transfers do not discard staged resources.
@@ -2194,7 +2196,11 @@ pub(crate) async fn run_manifest_download(
         ) => return Ok(ManifestOutcome::Aborted),
     };
     let mut _finish_stop_sender = None;
-    if !live_hls && !live_dash && tracks.uses_incremental_hls_vod() {
+    if !live_hls
+        && !live_dash
+        && !(job.source.subtitle_key.is_none() && !job.captions.is_empty())
+        && tracks.uses_incremental_hls_vod()
+    {
         // Preserve AES-128's established configured concurrency. Complex clear
         // VOD stays sequential, matching the ordinary static-HLS resource path.
         let connections = match &tracks {
@@ -3242,33 +3248,57 @@ async fn finalize_manifest_download(
     } else {
         None
     };
-    let subtitle_input = match &tracks {
-        Tracks::Hls {
-            subtitle: Some(_), ..
-        } => Some(staging.join("subtitles/local.m3u8")),
-        Tracks::Dash {
-            subtitle: Some(_), ..
-        } => {
-            let path = staging
-                .join("subtitles")
-                .join(TrackKind::Subtitles.part_filename(TrackFileFormat::Vtt));
-            match inspect_staged_regular_file(&path).await {
-                Ok(Some(_)) => Some(path),
-                Ok(None) => None,
-                Err(StagedFileError::NotRegularFile) => {
-                    return Err(ManifestRunError::Failed(
-                        "The normalized DASH subtitle staging path is not a regular file"
-                            .to_string(),
-                    ));
-                }
-                Err(StagedFileError::Io(error)) => {
-                    return Err(ManifestRunError::Failed(format!(
-                        "Could not inspect normalized DASH subtitle staging: {error}"
-                    )));
+    // Browser captions are a fallback for streams with no user-selected native
+    // subtitle. Only staged-track muxes can consume this extra FFmpeg input;
+    // a pre-muxed live output cannot attach a late external track.
+    let external_caption = if matches!(mode, ManifestFinalizationMode::MuxStagedTracks)
+        && job.source.subtitle_key.is_none()
+        && !job.captions.is_empty()
+    {
+        crate::caption_intake::stage_handoff_captions(
+            &job.source.url,
+            &job.captions,
+            staging,
+            job.proxy.as_ref(),
+            job.referer.as_deref(),
+        )
+        .await
+        .into_iter()
+        .next()
+    } else {
+        None
+    };
+    let subtitle_input = if let Some(caption) = external_caption.as_ref() {
+        Some(caption.path.clone())
+    } else {
+        match &tracks {
+            Tracks::Hls {
+                subtitle: Some(_), ..
+            } => Some(staging.join("subtitles/local.m3u8")),
+            Tracks::Dash {
+                subtitle: Some(_), ..
+            } => {
+                let path = staging
+                    .join("subtitles")
+                    .join(TrackKind::Subtitles.part_filename(TrackFileFormat::Vtt));
+                match inspect_staged_regular_file(&path).await {
+                    Ok(Some(_)) => Some(path),
+                    Ok(None) => None,
+                    Err(StagedFileError::NotRegularFile) => {
+                        return Err(ManifestRunError::Failed(
+                            "The normalized DASH subtitle staging path is not a regular file"
+                                .to_string(),
+                        ));
+                    }
+                    Err(StagedFileError::Io(error)) => {
+                        return Err(ManifestRunError::Failed(format!(
+                            "Could not inspect normalized DASH subtitle staging: {error}"
+                        )));
+                    }
                 }
             }
+            _ => None,
         }
-        _ => None,
     };
     if matches!(
         mode,
@@ -3313,16 +3343,19 @@ async fn finalize_manifest_download(
             }
         }
     }
-    let subtitle_language = match &tracks {
-        Tracks::Hls {
-            subtitle_language, ..
-        }
-        | Tracks::Dash {
-            subtitle_language, ..
-        } => subtitle_language.as_deref(),
-        Tracks::DashLiveOffline { .. } => None,
-    };
-    let subtitle_language = subtitle_language
+    let declared_language = external_caption
+        .as_ref()
+        .map(|caption| caption.language.as_str())
+        .or(match &tracks {
+            Tracks::Hls {
+                subtitle_language, ..
+            }
+            | Tracks::Dash {
+                subtitle_language, ..
+            } => subtitle_language.as_deref(),
+            Tracks::DashLiveOffline { .. } => None,
+        });
+    let subtitle_language = declared_language
         .filter(|language| {
             !language.is_empty()
                 && language.len() <= 35
@@ -3331,13 +3364,18 @@ async fn finalize_manifest_download(
                     .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-')
         })
         .unwrap_or("und");
-    let subtitle_format = match &tracks {
-        Tracks::Hls {
-            subtitle: Some(_),
-            subtitle_format,
-            ..
-        } => *subtitle_format,
-        _ => SubtitleFormat::Text,
+    let subtitle_format = if external_caption.is_some() {
+        // Handoff candidates are validated VTT/SRT text, never fMP4.
+        SubtitleFormat::Text
+    } else {
+        match &tracks {
+            Tracks::Hls {
+                subtitle: Some(_),
+                subtitle_format,
+                ..
+            } => *subtitle_format,
+            _ => SubtitleFormat::Text,
+        }
     };
     let output_container = manifest_output_container(&job.dest)?;
     // Text WebVTT playlists can be normalized to the destination container.
@@ -3856,12 +3894,12 @@ async fn ensure_live_finish_marker(directory: &Path, staged_bytes: u64) -> Resul
     }
 
     let contents = format!("{LIVE_FINISH_MARKER_VERSION}\n{staged_bytes}\n");
-    write_staged_file_atomic(
+    crate::staged_file::write_staged_file_atomic(
         directory,
         "live-capture.finished.part",
         LIVE_FINISH_MARKER_NAME,
         contents.as_bytes(),
-        StagedPublish::NoReplace,
+        crate::staged_file::StagedPublish::NoReplace,
     )
     .await?;
     sync_staging_directory(directory).await
@@ -3881,70 +3919,6 @@ async fn sync_staging_directory(directory: &Path) -> Result<(), String> {
         .sync_all()
         .await
         .map_err(|error| format!("Could not sync staging directory: {error}"))
-}
-
-#[derive(Clone, Copy)]
-pub(crate) enum StagedPublish {
-    Replace,
-    NoReplace,
-}
-
-pub(crate) async fn write_staged_file_atomic(
-    directory: &Path,
-    temporary_name: &str,
-    target_name: &str,
-    bytes: &[u8],
-    publish: StagedPublish,
-) -> Result<(), String> {
-    let temporary = directory.join(temporary_name);
-    let target = directory.join(target_name);
-    remove_regular_file_if_present(&temporary).await?;
-
-    let result = async {
-        let mut file = tokio::fs::OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(&temporary)
-            .await
-            .map_err(|error| format!("Could not create staged file {target_name}: {error}"))?;
-        file.write_all(bytes)
-            .await
-            .map_err(|error| format!("Could not write staged file {target_name}: {error}"))?;
-        file.sync_all()
-            .await
-            .map_err(|error| format!("Could not flush staged file {target_name}: {error}"))?;
-        drop(file);
-
-        match publish {
-            StagedPublish::Replace => {
-                match tokio::fs::symlink_metadata(&target).await {
-                    Ok(metadata) if metadata.file_type().is_symlink() || !metadata.is_file() => {
-                        return Err(format!("Staged target {target_name} is not a regular file"));
-                    }
-                    Ok(_) => {}
-                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-                    Err(error) => {
-                        return Err(format!(
-                            "Could not inspect staged target {target_name}: {error}"
-                        ));
-                    }
-                }
-                tokio::fs::rename(&temporary, &target)
-                    .await
-                    .map_err(|error| {
-                        format!("Could not publish staged file {target_name}: {error}")
-                    })
-            }
-            StagedPublish::NoReplace => crate::file_names::rename_noreplace(&temporary, &target)
-                .map_err(|error| format!("Could not publish staged file {target_name}: {error}")),
-        }
-    }
-    .await;
-
-    if result.is_err() {
-        let _ = remove_regular_file_if_present(&temporary).await;
-    }
-    result
 }
 
 struct IncrementalHlsFetch<'fetch> {
@@ -4064,12 +4038,12 @@ async fn fetch_hls_resources_incrementally(
                                 crate::manifest::HlsPlaylistFinality::Growing,
                             )
                             .map_err(|error| ManifestRunError::Failed(error.to_string()))?;
-                        write_staged_file_atomic(
+                        crate::staged_file::write_staged_file_atomic(
                             directory,
                             "local.m3u8.next",
                             "local.m3u8",
                             &bytes,
-                            StagedPublish::Replace,
+                            crate::staged_file::StagedPublish::Replace,
                         )
                         .await
                         .map_err(ManifestRunError::Failed)?;
@@ -4120,12 +4094,12 @@ async fn fetch_hls_resources_incrementally(
             crate::manifest::HlsPlaylistFinality::Complete,
         )
         .map_err(|error| ManifestRunError::Failed(error.to_string()))?;
-    write_staged_file_atomic(
+    crate::staged_file::write_staged_file_atomic(
         directory,
         "local.m3u8.next",
         "local.m3u8",
         &bytes,
-        StagedPublish::Replace,
+        crate::staged_file::StagedPublish::Replace,
     )
     .await
     .map_err(ManifestRunError::Failed)?;
@@ -4140,12 +4114,12 @@ async fn write_playlist(directory: &Path, plan: &HlsPlan) -> Result<(), String> 
             crate::manifest::HlsPlaylistFinality::Complete,
         )
         .map_err(|error| error.to_string())?;
-    write_staged_file_atomic(
+    crate::staged_file::write_staged_file_atomic(
         directory,
         "local.m3u8.part",
         "local.m3u8",
         &bytes,
-        StagedPublish::Replace,
+        crate::staged_file::StagedPublish::Replace,
     )
     .await
 }
@@ -5678,6 +5652,92 @@ mod tests {
 
     #[cfg(unix)]
     #[tokio::test]
+    async fn external_caption_input_is_mapped_and_embedded_as_text() {
+        let directory = tempfile::tempdir().expect("create FFmpeg argument test directory");
+        let ffmpeg = fake_ffmpeg_recording_arguments(directory.path());
+        let output = directory.path().join("output.mp4");
+
+        let args = run_ffmpeg_recording_args(
+            &ffmpeg,
+            &output,
+            SubtitleOutput {
+                input: Some(Path::new("external-captions.srt")),
+                embed: true,
+                sidecar: None,
+                format: SubtitleFormat::Text,
+            },
+        )
+        .await;
+
+        assert!(
+            args.windows(2)
+                .any(|pair| pair == ["-i", "external-captions.srt"]),
+            "external captions must be a distinct FFmpeg input: {args:?}"
+        );
+        assert!(
+            args.windows(2).any(|pair| pair == ["-map", "1:s:0"]),
+            "external subtitle stream must be mapped: {args:?}"
+        );
+        assert!(
+            args.windows(2).any(|pair| pair == ["-c:s", "mov_text"]),
+            "text captions must use MP4's mov_text codec: {args:?}"
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn external_caption_sidecar_is_mapped_without_embedding() {
+        let directory = tempfile::tempdir().expect("create FFmpeg argument test directory");
+        let ffmpeg = fake_ffmpeg_recording_arguments(directory.path());
+        let output = directory.path().join("output.mkv");
+        let sidecar = directory.path().join("output.en.srt");
+
+        let args = run_ffmpeg_recording_args(
+            &ffmpeg,
+            &output,
+            SubtitleOutput {
+                input: Some(Path::new("external-captions.srt")),
+                embed: false,
+                sidecar: Some(&sidecar),
+                format: SubtitleFormat::Text,
+            },
+        )
+        .await;
+
+        assert!(
+            args.windows(2)
+                .any(|pair| pair == ["-i", "external-captions.srt"]),
+            "external captions must be a distinct FFmpeg input: {args:?}"
+        );
+        assert!(
+            args.iter()
+                .any(|argument| argument == sidecar.to_string_lossy().as_ref()),
+            "sidecar destination must be supplied to FFmpeg: {args:?}"
+        );
+        let media_output_index = args
+            .iter()
+            .position(|argument| argument == output.to_string_lossy().as_ref())
+            .expect("primary media output");
+        let sidecar_map_index = args
+            .windows(2)
+            .position(|pair| pair == ["-map", "1:s:0"])
+            .expect("subtitle stream mapped for sidecar output");
+        let sidecar_path_index = args
+            .iter()
+            .position(|argument| argument == sidecar.to_string_lossy().as_ref())
+            .expect("sidecar output path");
+        assert!(
+            media_output_index < sidecar_map_index && sidecar_map_index < sidecar_path_index,
+            "subtitle mapping must follow the primary output and target only the sidecar: {args:?}"
+        );
+        assert!(
+            args.windows(2).any(|pair| pair == ["-c:s", "srt"]),
+            "sidecar must retain the SRT codec: {args:?}"
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
     async fn hls_subtitle_mux_preserves_fmp4_and_converts_webvtt() {
         let directory = tempfile::tempdir().expect("create FFmpeg argument test directory");
         let ffmpeg = fake_ffmpeg_recording_arguments(directory.path());
@@ -6555,6 +6615,7 @@ segment-2.ts
             cookies_browser: "none".to_string(),
             connections: 4,
             embed_subs: false,
+            captions: Vec::new(),
         };
         let gate = crate::attempt_gate::AttemptGate::new();
         let downloaded = Arc::new(AtomicU64::new(0));
@@ -6944,6 +7005,7 @@ segment-2.ts
             cookies_browser: "none".to_string(),
             connections: 4,
             embed_subs: false,
+            captions: Vec::new(),
         };
         let gate = crate::attempt_gate::AttemptGate::new();
         let downloaded = Arc::new(AtomicU64::new(0));
@@ -7350,6 +7412,7 @@ segment-2.ts
             cookies_browser: "none".to_string(),
             connections: 1,
             embed_subs: false,
+            captions: Vec::new(),
         };
         let gate = crate::attempt_gate::AttemptGate::new();
         let downloaded = Arc::new(AtomicU64::new(0));
@@ -8244,6 +8307,7 @@ segment-2.m4s
             cookies_browser: "none".to_string(),
             connections: 1,
             embed_subs: false,
+            captions: Vec::new(),
         };
         let gate = crate::attempt_gate::AttemptGate::new();
         let (_stop_tx, stop_rx) = tokio::sync::oneshot::channel();
@@ -9103,8 +9167,6 @@ mod staged_resource_size_tests {
 
 #[cfg(test)]
 mod staged_file_atomic_tests {
-    use super::*;
-
     #[tokio::test]
     async fn replace_publishes_new_contents_without_a_missing_target_window() {
         let directory = tempfile::tempdir().expect("create staging directory");
@@ -9113,12 +9175,12 @@ mod staged_file_atomic_tests {
             .await
             .expect("write existing playlist");
 
-        write_staged_file_atomic(
+        crate::staged_file::write_staged_file_atomic(
             directory.path(),
             "local.m3u8.part",
             "local.m3u8",
             b"new playlist",
-            StagedPublish::Replace,
+            crate::staged_file::StagedPublish::Replace,
         )
         .await
         .expect("atomically replace playlist");
@@ -9146,12 +9208,12 @@ mod staged_file_atomic_tests {
             .expect("write existing marker");
 
         assert!(
-            write_staged_file_atomic(
+            crate::staged_file::write_staged_file_atomic(
                 directory.path(),
                 "marker.part",
                 "marker",
                 b"new marker",
-                StagedPublish::NoReplace,
+                crate::staged_file::StagedPublish::NoReplace,
             )
             .await
             .is_err(),

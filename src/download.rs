@@ -1488,6 +1488,7 @@ impl DownloadManager {
         dest_dir: Option<&str>,
         filename: Option<&str>,
         referer: Option<&str>,
+        captions: Vec<crate::extension_server::Caption>,
     ) -> Result<(DownloadItem, BatchGuard), String> {
         let dir = self.resolve_dir(dest_dir);
         let listing_dir = dir.clone();
@@ -1508,8 +1509,14 @@ impl DownloadManager {
             Self::manifest_filename_for_container(filename, &source.url, container);
 
         let guard = self.batch_guard();
-        let item =
-            self.enqueue_manifest_staged(source, &dir, Some(&requested_name), &existing, referer)?;
+        let item = self.enqueue_manifest_staged(
+            source,
+            &dir,
+            Some(&requested_name),
+            &existing,
+            referer,
+            captions,
+        )?;
         Ok((item, guard))
     }
 
@@ -1905,6 +1912,7 @@ impl DownloadManager {
         filename: Option<&str>,
         existing: &[String],
         referer: Option<&str>,
+        captions: Vec<crate::extension_server::Caption>,
     ) -> Result<DownloadItem, String> {
         if !crate::manifest_intake::valid_source(&source) {
             return Err(gettext("The selected stream representation is invalid"));
@@ -1946,6 +1954,7 @@ impl DownloadManager {
         });
         let item = DownloadItem::new(self.alloc_id_for_in(existing), &url, &name, dir);
         item.set_referer(referer.unwrap_or_default());
+        item.set_handoff_captions(captions);
         item.set_detail(pending_resolve_detail(false));
         self.video_sources.borrow_mut().insert(
             item.id(),

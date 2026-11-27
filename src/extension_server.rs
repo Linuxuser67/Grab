@@ -5063,12 +5063,21 @@ mod tests {
         bad_format["format"] = serde_json::json!("txt");
         cases.push(bad_format);
 
+        let mut userinfo_url = caption();
+        userinfo_url["url"] = serde_json::json!("https://user:secret@subs.example.test/en.vtt");
+        cases.push(userinfo_url);
+
+        cases.push(serde_json::json!(42));
         for bad in cases {
             let body = body_with_captions(serde_json::json!([bad]));
             let r = signed_add(srv.port, &host, &body).await;
-            assert_eq!(status(&r), "400", "{r}");
+            assert_eq!(status(&r), "200", "{r}");
+            let handoff = srv.rx.recv().await.expect("media handoff");
+            assert!(
+                handoff.captions.is_empty(),
+                "invalid caption metadata must be ignored"
+            );
         }
-        assert!(srv.rx.try_recv().is_err());
     }
 
     #[tokio::test]

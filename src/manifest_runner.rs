@@ -6485,7 +6485,11 @@ segment-2.ts
     /// Shared body for the AES-128 incremental VOD integration test. The output
     /// container follows the destination extension, so exercise TS (the native
     /// MPEG-TS case) plus MP4/MKV written through the same owned part.
-    async fn assert_aes128_hls_vod_output(\n        extension: &str,\n        force_early_exit: bool,\n        with_browser_caption: bool,\n    ) {
+    async fn assert_aes128_hls_vod_output(
+        extension: &str,
+        force_early_exit: bool,
+        with_browser_caption: bool,
+    ) {
         use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
 
         let ffmpeg = match resolve_manifest_ffmpeg(&[PathBuf::from("/usr/bin")]) {

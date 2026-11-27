@@ -279,9 +279,6 @@ fn check_remote_torrent_uri(uri: &url::Url) -> Result<(), String> {
     Ok(())
 }
 
-/// Route one opened URI: remote .torrent fetch, video card pre-fill, or plain
-/// enqueue. Extracted from `connect_open` so the extension-handoff confirm
-/// dialog can run it after the user approves.
 /// Optional metadata that accompanies a browser or desktop handoff.
 #[derive(Clone, Default)]
 struct HandoffExtras {
@@ -317,6 +314,9 @@ async fn enqueue_direct_handoff(
         })
 }
 
+/// Route one opened URI: remote .torrent fetch, video card pre-fill, or plain
+/// enqueue. Extracted from `connect_open` so the extension-handoff confirm
+/// dialog can run it after the user approves.
 async fn route_open_uri(
     manager: Rc<DownloadManager>,
     toasts: Rc<adw::ToastOverlay>,

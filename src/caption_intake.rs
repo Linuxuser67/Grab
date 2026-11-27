@@ -331,7 +331,7 @@ fn caption_file_name(caption: &Caption, format: &str) -> String {
 mod tests {
     use super::*;
     use std::sync::Arc;
-    use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+    use tokio::io::AsyncReadExt as _;
     use tokio::net::TcpListener;
     use tokio::task::JoinHandle;
 

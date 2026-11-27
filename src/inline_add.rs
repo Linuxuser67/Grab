@@ -2765,7 +2765,8 @@ impl AddCard {
 
     /// Reveal a URL without any browser-supplied caption metadata.
     ///
-    /// Kept for desktop callers and tests that open the card directly.
+    /// Kept for tests that open the card directly.
+    #[cfg(test)]
     pub fn open(&self, initial_url: Option<String>, referer: Option<String>) {
         self.open_with_captions(initial_url, referer, Vec::new());
     }

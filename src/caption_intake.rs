@@ -327,7 +327,9 @@ fn validate_caption_redirect(
         || next.password().is_some()
         || (!loopback_fixture && !crate::download_net::is_public_destination_host(host))
     {
-        return Err("caption redirect was not a credential-free public HTTPS destination".to_string());
+        return Err(
+            "caption redirect was not a credential-free public HTTPS destination".to_string(),
+        );
     }
     if !same_caption_origin(current, next) && !loopback_fixture {
         let lease = crate::download_net::acquire_public_resolution(host)

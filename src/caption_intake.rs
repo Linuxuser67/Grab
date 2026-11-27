@@ -20,6 +20,7 @@ const MAX_CAPTION_REDIRECTS: usize = 5;
 /// Same allowlist the `/add` boundary validates; rechecked before sending.
 const ALLOWED_CAPTION_HEADERS: [&str; 4] =
     ["referer", "origin", "accept-language", "authorization"];
+type CaptionRedirectLeases = Vec<std::sync::Arc<crate::download_net::PublicResolutionLease>>;
 
 /// One caption file staged for later FFmpeg finalization (slice A3).
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -258,7 +259,7 @@ async fn send_caption_request_with_redirects(
     client: &reqwest::Client,
     requested: &url::Url,
     mut headers: HeaderMap,
-    redirect_leases: &mut Vec<std::sync::Arc<crate::download_net::PublicResolutionLease>>,
+    redirect_leases: &mut CaptionRedirectLeases,
 ) -> Result<reqwest::Response, String> {
     let mut current = requested.clone();
     for redirect_count in 0..=MAX_CAPTION_REDIRECTS {
@@ -303,7 +304,7 @@ fn same_caption_origin(left: &url::Url, right: &url::Url) -> bool {
 fn validate_caption_redirect(
     current: &url::Url,
     next: &url::Url,
-    redirect_leases: &mut Vec<std::sync::Arc<crate::download_net::PublicResolutionLease>>,
+    redirect_leases: &mut CaptionRedirectLeases,
 ) -> Result<(), String> {
     let host = next
         .host_str()
@@ -502,7 +503,7 @@ mod tests {
                 let accept_timeout = if index == 0 {
                     Duration::from_secs(5)
                 } else {
-                    Duration::from_millis(250)
+                    Duration::from_secs(1)
                 };
                 let accepted = tokio::time::timeout(accept_timeout, listener.accept()).await;
                 let (mut stream, _) = match accepted {

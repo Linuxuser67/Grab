@@ -25,11 +25,11 @@ The native HLS path covers multivariant master playlists with selectable video
 variants and external audio/subtitle renditions; static VOD and EVENT media
 playlists; ordinary non-low-latency live capture; MPEG-TS and fragmented-MP4
 media with initialization maps; explicit and valid implicit byte ranges;
-discontinuities; identity AES-128 keys (including key rotation and
-`METHOD=NONE` resets); and identity SAMPLE-AES for MPEG-TS. Master-playlist
-`EXT-X-SESSION-KEY` hints are accepted only for AES-128 with an explicit or
-implicit identity key format; Grab never fetches or substitutes these hints for
-the selected media playlist's authoritative `EXT-X-KEY`.
+discontinuities; and identity AES-128 keys (including key rotation and
+`METHOD=NONE` resets). Master-playlist `EXT-X-SESSION-KEY` hints are accepted
+only for AES-128 with an explicit or implicit identity key format; Grab never
+fetches or substitutes these hints for the selected media playlist's
+authoritative `EXT-X-KEY`.
 
 When a selected variant uses a separate audio rendition, Grab passes the
 video and audio media playlists as separate FFmpeg inputs and uses `-copyts`
@@ -107,10 +107,9 @@ EXT-X-DEFINE:IMPORT; the selected variable scope is carried through video,
 audio, subtitle, and LL-HLS reload planning. Undefined imports, duplicate
 definitions, and unsupported IMPORT attributes remain on yt-dlp fallback.
 I-frame-only media playlists, non-identity
-session-key formats, non-identity media-key formats, SAMPLE-AES over
-fragmented MP4/CBCS, and unsupported encryption remain on fallback. AES-128
-and supported SAMPLE-AES keys in ordinary HLS continue to use the existing
-bounded key-resource path; no license or CDM acquisition is added.
+session-key formats, all SAMPLE-AES key methods, and unsupported encryption
+remain on fallback. Identity AES-128 keys in ordinary HLS continue to use the
+existing bounded key-resource path; no license or CDM acquisition is added.
 
 ## Native Low-Latency HLS supported profile
 
@@ -292,8 +291,7 @@ and unchanged WVTT and FFmpeg finalization paths.
 This phase is shelved and is not part of the native-stream completion PR. No
 native DASH CENC/CBCS decryption expansion, user-supplied CENC keys, license
 acquisition, Widevine/PlayReady device-file support, or CDM integration is
-included. The existing HLS identity SAMPLE-AES MPEG-TS path remains on `main`;
-shelving this phase does not remove that already-supported HLS behavior.
+included. Shelving this phase adds no native DRM path.
 
 ### 5. DASH presentation-time offsets — implemented bounded profile
 

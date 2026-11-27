@@ -158,12 +158,12 @@ async fn stage_one(
         return Err(format!("body is not valid {format} content"));
     }
     let name = caption_file_name(caption, &format);
-    crate::manifest_runner::write_staged_file_atomic(
+    crate::staged_file::write_staged_file_atomic(
         staging_dir,
         &format!("{name}.part"),
         &name,
         &bytes,
-        crate::manifest_runner::StagedPublish::Replace,
+        crate::staged_file::StagedPublish::Replace,
     )
     .await?;
     Ok(StagedCaption {

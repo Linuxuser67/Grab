@@ -3667,6 +3667,7 @@ fn build_video_lookup_kicker(context: VideoLookupContext) -> VideoLookupKick {
                             {
                                 if let Some(source) = preferred_source {
                                     let filename = step_b.name.text().trim().to_string();
+                                    let captions = handoff_captions_for_url(&step_b, &url);
                                     let enqueue_manager = Rc::clone(&manager_b);
                                     let error_step = Rc::clone(&step_b);
                                     let error_lookup_add = Rc::clone(&lookup_add_b);
@@ -3681,6 +3682,7 @@ fn build_video_lookup_kicker(context: VideoLookupContext) -> VideoLookupKick {
                                                     directory.as_deref(),
                                                     Some(&filename),
                                                     source_referer.as_deref(),
+                                                    captions,
                                                 )
                                                 .await
                                         },
@@ -4176,6 +4178,7 @@ fn build_submit_handler(context: SubmitContext) -> SubmitHandler {
                 };
                 if let Some(source) = selected_source {
                     let filename = step2.name.text().trim().to_string();
+                    let captions = handoff_captions_for_url(&step2, &url);
                     let enqueue_manager = Rc::clone(&m);
                     let error_step = Rc::clone(&step2);
                     let error_lookup_add = Rc::clone(&lookup_add_submit);
@@ -4190,6 +4193,7 @@ fn build_submit_handler(context: SubmitContext) -> SubmitHandler {
                                     directory.as_deref(),
                                     Some(&filename),
                                     referer.as_deref(),
+                                    captions,
                                 )
                                 .await
                         },
@@ -5001,10 +5005,14 @@ pub fn build_add_card(manager: Rc<DownloadManager>) -> AddCard {
                             // Keep captions with their exact URL; a later click
                             // must not borrow metadata from the current card.
                             let mut queue = pending_url.borrow_mut();
-                            if !queue.iter().any(|(queued_url, queued_referer, _)| {
-                                queued_url == &normalized
-                                    && queued_referer == &initial_referer
-                            }) {
+                            if let Some((_, _, queued_captions)) =
+                                queue.iter_mut().find(|(queued_url, queued_referer, _)| {
+                                    queued_url == &normalized
+                                        && queued_referer == &initial_referer
+                                })
+                            {
+                                *queued_captions = initial_captions;
+                            } else {
                                 queue.push_back((
                                     normalized.clone(),
                                     initial_referer.clone(),

@@ -2096,14 +2096,7 @@ fn native_manifest_without_a_supplied_name_uses_a_title_from_the_manifest_url() 
     };
 
     let item = manager
-        .enqueue_manifest_staged(
-            source,
-            &directory,
-            None,
-            &[],
-            None,
-            Vec::new(),
-        )
+        .enqueue_manifest_staged(source, &directory, None, &[], None, Vec::new())
         .expect("enqueue manifest with a derived filename");
 
     assert_eq!(item.filename(), "my video.mkv");
@@ -2161,15 +2154,14 @@ fn native_manifest_accepts_mp4_mkv_and_ts_but_rejects_other_containers() {
         )
         .expect("MP4 native manifest row");
     assert_eq!(mp4.filename(), "Clip.mp4");
-    let unsupported = manager
-        .enqueue_manifest_staged(
-            source,
-            &directory,
-            Some("Stream.webm"),
-            &[],
-            None,
-            Vec::new(),
-        );
+    let unsupported = manager.enqueue_manifest_staged(
+        source,
+        &directory,
+        Some("Stream.webm"),
+        &[],
+        None,
+        Vec::new(),
+    );
     assert!(unsupported.is_err());
     assert_eq!(manager.store().n_items(), 3);
 

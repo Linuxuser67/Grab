@@ -2635,14 +2635,7 @@ async fn run_incremental_hls_vod(
         ));
     };
 
-    let part_path = crate::manifest_destination::part_path_async(
-        staging.to_path_buf(),
-        job.dest.clone(),
-        job.item_id,
-        TrackKind::Video,
-    )
-    .await
-    .map_err(ManifestRunError::Failed)?;
+    let part_path = output_part;
     let mut output_file = crate::manifest_destination::open_owned_part_async(
         staging.to_path_buf(),
         job.dest.clone(),
@@ -6770,6 +6763,8 @@ segment-2.ts
                 dest_dir: &task_dest_dir,
                 video_dir: &task_video_dir,
                 audio_dir: &task_audio_dir,
+                output_part: part_path.clone(),
+                caption_tasks: tokio::task::JoinSet::new(),
                 tracks: Tracks::Hls {
                     video: Box::new(plan),
                     audio: None,
@@ -7158,6 +7153,8 @@ segment-2.ts
                 dest_dir: &task_dest_dir,
                 video_dir: &task_video_dir,
                 audio_dir: &task_audio_dir,
+                output_part: part_path.clone(),
+                caption_tasks: tokio::task::JoinSet::new(),
                 tracks: Tracks::Hls {
                     video: Box::new(plan),
                     audio: None,
@@ -7565,6 +7562,8 @@ segment-2.ts
                 dest_dir: &task_dest_dir,
                 video_dir: &task_video_dir,
                 audio_dir: &task_audio_dir,
+                output_part: part_path.clone(),
+                caption_tasks: tokio::task::JoinSet::new(),
                 tracks: Tracks::Hls {
                     video: Box::new(video_plan),
                     audio: Some(Box::new(audio_plan)),

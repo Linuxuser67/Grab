@@ -4,10 +4,6 @@
 //! track is logged and skipped here. A caption must never block or fail the
 //! media download it accompanies.
 
-// The intake API is consumed by the later finalization slice; until then the
-// whole module is intentionally unreferenced by production code.
-#![allow(dead_code)]
-
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
@@ -29,7 +25,6 @@ const ALLOWED_CAPTION_HEADERS: [&str; 4] =
 pub(crate) struct StagedCaption {
     pub(crate) path: PathBuf,
     pub(crate) language: String,
-    pub(crate) format: String,
 }
 
 /// Fetch and stage the first usable caption attached to a handoff.
@@ -112,6 +107,7 @@ fn caption_url_policy(caption: &Caption) -> Result<String, String> {
 
 /// Fetch/stage helper with an injected client so the intake can be tested
 /// against a local fixture server without GTK or a real public endpoint.
+#[cfg(test)]
 async fn stage_with_client(
     client: &reqwest::Client,
     captions: &[&Caption],
@@ -173,10 +169,10 @@ async fn stage_one(
     Ok(StagedCaption {
         path: staging_dir.join(name),
         language: caption.language.clone(),
-        format,
     })
 }
 
+#[cfg(test)]
 async fn fetch_caption(client: &reqwest::Client, caption: &Caption) -> Result<Vec<u8>, String> {
     fetch_caption_with_referer(client, caption, None).await
 }
@@ -197,7 +193,10 @@ async fn fetch_caption_with_referer(
             return Err("caption request header is not allowed".to_string());
         }
         let name = HeaderName::from_bytes(name.as_bytes()).map_err(|error| error.to_string())?;
-        let value = HeaderValue::from_str(value).map_err(|error| error.to_string())?;
+        let mut value = HeaderValue::from_str(value).map_err(|error| error.to_string())?;
+        if matches!(name.as_str(), "authorization" | "origin" | "referer") {
+            value.set_sensitive(true);
+        }
         headers.insert(name, value);
     }
     if !headers.contains_key(reqwest::header::REFERER)
@@ -209,7 +208,8 @@ async fn fetch_caption_with_referer(
             },
         ))
     {
-        let value = HeaderValue::from_str(&referer).map_err(|error| error.to_string())?;
+        let mut value = HeaderValue::from_str(&referer).map_err(|error| error.to_string())?;
+        value.set_sensitive(true);
         headers.insert(reqwest::header::REFERER, value);
     }
 

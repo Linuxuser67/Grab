@@ -5716,6 +5716,77 @@ mod tests {
 
     #[cfg(unix)]
     #[tokio::test]
+    async fn external_caption_input_is_mapped_and_embedded_as_text() {
+        let directory = tempfile::tempdir().expect("create FFmpeg argument test directory");
+        let ffmpeg = fake_ffmpeg_recording_arguments(directory.path());
+        let output = directory.path().join("output.mp4");
+
+        let args = run_ffmpeg_recording_args(
+            &ffmpeg,
+            &output,
+            SubtitleOutput {
+                input: Some(Path::new("external-captions.srt")),
+                embed: true,
+                sidecar: None,
+                format: SubtitleFormat::Text,
+            },
+        )
+        .await;
+
+        assert!(
+            args.windows(2)
+                .any(|pair| pair == ["-i", "external-captions.srt"]),
+            "external captions must be a distinct FFmpeg input: {args:?}"
+        );
+        assert!(
+            args.windows(2)
+                .any(|pair| pair == ["-map", "1:s:0"]),
+            "external subtitle stream must be mapped: {args:?}"
+        );
+        assert!(
+            args.windows(2)
+                .any(|pair| pair == ["-c:s", "mov_text"]),
+            "text captions must use MP4's mov_text codec: {args:?}"
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn external_caption_sidecar_is_mapped_without_embedding() {
+        let directory = tempfile::tempdir().expect("create FFmpeg argument test directory");
+        let ffmpeg = fake_ffmpeg_recording_arguments(directory.path());
+        let output = directory.path().join("output.mkv");
+        let sidecar = directory.path().join("output.en.srt");
+
+        let args = run_ffmpeg_recording_args(
+            &ffmpeg,
+            &output,
+            SubtitleOutput {
+                input: Some(Path::new("external-captions.srt")),
+                embed: false,
+                sidecar: Some(&sidecar),
+                format: SubtitleFormat::Text,
+            },
+        )
+        .await;
+
+        assert!(
+            args.windows(2)
+                .any(|pair| pair == ["-i", "external-captions.srt"]),
+            "external captions must be a distinct FFmpeg input: {args:?}"
+        );
+        assert!(
+            args.iter().any(|argument| argument == sidecar.to_string_lossy().as_ref()),
+            "sidecar destination must be supplied to FFmpeg: {args:?}"
+        );
+        assert!(
+            !args.windows(2).any(|pair| pair == ["-map", "1:s:0"]),
+            "sidecars must not be embedded into the media output: {args:?}"
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
     async fn hls_subtitle_mux_preserves_fmp4_and_converts_webvtt() {
         let directory = tempfile::tempdir().expect("create FFmpeg argument test directory");
         let ffmpeg = fake_ffmpeg_recording_arguments(directory.path());
@@ -6593,6 +6664,7 @@ segment-2.ts
             cookies_browser: "none".to_string(),
             connections: 4,
             embed_subs: false,
+            captions: Vec::new(),
         };
         let gate = crate::attempt_gate::AttemptGate::new();
         let downloaded = Arc::new(AtomicU64::new(0));
@@ -6982,6 +7054,7 @@ segment-2.ts
             cookies_browser: "none".to_string(),
             connections: 4,
             embed_subs: false,
+            captions: Vec::new(),
         };
         let gate = crate::attempt_gate::AttemptGate::new();
         let downloaded = Arc::new(AtomicU64::new(0));
@@ -7388,6 +7461,7 @@ segment-2.ts
             cookies_browser: "none".to_string(),
             connections: 1,
             embed_subs: false,
+            captions: Vec::new(),
         };
         let gate = crate::attempt_gate::AttemptGate::new();
         let downloaded = Arc::new(AtomicU64::new(0));
@@ -8282,6 +8356,7 @@ segment-2.m4s
             cookies_browser: "none".to_string(),
             connections: 1,
             embed_subs: false,
+            captions: Vec::new(),
         };
         let gate = crate::attempt_gate::AttemptGate::new();
         let (_stop_tx, stop_rx) = tokio::sync::oneshot::channel();

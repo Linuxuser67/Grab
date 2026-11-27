@@ -9151,8 +9151,6 @@ mod staged_resource_size_tests {
 
 #[cfg(test)]
 mod staged_file_atomic_tests {
-    use super::*;
-
     #[tokio::test]
     async fn replace_publishes_new_contents_without_a_missing_target_window() {
         let directory = tempfile::tempdir().expect("create staging directory");

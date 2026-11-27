@@ -1447,7 +1447,10 @@ fn validated_captions(raw: Vec<Caption>) -> Result<Vec<Caption>, StatusCode> {
         }
 
         if caption.language.len() > MAX_CAPTION_LANGUAGE_BYTES
-            || !caption.language.bytes().all(|byte| byte.is_ascii_alphanumeric() || byte == b'-')
+            || !caption
+                .language
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-')
         {
             return Err(StatusCode::BAD_REQUEST);
         }
@@ -1537,6 +1540,8 @@ pub(crate) struct Handoff {
     pub authenticated: bool,
     /// Optional caption tracks, validated at the `/add` boundary. Carried to
     /// the GTK side without fetching or finalizing them in this layer.
+    /// Consumed by the caption intake/finalization slices.
+    #[allow(dead_code)]
     pub captions: Vec<Caption>,
     /// GTK closes the dialog at this instant, so it cannot outlive the
     /// server's confirmation window.
@@ -4761,10 +4766,8 @@ mod tests {
         let mut srv = start(4).await;
         let host = format!("127.0.0.1:{}", srv.port);
         let mut bad = caption();
-        bad["headers"] = serde_json::json!([
-            ["Referer", "https://example.test/watch"],
-            ["X-Evil", "1"],
-        ]);
+        bad["headers"] =
+            serde_json::json!([["Referer", "https://example.test/watch"], ["X-Evil", "1"],]);
         let body = body_with_captions(serde_json::json!([bad]));
         let r = signed_add(srv.port, &host, &body).await;
         assert_eq!(status(&r), "400", "{r}");

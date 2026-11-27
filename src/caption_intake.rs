@@ -16,6 +16,7 @@ use crate::extension_server::Caption;
 /// Upper bound for one subtitle body (matches the extension's HLS inspection cap).
 const MAX_CAPTION_BYTES: usize = 256 * 1024;
 const CAPTION_FETCH_BUDGET: Duration = Duration::from_secs(10);
+const MAX_CAPTION_REDIRECTS: usize = 5;
 /// Same allowlist the `/add` boundary validates; rechecked before sending.
 const ALLOWED_CAPTION_HEADERS: [&str; 4] =
     ["referer", "origin", "accept-language", "authorization"];
@@ -207,48 +208,125 @@ async fn fetch_caption_with_referer(
         headers.insert(reqwest::header::REFERER, value);
     }
 
-    let response = client
-        .get(requested.clone())
-        .timeout(CAPTION_FETCH_BUDGET)
-        .headers(headers)
-        .send()
-        .await
-        .map_err(|error| error.without_url().to_string())?;
-    if !response.status().is_success() {
-        return Err(format!(
-            "caption request returned HTTP {}",
-            response.status()
-        ));
-    }
-    // The guarded client already refuses https->http and public->private hops.
-    // Recheck the landed URL so an injected client cannot silently bypass it.
-    let landed = response.url();
-    if landed != &requested
-        && (landed.scheme() != "https"
-            || !landed.username().is_empty()
-            || landed.password().is_some()
-            || !landed
-                .host_str()
-                .is_some_and(crate::download_net::is_public_destination_host))
-    {
-        return Err("caption redirected away from public HTTPS".to_string());
-    }
-    if response
-        .content_length()
-        .is_some_and(|length| length > MAX_CAPTION_BYTES as u64)
-    {
-        return Err("caption body exceeds the size limit".to_string());
-    }
-    let mut stream = response.bytes_stream();
-    let mut body = Vec::new();
-    while let Some(chunk) = stream.next().await {
-        let chunk = chunk.map_err(|error| error.without_url().to_string())?;
-        if body.len().saturating_add(chunk.len()) > MAX_CAPTION_BYTES {
+    tokio::time::timeout(CAPTION_FETCH_BUDGET, async {
+        let mut redirect_leases = Vec::new();
+        let response =
+            send_caption_request_with_redirects(client, &requested, headers, &mut redirect_leases)
+                .await?;
+        if !response.status().is_success() {
+            return Err(format!(
+                "caption request returned HTTP {}",
+                response.status()
+            ));
+        }
+        if response
+            .content_length()
+            .is_some_and(|length| length > MAX_CAPTION_BYTES as u64)
+        {
             return Err("caption body exceeds the size limit".to_string());
         }
-        body.extend_from_slice(&chunk);
+        let mut stream = response.bytes_stream();
+        let mut body = Vec::new();
+        while let Some(chunk) = stream.next().await {
+            let chunk = chunk.map_err(|error| error.without_url().to_string())?;
+            if body.len().saturating_add(chunk.len()) > MAX_CAPTION_BYTES {
+                return Err("caption body exceeds the size limit".to_string());
+            }
+            body.extend_from_slice(&chunk);
+        }
+        Ok(body)
+    })
+    .await
+    .map_err(|_| "caption fetch exceeded its 10-second time limit".to_string())?
+}
+
+/// Follow a bounded redirect chain without letting Reqwest replay caption
+/// credentials or browser context headers onto a different origin.
+async fn send_caption_request_with_redirects(
+    client: &reqwest::Client,
+    requested: &url::Url,
+    mut headers: HeaderMap,
+    redirect_leases: &mut Vec<std::sync::Arc<crate::download_net::PublicResolutionLease>>,
+) -> Result<reqwest::Response, String> {
+    let mut current = requested.clone();
+    for redirect_count in 0..=MAX_CAPTION_REDIRECTS {
+        let response = client
+            .get(current.clone())
+            .headers(headers.clone())
+            .send()
+            .await
+            .map_err(|error| error.without_url().to_string())?;
+        if !response.status().is_redirection() {
+            return Ok(response);
+        }
+        if redirect_count == MAX_CAPTION_REDIRECTS {
+            return Err("caption exceeded the redirect limit".to_string());
+        }
+        let location = response
+            .headers()
+            .get(reqwest::header::LOCATION)
+            .and_then(|value| value.to_str().ok())
+            .ok_or_else(|| "caption redirect had no valid Location header".to_string())?;
+        let next = current
+            .join(location)
+            .map_err(|_| "caption redirect URL was invalid".to_string())?;
+        validate_caption_redirect(&current, &next, redirect_leases)?;
+
+        if !same_caption_origin(&current, &next) {
+            headers.remove(reqwest::header::AUTHORIZATION);
+            headers.remove(reqwest::header::ORIGIN);
+            headers.remove(reqwest::header::REFERER);
+        }
+        current = next;
     }
-    Ok(body)
+    Err("caption exceeded the redirect limit".to_string())
+}
+
+fn same_caption_origin(left: &url::Url, right: &url::Url) -> bool {
+    left.scheme() == right.scheme()
+        && left.host_str() == right.host_str()
+        && left.port_or_known_default() == right.port_or_known_default()
+}
+
+fn validate_caption_redirect(
+    current: &url::Url,
+    next: &url::Url,
+    redirect_leases: &mut Vec<std::sync::Arc<crate::download_net::PublicResolutionLease>>,
+) -> Result<(), String> {
+    let host = next
+        .host_str()
+        .ok_or_else(|| "caption redirect had no host".to_string())?;
+    let loopback_fixture = {
+        #[cfg(test)]
+        {
+            let loopback = |url: &url::Url| {
+                url.host_str()
+                    .and_then(|host| host.parse::<std::net::IpAddr>().ok())
+                    .is_some_and(|ip| ip.is_loopback())
+            };
+            current.scheme() == "http"
+                && next.scheme() == "http"
+                && loopback(current)
+                && loopback(next)
+        }
+        #[cfg(not(test))]
+        {
+            false
+        }
+    };
+    if (!loopback_fixture && next.scheme() != "https")
+        || !next.username().is_empty()
+        || next.password().is_some()
+        || (!loopback_fixture && !crate::download_net::is_public_destination_host(host))
+    {
+        return Err("caption redirect was not a credential-free public HTTPS destination".to_string());
+    }
+    if !same_caption_origin(current, next) && !loopback_fixture {
+        let lease = crate::download_net::acquire_public_resolution(host)
+            .ok_or_else(|| "caption redirect could not acquire a public DNS lease".to_string())?;
+        redirect_leases.push(lease);
+    }
+    Ok(())
 }
 
 fn valid_caption(bytes: &[u8], format: &str) -> bool {

@@ -313,6 +313,19 @@ pub(crate) fn http_client_for(
         .map_err(|error| error.to_string())
 }
 
+/// Client for callers that validate and follow redirects themselves.
+/// DNS filtering remains guarded; automatic redirects are disabled so request
+/// headers can be stripped before a cross-origin hop.
+pub(crate) fn http_client_for_manual_redirects(
+    proxy: Option<&ResolvedProxy>,
+) -> Result<reqwest::Client, String> {
+    let (_, resolver) = guarded_network_policy();
+    let builder = client_builder_with_policy(reqwest::redirect::Policy::none(), resolver);
+    apply_proxies(builder, proxy)
+        .build()
+        .map_err(|error| error.to_string())
+}
+
 #[cfg(test)]
 mod browser_referer_tests {
     use crate::referrer::{RefererContext, origin_for_target};
@@ -408,6 +421,22 @@ pub(crate) fn http_client_with_jar_and_user_agent(
     )
     .build()
     .map_err(|error| error.to_string())
+}
+
+/// Cookie-bearing client for manual redirect handling. Each redirect request
+/// still uses the provider jar, but this client never follows a Location itself.
+pub(crate) fn http_client_with_jar_and_user_agent_manual_redirects(
+    proxy: Option<&ResolvedProxy>,
+    jar: std::sync::Arc<reqwest::cookie::Jar>,
+    user_agent: &str,
+) -> Result<reqwest::Client, String> {
+    let (_, resolver) = guarded_network_policy();
+    let builder = client_builder_with_policy(reqwest::redirect::Policy::none(), resolver)
+        .cookie_provider(jar)
+        .user_agent(user_agent);
+    apply_proxies(builder, proxy)
+        .build()
+        .map_err(|error| error.to_string())
 }
 
 fn private_v4(a: Ipv4Addr) -> bool {

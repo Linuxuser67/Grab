@@ -3884,12 +3884,12 @@ async fn sync_staging_directory(directory: &Path) -> Result<(), String> {
 }
 
 #[derive(Clone, Copy)]
-pub(super) enum StagedPublish {
+pub(crate) enum StagedPublish {
     Replace,
     NoReplace,
 }
 
-pub(super) async fn write_staged_file_atomic(
+pub(crate) async fn write_staged_file_atomic(
     directory: &Path,
     temporary_name: &str,
     target_name: &str,

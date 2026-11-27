@@ -476,6 +476,7 @@ fn caption_file_name(caption: &Caption, format: &str) -> String {
 mod tests {
     use super::*;
     use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
     use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
     use tokio::net::TcpListener;
     use tokio::task::JoinHandle;
@@ -559,6 +560,47 @@ mod tests {
         });
         (format!("http://{host}:{port}/caption"), server)
     }
+    async fn slow_fixture_server(
+        delay: Duration,
+    ) -> (String, Arc<AtomicUsize>, JoinHandle<()>) {
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind delayed caption fixture");
+        let port = listener.local_addr().expect("fixture address").port();
+        let requests = Arc::new(AtomicUsize::new(0));
+        let server_requests = Arc::clone(&requests);
+        let server = tokio::spawn(async move {
+            loop {
+                let accepted = tokio::time::timeout(Duration::from_secs(2), listener.accept()).await;
+                let Ok(Ok((mut stream, _))) = accepted else {
+                    break;
+                };
+                server_requests.fetch_add(1, Ordering::SeqCst);
+                let mut request = Vec::new();
+                let mut chunk = [0_u8; 4096];
+                loop {
+                    let Ok(count) = stream.read(&mut chunk).await else {
+                        break;
+                    };
+                    if count == 0 {
+                        break;
+                    }
+                    request.extend_from_slice(&chunk[..count]);
+                    if request.windows(4).any(|window| window == b"\\r\\n\\r\\n") {
+                        break;
+                    }
+                }
+                tokio::time::sleep(delay).await;
+                let _ = stream
+                    .write_all(
+                        b"HTTP/1.1 503 Service Unavailable\\r\\nContent-Length: 0\\r\\nConnection: close\\r\\n\\r\\n",
+                    )
+                    .await;
+            }
+        });
+        (format!("http://127.0.0.1:{port}/caption"), requests, server)
+    }
+
     #[test]
     fn accepts_vtt_with_bom_and_leading_whitespace() {
         assert!(valid_vtt(
@@ -655,6 +697,39 @@ mod tests {
         .await;
 
         assert!(staged.is_empty());
+        assert_eq!(
+            std::fs::read_dir(directory.path())
+                .expect("staging listing")
+                .count(),
+            0
+        );
+    }
+
+    #[tokio::test]
+    async fn ordered_caption_candidates_share_one_total_deadline() {
+        let (url, requests, server) = slow_fixture_server(Duration::from_millis(500)).await;
+        let directory = tempfile::tempdir().expect("staging dir");
+        let first = caption(&format!("{url}/first"), "en", "vtt");
+        let second = caption(&format!("{url}/second"), "fr", "vtt");
+        let deadline = tokio::time::Instant::now() + Duration::from_millis(120);
+
+        let staged = stage_with_client_and_referer(
+            &fixture_client(),
+            &[&first, &second],
+            directory.path(),
+            None,
+            deadline,
+        )
+        .await;
+
+        server.abort();
+        let _ = server.await;
+        assert!(staged.is_empty());
+        assert_eq!(
+            requests.load(Ordering::SeqCst),
+            1,
+            "the expired shared deadline must prevent a second sequential caption request"
+        );
         assert_eq!(
             std::fs::read_dir(directory.path())
                 .expect("staging listing")

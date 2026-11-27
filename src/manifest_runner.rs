@@ -5675,13 +5675,11 @@ mod tests {
             "external captions must be a distinct FFmpeg input: {args:?}"
         );
         assert!(
-            args.windows(2)
-                .any(|pair| pair == ["-map", "1:s:0"]),
+            args.windows(2).any(|pair| pair == ["-map", "1:s:0"]),
             "external subtitle stream must be mapped: {args:?}"
         );
         assert!(
-            args.windows(2)
-                .any(|pair| pair == ["-c:s", "mov_text"]),
+            args.windows(2).any(|pair| pair == ["-c:s", "mov_text"]),
             "text captions must use MP4's mov_text codec: {args:?}"
         );
     }
@@ -5712,7 +5710,8 @@ mod tests {
             "external captions must be a distinct FFmpeg input: {args:?}"
         );
         assert!(
-            args.iter().any(|argument| argument == sidecar.to_string_lossy().as_ref()),
+            args.iter()
+                .any(|argument| argument == sidecar.to_string_lossy().as_ref()),
             "sidecar destination must be supplied to FFmpeg: {args:?}"
         );
         assert!(

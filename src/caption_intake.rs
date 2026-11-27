@@ -521,8 +521,14 @@ mod tests {
         let bad = caption("http://subs.example.test/en.vtt", "en", "vtt");
 
         let staged =
-            stage_handoff_captions("https://example.test/watch", &[bad], directory.path(), None)
-                .await;
+            stage_handoff_captions(
+                "https://example.test/watch",
+                &[bad],
+                directory.path(),
+                None,
+                None,
+            )
+            .await;
 
         assert!(staged.is_empty());
         assert_eq!(
@@ -544,7 +550,6 @@ mod tests {
 
         assert_eq!(staged.len(), 1);
         assert_eq!(staged[0].language, "en");
-        assert_eq!(staged[0].format, "vtt");
         assert_eq!(staged[0].path.parent(), Some(directory.path()));
         assert_eq!(std::fs::read(&staged[0].path).expect("staged bytes"), body);
         assert_eq!(

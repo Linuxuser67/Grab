@@ -871,7 +871,7 @@ mod tests {
     #[tokio::test]
     async fn caption_redirect_chain_is_limited_to_five_hops() {
         let redirect = b"HTTP/1.1 302 Found\\r\\nLocation: /caption\\r\\nContent-Length: 0\\r\\nConnection: close\\r\\n\\r\\n".to_vec();
-        let (url, server) = fixture_server(vec![redirect; MAX_CAPTION_REDIRECTS + 1]).await;
+        let (url, server) = fixture_server(vec![redirect; MAX_CAPTION_REDIRECTS + 2]).await;
         let client = fixture_client();
         let track = caption(&url, "en", "vtt");
 

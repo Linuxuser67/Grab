@@ -32,7 +32,7 @@ pub(crate) struct StagedCaption {
     pub(crate) format: String,
 }
 
-/// Fetch and stage every usable caption attached to a handoff.
+/// Fetch and stage the first usable caption attached to a handoff.
 ///
 /// `staging_dir` is the item's private XDG staging directory (created with
 /// owner-only permissions). Failures are soft: they are logged and omitted
@@ -92,8 +92,13 @@ fn caption_url_policy(caption: &Caption) -> Result<String, String> {
         .host_str()
         .ok_or_else(|| "caption URL has no host".to_string())?
         .to_owned();
-    if url.scheme() != "https" || !crate::download_net::is_public_destination_host(&host) {
-        return Err("caption URL is not a public HTTPS destination".to_string());
+    if url.scheme() != "https"
+        || !url.username().is_empty()
+        || url.password().is_some()
+        || host.is_empty()
+        || !crate::download_net::is_public_destination_host(&host)
+    {
+        return Err("caption URL is not a credential-free public HTTPS destination".to_string());
     }
     Ok(host)
 }
@@ -112,7 +117,13 @@ async fn stage_with_client(
     }
     for caption in captions {
         match stage_one(client, caption, staging_dir).await {
-            Ok(item) => staged.push(item),
+            Ok(item) => {
+                // Finalization selects one external track. Stop after the
+                // first usable candidate (the browser orders these by match
+                // quality) instead of downloading and retaining unused files.
+                staged.push(item);
+                break;
+            }
             Err(error) => tracing::warn!(
                 language = %caption.language,
                 error = %error,
@@ -151,6 +162,15 @@ async fn stage_one(
 
 async fn fetch_caption(client: &reqwest::Client, caption: &Caption) -> Result<Vec<u8>, String> {
     let requested = url::Url::parse(&caption.url).map_err(|error| error.to_string())?;
+    if requested.scheme() != "https"
+        || !requested.username().is_empty()
+        || requested.password().is_some()
+        || !requested
+            .host_str()
+            .is_some_and(crate::download_net::is_public_destination_host)
+    {
+        return Err("caption URL is not a credential-free public HTTPS destination".to_string());
+    }
     let mut headers = HeaderMap::new();
     for (name, value) in &caption.headers {
         if !ALLOWED_CAPTION_HEADERS.contains(&name.to_ascii_lowercase().as_str())
@@ -180,7 +200,9 @@ async fn fetch_caption(client: &reqwest::Client, caption: &Caption) -> Result<Ve
     // Recheck the landed URL so an injected client cannot silently bypass it.
     let landed = response.url();
     if landed != &requested
-        && (!matches!(landed.scheme(), "https")
+        && (landed.scheme() != "https"
+            || !landed.username().is_empty()
+            || landed.password().is_some()
             || !landed
                 .host_str()
                 .is_some_and(crate::download_net::is_public_destination_host))
@@ -214,6 +236,9 @@ fn valid_caption(bytes: &[u8], format: &str) -> bool {
 }
 
 fn valid_vtt(bytes: &[u8]) -> bool {
+    if std::str::from_utf8(bytes).is_err() {
+        return false;
+    }
     let body = bytes.strip_prefix(&[0xef, 0xbb, 0xbf]).unwrap_or(bytes);
     let body = body
         .iter()
@@ -263,9 +288,23 @@ fn valid_srt_time(value: &str) -> bool {
     else {
         return false;
     };
-    [hours, minutes, seconds, millis]
-        .iter()
-        .all(|part| !part.is_empty() && part.bytes().all(|byte| byte.is_ascii_digit()))
+    if hours.len() < 2
+        || minutes.len() != 2
+        || seconds.len() != 2
+        || millis.len() != 3
+        || [hours, minutes, seconds, millis]
+            .iter()
+            .any(|part| !part.bytes().all(|byte| byte.is_ascii_digit()))
+    {
+        return false;
+    }
+    let Ok(minutes) = minutes.parse::<u8>() else {
+        return false;
+    };
+    let Ok(seconds) = seconds.parse::<u8>() else {
+        return false;
+    };
+    minutes < 60 && seconds < 60
 }
 
 /// Single safe component: language from the validated metadata, a short
@@ -394,6 +433,8 @@ mod tests {
         assert!(!valid_srt(b"Just plain text without cues\n"));
         assert!(!valid_srt(b"1\nnot a timestamp\nHello\n"));
         assert!(!valid_srt(b"one\n00:00:01,000 --> 00:00:02,000\n"));
+        assert!(!valid_srt(b"1\n00:99:99,000 --> 00:00:02,000\n"));
+        assert!(!valid_srt(b"1\n0:00:01,00 --> 00:00:02,000\n"));
         assert!(!valid_srt(b""));
     }
 
@@ -425,6 +466,7 @@ mod tests {
     fn caption_url_policy_rejects_non_public_and_non_https_urls() {
         for url in [
             "http://subs.example.test/en.vtt",
+            "https://user:pass@subs.example.test/en.vtt",
             "https://127.0.0.1/en.vtt",
             "https://router/en.vtt",
             "file:///etc/passwd",
@@ -539,6 +581,29 @@ mod tests {
 
         assert_eq!(staged.len(), 1);
         assert_eq!(staged[0].language, "fr");
+        server.await.expect("fixture server");
+    }
+
+    #[tokio::test]
+    async fn stops_after_the_first_usable_caption() {
+        let (url, server) = fixture_server(vec![
+            response(b"WEBVTT\\n"),
+            response(b"WEBVTT\\n"),
+        ])
+        .await;
+        let directory = tempfile::tempdir().expect("staging dir");
+        let first = caption(&format!("{url}/first"), "en", "vtt");
+        let second = caption(&format!("{url}/second"), "fr", "vtt");
+
+        let staged = stage_with_client(
+            &fixture_client(),
+            &[&first, &second],
+            directory.path(),
+        )
+        .await;
+
+        assert_eq!(staged.len(), 1);
+        assert_eq!(staged[0].language, "en");
         server.await.expect("fixture server");
     }
 

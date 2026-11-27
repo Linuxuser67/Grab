@@ -84,6 +84,9 @@ mod imp {
         pub error_log: RefCell<String>,
         /// Optional multi-item source collection shared by this child row.
         pub(crate) group: RefCell<Option<DownloadGroup>>,
+        /// Session-only external caption candidates supplied for this exact queue row.
+        /// Deliberately not a GLib property or part of queue persistence.
+        pub(crate) handoff_captions: RefCell<Vec<crate::extension_server::Caption>>,
     }
 
     impl DownloadItem {
@@ -107,6 +110,20 @@ glib::wrapper! {
 }
 
 impl DownloadItem {
+    /// Attach optional browser caption candidates to this exact queue row.
+    /// These remain in memory across pause/resume but are never persisted.
+    pub(crate) fn set_handoff_captions(
+        &self,
+        captions: Vec<crate::extension_server::Caption>,
+    ) {
+        self.imp().handoff_captions.replace(captions);
+    }
+
+    /// Copy the row's transient caption candidates into a new attempt.
+    pub(crate) fn handoff_captions(&self) -> Vec<crate::extension_server::Caption> {
+        self.imp().handoff_captions.borrow().clone()
+    }
+
     /// Return the normalized source origin, or None when no source is attached.
     pub(crate) fn referer_opt(&self) -> Option<String> {
         let referer = self.referer();

@@ -83,6 +83,12 @@ const EXTENSION_CONNECTION_TIMEOUT: Duration = Duration::from_secs(180);
 /// alone does not bound dialogs: the GTK thread drains it into one dialog per
 /// request. Kept well below the queue so a flood cannot bury the user.
 const MAX_PENDING_CONFIRMATIONS: usize = 8;
+/// Optional browser-supplied subtitle tracks paired with a handoff URL.
+const MAX_CAPTIONS: usize = 4;
+const MAX_CAPTION_URL_BYTES: usize = 2048;
+const MAX_CAPTION_HEADERS: usize = 16;
+const MAX_CAPTION_HEADER_BYTES: usize = 8192;
+const MAX_CAPTION_LANGUAGE_BYTES: usize = 35;
 
 // --- Pairing ---------------------------------------------------------------
 
@@ -1396,6 +1402,79 @@ fn validated_referer(raw: Option<String>) -> Option<String> {
     raw.as_deref().and_then(crate::referrer::origin_only)
 }
 
+/// Validate browser-supplied caption metadata at the `/add` boundary. Only
+/// rejection statuses escape: header values must never reach a log.
+fn validated_captions(raw: Vec<Caption>) -> Result<Vec<Caption>, StatusCode> {
+    if raw.len() > MAX_CAPTIONS {
+        return Err(StatusCode::BAD_REQUEST);
+    }
+    let mut captions = Vec::with_capacity(raw.len());
+    for mut caption in raw {
+        if caption.url.len() > MAX_CAPTION_URL_BYTES {
+            return Err(StatusCode::BAD_REQUEST);
+        }
+        let Ok(url) = url::Url::parse(&caption.url) else {
+            return Err(StatusCode::BAD_REQUEST);
+        };
+        let Some(host) = url.host_str() else {
+            return Err(StatusCode::BAD_REQUEST);
+        };
+        // Same public-only guard as other untrusted handoff destinations;
+        // DNS names that resolve to private addresses are filtered at connect
+        // time by the guarded resolver used for the eventual fetch.
+        if url.scheme() != "https"
+            || host.is_empty()
+            || !crate::download_net::is_public_destination_host(host)
+        {
+            return Err(StatusCode::BAD_REQUEST);
+        }
+
+        if caption.headers.len() > MAX_CAPTION_HEADERS {
+            return Err(StatusCode::BAD_REQUEST);
+        }
+        let mut header_bytes = 0usize;
+        for (name, value) in &caption.headers {
+            if !matches!(
+                name.to_ascii_lowercase().as_str(),
+                "referer" | "origin" | "accept-language" | "authorization"
+            ) {
+                return Err(StatusCode::BAD_REQUEST);
+            }
+            header_bytes += name.len() + value.len();
+        }
+        if header_bytes > MAX_CAPTION_HEADER_BYTES {
+            return Err(StatusCode::BAD_REQUEST);
+        }
+
+        if caption.language.len() > MAX_CAPTION_LANGUAGE_BYTES
+            || !caption
+                .language
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-')
+        {
+            return Err(StatusCode::BAD_REQUEST);
+        }
+        if caption.language.is_empty() {
+            caption.language = "und".to_owned();
+        }
+        if !matches!(caption.format.to_ascii_lowercase().as_str(), "vtt" | "srt") {
+            return Err(StatusCode::BAD_REQUEST);
+        }
+        captions.push(caption);
+    }
+    Ok(captions)
+}
+
+/// One optional caption track supplied by a paired browser extension.
+/// `headers` is a list of name/value pairs from the extension's JSON array.
+#[derive(Clone, Debug, Deserialize)]
+pub(crate) struct Caption {
+    pub(crate) url: String,
+    pub(crate) headers: Vec<(String, String)>,
+    pub(crate) language: String,
+    pub(crate) format: String,
+}
+
 #[derive(Deserialize)]
 struct AddRequest {
     url: String,
@@ -1413,6 +1492,9 @@ struct AddRequest {
     /// Browser UA; `cf_clearance` is UA-bound, so it travels with the cookies.
     #[serde(default)]
     user_agent: Option<String>,
+    /// Optional caption tracks; unknown to older clients and ignored by them.
+    #[serde(default)]
+    captions: Vec<Caption>,
 }
 
 /// A URL handed off from the extension. Cookies (if any) are stored
@@ -1456,6 +1538,11 @@ pub(crate) struct Handoff {
     /// current replay metadata. Unpaired callers are forced to confirm even
     /// when the user enabled auto-add.
     pub authenticated: bool,
+    /// Optional caption tracks, validated at the `/add` boundary. Carried to
+    /// the GTK side without fetching or finalizing them in this layer.
+    /// Consumed by the caption intake/finalization slices.
+    #[allow(dead_code)]
+    pub captions: Vec<Caption>,
     /// GTK closes the dialog at this instant, so it cannot outlive the
     /// server's confirmation window.
     pub expires_at: Option<Instant>,
@@ -1933,6 +2020,15 @@ async fn handle_add(
     if req.cookies.len() > 100 {
         return StatusCode::BAD_REQUEST.into_response();
     }
+    // Captions are an additive extension feature: only a paired caller may
+    // supply them. Reject before consuming a nonce so a rejected body can be
+    // retried with the same signed metadata.
+    if !req.captions.is_empty() && !token_authenticated {
+        return StatusCode::FORBIDDEN.into_response();
+    }
+    let Ok(captions) = validated_captions(req.captions) else {
+        return StatusCode::BAD_REQUEST.into_response();
+    };
     // A pairing token authenticates a handoff only when its freshness and
     // single-use nonce metadata also pass validation. Missing or malformed
     // replay metadata fails closed instead of downgrading the paired request.
@@ -1984,6 +2080,7 @@ async fn handle_add(
         referer: validated_referer(req.referer),
         decision,
         authenticated,
+        captions,
         expires_at: wait.then(|| Instant::now() + st.confirm_wait),
     };
     // Stage before queuing: the GTK side may start a probe the moment the
@@ -4561,5 +4658,195 @@ mod tests {
         let (status, discard) = handoff_outcome_response(&HandoffOutcome::Failed);
         assert_eq!(status, axum::http::StatusCode::CONFLICT);
         assert!(discard);
+    }
+
+    // --- Optional caption handoff ------------------------------------------
+
+    fn caption() -> serde_json::Value {
+        serde_json::json!({
+            "url": "https://subs.example.test/en.vtt",
+            "headers": [["Referer", "https://example.test/watch"]],
+            "language": "en",
+            "format": "vtt",
+        })
+    }
+
+    fn body_with_captions(captions: serde_json::Value) -> String {
+        static NEXT_CAPTION_NONCE: std::sync::atomic::AtomicU64 =
+            std::sync::atomic::AtomicU64::new(1);
+        let timestamp_ms = unix_time_ms().expect("system clock");
+        let nonce = NEXT_CAPTION_NONCE.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        serde_json::json!({
+            "url": "https://example.com/file.zip",
+            "timestamp_ms": timestamp_ms,
+            "nonce": format!("{nonce:032x}"),
+            "captions": captions,
+        })
+        .to_string()
+    }
+
+    async fn signed_add(port: u16, host: &str, body: &str) -> String {
+        let tok = token(body);
+        request(port, &[("Host", host), ("X-Grab-Token", &tok), JSON], body).await
+    }
+
+    #[test]
+    fn old_add_body_without_captions_still_parses() {
+        let old: AddRequest = serde_json::from_str(BODY).expect("legacy /add body");
+        assert!(old.captions.is_empty());
+        let unknown: AddRequest = serde_json::from_str(
+            r#"{"url":"https://example.com/file.zip","captions":[],"future_field":true}"#,
+        )
+        .expect("unknown fields must remain acceptable");
+        assert!(unknown.captions.is_empty());
+    }
+
+    #[tokio::test]
+    async fn unpaired_captions_are_rejected() {
+        let _g = exclusive();
+        let mut srv = start(4).await;
+        let host = format!("127.0.0.1:{}", srv.port);
+        let body = body_with_captions(serde_json::json!([caption()]));
+        let r = request(srv.port, &[("Host", &host), JSON], &body).await;
+        assert_eq!(status(&r), "403", "{r}");
+        assert!(
+            srv.rx.try_recv().is_err(),
+            "unpaired captions must never reach the GTK queue"
+        );
+    }
+
+    #[tokio::test]
+    async fn too_many_captions_are_rejected() {
+        let _g = exclusive();
+        let mut srv = start(4).await;
+        let host = format!("127.0.0.1:{}", srv.port);
+        let body = body_with_captions(serde_json::json!([
+            caption(),
+            caption(),
+            caption(),
+            caption(),
+            caption(),
+        ]));
+        let r = signed_add(srv.port, &host, &body).await;
+        assert_eq!(status(&r), "400", "{r}");
+        assert!(srv.rx.try_recv().is_err());
+    }
+
+    #[tokio::test]
+    async fn non_https_caption_url_is_rejected() {
+        let _g = exclusive();
+        let mut srv = start(4).await;
+        let host = format!("127.0.0.1:{}", srv.port);
+        let mut bad = caption();
+        bad["url"] = serde_json::json!("http://subs.example.test/en.vtt");
+        let body = body_with_captions(serde_json::json!([bad]));
+        let r = signed_add(srv.port, &host, &body).await;
+        assert_eq!(status(&r), "400", "{r}");
+        assert!(srv.rx.try_recv().is_err());
+    }
+
+    #[tokio::test]
+    async fn private_caption_host_is_rejected() {
+        let _g = exclusive();
+        let mut srv = start(4).await;
+        let host = format!("127.0.0.1:{}", srv.port);
+        for url in ["https://127.0.0.1/en.vtt", "https://router/en.vtt"] {
+            let mut bad = caption();
+            bad["url"] = serde_json::json!(url);
+            let body = body_with_captions(serde_json::json!([bad]));
+            let r = signed_add(srv.port, &host, &body).await;
+            assert_eq!(status(&r), "400", "{url}: {r}");
+        }
+        assert!(srv.rx.try_recv().is_err());
+    }
+
+    #[tokio::test]
+    async fn disallowed_caption_header_is_rejected() {
+        let _g = exclusive();
+        let mut srv = start(4).await;
+        let host = format!("127.0.0.1:{}", srv.port);
+        let mut bad = caption();
+        bad["headers"] =
+            serde_json::json!([["Referer", "https://example.test/watch"], ["X-Evil", "1"],]);
+        let body = body_with_captions(serde_json::json!([bad]));
+        let r = signed_add(srv.port, &host, &body).await;
+        assert_eq!(status(&r), "400", "{r}");
+        assert!(srv.rx.try_recv().is_err());
+    }
+
+    #[tokio::test]
+    async fn caption_limits_are_enforced() {
+        let _g = exclusive();
+        let mut srv = start(4).await;
+        let host = format!("127.0.0.1:{}", srv.port);
+        let mut cases = Vec::new();
+
+        let mut too_long_url = caption();
+        too_long_url["url"] =
+            serde_json::json!(format!("https://subs.example.test/{}", "a".repeat(2100)));
+        cases.push(too_long_url);
+
+        let mut too_many_headers = caption();
+        let many_headers: Vec<[String; 2]> = (1..=MAX_CAPTION_HEADERS + 1)
+            .map(|n| ["Referer".to_owned(), n.to_string()])
+            .collect();
+        too_many_headers["headers"] = serde_json::json!(many_headers);
+        cases.push(too_many_headers);
+
+        let mut oversized_headers = caption();
+        oversized_headers["headers"] =
+            serde_json::json!([["Referer", "x".repeat(MAX_CAPTION_HEADER_BYTES)]]);
+        cases.push(oversized_headers);
+
+        let mut long_language = caption();
+        long_language["language"] = serde_json::json!("a".repeat(MAX_CAPTION_LANGUAGE_BYTES + 1));
+        cases.push(long_language);
+
+        let mut bad_language = caption();
+        bad_language["language"] = serde_json::json!("en_US");
+        cases.push(bad_language);
+
+        let mut bad_format = caption();
+        bad_format["format"] = serde_json::json!("txt");
+        cases.push(bad_format);
+
+        for bad in cases {
+            let body = body_with_captions(serde_json::json!([bad]));
+            let r = signed_add(srv.port, &host, &body).await;
+            assert_eq!(status(&r), "400", "{r}");
+        }
+        assert!(srv.rx.try_recv().is_err());
+    }
+
+    #[tokio::test]
+    async fn valid_captions_are_accepted_and_preserved() {
+        let _g = exclusive();
+        let mut srv = start(4).await;
+        let host = format!("127.0.0.1:{}", srv.port);
+        let second = serde_json::json!({
+            "url": "https://subs.example.test/fr.srt",
+            "headers": [],
+            "language": "",
+            "format": "SRT",
+        });
+        let body = body_with_captions(serde_json::json!([caption(), second]));
+        let r = signed_add(srv.port, &host, &body).await;
+        assert_eq!(status(&r), "200", "{r}");
+        let handoff = srv.rx.recv().await.expect("handoff");
+        assert!(handoff.authenticated);
+        assert_eq!(handoff.captions.len(), 2);
+        assert_eq!(handoff.captions[0].url, "https://subs.example.test/en.vtt");
+        assert_eq!(handoff.captions[0].headers.len(), 1);
+        assert_eq!(handoff.captions[0].headers[0].0, "Referer");
+        assert_eq!(
+            handoff.captions[0].headers[0].1,
+            "https://example.test/watch"
+        );
+        assert_eq!(handoff.captions[0].language, "en");
+        assert_eq!(handoff.captions[0].format, "vtt");
+        assert_eq!(handoff.captions[1].url, "https://subs.example.test/fr.srt");
+        assert!(handoff.captions[1].headers.is_empty());
+        assert_eq!(handoff.captions[1].language, "und");
+        assert_eq!(handoff.captions[1].format, "SRT");
     }
 }

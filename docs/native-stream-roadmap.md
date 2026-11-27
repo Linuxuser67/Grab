@@ -26,10 +26,10 @@ variants and external audio/subtitle renditions; static VOD and EVENT media
 playlists; ordinary non-low-latency live capture; MPEG-TS and fragmented-MP4
 media with initialization maps; explicit and valid implicit byte ranges;
 discontinuities; and identity AES-128 keys (including key rotation and
-`METHOD=NONE` resets). Master-playlist
-`EXT-X-SESSION-KEY` hints are accepted only for AES-128 with an explicit or
-implicit identity key format; Grab never fetches or substitutes these hints for
-the selected media playlist's authoritative `EXT-X-KEY`.
+`METHOD=NONE` resets). Master-playlist `EXT-X-SESSION-KEY` hints are accepted
+only for AES-128 with an explicit or implicit identity key format; Grab never
+fetches or substitutes these hints for the selected media playlist's
+authoritative `EXT-X-KEY`.
 
 When a selected variant uses a separate audio rendition, Grab passes the
 video and audio media playlists as separate FFmpeg inputs and uses `-copyts`

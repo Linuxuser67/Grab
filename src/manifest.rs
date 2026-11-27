@@ -4495,6 +4495,29 @@ one.ts
     }
 
     #[test]
+    fn rejects_sample_aes_in_live_and_staged_playlists() {
+        let live = b"#EXTM3U\n#EXT-X-TARGETDURATION:4\n#EXT-X-MEDIA-SEQUENCE:7\n#EXT-X-KEY:METHOD=SAMPLE-AES,URI=\"key.bin\"\n#EXTINF:2,\none.ts\n";
+        assert_eq!(
+            plan_hls_media_playlist(BASE_URL, live).err(),
+            Some(ManifestError::UnsupportedEncryption)
+        );
+
+        let staged = br#"#EXTM3U
+#EXT-X-TARGETDURATION:4
+#EXT-X-PLAYLIST-TYPE:VOD
+#EXT-X-MEDIA-SEQUENCE:42
+#EXT-X-KEY:METHOD=SAMPLE-AES,URI="key.bin"
+#EXTINF:2,
+one.ts
+#EXT-X-ENDLIST
+"#;
+        assert_eq!(
+            HlsLiveAccumulator::from_local_playlist_bytes(staged).err(),
+            Some(ManifestError::UnsupportedEncryption)
+        );
+    }
+
+    #[test]
     fn same_origin_query_inheritance_preserves_encoding_and_child_overrides() {
         let parent = Url::parse(
             "https://cdn.example.test/master.m3u8?t=opaque&s=parent%2Fsignature&e=86400",

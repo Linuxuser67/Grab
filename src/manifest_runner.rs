@@ -58,6 +58,7 @@ pub(super) fn staged_resource_size_ok(
         && range.is_none_or(|range| size == range.length)
         && (!is_key || size == 16)
 }
+
 /// Aggregate resource ceiling, matching the regular segmented downloader's 1 TiB trust limit.
 const MAX_MANIFEST_DOWNLOAD_BYTES: u64 = crate::manifest_types::MAX_MANIFEST_TOTAL_BYTES;
 /// Idle budget for receiving a response body; progressing transfers are not wall-clock limited.

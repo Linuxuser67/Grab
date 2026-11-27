@@ -870,12 +870,10 @@ mod tests {
         let (source_url, source_server) = fixture_server(vec![redirect]).await;
         let client = fixture_client();
         let mut track = caption(&source_url, "en", "vtt");
-        track.headers = vec![
-            (
-                "Origin".to_string(),
-                "https://player.example.test".to_string(),
-            ),
-        ];
+        track.headers = vec![(
+            "Origin".to_string(),
+            "https://player.example.test".to_string(),
+        )];
         let directory = tempfile::tempdir().expect("staging dir");
 
         let staged = stage_with_client_and_referer(
@@ -917,12 +915,10 @@ mod tests {
         let (url, server) = fixture_server(vec![redirect, response(b"WEBVTT\n")]).await;
         let client = fixture_client();
         let mut track = caption(&format!("{url}/start"), "en", "vtt");
-        track.headers = vec![
-            (
-                "Origin".to_string(),
-                "http://player.example.test".to_string(),
-            ),
-        ];
+        track.headers = vec![(
+            "Origin".to_string(),
+            "http://player.example.test".to_string(),
+        )];
         let directory = tempfile::tempdir().expect("staging dir");
 
         let staged = stage_with_client_and_referer(
@@ -986,12 +982,10 @@ mod tests {
             .build()
             .expect("fixture client with jar");
         let mut track = caption(&url, "en", "vtt");
-        track.headers = vec![
-            (
-                "Referer".to_string(),
-                "https://example.test/watch".to_string(),
-            ),
-        ];
+        track.headers = vec![(
+            "Referer".to_string(),
+            "https://example.test/watch".to_string(),
+        )];
         let directory = tempfile::tempdir().expect("staging dir");
 
         let staged = stage_with_client(&client, &[&track], directory.path()).await;

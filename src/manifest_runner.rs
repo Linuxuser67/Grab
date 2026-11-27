@@ -5580,6 +5580,7 @@ mod tests {
     async fn run_ffmpeg_recording_args(
         ffmpeg: &Path,
         output: &Path,
+        audio_input: Option<&Path>,
         subtitles: SubtitleOutput<'_>,
     ) -> Vec<String> {
         // Finish waits for the fake child to exit, making its captured args deterministic.
@@ -5593,7 +5594,10 @@ mod tests {
                 path: Path::new("video.m3u8"),
                 timestamp_offset: None,
             },
-            None,
+            audio_input.map(|path| FfmpegInput {
+                path,
+                timestamp_offset: None,
+            }),
             InputTimestampPolicy::Normalize,
             subtitles,
             output,
@@ -5657,7 +5661,7 @@ mod tests {
         let directory = tempfile::tempdir().expect("create FFmpeg argument test directory");
         let ffmpeg = fake_ffmpeg_recording_arguments(directory.path());
         let output = directory.path().join("output.mp4");
-        let args = run_ffmpeg_recording_args(&ffmpeg, &output, SubtitleOutput::default()).await;
+        let args = run_ffmpeg_recording_args(&ffmpeg, &output, None, SubtitleOutput::default()).await;
 
         assert!(
             args.windows(2)
@@ -5690,6 +5694,7 @@ mod tests {
         let embedded_fmp4 = run_ffmpeg_recording_args(
             &ffmpeg,
             &output,
+            None,
             SubtitleOutput {
                 input: Some(Path::new("subtitles.m3u8")),
                 embed: true,
@@ -5714,6 +5719,7 @@ mod tests {
         let preserved_sidecar = run_ffmpeg_recording_args(
             &ffmpeg,
             &output,
+            None,
             SubtitleOutput {
                 input: Some(Path::new("subtitles.m3u8")),
                 embed: false,
@@ -5744,6 +5750,7 @@ mod tests {
         let webvtt = run_ffmpeg_recording_args(
             &ffmpeg,
             &output,
+            None,
             SubtitleOutput {
                 input: Some(Path::new("subtitles.m3u8")),
                 embed: true,
@@ -5758,7 +5765,7 @@ mod tests {
         );
 
         let in_band_captions =
-            run_ffmpeg_recording_args(&ffmpeg, &output, SubtitleOutput::default()).await;
+            run_ffmpeg_recording_args(&ffmpeg, &output, None, SubtitleOutput::default()).await;
         assert!(
             in_band_captions
                 .windows(2)
@@ -5788,6 +5795,7 @@ mod tests {
         let args = run_ffmpeg_recording_args(
             &ffmpeg,
             &output,
+            Some(Path::new("audio.m3u8")),
             SubtitleOutput {
                 input: Some(Path::new("subtitles.m3u8")),
                 embed: true,
@@ -5796,6 +5804,8 @@ mod tests {
             },
         )
         .await;
+        let input_count = args.iter().filter(|argument| argument.as_str() == "-i").count();
+        assert_eq!(input_count, 3, "exercise video, audio, and subtitle inputs: {args:?}");
         let last_input = args
             .iter()
             .rposition(|argument| argument == "-i")
@@ -5807,6 +5817,14 @@ mod tests {
         assert!(
             last_input < first_map,
             "FFmpeg -map is an output option and must follow every -i: {args:?}"
+        );
+        let subtitle_map = args
+            .windows(2)
+            .position(|pair| pair == ["-map", "2:s:0"])
+            .expect("subtitle input must map from the third input");
+        assert!(
+            last_input < subtitle_map,
+            "the third-input subtitle map must also follow every -i: {args:?}"
         );
     }
 

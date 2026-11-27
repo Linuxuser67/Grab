@@ -1541,7 +1541,6 @@ pub(crate) struct Handoff {
     /// Optional caption tracks, validated at the `/add` boundary. Carried to
     /// the GTK side without fetching or finalizing them in this layer.
     /// Consumed by the caption intake/finalization slices.
-    #[allow(dead_code)]
     pub captions: Vec<Caption>,
     /// GTK closes the dialog at this instant, so it cannot outlive the
     /// server's confirmation window.

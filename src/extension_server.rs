@@ -1404,67 +1404,81 @@ fn validated_referer(raw: Option<String>) -> Option<String> {
 
 /// Validate browser-supplied caption metadata at the `/add` boundary. Only
 /// rejection statuses escape: header values must never reach a log.
-fn validated_captions(raw: Vec<Caption>) -> Result<Vec<Caption>, StatusCode> {
+fn validated_captions(raw: Vec<serde_json::Value>) -> Result<Vec<Caption>, StatusCode> {
     if raw.len() > MAX_CAPTIONS {
         return Err(StatusCode::BAD_REQUEST);
     }
     let mut captions = Vec::with_capacity(raw.len());
-    for mut caption in raw {
-        if caption.url.len() > MAX_CAPTION_URL_BYTES {
-            return Err(StatusCode::BAD_REQUEST);
-        }
-        let Ok(url) = url::Url::parse(&caption.url) else {
-            return Err(StatusCode::BAD_REQUEST);
-        };
-        let Some(host) = url.host_str() else {
-            return Err(StatusCode::BAD_REQUEST);
-        };
-        // Same public-only guard as other untrusted handoff destinations;
-        // DNS names that resolve to private addresses are filtered at connect
-        // time by the guarded resolver used for the eventual fetch.
-        if url.scheme() != "https"
-            || host.is_empty()
-            || !crate::download_net::is_public_destination_host(host)
-        {
-            return Err(StatusCode::BAD_REQUEST);
-        }
-
-        if caption.headers.len() > MAX_CAPTION_HEADERS {
-            return Err(StatusCode::BAD_REQUEST);
-        }
-        let mut header_bytes = 0usize;
-        for (name, value) in &caption.headers {
-            if !matches!(
-                name.to_ascii_lowercase().as_str(),
-                "referer" | "origin" | "accept-language" | "authorization"
-            ) {
-                return Err(StatusCode::BAD_REQUEST);
+    for (index, value) in raw.into_iter().enumerate() {
+        let mut caption: Caption = match serde_json::from_value(value) {
+            Ok(caption) => caption,
+            Err(_) => {
+                tracing::warn!(
+                    caption_index = index,
+                    reason = "invalid_shape",
+                    "ignoring invalid browser caption"
+                );
+                continue;
             }
-            header_bytes += name.len() + value.len();
-        }
-        if header_bytes > MAX_CAPTION_HEADER_BYTES {
-            return Err(StatusCode::BAD_REQUEST);
-        }
-
-        if caption.language.len() > MAX_CAPTION_LANGUAGE_BYTES
-            || !caption
-                .language
-                .bytes()
-                .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-')
-        {
-            return Err(StatusCode::BAD_REQUEST);
+        };
+        let invalid_reason = if caption.url.len() > MAX_CAPTION_URL_BYTES {
+            Some("url_too_long")
+        } else if let Ok(url) = url::Url::parse(&caption.url) {
+            let host = url.host_str().unwrap_or_default();
+            if url.scheme() != "https"
+                || !url.username().is_empty()
+                || url.password().is_some()
+                || host.is_empty()
+                || !crate::download_net::is_public_destination_host(host)
+            {
+                Some("unsafe_url")
+            } else if caption.headers.len() > MAX_CAPTION_HEADERS {
+                Some("too_many_headers")
+            } else if caption.headers.iter().any(|(name, _)| {
+                !matches!(
+                    name.to_ascii_lowercase().as_str(),
+                    "referer" | "origin" | "accept-language" | "authorization"
+                )
+            }) {
+                Some("disallowed_header")
+            } else if caption
+                .headers
+                .iter()
+                .map(|(name, value)| name.len() + value.len())
+                .sum::<usize>()
+                > MAX_CAPTION_HEADER_BYTES
+            {
+                Some("headers_too_large")
+            } else if caption.language.len() > MAX_CAPTION_LANGUAGE_BYTES
+                || !caption
+                    .language
+                    .bytes()
+                    .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-')
+            {
+                Some("invalid_language")
+            } else if !matches!(caption.format.to_ascii_lowercase().as_str(), "vtt" | "srt") {
+                Some("unsupported_format")
+            } else {
+                None
+            }
+        } else {
+            Some("invalid_url")
+        };
+        if let Some(reason) = invalid_reason {
+            tracing::warn!(
+                caption_index = index,
+                reason,
+                "ignoring invalid browser caption"
+            );
+            continue;
         }
         if caption.language.is_empty() {
             caption.language = "und".to_owned();
-        }
-        if !matches!(caption.format.to_ascii_lowercase().as_str(), "vtt" | "srt") {
-            return Err(StatusCode::BAD_REQUEST);
         }
         captions.push(caption);
     }
     Ok(captions)
 }
-
 /// One optional caption track supplied by a paired browser extension.
 /// `headers` is a list of name/value pairs from the extension's JSON array.
 #[derive(Clone, Debug, Deserialize)]
@@ -1494,7 +1508,7 @@ struct AddRequest {
     user_agent: Option<String>,
     /// Optional caption tracks; unknown to older clients and ignored by them.
     #[serde(default)]
-    captions: Vec<Caption>,
+    captions: Vec<serde_json::Value>,
 }
 
 /// A URL handed off from the extension. Cookies (if any) are stored
@@ -1989,22 +2003,17 @@ async fn handle_add(
     if !is_json_content_type(&headers) {
         return StatusCode::UNSUPPORTED_MEDIA_TYPE.into_response();
     }
-    // A token, when sent, must verify: a stale pairing is an error the
-    // extension should see, not something to quietly downgrade.
-    let token_authenticated = match headers.get("x-grab-token") {
-        None => false,
-        Some(token) => {
-            let valid = st
-                .pairing
-                .as_ref()
-                .zip(token.to_str().ok())
-                .is_some_and(|(p, t)| p.verify_token(&body, t));
-            if !valid {
-                return StatusCode::FORBIDDEN.into_response();
-            }
-            true
-        }
-    };
+    // Invalid or stale pairing falls back to the confirmation-only path. It
+    // never authorizes cookies or optional caption metadata.
+    let token_authenticated = headers.get("x-grab-token").is_some_and(|token| {
+        st.pairing
+            .as_ref()
+            .zip(token.to_str().ok())
+            .is_some_and(|(pairing, token)| pairing.verify_token(&body, token))
+    });
+    if headers.contains_key("x-grab-token") && !token_authenticated {
+        tracing::warn!("extension handoff authentication failed; requiring confirmation");
+    }
     let req: AddRequest = match serde_json::from_slice(&body) {
         Ok(r) => r,
         Err(e) if e.is_data() => return StatusCode::UNPROCESSABLE_ENTITY.into_response(),
@@ -2020,24 +2029,28 @@ async fn handle_add(
     if req.cookies.len() > 100 {
         return StatusCode::BAD_REQUEST.into_response();
     }
-    // Captions are an additive extension feature: only a paired caller may
-    // supply them. Reject before consuming a nonce so a rejected body can be
-    // retried with the same signed metadata.
-    if !req.captions.is_empty() && !token_authenticated {
-        return StatusCode::FORBIDDEN.into_response();
-    }
-    let Ok(captions) = validated_captions(req.captions) else {
+    // Enforce the request-level caption count limit, but treat each track as
+    // optional: malformed or unsafe entries are discarded independently.
+    let Ok(mut captions) = validated_captions(req.captions) else {
         return StatusCode::BAD_REQUEST.into_response();
     };
-    // A pairing token authenticates a handoff only when its freshness and
-    // single-use nonce metadata also pass validation. Missing or malformed
-    // replay metadata fails closed instead of downgrading the paired request.
-    if token_authenticated
-        && let Err(status) = reserve_handoff_nonce(req.timestamp_ms, req.nonce.as_deref())
-    {
-        return status.into_response();
+    // A pairing token is trusted only when freshness and single-use replay
+    // checks pass. Otherwise process this as an unpaired URL handoff, requiring
+    // explicit confirmation and discarding all browser-supplied metadata.
+    let authenticated = token_authenticated
+        && match reserve_handoff_nonce(req.timestamp_ms, req.nonce.as_deref()) {
+            Ok(()) => true,
+            Err(status) => {
+                tracing::warn!(
+                    status = %status,
+                    "extension handoff replay metadata invalid; requiring confirmation"
+                );
+                false
+            }
+        };
+    if !authenticated {
+        captions.clear();
     }
-    let authenticated = token_authenticated;
     // Register as soon as the authenticated request is validated. Later
     // cookieless handoffs must see this older request before its async write.
     let cookie_stage_registration = if authenticated && !req.cookies.is_empty() {
@@ -4702,17 +4715,87 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn unpaired_captions_are_rejected() {
+    async fn unpaired_captions_are_dropped_without_blocking_url_handoff() {
         let _g = exclusive();
         let mut srv = start(4).await;
         let host = format!("127.0.0.1:{}", srv.port);
         let body = body_with_captions(serde_json::json!([caption()]));
-        let r = request(srv.port, &[("Host", &host), JSON], &body).await;
-        assert_eq!(status(&r), "403", "{r}");
-        assert!(
-            srv.rx.try_recv().is_err(),
-            "unpaired captions must never reach the GTK queue"
-        );
+        let (port, request_host) = (srv.port, host.clone());
+        let task = tokio::spawn(async move {
+            request_to(port, "POST", "/add", &[("Host", &request_host), JSON], &body).await
+        });
+        let handoff = srv.rx.recv().await.expect("URL handoff");
+        assert_eq!(handoff.url, "https://example.com/file.zip");
+        assert!(!handoff.authenticated);
+        assert!(handoff.captions.is_empty());
+        handoff
+            .decision
+            .expect("unpaired handoff requires confirmation")
+            .send(HandoffOutcome::Queued)
+            .unwrap();
+        assert_eq!(status(&task.await.unwrap()), "200");
+    }
+
+    #[tokio::test]
+    async fn invalid_pairing_token_falls_back_to_confirmation_without_captions() {
+        let _g = exclusive();
+        let mut srv = start(4).await;
+        let host = format!("127.0.0.1:{}", srv.port);
+        let body = body_with_captions(serde_json::json!([caption()]));
+        let (port, request_host) = (srv.port, host.clone());
+        let task = tokio::spawn(async move {
+            request_to(
+                port,
+                "POST",
+                "/add",
+                &[("Host", &request_host), ("X-Grab-Token", "invalid-token"), JSON],
+                &body,
+            )
+            .await
+        });
+        let handoff = srv.rx.recv().await.expect("URL handoff");
+        assert!(!handoff.authenticated);
+        assert!(handoff.captions.is_empty());
+        handoff
+            .decision
+            .expect("invalid token must require confirmation")
+            .send(HandoffOutcome::Queued)
+            .unwrap();
+        assert_eq!(status(&task.await.unwrap()), "200");
+    }
+
+    #[tokio::test]
+    async fn stale_replay_metadata_falls_back_to_confirmation_without_captions() {
+        let _g = exclusive();
+        let mut srv = start(4).await;
+        let host = format!("127.0.0.1:{}", srv.port);
+        let body = serde_json::json!({
+            "url": "https://example.com/file.zip",
+            "timestamp_ms": 1,
+            "nonce": "00000000000000000000000000000001",
+            "captions": [caption()],
+        }).to_string();
+        let token_value = token(&body);
+        let (port, request_host) = (srv.port, host.clone());
+        let task = tokio::spawn(async move {
+            request_to(
+                port,
+                "POST",
+                "/add",
+                &[("Host", &request_host), ("X-Grab-Token", &token_value), JSON],
+                &body,
+            )
+            .await
+        });
+        let handoff = srv.rx.recv().await.expect("URL handoff");
+        assert!(!handoff.authenticated);
+        assert!(handoff.captions.is_empty());
+        handoff
+            .decision
+            .expect("stale authentication must require confirmation")
+            .send(HandoffOutcome::Queued)
+            .unwrap();
+        assert_eq!(status(&task.await.unwrap()), "200");
     }
 
     #[tokio::test]
@@ -4733,7 +4816,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn non_https_caption_url_is_rejected() {
+    async fn non_https_caption_is_ignored_for_media_handoff() {
         let _g = exclusive();
         let mut srv = start(4).await;
         let host = format!("127.0.0.1:{}", srv.port);
@@ -4741,12 +4824,14 @@ mod tests {
         bad["url"] = serde_json::json!("http://subs.example.test/en.vtt");
         let body = body_with_captions(serde_json::json!([bad]));
         let r = signed_add(srv.port, &host, &body).await;
-        assert_eq!(status(&r), "400", "{r}");
-        assert!(srv.rx.try_recv().is_err());
+        assert_eq!(status(&r), "200", "{r}");
+        let handoff = srv.rx.recv().await.expect("media handoff");
+        assert_eq!(handoff.url, "https://example.com/file.zip");
+        assert!(handoff.captions.is_empty());
     }
 
     #[tokio::test]
-    async fn private_caption_host_is_rejected() {
+    async fn private_caption_hosts_are_ignored_without_rejecting_media() {
         let _g = exclusive();
         let mut srv = start(4).await;
         let host = format!("127.0.0.1:{}", srv.port);
@@ -4755,13 +4840,15 @@ mod tests {
             bad["url"] = serde_json::json!(url);
             let body = body_with_captions(serde_json::json!([bad]));
             let r = signed_add(srv.port, &host, &body).await;
-            assert_eq!(status(&r), "400", "{url}: {r}");
+            assert_eq!(status(&r), "200", "{url}: {r}");
+            let handoff = srv.rx.recv().await.expect("media handoff");
+            assert_eq!(handoff.url, "https://example.com/file.zip");
+            assert!(handoff.captions.is_empty(), "unsafe caption must be dropped");
         }
-        assert!(srv.rx.try_recv().is_err());
     }
 
     #[tokio::test]
-    async fn disallowed_caption_header_is_rejected() {
+    async fn disallowed_caption_header_is_ignored_without_rejecting_media() {
         let _g = exclusive();
         let mut srv = start(4).await;
         let host = format!("127.0.0.1:{}", srv.port);
@@ -4770,8 +4857,9 @@ mod tests {
             serde_json::json!([["Referer", "https://example.test/watch"], ["X-Evil", "1"],]);
         let body = body_with_captions(serde_json::json!([bad]));
         let r = signed_add(srv.port, &host, &body).await;
-        assert_eq!(status(&r), "400", "{r}");
-        assert!(srv.rx.try_recv().is_err());
+        assert_eq!(status(&r), "200", "{r}");
+        let handoff = srv.rx.recv().await.expect("media handoff");
+        assert!(handoff.captions.is_empty());
     }
 
     #[tokio::test]
@@ -4810,12 +4898,17 @@ mod tests {
         bad_format["format"] = serde_json::json!("txt");
         cases.push(bad_format);
 
+        cases.push(serde_json::json!(42));
         for bad in cases {
             let body = body_with_captions(serde_json::json!([bad]));
             let r = signed_add(srv.port, &host, &body).await;
-            assert_eq!(status(&r), "400", "{r}");
+            assert_eq!(status(&r), "200", "{r}");
+            let handoff = srv.rx.recv().await.expect("media handoff");
+            assert!(
+                handoff.captions.is_empty(),
+                "invalid caption metadata must be ignored"
+            );
         }
-        assert!(srv.rx.try_recv().is_err());
     }
 
     #[tokio::test]

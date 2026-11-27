@@ -520,15 +520,14 @@ mod tests {
         let directory = tempfile::tempdir().expect("staging dir");
         let bad = caption("http://subs.example.test/en.vtt", "en", "vtt");
 
-        let staged =
-            stage_handoff_captions(
-                "https://example.test/watch",
-                &[bad],
-                directory.path(),
-                None,
-                None,
-            )
-            .await;
+        let staged = stage_handoff_captions(
+            "https://example.test/watch",
+            &[bad],
+            directory.path(),
+            None,
+            None,
+        )
+        .await;
 
         assert!(staged.is_empty());
         assert_eq!(

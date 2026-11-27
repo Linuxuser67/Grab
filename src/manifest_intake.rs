@@ -530,6 +530,21 @@ pub(crate) async fn client_for_direct_resource_probe(
         .map(|(client, _)| client)
 }
 
+/// Client for browser-supplied caption tracks attached to a handoff. Uses the
+/// same staged jar/UA, proxy policy and guarded redirect/DNS rules as media,
+/// but leaves Referer to the caption's own validated headers.
+pub(crate) async fn client_for_caption_handoff(
+    raw_url: &str,
+    proxy: Option<&crate::net_types::ResolvedProxy>,
+) -> Result<reqwest::Client, String> {
+    validate_handoff_proxy(raw_url)?;
+    if let Some(client) = client_with_handoff_jar(raw_url, proxy, None).await? {
+        return Ok(client);
+    }
+    crate::download_net::http_client_for(proxy, None)
+        .map_err(|_| gettext("The configured proxy could not be used for this caption fetch"))
+}
+
 /// Client carrying the configured browser's exported cookies, when they export
 /// successfully. Exporting is slow (keyring plus a full yt-dlp extraction), so
 /// only downloads pay for it; previews stay anonymous or use a handoff jar.

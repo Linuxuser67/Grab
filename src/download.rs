@@ -499,6 +499,9 @@ pub struct DownloadManager {
     /// Video-page source by row (in-memory only, like the maps above):
     /// persisted on [`StoredItem`] and re-staged on restore.
     video_sources: RefCell<HashMap<u64, crate::media_types::VideoSource>>,
+    /// Optional browser captions by handoff URL (session-only, like `video_sources`).
+    /// The Add Card probes and enqueues that same URL; native manifest jobs read them at spawn.
+    handoff_captions: RefCell<HashMap<String, Vec<crate::extension_server::Caption>>>,
     /// Gallery jobs by row id. Stored at enqueue time (carries the user's
     /// filter selection); consumed by spawn_gallery.
     gallery_jobs: RefCell<HashMap<u64, crate::gallery_argv::GalleryJob>>,
@@ -890,6 +893,7 @@ impl DownloadManager {
             torrent_pieces: RefCell::new(HashMap::new()),
             server_mtime: RefCell::new(HashMap::new()),
             video_sources: RefCell::new(HashMap::new()),
+            handoff_captions: RefCell::new(HashMap::new()),
             gallery_jobs: RefCell::new(HashMap::new()),
             gallery_file_row_index: RefCell::new(HashMap::new()),
             video_playlist_file_row_index: RefCell::new(HashMap::new()),
@@ -1480,6 +1484,21 @@ impl DownloadManager {
             .filter(|stem| !stem.is_empty())
             .unwrap_or(&fallback_stem);
         format!("{stem}.{}", container.extension())
+    }
+
+    /// Keep a handoff's optional captions for the manifest row the Add Card
+    /// will enqueue from this URL. Non-manifest downloads never read them.
+    pub(crate) fn note_handoff_captions(
+        &self,
+        uri: &url::Url,
+        captions: Vec<crate::extension_server::Caption>,
+    ) {
+        if captions.is_empty() {
+            return;
+        }
+        let key = crate::download_intake::normalize_url(uri.as_str())
+            .unwrap_or_else(|_| uri.as_str().to_string());
+        self.handoff_captions.borrow_mut().insert(key, captions);
     }
 
     pub(crate) async fn enqueue_manifest_async_batched(

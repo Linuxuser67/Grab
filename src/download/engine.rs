@@ -2047,6 +2047,12 @@ impl DownloadManager {
             cookies_browser: opts.cookies_browser.clone(),
             connections: opts.connections.max(1) as usize,
             embed_subs: self.settings.embed_subs(),
+            captions: self
+                .handoff_captions
+                .borrow()
+                .get(item.url())
+                .cloned()
+                .unwrap_or_default(),
         };
         let handle = tokio_rt().spawn(async move {
             match crate::manifest_runner::run_manifest_download(job, gate, abort_rx, tx.clone())

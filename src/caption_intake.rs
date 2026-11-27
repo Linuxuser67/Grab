@@ -661,10 +661,10 @@ mod tests {
     #[tokio::test]
     async fn source_context_and_authorization_headers_are_not_forwarded_across_redirects() {
         let (target_url, target_server) =
-            fixture_server(vec![response(b"WEBVTT\\n")]).await;
+            fixture_server(vec![response(b"WEBVTT\n")]).await;
         let redirected_url = target_url.replacen("127.0.0.1", "localhost", 1);
         let redirect = format!(
-            "HTTP/1.1 302 Found\\r\\nLocation: {redirected_url}\\r\\nContent-Length: 0\\r\\nConnection: close\\r\\n\\r\\n"
+            "HTTP/1.1 302 Found\r\nLocation: {redirected_url}\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
         )
         .into_bytes();
         let (source_url, source_server) = fixture_server(vec![redirect]).await;

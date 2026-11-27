@@ -25,11 +25,11 @@
 //! - Every paired `POST /add` includes a millisecond timestamp and 128-bit
 //!   nonce in its signed body. The timestamp has a two-minute clock-skew window
 //!   and each nonce may be used only once, preventing a captured POST from being
-//!   replayed. Paired requests missing either field are refused.
+//!   replayed. A request without valid authentication and replay metadata is
+//!   treated as unpaired and requires confirmation.
 //!
-//! Cookies are accepted only with valid authentication and replay metadata.
-//! Unpaired requests are confirmation-only and never forward cookies; a wrong
-//! token is refused outright.
+//! Cookies and caption metadata are accepted only with valid authentication.
+//! Unpaired or stale-pairing requests retain the URL but never forward either.
 //!
 //! Confirmation: `POST /add?confirm=1` holds the response until the user has
 //! answered Grab's dialog (`200` approved, `409` declined, `408` no answer
@@ -4897,6 +4897,10 @@ mod tests {
         let mut bad_format = caption();
         bad_format["format"] = serde_json::json!("txt");
         cases.push(bad_format);
+
+        let mut userinfo_url = caption();
+        userinfo_url["url"] = serde_json::json!("https://user:secret@subs.example.test/en.vtt");
+        cases.push(userinfo_url);
 
         cases.push(serde_json::json!(42));
         for bad in cases {

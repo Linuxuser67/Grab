@@ -75,13 +75,8 @@ pub(crate) async fn stage_handoff_captions(
             return Vec::new();
         }
     };
-    let staged = stage_with_client_and_referer(
-        &client,
-        &accepted,
-        staging_dir,
-        source_referer,
-    )
-    .await;
+    let staged =
+        stage_with_client_and_referer(&client, &accepted, staging_dir, source_referer).await;
     drop(leases);
     staged
 }
@@ -201,12 +196,11 @@ async fn fetch_caption_with_referer(
     }
     if !headers.contains_key(reqwest::header::REFERER)
         && let Some(source) = source_referer
-        && let Some(referer) = crate::referrer::origin_for_target(Some(
-            crate::referrer::RefererContext {
+        && let Some(referer) =
+            crate::referrer::origin_for_target(Some(crate::referrer::RefererContext {
                 source,
                 target: requested.as_str(),
-            },
-        ))
+            }))
     {
         let mut value = HeaderValue::from_str(&referer).map_err(|error| error.to_string())?;
         value.set_sensitive(true);
@@ -667,12 +661,8 @@ mod tests {
 
     #[tokio::test]
     async fn source_context_and_authorization_headers_are_not_forwarded_across_redirects() {
-        let (target_url, target_server) = fixture_server_at(
-            "0.0.0.0:0",
-            "127.0.0.2",
-            vec![response(b"WEBVTT\n")],
-        )
-        .await;
+        let (target_url, target_server) =
+            fixture_server_at("0.0.0.0:0", "127.0.0.2", vec![response(b"WEBVTT\n")]).await;
         let redirected_url = target_url;
         let redirect = format!(
             "HTTP/1.1 302 Found\r\nLocation: {redirected_url}\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
@@ -686,8 +676,14 @@ mod tests {
             .expect("redirect-enabled fixture client");
         let mut track = caption(&source_url, "en", "vtt");
         track.headers = vec![
-            ("Origin".to_string(), "https://player.example.test".to_string()),
-            ("Authorization".to_string(), "Bearer private-token".to_string()),
+            (
+                "Origin".to_string(),
+                "https://player.example.test".to_string(),
+            ),
+            (
+                "Authorization".to_string(),
+                "Bearer private-token".to_string(),
+            ),
         ];
         let directory = tempfile::tempdir().expect("staging dir");
 
@@ -701,13 +697,28 @@ mod tests {
 
         assert_eq!(staged.len(), 1);
         let initial = source_server.await.expect("source request");
-        let initial = initial.first().expect("initial request").to_ascii_lowercase();
-        assert!(initial.contains("authorization: bearer private-token"), "{initial}");
-        assert!(initial.contains("origin: https://player.example.test"), "{initial}");
-        assert!(initial.contains("referer: http://source.example.test/"), "{initial}");
+        let initial = initial
+            .first()
+            .expect("initial request")
+            .to_ascii_lowercase();
+        assert!(
+            initial.contains("authorization: bearer private-token"),
+            "{initial}"
+        );
+        assert!(
+            initial.contains("origin: https://player.example.test"),
+            "{initial}"
+        );
+        assert!(
+            initial.contains("referer: http://source.example.test/"),
+            "{initial}"
+        );
 
         let redirected = target_server.await.expect("redirected request");
-        let redirected = redirected.first().expect("follow-up request").to_ascii_lowercase();
+        let redirected = redirected
+            .first()
+            .expect("follow-up request")
+            .to_ascii_lowercase();
         assert!(!redirected.contains("authorization:"), "{redirected}");
         assert!(!redirected.contains("origin:"), "{redirected}");
         assert!(!redirected.contains("referer:"), "{redirected}");

@@ -4274,6 +4274,20 @@ mod tests {
         assert_eq!(status(&task.await.unwrap()), "200");
     }
 
+    // --- cookie file hardening --------------------------------------------
+
+    fn scoped(name: &str, domain: &str, path: &str) -> Cookie {
+        Cookie {
+            name: name.to_string(),
+            value: "v".to_string(),
+            domain: Some(domain.to_string()),
+            host_only: Some(true),
+            path: Some(path.to_string()),
+            secure: None,
+            expiration_date: None,
+        }
+    }
+
     #[test]
     fn handoff_cookie_hash_is_content_based_and_rejects_oversized_files() {
         let directory = tempfile::tempdir().expect("temporary directory");

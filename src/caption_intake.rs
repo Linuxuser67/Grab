@@ -659,6 +659,50 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn source_context_and_authorization_headers_are_not_forwarded_across_redirects() {
+        let (target_url, target_server) =
+            fixture_server(vec![response(b"WEBVTT\\n")]).await;
+        let redirected_url = target_url.replacen("127.0.0.1", "localhost", 1);
+        let redirect = format!(
+            "HTTP/1.1 302 Found\\r\\nLocation: {redirected_url}\\r\\nContent-Length: 0\\r\\nConnection: close\\r\\n\\r\\n"
+        )
+        .into_bytes();
+        let (source_url, source_server) = fixture_server(vec![redirect]).await;
+        let client = reqwest::Client::builder()
+            .no_proxy()
+            .redirect(reqwest::redirect::Policy::limited(5))
+            .build()
+            .expect("redirect-enabled fixture client");
+        let mut track = caption(&source_url, "en", "vtt");
+        track.headers = vec![
+            ("Origin".to_string(), "https://player.example.test".to_string()),
+            ("Authorization".to_string(), "Bearer private-token".to_string()),
+        ];
+        let directory = tempfile::tempdir().expect("staging dir");
+
+        let staged = stage_with_client_and_referer(
+            &client,
+            &[&track],
+            directory.path(),
+            Some("https://source.example.test/watch/private?token=secret"),
+        )
+        .await;
+
+        assert_eq!(staged.len(), 1);
+        let initial = source_server.await.expect("source request");
+        let initial = initial.first().expect("initial request").to_ascii_lowercase();
+        assert!(initial.contains("authorization: bearer private-token"), "{initial}");
+        assert!(initial.contains("origin: https://player.example.test"), "{initial}");
+        assert!(initial.contains("referer: https://source.example.test/"), "{initial}");
+
+        let redirected = target_server.await.expect("redirected request");
+        let redirected = redirected.first().expect("follow-up request").to_ascii_lowercase();
+        assert!(!redirected.contains("authorization:"), "{redirected}");
+        assert!(!redirected.contains("origin:"), "{redirected}");
+        assert!(!redirected.contains("referer:"), "{redirected}");
+    }
+
+    #[tokio::test]
     async fn caption_headers_and_staged_cookies_are_propagated() {
         let (url, server) = fixture_server(vec![response(b"WEBVTT\n")]).await;
         let jar = Arc::new(reqwest::cookie::Jar::default());

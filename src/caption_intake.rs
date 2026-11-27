@@ -546,7 +546,7 @@ mod tests {
     async fn caption_headers_and_staged_cookies_are_propagated() {
         let (url, server) = fixture_server(vec![response(b"WEBVTT\n")]).await;
         let jar = Arc::new(reqwest::cookie::Jar::default());
-        jar.set_cookies(
+        jar.add_cookie_str(
             "sid=abc; Path=/",
             &url::Url::parse(&url).expect("fixture URL"),
         );

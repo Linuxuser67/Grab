@@ -397,7 +397,6 @@ mod tests {
     }
 
     /// One GET per response, in order; returns the raw request headers seen.
-    /// One GET per response, in order; returns the raw request headers seen.
     async fn fixture_server(responses: Vec<Vec<u8>>) -> (String, JoinHandle<Vec<String>>) {
         fixture_server_at("127.0.0.1:0", "127.0.0.1", responses).await
     }

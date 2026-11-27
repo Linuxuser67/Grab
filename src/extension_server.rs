@@ -4722,7 +4722,14 @@ mod tests {
         let body = body_with_captions(serde_json::json!([caption()]));
         let (port, request_host) = (srv.port, host.clone());
         let task = tokio::spawn(async move {
-            request_to(port, "POST", "/add", &[("Host", &request_host), JSON], &body).await
+            request_to(
+                port,
+                "POST",
+                "/add",
+                &[("Host", &request_host), JSON],
+                &body,
+            )
+            .await
         });
         let handoff = srv.rx.recv().await.expect("URL handoff");
         assert_eq!(handoff.url, "https://example.com/file.zip");
@@ -4748,7 +4755,11 @@ mod tests {
                 port,
                 "POST",
                 "/add",
-                &[("Host", &request_host), ("X-Grab-Token", "invalid-token"), JSON],
+                &[
+                    ("Host", &request_host),
+                    ("X-Grab-Token", "invalid-token"),
+                    JSON,
+                ],
                 &body,
             )
             .await
@@ -4774,7 +4785,8 @@ mod tests {
             "timestamp_ms": 1,
             "nonce": "00000000000000000000000000000001",
             "captions": [caption()],
-        }).to_string();
+        })
+        .to_string();
         let token_value = token(&body);
         let (port, request_host) = (srv.port, host.clone());
         let task = tokio::spawn(async move {
@@ -4782,7 +4794,11 @@ mod tests {
                 port,
                 "POST",
                 "/add",
-                &[("Host", &request_host), ("X-Grab-Token", &token_value), JSON],
+                &[
+                    ("Host", &request_host),
+                    ("X-Grab-Token", &token_value),
+                    JSON,
+                ],
                 &body,
             )
             .await
@@ -4843,7 +4859,10 @@ mod tests {
             assert_eq!(status(&r), "200", "{url}: {r}");
             let handoff = srv.rx.recv().await.expect("media handoff");
             assert_eq!(handoff.url, "https://example.com/file.zip");
-            assert!(handoff.captions.is_empty(), "unsafe caption must be dropped");
+            assert!(
+                handoff.captions.is_empty(),
+                "unsafe caption must be dropped"
+            );
         }
     }
 

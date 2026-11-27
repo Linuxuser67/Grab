@@ -282,6 +282,13 @@ fn check_remote_torrent_uri(uri: &url::Url) -> Result<(), String> {
 /// Route one opened URI: remote .torrent fetch, video card pre-fill, or plain
 /// enqueue. Extracted from `connect_open` so the extension-handoff confirm
 /// dialog can run it after the user approves.
+/// Optional metadata that accompanies a browser or desktop handoff.
+#[derive(Clone, Default)]
+struct HandoffExtras {
+    referer: Option<String>,
+    captions: Vec<crate::extension_server::Caption>,
+}
+
 /// What `route_open_uri` did with a URI.
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Routed {
@@ -316,8 +323,7 @@ async fn route_open_uri(
     add_card: crate::inline_add::AddCard,
     settings: AppSettings,
     uri: url::Url,
-    referer: Option<String>,
-    captions: Vec<crate::extension_server::Caption>,
+    handoff: HandoffExtras,
     public_host_lease: Option<std::sync::Arc<crate::download_net::PublicResolutionLease>>,
 ) -> Routed {
     // Remote .torrent files: fetch the bytes and run the
@@ -342,7 +348,8 @@ async fn route_open_uri(
             };
         let client = match crate::download_net::http_client_for(
             proxy.as_ref(),
-            referer
+            handoff
+                .referer
                 .as_deref()
                 .map(|source| crate::referrer::RefererContext {
                     source,
@@ -365,13 +372,17 @@ async fn route_open_uri(
     // like a pasted URL. Plain enqueue would save a raw page — or a manifest
     // — as a file.
     if handoff_goes_to_card(&uri) {
-        add_card.open_with_captions(Some(uri.as_str().to_string()), referer, captions);
+        add_card.open_with_captions(
+            Some(uri.as_str().to_string()),
+            handoff.referer,
+            handoff.captions,
+        );
         if let Some(lease) = public_host_lease {
             add_card.retain_public_resolution_lease(lease);
         }
         return Routed::OpenedCard;
     }
-    match enqueue_direct_handoff(&manager, &uri, referer.as_deref()).await {
+    match enqueue_direct_handoff(&manager, &uri, handoff.referer.as_deref()).await {
         Ok(()) => Routed::Queued,
         Err(e) => {
             toasts.add_toast(crate::ui_util::plain_toast(&e));
@@ -407,8 +418,7 @@ fn dispatch_handoff(
     extension_authenticated: Option<bool>,
     decision: Option<tokio::sync::oneshot::Sender<crate::extension_server::HandoffOutcome>>,
     expires_at: Option<std::time::Instant>,
-    captions: Vec<crate::extension_server::Caption>,
-    referer: Option<String>,
+    handoff: HandoffExtras,
 ) {
     let (manager, toasts, add_card, settings) = (
         s.manager.clone(),
@@ -458,8 +468,7 @@ fn dispatch_handoff(
                 add_card,
                 settings,
                 uri,
-                referer,
-                captions,
+                handoff,
                 public_host_lease,
             )
             .await;
@@ -512,12 +521,16 @@ fn dispatch_handoff(
             let add_card_c = add_card.clone();
             let settings_c = settings.clone();
             let approved_c = approved.clone();
-            let referer_c = referer.clone();
-            let captions_c = captions.clone();
+            let handoff_c = handoff.clone();
             let decision_c = decision.clone();
             glib::spawn_future_local(async move {
                 let routed = route_open_uri(
-                    manager_c, toasts_c, add_card_c, settings_c, approved_c, referer_c, captions_c,
+                    manager_c,
+                    toasts_c,
+                    add_card_c,
+                    settings_c,
+                    approved_c,
+                    handoff_c,
                     None,
                 )
                 .await;
@@ -582,7 +595,7 @@ fn handle_open_files(s: Rc<State>, files: Vec<gio::File>) {
             if let Ok(uri) = uri_text.parse::<url::Url>()
                 && matches!(uri.scheme(), "http" | "https" | "magnet")
             {
-                dispatch_handoff(&s, uri, via_grab, None, None, None, Vec::new(), None);
+                dispatch_handoff(&s, uri, via_grab, None, None, None, HandoffExtras::default());
                 continue;
             }
             if let Some(path) = f.path() {
@@ -815,12 +828,15 @@ pub fn setup(app: &adw::Application) {
             glib::spawn_future_local(async move {
                 while let Some(handoff) = ext_rx.recv().await {
                     // Early `continue`s below drop `decision`: a decline.
-                    let (url_text, decision, authenticated, expires_at, captions) = (
+                    let (url_text, decision, authenticated, expires_at, extras) = (
                         handoff.url,
                         handoff.decision,
                         handoff.authenticated,
                         handoff.expires_at,
-                        handoff.captions,
+                        HandoffExtras {
+                            referer: handoff.referer,
+                            captions: handoff.captions,
+                        },
                     );
                     let s = match bridge_state.borrow().as_ref().cloned() {
                         Some(s) => s,
@@ -856,8 +872,7 @@ pub fn setup(app: &adw::Application) {
                         Some(authenticated),
                         decision,
                         expires_at,
-                        captions,
-                        handoff.referer,
+                        extras,
                     );
                 }
             });

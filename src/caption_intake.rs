@@ -4,6 +4,10 @@
 //! track is logged and skipped here. A caption must never block or fail the
 //! media download it accompanies.
 
+// The intake API is consumed by the later finalization slice; until then the
+// whole module is intentionally unreferenced by production code.
+#![allow(dead_code)]
+
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 

@@ -279,6 +279,8 @@ pub(crate) struct ManifestJob {
     pub(crate) cookies_browser: String,
     pub(crate) connections: usize,
     pub(crate) embed_subs: bool,
+    /// Optional, session-only browser caption candidates bound to this queue row.
+    pub(crate) captions: Vec<crate::extension_server::Caption>,
 }
 
 /// Classifies native manifest failures so transient transfers do not discard staged resources.
@@ -2194,7 +2196,11 @@ pub(crate) async fn run_manifest_download(
         ) => return Ok(ManifestOutcome::Aborted),
     };
     let mut _finish_stop_sender = None;
-    if !live_hls && !live_dash && tracks.uses_incremental_hls_vod() {
+    if !live_hls
+        && !live_dash
+        && !(job.source.subtitle_key.is_none() && !job.captions.is_empty())
+        && tracks.uses_incremental_hls_vod()
+    {
         // Preserve AES-128's established configured concurrency. Complex clear
         // VOD stays sequential, matching the ordinary static-HLS resource path.
         let connections = match &tracks {
@@ -3242,33 +3248,57 @@ async fn finalize_manifest_download(
     } else {
         None
     };
-    let subtitle_input = match &tracks {
-        Tracks::Hls {
-            subtitle: Some(_), ..
-        } => Some(staging.join("subtitles/local.m3u8")),
-        Tracks::Dash {
-            subtitle: Some(_), ..
-        } => {
-            let path = staging
-                .join("subtitles")
-                .join(TrackKind::Subtitles.part_filename(TrackFileFormat::Vtt));
-            match inspect_staged_regular_file(&path).await {
-                Ok(Some(_)) => Some(path),
-                Ok(None) => None,
-                Err(StagedFileError::NotRegularFile) => {
-                    return Err(ManifestRunError::Failed(
-                        "The normalized DASH subtitle staging path is not a regular file"
-                            .to_string(),
-                    ));
-                }
-                Err(StagedFileError::Io(error)) => {
-                    return Err(ManifestRunError::Failed(format!(
-                        "Could not inspect normalized DASH subtitle staging: {error}"
-                    )));
+    // Browser captions are a fallback for streams with no user-selected native
+    // subtitle. Only staged-track muxes can consume this extra FFmpeg input;
+    // a pre-muxed live output cannot attach a late external track.
+    let external_caption = if matches!(mode, ManifestFinalizationMode::MuxStagedTracks)
+        && job.source.subtitle_key.is_none()
+        && !job.captions.is_empty()
+    {
+        crate::caption_intake::stage_handoff_captions(
+            &job.source.url,
+            &job.captions,
+            staging,
+            job.proxy.as_ref(),
+            job.referer.as_deref(),
+        )
+        .await
+        .into_iter()
+        .next()
+    } else {
+        None
+    };
+    let subtitle_input = if let Some(caption) = external_caption.as_ref() {
+        Some(caption.path.clone())
+    } else {
+        match &tracks {
+            Tracks::Hls {
+                subtitle: Some(_), ..
+            } => Some(staging.join("subtitles/local.m3u8")),
+            Tracks::Dash {
+                subtitle: Some(_), ..
+            } => {
+                let path = staging
+                    .join("subtitles")
+                    .join(TrackKind::Subtitles.part_filename(TrackFileFormat::Vtt));
+                match inspect_staged_regular_file(&path).await {
+                    Ok(Some(_)) => Some(path),
+                    Ok(None) => None,
+                    Err(StagedFileError::NotRegularFile) => {
+                        return Err(ManifestRunError::Failed(
+                            "The normalized DASH subtitle staging path is not a regular file"
+                                .to_string(),
+                        ));
+                    }
+                    Err(StagedFileError::Io(error)) => {
+                        return Err(ManifestRunError::Failed(format!(
+                            "Could not inspect normalized DASH subtitle staging: {error}"
+                        )));
+                    }
                 }
             }
+            _ => None,
         }
-        _ => None,
     };
     if matches!(
         mode,
@@ -3313,16 +3343,19 @@ async fn finalize_manifest_download(
             }
         }
     }
-    let subtitle_language = match &tracks {
-        Tracks::Hls {
-            subtitle_language, ..
-        }
-        | Tracks::Dash {
-            subtitle_language, ..
-        } => subtitle_language.as_deref(),
-        Tracks::DashLiveOffline { .. } => None,
-    };
-    let subtitle_language = subtitle_language
+    let declared_language = external_caption
+        .as_ref()
+        .map(|caption| caption.language.as_str())
+        .or(match &tracks {
+            Tracks::Hls {
+                subtitle_language, ..
+            }
+            | Tracks::Dash {
+                subtitle_language, ..
+            } => subtitle_language.as_deref(),
+            Tracks::DashLiveOffline { .. } => None,
+        });
+    let subtitle_language = declared_language
         .filter(|language| {
             !language.is_empty()
                 && language.len() <= 35
@@ -3331,13 +3364,18 @@ async fn finalize_manifest_download(
                     .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-')
         })
         .unwrap_or("und");
-    let subtitle_format = match &tracks {
-        Tracks::Hls {
-            subtitle: Some(_),
-            subtitle_format,
-            ..
-        } => *subtitle_format,
-        _ => SubtitleFormat::Text,
+    let subtitle_format = if external_caption.is_some() {
+        // Handoff candidates are validated VTT/SRT text, never fMP4.
+        SubtitleFormat::Text
+    } else {
+        match &tracks {
+            Tracks::Hls {
+                subtitle: Some(_),
+                subtitle_format,
+                ..
+            } => *subtitle_format,
+            _ => SubtitleFormat::Text,
+        }
     };
     let output_container = manifest_output_container(&job.dest)?;
     // Text WebVTT playlists can be normalized to the destination container.
@@ -5678,6 +5716,77 @@ mod tests {
 
     #[cfg(unix)]
     #[tokio::test]
+    async fn external_caption_input_is_mapped_and_embedded_as_text() {
+        let directory = tempfile::tempdir().expect("create FFmpeg argument test directory");
+        let ffmpeg = fake_ffmpeg_recording_arguments(directory.path());
+        let output = directory.path().join("output.mp4");
+
+        let args = run_ffmpeg_recording_args(
+            &ffmpeg,
+            &output,
+            SubtitleOutput {
+                input: Some(Path::new("external-captions.srt")),
+                embed: true,
+                sidecar: None,
+                format: SubtitleFormat::Text,
+            },
+        )
+        .await;
+
+        assert!(
+            args.windows(2)
+                .any(|pair| pair == ["-i", "external-captions.srt"]),
+            "external captions must be a distinct FFmpeg input: {args:?}"
+        );
+        assert!(
+            args.windows(2)
+                .any(|pair| pair == ["-map", "1:s:0"]),
+            "external subtitle stream must be mapped: {args:?}"
+        );
+        assert!(
+            args.windows(2)
+                .any(|pair| pair == ["-c:s", "mov_text"]),
+            "text captions must use MP4's mov_text codec: {args:?}"
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn external_caption_sidecar_is_mapped_without_embedding() {
+        let directory = tempfile::tempdir().expect("create FFmpeg argument test directory");
+        let ffmpeg = fake_ffmpeg_recording_arguments(directory.path());
+        let output = directory.path().join("output.mkv");
+        let sidecar = directory.path().join("output.en.srt");
+
+        let args = run_ffmpeg_recording_args(
+            &ffmpeg,
+            &output,
+            SubtitleOutput {
+                input: Some(Path::new("external-captions.srt")),
+                embed: false,
+                sidecar: Some(&sidecar),
+                format: SubtitleFormat::Text,
+            },
+        )
+        .await;
+
+        assert!(
+            args.windows(2)
+                .any(|pair| pair == ["-i", "external-captions.srt"]),
+            "external captions must be a distinct FFmpeg input: {args:?}"
+        );
+        assert!(
+            args.iter().any(|argument| argument == sidecar.to_string_lossy().as_ref()),
+            "sidecar destination must be supplied to FFmpeg: {args:?}"
+        );
+        assert!(
+            !args.windows(2).any(|pair| pair == ["-map", "1:s:0"]),
+            "sidecars must not be embedded into the media output: {args:?}"
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
     async fn hls_subtitle_mux_preserves_fmp4_and_converts_webvtt() {
         let directory = tempfile::tempdir().expect("create FFmpeg argument test directory");
         let ffmpeg = fake_ffmpeg_recording_arguments(directory.path());
@@ -6555,6 +6664,7 @@ segment-2.ts
             cookies_browser: "none".to_string(),
             connections: 4,
             embed_subs: false,
+            captions: Vec::new(),
         };
         let gate = crate::attempt_gate::AttemptGate::new();
         let downloaded = Arc::new(AtomicU64::new(0));
@@ -6944,6 +7054,7 @@ segment-2.ts
             cookies_browser: "none".to_string(),
             connections: 4,
             embed_subs: false,
+            captions: Vec::new(),
         };
         let gate = crate::attempt_gate::AttemptGate::new();
         let downloaded = Arc::new(AtomicU64::new(0));
@@ -7350,6 +7461,7 @@ segment-2.ts
             cookies_browser: "none".to_string(),
             connections: 1,
             embed_subs: false,
+            captions: Vec::new(),
         };
         let gate = crate::attempt_gate::AttemptGate::new();
         let downloaded = Arc::new(AtomicU64::new(0));
@@ -8244,6 +8356,7 @@ segment-2.m4s
             cookies_browser: "none".to_string(),
             connections: 1,
             embed_subs: false,
+            captions: Vec::new(),
         };
         let gate = crate::attempt_gate::AttemptGate::new();
         let (_stop_tx, stop_rx) = tokio::sync::oneshot::channel();

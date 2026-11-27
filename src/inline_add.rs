@@ -181,8 +181,8 @@ fn paste_fingerprint(url: &str) -> String {
         .collect()
 }
 
-/// A queued URL keeps the optional browser source page that belongs to it.
-type PendingUrl = (String, Option<String>);
+/// A queued handoff keeps its URL, source page and caption candidates together.
+type PendingUrl = (String, Option<String>, Vec<crate::extension_server::Caption>);
 
 /// Starts the next queued link once the finished lookup's marker is cleared.
 /// The start is deferred to an idle callback so it never re-enters the task
@@ -938,6 +938,9 @@ pub(crate) struct VideoStep {
     pub(crate) url_entry: gtk4::Entry,
     /// Browser source page bound to the exact URL currently in the entry.
     pub(crate) source_referer: Rc<RefCell<Option<(String, String)>>>,
+    /// Browser caption candidates bound to that exact URL; never persisted.
+    pub(crate) handoff_captions:
+        Rc<RefCell<Option<(String, Vec<crate::extension_server::Caption>)>>>,
     /// Public-only hosts retained while this untrusted handoff card is open.
     public_host_leases: PublicHostLeases,
     /// Spinner paintable for the entry's secondary icon slot: GTK4 entries
@@ -1025,6 +1028,19 @@ pub(crate) struct VideoStep {
     /// Queue-all action for collections; reused as the labeled Add action
     /// for single-media results.
     pub(crate) add_btn: gtk4::Button,
+}
+
+/// Copy captions only when the preview still belongs to the exact URL.
+fn handoff_captions_for_url(
+    step: &VideoStep,
+    url: &str,
+) -> Vec<crate::extension_server::Caption> {
+    step.handoff_captions
+        .borrow()
+        .as_ref()
+        .filter(|(bound_url, _)| bound_url == url)
+        .map(|(_, captions)| captions.clone())
+        .unwrap_or_default()
 }
 
 /// Pair the collection's hidden button with the URL-entry queue-all action.
@@ -1374,6 +1390,7 @@ fn reset_video_step(step: &VideoStep) {
     // probe children instead of letting them run on for a dead card.
     abort_enumeration(step);
     abort_lookup(step);
+    step.handoff_captions.borrow_mut().take();
     clear_manifest_preview(step);
     // Drop the format options and the current pick.
     step.options.borrow_mut().clear();
@@ -2722,7 +2739,13 @@ pub struct AddCard {
     widget: gtk4::Widget,
     nav: adw::NavigationView,
     public_host_leases: PublicHostLeases,
-    open: Rc<dyn Fn(Option<String>, Option<String>)>,
+    open: Rc<
+        dyn Fn(
+            Option<String>,
+            Option<String>,
+            Vec<crate::extension_server::Caption>,
+        ),
+    >,
     toggle: Rc<dyn Fn()>,
     open_torrent_picker: TorrentPickerOpener,
     state: Rc<OpenState>,
@@ -2745,9 +2768,21 @@ impl AddCard {
     /// The source is scoped to the exact submitted URL. If the card is already
     /// open, this focuses it; collapsing the card always resets the form.
     pub fn open(&self, initial_url: Option<String>, referer: Option<String>) {
+        self.open_with_captions(initial_url, referer, Vec::new());
+    }
+
+    /// Reveal a browser URL with its validated, session-only caption candidates.
+    /// Candidates are bound to the exact URL and transferred to its queue row
+    /// only if the user selects a native manifest download.
+    pub(crate) fn open_with_captions(
+        &self,
+        initial_url: Option<String>,
+        referer: Option<String>,
+        captions: Vec<crate::extension_server::Caption>,
+    ) {
         let referer = referer.as_deref().and_then(crate::referrer::origin_only);
         self.public_host_leases.borrow_mut().activate();
-        (self.open)(initial_url, referer)
+        (self.open)(initial_url, referer, captions)
     }
 
     /// Shared toggle for every New Download affordance (header `+`,
@@ -3052,6 +3087,7 @@ fn build_video_preview(
     let step = Rc::new(VideoStep {
         url_entry: url_entry.clone(),
         source_referer: Rc::new(RefCell::new(None)),
+        handoff_captions: Rc::new(RefCell::new(None)),
         public_host_leases,
         spinner_paintable,
         looking_up: Cell::new(false),
@@ -3431,10 +3467,12 @@ fn build_video_lookup_kicker(context: VideoLookupContext) -> VideoLookupKick {
                     start: {
                         let url_entry = url_b.clone();
                         let source_referer = Rc::clone(&step_b.source_referer);
-                        Rc::new(move |(next, referer): PendingUrl| {
+                        let handoff_captions = Rc::clone(&step_b.handoff_captions);
+                        Rc::new(move |(next, referer, captions): PendingUrl| {
                             url_entry.set_text(&next);
                             *source_referer.borrow_mut() =
                                 referer.map(|referer| (next.clone(), referer));
+                            *handoff_captions.borrow_mut() = Some((next.clone(), captions));
                             // Submit one idle later: the changed handler settles
                             // on a 0 ms timeout, and submitting in this turn reads
                             // the previous URL's state while the deferred edit
@@ -3629,6 +3667,7 @@ fn build_video_lookup_kicker(context: VideoLookupContext) -> VideoLookupKick {
                             {
                                 if let Some(source) = preferred_source {
                                     let filename = step_b.name.text().trim().to_string();
+                                    let captions = handoff_captions_for_url(&step_b, &url);
                                     let enqueue_manager = Rc::clone(&manager_b);
                                     let error_step = Rc::clone(&step_b);
                                     let error_lookup_add = Rc::clone(&lookup_add_b);
@@ -3643,6 +3682,7 @@ fn build_video_lookup_kicker(context: VideoLookupContext) -> VideoLookupKick {
                                                     directory.as_deref(),
                                                     Some(&filename),
                                                     source_referer.as_deref(),
+                                                    captions,
                                                 )
                                                 .await
                                         },
@@ -4138,6 +4178,7 @@ fn build_submit_handler(context: SubmitContext) -> SubmitHandler {
                 };
                 if let Some(source) = selected_source {
                     let filename = step2.name.text().trim().to_string();
+                    let captions = handoff_captions_for_url(&step2, &url);
                     let enqueue_manager = Rc::clone(&m);
                     let error_step = Rc::clone(&step2);
                     let error_lookup_add = Rc::clone(&lookup_add_submit);
@@ -4152,6 +4193,7 @@ fn build_submit_handler(context: SubmitContext) -> SubmitHandler {
                                     directory.as_deref(),
                                     Some(&filename),
                                     referer.as_deref(),
+                                    captions,
                                 )
                                 .await
                         },
@@ -4444,6 +4486,14 @@ fn wire_url_entry(
             {
                 step2.source_referer.borrow_mut().take();
             }
+            if step2
+                .handoff_captions
+                .borrow()
+                .as_ref()
+                .is_some_and(|(bound_url, _)| bound_url != &text)
+            {
+                step2.handoff_captions.borrow_mut().take();
+            }
             if !fresh {
                 hide_video_step(&step2);
                 step2.action_revealer.set_reveal_child(false);
@@ -4482,6 +4532,14 @@ fn wire_url_entry(
             // entry locked. Empty is skipped because GTK emits it transiently
             // during a replace; `apply` aborts a real clear.
             let text = entry.text().trim().to_string();
+            if step_sync
+                .handoff_captions
+                .borrow()
+                .as_ref()
+                .is_some_and(|(bound_url, _)| bound_url != &text)
+            {
+                step_sync.handoff_captions.borrow_mut().take();
+            }
             let looking_up = step_sync.looking_up.get();
             if edit_invalidates_lookup(last_text_sync.borrow().as_str(), &text, looking_up) {
                 // Stale *now*: a probe completing this turn must not slip past
@@ -4906,6 +4964,7 @@ pub fn build_add_card(manager: Rc<DownloadManager>) -> AddCard {
         let public_host_leases = Rc::clone(&public_host_leases);
         let url_entry = url_entry.clone();
         let source_referer = Rc::clone(&step.source_referer);
+        let handoff_captions = Rc::clone(&step.handoff_captions);
         let probe = Rc::clone(&probe);
         let pending_url = Rc::clone(&pending_url);
         // The last URL the clipboard auto-paste inserted: a stale clipboard
@@ -4918,7 +4977,11 @@ pub fn build_add_card(manager: Rc<DownloadManager>) -> AddCard {
             if saved.is_empty() { None } else { Some(saved) }
         }));
         Rc::new(
-            move |initial_url: Option<String>, initial_referer: Option<String>| {
+            move |
+                initial_url: Option<String>,
+                initial_referer: Option<String>,
+                initial_captions: Vec<crate::extension_server::Caption>,
+            | {
                 public_host_leases.borrow_mut().activate();
                 let already = open_state.is_open();
                 reveal();
@@ -4939,25 +5002,41 @@ pub fn build_add_card(manager: Rc<DownloadManager>) -> AddCard {
                         drop(st);
                         if busy || has_unprobed {
                             // FIFO: rapid sends must not overwrite each other.
-                            let queued = (normalized.clone(), initial_referer.clone());
+                            // Keep captions with their exact URL; a later click
+                            // must not borrow metadata from the current card.
                             let mut queue = pending_url.borrow_mut();
-                            if !queue.contains(&queued) {
-                                queue.push_back(queued);
+                            if let Some((_, _, queued_captions)) =
+                                queue.iter_mut().find(|(queued_url, queued_referer, _)| {
+                                    queued_url == &normalized
+                                        && queued_referer == &initial_referer
+                                })
+                            {
+                                *queued_captions = initial_captions;
+                            } else {
+                                queue.push_back((
+                                    normalized.clone(),
+                                    initial_referer.clone(),
+                                    initial_captions,
+                                ));
                             }
                             return;
                         }
                         url_entry.set_text(&normalized);
                         *source_referer.borrow_mut() = initial_referer
                             .filter(|referer| !referer.is_empty())
-                            .map(|referer| (normalized, referer));
+                            .map(|referer| (normalized.clone(), referer));
+                        *handoff_captions.borrow_mut() =
+                            Some((normalized, initial_captions));
                     }
                 } else if !already && url_entry.text().trim().is_empty() {
                     let next = { pending_url.borrow_mut().pop_front() };
-                    if let Some((next, referer)) = next {
+                    if let Some((next, referer, captions)) = next {
                         // A manifest preview may have held this FIFO entry until
                         // the user dismissed it. Resume the oldest queued URL first.
                         url_entry.set_text(&next);
-                        *source_referer.borrow_mut() = referer.map(|referer| (next, referer));
+                        *source_referer.borrow_mut() =
+                            referer.map(|referer| (next.clone(), referer));
+                        *handoff_captions.borrow_mut() = Some((next, captions));
                     } else {
                         // Single clipboard read per fresh open; no watch, no polling.
                         let url_entry = url_entry.clone();
@@ -4982,6 +5061,7 @@ pub fn build_add_card(manager: Rc<DownloadManager>) -> AddCard {
                                 }
                                 url_entry.set_text(&normalized);
                                 source_referer.borrow_mut().take();
+                                handoff_captions.borrow_mut().take();
                                 *last_auto_paste.borrow_mut() = Some(fingerprint.clone());
                                 // Persist so a restart doesn't re-paste the stale link.
                                 // The manager Rc isn't available in this async block;
@@ -5006,7 +5086,7 @@ pub fn build_add_card(manager: Rc<DownloadManager>) -> AddCard {
             if open_state.is_open() {
                 close_card();
             } else {
-                open(None, None);
+                open(None, None, Vec::new());
             }
         })
     };

@@ -4,10 +4,6 @@
 //! track is logged and skipped here. A caption must never block or fail the
 //! media download it accompanies.
 
-// The intake API is consumed by the later finalization slice; until then the
-// whole module is intentionally unreferenced by production code.
-#![allow(dead_code)]
-
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
@@ -29,7 +25,6 @@ const ALLOWED_CAPTION_HEADERS: [&str; 4] =
 pub(crate) struct StagedCaption {
     pub(crate) path: PathBuf,
     pub(crate) language: String,
-    pub(crate) format: String,
 }
 
 /// Fetch and stage the first usable caption attached to a handoff.
@@ -42,6 +37,7 @@ pub(crate) async fn stage_handoff_captions(
     captions: &[Caption],
     staging_dir: &Path,
     proxy: Option<&crate::net_types::ResolvedProxy>,
+    source_referer: Option<&str>,
 ) -> Vec<StagedCaption> {
     if captions.is_empty() {
         return Vec::new();
@@ -79,7 +75,13 @@ pub(crate) async fn stage_handoff_captions(
             return Vec::new();
         }
     };
-    let staged = stage_with_client(&client, &accepted, staging_dir).await;
+    let staged = stage_with_client_and_referer(
+        &client,
+        &accepted,
+        staging_dir,
+        source_referer,
+    )
+    .await;
     drop(leases);
     staged
 }
@@ -105,10 +107,20 @@ fn caption_url_policy(caption: &Caption) -> Result<String, String> {
 
 /// Fetch/stage helper with an injected client so the intake can be tested
 /// against a local fixture server without GTK or a real public endpoint.
+#[cfg(test)]
 async fn stage_with_client(
     client: &reqwest::Client,
     captions: &[&Caption],
     staging_dir: &Path,
+) -> Vec<StagedCaption> {
+    stage_with_client_and_referer(client, captions, staging_dir, None).await
+}
+
+async fn stage_with_client_and_referer(
+    client: &reqwest::Client,
+    captions: &[&Caption],
+    staging_dir: &Path,
+    source_referer: Option<&str>,
 ) -> Vec<StagedCaption> {
     let mut staged = Vec::new();
     if let Err(error) = crate::video_staging::ensure_real_staging_leaf(staging_dir) {
@@ -116,7 +128,7 @@ async fn stage_with_client(
         return staged;
     }
     for caption in captions {
-        match stage_one(client, caption, staging_dir).await {
+        match stage_one(client, caption, staging_dir, source_referer).await {
             Ok(item) => {
                 // Finalization selects one external track. Stop after the
                 // first usable candidate (the browser orders these by match
@@ -138,8 +150,9 @@ async fn stage_one(
     client: &reqwest::Client,
     caption: &Caption,
     staging_dir: &Path,
+    source_referer: Option<&str>,
 ) -> Result<StagedCaption, String> {
-    let bytes = fetch_caption(client, caption).await?;
+    let bytes = fetch_caption_with_referer(client, caption, source_referer).await?;
     let format = caption.format.to_ascii_lowercase();
     if !valid_caption(&bytes, &format) {
         return Err(format!("body is not valid {format} content"));
@@ -156,11 +169,19 @@ async fn stage_one(
     Ok(StagedCaption {
         path: staging_dir.join(name),
         language: caption.language.clone(),
-        format,
     })
 }
 
+#[cfg(test)]
 async fn fetch_caption(client: &reqwest::Client, caption: &Caption) -> Result<Vec<u8>, String> {
+    fetch_caption_with_referer(client, caption, None).await
+}
+
+async fn fetch_caption_with_referer(
+    client: &reqwest::Client,
+    caption: &Caption,
+    source_referer: Option<&str>,
+) -> Result<Vec<u8>, String> {
     let requested = url::Url::parse(&caption.url).map_err(|error| error.to_string())?;
     // Production callers already passed caption_url_policy and acquired a
     // public-only DNS lease. Keep this helper injectable for loopback fixtures.
@@ -172,8 +193,24 @@ async fn fetch_caption(client: &reqwest::Client, caption: &Caption) -> Result<Ve
             return Err("caption request header is not allowed".to_string());
         }
         let name = HeaderName::from_bytes(name.as_bytes()).map_err(|error| error.to_string())?;
-        let value = HeaderValue::from_str(value).map_err(|error| error.to_string())?;
+        let mut value = HeaderValue::from_str(value).map_err(|error| error.to_string())?;
+        if matches!(name.as_str(), "authorization" | "origin" | "referer") {
+            value.set_sensitive(true);
+        }
         headers.insert(name, value);
+    }
+    if !headers.contains_key(reqwest::header::REFERER)
+        && let Some(source) = source_referer
+        && let Some(referer) = crate::referrer::origin_for_target(Some(
+            crate::referrer::RefererContext {
+                source,
+                target: requested.as_str(),
+            },
+        ))
+    {
+        let mut value = HeaderValue::from_str(&referer).map_err(|error| error.to_string())?;
+        value.set_sensitive(true);
+        headers.insert(reqwest::header::REFERER, value);
     }
 
     let response = client
@@ -361,10 +398,18 @@ mod tests {
 
     /// One GET per response, in order; returns the raw request headers seen.
     async fn fixture_server(responses: Vec<Vec<u8>>) -> (String, JoinHandle<Vec<String>>) {
-        let listener = TcpListener::bind("127.0.0.1:0")
+        fixture_server_at("127.0.0.1:0", "127.0.0.1", responses).await
+    }
+
+    async fn fixture_server_at(
+        bind_address: &str,
+        host: &str,
+        responses: Vec<Vec<u8>>,
+    ) -> (String, JoinHandle<Vec<String>>) {
+        let listener = TcpListener::bind(bind_address)
             .await
             .expect("bind caption fixture");
-        let address = listener.local_addr().expect("fixture address");
+        let port = listener.local_addr().expect("fixture address").port();
         let server = tokio::spawn(async move {
             let mut seen = Vec::new();
             for response in responses {
@@ -393,9 +438,8 @@ mod tests {
             }
             seen
         });
-        (format!("http://{address}/caption"), server)
+        (format!("http://{host}:{port}/caption"), server)
     }
-
     #[test]
     fn accepts_vtt_with_bom_and_leading_whitespace() {
         assert!(valid_vtt(
@@ -595,6 +639,78 @@ mod tests {
             1,
             "the first usable caption prevents later candidates from being fetched",
         );
+    }
+
+    #[tokio::test]
+    async fn source_referer_is_reduced_to_origin_for_caption_requests() {
+        let (url, server) = fixture_server(vec![response(b"WEBVTT\n")]).await;
+        let directory = tempfile::tempdir().expect("staging dir");
+        let track = caption(&url, "en", "vtt");
+        let staged = stage_with_client_and_referer(
+            &fixture_client(),
+            &[&track],
+            directory.path(),
+            Some("http://source.example.test/watch/private?token=secret#player"),
+        )
+        .await;
+
+        assert_eq!(staged.len(), 1);
+        let requests = server.await.expect("fixture server");
+        let request = requests.first().expect("one request").to_ascii_lowercase();
+        assert!(
+            request.contains("referer: http://source.example.test/"),
+            "{request}"
+        );
+        assert!(!request.contains("token=secret"), "{request}");
+        assert!(!request.contains("/watch/private"), "{request}");
+    }
+
+    #[tokio::test]
+    async fn source_context_and_authorization_headers_are_not_forwarded_across_redirects() {
+        let (target_url, target_server) = fixture_server_at(
+            "0.0.0.0:0",
+            "127.0.0.2",
+            vec![response(b"WEBVTT\n")],
+        )
+        .await;
+        let redirected_url = target_url;
+        let redirect = format!(
+            "HTTP/1.1 302 Found\r\nLocation: {redirected_url}\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+        )
+        .into_bytes();
+        let (source_url, source_server) = fixture_server(vec![redirect]).await;
+        let client = reqwest::Client::builder()
+            .no_proxy()
+            .redirect(reqwest::redirect::Policy::limited(5))
+            .build()
+            .expect("redirect-enabled fixture client");
+        let mut track = caption(&source_url, "en", "vtt");
+        track.headers = vec![
+            ("Origin".to_string(), "https://player.example.test".to_string()),
+            ("Authorization".to_string(), "Bearer private-token".to_string()),
+        ];
+        let directory = tempfile::tempdir().expect("staging dir");
+
+        let staged = stage_with_client_and_referer(
+            &client,
+            &[&track],
+            directory.path(),
+            Some("http://source.example.test/watch/private?token=secret"),
+        )
+        .await;
+
+        assert_eq!(staged.len(), 1);
+        let initial = source_server.await.expect("source request");
+        let initial = initial.first().expect("initial request").to_ascii_lowercase();
+        assert!(initial.contains("authorization: bearer private-token"), "{initial}");
+        assert!(initial.contains("origin: https://player.example.test"), "{initial}");
+        assert!(initial.contains("referer: http://source.example.test/"), "{initial}");
+
+        let redirected = target_server.await.expect("redirected request");
+        let redirected = redirected.first().expect("follow-up request").to_ascii_lowercase();
+        assert!(!redirected.contains("authorization:"), "{redirected}");
+        assert!(!redirected.contains("origin:"), "{redirected}");
+        assert!(!redirected.contains("referer:"), "{redirected}");
     }
 
     #[tokio::test]

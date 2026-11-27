@@ -4953,8 +4953,7 @@ mod tests {
         assert_eq!(handoff.url, "https://example.com/file.zip");
         assert_eq!(handoff.captions.len(), 1);
         assert_eq!(
-            handoff.captions[0].url,
-            "https://subs.example.test/en.vtt",
+            handoff.captions[0].url, "https://subs.example.test/en.vtt",
             "one invalid sibling must not discard an otherwise valid caption"
         );
     }

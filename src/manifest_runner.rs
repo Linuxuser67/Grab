@@ -5406,15 +5406,20 @@ async fn run_ffmpeg_with_offsets_timeout(
             command.arg("-itsoffset").arg(offset);
         }
         command.arg("-i").arg(audio_input.path);
-        command.arg("-map").arg("0:v:0?").arg("-map").arg("1:a:0?");
-    } else {
-        command.arg("-map").arg("0:v:0?").arg("-map").arg("0:a:0?");
     }
     if let Some(subtitle_input) = subtitles.input {
         if is_hls_playlist_input(subtitle_input) {
             add_hls_staging_options(&mut command);
         }
         command.arg("-i").arg(subtitle_input);
+    }
+    // -map is an output option: it must follow every -i. FFmpeg treats an
+    // option placed before the next input as belonging to that input, which
+    // makes a third (subtitle) input fail with "Invalid argument".
+    if audio_input.is_some() {
+        command.arg("-map").arg("0:v:0?").arg("-map").arg("1:a:0?");
+    } else {
+        command.arg("-map").arg("0:v:0?").arg("-map").arg("0:a:0?");
     }
     command.args(["-c", "copy"]);
     if overwrite_output {
@@ -5771,6 +5776,37 @@ mod tests {
                 .iter()
                 .any(|argument| argument.contains(":s:")),
             "in-band captions must not be treated as a separate subtitle playlist"
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn subtitle_input_precedes_all_output_map_options() {
+        let directory = tempfile::tempdir().expect("create FFmpeg argument test directory");
+        let ffmpeg = fake_ffmpeg_recording_arguments(directory.path());
+        let output = directory.path().join("output.mkv");
+        let args = run_ffmpeg_recording_args(
+            &ffmpeg,
+            &output,
+            SubtitleOutput {
+                input: Some(Path::new("subtitles.m3u8")),
+                embed: true,
+                sidecar: None,
+                format: SubtitleFormat::Text,
+            },
+        )
+        .await;
+        let last_input = args
+            .iter()
+            .rposition(|argument| argument == "-i")
+            .expect("video and subtitle inputs");
+        let first_map = args
+            .iter()
+            .position(|argument| argument == "-map")
+            .expect("base stream maps");
+        assert!(
+            last_input < first_map,
+            "FFmpeg -map is an output option and must follow every -i: {args:?}"
         );
     }
 

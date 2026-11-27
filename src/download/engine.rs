@@ -2050,7 +2050,7 @@ impl DownloadManager {
             captions: self
                 .handoff_captions
                 .borrow()
-                .get(item.url())
+                .get(&item.url())
                 .cloned()
                 .unwrap_or_default(),
         };

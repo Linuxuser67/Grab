@@ -5919,7 +5919,8 @@ mod tests {
             "text captions must be converted to SRT sidecars: {args:?}"
         );
         assert!(
-            args.iter().any(|argument| argument == sidecar_text.as_str()),
+            args.iter()
+                .any(|argument| argument == sidecar_text.as_str()),
             "the language-named sidecar destination must be passed to FFmpeg: {args:?}"
         );
     }

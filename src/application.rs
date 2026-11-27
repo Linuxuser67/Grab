@@ -520,13 +520,7 @@ fn dispatch_handoff(
             let decision_c = decision.clone();
             glib::spawn_future_local(async move {
                 let routed = route_open_uri(
-                    manager_c,
-                    toasts_c,
-                    add_card_c,
-                    settings_c,
-                    approved_c,
-                    referer_c,
-                    captions_c,
+                    manager_c, toasts_c, add_card_c, settings_c, approved_c, referer_c, captions_c,
                     None,
                 )
                 .await;

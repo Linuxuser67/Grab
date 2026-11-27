@@ -468,8 +468,8 @@ mod tests {
         assert_eq!(staged[0].language, "en");
         assert_eq!(staged[0].format, "vtt");
         assert_eq!(staged[0].path.parent(), Some(directory.path()));
-        assert_eq!(
         assert_eq!(std::fs::read(&staged[0].path).expect("staged bytes"), body);
+        assert_eq!(
             std::fs::read_dir(directory.path())
                 .expect("staging listing")
                 .count(),

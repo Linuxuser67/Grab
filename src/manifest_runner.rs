@@ -6909,10 +6909,19 @@ segment-2.ts
             .args(["-hide_banner", "-loglevel", "error", "-i"])
             .arg(&destination);
         if with_browser_caption {
-            verification_command.args(["-map", "0:v:0", "-map", "0:s:0"]);
+            // The CI FFmpeg build may not include a subtitle encoder for the
+            // null muxer. Stream-copy both tracks into a Matroska stdout sink.
+            verification_command.args([
+                "-map", "0:v:0",
+                "-map", "0:s:0",
+                "-c", "copy",
+                "-f", "matroska",
+                "-",
+            ]);
+        } else {
+            verification_command.args(["-f", "null", "-"]);
         }
         let verification = verification_command
-            .args(["-f", "null", "-"])
             .output()
             .await
             .expect("verify decrypted destination output");

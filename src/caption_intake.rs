@@ -825,6 +825,50 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn same_origin_redirect_keeps_caption_request_headers() {
+        let redirect = b"HTTP/1.1 302 Found\\r\\nLocation: /caption/final\\r\\nContent-Length: 0\\r\\nConnection: close\\r\\n\\r\\n".to_vec();
+        let (url, server) = fixture_server(vec![redirect, response(b"WEBVTT\\n")]).await;
+        let client = fixture_client();
+        let mut track = caption(&format!("{url}/start"), "en", "vtt");
+        track.headers = vec![
+            ("Origin".to_string(), "http://player.example.test".to_string()),
+            ("Authorization".to_string(), "Bearer same-origin-token".to_string()),
+        ];
+        let directory = tempfile::tempdir().expect("staging dir");
+
+        let staged = stage_with_client_and_referer(
+            &client,
+            &[&track],
+            directory.path(),
+            Some("http://source.example.test/watch?token=secret"),
+        )
+        .await;
+
+        assert_eq!(staged.len(), 1);
+        let requests = server.await.expect("same-origin redirect requests");
+        assert_eq!(requests.len(), 2);
+        let second = requests[1].to_ascii_lowercase();
+        assert!(second.contains("authorization: bearer same-origin-token"), "{second}");
+        assert!(second.contains("origin: http://player.example.test"), "{second}");
+        assert!(second.contains("referer: http://source.example.test/"), "{second}");
+    }
+
+    #[tokio::test]
+    async fn caption_redirect_chain_is_limited_to_five_hops() {
+        let redirect = b"HTTP/1.1 302 Found\\r\\nLocation: /caption\\r\\nContent-Length: 0\\r\\nConnection: close\\r\\n\\r\\n".to_vec();
+        let (url, server) =
+            fixture_server(vec![redirect; MAX_CAPTION_REDIRECTS + 1]).await;
+        let client = fixture_client();
+        let track = caption(&url, "en", "vtt");
+
+        let result = fetch_caption_with_referer(&client, &track, None).await;
+
+        assert!(result.is_err(), "six redirects must exceed the five-hop limit");
+        let requests = server.await.expect("redirect chain requests");
+        assert_eq!(requests.len(), MAX_CAPTION_REDIRECTS + 1);
+    }
+
+    #[tokio::test]
     async fn caption_headers_and_staged_cookies_are_propagated() {
         let (url, server) = fixture_server(vec![response(b"WEBVTT\n")]).await;
         let jar = Arc::new(reqwest::cookie::Jar::default());

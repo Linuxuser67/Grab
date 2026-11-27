@@ -2841,12 +2841,16 @@ async fn run_incremental_hls_vod(
             .map_err(ManifestRunError::Failed)?;
     }
     let remux_subtitles = SubtitleOutput {
-        input: external_caption.as_ref().map(|caption| caption.path.as_path()),
+        input: external_caption
+            .as_ref()
+            .map(|caption| caption.path.as_path()),
         embed: embed_subtitles,
         sidecar: subtitle_sidecar.as_deref(),
         format: SubtitleFormat::Text,
     };
-    let ffmpeg_subtitle_input = external_caption.as_ref().map(|caption| caption.path.clone());
+    let ffmpeg_subtitle_input = external_caption
+        .as_ref()
+        .map(|caption| caption.path.clone());
     let ffmpeg_subtitle_sidecar = subtitle_sidecar.clone();
     let ffmpeg_embed_subtitles = embed_subtitles;
     let ffmpeg_path = ffmpeg.clone();
@@ -3470,9 +3474,7 @@ async fn finalize_manifest_download(
             None
         }
     });
-    if !has_precreated_subtitle_sidecar
-        && let Some(sidecar) = subtitle_sidecar.as_deref()
-    {
+    if !has_precreated_subtitle_sidecar && let Some(sidecar) = subtitle_sidecar.as_deref() {
         remove_regular_file_if_present(sidecar)
             .await
             .map_err(ManifestRunError::Failed)?;

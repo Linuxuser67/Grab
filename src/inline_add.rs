@@ -933,6 +933,12 @@ pub(crate) enum UrlEntryAction {
     QueueAll,
 }
 
+/// Captions stay attached to the URL they came with while the card probes.
+type UrlBoundCaptions = (String, Vec<crate::extension_server::Caption>);
+type HandoffCaptionState = Rc<RefCell<Option<UrlBoundCaptions>>>;
+type AddCardOpen =
+    Rc<dyn Fn(Option<String>, Option<String>, Vec<crate::extension_server::Caption>)>;
+
 /// The video preview block inside the form: exactly one state shows at a
 /// time (ready rows, tools row, or the centered error card), driven by the
 /// probe below.
@@ -943,8 +949,7 @@ pub(crate) struct VideoStep {
     /// Browser source page bound to the exact URL currently in the entry.
     pub(crate) source_referer: Rc<RefCell<Option<(String, String)>>>,
     /// Browser caption candidates bound to that exact URL; never persisted.
-    pub(crate) handoff_captions:
-        Rc<RefCell<Option<(String, Vec<crate::extension_server::Caption>)>>>,
+    pub(crate) handoff_captions: HandoffCaptionState,
     /// Public-only hosts retained while this untrusted handoff card is open.
     public_host_leases: PublicHostLeases,
     /// Spinner paintable for the entry's secondary icon slot: GTK4 entries
@@ -2740,7 +2745,7 @@ pub struct AddCard {
     widget: gtk4::Widget,
     nav: adw::NavigationView,
     public_host_leases: PublicHostLeases,
-    open: Rc<dyn Fn(Option<String>, Option<String>, Vec<crate::extension_server::Caption>)>,
+    open: AddCardOpen,
     toggle: Rc<dyn Fn()>,
     open_torrent_picker: TorrentPickerOpener,
     state: Rc<OpenState>,
@@ -2756,14 +2761,6 @@ impl AddCard {
     /// can react to a picker page becoming visible.
     pub fn navigation(&self) -> &adw::NavigationView {
         &self.nav
-    }
-
-    /// Reveal a browser URL and retain only the source page's origin.
-    ///
-    /// The source is scoped to the exact submitted URL. If the card is already
-    /// open, this focuses it; collapsing the card always resets the form.
-    pub fn open(&self, initial_url: Option<String>, referer: Option<String>) {
-        self.open_with_captions(initial_url, referer, Vec::new());
     }
 
     /// Reveal a browser URL with its validated, session-only caption candidates.

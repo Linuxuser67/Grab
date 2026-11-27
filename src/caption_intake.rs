@@ -68,6 +68,14 @@ pub(crate) async fn stage_handoff_captions(
         return Vec::new();
     }
 
+    // A configured upstream proxy resolves the caption host itself and would
+    // bypass the public-only DNS lease. Captions are optional, so skip them
+    // rather than failing the associated media download.
+    if let Err(error) = crate::subprocess_proxy::validate_proxy_compatibility() {
+        tracing::warn!(error = %error, "caption fetch skipped because the configured proxy bypasses DNS safeguards");
+        return Vec::new();
+    }
+
     let client = match crate::manifest_intake::client_for_caption_handoff(handoff_url, proxy).await
     {
         Ok(client) => client,

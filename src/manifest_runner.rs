@@ -3335,7 +3335,7 @@ async fn finalize_manifest_download(
     }
     let declared_language = external_caption
         .map(|caption| caption.language.as_str())
-        .or_else(|| match &tracks {
+        .or(match &tracks {
             Tracks::Hls {
                 subtitle_language, ..
             }

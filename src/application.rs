@@ -310,6 +310,7 @@ async fn enqueue_direct_handoff(
         })
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn route_open_uri(
     manager: Rc<DownloadManager>,
     toasts: Rc<adw::ToastOverlay>,
@@ -403,6 +404,7 @@ async fn route_open_uri(
 /// own download only after Grab really has it. Dropping it unanswered counts
 /// as declined. `expires_at` is the server's confirmation deadline, used to
 /// close the dialog before the waiting request expires.
+#[allow(clippy::too_many_arguments)]
 fn dispatch_handoff(
     s: &State,
     uri: url::Url,

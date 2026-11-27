@@ -15,6 +15,7 @@ use std::time::Duration;
 use futures_util::StreamExt as _;
 use reqwest::header::{HeaderMap, HeaderName, HeaderValue};
 use sha2::Digest as _;
+use tokio::io::AsyncWriteExt as _;
 
 use crate::extension_server::Caption;
 
@@ -135,19 +136,54 @@ async fn stage_one(
         return Err(format!("body is not valid {format} content"));
     }
     let name = caption_file_name(caption, &format);
-    crate::manifest_runner::write_staged_file_atomic(
-        staging_dir,
-        &format!("{name}.part"),
-        &name,
-        &bytes,
-        crate::manifest_runner::StagedPublish::Replace,
-    )
-    .await?;
+    stage_atomically(staging_dir, &name, &bytes).await?;
     Ok(StagedCaption {
         path: staging_dir.join(name),
         language: caption.language.clone(),
         format,
     })
+}
+
+/// Publish a single staged caption file atomically without depending on the
+/// manifest runner (that would introduce an import cycle).
+async fn stage_atomically(directory: &Path, name: &str, bytes: &[u8]) -> Result<(), String> {
+    let temporary = directory.join(format!("{name}.part"));
+    let target = directory.join(name);
+    let _ = tokio::fs::remove_file(&temporary).await;
+
+    let result = async {
+        let mut file = tokio::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&temporary)
+            .await
+            .map_err(|error| format!("Could not create staged caption {name}: {error}"))?;
+        file.write_all(bytes)
+            .await
+            .map_err(|error| format!("Could not write staged caption {name}: {error}"))?;
+        file.sync_all()
+            .await
+            .map_err(|error| format!("Could not flush staged caption {name}: {error}"))?;
+        drop(file);
+
+        match tokio::fs::symlink_metadata(&target).await {
+            Ok(metadata) if metadata.file_type().is_symlink() || !metadata.is_file() => {
+                return Err(format!("Staged caption {name} is not a regular file"));
+            }
+            Ok(_) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(format!("Could not inspect staged caption {name}: {error}")),
+        }
+        tokio::fs::rename(&temporary, &target)
+            .await
+            .map_err(|error| format!("Could not publish staged caption {name}: {error}"))
+    }
+    .await;
+
+    if result.is_err() {
+        let _ = tokio::fs::remove_file(&temporary).await;
+    }
+    result
 }
 
 async fn fetch_caption(client: &reqwest::Client, caption: &Caption) -> Result<Vec<u8>, String> {

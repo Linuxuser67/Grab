@@ -19,8 +19,7 @@ const MAX_CAPTION_BYTES: usize = 256 * 1024;
 const CAPTION_FETCH_BUDGET: Duration = Duration::from_secs(10);
 const MAX_CAPTION_REDIRECTS: usize = 5;
 /// Same allowlist the `/add` boundary validates; rechecked before sending.
-const ALLOWED_CAPTION_HEADERS: [&str; 4] =
-    ["referer", "origin", "accept-language", "authorization"];
+const ALLOWED_CAPTION_HEADERS: [&str; 3] = ["referer", "origin", "accept-language"];
 type CaptionRedirectLeases = Vec<std::sync::Arc<crate::download_net::PublicResolutionLease>>;
 
 /// One caption file staged for later FFmpeg finalization (slice A3).
@@ -99,14 +98,9 @@ pub(crate) async fn stage_handoff_captions(
             return Vec::new();
         }
     };
-    let staged = stage_with_client_and_referer(
-        &client,
-        &accepted,
-        staging_dir,
-        source_referer,
-        deadline,
-    )
-    .await;
+    let staged =
+        stage_with_client_and_referer(&client, &accepted, staging_dir, source_referer, deadline)
+            .await;
     drop(leases);
     staged
 }
@@ -228,7 +222,7 @@ async fn fetch_caption_with_referer(
         }
         let name = HeaderName::from_bytes(name.as_bytes()).map_err(|error| error.to_string())?;
         let mut value = HeaderValue::from_str(value).map_err(|error| error.to_string())?;
-        if matches!(name.as_str(), "authorization" | "origin" | "referer") {
+        if matches!(name.as_str(), "origin" | "referer") {
             value.set_sensitive(true);
         }
         headers.insert(name, value);
@@ -475,8 +469,8 @@ fn caption_file_name(caption: &Caption, format: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
     use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
     use tokio::net::TcpListener;
     use tokio::task::JoinHandle;
@@ -560,9 +554,7 @@ mod tests {
         });
         (format!("http://{host}:{port}/caption"), server)
     }
-    async fn slow_fixture_server(
-        delay: Duration,
-    ) -> (String, Arc<AtomicUsize>, JoinHandle<()>) {
+    async fn slow_fixture_server(delay: Duration) -> (String, Arc<AtomicUsize>, JoinHandle<()>) {
         let listener = TcpListener::bind("127.0.0.1:0")
             .await
             .expect("bind delayed caption fixture");
@@ -571,7 +563,8 @@ mod tests {
         let server_requests = Arc::clone(&requests);
         let server = tokio::spawn(async move {
             loop {
-                let accepted = tokio::time::timeout(Duration::from_secs(2), listener.accept()).await;
+                let accepted =
+                    tokio::time::timeout(Duration::from_secs(2), listener.accept()).await;
                 let Ok(Ok((mut stream, _))) = accepted else {
                     break;
                 };
@@ -866,7 +859,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn source_context_and_authorization_headers_are_not_forwarded_across_redirects() {
+    async fn source_context_headers_are_not_forwarded_across_redirects() {
         let (target_url, target_server) =
             fixture_server_at("0.0.0.0:0", "127.0.0.2", vec![response(b"WEBVTT\n")]).await;
         let redirected_url = target_url;
@@ -882,10 +875,6 @@ mod tests {
                 "Origin".to_string(),
                 "https://player.example.test".to_string(),
             ),
-            (
-                "Authorization".to_string(),
-                "Bearer private-token".to_string(),
-            ),
         ];
         let directory = tempfile::tempdir().expect("staging dir");
 
@@ -894,6 +883,7 @@ mod tests {
             &[&track],
             directory.path(),
             Some("http://source.example.test/watch/private?token=secret"),
+            tokio::time::Instant::now() + CAPTION_FETCH_BUDGET,
         )
         .await;
 
@@ -903,10 +893,6 @@ mod tests {
             .first()
             .expect("initial request")
             .to_ascii_lowercase();
-        assert!(
-            initial.contains("authorization: bearer private-token"),
-            "{initial}"
-        );
         assert!(
             initial.contains("origin: https://player.example.test"),
             "{initial}"
@@ -921,7 +907,6 @@ mod tests {
             .first()
             .expect("follow-up request")
             .to_ascii_lowercase();
-        assert!(!redirected.contains("authorization:"), "{redirected}");
         assert!(!redirected.contains("origin:"), "{redirected}");
         assert!(!redirected.contains("referer:"), "{redirected}");
     }
@@ -937,10 +922,6 @@ mod tests {
                 "Origin".to_string(),
                 "http://player.example.test".to_string(),
             ),
-            (
-                "Authorization".to_string(),
-                "Bearer same-origin-token".to_string(),
-            ),
         ];
         let directory = tempfile::tempdir().expect("staging dir");
 
@@ -949,6 +930,7 @@ mod tests {
             &[&track],
             directory.path(),
             Some("http://source.example.test/watch?token=secret"),
+            tokio::time::Instant::now() + CAPTION_FETCH_BUDGET,
         )
         .await;
 
@@ -956,10 +938,6 @@ mod tests {
         let requests = server.await.expect("same-origin redirect requests");
         assert_eq!(requests.len(), 2);
         let second = requests[1].to_ascii_lowercase();
-        assert!(
-            second.contains("authorization: bearer same-origin-token"),
-            "{second}"
-        );
         assert!(
             second.contains("origin: http://player.example.test"),
             "{second}"
@@ -977,7 +955,13 @@ mod tests {
         let client = fixture_client();
         let track = caption(&url, "en", "vtt");
 
-        let result = fetch_caption_with_referer(&client, &track, None).await;
+        let result = fetch_caption_with_referer(
+            &client,
+            &track,
+            None,
+            tokio::time::Instant::now() + CAPTION_FETCH_BUDGET,
+        )
+        .await;
 
         assert!(
             result.is_err(),
@@ -1007,7 +991,6 @@ mod tests {
                 "Referer".to_string(),
                 "https://example.test/watch".to_string(),
             ),
-            ("Authorization".to_string(), "Bearer token".to_string()),
         ];
         let directory = tempfile::tempdir().expect("staging dir");
 
@@ -1021,7 +1004,6 @@ mod tests {
             request.contains("referer: https://example.test/watch"),
             "{request}"
         );
-        assert!(request.contains("authorization: bearer token"), "{request}");
     }
 
     #[test]
@@ -1032,6 +1014,12 @@ mod tests {
         let error = runtime
             .block_on(fetch_caption(&fixture_client(), &track))
             .expect_err("unexpected header must be refused");
+        assert!(error.contains("not allowed"), "{error}");
+
+        track.headers = vec![("Authorization".to_string(), "Bearer token".to_string())];
+        let error = runtime
+            .block_on(fetch_caption(&fixture_client(), &track))
+            .expect_err("authorization must remain unavailable until an extension caller needs it");
         assert!(error.contains("not allowed"), "{error}");
 
         track.headers = vec![("Referer".to_string(), "a\r\nX-Evil: b".to_string())];

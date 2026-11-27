@@ -759,11 +759,7 @@ mod tests {
         )
         .into_bytes();
         let (source_url, source_server) = fixture_server(vec![redirect]).await;
-        let client = reqwest::Client::builder()
-            .no_proxy()
-            .redirect(reqwest::redirect::Policy::limited(5))
-            .build()
-            .expect("redirect-enabled fixture client");
+        let client = fixture_client();
         let mut track = caption(&source_url, "en", "vtt");
         track.headers = vec![
             (

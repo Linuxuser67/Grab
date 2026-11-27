@@ -1503,7 +1503,7 @@ mod caption_debug_tests {
         assert!(!debug.contains("token=secret"));
         assert!(!debug.contains("Bearer secret"));
         assert!(debug.contains("<redacted>"));
-        assert!(debug.contains("Authorization") == false);
+        assert!(!debug.contains("Authorization"));
     }
 }
 

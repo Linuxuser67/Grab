@@ -119,10 +119,7 @@ glib::wrapper! {
 impl DownloadItem {
     /// Attach optional browser caption candidates to this exact queue row.
     /// These remain in memory across pause/resume but are never persisted.
-    pub(crate) fn set_handoff_captions(
-        &self,
-        captions: Vec<crate::extension_server::Caption>,
-    ) {
+    pub(crate) fn set_handoff_captions(&self, captions: Vec<crate::extension_server::Caption>) {
         self.imp().handoff_captions.replace(captions);
     }
 

@@ -530,10 +530,8 @@ pub(crate) async fn client_for_direct_resource_probe(
         .map(|(client, _)| client)
 }
 
-/// Client for browser-supplied caption tracks attached to a handoff. Uses the
-/// same staged jar/UA, proxy policy and guarded redirect/DNS rules as media,
-/// but leaves Referer to the caption's own validated headers.
-#[allow(dead_code)] // consumed by the caption intake/finalization slices
+/// Client for browser-supplied caption tracks attached to a handoff.
+/// Uses the same staged jar/UA, proxy policy and guarded redirect/DNS rules as media.
 pub(crate) async fn client_for_caption_handoff(
     raw_url: &str,
     proxy: Option<&crate::net_types::ResolvedProxy>,

@@ -5714,9 +5714,25 @@ mod tests {
                 .any(|argument| argument == sidecar.to_string_lossy().as_ref()),
             "sidecar destination must be supplied to FFmpeg: {args:?}"
         );
+        let media_output_index = args
+            .iter()
+            .position(|argument| argument == output.to_string_lossy().as_ref())
+            .expect("primary media output");
+        let sidecar_map_index = args
+            .windows(2)
+            .position(|pair| pair == ["-map", "1:s:0"])
+            .expect("subtitle stream mapped for sidecar output");
+        let sidecar_path_index = args
+            .iter()
+            .position(|argument| argument == sidecar.to_string_lossy().as_ref())
+            .expect("sidecar output path");
         assert!(
-            !args.windows(2).any(|pair| pair == ["-map", "1:s:0"]),
-            "sidecars must not be embedded into the media output: {args:?}"
+            media_output_index < sidecar_map_index && sidecar_map_index < sidecar_path_index,
+            "subtitle mapping must follow the primary output and target only the sidecar: {args:?}"
+        );
+        assert!(
+            args.windows(2).any(|pair| pair == ["-c:s", "srt"]),
+            "sidecar must retain the SRT codec: {args:?}"
         );
     }
 

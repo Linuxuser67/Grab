@@ -6485,7 +6485,7 @@ segment-2.ts
     /// Shared body for the AES-128 incremental VOD integration test. The output
     /// container follows the destination extension, so exercise TS (the native
     /// MPEG-TS case) plus MP4/MKV written through the same owned part.
-    async fn assert_aes128_hls_vod_output(extension: &str, force_early_exit: bool) {
+    async fn assert_aes128_hls_vod_output(\n        extension: &str,\n        force_early_exit: bool,\n        with_browser_caption: bool,\n    ) {
         use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
 
         let ffmpeg = match resolve_manifest_ffmpeg(&[PathBuf::from("/usr/bin")]) {
@@ -6695,6 +6695,26 @@ segment-2.ts
             .build()
             .expect("build AES-128 fixture client");
         let staging = tempfile::tempdir().expect("create AES-128 HLS staging directory");
+        let caption_release = Arc::new(tokio::sync::Notify::new());
+        let mut caption_tasks =
+            tokio::task::JoinSet::<Option<crate::caption_intake::StagedCaption>>::new();
+        if with_browser_caption {
+            let release = Arc::clone(&caption_release);
+            let caption_path = staging.path().join("browser-caption.vtt");
+            caption_tasks.spawn(async move {
+                release.notified().await;
+                tokio::fs::write(
+                    &caption_path,
+                    "WEBVTT\n\n00:00:00.000 --> 00:00:04.000\nBrowser caption fixture\n",
+                )
+                .await
+                .expect("write browser caption fixture");
+                Some(crate::caption_intake::StagedCaption {
+                    path: caption_path,
+                    language: "en".to_string(),
+                })
+            });
+        }
         let destination_dir = tempfile::tempdir().expect("create AES-128 destination directory");
         let destination = destination_dir
             .path()
@@ -6741,7 +6761,7 @@ segment-2.ts
             proxy: None,
             cookies_browser: "none".to_string(),
             connections: 4,
-            embed_subs: false,
+            embed_subs: with_browser_caption,
             captions: Vec::new(),
         };
         let gate = crate::attempt_gate::AttemptGate::new();
@@ -6767,7 +6787,7 @@ segment-2.ts
                 dest_dir: &task_dest_dir,
                 video_dir: &task_video_dir,
                 audio_dir: &task_audio_dir,
-                caption_tasks: tokio::task::JoinSet::new(),
+                caption_tasks,
                 tracks: Tracks::Hls {
                     video: Box::new(plan),
                     audio: None,
@@ -6796,6 +6816,18 @@ segment-2.ts
         );
         assert!(!growing_prefix.contains("#EXT-X-ENDLIST"));
         assert!(!growing_prefix.contains("#EXT-X-PLAYLIST-TYPE:VOD"));
+        if with_browser_caption {
+            let metadata = tokio::fs::symlink_metadata(&part_path)
+                .await
+                .expect("destination-owned part must exist while caption staging is pending");
+            assert!(metadata.is_file() && !metadata.file_type().is_symlink());
+            assert_eq!(
+                metadata.len(),
+                0,
+                "FFmpeg should wait for caption staging while the destination part remains visible"
+            );
+            caption_release.notify_one();
+        }
         assert!(
             !download_task.is_finished(),
             "the final segment must remain in flight while FFmpeg consumes the growing prefix"
@@ -6868,9 +6900,14 @@ segment-2.ts
             "successful publication must remove the part ownership record"
         );
 
-        let verification = tokio::process::Command::new(&ffmpeg)
+        let mut verification_command = tokio::process::Command::new(&ffmpeg);
+        verification_command
             .args(["-hide_banner", "-loglevel", "error", "-i"])
-            .arg(&destination)
+            .arg(&destination);
+        if with_browser_caption {
+            verification_command.args(["-map", "0:v:0", "-map", "0:s:0"]);
+        }
+        let verification = verification_command
             .args(["-f", "null", "-"])
             .output()
             .await
@@ -6884,23 +6921,23 @@ segment-2.ts
 
     #[tokio::test]
     async fn ffmpeg_decrypts_aes128_hls_vod_into_an_owned_ts_part() {
-        assert_aes128_hls_vod_output("ts", false).await;
+        assert_aes128_hls_vod_output("ts", false, false).await;
     }
 
     #[cfg(unix)]
     #[tokio::test]
     async fn aes128_vod_remuxes_again_when_ffmpeg_exits_before_playlist_completion() {
-        assert_aes128_hls_vod_output("ts", true).await;
+        assert_aes128_hls_vod_output("ts", true, false).await;
     }
 
     #[tokio::test]
     async fn ffmpeg_decrypts_aes128_hls_vod_into_an_owned_mp4_part() {
-        assert_aes128_hls_vod_output("mp4", false).await;
+        assert_aes128_hls_vod_output("mp4", false, false).await;
     }
 
     #[tokio::test]
     async fn ffmpeg_decrypts_aes128_hls_vod_into_an_owned_mkv_part() {
-        assert_aes128_hls_vod_output("mkv", false).await;
+        assert_aes128_hls_vod_output("mkv", false, true).await;
     }
 
     #[cfg(target_os = "linux")]

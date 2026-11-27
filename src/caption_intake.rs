@@ -571,10 +571,7 @@ mod tests {
                 server_requests.fetch_add(1, Ordering::SeqCst);
                 let mut request = Vec::new();
                 let mut chunk = [0_u8; 4096];
-                loop {
-                    let Ok(count) = stream.read(&mut chunk).await else {
-                        break;
-                    };
+                while let Ok(count) = stream.read(&mut chunk).await {
                     if count == 0 {
                         break;
                     }

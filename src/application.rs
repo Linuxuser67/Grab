@@ -525,13 +525,7 @@ fn dispatch_handoff(
             let decision_c = decision.clone();
             glib::spawn_future_local(async move {
                 let routed = route_open_uri(
-                    manager_c,
-                    toasts_c,
-                    add_card_c,
-                    settings_c,
-                    approved_c,
-                    handoff_c,
-                    None,
+                    manager_c, toasts_c, add_card_c, settings_c, approved_c, handoff_c, None,
                 )
                 .await;
                 answer_handoff(decision_c.borrow_mut().take(), routed.into());
@@ -595,7 +589,15 @@ fn handle_open_files(s: Rc<State>, files: Vec<gio::File>) {
             if let Ok(uri) = uri_text.parse::<url::Url>()
                 && matches!(uri.scheme(), "http" | "https" | "magnet")
             {
-                dispatch_handoff(&s, uri, via_grab, None, None, None, HandoffExtras::default());
+                dispatch_handoff(
+                    &s,
+                    uri,
+                    via_grab,
+                    None,
+                    None,
+                    None,
+                    HandoffExtras::default(),
+                );
                 continue;
             }
             if let Some(path) = f.path() {

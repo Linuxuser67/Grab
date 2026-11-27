@@ -406,12 +406,19 @@ mod tests {
         let port = listener.local_addr().expect("fixture address").port();
         let server = tokio::spawn(async move {
             let mut seen = Vec::new();
-            for response in responses {
-                let (mut stream, _) =
-                    tokio::time::timeout(Duration::from_secs(5), listener.accept())
-                        .await
-                        .expect("fixture accept")
-                        .expect("accept caption request");
+            for (index, response) in responses.into_iter().enumerate() {
+                let accept_timeout = if index == 0 {
+                    Duration::from_secs(5)
+                } else {
+                    Duration::from_millis(250)
+                };
+                let accepted = tokio::time::timeout(accept_timeout, listener.accept()).await;
+                let (mut stream, _) = match accepted {
+                    Ok(Ok(connection)) => connection,
+                    Err(_) if index > 0 => break,
+                    Ok(Err(error)) => panic!("accept caption request: {error}"),
+                    Err(error) => panic!("fixture accept: {error}"),
+                };
                 let mut request = Vec::new();
                 let mut chunk = [0_u8; 4096];
                 loop {
@@ -621,7 +628,8 @@ mod tests {
 
     #[tokio::test]
     async fn stops_after_the_first_usable_caption() {
-        let (url, server) = fixture_server(vec![response(b"WEBVTT\n")]).await;
+        let (url, server) =
+            fixture_server(vec![response(b"WEBVTT\n"), response(b"WEBVTT\n")]).await;
         let directory = tempfile::tempdir().expect("staging dir");
         let first = caption(&format!("{url}/first"), "en", "vtt");
         let second = caption(&format!("{url}/second"), "fr", "vtt");

@@ -475,8 +475,8 @@ fn caption_file_name(caption: &Caption, format: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::Arc;
     use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::Arc;
     use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
     use tokio::net::TcpListener;
     use tokio::task::JoinHandle;
@@ -586,14 +586,14 @@ mod tests {
                         break;
                     }
                     request.extend_from_slice(&chunk[..count]);
-                    if request.windows(4).any(|window| window == b"\\r\\n\\r\\n") {
+                    if request.windows(4).any(|window| window == b"\r\n\r\n") {
                         break;
                     }
                 }
                 tokio::time::sleep(delay).await;
                 let _ = stream
                     .write_all(
-                        b"HTTP/1.1 503 Service Unavailable\\r\\nContent-Length: 0\\r\\nConnection: close\\r\\n\\r\\n",
+                        b"HTTP/1.1 503 Service Unavailable\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
                     )
                     .await;
             }

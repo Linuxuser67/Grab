@@ -5032,6 +5032,7 @@ pub fn build_add_card(manager: Rc<DownloadManager>) -> AddCard {
                         // Single clipboard read per fresh open; no watch, no polling.
                         let url_entry = url_entry.clone();
                         let source_referer = Rc::clone(&source_referer);
+                        let handoff_captions = Rc::clone(&handoff_captions);
                         let last_auto_paste = Rc::clone(&last_auto_paste);
                         glib::spawn_future_local(async move {
                             let clipboard = gtk4::gdk::Display::default().map(|d| d.clipboard());

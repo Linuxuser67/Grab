@@ -38,7 +38,7 @@ mod imp {
         pub filename: RefCell<String>,
         #[property(get, set)]
         pub dest_dir: RefCell<String>,
-        #[property(get, set, builder(DownloadStatus::Queued))]
+        #[property(get, set = Self::set_status, builder(DownloadStatus::Queued))]
         pub status: Cell<DownloadStatus>,
         #[property(get, set)]
         pub progress: Cell<f64>,
@@ -92,6 +92,13 @@ mod imp {
     impl DownloadItem {
         fn set_referer(&self, value: String) {
             *self.referer.borrow_mut() = crate::referrer::origin_only(&value).unwrap_or_default();
+        }
+
+        fn set_status(&self, value: DownloadStatus) {
+            self.status.set(value);
+            if matches!(value, DownloadStatus::Done | DownloadStatus::Cancelled) {
+                self.handoff_captions.borrow_mut().clear();
+            }
         }
     }
 
@@ -302,5 +309,24 @@ mod tests {
         first.set_handoff_captions(vec![caption.clone()]);
         assert_eq!(first.handoff_captions().len(), 1);
         assert!(second.handoff_captions().is_empty());
+
+        first.set_status(DownloadStatus::Paused);
+        assert_eq!(
+            first.handoff_captions().len(),
+            1,
+            "paused rows retain captions for an in-session resume",
+        );
+        first.set_status(DownloadStatus::Done);
+        assert!(
+            first.handoff_captions().is_empty(),
+            "completed rows release signed caption URLs",
+        );
+
+        second.set_handoff_captions(vec![caption]);
+        second.set_status(DownloadStatus::Cancelled);
+        assert!(
+            second.handoff_captions().is_empty(),
+            "cancelled rows release signed caption URLs",
+        );
     }
 }

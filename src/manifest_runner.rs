@@ -2827,7 +2827,13 @@ async fn run_incremental_hls_vod(
         .filter(|_| !embed_subtitles)
         .map(|caption| {
             let language = manifest_subtitle_language(Some(caption.language.as_str()));
-            crate::video_staging::sidecar_path_for(&output_part, language)
+            // Keep the intermediate subtitle in the private per-item XDG
+            // staging directory. A destination-side path could collide with a
+            // user file before the no-clobber final publication.
+            crate::video_staging::sidecar_path_for(
+                &staging.join("incremental-output.mkv"),
+                language,
+            )
         });
     if let Some(sidecar) = subtitle_sidecar.as_deref() {
         remove_regular_file_if_present(sidecar)

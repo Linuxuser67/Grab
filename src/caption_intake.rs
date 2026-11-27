@@ -15,7 +15,6 @@ use std::time::Duration;
 use futures_util::StreamExt as _;
 use reqwest::header::{HeaderMap, HeaderName, HeaderValue};
 use sha2::Digest as _;
-use tokio::io::AsyncWriteExt as _;
 
 use crate::extension_server::Caption;
 

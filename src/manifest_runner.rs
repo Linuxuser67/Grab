@@ -2196,11 +2196,30 @@ pub(crate) async fn run_manifest_download(
         ) => return Ok(ManifestOutcome::Aborted),
     };
     let mut _finish_stop_sender = None;
-    if !live_hls
-        && !live_dash
-        && !(job.source.subtitle_key.is_none() && !job.captions.is_empty())
-        && tracks.uses_incremental_hls_vod()
-    {
+    if !live_hls && !live_dash && tracks.uses_incremental_hls_vod() {
+        // Browser captions are staged alongside the media fetch and become an
+        // additional FFmpeg input. Keep the incremental mux so its owned video
+        // part remains visible in the destination while the HLS resources arrive.
+        let mut caption_tasks = tokio::task::JoinSet::new();
+        if job.source.subtitle_key.is_none() && !job.captions.is_empty() {
+            let handoff_url = job.source.url.clone();
+            let captions = job.captions.clone();
+            let caption_staging = staging.clone();
+            let proxy = job.proxy.clone();
+            let referer = job.referer.clone();
+            caption_tasks.spawn(async move {
+                crate::caption_intake::stage_handoff_captions(
+                    &handoff_url,
+                    &captions,
+                    &caption_staging,
+                    proxy.as_ref(),
+                    referer.as_deref(),
+                )
+                .await
+                .into_iter()
+                .next()
+            });
+        }
         // Preserve AES-128's established configured concurrency. Complex clear
         // VOD stays sequential, matching the ordinary static-HLS resource path.
         let connections = match &tracks {
@@ -2218,6 +2237,7 @@ pub(crate) async fn run_manifest_download(
             dest_dir: &dest_dir,
             video_dir: &video_dir,
             audio_dir: &audio_dir,
+            caption_tasks,
             tracks,
             ffmpeg,
             downloaded,
@@ -2389,6 +2409,8 @@ pub(crate) async fn run_manifest_download(
         video_dir: &video_dir,
         audio_dir: &audio_dir,
         output_part,
+        pre_staged_caption: None,
+        precreated_subtitle_sidecar: None,
         tracks,
         has_audio,
         ffmpeg,
@@ -2406,6 +2428,7 @@ struct ManifestIncrementalHlsVod<'a> {
     dest_dir: &'a Path,
     video_dir: &'a Path,
     audio_dir: &'a Path,
+    caption_tasks: tokio::task::JoinSet<Option<crate::caption_intake::StagedCaption>>,
     tracks: Tracks,
     ffmpeg: PathBuf,
     downloaded: Arc<AtomicU64>,
@@ -2496,6 +2519,7 @@ struct ManifestCompleteHlsRemux<'a> {
     part_path: &'a Path,
     container: ManifestContainer,
     timestamp_policy: InputTimestampPolicy,
+    subtitles: SubtitleOutput<'a>,
     abort: &'a mut tokio::sync::oneshot::Receiver<crate::video::StopIntent>,
 }
 
@@ -2526,6 +2550,7 @@ async fn remux_complete_hls_vod_part(
         part_path,
         container,
         timestamp_policy,
+        subtitles,
         abort,
     } = context;
     let mut output_file = crate::manifest_destination::open_owned_part_async(
@@ -2561,12 +2586,7 @@ async fn remux_complete_hls_vod_part(
             timestamp_policy,
             timeout: Some(INCREMENTAL_HLS_MUX_TIMEOUT),
         },
-        SubtitleOutput {
-            input: None,
-            embed: false,
-            sidecar: None,
-            format: SubtitleFormat::Text,
-        },
+        subtitles,
         FfmpegOutput::OwnedPart {
             file: output_file.into_std().await,
             container,
@@ -2591,6 +2611,7 @@ async fn run_incremental_hls_vod(
         dest_dir,
         video_dir,
         audio_dir,
+        mut caption_tasks,
         tracks,
         ffmpeg,
         downloaded,
@@ -2698,6 +2719,8 @@ async fn run_incremental_hls_vod(
         first_segment_events.push(async move { (index, receiver.await) });
     }
     let mut first_segment_ready = vec![false; track_count];
+    let mut external_caption = None;
+    let mut caption_pending = !caption_tasks.is_empty();
     let mut fetch_abort_tx = Some(Vec::new());
     for worker in &mut workers {
         if let Some(sender) = worker.abort_sender.take() {
@@ -2714,7 +2737,7 @@ async fn run_incremental_hls_vod(
 
     // Do not start FFmpeg until every selected rendition has published a
     // complete first segment and its growing local playlist snapshot.
-    while first_segment_ready.iter().any(|ready| !ready) {
+    while first_segment_ready.iter().any(|ready| !ready) || caption_pending {
         tokio::select! {
             biased;
             stop = &mut abort, if !abort_done => {
@@ -2737,6 +2760,18 @@ async fn run_incremental_hls_vod(
                     && result.is_ok()
                 {
                     first_segment_ready[index] = true;
+                }
+            }
+            caption = caption_tasks.join_next(), if caption_pending => {
+                caption_pending = false;
+                match caption {
+                    Some(Ok(staged)) => external_caption = staged,
+                    Some(Err(error)) => tracing::warn!(
+                        item_id = job.item_id,
+                        error = %error,
+                        "browser caption staging task failed; continuing without captions"
+                    ),
+                    None => {}
                 }
             }
             joined = fetchers.join_next(), if !fetchers.is_empty() => {
@@ -2781,12 +2816,52 @@ async fn run_incremental_hls_vod(
     }
 
     let output_container = manifest_output_container(&job.dest)?;
+    let embed_subtitles = external_caption.as_ref().is_some_and(|_| {
+        embed_manifest_subtitles(job.embed_subs, output_container, SubtitleFormat::Text)
+    });
+    let subtitle_sidecar = external_caption
+        .as_ref()
+        .filter(|_| !embed_subtitles)
+        .map(|caption| {
+            let language = manifest_subtitle_language(Some(caption.language.as_str()));
+            // Keep the intermediate subtitle in the private per-item XDG
+            // staging directory. A destination-side path could collide with a
+            // user file before the no-clobber final publication.
+            crate::video_staging::sidecar_path_for(
+                &staging.join("incremental-output.mkv"),
+                language,
+            )
+        });
+    if let Some(sidecar) = subtitle_sidecar.as_deref() {
+        remove_regular_file_if_present(sidecar)
+            .await
+            .map_err(ManifestRunError::Failed)?;
+    }
+    let remux_subtitles = SubtitleOutput {
+        input: external_caption
+            .as_ref()
+            .map(|caption| caption.path.as_path()),
+        embed: embed_subtitles,
+        sidecar: subtitle_sidecar.as_deref(),
+        format: SubtitleFormat::Text,
+    };
+    let ffmpeg_subtitle_input = external_caption
+        .as_ref()
+        .map(|caption| caption.path.clone());
+    let ffmpeg_subtitle_sidecar = subtitle_sidecar.clone();
+    let ffmpeg_embed_subtitles = embed_subtitles;
     let ffmpeg_path = ffmpeg.clone();
     let ffmpeg_video_playlist = video_playlist.clone();
     let ffmpeg_audio_playlist = audio_playlist.clone();
     let output_label = part_path.clone();
     let output_file = output_file.into_std().await;
     let mut ffmpeg_task = tokio::spawn(async move {
+        let subtitles = SubtitleOutput {
+            input: ffmpeg_subtitle_input.as_deref(),
+            embed: ffmpeg_embed_subtitles,
+            sidecar: ffmpeg_subtitle_sidecar.as_deref(),
+            format: SubtitleFormat::Text,
+        };
         run_ffmpeg_with_offsets_timeout(
             &ffmpeg_path,
             FfmpegInput {
@@ -2801,12 +2876,7 @@ async fn run_incremental_hls_vod(
                 timestamp_policy,
                 timeout: Some(INCREMENTAL_HLS_MUX_TIMEOUT),
             },
-            SubtitleOutput {
-                input: None,
-                embed: false,
-                sidecar: None,
-                format: SubtitleFormat::Text,
-            },
+            subtitles,
             FfmpegOutput::OwnedPart {
                 file: output_file,
                 container: output_container,
@@ -2974,6 +3044,7 @@ async fn run_incremental_hls_vod(
                     } else {
                         InputTimestampPolicy::Normalize
                     },
+                    subtitles: remux_subtitles,
                     abort: &mut finish_abort,
                 })
                 .await?
@@ -2992,6 +3063,7 @@ async fn run_incremental_hls_vod(
                     } else {
                         InputTimestampPolicy::Normalize
                     },
+                    subtitles: remux_subtitles,
                     abort: &mut abort,
                 })
                 .await?
@@ -3040,6 +3112,8 @@ async fn run_incremental_hls_vod(
         video_dir,
         audio_dir,
         output_part: part_path,
+        pre_staged_caption: external_caption,
+        precreated_subtitle_sidecar: subtitle_sidecar,
         tracks: Tracks::Hls {
             video: Box::new(video),
             audio: audio.map(Box::new),
@@ -3078,6 +3152,8 @@ struct ManifestFinalization<'a> {
     video_dir: &'a Path,
     audio_dir: &'a Path,
     output_part: PathBuf,
+    pre_staged_caption: Option<crate::caption_intake::StagedCaption>,
+    precreated_subtitle_sidecar: Option<PathBuf>,
     tracks: Tracks,
     has_audio: bool,
     ffmpeg: PathBuf,
@@ -3172,6 +3248,8 @@ async fn finalize_manifest_download(
         video_dir,
         audio_dir,
         output_part,
+        pre_staged_caption,
+        precreated_subtitle_sidecar,
         tracks,
         has_audio,
         ffmpeg,
@@ -3248,10 +3326,12 @@ async fn finalize_manifest_download(
     } else {
         None
     };
-    // Browser captions are a fallback for streams with no user-selected native
-    // subtitle. Only staged-track muxes can consume this extra FFmpeg input;
-    // a pre-muxed live output cannot attach a late external track.
-    let external_caption = if matches!(mode, ManifestFinalizationMode::MuxStagedTracks)
+    // Browser captions are a fallback only when there is no user-selected native
+    // subtitle. Incremental HLS stages them before muxing; other staged-track
+    // finalization paths fetch them here. Live output cannot attach a late track.
+    let external_caption = if let Some(caption) = pre_staged_caption {
+        Some(caption)
+    } else if matches!(mode, ManifestFinalizationMode::MuxStagedTracks)
         && job.source.subtitle_key.is_none()
         && !job.captions.is_empty()
     {
@@ -3355,15 +3435,7 @@ async fn finalize_manifest_download(
             } => subtitle_language.as_deref(),
             Tracks::DashLiveOffline { .. } => None,
         });
-    let subtitle_language = declared_language
-        .filter(|language| {
-            !language.is_empty()
-                && language.len() <= 35
-                && language
-                    .bytes()
-                    .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-')
-        })
-        .unwrap_or("und");
+    let subtitle_language = manifest_subtitle_language(declared_language);
     let subtitle_format = if external_caption.is_some() {
         // Handoff candidates are validated VTT/SRT text, never fMP4.
         SubtitleFormat::Text
@@ -3383,20 +3455,23 @@ async fn finalize_manifest_download(
     // being decoded to SRT or converted to mov_text.
     let embed_subtitles =
         embed_manifest_subtitles(job.embed_subs, output_container, subtitle_format);
-    let subtitle_sidecar = if subtitle_input.is_some() && !embed_subtitles {
-        Some(if subtitle_format == SubtitleFormat::Fmp4 {
-            crate::video_staging::sidecar_path_for_extension(
-                &output_part,
-                subtitle_language,
-                crate::video_staging::FMP4_SUBTITLE_SIDECAR_EXTENSION,
-            )
+    let has_precreated_subtitle_sidecar = precreated_subtitle_sidecar.is_some();
+    let subtitle_sidecar = precreated_subtitle_sidecar.or_else(|| {
+        if subtitle_input.is_some() && !embed_subtitles {
+            Some(if subtitle_format == SubtitleFormat::Fmp4 {
+                crate::video_staging::sidecar_path_for_extension(
+                    &output_part,
+                    subtitle_language,
+                    crate::video_staging::FMP4_SUBTITLE_SIDECAR_EXTENSION,
+                )
+            } else {
+                crate::video_staging::sidecar_path_for(&output_part, subtitle_language)
+            })
         } else {
-            crate::video_staging::sidecar_path_for(&output_part, subtitle_language)
-        })
-    } else {
-        None
-    };
-    if let Some(sidecar) = subtitle_sidecar.as_deref() {
+            None
+        }
+    });
+    if !has_precreated_subtitle_sidecar && let Some(sidecar) = subtitle_sidecar.as_deref() {
         remove_regular_file_if_present(sidecar)
             .await
             .map_err(ManifestRunError::Failed)?;
@@ -3736,6 +3811,31 @@ fn embed_manifest_subtitles(
     embed_requested
         && output_container != ManifestContainer::Ts
         && (subtitle_format == SubtitleFormat::Text || output_container == ManifestContainer::Mp4)
+}
+
+fn manifest_subtitle_language(language: Option<&str>) -> &str {
+    language
+        .filter(|language| {
+            !language.is_empty()
+                && language.len() <= 35
+                && language
+                    .bytes()
+                    .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-')
+        })
+        .unwrap_or("und")
+}
+
+#[cfg(test)]
+mod manifest_subtitle_language_tests {
+    use super::manifest_subtitle_language;
+
+    #[test]
+    fn only_safe_bounded_language_tags_are_used_in_sidecar_names() {
+        assert_eq!(manifest_subtitle_language(Some("en-US")), "en-US");
+        assert_eq!(manifest_subtitle_language(Some("")), "und");
+        assert_eq!(manifest_subtitle_language(Some("../ar")), "und");
+        assert_eq!(manifest_subtitle_language(None), "und");
+    }
 }
 
 fn guard_hls_resources(
@@ -6385,7 +6485,11 @@ segment-2.ts
     /// Shared body for the AES-128 incremental VOD integration test. The output
     /// container follows the destination extension, so exercise TS (the native
     /// MPEG-TS case) plus MP4/MKV written through the same owned part.
-    async fn assert_aes128_hls_vod_output(extension: &str, force_early_exit: bool) {
+    async fn assert_aes128_hls_vod_output(
+        extension: &str,
+        force_early_exit: bool,
+        with_browser_caption: bool,
+    ) {
         use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
 
         let ffmpeg = match resolve_manifest_ffmpeg(&[PathBuf::from("/usr/bin")]) {
@@ -6595,6 +6699,26 @@ segment-2.ts
             .build()
             .expect("build AES-128 fixture client");
         let staging = tempfile::tempdir().expect("create AES-128 HLS staging directory");
+        let caption_release = Arc::new(tokio::sync::Notify::new());
+        let mut caption_tasks =
+            tokio::task::JoinSet::<Option<crate::caption_intake::StagedCaption>>::new();
+        if with_browser_caption {
+            let release = Arc::clone(&caption_release);
+            let caption_path = staging.path().join("browser-caption.vtt");
+            caption_tasks.spawn(async move {
+                release.notified().await;
+                tokio::fs::write(
+                    &caption_path,
+                    "WEBVTT\n\n00:00:00.000 --> 00:00:04.000\nBrowser caption fixture\n",
+                )
+                .await
+                .expect("write browser caption fixture");
+                Some(crate::caption_intake::StagedCaption {
+                    path: caption_path,
+                    language: "en".to_string(),
+                })
+            });
+        }
         let destination_dir = tempfile::tempdir().expect("create AES-128 destination directory");
         let destination = destination_dir
             .path()
@@ -6641,7 +6765,7 @@ segment-2.ts
             proxy: None,
             cookies_browser: "none".to_string(),
             connections: 4,
-            embed_subs: false,
+            embed_subs: with_browser_caption,
             captions: Vec::new(),
         };
         let gate = crate::attempt_gate::AttemptGate::new();
@@ -6667,6 +6791,7 @@ segment-2.ts
                 dest_dir: &task_dest_dir,
                 video_dir: &task_video_dir,
                 audio_dir: &task_audio_dir,
+                caption_tasks,
                 tracks: Tracks::Hls {
                     video: Box::new(plan),
                     audio: None,
@@ -6695,6 +6820,18 @@ segment-2.ts
         );
         assert!(!growing_prefix.contains("#EXT-X-ENDLIST"));
         assert!(!growing_prefix.contains("#EXT-X-PLAYLIST-TYPE:VOD"));
+        if with_browser_caption {
+            let metadata = tokio::fs::symlink_metadata(&part_path)
+                .await
+                .expect("destination-owned part must exist while caption staging is pending");
+            assert!(metadata.is_file() && !metadata.file_type().is_symlink());
+            assert_eq!(
+                metadata.len(),
+                0,
+                "FFmpeg should wait for caption staging while the destination part remains visible"
+            );
+            caption_release.notify_one();
+        }
         assert!(
             !download_task.is_finished(),
             "the final segment must remain in flight while FFmpeg consumes the growing prefix"
@@ -6767,10 +6904,20 @@ segment-2.ts
             "successful publication must remove the part ownership record"
         );
 
-        let verification = tokio::process::Command::new(&ffmpeg)
+        let mut verification_command = tokio::process::Command::new(&ffmpeg);
+        verification_command
             .args(["-hide_banner", "-loglevel", "error", "-i"])
-            .arg(&destination)
-            .args(["-f", "null", "-"])
+            .arg(&destination);
+        if with_browser_caption {
+            // The CI FFmpeg build may not include a subtitle encoder for the
+            // null muxer. Stream-copy both tracks into a Matroska stdout sink.
+            verification_command.args([
+                "-map", "0:v:0", "-map", "0:s:0", "-c", "copy", "-f", "matroska", "-",
+            ]);
+        } else {
+            verification_command.args(["-f", "null", "-"]);
+        }
+        let verification = verification_command
             .output()
             .await
             .expect("verify decrypted destination output");
@@ -6783,23 +6930,23 @@ segment-2.ts
 
     #[tokio::test]
     async fn ffmpeg_decrypts_aes128_hls_vod_into_an_owned_ts_part() {
-        assert_aes128_hls_vod_output("ts", false).await;
+        assert_aes128_hls_vod_output("ts", false, false).await;
     }
 
     #[cfg(unix)]
     #[tokio::test]
     async fn aes128_vod_remuxes_again_when_ffmpeg_exits_before_playlist_completion() {
-        assert_aes128_hls_vod_output("ts", true).await;
+        assert_aes128_hls_vod_output("ts", true, false).await;
     }
 
     #[tokio::test]
     async fn ffmpeg_decrypts_aes128_hls_vod_into_an_owned_mp4_part() {
-        assert_aes128_hls_vod_output("mp4", false).await;
+        assert_aes128_hls_vod_output("mp4", false, false).await;
     }
 
     #[tokio::test]
     async fn ffmpeg_decrypts_aes128_hls_vod_into_an_owned_mkv_part() {
-        assert_aes128_hls_vod_output("mkv", false).await;
+        assert_aes128_hls_vod_output("mkv", false, true).await;
     }
 
     #[cfg(target_os = "linux")]
@@ -7055,6 +7202,7 @@ segment-2.ts
                 dest_dir: &task_dest_dir,
                 video_dir: &task_video_dir,
                 audio_dir: &task_audio_dir,
+                caption_tasks: tokio::task::JoinSet::new(),
                 tracks: Tracks::Hls {
                     video: Box::new(plan),
                     audio: None,
@@ -7462,6 +7610,7 @@ segment-2.ts
                 dest_dir: &task_dest_dir,
                 video_dir: &task_video_dir,
                 audio_dir: &task_audio_dir,
+                caption_tasks: tokio::task::JoinSet::new(),
                 tracks: Tracks::Hls {
                     video: Box::new(video_plan),
                     audio: Some(Box::new(audio_plan)),

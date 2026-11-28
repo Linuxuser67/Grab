@@ -2438,21 +2438,20 @@ video/720.m3u8
         .expect("construct guarded staged-jar client")
         .expect("staged cookie jar should contain one valid cookie");
 
-        let response = match tokio::time::timeout(
-            Duration::from_secs(3),
-            client.get(&url).send(),
-        )
-        .await
-        {
-            Ok(Ok(response)) => response,
-            result => {
-                server.abort();
-                panic!("staged-jar manifest client did not follow its redirect: {result:?}");
-            }
-        };
+        let response =
+            match tokio::time::timeout(Duration::from_secs(3), client.get(&url).send()).await {
+                Ok(Ok(response)) => response,
+                result => {
+                    server.abort();
+                    panic!("staged-jar manifest client did not follow its redirect: {result:?}");
+                }
+            };
         assert!(response.status().is_success());
         assert_eq!(
-            response.text().await.expect("read redirected manifest body"),
+            response
+                .text()
+                .await
+                .expect("read redirected manifest body"),
             "#EXTM3U\nredirected"
         );
         let requests = tokio::time::timeout(Duration::from_secs(3), server)

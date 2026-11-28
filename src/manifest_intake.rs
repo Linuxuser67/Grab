@@ -430,7 +430,14 @@ pub(crate) async fn client_for_manifest(
     referer_context: Option<crate::referrer::RefererContext<'_>>,
 ) -> Result<reqwest::Client, String> {
     validate_handoff_proxy(raw_url)?;
-    if let Some(client) = client_with_handoff_jar(raw_url, proxy, referer_context).await? {
+    if let Some(client) = client_with_handoff_jar(
+        raw_url,
+        proxy,
+        referer_context,
+        RedirectHandling::GuardedAutomatic,
+    )
+    .await?
+    {
         return Ok(client);
     }
     if let Some(client) =
@@ -469,6 +476,7 @@ async fn client_with_handoff_jar(
     raw_url: &str,
     proxy: Option<&crate::net_types::ResolvedProxy>,
     referer_context: Option<crate::referrer::RefererContext<'_>>,
+    redirect_handling: RedirectHandling,
 ) -> Result<Option<reqwest::Client>, String> {
     let Some((path, user_agent)) = crate::extension_server::live_handoff_identity(raw_url) else {
         return Ok(None);
@@ -478,7 +486,7 @@ async fn client_with_handoff_jar(
         user_agent.as_deref(),
         proxy,
         referer_context,
-        RedirectHandling::Manual,
+        redirect_handling,
     )
     .await
 }
@@ -566,7 +574,9 @@ pub(crate) async fn client_for_caption_handoff(
     proxy: Option<&crate::net_types::ResolvedProxy>,
 ) -> Result<reqwest::Client, String> {
     validate_handoff_proxy(raw_url)?;
-    if let Some(client) = client_with_handoff_jar(raw_url, proxy, None).await? {
+    if let Some(client) =
+        client_with_handoff_jar(raw_url, proxy, None, RedirectHandling::Manual).await?
+    {
         return Ok(client);
     }
     crate::download_net::http_client_for_manual_redirects(proxy)
@@ -2353,6 +2363,124 @@ video/720.m3u8
             "https://cdn.example.test/master.m3u8?expires=1&signature=x"
         ));
         assert!(supports("https://cdn.example.test/manifest.mpd#fragment"));
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn staged_handoff_manifest_client_follows_guarded_redirect_with_referer() {
+        use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+
+        let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0))
+            .await
+            .expect("bind staged handoff manifest fixture");
+        let address = listener.local_addr().expect("fixture address");
+        let server = tokio::spawn(async move {
+            let mut requests = Vec::with_capacity(2);
+            for request_index in 0..2 {
+                let (mut socket, _) = listener
+                    .accept()
+                    .await
+                    .expect("accept manifest redirect request");
+                let mut request = Vec::new();
+                loop {
+                    let mut chunk = [0_u8; 1024];
+                    let read = socket
+                        .read(&mut chunk)
+                        .await
+                        .expect("read manifest redirect request");
+                    assert_ne!(read, 0, "request ended before its headers");
+                    request.extend_from_slice(&chunk[..read]);
+                    if request.windows(4).any(|window| window == b"\r\n\r\n") {
+                        break;
+                    }
+                    assert!(
+                        request.len() <= 16 * 1024,
+                        "manifest request headers stay bounded"
+                    );
+                }
+                requests.push(String::from_utf8_lossy(&request).into_owned());
+                let response = if request_index == 0 {
+                    "HTTP/1.1 302 Found\r\nLocation: /resolved.m3u8?sig=rotated\r\nContent-Length: 0\r\nConnection: close\r\n\r\n".to_string()
+                } else {
+                    let body = "#EXTM3U\nredirected";
+                    format!(
+                        "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                        body.len()
+                    )
+                };
+                socket
+                    .write_all(response.as_bytes())
+                    .await
+                    .expect("write manifest redirect response");
+            }
+            requests
+        });
+
+        let jar_directory = tempfile::tempdir().expect("create staged cookie directory");
+        let jar_path = jar_directory.path().join("handoff.cookies");
+        std::fs::write(
+            &jar_path,
+            "# Netscape HTTP Cookie File\n127.0.0.1\tFALSE\t/\tFALSE\t0\tsid\tmanifest-fixture\n",
+        )
+        .expect("write staged cookie jar");
+        let url = format!("http://{address}/master.m3u8?sig=initial");
+        let referer = crate::referrer::RefererContext {
+            source: "http://player.example.test/watch?token=private",
+            target: &url,
+        };
+        let client = client_from_handoff_jar(
+            &jar_path,
+            Some("Grab-Manifest-Test"),
+            None,
+            Some(referer),
+            RedirectHandling::GuardedAutomatic,
+        )
+        .await
+        .expect("construct guarded staged-jar client")
+        .expect("staged cookie jar should contain one valid cookie");
+
+        let response =
+            match tokio::time::timeout(Duration::from_secs(3), client.get(&url).send()).await {
+                Ok(Ok(response)) => response,
+                result => {
+                    server.abort();
+                    panic!("staged-jar manifest client did not follow its redirect: {result:?}");
+                }
+            };
+        assert!(response.status().is_success());
+        assert_eq!(
+            response
+                .text()
+                .await
+                .expect("read redirected manifest body"),
+            "#EXTM3U\nredirected"
+        );
+        let requests = tokio::time::timeout(Duration::from_secs(3), server)
+            .await
+            .expect("both manifest redirect requests should be received")
+            .expect("manifest fixture task should succeed");
+        assert_eq!(requests.len(), 2);
+        assert!(requests[0].starts_with("GET /master.m3u8?sig=initial "));
+        assert!(requests[1].starts_with("GET /resolved.m3u8?sig=rotated "));
+        for request in requests {
+            assert!(
+                request
+                    .lines()
+                    .any(|line| line.eq_ignore_ascii_case("referer: http://player.example.test/")),
+                "source Referer must be present on the manifest request: {request}"
+            );
+            assert!(
+                request
+                    .lines()
+                    .any(|line| line.eq_ignore_ascii_case("cookie: sid=manifest-fixture")),
+                "the staged cookie provider must apply cookies to each redirect hop: {request}"
+            );
+            assert!(
+                request
+                    .lines()
+                    .any(|line| line.eq_ignore_ascii_case("user-agent: Grab-Manifest-Test")),
+                "the browser-bound User-Agent must be retained on each redirect hop: {request}"
+            );
+        }
     }
 
     #[tokio::test(flavor = "current_thread")]

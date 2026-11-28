@@ -627,7 +627,7 @@ pub(crate) fn download_plan(
                 HlsMasterDownloadPlan {
                     video_url: variant.url.clone(),
                     audio_url: selected_audio.and_then(|rendition| rendition.url.clone()),
-                    subtitle_url: selected_subtitle.and_then(|rendition| rendition.url.clone()),
+                    subtitle_url: selected_subtitle.map(|rendition| rendition.url.clone()),
                     subtitle_language: selected_subtitle
                         .and_then(|rendition| rendition.language.clone()),
                     subtitle_metadata,

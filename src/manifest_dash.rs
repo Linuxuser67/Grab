@@ -3426,6 +3426,7 @@ mod tests {
     <AdaptationSet contentType="text" mimeType="application/mp4" lang="en">
       <SegmentTemplate duration="5" initialization="sub-init.mp4" media="sub-$Number$.m4s"/>
       <Representation id="forced-en" bandwidth="1000" codecs="wvtt">
+        <Label lang="en">Forced English</Label>
         <Role schemeIdUri="urn:mpeg:dash:role:2011" value="forced-subtitle"/>
       </Representation>
     </AdaptationSet>
@@ -3437,6 +3438,7 @@ mod tests {
 
         assert_eq!(subtitle.representation_id.as_deref(), Some("forced-en"));
         assert_eq!(subtitle.language.as_deref(), Some("en"));
+        assert_eq!(subtitle.label.as_deref(), Some("Forced English"));
         assert!(!subtitle.is_default_subtitle);
         assert!(subtitle.is_forced_subtitle);
     }

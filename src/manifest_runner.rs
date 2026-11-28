@@ -2224,9 +2224,9 @@ pub(crate) async fn run_manifest_download(
         });
     }
     if !live_hls && !live_dash && tracks.uses_incremental_hls_vod() {
-        // Browser captions are staged alongside the media fetch and become an
-        // additional FFmpeg input. Keep the incremental mux so its owned video
-        // part remains visible in the destination while the HLS resources arrive.
+        // Native subtitle renditions and browser captions are staged alongside
+        // the media fetch and become FFmpeg inputs to the first mux. Keep the
+        // incremental path so its owned video part remains visible in the destination.
         // Preserve AES-128's established configured concurrency. Complex clear
         // VOD stays sequential, matching the ordinary static-HLS resource path.
         let connections = match &tracks {
@@ -2782,12 +2782,11 @@ async fn run_incremental_hls_vod(
     let mut abort_done = false;
     let mut stop_intent = None;
 
-    // Do not start FFmpeg until every selected rendition has published a
-    // complete first segment and its growing local playlist snapshot. When a
-    // browser caption is available, it is also opened as an FFmpeg input from
-    // the start: this wait includes its shared 10-second intake budget while
-    // segment fetching continues. Starting without it would require a later
-    // remux or a second output publication to attach the caption.
+    // Do not start FFmpeg until every media rendition has published a
+    // complete first segment and its growing local playlist snapshot. A native
+    // subtitle playlist is staged completely, and a browser caption is fetched,
+    // before the first mux so each is present as an input from the start.
+    // Media-segment fetching continues while either subtitle source is staged.
     while first_segment_ready.iter().any(|ready| !ready)
         || caption_pending
         || subtitle_pending

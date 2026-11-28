@@ -864,6 +864,18 @@ pub(crate) fn handoff_cookie_hash(path: &Path) -> Option<[u8; 32]> {
     Some(Sha256::digest(&contents).into())
 }
 
+/// Serializes tests that access process-global extension-server state.
+#[cfg(test)]
+static EXTENSION_SERVER_TEST_LOCK: Mutex<()> = Mutex::new(());
+
+/// Acquire the process-wide extension-server test lock.
+#[cfg(test)]
+pub(crate) fn extension_server_test_guard() -> MutexGuard<'static, ()> {
+    EXTENSION_SERVER_TEST_LOCK
+        .lock()
+        .unwrap_or_else(|error| error.into_inner())
+}
+
 /// Test helper that stores a cookie file with the current request time.
 #[cfg(test)]
 pub(crate) fn store_handoff_cookies(url: &str, path: PathBuf, user_agent: Option<String>) {
@@ -2909,12 +2921,9 @@ mod tests {
         assert_eq!(status(&r), "200", "queue drains: {r}");
     }
 
-    /// The staging map is process-global: tests that touch it run one at a
-    /// time, and start from an empty store.
-    static STORE_LOCK: Mutex<()> = Mutex::new(());
-
+    /// Reset shared extension-server state while holding its process-wide test lock.
     fn exclusive() -> std::sync::MutexGuard<'static, ()> {
-        let guard = STORE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let guard = super::extension_server_test_guard();
         purge_handoff_cookies();
         if let Ok(mut cache) = HANDOFF_REPLAY_CACHE.lock() {
             cache.expires_at_ms.clear();

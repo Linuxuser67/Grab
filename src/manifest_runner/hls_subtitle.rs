@@ -180,6 +180,7 @@ caption.vtt
             audio: None,
             subtitle: Some(Box::new(live_subtitle)),
             subtitle_language: Some("en".to_string()),
+            subtitle_metadata: None,
             subtitle_format: SubtitleFormat::Text,
         };
         assert!(

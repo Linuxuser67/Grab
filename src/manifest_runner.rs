@@ -2648,7 +2648,7 @@ async fn run_incremental_hls_vod(
         audio,
         subtitle,
         mut subtitle_language,
-        subtitle_metadata,
+        mut subtitle_metadata,
         subtitle_format,
     } = tracks
     else {
@@ -2847,6 +2847,7 @@ async fn run_incremental_hls_vod(
                         );
                         subtitle = None;
                         subtitle_language = None;
+                        subtitle_metadata = None;
                     }
                     Some(Err(error)) => {
                         tracing::warn!(
@@ -2856,6 +2857,7 @@ async fn run_incremental_hls_vod(
                         );
                         subtitle = None;
                         subtitle_language = None;
+                        subtitle_metadata = None;
                     }
                     None => {
                         tracing::warn!(
@@ -2864,6 +2866,7 @@ async fn run_incremental_hls_vod(
                         );
                         subtitle = None;
                         subtitle_language = None;
+                        subtitle_metadata = None;
                     }
                 }
             }
@@ -2950,12 +2953,22 @@ async fn run_incremental_hls_vod(
             .await
             .map_err(ManifestRunError::Failed)?;
     }
+    let selected_subtitle_metadata = if external_caption.is_none() && subtitle.is_some() {
+        subtitle_metadata.as_ref()
+    } else {
+        None
+    };
+    let ffmpeg_subtitle_metadata = if external_caption.is_none() && subtitle.is_some() {
+        subtitle_metadata.clone()
+    } else {
+        None
+    };
     let remux_subtitles = SubtitleOutput {
         input: subtitle_input.as_deref(),
         embed: embed_subtitles,
         sidecar: subtitle_sidecar.as_deref(),
         format: output_subtitle_format,
-        metadata: subtitle_metadata.as_ref(),
+        metadata: selected_subtitle_metadata,
     };
     let ffmpeg_subtitle_input = subtitle_input.clone();
     let ffmpeg_subtitle_sidecar = subtitle_sidecar.clone();
@@ -2971,7 +2984,7 @@ async fn run_incremental_hls_vod(
             embed: ffmpeg_embed_subtitles,
             sidecar: ffmpeg_subtitle_sidecar.as_deref(),
             format: output_subtitle_format,
-            metadata: subtitle_metadata.as_ref(),
+            metadata: ffmpeg_subtitle_metadata.as_ref(),
         };
         run_ffmpeg_with_offsets_timeout(
             &ffmpeg_path,

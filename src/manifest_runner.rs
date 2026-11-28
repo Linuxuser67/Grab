@@ -6639,9 +6639,10 @@ segment-2.ts
             .output()
             .await
             .expect("generate fragmented MP4 subtitle fixture");
-        assert_command_succeeded(
-            &generated,
-            "FFmpeg failed to generate the fMP4 subtitle fixture",
+        assert!(
+            generated.status.success(),
+            "FFmpeg failed to generate the fMP4 subtitle fixture: {}",
+            String::from_utf8_lossy(&generated.stderr)
         );
 
         let bytes = tokio::fs::read(&fragmented)
@@ -7248,7 +7249,11 @@ segment-2.ts
                 .output()
                 .await
                 .expect("probe finalized fMP4 subtitle output");
-            assert_command_succeeded(&probe, "ffprobe rejected the fMP4 subtitle output");
+            assert!(
+                probe.status.success(),
+                "ffprobe rejected the fMP4 subtitle output: {}",
+                String::from_utf8_lossy(&probe.stderr)
+            );
             let streams = String::from_utf8_lossy(&probe.stdout);
             assert!(
                 streams.contains("codec_type=subtitle") && streams.contains("codec_name=mov_text"),

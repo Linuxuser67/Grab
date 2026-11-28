@@ -2322,10 +2322,6 @@ mod validated_referer_tests {
 }
 
 #[cfg(test)]
-#[allow(
-    clippy::await_holding_lock,
-    reason = "tests hold the serial-test guard across awaits by design"
-)]
 mod tests {
     use super::*;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};

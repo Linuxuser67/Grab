@@ -225,9 +225,7 @@ pub(super) fn append_ffmpeg_metadata(
         } else {
             "title"
         };
-        command
-            .arg("-metadata:s:s:0")
-            .arg(format!("{key}={name}"));
+        command.arg("-metadata:s:s:0").arg(format!("{key}={name}"));
     }
 
     if let Some(language) = metadata.language.as_deref() {

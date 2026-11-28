@@ -42,7 +42,7 @@ pub(super) async fn fetch(
         &directory,
         HLS_STATIC_RESOURCE_CONNECTIONS,
         &tx,
-        downloaded.as_ref(),
+        &downloaded,
         &mut abort,
     )
     .await?

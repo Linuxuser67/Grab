@@ -192,6 +192,58 @@ const ISO_639_1_TO_2: &[(&str, &str)] = &[
     ("zu", "zul"),
 ];
 
+/// ISO 639-2/T to ISO 639-2/B aliases used by the Matroska muxer.
+/// Region and script subtags are discarded because the legacy language field is three-letter.
+const ISO_639_2_T_TO_B: &[(&str, &str)] = &[
+    ("sqi", "alb"),
+    ("hye", "arm"),
+    ("eus", "baq"),
+    ("mya", "bur"),
+    ("zho", "chi"),
+    ("ces", "cze"),
+    ("nld", "dut"),
+    ("fra", "fre"),
+    ("kat", "geo"),
+    ("deu", "ger"),
+    ("ell", "gre"),
+    ("isl", "ice"),
+    ("mkd", "mac"),
+    ("mri", "mao"),
+    ("msa", "may"),
+    ("fas", "per"),
+    ("ron", "rum"),
+    ("slk", "slo"),
+    ("bod", "tib"),
+    ("cym", "wel"),
+];
+
+/// Convert a BCP 47 tag to the ISO 639-2/B code accepted by FFmpeg's Matroska muxer.
+fn matroska_language_code(language: &str) -> Option<String> {
+    let terminology = mp4_language_code(language)?;
+    let bibliographic = ISO_639_2_T_TO_B
+        .iter()
+        .find(|(terminology_code, _)| *terminology_code == terminology.as_str())
+        .map_or(terminology.as_str(), |(_, bibliographic_code)| {
+            *bibliographic_code
+        });
+    Some(bibliographic.to_string())
+}
+
+/// Maximum UTF-8 byte length of a manifest-provided subtitle display name.
+const MAX_SUBTITLE_NAME_BYTES: usize = 255;
+
+/// Remove control characters and cap a manifest-provided display name on a UTF-8 boundary.
+fn sanitize_display_name(name: &str) -> Option<String> {
+    let mut sanitized = String::with_capacity(name.len().min(MAX_SUBTITLE_NAME_BYTES));
+    for character in name.chars().filter(|character| !character.is_control()) {
+        if sanitized.len() + character.len_utf8() > MAX_SUBTITLE_NAME_BYTES {
+            break;
+        }
+        sanitized.push(character);
+    }
+    (!sanitized.is_empty()).then_some(sanitized)
+}
+
 fn mp4_language_code(language: &str) -> Option<String> {
     let primary = language.split('-').next()?.trim();
     if primary.len() == 3 && primary.bytes().all(|byte| byte.is_ascii_alphabetic()) {
@@ -218,7 +270,7 @@ pub(super) fn append_ffmpeg_metadata(
         return;
     };
 
-    if let Some(name) = metadata.name.as_deref().filter(|name| !name.is_empty()) {
+    if let Some(name) = metadata.name.as_deref().and_then(sanitize_display_name) {
         let key = if container == ManifestContainer::Mp4 {
             // The MP4 muxer writes handler_name to the track's display name.
             "handler_name"
@@ -231,7 +283,7 @@ pub(super) fn append_ffmpeg_metadata(
     if let Some(language) = metadata.language.as_deref() {
         let language = match container {
             ManifestContainer::Mp4 => mp4_language_code(language),
-            ManifestContainer::Mkv => Some(language.to_string()),
+            ManifestContainer::Mkv => matroska_language_code(language),
             ManifestContainer::Ts => None,
         };
         if let Some(language) = language {
@@ -252,7 +304,7 @@ pub(super) fn append_ffmpeg_metadata(
 
 #[cfg(test)]
 mod tests {
-    use super::mp4_language_code;
+    use super::{matroska_language_code, mp4_language_code, sanitize_display_name};
 
     #[test]
     fn maps_bcp47_primary_language_to_the_mp4_iso639_code() {
@@ -262,5 +314,32 @@ mod tests {
         assert_eq!(mp4_language_code("und").as_deref(), Some("und"));
         assert_eq!(mp4_language_code("x-private"), None);
         assert_eq!(mp4_language_code("en_US"), None);
+    }
+
+    #[test]
+    fn maps_bcp47_primary_language_to_matroska_iso639_2_b() {
+        assert_eq!(matroska_language_code("de-DE").as_deref(), Some("ger"));
+        assert_eq!(matroska_language_code("fr-CA").as_deref(), Some("fre"));
+        assert_eq!(matroska_language_code("zh-Hant-TW").as_deref(), Some("chi"));
+        assert_eq!(matroska_language_code("und").as_deref(), Some("und"));
+        assert_eq!(matroska_language_code("x-private"), None);
+    }
+
+    #[test]
+    fn strips_control_characters_and_caps_subtitle_names_by_utf8_bytes() {
+        let input = format!("German\r\n{}", "x".repeat(300));
+        let sanitized = sanitize_display_name(&input).expect("visible characters remain");
+        assert_eq!(sanitized.len(), 255);
+        assert!(sanitized.starts_with("German"));
+        assert!(!sanitized.chars().any(|character| character.is_control()));
+
+        let multibyte =
+            sanitize_display_name(&"é".repeat(200)).expect("non-control Unicode characters remain");
+        assert_eq!(multibyte.len(), 254);
+    }
+
+    #[test]
+    fn omits_subtitle_names_containing_only_control_characters() {
+        assert_eq!(sanitize_display_name("\r\n\u{007f}"), None);
     }
 }

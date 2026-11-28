@@ -2735,8 +2735,7 @@ async fn run_incremental_hls_vod(
         ));
     }
 
-    let mut subtitle_fetcher =
-        tokio::task::JoinSet::<Result<bool, ManifestRunError>>::new();
+    let mut subtitle_fetcher = tokio::task::JoinSet::<Result<bool, ManifestRunError>>::new();
     let mut subtitle_abort_sender = None;
     if let Some(subtitle_plan) = subtitle.as_ref() {
         let (sender, subtitle_abort) = tokio::sync::oneshot::channel();
@@ -2787,10 +2786,7 @@ async fn run_incremental_hls_vod(
     // subtitle playlist is staged completely, and a browser caption is fetched,
     // before the first mux so each is present as an input from the start.
     // Media-segment fetching continues while either subtitle source is staged.
-    while first_segment_ready.iter().any(|ready| !ready)
-        || caption_pending
-        || subtitle_pending
-    {
+    while first_segment_ready.iter().any(|ready| !ready) || caption_pending || subtitle_pending {
         tokio::select! {
             biased;
             stop = &mut abort, if !abort_done => {
@@ -2897,7 +2893,11 @@ async fn run_incremental_hls_vod(
     let subtitle_input = external_caption
         .as_ref()
         .map(|caption| caption.path.clone())
-        .or_else(|| subtitle.as_ref().map(|_| hls_subtitle::playlist_path(staging)));
+        .or_else(|| {
+            subtitle
+                .as_ref()
+                .map(|_| hls_subtitle::playlist_path(staging))
+        });
     let output_subtitle_format = if external_caption.is_some() {
         SubtitleFormat::Text
     } else {
@@ -6771,8 +6771,10 @@ segment-2.ts
                 .first()
                 .map(|resource| resource.url.path().to_string())
         });
-        let request_count =
-            plan.resources.len() + subtitle_plan.as_ref().map_or(0, |plan| plan.resources.len());
+        let request_count = plan.resources.len()
+            + subtitle_plan
+                .as_ref()
+                .map_or(0, |plan| plan.resources.len());
         let fixture_root = fixture.path().to_path_buf();
         let release_final_segment = Arc::new(tokio::sync::Notify::new());
         let final_segment_requested = Arc::new(tokio::sync::Notify::new());

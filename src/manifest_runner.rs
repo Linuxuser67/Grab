@@ -2197,11 +2197,7 @@ pub(crate) async fn run_manifest_download(
     };
     let mut _finish_stop_sender = None;
     let mut caption_tasks = tokio::task::JoinSet::new();
-    if !live_hls
-        && !live_dash
-        && job.source.subtitle_key.is_none()
-        && !job.captions.is_empty()
-    {
+    if !live_hls && !live_dash && job.source.subtitle_key.is_none() && !job.captions.is_empty() {
         let handoff_url = job.source.url.clone();
         let captions = job.captions.clone();
         let caption_staging = staging.clone();

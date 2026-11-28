@@ -2013,7 +2013,11 @@ async fn handle_inspect_hls(
 /// Attach the number of cookies serialized into the staged jar.
 /// Invalid, out-of-scope, and malformed cookies are skipped by design, but
 /// the extension should be able to detect a partial cookie handoff.
-fn cookie_report_response(accepted: usize, status: StatusCode) -> Response {
+fn cookie_report_response(
+    accepted: usize,
+    status: StatusCode,
+    pairing_stale: bool,
+) -> Response {
     let value = accepted
         .to_string()
         .parse::<HeaderValue>()
@@ -2022,6 +2026,11 @@ fn cookie_report_response(accepted: usize, status: StatusCode) -> Response {
     response
         .headers_mut()
         .insert("x-grab-cookies-accepted", value);
+    if pairing_stale {
+        response
+            .headers_mut()
+            .insert("x-grab-pairing", HeaderValue::from_static("stale"));
+    }
     response
 }
 
@@ -2085,6 +2094,9 @@ async fn handle_add(
     if !authenticated {
         captions.clear();
     }
+    // An absent token is an ordinary unpaired handoff. Only a supplied token
+    // that failed its MAC, freshness, or replay check means saved pairing is stale.
+    let pairing_stale = headers.contains_key("x-grab-token") && !authenticated;
     // Register as soon as the authenticated request is validated. Later
     // cookieless handoffs must see this older request before its async write.
     let cookie_stage_registration = if authenticated && !req.cookies.is_empty() {
@@ -2189,7 +2201,7 @@ async fn handle_add(
         if let Some(suppression) = suppression {
             suppression.keep();
         }
-        return cookie_report_response(accepted_cookie_count, StatusCode::OK);
+        return cookie_report_response(accepted_cookie_count, StatusCode::OK, pairing_stale);
     };
     match tokio::time::timeout(st.confirm_wait, answer).await {
         Ok(Ok(outcome)) => {
@@ -2206,7 +2218,7 @@ async fn handle_add(
             } else if let Some(suppression) = suppression {
                 suppression.keep();
             }
-            cookie_report_response(if discard { 0 } else { accepted_cookie_count }, status)
+            cookie_report_response(if discard { 0 } else { accepted_cookie_count }, status, pairing_stale)
         }
         outcome => {
             // Dropped unanswered or timed out: this request will not start a
@@ -2223,7 +2235,7 @@ async fn handle_add(
             } else {
                 StatusCode::CONFLICT
             };
-            cookie_report_response(0, status)
+            cookie_report_response(0, status, pairing_stale)
         }
     }
 }
@@ -4866,7 +4878,12 @@ mod tests {
             .expect("unpaired handoff requires confirmation")
             .send(HandoffOutcome::Queued)
             .unwrap();
-        assert_eq!(status(&task.await.unwrap()), "200");
+        let response = task.await.unwrap();
+        assert_eq!(status(&response), "200");
+        assert!(
+            !response.to_ascii_lowercase().contains("x-grab-pairing: stale"),
+            "a deliberately unpaired handoff is not a stale saved pairing: {response}"
+        );
     }
 
     #[tokio::test]
@@ -4898,7 +4915,12 @@ mod tests {
             .expect("invalid token must require confirmation")
             .send(HandoffOutcome::Queued)
             .unwrap();
-        assert_eq!(status(&task.await.unwrap()), "200");
+        let response = task.await.unwrap();
+        assert_eq!(status(&response), "200");
+        assert!(
+            response.to_ascii_lowercase().contains("x-grab-pairing: stale"),
+            "a supplied invalid token must tell the extension to re-pair: {response}"
+        );
     }
 
     #[tokio::test]
@@ -4937,7 +4959,12 @@ mod tests {
             .expect("stale authentication must require confirmation")
             .send(HandoffOutcome::Queued)
             .unwrap();
-        assert_eq!(status(&task.await.unwrap()), "200");
+        let response = task.await.unwrap();
+        assert_eq!(status(&response), "200");
+        assert!(
+            response.to_ascii_lowercase().contains("x-grab-pairing: stale"),
+            "stale replay metadata must tell the extension to re-pair: {response}"
+        );
     }
 
     #[tokio::test]

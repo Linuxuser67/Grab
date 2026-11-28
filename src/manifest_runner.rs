@@ -2196,30 +2196,30 @@ pub(crate) async fn run_manifest_download(
         ) => return Ok(ManifestOutcome::Aborted),
     };
     let mut _finish_stop_sender = None;
+    let mut caption_tasks = tokio::task::JoinSet::new();
+    if job.source.subtitle_key.is_none() && !job.captions.is_empty() {
+        let handoff_url = job.source.url.clone();
+        let captions = job.captions.clone();
+        let caption_staging = staging.clone();
+        let proxy = job.proxy.clone();
+        let referer = job.referer.clone();
+        caption_tasks.spawn(async move {
+            crate::caption_intake::stage_handoff_captions(
+                &handoff_url,
+                &captions,
+                &caption_staging,
+                proxy.as_ref(),
+                referer.as_deref(),
+            )
+            .await
+            .into_iter()
+            .next()
+        });
+    }
     if !live_hls && !live_dash && tracks.uses_incremental_hls_vod() {
         // Browser captions are staged alongside the media fetch and become an
         // additional FFmpeg input. Keep the incremental mux so its owned video
         // part remains visible in the destination while the HLS resources arrive.
-        let mut caption_tasks = tokio::task::JoinSet::new();
-        if job.source.subtitle_key.is_none() && !job.captions.is_empty() {
-            let handoff_url = job.source.url.clone();
-            let captions = job.captions.clone();
-            let caption_staging = staging.clone();
-            let proxy = job.proxy.clone();
-            let referer = job.referer.clone();
-            caption_tasks.spawn(async move {
-                crate::caption_intake::stage_handoff_captions(
-                    &handoff_url,
-                    &captions,
-                    &caption_staging,
-                    proxy.as_ref(),
-                    referer.as_deref(),
-                )
-                .await
-                .into_iter()
-                .next()
-            });
-        }
         // Preserve AES-128's established configured concurrency. Complex clear
         // VOD stays sequential, matching the ordinary static-HLS resource path.
         let connections = match &tracks {
@@ -2397,6 +2397,18 @@ pub(crate) async fn run_manifest_download(
             Err(error) => return Err(error),
         }
     }
+    let pre_staged_caption = match caption_tasks.join_next().await {
+        Some(Ok(caption)) => caption,
+        Some(Err(error)) => {
+            tracing::warn!(
+                item_id = job.item_id,
+                error = %error,
+                "browser caption staging task failed; continuing without captions"
+            );
+            None
+        }
+        None => None,
+    };
     finalize_manifest_download(ManifestFinalization {
         job: &job,
         destination_parts: live_destination_parts || static_destination_parts,
@@ -2409,7 +2421,7 @@ pub(crate) async fn run_manifest_download(
         video_dir: &video_dir,
         audio_dir: &audio_dir,
         output_part,
-        pre_staged_caption: None,
+        pre_staged_caption,
         precreated_subtitle_sidecar: None,
         tracks,
         has_audio,
@@ -3326,28 +3338,9 @@ async fn finalize_manifest_download(
     } else {
         None
     };
-    // Browser captions are a fallback only when there is no user-selected native
-    // subtitle. Incremental HLS stages them before muxing; other staged-track
-    // finalization paths fetch them here. Live output cannot attach a late track.
-    let external_caption = if let Some(caption) = pre_staged_caption {
-        Some(caption)
-    } else if matches!(mode, ManifestFinalizationMode::MuxStagedTracks)
-        && job.source.subtitle_key.is_none()
-        && !job.captions.is_empty()
-    {
-        crate::caption_intake::stage_handoff_captions(
-            &job.source.url,
-            &job.captions,
-            staging,
-            job.proxy.as_ref(),
-            job.referer.as_deref(),
-        )
-        .await
-        .into_iter()
-        .next()
-    } else {
-        None
-    };
+    // Browser captions are fetched before media transfer and retained as a
+    // staged file until the selected tracks are finalized.
+    let external_caption = pre_staged_caption;
     let subtitle_input = if let Some(caption) = external_caption.as_ref() {
         Some(caption.path.clone())
     } else {

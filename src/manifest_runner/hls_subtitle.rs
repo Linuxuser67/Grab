@@ -54,7 +54,6 @@ pub(super) async fn fetch(
     Ok(true)
 }
 
-
 #[cfg(test)]
 mod tests {
     use super::supports_incremental_vod;
@@ -112,6 +111,7 @@ caption.vtt
     fn rejects_low_latency_hls() {
         let plan = plan(
             br#"#EXTM3U
+#EXT-X-PLAYLIST-TYPE:VOD
 #EXT-X-TARGETDURATION:2
 #EXT-X-MEDIA-SEQUENCE:100
 #EXT-X-MAP:URI="init.mp4"
@@ -122,8 +122,11 @@ caption.vtt
 100.m4s
 #EXT-X-PRELOAD-HINT:TYPE=PART,URI="100.1.m4s"
 #EXT-X-RENDITION-REPORT:URI="audio.m3u8",LAST-MSN=100,LAST-PART=0
+#EXT-X-ENDLIST
 "#,
         );
+        assert!(!plan.is_live);
+        assert!(plan.end_list);
         assert!(plan.low_latency.is_some());
         assert!(!supports_incremental_vod(&plan));
     }

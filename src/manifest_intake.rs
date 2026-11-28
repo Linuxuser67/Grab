@@ -2427,16 +2427,19 @@ video/720.m3u8
             source: "http://player.example.test/watch?token=private",
             target: &url,
         };
-        let client = client_from_handoff_jar(
-            &jar_path,
-            Some("Grab-Manifest-Test"),
-            None,
-            Some(referer),
-            RedirectHandling::GuardedAutomatic,
-        )
-        .await
-        .expect("construct guarded staged-jar client")
-        .expect("staged cookie jar should contain one valid cookie");
+        crate::extension_server::store_handoff_cookies(
+            &url,
+            jar_path.clone(),
+            Some("Grab-Manifest-Test".to_string()),
+        );
+        assert_eq!(
+            crate::extension_server::live_handoff_identity(&url),
+            Some((jar_path.clone(), Some("Grab-Manifest-Test".to_string()))),
+            "the fixture must be visible through the same staged-handoff lookup as production"
+        );
+        let client = client_for_manifest(&url, "none", None, Some(referer))
+            .await
+            .expect("construct client through the manifest download entry point");
 
         let response =
             match tokio::time::timeout(Duration::from_secs(3), client.get(&url).send()).await {
@@ -2481,6 +2484,7 @@ video/720.m3u8
                 "the browser-bound User-Agent must be retained on each redirect hop: {request}"
             );
         }
+        crate::extension_server::discard_handoff_cookies(&url);
     }
 
     #[tokio::test(flavor = "current_thread")]

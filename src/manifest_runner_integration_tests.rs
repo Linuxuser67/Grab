@@ -3223,6 +3223,7 @@ segment-001.m4s
         audio: None,
         subtitle: None,
         subtitle_language: None,
+        subtitle_metadata: None,
         subtitle_format: SubtitleFormat::Text,
     };
     assert!(
@@ -3294,6 +3295,7 @@ segment-001.m4s
         audio: None,
         subtitle: None,
         subtitle_language: None,
+        subtitle_metadata: None,
         subtitle_format: SubtitleFormat::Text,
     };
 
@@ -4570,6 +4572,7 @@ combined.mp4
         audio: None,
         subtitle: None,
         subtitle_language: None,
+        subtitle_metadata: None,
         subtitle_format: SubtitleFormat::Text,
     };
     let root = TempRoot::new("hls-single-file-fmp4-ranges");

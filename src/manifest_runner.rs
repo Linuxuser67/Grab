@@ -24,6 +24,7 @@ use crate::manifest_destination::{TrackFileFormat, TrackKind};
 use crate::manifest_intake::ManifestLookup;
 #[cfg(test)]
 use crate::manifest_intake::NativeManifest;
+use crate::manifest_types::ManifestSubtitleMetadata;
 use crate::media_types::{
     ManifestContainer, ManifestKind, ManifestRepresentationKey, ManifestSource,
 };
@@ -31,6 +32,7 @@ use crate::media_types::{
 mod dash_live;
 mod hls_live;
 mod hls_subtitle;
+mod subtitle_metadata;
 
 #[cfg(test)]
 use dash_live::{
@@ -430,6 +432,7 @@ enum Tracks {
         audio: Option<Box<HlsPlan>>,
         subtitle: Option<Box<HlsPlan>>,
         subtitle_language: Option<String>,
+        subtitle_metadata: Option<ManifestSubtitleMetadata>,
         subtitle_format: SubtitleFormat,
     },
     Dash {
@@ -437,6 +440,7 @@ enum Tracks {
         audio: Option<Box<DashRepresentationPlan>>,
         subtitle: Option<Box<DashRepresentationPlan>>,
         subtitle_language: Option<String>,
+        subtitle_metadata: Option<ManifestSubtitleMetadata>,
     },
     DashLiveOffline {
         has_audio: bool,
@@ -2644,6 +2648,7 @@ async fn run_incremental_hls_vod(
         audio,
         subtitle,
         mut subtitle_language,
+        mut subtitle_metadata,
         subtitle_format,
     } = tracks
     else {
@@ -2842,6 +2847,7 @@ async fn run_incremental_hls_vod(
                         );
                         subtitle = None;
                         subtitle_language = None;
+                        subtitle_metadata = None;
                     }
                     Some(Err(error)) => {
                         tracing::warn!(
@@ -2851,6 +2857,7 @@ async fn run_incremental_hls_vod(
                         );
                         subtitle = None;
                         subtitle_language = None;
+                        subtitle_metadata = None;
                     }
                     None => {
                         tracing::warn!(
@@ -2859,6 +2866,7 @@ async fn run_incremental_hls_vod(
                         );
                         subtitle = None;
                         subtitle_language = None;
+                        subtitle_metadata = None;
                     }
                 }
             }
@@ -2945,11 +2953,22 @@ async fn run_incremental_hls_vod(
             .await
             .map_err(ManifestRunError::Failed)?;
     }
+    let selected_subtitle_metadata = if external_caption.is_none() && subtitle.is_some() {
+        subtitle_metadata.as_ref()
+    } else {
+        None
+    };
+    let ffmpeg_subtitle_metadata = if external_caption.is_none() && subtitle.is_some() {
+        subtitle_metadata.clone()
+    } else {
+        None
+    };
     let remux_subtitles = SubtitleOutput {
         input: subtitle_input.as_deref(),
         embed: embed_subtitles,
         sidecar: subtitle_sidecar.as_deref(),
         format: output_subtitle_format,
+        metadata: selected_subtitle_metadata,
     };
     let ffmpeg_subtitle_input = subtitle_input.clone();
     let ffmpeg_subtitle_sidecar = subtitle_sidecar.clone();
@@ -2965,6 +2984,7 @@ async fn run_incremental_hls_vod(
             embed: ffmpeg_embed_subtitles,
             sidecar: ffmpeg_subtitle_sidecar.as_deref(),
             format: output_subtitle_format,
+            metadata: ffmpeg_subtitle_metadata.as_ref(),
         };
         run_ffmpeg_with_offsets_timeout(
             &ffmpeg_path,
@@ -3232,6 +3252,7 @@ async fn run_incremental_hls_vod(
             audio: audio.map(Box::new),
             subtitle,
             subtitle_language,
+            subtitle_metadata,
             subtitle_format,
         },
         has_audio,
@@ -3517,9 +3538,23 @@ async fn finalize_manifest_download(
             }
         }
     }
+    let subtitle_output_metadata = if external_caption.is_none() {
+        match &tracks {
+            Tracks::Hls {
+                subtitle_metadata, ..
+            }
+            | Tracks::Dash {
+                subtitle_metadata, ..
+            } => subtitle_metadata.as_ref(),
+            Tracks::DashLiveOffline { .. } => None,
+        }
+    } else {
+        None
+    };
     let declared_language = external_caption
         .as_ref()
         .map(|caption| caption.language.as_str())
+        .or_else(|| subtitle_output_metadata.and_then(|metadata| metadata.language.as_deref()))
         .or(match &tracks {
             Tracks::Hls {
                 subtitle_language, ..
@@ -3608,6 +3643,7 @@ async fn finalize_manifest_download(
                 embed: embed_subtitles,
                 sidecar: subtitle_sidecar.as_deref(),
                 format: subtitle_format,
+                metadata: subtitle_output_metadata,
             },
             &output_part,
             &mut abort,
@@ -3783,6 +3819,7 @@ async fn resolve_tracks(
                 audio: None,
                 subtitle: None,
                 subtitle_language: None,
+                subtitle_metadata: None,
                 subtitle_format: SubtitleFormat::Text,
             })
         }
@@ -3792,6 +3829,7 @@ async fn resolve_tracks(
                 audio_url,
                 subtitle_url,
                 subtitle_language,
+                subtitle_metadata,
                 inherited_variables,
             } = *plan;
             guard_manifest_child_url(&source.url, &video_url, guarded_child_hosts)?;
@@ -3853,6 +3891,7 @@ async fn resolve_tracks(
                 audio: audio.map(Box::new),
                 subtitle,
                 subtitle_language,
+                subtitle_metadata,
                 subtitle_format,
             })
         }
@@ -3874,14 +3913,25 @@ async fn resolve_tracks(
                     guard_manifest_child_url(&source.url, &resource.url, guarded_child_hosts)?;
                 }
             }
-            let subtitle_language = subtitle
+            let subtitle_metadata = subtitle.as_ref().map(|track| ManifestSubtitleMetadata {
+                language: track.representation.language.clone(),
+                name: track
+                    .representation
+                    .label
+                    .clone()
+                    .or_else(|| track.representation.representation_id.clone()),
+                is_default: track.representation.is_default_subtitle,
+                is_forced: track.representation.is_forced_subtitle,
+            });
+            let subtitle_language = subtitle_metadata
                 .as_ref()
-                .and_then(|track| track.representation.language.clone());
+                .and_then(|metadata| metadata.language.clone());
             Ok(Tracks::Dash {
                 video,
                 audio,
                 subtitle,
                 subtitle_language,
+                subtitle_metadata,
             })
         }
     }
@@ -5359,6 +5409,7 @@ struct SubtitleOutput<'a> {
     embed: bool,
     sidecar: Option<&'a Path>,
     format: SubtitleFormat,
+    metadata: Option<&'a ManifestSubtitleMetadata>,
 }
 
 #[derive(Clone, Copy)]
@@ -5615,6 +5666,11 @@ async fn run_ffmpeg_with_offsets_timeout(
             .arg("-map")
             .arg(subtitle_stream)
             .args(["-c:s", subtitle_codec]);
+        subtitle_metadata::append_ffmpeg_metadata(
+            &mut command,
+            output_container,
+            subtitles.metadata,
+        );
     }
     match output_container {
         ManifestContainer::Mp4 => {
@@ -5639,9 +5695,13 @@ async fn run_ffmpeg_with_offsets_timeout(
         });
         if subtitles.format == SubtitleFormat::Fmp4 {
             // Preserve the source subtitle codec through stream-copy.
-            command
-                .args(["-c:s", "copy", "-movflags", "+faststart", "-f", "mp4"])
-                .arg(sidecar);
+            command.args(["-c:s", "copy", "-movflags", "+faststart", "-f", "mp4"]);
+            subtitle_metadata::append_ffmpeg_metadata(
+                &mut command,
+                ManifestContainer::Mp4,
+                subtitles.metadata,
+            );
+            command.arg(sidecar);
         } else {
             command.args(["-c:s", "srt", "-f", "srt"]).arg(sidecar);
         }
@@ -5865,6 +5925,7 @@ mod tests {
                 embed: true,
                 sidecar: None,
                 format: SubtitleFormat::Text,
+                metadata: None,
             },
         )
         .await;
@@ -5901,6 +5962,7 @@ mod tests {
                 embed: false,
                 sidecar: Some(&sidecar),
                 format: SubtitleFormat::Text,
+                metadata: None,
             },
         )
         .await;
@@ -5957,6 +6019,7 @@ mod tests {
                 embed: true,
                 sidecar: None,
                 format: SubtitleFormat::Fmp4,
+                metadata: None,
             },
         )
         .await;
@@ -5982,6 +6045,7 @@ mod tests {
                 embed: false,
                 sidecar: Some(&sidecar),
                 format: SubtitleFormat::Fmp4,
+                metadata: None,
             },
         )
         .await;
@@ -6013,6 +6077,7 @@ mod tests {
                 embed: true,
                 sidecar: None,
                 format: SubtitleFormat::Text,
+                metadata: None,
             },
         )
         .await;
@@ -6058,6 +6123,7 @@ mod tests {
                 embed: true,
                 sidecar: None,
                 format: SubtitleFormat::Text,
+                metadata: None,
             },
         )
         .await;
@@ -6881,7 +6947,13 @@ segment-2.ts
                     video: Box::new(plan.clone()),
                     audio: None,
                     subtitle: subtitle_plan.clone(),
-                    subtitle_language: Some("en".to_string()),
+                    subtitle_language: Some("en-US".to_string()),
+                    subtitle_metadata: Some(ManifestSubtitleMetadata {
+                        language: Some("en-US".to_string()),
+                        name: Some("English (United States)".to_string()),
+                        is_default: false,
+                        is_forced: true,
+                    }),
                     subtitle_format,
                 }
                 .uses_incremental_hls_vod(),
@@ -7034,7 +7106,7 @@ segment-2.ts
                 output_container: None,
                 audio_key: None,
                 subtitle_key: with_native_subtitle.then(|| "hls-subtitle-fixture".into()),
-                subtitle_language: with_native_subtitle.then(|| "en".to_string()),
+                subtitle_language: with_native_subtitle.then(|| "en-US".to_string()),
             },
             referer: None,
             dest: destination.clone(),
@@ -7072,7 +7144,13 @@ segment-2.ts
                     video: Box::new(plan),
                     audio: None,
                     subtitle: subtitle_plan,
-                    subtitle_language: with_native_subtitle.then(|| "en".to_string()),
+                    subtitle_language: with_native_subtitle.then(|| "en-US".to_string()),
+                    subtitle_metadata: with_native_subtitle.then(|| ManifestSubtitleMetadata {
+                        language: Some("en-US".to_string()),
+                        name: Some("English (United States)".to_string()),
+                        is_default: false,
+                        is_forced: true,
+                    }),
                     subtitle_format,
                 },
                 ffmpeg: task_ffmpeg,
@@ -7206,7 +7284,7 @@ segment-2.ts
             verification_command.args(["-map", "0:v:0", "-map", "0:s:0", "-c", "copy"]);
             verification_command.arg(fixture.path().join("verified-native-subtitle.mp4"));
         } else if with_native_subtitle && extension == "ts" && !fail_native_subtitle {
-            let sidecar = crate::video_staging::sidecar_path_for(&destination, "en");
+            let sidecar = crate::video_staging::sidecar_path_for(&destination, "en-US");
             let sidecar_text = tokio::fs::read_to_string(&sidecar)
                 .await
                 .expect("native HLS subtitles should be published as an SRT sidecar for TS");
@@ -7241,9 +7319,9 @@ segment-2.ts
                     "-v",
                     "error",
                     "-show_entries",
-                    "stream=codec_type,codec_name",
+                    "stream=codec_type,codec_name:stream_tags=language,title,handler_name:stream_disposition=default,forced",
                     "-of",
-                    "default=noprint_wrappers=1",
+                    "json",
                 ])
                 .arg(&destination)
                 .output()
@@ -7254,14 +7332,54 @@ segment-2.ts
                 "ffprobe rejected the fMP4 subtitle output: {}",
                 String::from_utf8_lossy(&probe.stderr)
             );
-            let streams = String::from_utf8_lossy(&probe.stdout);
+            let result: serde_json::Value =
+                serde_json::from_slice(&probe.stdout).expect("parse ffprobe subtitle metadata");
+            let subtitle = result["streams"]
+                .as_array()
+                .expect("ffprobe streams array")
+                .iter()
+                .find(|stream| stream["codec_type"] == "subtitle")
+                .expect("finalized MP4 subtitle stream");
+            assert_eq!(subtitle["codec_name"], "mov_text");
+            assert_eq!(subtitle["tags"]["language"], "eng");
+            assert_eq!(subtitle["tags"]["handler_name"], "English (United States)");
+            assert_eq!(subtitle["disposition"]["forced"], 1);
+            // FFmpeg's MP4 muxer marks a lone subtitle stream as default even
+            // when the selected HLS rendition did not declare DEFAULT=YES.
+        }
+        if with_native_subtitle && extension == "mkv" && !fail_native_subtitle {
+            let probe = tokio::process::Command::new("ffprobe")
+                .args([
+                    "-v",
+                    "error",
+                    "-show_entries",
+                    "stream=codec_type:stream_tags=language,title:stream_disposition=default,forced",
+                    "-of",
+                    "json",
+                ])
+                .arg(&destination)
+                .output()
+                .await
+                .expect("probe finalized Matroska subtitle metadata");
             assert!(
-                streams.contains("codec_type=subtitle") && streams.contains("codec_name=mov_text"),
-                "MP4 output must retain the fMP4 subtitle codec: {streams}"
+                probe.status.success(),
+                "ffprobe rejected the Matroska subtitle output"
             );
+            let result: serde_json::Value =
+                serde_json::from_slice(&probe.stdout).expect("parse ffprobe Matroska metadata");
+            let subtitle = result["streams"]
+                .as_array()
+                .expect("ffprobe streams array")
+                .iter()
+                .find(|stream| stream["codec_type"] == "subtitle")
+                .expect("finalized Matroska subtitle stream");
+            assert_eq!(subtitle["tags"]["language"], "en-US");
+            assert_eq!(subtitle["tags"]["title"], "English (United States)");
+            assert_eq!(subtitle["disposition"]["default"], 0);
+            assert_eq!(subtitle["disposition"]["forced"], 1);
         }
         if with_native_subtitle && extension == "mp4" {
-            let sidecar = crate::video_staging::sidecar_path_for(&destination, "en");
+            let sidecar = crate::video_staging::sidecar_path_for(&destination, "en-US");
             assert!(
                 tokio::fs::symlink_metadata(sidecar).await.is_err(),
                 "an MP4 with an embedded native HLS subtitle must not publish an SRT sidecar"
@@ -7279,7 +7397,7 @@ segment-2.ts
                 !subtitle_probe.status.success(),
                 "an unavailable native subtitle must not leave an embedded subtitle stream"
             );
-            let sidecar = crate::video_staging::sidecar_path_for(&destination, "en");
+            let sidecar = crate::video_staging::sidecar_path_for(&destination, "en-US");
             assert!(
                 tokio::fs::symlink_metadata(sidecar).await.is_err(),
                 "an unavailable native subtitle must not leave a sidecar"
@@ -7592,6 +7710,7 @@ segment-2.ts
                     audio: None,
                     subtitle: None,
                     subtitle_language: None,
+                    subtitle_metadata: None,
                     subtitle_format: SubtitleFormat::Text,
                 },
                 ffmpeg: task_ffmpeg,
@@ -7804,6 +7923,7 @@ segment-2.ts
                 audio: Some(Box::new(audio_plan.clone())),
                 subtitle: None,
                 subtitle_language: None,
+                subtitle_metadata: None,
                 subtitle_format: SubtitleFormat::Text,
             }
             .uses_incremental_hls_vod(),
@@ -8000,6 +8120,7 @@ segment-2.ts
                     audio: Some(Box::new(audio_plan)),
                     subtitle: None,
                     subtitle_language: None,
+                    subtitle_metadata: None,
                     subtitle_format: SubtitleFormat::Text,
                 },
                 ffmpeg: task_ffmpeg,
@@ -8352,6 +8473,7 @@ segment-2.m4s
                 embed: true,
                 sidecar: None,
                 format: SubtitleFormat::Text,
+                metadata: None,
             },
             Path::new("output.ts"),
             &mut abort,

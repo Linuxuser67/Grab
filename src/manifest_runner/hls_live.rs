@@ -55,6 +55,7 @@ pub(super) async fn restore_local_live_hls_tracks(
         audio: audio.map(Box::new),
         subtitle: None,
         subtitle_language: None,
+        subtitle_metadata: None,
         subtitle_format: SubtitleFormat::Text,
     }))
 }

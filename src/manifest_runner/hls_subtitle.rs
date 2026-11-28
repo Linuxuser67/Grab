@@ -162,6 +162,7 @@ segment-001.m4s
             audio: None,
             subtitle: None,
             subtitle_language: None,
+            subtitle_metadata: None,
             subtitle_format: SubtitleFormat::Text,
         };
         assert!(without_subtitle.uses_incremental_hls_vod());
@@ -179,6 +180,7 @@ caption.vtt
             audio: None,
             subtitle: Some(Box::new(live_subtitle)),
             subtitle_language: Some("en".to_string()),
+            subtitle_metadata: None,
             subtitle_format: SubtitleFormat::Text,
         };
         assert!(

@@ -71,9 +71,11 @@ pub(crate) struct DashRepresentation {
     pub(crate) mime_type: Option<String>,
     pub(crate) codecs: Option<String>,
     pub(crate) language: Option<String>,
+    pub(crate) label: Option<String>,
     pub(crate) kind: DashTrackKind,
     pub(crate) is_default_audio: bool,
     pub(crate) is_default_subtitle: bool,
+    pub(crate) is_forced_subtitle: bool,
     adaptation_id: Option<String>,
     source: DashRepresentationSource,
     /// Additional period-local addressing sources in MPD presentation order.
@@ -664,10 +666,12 @@ pub(crate) fn parse_dash_manifest_at(
             for (representation_index, representation) in
                 adaptation.representations.iter().enumerate()
             {
-                let representation_is_main = adaptation_metadata
+                let representation_role_metadata = adaptation_metadata
                     .get(representation_index)
-                    .ok_or(DashError::Parse)?
-                    .is_main;
+                    .ok_or(DashError::Parse)?;
+                let representation_is_main = representation_role_metadata.is_main;
+                let representation_is_forced_subtitle =
+                    representation_role_metadata.is_forced_subtitle;
                 if representation.href.is_some() || !representation.ContentProtection.is_empty() {
                     return Err(DashError::UnsupportedPresentation);
                 }
@@ -790,6 +794,27 @@ pub(crate) fn parse_dash_manifest_at(
                     .lang
                     .clone()
                     .or_else(|| adaptation.lang.clone());
+                let label_for_language = |labels: &[dash_mpd_core::Label]| {
+                    let matching = language.as_deref().and_then(|language| {
+                        labels.iter().find(|label| {
+                            label.lang.as_deref().is_some_and(|label_language| {
+                                label_language.eq_ignore_ascii_case(language)
+                            })
+                        })
+                    });
+                    matching
+                        .or_else(|| labels.iter().find(|label| label.lang.is_none()))
+                        .or_else(|| {
+                            if language.is_none() {
+                                labels.first()
+                            } else {
+                                None
+                            }
+                        })
+                        .map(|label| label.content.clone())
+                };
+                let label = label_for_language(&representation.Label)
+                    .or_else(|| label_for_language(&adaptation.Label));
                 let identity = RepresentationIdentity {
                     id: representation_id.as_deref(),
                     kind,
@@ -823,9 +848,16 @@ pub(crate) fn parse_dash_manifest_at(
                     mime_type,
                     codecs,
                     language,
+                    label,
                     kind,
                     is_default_audio,
                     is_default_subtitle: kind == DashTrackKind::Subtitle && is_main,
+                    is_forced_subtitle: kind == DashTrackKind::Subtitle
+                        && (representation_is_forced_subtitle
+                            || adaptation.Role.iter().any(|role| {
+                                role.schemeIdUri == DASH_ROLE_SCHEME
+                                    && role.value.as_deref() == Some("forced-subtitle")
+                            })),
                     adaptation_id: adaptation.id.clone(),
                     source: DashRepresentationSource {
                         base_url: representation_base,
@@ -3386,6 +3418,35 @@ mod tests {
             Some("declared-main"),
             "Representation-level Role=main must override the first-track fallback"
         );
+    }
+
+    #[test]
+    fn retains_representation_level_forced_subtitle_role() {
+        let body = r#"<?xml version="1.0"?>
+<MPD xmlns="urn:mpeg:dash:schema:mpd:2011" type="static" mediaPresentationDuration="PT10S">
+  <Period duration="PT10S">
+    <AdaptationSet contentType="video" mimeType="video/mp4">
+      <SegmentTemplate duration="5" media="video-$Number$.m4s"/>
+      <Representation id="video" bandwidth="1000000"/>
+    </AdaptationSet>
+    <AdaptationSet contentType="text" mimeType="application/mp4" lang="en">
+      <SegmentTemplate duration="5" initialization="sub-init.mp4" media="sub-$Number$.m4s"/>
+      <Representation id="forced-en" bandwidth="1000" codecs="wvtt">
+        <Label lang="en">Forced English</Label>
+        <Role schemeIdUri="urn:mpeg:dash:role:2011" value="forced-subtitle"/>
+      </Representation>
+    </AdaptationSet>
+  </Period>
+</MPD>"#;
+        let manifest = parse_dash_manifest(BASE_URL, body)
+            .expect("forced WVTT subtitle representation should parse");
+        let subtitle = &manifest.subtitle_representations[0];
+
+        assert_eq!(subtitle.representation_id.as_deref(), Some("forced-en"));
+        assert_eq!(subtitle.language.as_deref(), Some("en"));
+        assert_eq!(subtitle.label.as_deref(), Some("Forced English"));
+        assert!(!subtitle.is_default_subtitle);
+        assert!(subtitle.is_forced_subtitle);
     }
 
     #[test]

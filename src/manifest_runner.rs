@@ -22,6 +22,7 @@ use crate::manifest::{
 };
 use crate::manifest_destination::{TrackFileFormat, TrackKind};
 use crate::manifest_intake::ManifestLookup;
+use crate::manifest_types::ManifestSubtitleMetadata;
 #[cfg(test)]
 use crate::manifest_intake::NativeManifest;
 use crate::media_types::{
@@ -430,6 +431,7 @@ enum Tracks {
         audio: Option<Box<HlsPlan>>,
         subtitle: Option<Box<HlsPlan>>,
         subtitle_language: Option<String>,
+        subtitle_metadata: Option<ManifestSubtitleMetadata>,
         subtitle_format: SubtitleFormat,
     },
     Dash {
@@ -437,6 +439,7 @@ enum Tracks {
         audio: Option<Box<DashRepresentationPlan>>,
         subtitle: Option<Box<DashRepresentationPlan>>,
         subtitle_language: Option<String>,
+        subtitle_metadata: Option<ManifestSubtitleMetadata>,
     },
     DashLiveOffline {
         has_audio: bool,
@@ -2644,6 +2647,7 @@ async fn run_incremental_hls_vod(
         audio,
         subtitle,
         mut subtitle_language,
+        subtitle_metadata,
         subtitle_format,
     } = tracks
     else {
@@ -2950,6 +2954,7 @@ async fn run_incremental_hls_vod(
         embed: embed_subtitles,
         sidecar: subtitle_sidecar.as_deref(),
         format: output_subtitle_format,
+        metadata: subtitle_metadata.as_ref(),
     };
     let ffmpeg_subtitle_input = subtitle_input.clone();
     let ffmpeg_subtitle_sidecar = subtitle_sidecar.clone();
@@ -2965,6 +2970,7 @@ async fn run_incremental_hls_vod(
             embed: ffmpeg_embed_subtitles,
             sidecar: ffmpeg_subtitle_sidecar.as_deref(),
             format: output_subtitle_format,
+            metadata: subtitle_metadata.as_ref(),
         };
         run_ffmpeg_with_offsets_timeout(
             &ffmpeg_path,
@@ -3232,6 +3238,7 @@ async fn run_incremental_hls_vod(
             audio: audio.map(Box::new),
             subtitle,
             subtitle_language,
+            subtitle_metadata,
             subtitle_format,
         },
         has_audio,
@@ -3517,9 +3524,23 @@ async fn finalize_manifest_download(
             }
         }
     }
+    let subtitle_output_metadata = if external_caption.is_none() {
+        match &tracks {
+            Tracks::Hls {
+                subtitle_metadata, ..
+            }
+            | Tracks::Dash {
+                subtitle_metadata, ..
+            } => subtitle_metadata.as_ref(),
+            Tracks::DashLiveOffline { .. } => None,
+        }
+    } else {
+        None
+    };
     let declared_language = external_caption
         .as_ref()
         .map(|caption| caption.language.as_str())
+        .or_else(|| subtitle_output_metadata.and_then(|metadata| metadata.language.as_deref()))
         .or(match &tracks {
             Tracks::Hls {
                 subtitle_language, ..
@@ -3608,6 +3629,7 @@ async fn finalize_manifest_download(
                 embed: embed_subtitles,
                 sidecar: subtitle_sidecar.as_deref(),
                 format: subtitle_format,
+                metadata: subtitle_output_metadata,
             },
             &output_part,
             &mut abort,
@@ -3783,6 +3805,7 @@ async fn resolve_tracks(
                 audio: None,
                 subtitle: None,
                 subtitle_language: None,
+                subtitle_metadata: None,
                 subtitle_format: SubtitleFormat::Text,
             })
         }
@@ -3792,6 +3815,7 @@ async fn resolve_tracks(
                 audio_url,
                 subtitle_url,
                 subtitle_language,
+                subtitle_metadata,
                 inherited_variables,
             } = *plan;
             guard_manifest_child_url(&source.url, &video_url, guarded_child_hosts)?;
@@ -3853,6 +3877,7 @@ async fn resolve_tracks(
                 audio: audio.map(Box::new),
                 subtitle,
                 subtitle_language,
+                subtitle_metadata,
                 subtitle_format,
             })
         }
@@ -3874,14 +3899,21 @@ async fn resolve_tracks(
                     guard_manifest_child_url(&source.url, &resource.url, guarded_child_hosts)?;
                 }
             }
-            let subtitle_language = subtitle
+            let subtitle_metadata = subtitle.as_ref().map(|track| ManifestSubtitleMetadata {
+                language: track.representation.language.clone(),
+                name: track.representation.representation_id.clone(),
+                is_default: track.representation.is_default_subtitle,
+                is_forced: track.representation.is_forced_subtitle,
+            });
+            let subtitle_language = subtitle_metadata
                 .as_ref()
-                .and_then(|track| track.representation.language.clone());
+                .and_then(|metadata| metadata.language.clone());
             Ok(Tracks::Dash {
                 video,
                 audio,
                 subtitle,
                 subtitle_language,
+                subtitle_metadata,
             })
         }
     }
@@ -5359,6 +5391,7 @@ struct SubtitleOutput<'a> {
     embed: bool,
     sidecar: Option<&'a Path>,
     format: SubtitleFormat,
+    metadata: Option<&'a ManifestSubtitleMetadata>,
 }
 
 #[derive(Clone, Copy)]
@@ -5865,6 +5898,7 @@ mod tests {
                 embed: true,
                 sidecar: None,
                 format: SubtitleFormat::Text,
+            metadata: None,
             },
         )
         .await;
@@ -5901,6 +5935,7 @@ mod tests {
                 embed: false,
                 sidecar: Some(&sidecar),
                 format: SubtitleFormat::Text,
+            metadata: None,
             },
         )
         .await;
@@ -5957,6 +5992,7 @@ mod tests {
                 embed: true,
                 sidecar: None,
                 format: SubtitleFormat::Fmp4,
+            metadata: None,
             },
         )
         .await;
@@ -5982,6 +6018,7 @@ mod tests {
                 embed: false,
                 sidecar: Some(&sidecar),
                 format: SubtitleFormat::Fmp4,
+            metadata: None,
             },
         )
         .await;
@@ -6013,6 +6050,7 @@ mod tests {
                 embed: true,
                 sidecar: None,
                 format: SubtitleFormat::Text,
+            metadata: None,
             },
         )
         .await;
@@ -6058,6 +6096,7 @@ mod tests {
                 embed: true,
                 sidecar: None,
                 format: SubtitleFormat::Text,
+            metadata: None,
             },
         )
         .await;
@@ -6881,7 +6920,13 @@ segment-2.ts
                     video: Box::new(plan.clone()),
                     audio: None,
                     subtitle: subtitle_plan.clone(),
-                    subtitle_language: Some("en".to_string()),
+                    subtitle_language: Some("en-US".to_string()),
+                    subtitle_metadata: Some(ManifestSubtitleMetadata {
+                        language: Some("en-US".to_string()),
+                        name: Some("English (United States)".to_string()),
+                        is_default: false,
+                        is_forced: true,
+                    }),
                     subtitle_format,
                 }
                 .uses_incremental_hls_vod(),
@@ -7072,7 +7117,13 @@ segment-2.ts
                     video: Box::new(plan),
                     audio: None,
                     subtitle: subtitle_plan,
-                    subtitle_language: with_native_subtitle.then(|| "en".to_string()),
+                    subtitle_language: with_native_subtitle.then(|| "en-US".to_string()),
+                    subtitle_metadata: with_native_subtitle.then(|| ManifestSubtitleMetadata {
+                        language: Some("en-US".to_string()),
+                        name: Some("English (United States)".to_string()),
+                        is_default: false,
+                        is_forced: true,
+                    }),
                     subtitle_format,
                 },
                 ffmpeg: task_ffmpeg,
@@ -7804,6 +7855,7 @@ segment-2.ts
                 audio: Some(Box::new(audio_plan.clone())),
                 subtitle: None,
                 subtitle_language: None,
+                subtitle_metadata: None,
                 subtitle_format: SubtitleFormat::Text,
             }
             .uses_incremental_hls_vod(),
@@ -8352,6 +8404,7 @@ segment-2.m4s
                 embed: true,
                 sidecar: None,
                 format: SubtitleFormat::Text,
+            metadata: None,
             },
             Path::new("output.ts"),
             &mut abort,

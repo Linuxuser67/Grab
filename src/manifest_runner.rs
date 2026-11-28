@@ -22,9 +22,9 @@ use crate::manifest::{
 };
 use crate::manifest_destination::{TrackFileFormat, TrackKind};
 use crate::manifest_intake::ManifestLookup;
-use crate::manifest_types::ManifestSubtitleMetadata;
 #[cfg(test)]
 use crate::manifest_intake::NativeManifest;
+use crate::manifest_types::ManifestSubtitleMetadata;
 use crate::media_types::{
     ManifestContainer, ManifestKind, ManifestRepresentationKey, ManifestSource,
 };
@@ -5925,7 +5925,7 @@ mod tests {
                 embed: true,
                 sidecar: None,
                 format: SubtitleFormat::Text,
-            metadata: None,
+                metadata: None,
             },
         )
         .await;
@@ -5962,7 +5962,7 @@ mod tests {
                 embed: false,
                 sidecar: Some(&sidecar),
                 format: SubtitleFormat::Text,
-            metadata: None,
+                metadata: None,
             },
         )
         .await;
@@ -6019,7 +6019,7 @@ mod tests {
                 embed: true,
                 sidecar: None,
                 format: SubtitleFormat::Fmp4,
-            metadata: None,
+                metadata: None,
             },
         )
         .await;
@@ -6045,7 +6045,7 @@ mod tests {
                 embed: false,
                 sidecar: Some(&sidecar),
                 format: SubtitleFormat::Fmp4,
-            metadata: None,
+                metadata: None,
             },
         )
         .await;
@@ -6077,7 +6077,7 @@ mod tests {
                 embed: true,
                 sidecar: None,
                 format: SubtitleFormat::Text,
-            metadata: None,
+                metadata: None,
             },
         )
         .await;
@@ -6123,7 +6123,7 @@ mod tests {
                 embed: true,
                 sidecar: None,
                 format: SubtitleFormat::Text,
-            metadata: None,
+                metadata: None,
             },
         )
         .await;
@@ -7332,8 +7332,8 @@ segment-2.ts
                 "ffprobe rejected the fMP4 subtitle output: {}",
                 String::from_utf8_lossy(&probe.stderr)
             );
-            let result: serde_json::Value = serde_json::from_slice(&probe.stdout)
-                .expect("parse ffprobe subtitle metadata");
+            let result: serde_json::Value =
+                serde_json::from_slice(&probe.stdout).expect("parse ffprobe subtitle metadata");
             let subtitle = result["streams"]
                 .as_array()
                 .expect("ffprobe streams array")
@@ -7361,9 +7361,12 @@ segment-2.ts
                 .output()
                 .await
                 .expect("probe finalized Matroska subtitle metadata");
-            assert!(probe.status.success(), "ffprobe rejected the Matroska subtitle output");
-            let result: serde_json::Value = serde_json::from_slice(&probe.stdout)
-                .expect("parse ffprobe Matroska metadata");
+            assert!(
+                probe.status.success(),
+                "ffprobe rejected the Matroska subtitle output"
+            );
+            let result: serde_json::Value =
+                serde_json::from_slice(&probe.stdout).expect("parse ffprobe Matroska metadata");
             let subtitle = result["streams"]
                 .as_array()
                 .expect("ffprobe streams array")
@@ -8470,7 +8473,7 @@ segment-2.m4s
                 embed: true,
                 sidecar: None,
                 format: SubtitleFormat::Text,
-            metadata: None,
+                metadata: None,
             },
             Path::new("output.ts"),
             &mut abort,

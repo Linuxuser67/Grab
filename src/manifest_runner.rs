@@ -2197,7 +2197,7 @@ pub(crate) async fn run_manifest_download(
     };
     let mut _finish_stop_sender = None;
     let mut caption_tasks = tokio::task::JoinSet::new();
-    if job.source.subtitle_key.is_none() && !job.captions.is_empty() {
+    if !live_hls && !live_dash && job.source.subtitle_key.is_none() && !job.captions.is_empty() {
         let handoff_url = job.source.url.clone();
         let captions = job.captions.clone();
         let caption_staging = staging.clone();
@@ -2748,7 +2748,11 @@ async fn run_incremental_hls_vod(
     let mut stop_intent = None;
 
     // Do not start FFmpeg until every selected rendition has published a
-    // complete first segment and its growing local playlist snapshot.
+    // complete first segment and its growing local playlist snapshot. When a
+    // browser caption is available, it is also opened as an FFmpeg input from
+    // the start: this wait includes its shared 10-second intake budget while
+    // segment fetching continues. Starting without it would require a later
+    // remux or a second output publication to attach the caption.
     while first_segment_ready.iter().any(|ready| !ready) || caption_pending {
         tokio::select! {
             biased;

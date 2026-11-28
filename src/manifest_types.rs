@@ -39,6 +39,15 @@ pub(crate) struct ManifestSubtitleChoice {
     pub(crate) is_forced: bool,
 }
 
+/// Output metadata retained from the selected protocol subtitle rendition.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub(crate) struct ManifestSubtitleMetadata {
+    pub(crate) language: Option<String>,
+    pub(crate) name: Option<String>,
+    pub(crate) is_default: bool,
+    pub(crate) is_forced: bool,
+}
+
 /// Parsed native presentation, before the user's representation selection is applied.
 #[derive(Clone, Debug)]
 pub(crate) enum NativeManifest {

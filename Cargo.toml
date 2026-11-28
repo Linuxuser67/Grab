@@ -38,6 +38,8 @@ dash-mpd-core = "=0.1.0"
 quick-xml = "0.42"
 # Read the single verified Deno executable from the official release ZIP.
 zip = { version = "9.6.0", default-features = false, features = ["deflate", "deflate-flate2-zlib-rs"] }
+# Filter Unicode control/format characters from untrusted subtitle display names.
+regex = "1.13.2"
 percent-encoding = "2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"

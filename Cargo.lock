@@ -1422,6 +1422,7 @@ dependencies = [
  "proptest",
  "psl",
  "quick-xml 0.42.0",
+ "regex",
  "reqwest",
  "rustix",
  "serde",

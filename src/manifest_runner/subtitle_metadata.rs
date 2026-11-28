@@ -2,6 +2,7 @@
 
 use super::ManifestContainer;
 use crate::manifest_types::ManifestSubtitleMetadata;
+use std::sync::OnceLock;
 
 /// ISO 639-1 to ISO 639-2/T. MP4 stores a three-letter language code in its
 /// track header, while HLS and DASH commonly signal BCP 47 tags.
@@ -217,16 +218,26 @@ const ISO_639_2_T_TO_B: &[(&str, &str)] = &[
     ("cym", "wel"),
 ];
 
+/// Convert an ISO 639-2/B bibliographic code to its ISO 639-2/T terminology form.
+fn terminology_language_code(code: &str) -> &str {
+    ISO_639_2_T_TO_B
+        .iter()
+        .find(|(_, bibliographic_code)| *bibliographic_code == code)
+        .map_or(code, |(terminology_code, _)| *terminology_code)
+}
+
+/// Convert an ISO 639-2/T terminology code to its ISO 639-2/B bibliographic form.
+fn bibliographic_language_code(code: &str) -> &str {
+    ISO_639_2_T_TO_B
+        .iter()
+        .find(|(terminology_code, _)| *terminology_code == code)
+        .map_or(code, |(_, bibliographic_code)| *bibliographic_code)
+}
+
 /// Convert a BCP 47 tag to the ISO 639-2/B code accepted by FFmpeg's Matroska muxer.
 fn matroska_language_code(language: &str) -> Option<String> {
     let terminology = mp4_language_code(language)?;
-    let bibliographic = ISO_639_2_T_TO_B
-        .iter()
-        .find(|(terminology_code, _)| *terminology_code == terminology.as_str())
-        .map_or(terminology.as_str(), |(_, bibliographic_code)| {
-            *bibliographic_code
-        });
-    Some(bibliographic.to_string())
+    Some(bibliographic_language_code(&terminology).to_string())
 }
 
 /// Maximum UTF-8 byte length of a manifest-provided subtitle display name.
@@ -234,8 +245,19 @@ const MAX_SUBTITLE_NAME_BYTES: usize = 255;
 
 /// Remove control characters and cap a manifest-provided display name on a UTF-8 boundary.
 fn sanitize_display_name(name: &str) -> Option<String> {
+    static FORMAT_CHARACTERS: OnceLock<regex::Regex> = OnceLock::new();
+    let format_characters = FORMAT_CHARACTERS.get_or_init(|| {
+        regex::Regex::new(r"\p{Cf}").expect("Unicode format-character regex is valid")
+    });
+
     let mut sanitized = String::with_capacity(name.len().min(MAX_SUBTITLE_NAME_BYTES));
-    for character in name.chars().filter(|character| !character.is_control()) {
+    let mut buffer = [0; 4];
+    for character in name.chars() {
+        if character.is_control()
+            || format_characters.is_match(character.encode_utf8(&mut buffer))
+        {
+            continue;
+        }
         if sanitized.len() + character.len_utf8() > MAX_SUBTITLE_NAME_BYTES {
             break;
         }
@@ -247,7 +269,8 @@ fn sanitize_display_name(name: &str) -> Option<String> {
 fn mp4_language_code(language: &str) -> Option<String> {
     let primary = language.split('-').next()?.trim();
     if primary.len() == 3 && primary.bytes().all(|byte| byte.is_ascii_alphabetic()) {
-        return Some(primary.to_ascii_lowercase());
+        let primary = primary.to_ascii_lowercase();
+        return Some(terminology_language_code(&primary).to_string());
     }
     if primary.len() != 2 || !primary.bytes().all(|byte| byte.is_ascii_alphabetic()) {
         return None;
@@ -314,6 +337,10 @@ mod tests {
         assert_eq!(mp4_language_code("und").as_deref(), Some("und"));
         assert_eq!(mp4_language_code("x-private"), None);
         assert_eq!(mp4_language_code("en_US"), None);
+        assert_eq!(mp4_language_code("ger"), Some("deu".to_string()));
+        assert_eq!(mp4_language_code("fre"), Some("fra".to_string()));
+        assert_eq!(mp4_language_code("alb"), Some("sqi".to_string()));
+        assert_eq!(mp4_language_code("GER-DE"), Some("deu".to_string()));
     }
 
     #[test]
@@ -326,11 +353,12 @@ mod tests {
     }
 
     #[test]
-    fn strips_control_characters_and_caps_subtitle_names_by_utf8_bytes() {
-        let input = format!("German\r\n{}", "x".repeat(300));
+    fn strips_control_and_format_characters_and_caps_subtitle_names_by_utf8_bytes() {
+        let input = format!("Ger\u{202e}man\u{200b}\r\n{}", "x".repeat(300));
         let sanitized = sanitize_display_name(&input).expect("visible characters remain");
         assert_eq!(sanitized.len(), 255);
         assert!(sanitized.starts_with("German"));
+        assert_eq!(sanitize_display_name("A\u{202e}B\u{200b}C"), Some("ABC".to_string()));
         assert!(!sanitized.chars().any(|character| character.is_control()));
 
         let multibyte =
@@ -341,5 +369,13 @@ mod tests {
     #[test]
     fn omits_subtitle_names_containing_only_control_characters() {
         assert_eq!(sanitize_display_name("\r\n\u{007f}"), None);
+    }
+
+    #[test]
+    fn normalizes_all_iso_639_2_bibliographic_aliases_symmetrically() {
+        for (terminology, bibliographic) in ISO_639_2_T_TO_B {
+            assert_eq!(terminology_language_code(bibliographic), *terminology);
+            assert_eq!(bibliographic_language_code(terminology), *bibliographic);
+        }
     }
 }

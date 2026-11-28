@@ -699,6 +699,16 @@ video.m3u8
             plan.subtitle_url.as_ref().map(Url::as_str),
             Some("https://cdn.example.test/media/subs.m3u8")
         );
+        assert_eq!(plan.subtitle_language.as_deref(), Some("en"));
+        assert_eq!(
+            plan.subtitle_metadata,
+            Some(crate::manifest_types::ManifestSubtitleMetadata {
+                language: Some("en".to_string()),
+                name: Some("English".to_string()),
+                is_default: true,
+                is_forced: false,
+            })
+        );
     }
 
     #[test]

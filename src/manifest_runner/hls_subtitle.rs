@@ -56,8 +56,8 @@ pub(super) async fn fetch(
 
 #[cfg(test)]
 mod tests {
-    use super::supports_incremental_vod;
     use super::super::{SubtitleFormat, Tracks};
+    use super::supports_incremental_vod;
     use crate::manifest::{HlsPlan, plan_hls_media_playlist};
 
     const SUBTITLE_URL: &str = "https://cdn.example.test/subtitles/index.m3u8";

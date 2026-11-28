@@ -864,6 +864,59 @@ pub(crate) fn handoff_cookie_hash(path: &Path) -> Option<[u8; 32]> {
     Some(Sha256::digest(&contents).into())
 }
 
+/// Serializes tests that access process-global extension-server state.
+#[cfg(test)]
+static EXTENSION_SERVER_TEST_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
+/// Reset the process-global extension-server state while holding its test lock.
+#[cfg(test)]
+fn reset_extension_server_test_state() {
+    purge_handoff_cookies();
+    if let Ok(mut cache) = HANDOFF_REPLAY_CACHE.lock() {
+        cache.expires_at_ms.clear();
+    }
+    if let Ok(mut cache) = HLS_INSPECTION_REPLAY_CACHE.lock() {
+        cache.expires_at_ms.clear();
+    }
+    if let Ok(mut limiter) = HLS_INSPECTION_RATE_LIMITER.lock() {
+        *limiter = HlsInspectionRateLimiter::default();
+    }
+}
+
+/// Acquire the process-wide test lock from an async test.
+#[cfg(test)]
+pub(crate) async fn exclusive_test_state() -> tokio::sync::MutexGuard<'static, ()> {
+    let guard = EXTENSION_SERVER_TEST_LOCK.lock().await;
+    reset_extension_server_test_state();
+    guard
+}
+
+/// Acquire the process-wide test lock from a synchronous test outside a runtime.
+#[cfg(test)]
+pub(crate) fn exclusive_test_state_blocking() -> tokio::sync::MutexGuard<'static, ()> {
+    let guard = EXTENSION_SERVER_TEST_LOCK.blocking_lock();
+    reset_extension_server_test_state();
+    guard
+}
+
+/// Removes a staged handoff-cookie entry and its file when a test fixture leaves scope.
+#[cfg(test)]
+pub(crate) struct HandoffCookieCleanup<'a>(&'a str);
+
+#[cfg(test)]
+impl<'a> HandoffCookieCleanup<'a> {
+    pub(crate) fn new(url: &'a str) -> Self {
+        Self(url)
+    }
+}
+
+#[cfg(test)]
+impl Drop for HandoffCookieCleanup<'_> {
+    fn drop(&mut self) {
+        discard_handoff_cookies(self.0);
+    }
+}
+
 /// Test helper that stores a cookie file with the current request time.
 #[cfg(test)]
 pub(crate) fn store_handoff_cookies(url: &str, path: PathBuf, user_agent: Option<String>) {
@@ -2269,10 +2322,6 @@ mod validated_referer_tests {
 }
 
 #[cfg(test)]
-#[allow(
-    clippy::await_holding_lock,
-    reason = "tests hold the serial-test guard across awaits by design"
-)]
 mod tests {
     use super::*;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -2441,7 +2490,7 @@ mod tests {
 
     #[tokio::test]
     async fn hls_inspection_refuses_requests_over_the_concurrency_limit() {
-        let _guard = exclusive();
+        let _guard = exclusive().await;
         let mut srv = start(4).await;
         let host = format!("127.0.0.1:{}", srv.port);
         let permits: Vec<_> = (0..MAX_CONCURRENT_HLS_INSPECTIONS)
@@ -2478,7 +2527,7 @@ mod tests {
 
     #[tokio::test]
     async fn hls_inspection_requires_a_valid_pairing_token() {
-        let _guard = exclusive();
+        let _guard = exclusive().await;
         let mut srv = start(4).await;
         let host = format!("127.0.0.1:{}", srv.port);
         let body = r#"{"url":"http://127.0.0.1:1234/master.m3u8","timestamp_ms":1,"nonce":"00000000000000000000000000000001"}"#;
@@ -2501,7 +2550,7 @@ mod tests {
 
     #[test]
     fn hls_inspection_nonce_budget_is_separate_and_rate_limited() {
-        let _guard = exclusive();
+        let _guard = exclusive_blocking();
         let now = unix_time_ms().expect("system clock");
         let first_inspection_nonce = format!("{:032x}", 1_u128);
 
@@ -2537,7 +2586,7 @@ mod tests {
 
     #[tokio::test]
     async fn hls_inspection_rejects_the_download_hmac_context() {
-        let _guard = exclusive();
+        let _guard = exclusive().await;
         let mut srv = start(4).await;
         let host = format!("127.0.0.1:{}", srv.port);
         let body = serde_json::json!({
@@ -2560,7 +2609,7 @@ mod tests {
 
     #[tokio::test]
     async fn hls_inspection_rejects_unknown_request_fields() {
-        let _guard = exclusive();
+        let _guard = exclusive().await;
         let mut srv = start(4).await;
         let host = format!("127.0.0.1:{}", srv.port);
         let body = serde_json::json!({
@@ -2584,7 +2633,7 @@ mod tests {
 
     #[tokio::test]
     async fn hls_inspection_fails_closed_for_private_literal_hosts() {
-        let _guard = exclusive();
+        let _guard = exclusive().await;
         let mut srv = start(4).await;
         let host = format!("127.0.0.1:{}", srv.port);
         let body = serde_json::json!({
@@ -2618,7 +2667,7 @@ mod tests {
 
     #[tokio::test]
     async fn hls_inspection_rejects_non_hls_and_credential_urls() {
-        let _guard = exclusive();
+        let _guard = exclusive().await;
         let mut srv = start(4).await;
         let host = format!("127.0.0.1:{}", srv.port);
         for url in [
@@ -2909,23 +2958,13 @@ mod tests {
         assert_eq!(status(&r), "200", "queue drains: {r}");
     }
 
-    /// The staging map is process-global: tests that touch it run one at a
-    /// time, and start from an empty store.
-    static STORE_LOCK: Mutex<()> = Mutex::new(());
+    /// Reset shared extension-server state while holding its process-wide test lock.
+    async fn exclusive() -> tokio::sync::MutexGuard<'static, ()> {
+        super::exclusive_test_state().await
+    }
 
-    fn exclusive() -> std::sync::MutexGuard<'static, ()> {
-        let guard = STORE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-        purge_handoff_cookies();
-        if let Ok(mut cache) = HANDOFF_REPLAY_CACHE.lock() {
-            cache.expires_at_ms.clear();
-        }
-        if let Ok(mut cache) = HLS_INSPECTION_REPLAY_CACHE.lock() {
-            cache.expires_at_ms.clear();
-        }
-        if let Ok(mut limiter) = HLS_INSPECTION_RATE_LIMITER.lock() {
-            *limiter = HlsInspectionRateLimiter::default();
-        }
-        guard
+    fn exclusive_blocking() -> tokio::sync::MutexGuard<'static, ()> {
+        super::exclusive_test_state_blocking()
     }
 
     /// Clear staged entries and delete their files.
@@ -3080,7 +3119,7 @@ mod tests {
 
     #[test]
     fn handoff_cookie_args_match_canonical_url_forms() {
-        let _g = exclusive();
+        let _g = exclusive_blocking();
         // Stored under the bare domain; the intake hands the probe the
         // slash-terminated canonical form. One entry must serve both.
         let path = write_handoff_cookies("https://example.com", &[cookie("c", "v")]).expect("path");
@@ -3102,7 +3141,7 @@ mod tests {
 
     #[test]
     fn late_older_handoff_cannot_replace_a_newer_same_url_jar() {
-        let _g = exclusive();
+        let _g = exclusive_blocking();
         clear_handoff_cookies();
         let url = "https://ordered-handoff.example/video";
         let started = Instant::now();
@@ -3139,7 +3178,7 @@ mod tests {
 
     #[test]
     fn failed_older_handoff_cleanup_cannot_remove_a_newer_jar() {
-        let _g = exclusive();
+        let _g = exclusive_blocking();
         clear_handoff_cookies();
         let url = "https://cleanup-race.example/video";
         let started = Instant::now();
@@ -3170,7 +3209,7 @@ mod tests {
 
     #[test]
     fn same_host_fallback_uses_request_order_not_staging_completion_order() {
-        let _g = exclusive();
+        let _g = exclusive_blocking();
         clear_handoff_cookies();
         let started = Instant::now();
         let older_url = "https://ordered-host.example/collection";
@@ -3211,7 +3250,7 @@ mod tests {
 
     #[test]
     fn approved_cookieless_handoff_hides_an_older_inflight_cookie_stage() {
-        let _g = exclusive();
+        let _g = exclusive_blocking();
         clear_handoff_cookies();
         let url = "https://suppressed-race.example/video";
         let started = Instant::now();
@@ -3244,7 +3283,7 @@ mod tests {
 
     #[test]
     fn declined_cookieless_handoff_restores_an_older_inflight_cookie_stage() {
-        let _g = exclusive();
+        let _g = exclusive_blocking();
         clear_handoff_cookies();
         let url = "https://declined-suppression.example/video";
         let started = Instant::now();
@@ -3289,7 +3328,7 @@ mod tests {
 
     #[test]
     fn live_handoff_identity_uses_the_jar_freshness_policy() {
-        let _g = exclusive();
+        let _g = exclusive_blocking();
         let url = "https://ua-freshness.example.com/file";
         let path = write_handoff_cookies(url, &[cookie("c", "v")]).expect("path");
         store_handoff_cookies(url, path.clone(), Some("UA/1".into()));
@@ -3308,7 +3347,7 @@ mod tests {
 
     #[test]
     fn ytdlp_spawn_identity_drops_a_stale_jar() {
-        let _g = exclusive();
+        let _g = exclusive_blocking();
         let url = "https://freshness.example.com/v";
         let path = write_handoff_cookies(url, &[cookie("c", "v")]).expect("path");
         store_handoff_cookies(url, path.clone(), Some("UA/1".into()));
@@ -3345,7 +3384,7 @@ mod tests {
 
     #[test]
     fn an_offline_stale_jar_remains_an_authenticated_cache_identity() {
-        let _g = exclusive();
+        let _g = exclusive_blocking();
         let url = "https://www.youtube.com/watch?v=cache-identity";
         let path = write_handoff_cookies(url, &[cookie("c", "v")]).expect("path");
         store_handoff_cookies(url, path, None);
@@ -3369,7 +3408,7 @@ mod tests {
 
     #[test]
     fn live_handoff_path_withholds_a_stale_jar() {
-        let _g = exclusive();
+        let _g = exclusive_blocking();
         let url = "https://gallery-freshness.example.com/album";
         let path = write_handoff_cookies(url, &[cookie("c", "v")]).expect("path");
         store_handoff_cookies(url, path.clone(), Some("UA/1".into()));
@@ -3392,7 +3431,7 @@ mod tests {
 
     #[test]
     fn discard_handoff_cookies_removes_entry_and_file() {
-        let _g = exclusive();
+        let _g = exclusive_blocking();
         let path =
             write_handoff_cookies("https://example.com/item", &[cookie("c", "v")]).expect("path");
         store_handoff_cookies("https://example.com/item", path.clone(), None);
@@ -3408,7 +3447,7 @@ mod tests {
 
     #[test]
     fn store_handoff_cookies_evicts_past_cap() {
-        let _g = exclusive();
+        let _g = exclusive_blocking();
         let mut paths = Vec::new();
         for i in 0..=(MAX_HANDOFF_ENTRIES + 2) {
             let url = format!("https://example.com/evict-{i}");
@@ -3434,7 +3473,7 @@ mod tests {
 
     #[test]
     fn handoff_cookie_fields_strip_all_control_characters() {
-        let _g = exclusive();
+        let _g = exclusive_blocking();
         let url = "https://example.com/control-fields";
         let path = write_handoff_cookies(url, &[cookie("na\u{000b}me", "va\u{0085}l\u{0000}ue")])
             .expect("sanitized cookie");
@@ -3450,7 +3489,7 @@ mod tests {
 
     #[tokio::test]
     async fn handle_add_with_cookies_stages_file_for_probe() {
-        let _g = exclusive();
+        let _g = exclusive().await;
         clear_handoff_cookies();
         let mut srv = start(4).await;
         let host = format!("127.0.0.1:{}", srv.port);
@@ -3492,7 +3531,7 @@ mod tests {
 
     #[tokio::test]
     async fn handle_add_reports_cookies_dropped_by_scope_validation() {
-        let _g = exclusive();
+        let _g = exclusive().await;
         clear_handoff_cookies();
         let mut srv = start(4).await;
         let host = format!("127.0.0.1:{}", srv.port);
@@ -3520,7 +3559,7 @@ mod tests {
 
     #[tokio::test]
     async fn handle_add_cookieless_handoff_discards_stale_entry() {
-        let _g = exclusive();
+        let _g = exclusive().await;
         let mut srv = start(4).await;
         let host = format!("127.0.0.1:{}", srv.port);
         let url = "https://example.com/watch?v=8";
@@ -3571,7 +3610,7 @@ mod tests {
 
     #[tokio::test]
     async fn handle_add_rejects_too_many_cookies() {
-        let _g = exclusive();
+        let _g = exclusive().await;
         let mut srv = start(4).await;
         let host = format!("127.0.0.1:{}", srv.port);
         let cookies: Vec<String> = (0..101)
@@ -3593,7 +3632,7 @@ mod tests {
 
     #[tokio::test]
     async fn cookieless_handoff_blocks_same_host_fallback_until_new_jar() {
-        let _g = exclusive();
+        let _g = exclusive().await;
         let mut srv = start(4).await;
         let host = format!("127.0.0.1:{}", srv.port);
         let old_url = "https://same-host.example/old";
@@ -3676,7 +3715,7 @@ mod tests {
 
     #[test]
     fn accepted_suppression_survives_cancellation_drop() {
-        let _g = exclusive();
+        let _g = exclusive_blocking();
         clear_handoff_cookies();
         let url = "https://cancelled.example/file";
         let path = write_handoff_cookies(url, &[cookie("c", "v")]).expect("path");
@@ -3693,7 +3732,7 @@ mod tests {
 
     #[test]
     fn overlapping_suppressions_keep_the_tombstone_until_all_release() {
-        let _g = exclusive();
+        let _g = exclusive_blocking();
         clear_handoff_cookies();
         let url = "https://overlap.example/file";
         let path = write_handoff_cookies(url, &[cookie("c", "v")]).expect("path");
@@ -3715,7 +3754,7 @@ mod tests {
 
     #[test]
     fn approved_suppression_is_reclaimed_when_the_old_jar_is_removed() {
-        let _g = exclusive();
+        let _g = exclusive_blocking();
         clear_handoff_cookies();
         let url = "https://reclaimed.example/file";
         let path = write_handoff_cookies(url, &[cookie("c", "old")]).expect("old jar");
@@ -3739,7 +3778,7 @@ mod tests {
 
     #[test]
     fn approved_suppression_is_reclaimed_when_the_old_jar_is_replaced() {
-        let _g = exclusive();
+        let _g = exclusive_blocking();
         clear_handoff_cookies();
         let url = "https://replaced.example/file";
         let old_path = write_handoff_cookies(url, &[cookie("c", "old")]).expect("old jar");
@@ -3763,7 +3802,7 @@ mod tests {
 
     #[test]
     fn declined_suppression_restores_approved_cutoff_and_allows_newer_fallback() {
-        let _g = exclusive();
+        let _g = exclusive_blocking();
         clear_handoff_cookies();
         let old_url = "https://cutoff.example/old";
         let old_path = write_handoff_cookies(old_url, &[cookie("c", "old")]).expect("old jar");
@@ -3800,7 +3839,7 @@ mod tests {
 
     #[test]
     fn approved_suppression_entries_stay_bounded_as_old_jars_are_evicted() {
-        let _g = exclusive();
+        let _g = exclusive_blocking();
         clear_handoff_cookies();
 
         for index in 0..(MAX_SUPPRESSED_HOSTS * 2) {
@@ -3826,7 +3865,7 @@ mod tests {
 
     #[test]
     fn cookieless_suppression_ignores_hosts_without_a_staged_jar() {
-        let _g = exclusive();
+        let _g = exclusive_blocking();
         clear_handoff_cookies();
         assert!(
             suppress_handoff_host("https://no-jar.example/file").is_none(),
@@ -3845,7 +3884,7 @@ mod tests {
 
     #[test]
     fn handoff_host_fallback_returns_newest_entry() {
-        let _g = exclusive();
+        let _g = exclusive_blocking();
         // Stage two different URLs on the same host; the newer one must win
         // the host fallback deterministically.
         let old_url = "https://example.com/old";
@@ -3869,7 +3908,7 @@ mod tests {
 
     #[tokio::test]
     async fn handle_add_429_stages_nothing() {
-        let _g = exclusive();
+        let _g = exclusive().await;
         let srv = start(1).await;
         let host = format!("127.0.0.1:{}", srv.port);
         let body = r#"{"url":"https://example.com/a","cookies":[{"name":"c","value":"v"}]}"#;
@@ -3971,7 +4010,7 @@ mod tests {
 
     #[tokio::test]
     async fn unpaired_request_waits_for_confirmation_and_drops_cookies() {
-        let _g = exclusive();
+        let _g = exclusive().await;
         let mut srv = start(4).await;
         let host = format!("127.0.0.1:{}", srv.port);
         let body = r#"{"url":"https://example.com/p","cookies":[{"name":"s","value":"v"}]}"#;
@@ -4001,7 +4040,7 @@ mod tests {
 
     #[tokio::test]
     async fn wrong_or_unverifiable_token_falls_back_to_confirmation() {
-        let _g = exclusive();
+        let _g = exclusive().await;
         let mut srv = start(4).await;
         let host = format!("127.0.0.1:{}", srv.port);
         let tok_other_body = token(r#"{"url":"https://example.com/other"}"#);
@@ -4136,7 +4175,7 @@ mod tests {
 
     #[tokio::test]
     async fn invalid_replay_metadata_falls_back_to_confirmation() {
-        let _guard = exclusive();
+        let _guard = exclusive().await;
         let mut srv = start(4).await;
         let host = format!("127.0.0.1:{}", srv.port);
         let timestamp_ms = unix_time_ms().expect("system clock");
@@ -4382,7 +4421,7 @@ mod tests {
 
     #[test]
     fn purge_handoff_cookies_deletes_every_staged_file() {
-        let _g = exclusive();
+        let _g = exclusive_blocking();
         let mut paths = Vec::new();
         for i in 0..3 {
             let url = format!("https://example.com/purge-{i}");
@@ -4398,7 +4437,7 @@ mod tests {
 
     #[test]
     fn purge_handoff_cookies_async_deletes_every_staged_file() {
-        let _g = exclusive();
+        let _g = exclusive_blocking();
         let mut paths = Vec::new();
         for i in 0..3 {
             let url = format!("https://example.com/async-purge-{i}");
@@ -4417,7 +4456,7 @@ mod tests {
 
     #[test]
     fn store_handoff_cookies_deletes_the_file_when_the_url_has_no_key() {
-        let _g = exclusive();
+        let _g = exclusive_blocking();
         let path =
             write_handoff_cookies("https://example.com/k", &[cookie("c", "v")]).expect("path");
         store_handoff_cookies("not a url", path.clone(), None);
@@ -4460,7 +4499,7 @@ mod tests {
 
     #[tokio::test]
     async fn confirm_card_opened_returns_accepted_and_keeps_cookies() {
-        let _g = exclusive();
+        let _g = exclusive().await;
         let mut srv = start(4).await;
         let host = format!("127.0.0.1:{}", srv.port);
         let url = "https://example.com/card";
@@ -4492,7 +4531,7 @@ mod tests {
 
     #[tokio::test]
     async fn confirm_failed_returns_conflict_and_drops_cookies() {
-        let _g = exclusive();
+        let _g = exclusive().await;
         let mut srv = start(4).await;
         let host = format!("127.0.0.1:{}", srv.port);
         let body = r#"{"url":"https://example.com/f","cookies":[{"name":"c","value":"v"}]}"#;
@@ -4564,7 +4603,7 @@ mod tests {
 
     #[tokio::test]
     async fn confirm_reports_decline_and_drops_cookies() {
-        let _g = exclusive();
+        let _g = exclusive().await;
         let mut srv = start(4).await;
         let host = format!("127.0.0.1:{}", srv.port);
         let body = r#"{"url":"https://example.com/d","cookies":[{"name":"c","value":"v"}]}"#;
@@ -4594,7 +4633,7 @@ mod tests {
 
     #[tokio::test]
     async fn unauthenticated_decline_preserves_staged_entry_but_approval_hides_it() {
-        let _g = exclusive();
+        let _g = exclusive().await;
         let mut srv = start(4).await;
         let host = format!("127.0.0.1:{}", srv.port);
         let url = "https://example.com/keep";
@@ -4854,7 +4893,7 @@ mod tests {
 
     #[tokio::test]
     async fn unpaired_captions_are_dropped_without_blocking_url_handoff() {
-        let _g = exclusive();
+        let _g = exclusive().await;
         let mut srv = start(4).await;
         let host = format!("127.0.0.1:{}", srv.port);
         let body = body_with_captions(serde_json::json!([caption()]));
@@ -4890,7 +4929,7 @@ mod tests {
 
     #[tokio::test]
     async fn invalid_pairing_token_falls_back_to_confirmation_without_captions() {
-        let _g = exclusive();
+        let _g = exclusive().await;
         let mut srv = start(4).await;
         let host = format!("127.0.0.1:{}", srv.port);
         let body = body_with_captions(serde_json::json!([caption()]));
@@ -4929,7 +4968,7 @@ mod tests {
 
     #[tokio::test]
     async fn stale_replay_metadata_falls_back_to_confirmation_without_captions() {
-        let _g = exclusive();
+        let _g = exclusive().await;
         let mut srv = start(4).await;
         let host = format!("127.0.0.1:{}", srv.port);
         let body = serde_json::json!({
@@ -4975,7 +5014,7 @@ mod tests {
 
     #[tokio::test]
     async fn too_many_captions_are_rejected() {
-        let _g = exclusive();
+        let _g = exclusive().await;
         let mut srv = start(4).await;
         let host = format!("127.0.0.1:{}", srv.port);
         let body = body_with_captions(serde_json::json!([
@@ -4992,7 +5031,7 @@ mod tests {
 
     #[tokio::test]
     async fn non_https_caption_is_ignored_for_media_handoff() {
-        let _g = exclusive();
+        let _g = exclusive().await;
         let mut srv = start(4).await;
         let host = format!("127.0.0.1:{}", srv.port);
         let mut bad = caption();
@@ -5007,7 +5046,7 @@ mod tests {
 
     #[tokio::test]
     async fn invalid_caption_does_not_discard_valid_sibling() {
-        let _g = exclusive();
+        let _g = exclusive().await;
         let mut srv = start(4).await;
         let host = format!("127.0.0.1:{}", srv.port);
         let mut unsafe_caption = caption();
@@ -5027,7 +5066,7 @@ mod tests {
 
     #[tokio::test]
     async fn private_caption_hosts_are_ignored_without_rejecting_media() {
-        let _g = exclusive();
+        let _g = exclusive().await;
         let mut srv = start(4).await;
         let host = format!("127.0.0.1:{}", srv.port);
         for url in ["https://127.0.0.1/en.vtt", "https://router/en.vtt"] {
@@ -5047,7 +5086,7 @@ mod tests {
 
     #[tokio::test]
     async fn disallowed_caption_header_is_ignored_without_rejecting_media() {
-        let _g = exclusive();
+        let _g = exclusive().await;
         let mut srv = start(4).await;
         let host = format!("127.0.0.1:{}", srv.port);
         let mut bad = caption();
@@ -5062,7 +5101,7 @@ mod tests {
 
     #[tokio::test]
     async fn caption_limits_are_enforced() {
-        let _g = exclusive();
+        let _g = exclusive().await;
         let mut srv = start(4).await;
         let host = format!("127.0.0.1:{}", srv.port);
         let mut cases = Vec::new();
@@ -5115,7 +5154,7 @@ mod tests {
 
     #[tokio::test]
     async fn valid_captions_are_accepted_and_preserved() {
-        let _g = exclusive();
+        let _g = exclusive().await;
         let mut srv = start(4).await;
         let host = format!("127.0.0.1:{}", srv.port);
         let second = serde_json::json!({

@@ -573,6 +573,8 @@ mod tests {
             secure: None,
             expiration_date: None,
         }];
+        let _store_guard = crate::extension_server::exclusive_test_state_blocking();
+        let _cleanup = crate::extension_server::HandoffCookieCleanup::new(url);
         let path = crate::extension_server::write_handoff_cookies(url, &cookies)
             .expect("stage extension cookie fixture");
         crate::extension_server::store_handoff_cookies(
@@ -585,8 +587,6 @@ mod tests {
         assert_eq!(auth.cookies_path.as_deref(), Some(path.as_path()));
         assert_eq!(auth.user_agent.as_deref(), Some("Grab-Test-UA"));
         assert!(auth.cookies_browser.is_none());
-
-        crate::extension_server::discard_handoff_cookies(url);
     }
 
     fn cache_auth(

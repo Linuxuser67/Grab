@@ -2427,6 +2427,8 @@ video/720.m3u8
             source: "http://player.example.test/watch?token=private",
             target: &url,
         };
+        let _store_guard = crate::extension_server::exclusive_test_state().await;
+        let _cleanup = crate::extension_server::HandoffCookieCleanup::new(&url);
         crate::extension_server::store_handoff_cookies(
             &url,
             jar_path.clone(),
@@ -2484,7 +2486,6 @@ video/720.m3u8
                 "the browser-bound User-Agent must be retained on each redirect hop: {request}"
             );
         }
-        crate::extension_server::discard_handoff_cookies(&url);
     }
 
     #[tokio::test(flavor = "current_thread")]

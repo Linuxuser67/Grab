@@ -9,7 +9,8 @@ use crate::manifest::{
     dash::{DashPresentation, DashRepresentationPlan},
 };
 use crate::manifest_types::{
-    ManifestAudioChoice, ManifestChoice, ManifestLookup, ManifestSubtitleChoice, NativeManifest,
+    ManifestAudioChoice, ManifestChoice, ManifestLookup, ManifestSubtitleChoice,
+    ManifestSubtitleMetadata, NativeManifest,
 };
 use crate::media_types::{
     ManifestAudioKey, ManifestContainer, ManifestKind, ManifestRepresentationKey, ManifestSource,
@@ -23,6 +24,7 @@ pub(crate) struct HlsMasterDownloadPlan {
     pub(crate) audio_url: Option<Url>,
     pub(crate) subtitle_url: Option<Url>,
     pub(crate) subtitle_language: Option<String>,
+    pub(crate) subtitle_metadata: Option<ManifestSubtitleMetadata>,
     pub(crate) inherited_variables: Box<[(String, String)]>,
 }
 
@@ -596,42 +598,40 @@ pub(crate) fn download_plan(
                         })
                 }),
             };
+            let selected_subtitle = source
+                .subtitle_key
+                .as_deref()
+                .map(|subtitle_key| {
+                    master
+                        .subtitle_renditions
+                        .iter()
+                        .zip(hls_subtitle_rendition_keys(&master.subtitle_renditions))
+                        .find_map(|(rendition, key)| {
+                            (key.as_deref() == Some(subtitle_key)
+                                && variant.subtitles_group.as_deref()
+                                    == Some(rendition.group_id.as_str()))
+                            .then_some(rendition)
+                        })
+                        .ok_or_else(|| {
+                            "The selected HLS subtitle rendition is no longer available"
+                                .to_string()
+                        })
+                })
+                .transpose()?;
+            let subtitle_metadata = selected_subtitle.map(|rendition| ManifestSubtitleMetadata {
+                language: rendition.language.clone(),
+                name: Some(rendition.name.clone()),
+                is_default: rendition.is_default,
+                is_forced: rendition.is_forced,
+            });
             Ok(ManifestDownloadPlan::HlsMaster(Box::new(
                 HlsMasterDownloadPlan {
                     video_url: variant.url.clone(),
                     audio_url: selected_audio.and_then(|rendition| rendition.url.clone()),
-                    subtitle_url: match source.subtitle_key.as_deref() {
-                        Some(subtitle_key) => Some(
-                            master
-                                .subtitle_renditions
-                                .iter()
-                                .zip(hls_subtitle_rendition_keys(&master.subtitle_renditions))
-                                .find_map(|(rendition, key)| {
-                                    (key.as_deref() == Some(subtitle_key)
-                                        && variant.subtitles_group.as_deref()
-                                            == Some(rendition.group_id.as_str()))
-                                    .then_some(rendition.url.clone())
-                                })
-                                .ok_or_else(|| {
-                                    "The selected HLS subtitle rendition is no longer available"
-                                        .to_string()
-                                })?,
-                        ),
-                        None => None,
-                    },
-                    subtitle_language: source.subtitle_key.as_deref().and_then(|subtitle_key| {
-                        master
-                            .subtitle_renditions
-                            .iter()
-                            .zip(hls_subtitle_rendition_keys(&master.subtitle_renditions))
-                            .find_map(|(rendition, key)| {
-                                (key.as_deref() == Some(subtitle_key)
-                                    && variant.subtitles_group.as_deref()
-                                        == Some(rendition.group_id.as_str()))
-                                .then_some(rendition.language.clone())
-                                .flatten()
-                            })
-                    }),
+                    subtitle_url: selected_subtitle.and_then(|rendition| rendition.url.clone()),
+                    subtitle_language: selected_subtitle
+                        .and_then(|rendition| rendition.language.clone()),
+                    subtitle_metadata,
                     inherited_variables: master.inherited_variables.clone(),
                 },
             )))

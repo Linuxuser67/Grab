@@ -6902,7 +6902,7 @@ segment-2.ts
                 representation_key: "hls-media".into(),
                 output_container: None,
                 audio_key: None,
-                subtitle_key: with_native_subtitle.then(|| "hls-subtitle-fixture".to_string()),
+                subtitle_key: with_native_subtitle.then(|| "hls-subtitle-fixture".into()),
                 subtitle_language: with_native_subtitle.then(|| "en".to_string()),
             },
             referer: None,

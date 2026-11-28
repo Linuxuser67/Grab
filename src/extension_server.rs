@@ -2013,11 +2013,7 @@ async fn handle_inspect_hls(
 /// Attach the number of cookies serialized into the staged jar.
 /// Invalid, out-of-scope, and malformed cookies are skipped by design, but
 /// the extension should be able to detect a partial cookie handoff.
-fn cookie_report_response(
-    accepted: usize,
-    status: StatusCode,
-    pairing_stale: bool,
-) -> Response {
+fn cookie_report_response(accepted: usize, status: StatusCode, pairing_stale: bool) -> Response {
     let value = accepted
         .to_string()
         .parse::<HeaderValue>()
@@ -2218,7 +2214,11 @@ async fn handle_add(
             } else if let Some(suppression) = suppression {
                 suppression.keep();
             }
-            cookie_report_response(if discard { 0 } else { accepted_cookie_count }, status, pairing_stale)
+            cookie_report_response(
+                if discard { 0 } else { accepted_cookie_count },
+                status,
+                pairing_stale,
+            )
         }
         outcome => {
             // Dropped unanswered or timed out: this request will not start a
@@ -4881,7 +4881,9 @@ mod tests {
         let response = task.await.unwrap();
         assert_eq!(status(&response), "200");
         assert!(
-            !response.to_ascii_lowercase().contains("x-grab-pairing: stale"),
+            !response
+                .to_ascii_lowercase()
+                .contains("x-grab-pairing: stale"),
             "a deliberately unpaired handoff is not a stale saved pairing: {response}"
         );
     }
@@ -4918,7 +4920,9 @@ mod tests {
         let response = task.await.unwrap();
         assert_eq!(status(&response), "200");
         assert!(
-            response.to_ascii_lowercase().contains("x-grab-pairing: stale"),
+            response
+                .to_ascii_lowercase()
+                .contains("x-grab-pairing: stale"),
             "a supplied invalid token must tell the extension to re-pair: {response}"
         );
     }
@@ -4962,7 +4966,9 @@ mod tests {
         let response = task.await.unwrap();
         assert_eq!(status(&response), "200");
         assert!(
-            response.to_ascii_lowercase().contains("x-grab-pairing: stale"),
+            response
+                .to_ascii_lowercase()
+                .contains("x-grab-pairing: stale"),
             "stale replay metadata must tell the extension to re-pair: {response}"
         );
     }

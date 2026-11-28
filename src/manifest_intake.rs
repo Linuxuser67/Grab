@@ -1244,6 +1244,10 @@ mod tests {
         }
     }
 
+    fn exclusive_handoff_cookie_store() -> std::sync::MutexGuard<'static, ()> {
+        crate::extension_server::extension_server_test_guard()
+    }
+
     #[test]
     fn signed_master_query_is_inherited_only_by_same_origin_renditions() {
         let body = br#"#EXTM3U
@@ -2435,7 +2439,7 @@ video/720.m3u8
             source: "http://player.example.test/watch?token=private",
             target: &url,
         };
-        let _store_guard = crate::extension_server::extension_server_test_guard();
+        let _store_guard = exclusive_handoff_cookie_store();
         crate::extension_server::store_handoff_cookies(
             &url,
             jar_path.clone(),

@@ -1232,6 +1232,14 @@ async fn read_bounded_response_with_limit(
 mod tests {
     use super::*;
     use crate::extension_server::handoff_cookie_hash;
+
+    struct HandoffCookieCleanup<'a>(&'a str);
+
+    impl Drop for HandoffCookieCleanup<'_> {
+        fn drop(&mut self) {
+            crate::extension_server::discard_handoff_cookies(self.0);
+        }
+    }
     use crate::manifest_plan::{
         hls_audio_rendition_key, hls_audio_rendition_keys, hls_variant_key, hls_variant_keys,
     };
@@ -2427,11 +2435,13 @@ video/720.m3u8
             source: "http://player.example.test/watch?token=private",
             target: &url,
         };
+        let _store_guard = crate::extension_server::extension_server_test_guard();
         crate::extension_server::store_handoff_cookies(
             &url,
             jar_path.clone(),
             Some("Grab-Manifest-Test".to_string()),
         );
+        let _cleanup = HandoffCookieCleanup(&url);
         assert_eq!(
             crate::extension_server::live_handoff_identity(&url),
             Some((jar_path.clone(), Some("Grab-Manifest-Test".to_string()))),
@@ -2484,7 +2494,6 @@ video/720.m3u8
                 "the browser-bound User-Agent must be retained on each redirect hop: {request}"
             );
         }
-        crate::extension_server::discard_handoff_cookies(&url);
     }
 
     #[tokio::test(flavor = "current_thread")]

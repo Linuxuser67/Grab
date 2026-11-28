@@ -3398,6 +3398,33 @@ mod tests {
     }
 
     #[test]
+    fn retains_representation_level_forced_subtitle_role() {
+        let body = r#"<?xml version="1.0"?>
+<MPD xmlns="urn:mpeg:dash:schema:mpd:2011" type="static" mediaPresentationDuration="PT10S">
+  <Period duration="PT10S">
+    <AdaptationSet contentType="video" mimeType="video/mp4">
+      <SegmentTemplate duration="5" media="video-$Number$.m4s"/>
+      <Representation id="video" bandwidth="1000000"/>
+    </AdaptationSet>
+    <AdaptationSet contentType="text" mimeType="application/mp4" lang="en">
+      <SegmentTemplate duration="5" initialization="sub-init.mp4" media="sub-$Number$.m4s"/>
+      <Representation id="forced-en" bandwidth="1000" codecs="wvtt">
+        <Role schemeIdUri="urn:mpeg:dash:role:2011" value="forced-subtitle"/>
+      </Representation>
+    </AdaptationSet>
+  </Period>
+</MPD>"#;
+        let manifest = parse_dash_manifest(BASE_URL, body)
+            .expect("forced WVTT subtitle representation should parse");
+        let subtitle = &manifest.subtitle_representations[0];
+
+        assert_eq!(subtitle.representation_id.as_deref(), Some("forced-en"));
+        assert_eq!(subtitle.language.as_deref(), Some("en"));
+        assert!(!subtitle.is_default_subtitle);
+        assert!(subtitle.is_forced_subtitle);
+    }
+
+    #[test]
     fn parses_video_and_audio_representations_and_selects_main_audio() {
         let plan = parse_dash_manifest(BASE_URL, TEMPLATE_MPD)
             .expect("static single-period MPD should parse");

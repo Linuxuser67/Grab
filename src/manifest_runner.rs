@@ -32,6 +32,7 @@ use crate::media_types::{
 mod dash_live;
 mod hls_live;
 mod hls_subtitle;
+mod subtitle_metadata;
 
 #[cfg(test)]
 use dash_live::{

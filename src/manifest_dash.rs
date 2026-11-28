@@ -804,7 +804,13 @@ pub(crate) fn parse_dash_manifest_at(
                     });
                     matching
                         .or_else(|| labels.iter().find(|label| label.lang.is_none()))
-                        .or_else(|| if language.is_none() { labels.first() } else { None })
+                        .or_else(|| {
+                            if language.is_none() {
+                                labels.first()
+                            } else {
+                                None
+                            }
+                        })
                         .map(|label| label.content.clone())
                 };
                 let label = label_for_language(&representation.Label)

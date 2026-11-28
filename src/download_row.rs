@@ -96,7 +96,10 @@ mod imp {
 
         fn set_status(&self, value: DownloadStatus) {
             self.status.set(value);
-            if matches!(value, DownloadStatus::Done | DownloadStatus::Cancelled) {
+            if matches!(
+                value,
+                DownloadStatus::Done | DownloadStatus::Cancelled | DownloadStatus::Failed
+            ) {
                 self.handoff_captions.borrow_mut().clear();
             }
         }
@@ -320,11 +323,19 @@ mod tests {
             "completed rows release signed caption URLs",
         );
 
-        second.set_handoff_captions(vec![caption]);
+        second.set_handoff_captions(vec![caption.clone()]);
         second.set_status(DownloadStatus::Cancelled);
         assert!(
             second.handoff_captions().is_empty(),
             "cancelled rows release signed caption URLs",
+        );
+
+        let failed = DownloadItem::new(3, "https://example.com/failed.m3u8", "Failed", "/tmp");
+        failed.set_handoff_captions(vec![caption]);
+        failed.set_status(DownloadStatus::Failed);
+        assert!(
+            failed.handoff_captions().is_empty(),
+            "failed rows release signed caption URLs",
         );
     }
 }

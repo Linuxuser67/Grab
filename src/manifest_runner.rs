@@ -6585,9 +6585,8 @@ segment-2.ts
             let (box_size, header_size) = match size {
                 0 => (bytes.len().checked_sub(cursor)?, 8_usize),
                 1 => {
-                    let extended = u64::from_be_bytes(
-                        bytes.get(cursor + 8..cursor + 16)?.try_into().ok()?,
-                    );
+                    let extended =
+                        u64::from_be_bytes(bytes.get(cursor + 8..cursor + 16)?.try_into().ok()?);
                     (usize::try_from(extended).ok()?, 16_usize)
                 }
                 size => (usize::try_from(size).ok()?, 8_usize),
@@ -6638,7 +6637,10 @@ segment-2.ts
             .output()
             .await
             .expect("generate fragmented MP4 subtitle fixture");
-        assert_command_succeeded(&generated, "FFmpeg failed to generate the fMP4 subtitle fixture");
+        assert_command_succeeded(
+            &generated,
+            "FFmpeg failed to generate the fMP4 subtitle fixture",
+        );
 
         let bytes = tokio::fs::read(&fragmented)
             .await
@@ -6825,8 +6827,7 @@ segment-2.ts
         }
         let subtitle_plan = if let Some(format) = native_subtitle_format {
             let subtitle_dir = fixture.path().join("subtitles");
-            std::fs::create_dir(&subtitle_dir)
-                .expect("create HLS subtitle fixture directory");
+            std::fs::create_dir(&subtitle_dir).expect("create HLS subtitle fixture directory");
             let subtitle_playlist: &[u8] = match format {
                 SubtitleFormat::Text => {
                     std::fs::write(
@@ -7312,14 +7313,7 @@ segment-2.ts
 
     #[tokio::test]
     async fn native_hls_fmp4_subtitle_is_stream_copied_into_mp4_output() {
-        assert_aes128_hls_vod_output(
-            "mp4",
-            false,
-            false,
-            Some(SubtitleFormat::Fmp4),
-            false,
-        )
-        .await;
+        assert_aes128_hls_vod_output("mp4", false, false, Some(SubtitleFormat::Fmp4), false).await;
     }
 
     #[tokio::test]

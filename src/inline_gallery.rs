@@ -573,7 +573,7 @@ mod tests {
             secure: None,
             expiration_date: None,
         }];
-        let _store_guard = crate::extension_server::exclusive_test_state();
+        let _store_guard = crate::extension_server::exclusive_test_state_blocking();
         let _cleanup = crate::extension_server::HandoffCookieCleanup::new(url);
         let path = crate::extension_server::write_handoff_cookies(url, &cookies)
             .expect("stage extension cookie fixture");

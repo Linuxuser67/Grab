@@ -887,6 +887,24 @@ pub(crate) fn exclusive_test_state() -> MutexGuard<'static, ()> {
     guard
 }
 
+/// Removes a staged handoff-cookie entry and its file when a test fixture leaves scope.
+#[cfg(test)]
+pub(crate) struct HandoffCookieCleanup<'a>(&'a str);
+
+#[cfg(test)]
+impl<'a> HandoffCookieCleanup<'a> {
+    pub(crate) fn new(url: &'a str) -> Self {
+        Self(url)
+    }
+}
+
+#[cfg(test)]
+impl Drop for HandoffCookieCleanup<'_> {
+    fn drop(&mut self) {
+        discard_handoff_cookies(self.0);
+    }
+}
+
 /// Test helper that stores a cookie file with the current request time.
 #[cfg(test)]
 pub(crate) fn store_handoff_cookies(url: &str, path: PathBuf, user_agent: Option<String>) {

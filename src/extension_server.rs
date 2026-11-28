@@ -868,12 +868,23 @@ pub(crate) fn handoff_cookie_hash(path: &Path) -> Option<[u8; 32]> {
 #[cfg(test)]
 static EXTENSION_SERVER_TEST_LOCK: Mutex<()> = Mutex::new(());
 
-/// Acquire the process-wide extension-server test lock.
+/// Reset shared extension-server state while holding its process-wide test lock.
 #[cfg(test)]
-pub(crate) fn extension_server_test_guard() -> MutexGuard<'static, ()> {
-    EXTENSION_SERVER_TEST_LOCK
+pub(crate) fn exclusive_test_state() -> MutexGuard<'static, ()> {
+    let guard = EXTENSION_SERVER_TEST_LOCK
         .lock()
-        .unwrap_or_else(|error| error.into_inner())
+        .unwrap_or_else(|error| error.into_inner());
+    purge_handoff_cookies();
+    if let Ok(mut cache) = HANDOFF_REPLAY_CACHE.lock() {
+        cache.expires_at_ms.clear();
+    }
+    if let Ok(mut cache) = HLS_INSPECTION_REPLAY_CACHE.lock() {
+        cache.expires_at_ms.clear();
+    }
+    if let Ok(mut limiter) = HLS_INSPECTION_RATE_LIMITER.lock() {
+        *limiter = HlsInspectionRateLimiter::default();
+    }
+    guard
 }
 
 /// Test helper that stores a cookie file with the current request time.
@@ -2923,18 +2934,7 @@ mod tests {
 
     /// Reset shared extension-server state while holding its process-wide test lock.
     fn exclusive() -> std::sync::MutexGuard<'static, ()> {
-        let guard = super::extension_server_test_guard();
-        purge_handoff_cookies();
-        if let Ok(mut cache) = HANDOFF_REPLAY_CACHE.lock() {
-            cache.expires_at_ms.clear();
-        }
-        if let Ok(mut cache) = HLS_INSPECTION_REPLAY_CACHE.lock() {
-            cache.expires_at_ms.clear();
-        }
-        if let Ok(mut limiter) = HLS_INSPECTION_RATE_LIMITER.lock() {
-            *limiter = HlsInspectionRateLimiter::default();
-        }
-        guard
+        super::exclusive_test_state()
     }
 
     /// Clear staged entries and delete their files.

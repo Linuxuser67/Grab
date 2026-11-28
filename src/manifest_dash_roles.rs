@@ -403,7 +403,6 @@ mod tests {
         assert!(!metadata.periods[0][1][0].is_main);
     }
 
-
     #[test]
     fn records_representation_level_forced_subtitle_role() {
         let body = br#"<MPD xmlns="urn:mpeg:dash:schema:mpd:2011">

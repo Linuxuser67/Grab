@@ -3902,7 +3902,11 @@ async fn resolve_tracks(
             }
             let subtitle_metadata = subtitle.as_ref().map(|track| ManifestSubtitleMetadata {
                 language: track.representation.language.clone(),
-                name: track.representation.representation_id.clone(),
+                name: track
+                    .representation
+                    .label
+                    .clone()
+                    .or_else(|| track.representation.representation_id.clone()),
                 is_default: track.representation.is_default_subtitle,
                 is_forced: track.representation.is_forced_subtitle,
             });

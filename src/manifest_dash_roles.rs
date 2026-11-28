@@ -22,6 +22,7 @@ pub(super) const DASH_ROLE_SCHEME: &str = "urn:mpeg:dash:role:2011";
 pub(super) struct RepresentationRoleMetadata {
     pub(super) id: Option<String>,
     pub(super) is_main: bool,
+    pub(super) is_forced_subtitle: bool,
     /// Effective inherited SegmentList presentation-time offset.
     pub(super) segment_list_presentation_time_offset: Option<u64>,
     /// Effective inherited SegmentList availability-time offset.
@@ -188,15 +189,17 @@ fn push_element(
                 .push(RepresentationRoleMetadata {
                     id: representation_id(start).ok()?,
                     is_main: false,
+                    is_forced_subtitle: false,
                     segment_list_presentation_time_offset: state.adaptation_list_pto,
                     segment_list_availability_time_offset: state.adaptation_list_ato.clone(),
                 });
             Element::Representation
         }
         (Some(Element::Representation), "Role", true) => {
-            if is_main_role(start)? {
-                periods.last_mut()?.last_mut()?.last_mut()?.is_main = true;
-            }
+            let (is_main, is_forced_subtitle) = role_flags(start)?;
+            let metadata = periods.last_mut()?.last_mut()?.last_mut()?;
+            metadata.is_main |= is_main;
+            metadata.is_forced_subtitle |= is_forced_subtitle;
             Element::Other
         }
         (Some(Element::Period), "SegmentList", true) => {
@@ -334,7 +337,7 @@ fn representation_id(start: &BytesStart<'_>) -> Result<Option<String>, ()> {
     Ok(id)
 }
 
-fn is_main_role(start: &BytesStart<'_>) -> Option<bool> {
+fn role_flags(start: &BytesStart<'_>) -> Option<(bool, bool)> {
     let mut scheme = None;
     let mut value = None;
 
@@ -361,7 +364,11 @@ fn is_main_role(start: &BytesStart<'_>) -> Option<bool> {
         }
     }
 
-    Some(scheme.as_deref() == Some(DASH_ROLE_SCHEME) && value.as_deref() == Some("main"))
+    let is_dash_role = scheme.as_deref() == Some(DASH_ROLE_SCHEME);
+    Some((
+        is_dash_role && value.as_deref() == Some("main"),
+        is_dash_role && value.as_deref() == Some("forced-subtitle"),
+    ))
 }
 
 #[cfg(test)]
@@ -391,10 +398,28 @@ mod tests {
         assert!(!metadata.periods[0][0][0].is_main);
         assert_eq!(metadata.periods[0][0][1].id.as_deref(), Some("main"));
         assert!(metadata.periods[0][0][1].is_main);
+        assert!(!metadata.periods[0][0][1].is_forced_subtitle);
         assert_eq!(metadata.periods[0][1][0].id.as_deref(), Some("other"));
         assert!(!metadata.periods[0][1][0].is_main);
     }
 
+
+    #[test]
+    fn records_representation_level_forced_subtitle_role() {
+        let body = br#"<MPD xmlns="urn:mpeg:dash:schema:mpd:2011">
+  <Period>
+    <AdaptationSet>
+      <Representation id="forced">
+        <Role schemeIdUri="urn:mpeg:dash:role:2011" value="forced-subtitle"/>
+      </Representation>
+    </AdaptationSet>
+  </Period>
+</MPD>"#;
+        let metadata = representation_metadata(body, 1).expect("valid forced subtitle metadata");
+        let representation = &metadata.periods[0][0][0];
+        assert!(!representation.is_main);
+        assert!(representation.is_forced_subtitle);
+    }
     #[test]
     fn supports_prefixed_elements_and_empty_role_elements() {
         let body = br#"<mpd:MPD xmlns:mpd="urn:mpeg:dash:schema:mpd:2011">

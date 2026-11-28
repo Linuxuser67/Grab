@@ -30,6 +30,7 @@ use crate::media_types::{
 
 mod dash_live;
 mod hls_live;
+mod hls_subtitle;
 
 #[cfg(test)]
 use dash_live::{
@@ -456,12 +457,18 @@ impl Tracks {
         let Self::Hls {
             video,
             audio,
-            subtitle: None,
+            subtitle,
             ..
         } = self
         else {
             return false;
         };
+        if subtitle
+            .as_deref()
+            .is_some_and(|plan| !hls_subtitle::supports_incremental_vod(plan))
+        {
+            return false;
+        }
 
         let video_incremental = video.is_incremental_aes128_mpegts_vod_candidate()
             || video.is_incremental_clear_vod_candidate();
@@ -2217,9 +2224,9 @@ pub(crate) async fn run_manifest_download(
         });
     }
     if !live_hls && !live_dash && tracks.uses_incremental_hls_vod() {
-        // Browser captions are staged alongside the media fetch and become an
-        // additional FFmpeg input. Keep the incremental mux so its owned video
-        // part remains visible in the destination while the HLS resources arrive.
+        // Native subtitle renditions and browser captions are staged alongside
+        // the media fetch and become FFmpeg inputs to the first mux. Keep the
+        // incremental path so its owned video part remains visible in the destination.
         // Preserve AES-128's established configured concurrency. Complex clear
         // VOD stays sequential, matching the ordinary static-HLS resource path.
         let connections = match &tracks {
@@ -2635,14 +2642,24 @@ async fn run_incremental_hls_vod(
     let Tracks::Hls {
         video,
         audio,
-        subtitle: None,
-        ..
+        subtitle,
+        subtitle_language,
+        subtitle_format,
     } = tracks
     else {
         return Err(ManifestRunError::Failed(
-            "Incremental HLS VOD requires video and optional audio media playlists".to_string(),
+            "Incremental HLS VOD requires HLS media tracks".to_string(),
         ));
     };
+    if subtitle
+        .as_deref()
+        .is_some_and(|plan| !hls_subtitle::supports_incremental_vod(plan))
+    {
+        return Err(ManifestRunError::Unsupported(
+            "The selected HLS subtitle playlist cannot be fetched as a finite VOD track"
+                .to_string(),
+        ));
+    }
 
     let part_path = crate::manifest_destination::part_path_async(
         staging.to_path_buf(),
@@ -2673,6 +2690,7 @@ async fn run_incremental_hls_vod(
 
     let video = Arc::from(video);
     let audio = audio.map(Arc::from);
+    let subtitle = subtitle.map(Arc::from);
     let video_playlist = video_dir.join("local.m3u8");
     let audio_playlist = audio.as_ref().map(|_| audio_dir.join("local.m3u8"));
     let timestamp_policy = if audio.is_some() {
@@ -2717,6 +2735,22 @@ async fn run_incremental_hls_vod(
         ));
     }
 
+    let mut subtitle_fetcher = tokio::task::JoinSet::<Result<bool, ManifestRunError>>::new();
+    let mut subtitle_abort_sender = None;
+    if let Some(subtitle_plan) = subtitle.as_ref() {
+        let (sender, subtitle_abort) = tokio::sync::oneshot::channel();
+        subtitle_abort_sender = Some(sender);
+        subtitle_fetcher.spawn(hls_subtitle::fetch(
+            client.clone(),
+            Arc::clone(subtitle_plan),
+            staging.to_path_buf(),
+            tx.clone(),
+            Arc::clone(&downloaded),
+            subtitle_abort,
+        ));
+    }
+    let mut subtitle_pending = !subtitle_fetcher.is_empty();
+
     let track_count = workers.len();
     let mut fetch_results = std::iter::repeat_with(|| None)
         .take(track_count)
@@ -2747,13 +2781,12 @@ async fn run_incremental_hls_vod(
     let mut abort_done = false;
     let mut stop_intent = None;
 
-    // Do not start FFmpeg until every selected rendition has published a
-    // complete first segment and its growing local playlist snapshot. When a
-    // browser caption is available, it is also opened as an FFmpeg input from
-    // the start: this wait includes its shared 10-second intake budget while
-    // segment fetching continues. Starting without it would require a later
-    // remux or a second output publication to attach the caption.
-    while first_segment_ready.iter().any(|ready| !ready) || caption_pending {
+    // Do not start FFmpeg until every media rendition has published a
+    // complete first segment and its growing local playlist snapshot. A native
+    // subtitle playlist is staged completely, and a browser caption is fetched,
+    // before the first mux so each is present as an input from the start.
+    // Media-segment fetching continues while either subtitle source is staged.
+    while first_segment_ready.iter().any(|ready| !ready) || caption_pending || subtitle_pending {
         tokio::select! {
             biased;
             stop = &mut abort, if !abort_done => {
@@ -2765,6 +2798,9 @@ async fn run_incremental_hls_vod(
                         for sender in senders.drain(..) {
                             let _ = sender.send(intent);
                         }
+                    }
+                    if let Some(sender) = subtitle_abort_sender.take() {
+                        let _ = sender.send(intent);
                     }
                     send_manifest_stop_intent(&mut ffmpeg_abort_tx, intent);
                 }
@@ -2788,6 +2824,28 @@ async fn run_incremental_hls_vod(
                         "browser caption staging task failed; continuing without captions"
                     ),
                     None => {}
+                }
+            }
+            joined = subtitle_fetcher.join_next(), if subtitle_pending => {
+                subtitle_pending = false;
+                let _ = subtitle_abort_sender.take();
+                match joined {
+                    Some(Ok(Ok(true))) => {}
+                    Some(Ok(Ok(false))) => {
+                        stop_intent.get_or_insert(crate::video::StopIntent::Pause);
+                    }
+                    Some(Ok(Err(error))) => return Err(error),
+                    Some(Err(error)) => {
+                        return Err(ManifestRunError::Failed(format!(
+                            "Incremental HLS subtitle fetch task failed: {error}"
+                        )));
+                    }
+                    None => {
+                        return Err(ManifestRunError::Failed(
+                            "Incremental HLS subtitle fetch task ended without a result"
+                                .to_string(),
+                        ));
+                    }
                 }
             }
             joined = fetchers.join_next(), if !fetchers.is_empty() => {
@@ -2832,21 +2890,41 @@ async fn run_incremental_hls_vod(
     }
 
     let output_container = manifest_output_container(&job.dest)?;
-    let embed_subtitles = external_caption.as_ref().is_some_and(|_| {
-        embed_manifest_subtitles(job.embed_subs, output_container, SubtitleFormat::Text)
-    });
-    let subtitle_sidecar = external_caption
+    let subtitle_input = external_caption
+        .as_ref()
+        .map(|caption| caption.path.clone())
+        .or_else(|| {
+            subtitle
+                .as_ref()
+                .map(|_| hls_subtitle::playlist_path(staging))
+        });
+    let output_subtitle_format = if external_caption.is_some() {
+        SubtitleFormat::Text
+    } else {
+        subtitle_format
+    };
+    let output_subtitle_language = manifest_subtitle_language(
+        external_caption
+            .as_ref()
+            .map(|caption| caption.language.as_str())
+            .or(subtitle_language.as_deref()),
+    );
+    let embed_subtitles = subtitle_input.is_some()
+        && embed_manifest_subtitles(job.embed_subs, output_container, output_subtitle_format);
+    let subtitle_sidecar = subtitle_input
         .as_ref()
         .filter(|_| !embed_subtitles)
-        .map(|caption| {
-            let language = manifest_subtitle_language(Some(caption.language.as_str()));
-            // Keep the intermediate subtitle in the private per-item XDG
-            // staging directory. A destination-side path could collide with a
-            // user file before the no-clobber final publication.
-            crate::video_staging::sidecar_path_for(
-                &staging.join("incremental-output.mkv"),
-                language,
-            )
+        .map(|_| {
+            let output = staging.join("incremental-output.mkv");
+            if output_subtitle_format == SubtitleFormat::Fmp4 {
+                crate::video_staging::sidecar_path_for_extension(
+                    &output,
+                    output_subtitle_language,
+                    crate::video_staging::FMP4_SUBTITLE_SIDECAR_EXTENSION,
+                )
+            } else {
+                crate::video_staging::sidecar_path_for(&output, output_subtitle_language)
+            }
         });
     if let Some(sidecar) = subtitle_sidecar.as_deref() {
         remove_regular_file_if_present(sidecar)
@@ -2854,16 +2932,12 @@ async fn run_incremental_hls_vod(
             .map_err(ManifestRunError::Failed)?;
     }
     let remux_subtitles = SubtitleOutput {
-        input: external_caption
-            .as_ref()
-            .map(|caption| caption.path.as_path()),
+        input: subtitle_input.as_deref(),
         embed: embed_subtitles,
         sidecar: subtitle_sidecar.as_deref(),
-        format: SubtitleFormat::Text,
+        format: output_subtitle_format,
     };
-    let ffmpeg_subtitle_input = external_caption
-        .as_ref()
-        .map(|caption| caption.path.clone());
+    let ffmpeg_subtitle_input = subtitle_input.clone();
     let ffmpeg_subtitle_sidecar = subtitle_sidecar.clone();
     let ffmpeg_embed_subtitles = embed_subtitles;
     let ffmpeg_path = ffmpeg.clone();
@@ -2876,7 +2950,7 @@ async fn run_incremental_hls_vod(
             input: ffmpeg_subtitle_input.as_deref(),
             embed: ffmpeg_embed_subtitles,
             sidecar: ffmpeg_subtitle_sidecar.as_deref(),
-            format: SubtitleFormat::Text,
+            format: output_subtitle_format,
         };
         run_ffmpeg_with_offsets_timeout(
             &ffmpeg_path,
@@ -3107,6 +3181,15 @@ async fn run_incremental_hls_vod(
             })
         })
         .transpose()?;
+    let subtitle = subtitle
+        .map(|plan| {
+            Arc::try_unwrap(plan).map(Box::new).map_err(|_| {
+                ManifestRunError::Failed(
+                    "incremental HLS subtitle plan still has active readers".to_string(),
+                )
+            })
+        })
+        .transpose()?;
     let has_audio = audio.is_some();
     let (finalizer_abort_sender, finalizer_abort) = if abort_done {
         let (sender, receiver) = tokio::sync::oneshot::channel();
@@ -3133,9 +3216,9 @@ async fn run_incremental_hls_vod(
         tracks: Tracks::Hls {
             video: Box::new(video),
             audio: audio.map(Box::new),
-            subtitle: None,
-            subtitle_language: None,
-            subtitle_format: SubtitleFormat::Text,
+            subtitle,
+            subtitle_language,
+            subtitle_format,
         },
         has_audio,
         ffmpeg,
@@ -6486,6 +6569,7 @@ segment-2.ts
         extension: &str,
         force_early_exit: bool,
         with_browser_caption: bool,
+        with_native_subtitle: bool,
     ) {
         use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
 
@@ -6638,12 +6722,69 @@ segment-2.ts
             resource.url = Url::parse(&format!("http://{address}/{name}"))
                 .expect("set local AES-128 fixture resource URL");
         }
-        let request_count = plan.resources.len();
+        let subtitle_plan = if with_native_subtitle {
+            let subtitle_playlist = b"#EXTM3U\n#EXT-X-VERSION:3\n#EXT-X-TARGETDURATION:4\n#EXTINF:4.0,\ncaption.vtt\n#EXT-X-ENDLIST\n";
+            let mut subtitle_plan = crate::manifest::plan_hls_media_playlist(
+                "https://cdn.example.test/subtitles/playlist.m3u8",
+                subtitle_playlist,
+            )
+            .expect("plan finite native HLS subtitle fixture");
+            std::fs::create_dir(fixture.path().join("subtitles"))
+                .expect("create HLS subtitle fixture directory");
+            std::fs::write(
+                fixture.path().join("subtitles/caption.vtt"),
+                "WEBVTT\n\n00:00:00.000 --> 00:00:04.000\nNative subtitle fixture\n",
+            )
+            .expect("write HLS subtitle fixture");
+            for resource in &mut subtitle_plan.resources {
+                let name = resource
+                    .url
+                    .path()
+                    .rsplit('/')
+                    .next()
+                    .filter(|name| !name.is_empty())
+                    .expect("planned subtitle resource must have a filename")
+                    .to_string();
+                resource.url = Url::parse(&format!("http://{address}/subtitles/{name}"))
+                    .expect("set local HLS subtitle resource URL");
+            }
+            Some(Box::new(subtitle_plan))
+        } else {
+            None
+        };
+        if with_native_subtitle {
+            assert!(
+                Tracks::Hls {
+                    video: Box::new(plan.clone()),
+                    audio: None,
+                    subtitle: subtitle_plan.clone(),
+                    subtitle_language: Some("en".to_string()),
+                    subtitle_format: SubtitleFormat::Text,
+                }
+                .uses_incremental_hls_vod(),
+                "a finite native HLS subtitle rendition must retain incremental VOD output"
+            );
+        }
+        let subtitle_request_path = subtitle_plan.as_ref().and_then(|subtitle| {
+            subtitle
+                .resources
+                .first()
+                .map(|resource| resource.url.path().to_string())
+        });
+        let request_count = plan.resources.len()
+            + subtitle_plan
+                .as_ref()
+                .map_or(0, |plan| plan.resources.len());
         let fixture_root = fixture.path().to_path_buf();
         let release_final_segment = Arc::new(tokio::sync::Notify::new());
         let final_segment_requested = Arc::new(tokio::sync::Notify::new());
+        let release_subtitle = Arc::new(tokio::sync::Notify::new());
+        let subtitle_requested = Arc::new(tokio::sync::Notify::new());
         let server_release = Arc::clone(&release_final_segment);
         let server_requested = Arc::clone(&final_segment_requested);
+        let server_subtitle_release = Arc::clone(&release_subtitle);
+        let server_subtitle_requested = Arc::clone(&subtitle_requested);
+        let server_subtitle_path = subtitle_request_path.clone();
         let server_final_path = final_segment_path.clone();
         let server = tokio::spawn(async move {
             let mut responses = Vec::with_capacity(request_count);
@@ -6656,6 +6797,9 @@ segment-2.ts
                 let release = Arc::clone(&server_release);
                 let requested = Arc::clone(&server_requested);
                 let final_path = server_final_path.clone();
+                let subtitle_release = Arc::clone(&server_subtitle_release);
+                let subtitle_requested = Arc::clone(&server_subtitle_requested);
+                let subtitle_path = server_subtitle_path.clone();
                 responses.push(tokio::spawn(async move {
                     let mut request = [0_u8; 1024];
                     let count = socket
@@ -6667,6 +6811,10 @@ segment-2.ts
                     if path == final_path.as_str() {
                         requested.notify_one();
                         release.notified().await;
+                    }
+                    if subtitle_path.as_deref() == Some(path) {
+                        subtitle_requested.notify_one();
+                        subtitle_release.notified().await;
                     }
                     let name = path.trim_start_matches('/');
                     let payload = tokio::fs::read(fixture_root.join(name))
@@ -6726,7 +6874,7 @@ segment-2.ts
             &destination,
             item_id,
             false,
-            false,
+            with_native_subtitle,
         )
         .expect("persist destination ownership plan");
         let part_path = crate::manifest_destination::part_path_async(
@@ -6754,15 +6902,15 @@ segment-2.ts
                 representation_key: "hls-media".into(),
                 output_container: None,
                 audio_key: None,
-                subtitle_key: None,
-                subtitle_language: None,
+                subtitle_key: with_native_subtitle.then(|| "hls-subtitle-fixture".into()),
+                subtitle_language: with_native_subtitle.then(|| "en".to_string()),
             },
             referer: None,
             dest: destination.clone(),
             proxy: None,
             cookies_browser: "none".to_string(),
             connections: 4,
-            embed_subs: with_browser_caption,
+            embed_subs: with_browser_caption || with_native_subtitle,
             captions: Vec::new(),
         };
         let gate = crate::attempt_gate::AttemptGate::new();
@@ -6792,8 +6940,8 @@ segment-2.ts
                 tracks: Tracks::Hls {
                     video: Box::new(plan),
                     audio: None,
-                    subtitle: None,
-                    subtitle_language: None,
+                    subtitle: subtitle_plan,
+                    subtitle_language: with_native_subtitle.then(|| "en".to_string()),
                     subtitle_format: SubtitleFormat::Text,
                 },
                 ffmpeg: task_ffmpeg,
@@ -6804,9 +6952,20 @@ segment-2.ts
             .await
         });
 
-        tokio::time::timeout(Duration::from_secs(10), final_segment_requested.notified())
+        if with_native_subtitle {
+            tokio::time::timeout(Duration::from_secs(10), async {
+                tokio::join!(
+                    final_segment_requested.notified(),
+                    subtitle_requested.notified()
+                );
+            })
             .await
-            .expect("the final segment request should start while earlier segments are muxed");
+            .expect("media and subtitle fetches should reach their held resources");
+        } else {
+            tokio::time::timeout(Duration::from_secs(10), final_segment_requested.notified())
+                .await
+                .expect("the final segment request should start while earlier segments are muxed");
+        }
         let growing_prefix = tokio::fs::read_to_string(staging.path().join("video/local.m3u8"))
             .await
             .expect("read the growing AES-128 playlist while the final segment is blocked");
@@ -6817,17 +6976,22 @@ segment-2.ts
         );
         assert!(!growing_prefix.contains("#EXT-X-ENDLIST"));
         assert!(!growing_prefix.contains("#EXT-X-PLAYLIST-TYPE:VOD"));
-        if with_browser_caption {
+        if with_browser_caption || with_native_subtitle {
             let metadata = tokio::fs::symlink_metadata(&part_path)
                 .await
-                .expect("destination-owned part must exist while caption staging is pending");
+                .expect("destination-owned part must exist while subtitle staging is pending");
             assert!(metadata.is_file() && !metadata.file_type().is_symlink());
             assert_eq!(
                 metadata.len(),
                 0,
-                "FFmpeg should wait for caption staging while the destination part remains visible"
+                "FFmpeg should wait for subtitle staging while the destination part remains visible"
             );
-            caption_release.notify_one();
+            if with_browser_caption {
+                caption_release.notify_one();
+            }
+            if with_native_subtitle {
+                release_subtitle.notify_one();
+            }
         }
         assert!(
             !download_task.is_finished(),
@@ -6905,7 +7069,7 @@ segment-2.ts
         verification_command
             .args(["-hide_banner", "-loglevel", "error", "-i"])
             .arg(&destination);
-        if with_browser_caption {
+        if with_browser_caption || with_native_subtitle {
             // The CI FFmpeg build may not include a subtitle encoder for the
             // null muxer. Stream-copy both tracks into a Matroska stdout sink.
             verification_command.args([
@@ -6927,23 +7091,28 @@ segment-2.ts
 
     #[tokio::test]
     async fn ffmpeg_decrypts_aes128_hls_vod_into_an_owned_ts_part() {
-        assert_aes128_hls_vod_output("ts", false, false).await;
+        assert_aes128_hls_vod_output("ts", false, false, false).await;
     }
 
     #[cfg(unix)]
     #[tokio::test]
     async fn aes128_vod_remuxes_again_when_ffmpeg_exits_before_playlist_completion() {
-        assert_aes128_hls_vod_output("ts", true, false).await;
+        assert_aes128_hls_vod_output("ts", true, false, false).await;
     }
 
     #[tokio::test]
     async fn ffmpeg_decrypts_aes128_hls_vod_into_an_owned_mp4_part() {
-        assert_aes128_hls_vod_output("mp4", false, false).await;
+        assert_aes128_hls_vod_output("mp4", false, false, false).await;
     }
 
     #[tokio::test]
     async fn ffmpeg_decrypts_aes128_hls_vod_into_an_owned_mkv_part() {
-        assert_aes128_hls_vod_output("mkv", false, true).await;
+        assert_aes128_hls_vod_output("mkv", false, true, false).await;
+    }
+
+    #[tokio::test]
+    async fn native_hls_subtitle_keeps_destination_part_visible_while_staging() {
+        assert_aes128_hls_vod_output("mkv", false, false, true).await;
     }
 
     #[cfg(target_os = "linux")]

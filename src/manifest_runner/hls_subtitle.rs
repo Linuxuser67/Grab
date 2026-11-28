@@ -1,7 +1,7 @@
 //! Bounded native HLS subtitle staging for incremental VOD muxing.
 
 use std::path::{Path, PathBuf};
-use std::sync::{atomic::AtomicU64, Arc};
+use std::sync::{Arc, atomic::AtomicU64};
 
 use tokio::sync::{mpsc::UnboundedSender, oneshot};
 
@@ -16,10 +16,7 @@ use super::{
 /// A subtitle playlist can join incremental VOD only when it is finite and
 /// does not rely on live or low-latency reload semantics.
 pub(super) fn supports_incremental_vod(plan: &HlsPlan) -> bool {
-    !plan.is_live
-        && plan.end_list
-        && plan.low_latency.is_none()
-        && !plan.resources.is_empty()
+    !plan.is_live && plan.end_list && plan.low_latency.is_none() && !plan.resources.is_empty()
 }
 
 /// The local subtitle playlist consumed by FFmpeg after its resources are staged.

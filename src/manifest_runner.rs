@@ -7126,6 +7126,13 @@ segment-2.ts
             "decrypted AES-128 output is not readable: {}",
             String::from_utf8_lossy(&verification.stderr)
         );
+        if with_native_subtitle && extension == "mp4" {
+            let sidecar = crate::video_staging::sidecar_path_for(&destination, "en");
+            assert!(
+                tokio::fs::symlink_metadata(sidecar).await.is_err(),
+                "an MP4 with an embedded native HLS subtitle must not publish an SRT sidecar"
+            );
+        }
         if fail_native_subtitle {
             let subtitle_probe = tokio::process::Command::new(&ffmpeg)
                 .args(["-hide_banner", "-loglevel", "error", "-i"])
@@ -7170,6 +7177,11 @@ segment-2.ts
     #[tokio::test]
     async fn native_hls_subtitle_keeps_destination_part_visible_while_staging() {
         assert_aes128_hls_vod_output("mkv", false, false, true, false).await;
+    }
+
+    #[tokio::test]
+    async fn native_hls_subtitle_is_embedded_in_mp4_output() {
+        assert_aes128_hls_vod_output("mp4", false, false, true, false).await;
     }
 
     #[tokio::test]

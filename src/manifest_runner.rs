@@ -2643,7 +2643,7 @@ async fn run_incremental_hls_vod(
         video,
         audio,
         subtitle,
-        subtitle_language,
+        mut subtitle_language,
         subtitle_format,
     } = tracks
     else {
@@ -2690,7 +2690,7 @@ async fn run_incremental_hls_vod(
 
     let video = Arc::from(video);
     let audio = audio.map(Arc::from);
-    let subtitle = subtitle.map(Arc::from);
+    let mut subtitle = subtitle.map(Arc::from);
     let video_playlist = video_dir.join("local.m3u8");
     let audio_playlist = audio.as_ref().map(|_| audio_dir.join("local.m3u8"));
     let timestamp_policy = if audio.is_some() {
@@ -2834,17 +2834,31 @@ async fn run_incremental_hls_vod(
                     Some(Ok(Ok(false))) => {
                         stop_intent.get_or_insert(crate::video::StopIntent::Pause);
                     }
-                    Some(Ok(Err(error))) => return Err(error),
+                    Some(Ok(Err(error))) => {
+                        tracing::warn!(
+                            item_id = job.item_id,
+                            error = %error,
+                            "native HLS subtitle staging failed; continuing without subtitles"
+                        );
+                        subtitle = None;
+                        subtitle_language = None;
+                    }
                     Some(Err(error)) => {
-                        return Err(ManifestRunError::Failed(format!(
-                            "Incremental HLS subtitle fetch task failed: {error}"
-                        )));
+                        tracing::warn!(
+                            item_id = job.item_id,
+                            error = %error,
+                            "native HLS subtitle staging task failed; continuing without subtitles"
+                        );
+                        subtitle = None;
+                        subtitle_language = None;
                     }
                     None => {
-                        return Err(ManifestRunError::Failed(
-                            "Incremental HLS subtitle fetch task ended without a result"
-                                .to_string(),
-                        ));
+                        tracing::warn!(
+                            item_id = job.item_id,
+                            "native HLS subtitle staging task ended without a result; continuing without subtitles"
+                        );
+                        subtitle = None;
+                        subtitle_language = None;
                     }
                 }
             }
@@ -6570,7 +6584,12 @@ segment-2.ts
         force_early_exit: bool,
         with_browser_caption: bool,
         with_native_subtitle: bool,
+        fail_native_subtitle: bool,
     ) {
+        assert!(
+            !fail_native_subtitle || with_native_subtitle,
+            "the failing resource must belong to a native subtitle track"
+        );
         use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
 
         let ffmpeg = match resolve_manifest_ffmpeg(&[PathBuf::from("/usr/bin")]) {
@@ -6800,6 +6819,7 @@ segment-2.ts
                 let subtitle_release = Arc::clone(&server_subtitle_release);
                 let subtitle_requested = Arc::clone(&server_subtitle_requested);
                 let subtitle_path = server_subtitle_path.clone();
+                let fail_subtitle = fail_native_subtitle;
                 responses.push(tokio::spawn(async move {
                     let mut request = [0_u8; 1024];
                     let count = socket
@@ -6815,6 +6835,13 @@ segment-2.ts
                     if subtitle_path.as_deref() == Some(path) {
                         subtitle_requested.notify_one();
                         subtitle_release.notified().await;
+                        if fail_subtitle {
+                            socket
+                                .write_all(b"HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
+                                .await
+                                .expect("write missing native subtitle response");
+                            return;
+                        }
                     }
                     let name = path.trim_start_matches('/');
                     let payload = tokio::fs::read(fixture_root.join(name))
@@ -7069,7 +7096,19 @@ segment-2.ts
         verification_command
             .args(["-hide_banner", "-loglevel", "error", "-i"])
             .arg(&destination);
-        if with_browser_caption || with_native_subtitle {
+        if with_native_subtitle && extension == "ts" && !fail_native_subtitle {
+            let sidecar = crate::video_staging::sidecar_path_for(&destination, "en");
+            let sidecar_text = tokio::fs::read_to_string(&sidecar)
+                .await
+                .expect("native HLS subtitles should be published as an SRT sidecar for TS");
+            assert!(
+                sidecar_text.contains("Native subtitle fixture"),
+                "the TS sidecar must contain the selected native subtitle cues"
+            );
+            verification_command.args(["-map", "0:v:0", "-f", "null", "-"]);
+        } else if fail_native_subtitle {
+            verification_command.args(["-map", "0:v:0", "-f", "null", "-"]);
+        } else if with_browser_caption || with_native_subtitle {
             // The CI FFmpeg build may not include a subtitle encoder for the
             // null muxer. Stream-copy both tracks into a Matroska stdout sink.
             verification_command.args([
@@ -7087,32 +7126,60 @@ segment-2.ts
             "decrypted AES-128 output is not readable: {}",
             String::from_utf8_lossy(&verification.stderr)
         );
+        if fail_native_subtitle {
+            let subtitle_probe = tokio::process::Command::new(&ffmpeg)
+                .args(["-hide_banner", "-loglevel", "error", "-i"])
+                .arg(&destination)
+                .args(["-map", "0:s:0", "-c", "copy", "-f", "matroska", "-"])
+                .output()
+                .await
+                .expect("verify video-only output after native subtitle failure");
+            assert!(
+                !subtitle_probe.status.success(),
+                "an unavailable native subtitle must not leave an embedded subtitle stream"
+            );
+            let sidecar = crate::video_staging::sidecar_path_for(&destination, "en");
+            assert!(
+                tokio::fs::symlink_metadata(sidecar).await.is_err(),
+                "an unavailable native subtitle must not leave a sidecar"
+            );
+        }
     }
 
     #[tokio::test]
     async fn ffmpeg_decrypts_aes128_hls_vod_into_an_owned_ts_part() {
-        assert_aes128_hls_vod_output("ts", false, false, false).await;
+        assert_aes128_hls_vod_output("ts", false, false, false, false).await;
     }
 
     #[cfg(unix)]
     #[tokio::test]
     async fn aes128_vod_remuxes_again_when_ffmpeg_exits_before_playlist_completion() {
-        assert_aes128_hls_vod_output("ts", true, false, false).await;
+        assert_aes128_hls_vod_output("ts", true, false, false, false).await;
     }
 
     #[tokio::test]
     async fn ffmpeg_decrypts_aes128_hls_vod_into_an_owned_mp4_part() {
-        assert_aes128_hls_vod_output("mp4", false, false, false).await;
+        assert_aes128_hls_vod_output("mp4", false, false, false, false).await;
     }
 
     #[tokio::test]
     async fn ffmpeg_decrypts_aes128_hls_vod_into_an_owned_mkv_part() {
-        assert_aes128_hls_vod_output("mkv", false, true, false).await;
+        assert_aes128_hls_vod_output("mkv", false, true, false, false).await;
     }
 
     #[tokio::test]
     async fn native_hls_subtitle_keeps_destination_part_visible_while_staging() {
-        assert_aes128_hls_vod_output("mkv", false, false, true).await;
+        assert_aes128_hls_vod_output("mkv", false, false, true, false).await;
+    }
+
+    #[tokio::test]
+    async fn native_hls_subtitle_uses_srt_sidecar_for_ts_output() {
+        assert_aes128_hls_vod_output("ts", false, false, true, false).await;
+    }
+
+    #[tokio::test]
+    async fn native_hls_subtitle_fetch_failure_does_not_fail_video_download() {
+        assert_aes128_hls_vod_output("mkv", false, false, true, true).await;
     }
 
     #[cfg(target_os = "linux")]

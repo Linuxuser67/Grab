@@ -6576,6 +6576,92 @@ segment-2.ts
         );
     }
 
+    /// Find the first top-level movie fragment in an FFmpeg-generated fMP4 file.
+    /// Use mp4box for ISO BMFF header decoding instead of duplicating its parser.
+    fn first_fragmented_mp4_fragment_offset(bytes: &[u8]) -> Option<usize> {
+        let end = u64::try_from(bytes.len()).ok()?;
+        let mut reader = std::io::Cursor::new(bytes);
+        while reader.position() < end {
+            let header = mp4box::parser::read_box_header(&mut reader).ok()?;
+            let start = usize::try_from(header.start).ok()?;
+            let header_size = usize::try_from(header.header_size).ok()?;
+            // ISO BMFF size zero means that the box extends to the containing range.
+            let box_size = if header.size == 0 {
+                bytes.len().checked_sub(start)?
+            } else {
+                usize::try_from(header.size).ok()?
+            };
+            if box_size < header_size {
+                return None;
+            }
+            let box_end = start
+                .checked_add(box_size)
+                .filter(|box_end| *box_end <= bytes.len())?;
+            if header.typ.0 == *b"moof" {
+                return Some(start);
+            }
+            reader.set_position(u64::try_from(box_end).ok()?);
+        }
+        None
+    }
+
+    /// Generate a fragmented-MP4 subtitle track and split its init and media
+    /// resources for an HLS EXT-X-MAP playlist.
+    async fn write_fmp4_subtitle_fixture(ffmpeg: &Path, directory: &Path) {
+        let source = directory.join("captions.srt");
+        let fragmented = directory.join("captions.mp4");
+        tokio::fs::write(
+            &source,
+            "1\n00:00:00,000 --> 00:00:03,000\nNative fragmented subtitle\n\n",
+        )
+        .await
+        .expect("write fMP4 subtitle source");
+
+        // FFmpeg's built-in mov_text encoder produces a fragmented MP4 text
+        // track in CI. This fixture covers the EXT-X-MAP and MP4 stream-copy
+        // finalization branch; it does not claim STPP profile coverage.
+        let generated = tokio::process::Command::new(ffmpeg)
+            .args(["-hide_banner", "-loglevel", "error", "-y", "-i"])
+            .arg(&source)
+            .args([
+                "-map",
+                "0:s:0",
+                "-c:s",
+                "mov_text",
+                "-movflags",
+                "+empty_moov+default_base_moof",
+                "-frag_duration",
+                "1000000",
+                "-f",
+                "mp4",
+            ])
+            .arg(&fragmented)
+            .output()
+            .await
+            .expect("generate fragmented MP4 subtitle fixture");
+        assert!(
+            generated.status.success(),
+            "FFmpeg failed to generate the fMP4 subtitle fixture: {}",
+            String::from_utf8_lossy(&generated.stderr)
+        );
+
+        let bytes = tokio::fs::read(&fragmented)
+            .await
+            .expect("read generated fragmented MP4 subtitle");
+        let fragment_offset = first_fragmented_mp4_fragment_offset(&bytes)
+            .expect("generated fragmented MP4 contains a top-level moof box");
+        assert!(
+            fragment_offset > 0 && fragment_offset < bytes.len(),
+            "fragmented MP4 contains both initialization and media data"
+        );
+        tokio::fs::write(directory.join("init.mp4"), &bytes[..fragment_offset])
+            .await
+            .expect("write fMP4 subtitle initialization section");
+        tokio::fs::write(directory.join("caption.m4s"), &bytes[fragment_offset..])
+            .await
+            .expect("write fMP4 subtitle media fragment");
+    }
+
     /// Shared body for the AES-128 incremental VOD integration test. The output
     /// container follows the destination extension, so exercise TS (the native
     /// MPEG-TS case) plus MP4/MKV written through the same owned part.
@@ -6583,9 +6669,10 @@ segment-2.ts
         extension: &str,
         force_early_exit: bool,
         with_browser_caption: bool,
-        with_native_subtitle: bool,
+        native_subtitle_format: Option<SubtitleFormat>,
         fail_native_subtitle: bool,
     ) {
+        let with_native_subtitle = native_subtitle_format.is_some();
         assert!(
             !fail_native_subtitle || with_native_subtitle,
             "the failing resource must belong to a native subtitle track"
@@ -6741,20 +6828,33 @@ segment-2.ts
             resource.url = Url::parse(&format!("http://{address}/{name}"))
                 .expect("set local AES-128 fixture resource URL");
         }
-        let subtitle_plan = if with_native_subtitle {
-            let subtitle_playlist = b"#EXTM3U\n#EXT-X-VERSION:3\n#EXT-X-TARGETDURATION:4\n#EXTINF:4.0,\ncaption.vtt\n#EXT-X-ENDLIST\n";
+        let subtitle_plan = if let Some(format) = native_subtitle_format {
+            let subtitle_dir = fixture.path().join("subtitles");
+            std::fs::create_dir(&subtitle_dir).expect("create HLS subtitle fixture directory");
+            let subtitle_playlist: &[u8] = match format {
+                SubtitleFormat::Text => {
+                    std::fs::write(
+                        subtitle_dir.join("caption.vtt"),
+                        "WEBVTT\n\n00:00:00.000 --> 00:00:04.000\nNative subtitle fixture\n",
+                    )
+                    .expect("write HLS WebVTT subtitle fixture");
+                    b"#EXTM3U\n#EXT-X-VERSION:3\n#EXT-X-TARGETDURATION:4\n#EXTINF:4.0,\ncaption.vtt\n#EXT-X-ENDLIST\n"
+                }
+                SubtitleFormat::Fmp4 => {
+                    write_fmp4_subtitle_fixture(&ffmpeg, &subtitle_dir).await;
+                    b"#EXTM3U\n#EXT-X-VERSION:7\n#EXT-X-TARGETDURATION:4\n#EXT-X-MAP:URI=\"init.mp4\"\n#EXTINF:3.0,\ncaption.m4s\n#EXT-X-ENDLIST\n"
+                }
+            };
             let mut subtitle_plan = crate::manifest::plan_hls_media_playlist(
                 "https://cdn.example.test/subtitles/playlist.m3u8",
                 subtitle_playlist,
             )
             .expect("plan finite native HLS subtitle fixture");
-            std::fs::create_dir(fixture.path().join("subtitles"))
-                .expect("create HLS subtitle fixture directory");
-            std::fs::write(
-                fixture.path().join("subtitles/caption.vtt"),
-                "WEBVTT\n\n00:00:00.000 --> 00:00:04.000\nNative subtitle fixture\n",
-            )
-            .expect("write HLS subtitle fixture");
+            assert_eq!(
+                hls_subtitle_format(&subtitle_plan),
+                format,
+                "the HLS playlist metadata must select the expected subtitle input format"
+            );
             for resource in &mut subtitle_plan.resources {
                 let name = resource
                     .url
@@ -6771,6 +6871,10 @@ segment-2.ts
         } else {
             None
         };
+        let subtitle_format = subtitle_plan
+            .as_deref()
+            .map(hls_subtitle_format)
+            .unwrap_or_default();
         if with_native_subtitle {
             assert!(
                 Tracks::Hls {
@@ -6778,7 +6882,7 @@ segment-2.ts
                     audio: None,
                     subtitle: subtitle_plan.clone(),
                     subtitle_language: Some("en".to_string()),
-                    subtitle_format: SubtitleFormat::Text,
+                    subtitle_format,
                 }
                 .uses_incremental_hls_vod(),
                 "a finite native HLS subtitle rendition must retain incremental VOD output"
@@ -6969,7 +7073,7 @@ segment-2.ts
                     audio: None,
                     subtitle: subtitle_plan,
                     subtitle_language: with_native_subtitle.then(|| "en".to_string()),
-                    subtitle_format: SubtitleFormat::Text,
+                    subtitle_format,
                 },
                 ffmpeg: task_ffmpeg,
                 downloaded: task_downloaded,
@@ -7131,6 +7235,31 @@ segment-2.ts
             "decrypted AES-128 output is not readable: {}",
             String::from_utf8_lossy(&verification.stderr)
         );
+        if native_subtitle_format == Some(SubtitleFormat::Fmp4) {
+            let probe = tokio::process::Command::new("ffprobe")
+                .args([
+                    "-v",
+                    "error",
+                    "-show_entries",
+                    "stream=codec_type,codec_name",
+                    "-of",
+                    "default=noprint_wrappers=1",
+                ])
+                .arg(&destination)
+                .output()
+                .await
+                .expect("probe finalized fMP4 subtitle output");
+            assert!(
+                probe.status.success(),
+                "ffprobe rejected the fMP4 subtitle output: {}",
+                String::from_utf8_lossy(&probe.stderr)
+            );
+            let streams = String::from_utf8_lossy(&probe.stdout);
+            assert!(
+                streams.contains("codec_type=subtitle") && streams.contains("codec_name=mov_text"),
+                "MP4 output must retain the fMP4 subtitle codec: {streams}"
+            );
+        }
         if with_native_subtitle && extension == "mp4" {
             let sidecar = crate::video_staging::sidecar_path_for(&destination, "en");
             assert!(
@@ -7160,43 +7289,48 @@ segment-2.ts
 
     #[tokio::test]
     async fn ffmpeg_decrypts_aes128_hls_vod_into_an_owned_ts_part() {
-        assert_aes128_hls_vod_output("ts", false, false, false, false).await;
+        assert_aes128_hls_vod_output("ts", false, false, None, false).await;
     }
 
     #[cfg(unix)]
     #[tokio::test]
     async fn aes128_vod_remuxes_again_when_ffmpeg_exits_before_playlist_completion() {
-        assert_aes128_hls_vod_output("ts", true, false, false, false).await;
+        assert_aes128_hls_vod_output("ts", true, false, None, false).await;
     }
 
     #[tokio::test]
     async fn ffmpeg_decrypts_aes128_hls_vod_into_an_owned_mp4_part() {
-        assert_aes128_hls_vod_output("mp4", false, false, false, false).await;
+        assert_aes128_hls_vod_output("mp4", false, false, None, false).await;
     }
 
     #[tokio::test]
     async fn ffmpeg_decrypts_aes128_hls_vod_into_an_owned_mkv_part() {
-        assert_aes128_hls_vod_output("mkv", false, true, false, false).await;
+        assert_aes128_hls_vod_output("mkv", false, true, None, false).await;
     }
 
     #[tokio::test]
     async fn native_hls_subtitle_keeps_destination_part_visible_while_staging() {
-        assert_aes128_hls_vod_output("mkv", false, false, true, false).await;
+        assert_aes128_hls_vod_output("mkv", false, false, Some(SubtitleFormat::Text), false).await;
     }
 
     #[tokio::test]
     async fn native_hls_subtitle_is_embedded_in_mp4_output() {
-        assert_aes128_hls_vod_output("mp4", false, false, true, false).await;
+        assert_aes128_hls_vod_output("mp4", false, false, Some(SubtitleFormat::Text), false).await;
+    }
+
+    #[tokio::test]
+    async fn native_hls_fmp4_subtitle_is_stream_copied_into_mp4_output() {
+        assert_aes128_hls_vod_output("mp4", false, false, Some(SubtitleFormat::Fmp4), false).await;
     }
 
     #[tokio::test]
     async fn native_hls_subtitle_uses_srt_sidecar_for_ts_output() {
-        assert_aes128_hls_vod_output("ts", false, false, true, false).await;
+        assert_aes128_hls_vod_output("ts", false, false, Some(SubtitleFormat::Text), false).await;
     }
 
     #[tokio::test]
     async fn native_hls_subtitle_fetch_failure_does_not_fail_video_download() {
-        assert_aes128_hls_vod_output("mkv", false, false, true, true).await;
+        assert_aes128_hls_vod_output("mkv", false, false, Some(SubtitleFormat::Text), true).await;
     }
 
     #[cfg(target_os = "linux")]

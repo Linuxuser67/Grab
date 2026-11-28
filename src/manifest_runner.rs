@@ -6577,28 +6577,30 @@ segment-2.ts
     }
 
     /// Find the first top-level movie fragment in an FFmpeg-generated fMP4 file.
+    /// Use mp4box for ISO BMFF header decoding instead of duplicating its parser.
     fn first_fragmented_mp4_fragment_offset(bytes: &[u8]) -> Option<usize> {
-        let mut cursor = 0_usize;
-        while cursor.checked_add(8).is_some_and(|end| end <= bytes.len()) {
-            let size = u32::from_be_bytes(bytes.get(cursor..cursor + 4)?.try_into().ok()?);
-            let kind = bytes.get(cursor + 4..cursor + 8)?;
-            let (box_size, header_size) = match size {
-                0 => (bytes.len().checked_sub(cursor)?, 8_usize),
-                1 => {
-                    let extended =
-                        u64::from_be_bytes(bytes.get(cursor + 8..cursor + 16)?.try_into().ok()?);
-                    (usize::try_from(extended).ok()?, 16_usize)
-                }
-                size => (usize::try_from(size).ok()?, 8_usize),
+        let end = u64::try_from(bytes.len()).ok()?;
+        let mut reader = std::io::Cursor::new(bytes);
+        while reader.position() < end {
+            let header = mp4box::parser::read_box_header(&mut reader).ok()?;
+            let start = usize::try_from(header.start).ok()?;
+            let header_size = usize::try_from(header.header_size).ok()?;
+            // ISO BMFF size zero means that the box extends to the containing range.
+            let box_size = if header.size == 0 {
+                bytes.len().checked_sub(start)?
+            } else {
+                usize::try_from(header.size).ok()?
             };
-            let box_end = cursor.checked_add(box_size)?;
-            if box_size < header_size || box_end > bytes.len() {
+            if box_size < header_size {
                 return None;
             }
-            if kind == b"moof" {
-                return Some(cursor);
+            let box_end = start
+                .checked_add(box_size)
+                .filter(|box_end| *box_end <= bytes.len())?;
+            if header.typ.0 == *b"moof" {
+                return Some(start);
             }
-            cursor = box_end;
+            reader.set_position(u64::try_from(box_end).ok()?);
         }
         None
     }

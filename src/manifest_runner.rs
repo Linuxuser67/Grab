@@ -2642,7 +2642,7 @@ async fn run_incremental_hls_vod(
     let Tracks::Hls {
         video,
         audio,
-        mut subtitle,
+        subtitle,
         mut subtitle_language,
         subtitle_format,
     } = tracks

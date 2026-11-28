@@ -1236,14 +1236,6 @@ mod tests {
         hls_audio_rendition_key, hls_audio_rendition_keys, hls_variant_key, hls_variant_keys,
     };
 
-    struct HandoffCookieCleanup<'a>(&'a str);
-
-    impl Drop for HandoffCookieCleanup<'_> {
-        fn drop(&mut self) {
-            crate::extension_server::discard_handoff_cookies(self.0);
-        }
-    }
-
     #[test]
     fn signed_master_query_is_inherited_only_by_same_origin_renditions() {
         let body = br#"#EXTM3U
@@ -2436,7 +2428,7 @@ video/720.m3u8
             target: &url,
         };
         let _store_guard = crate::extension_server::exclusive_test_state();
-        let _cleanup = HandoffCookieCleanup(&url);
+        let _cleanup = crate::extension_server::HandoffCookieCleanup::new(&url);
         crate::extension_server::store_handoff_cookies(
             &url,
             jar_path.clone(),

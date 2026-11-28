@@ -71,6 +71,7 @@ pub(crate) struct DashRepresentation {
     pub(crate) mime_type: Option<String>,
     pub(crate) codecs: Option<String>,
     pub(crate) language: Option<String>,
+    pub(crate) label: Option<String>,
     pub(crate) kind: DashTrackKind,
     pub(crate) is_default_audio: bool,
     pub(crate) is_default_subtitle: bool,
@@ -793,6 +794,21 @@ pub(crate) fn parse_dash_manifest_at(
                     .lang
                     .clone()
                     .or_else(|| adaptation.lang.clone());
+                let label_for_language = |labels: &[dash_mpd_core::Label]| {
+                    let matching = language.as_deref().and_then(|language| {
+                        labels.iter().find(|label| {
+                            label.lang.as_deref().is_some_and(|label_language| {
+                                label_language.eq_ignore_ascii_case(language)
+                            })
+                        })
+                    });
+                    matching
+                        .or_else(|| labels.iter().find(|label| label.lang.is_none()))
+                        .or_else(|| language.is_none().then(|| labels.first()).flatten())
+                        .map(|label| label.content.clone())
+                };
+                let label = label_for_language(&representation.Label)
+                    .or_else(|| label_for_language(&adaptation.Label));
                 let identity = RepresentationIdentity {
                     id: representation_id.as_deref(),
                     kind,
@@ -826,6 +842,7 @@ pub(crate) fn parse_dash_manifest_at(
                     mime_type,
                     codecs,
                     language,
+                    label,
                     kind,
                     is_default_audio,
                     is_default_subtitle: kind == DashTrackKind::Subtitle && is_main,

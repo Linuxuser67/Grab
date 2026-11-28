@@ -2427,7 +2427,7 @@ video/720.m3u8
             source: "http://player.example.test/watch?token=private",
             target: &url,
         };
-        let _store_guard = crate::extension_server::exclusive_test_state();
+        let _store_guard = crate::extension_server::exclusive_test_state().await;
         let _cleanup = crate::extension_server::HandoffCookieCleanup::new(&url);
         crate::extension_server::store_handoff_cookies(
             &url,

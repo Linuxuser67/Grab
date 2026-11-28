@@ -74,6 +74,7 @@ pub(crate) struct DashRepresentation {
     pub(crate) kind: DashTrackKind,
     pub(crate) is_default_audio: bool,
     pub(crate) is_default_subtitle: bool,
+    pub(crate) is_forced_subtitle: bool,
     adaptation_id: Option<String>,
     source: DashRepresentationSource,
     /// Additional period-local addressing sources in MPD presentation order.
@@ -664,10 +665,12 @@ pub(crate) fn parse_dash_manifest_at(
             for (representation_index, representation) in
                 adaptation.representations.iter().enumerate()
             {
-                let representation_is_main = adaptation_metadata
+                let representation_role_metadata = adaptation_metadata
                     .get(representation_index)
-                    .ok_or(DashError::Parse)?
-                    .is_main;
+                    .ok_or(DashError::Parse)?;
+                let representation_is_main = representation_role_metadata.is_main;
+                let representation_is_forced_subtitle =
+                    representation_role_metadata.is_forced_subtitle;
                 if representation.href.is_some() || !representation.ContentProtection.is_empty() {
                     return Err(DashError::UnsupportedPresentation);
                 }
@@ -826,6 +829,12 @@ pub(crate) fn parse_dash_manifest_at(
                     kind,
                     is_default_audio,
                     is_default_subtitle: kind == DashTrackKind::Subtitle && is_main,
+                    is_forced_subtitle: kind == DashTrackKind::Subtitle
+                        && (representation_is_forced_subtitle
+                            || adaptation.Role.iter().any(|role| {
+                                role.schemeIdUri == DASH_ROLE_SCHEME
+                                    && role.value.as_deref() == Some("forced-subtitle")
+                            })),
                     adaptation_id: adaptation.id.clone(),
                     source: DashRepresentationSource {
                         base_url: representation_base,

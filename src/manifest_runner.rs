@@ -2951,7 +2951,7 @@ async fn run_incremental_hls_vod(
             input: ffmpeg_subtitle_input.as_deref(),
             embed: ffmpeg_embed_subtitles,
             sidecar: ffmpeg_subtitle_sidecar.as_deref(),
-            format: SubtitleFormat::Text,
+            format: output_subtitle_format,
         };
         run_ffmpeg_with_offsets_timeout(
             &ffmpeg_path,

@@ -1232,6 +1232,9 @@ async fn read_bounded_response_with_limit(
 mod tests {
     use super::*;
     use crate::extension_server::handoff_cookie_hash;
+    use crate::manifest_plan::{
+        hls_audio_rendition_key, hls_audio_rendition_keys, hls_variant_key, hls_variant_keys,
+    };
 
     struct HandoffCookieCleanup<'a>(&'a str);
 
@@ -1240,9 +1243,6 @@ mod tests {
             crate::extension_server::discard_handoff_cookies(self.0);
         }
     }
-    use crate::manifest_plan::{
-        hls_audio_rendition_key, hls_audio_rendition_keys, hls_variant_key, hls_variant_keys,
-    };
 
     #[test]
     fn signed_master_query_is_inherited_only_by_same_origin_renditions() {

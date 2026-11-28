@@ -613,8 +613,7 @@ pub(crate) fn download_plan(
                             .then_some(rendition)
                         })
                         .ok_or_else(|| {
-                            "The selected HLS subtitle rendition is no longer available"
-                                .to_string()
+                            "The selected HLS subtitle rendition is no longer available".to_string()
                         })
                 })
                 .transpose()?;

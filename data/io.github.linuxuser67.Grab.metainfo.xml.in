@@ -64,6 +64,7 @@
           <li>Downloads: keep browser-caption HLS captures incremental on the owned destination part, keep caption sidecars in private staging, and verify embedded captions without a subtitle encoder.</li>
           <li>Handoff: guard redirects for staged manifest handoffs, stage captions before media transfer, clear captions when a download fails, and report stale extension pairing after confirmation fallback.</li>
           <li>Downloads: skip browser caption fetches for live manifest captures.</li>
+          <li>Subtitles: preserve selected HLS/DASH language, labels and default/forced dispositions; source non-default tracks remain non-default where the container honors the disposition (MP4 may default a sole subtitle stream).</li>
         </ul>
       </description>
     </release>

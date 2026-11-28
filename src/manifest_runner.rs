@@ -6947,10 +6947,10 @@ segment-2.ts
                     video: Box::new(plan.clone()),
                     audio: None,
                     subtitle: subtitle_plan.clone(),
-                    subtitle_language: Some("en-US".to_string()),
+                    subtitle_language: Some("de-DE".to_string()),
                     subtitle_metadata: Some(ManifestSubtitleMetadata {
-                        language: Some("en-US".to_string()),
-                        name: Some("English (United States)".to_string()),
+                        language: Some("de-DE".to_string()),
+                        name: Some(format!("German (Germany)\r\n{}", "x".repeat(300))),
                         is_default: false,
                         is_forced: true,
                     }),
@@ -7106,7 +7106,7 @@ segment-2.ts
                 output_container: None,
                 audio_key: None,
                 subtitle_key: with_native_subtitle.then(|| "hls-subtitle-fixture".into()),
-                subtitle_language: with_native_subtitle.then(|| "en-US".to_string()),
+                subtitle_language: with_native_subtitle.then(|| "de-DE".to_string()),
             },
             referer: None,
             dest: destination.clone(),
@@ -7144,10 +7144,10 @@ segment-2.ts
                     video: Box::new(plan),
                     audio: None,
                     subtitle: subtitle_plan,
-                    subtitle_language: with_native_subtitle.then(|| "en-US".to_string()),
+                    subtitle_language: with_native_subtitle.then(|| "de-DE".to_string()),
                     subtitle_metadata: with_native_subtitle.then(|| ManifestSubtitleMetadata {
-                        language: Some("en-US".to_string()),
-                        name: Some("English (United States)".to_string()),
+                        language: Some("de-DE".to_string()),
+                        name: Some(format!("German (Germany)\r\n{}", "x".repeat(300))),
                         is_default: false,
                         is_forced: true,
                     }),
@@ -7284,7 +7284,7 @@ segment-2.ts
             verification_command.args(["-map", "0:v:0", "-map", "0:s:0", "-c", "copy"]);
             verification_command.arg(fixture.path().join("verified-native-subtitle.mp4"));
         } else if with_native_subtitle && extension == "ts" && !fail_native_subtitle {
-            let sidecar = crate::video_staging::sidecar_path_for(&destination, "en-US");
+            let sidecar = crate::video_staging::sidecar_path_for(&destination, "de-DE");
             let sidecar_text = tokio::fs::read_to_string(&sidecar)
                 .await
                 .expect("native HLS subtitles should be published as an SRT sidecar for TS");
@@ -7341,8 +7341,13 @@ segment-2.ts
                 .find(|stream| stream["codec_type"] == "subtitle")
                 .expect("finalized MP4 subtitle stream");
             assert_eq!(subtitle["codec_name"], "mov_text");
-            assert_eq!(subtitle["tags"]["language"], "eng");
-            assert_eq!(subtitle["tags"]["handler_name"], "English (United States)");
+            assert_eq!(subtitle["tags"]["language"], "deu");
+            let handler_name = subtitle["tags"]["handler_name"]
+                .as_str()
+                .expect("MP4 subtitle handler name");
+            assert!(handler_name.starts_with("German (Germany)"));
+            assert_eq!(handler_name.len(), 255);
+            assert!(!handler_name.chars().any(|character| character.is_control()));
             assert_eq!(subtitle["disposition"]["forced"], 1);
             // FFmpeg's MP4 muxer marks a lone subtitle stream as default even
             // when the selected HLS rendition did not declare DEFAULT=YES.
@@ -7373,13 +7378,18 @@ segment-2.ts
                 .iter()
                 .find(|stream| stream["codec_type"] == "subtitle")
                 .expect("finalized Matroska subtitle stream");
-            assert_eq!(subtitle["tags"]["language"], "en-US");
-            assert_eq!(subtitle["tags"]["title"], "English (United States)");
+            assert_eq!(subtitle["tags"]["language"], "ger");
+            let title = subtitle["tags"]["title"]
+                .as_str()
+                .expect("Matroska subtitle title");
+            assert!(title.starts_with("German (Germany)"));
+            assert_eq!(title.len(), 255);
+            assert!(!title.chars().any(|character| character.is_control()));
             assert_eq!(subtitle["disposition"]["default"], 0);
             assert_eq!(subtitle["disposition"]["forced"], 1);
         }
         if with_native_subtitle && extension == "mp4" {
-            let sidecar = crate::video_staging::sidecar_path_for(&destination, "en-US");
+            let sidecar = crate::video_staging::sidecar_path_for(&destination, "de-DE");
             assert!(
                 tokio::fs::symlink_metadata(sidecar).await.is_err(),
                 "an MP4 with an embedded native HLS subtitle must not publish an SRT sidecar"
@@ -7397,7 +7407,7 @@ segment-2.ts
                 !subtitle_probe.status.success(),
                 "an unavailable native subtitle must not leave an embedded subtitle stream"
             );
-            let sidecar = crate::video_staging::sidecar_path_for(&destination, "en-US");
+            let sidecar = crate::video_staging::sidecar_path_for(&destination, "de-DE");
             assert!(
                 tokio::fs::symlink_metadata(sidecar).await.is_err(),
                 "an unavailable native subtitle must not leave a sidecar"

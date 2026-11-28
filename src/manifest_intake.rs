@@ -2436,12 +2436,12 @@ video/720.m3u8
             target: &url,
         };
         let _store_guard = crate::extension_server::exclusive_test_state();
+        let _cleanup = HandoffCookieCleanup(&url);
         crate::extension_server::store_handoff_cookies(
             &url,
             jar_path.clone(),
             Some("Grab-Manifest-Test".to_string()),
         );
-        let _cleanup = HandoffCookieCleanup(&url);
         assert_eq!(
             crate::extension_server::live_handoff_identity(&url),
             Some((jar_path.clone(), Some("Grab-Manifest-Test".to_string()))),

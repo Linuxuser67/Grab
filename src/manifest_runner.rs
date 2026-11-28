@@ -7089,7 +7089,7 @@ segment-2.ts
                 output_container: None,
                 audio_key: None,
                 subtitle_key: with_native_subtitle.then(|| "hls-subtitle-fixture".into()),
-                subtitle_language: with_native_subtitle.then(|| "en".to_string()),
+                subtitle_language: with_native_subtitle.then(|| "en-US".to_string()),
             },
             referer: None,
             dest: destination.clone(),
@@ -7267,7 +7267,7 @@ segment-2.ts
             verification_command.args(["-map", "0:v:0", "-map", "0:s:0", "-c", "copy"]);
             verification_command.arg(fixture.path().join("verified-native-subtitle.mp4"));
         } else if with_native_subtitle && extension == "ts" && !fail_native_subtitle {
-            let sidecar = crate::video_staging::sidecar_path_for(&destination, "en");
+            let sidecar = crate::video_staging::sidecar_path_for(&destination, "en-US");
             let sidecar_text = tokio::fs::read_to_string(&sidecar)
                 .await
                 .expect("native HLS subtitles should be published as an SRT sidecar for TS");
@@ -7302,9 +7302,9 @@ segment-2.ts
                     "-v",
                     "error",
                     "-show_entries",
-                    "stream=codec_type,codec_name",
+                    "stream=codec_type,codec_name:stream_tags=language,title,handler_name:stream_disposition=default,forced",
                     "-of",
-                    "default=noprint_wrappers=1",
+                    "json",
                 ])
                 .arg(&destination)
                 .output()
@@ -7315,14 +7315,51 @@ segment-2.ts
                 "ffprobe rejected the fMP4 subtitle output: {}",
                 String::from_utf8_lossy(&probe.stderr)
             );
-            let streams = String::from_utf8_lossy(&probe.stdout);
-            assert!(
-                streams.contains("codec_type=subtitle") && streams.contains("codec_name=mov_text"),
-                "MP4 output must retain the fMP4 subtitle codec: {streams}"
-            );
+            let result: serde_json::Value = serde_json::from_slice(&probe.stdout)
+                .expect("parse ffprobe subtitle metadata");
+            let subtitle = result["streams"]
+                .as_array()
+                .expect("ffprobe streams array")
+                .iter()
+                .find(|stream| stream["codec_type"] == "subtitle")
+                .expect("finalized MP4 subtitle stream");
+            assert_eq!(subtitle["codec_name"], "mov_text");
+            assert_eq!(subtitle["tags"]["language"], "eng");
+            assert_eq!(subtitle["tags"]["handler_name"], "English (United States)");
+            assert_eq!(subtitle["disposition"]["forced"], 1);
+            // FFmpeg's MP4 muxer marks a lone subtitle stream as default even
+            // when the selected HLS rendition did not declare DEFAULT=YES.
+        }
+        if with_native_subtitle && extension == "mkv" && !fail_native_subtitle {
+            let probe = tokio::process::Command::new("ffprobe")
+                .args([
+                    "-v",
+                    "error",
+                    "-show_entries",
+                    "stream=codec_type:stream_tags=language,title:stream_disposition=default,forced",
+                    "-of",
+                    "json",
+                ])
+                .arg(&destination)
+                .output()
+                .await
+                .expect("probe finalized Matroska subtitle metadata");
+            assert!(probe.status.success(), "ffprobe rejected the Matroska subtitle output");
+            let result: serde_json::Value = serde_json::from_slice(&probe.stdout)
+                .expect("parse ffprobe Matroska metadata");
+            let subtitle = result["streams"]
+                .as_array()
+                .expect("ffprobe streams array")
+                .iter()
+                .find(|stream| stream["codec_type"] == "subtitle")
+                .expect("finalized Matroska subtitle stream");
+            assert_eq!(subtitle["tags"]["language"], "en-US");
+            assert_eq!(subtitle["tags"]["title"], "English (United States)");
+            assert_eq!(subtitle["disposition"]["default"], 0);
+            assert_eq!(subtitle["disposition"]["forced"], 1);
         }
         if with_native_subtitle && extension == "mp4" {
-            let sidecar = crate::video_staging::sidecar_path_for(&destination, "en");
+            let sidecar = crate::video_staging::sidecar_path_for(&destination, "en-US");
             assert!(
                 tokio::fs::symlink_metadata(sidecar).await.is_err(),
                 "an MP4 with an embedded native HLS subtitle must not publish an SRT sidecar"
@@ -7340,7 +7377,7 @@ segment-2.ts
                 !subtitle_probe.status.success(),
                 "an unavailable native subtitle must not leave an embedded subtitle stream"
             );
-            let sidecar = crate::video_staging::sidecar_path_for(&destination, "en");
+            let sidecar = crate::video_staging::sidecar_path_for(&destination, "en-US");
             assert!(
                 tokio::fs::symlink_metadata(sidecar).await.is_err(),
                 "an unavailable native subtitle must not leave a sidecar"

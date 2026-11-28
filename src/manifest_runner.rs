@@ -5649,6 +5649,11 @@ async fn run_ffmpeg_with_offsets_timeout(
             .arg("-map")
             .arg(subtitle_stream)
             .args(["-c:s", subtitle_codec]);
+        subtitle_metadata::append_ffmpeg_metadata(
+            &mut command,
+            output_container,
+            subtitles.metadata,
+        );
     }
     match output_container {
         ManifestContainer::Mp4 => {
@@ -5673,9 +5678,13 @@ async fn run_ffmpeg_with_offsets_timeout(
         });
         if subtitles.format == SubtitleFormat::Fmp4 {
             // Preserve the source subtitle codec through stream-copy.
-            command
-                .args(["-c:s", "copy", "-movflags", "+faststart", "-f", "mp4"])
-                .arg(sidecar);
+            command.args(["-c:s", "copy", "-movflags", "+faststart", "-f", "mp4"]);
+            subtitle_metadata::append_ffmpeg_metadata(
+                &mut command,
+                ManifestContainer::Mp4,
+                subtitles.metadata,
+            );
+            command.arg(sidecar);
         } else {
             command.args(["-c:s", "srt", "-f", "srt"]).arg(sidecar);
         }

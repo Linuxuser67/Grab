@@ -339,7 +339,7 @@ impl ManifestLookup {
                         language: track.language.clone(),
                         is_default: track.is_default_subtitle,
                         is_autoselect: false,
-                        is_forced: false,
+                        is_forced: track.is_forced_subtitle,
                     })
                     .collect::<Vec<_>>();
                 choices.sort_by_key(|choice| !choice.is_default);
